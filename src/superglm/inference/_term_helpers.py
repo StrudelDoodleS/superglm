@@ -333,6 +333,14 @@ def _expand_grouped_term(
     piecewise constant".  Propagating a band through the interpolant was
     therefore never available, and with the interpolant gone the question
     lapses.
+
+    One caveat kept rather than glossed: the same passage pairs pointwise
+    intervals at masspoints with "making corrections for multiple testing", and
+    the per-level CIs here are uncorrected.  Comparing every adjacent pair of
+    relativities on a panel is a multiple-comparison problem, so the marker
+    intervals are honest one at a time and optimistic read as a family.  Not
+    addressed here -- it is a separate decision about what the level table
+    reports, and it is unchanged by this function either way.
     """
     if ti.levels is None:
         raise ValueError("Grouped term expansion requires categorical levels.")
@@ -398,31 +406,14 @@ def _expand_grouped_term(
         # This used to fork on ``np.array_equal(curve.level_x, uniq_x)`` -- was
         # the display axis where it was? -- keeping the fitted curve when it was
         # and interpolating a PCHIP through the expanded markers when it was
-        # not.  Both arms now agree, so there is no fork.  What the interpolating
-        # arm cost, measured on ten evenly spaced levels with
-        # ``Spline(kind="cr", n_knots=4)``: merging the interior pair
-        # ``Mi001+Mi002`` drew a curve up to 0.0474 in log-relativity (4.86% in
-        # relativity) from the fitted one, and the three-member merge
-        # ``Mi003+Mi004+Mi005`` reached 0.0898 (9.39%).  Against the fitted
-        # curve's own 95% band -- half-width at most 0.00587 and 0.00666
-        # respectively, i.e. 1.96x a maximum standard error of 0.00300 and
-        # 0.00340 -- that is 61 and 81 of the 200 drawn points lying strictly
-        # outside the band computed for the curve they replaced.  (The "max band
-        # half-width = 0.00302" quoted in issues #277 and #282 is the maximum
-        # STANDARD ERROR, not a half-width; 1.96x it is the 95% half-width.  The
-        # conclusion is unchanged -- the ratio is what carries it.)
-        #
-        # That last measurement is also why #277's rule LAPSES rather than being
-        # overruled.  #277 dropped the band because a band is a statement about
-        # the curve it is drawn around and the drawn curve's VALUES had been
-        # replaced; on an interior merge the fitted and rebuilt grids were the
-        # same 200-point linspace, so the fitted band zipped against
-        # interpolated values and was exported around a line nobody drew.
-        # Nothing here replaces any value now, so the band's centre and the
-        # drawn curve are the same array and that failure mode is unreachable --
-        # 0 of 200 points outside, by identity rather than by tolerance.
-        # ``test_a_grouped_display_band_is_centred_on_the_curve_it_ships_with``
-        # measures exactly #277's quantity on exactly #277's fixture.
+        # not.  Both arms now agree, so there is no fork.  The docstring carries
+        # what that cost and why #277's band rule lapses with it; the two
+        # numbers worth having beside the line are that the interpolating arm
+        # put 61 of 200 drawn points (and 81 of 200 on a three-member merge)
+        # outside the band computed for the curve they replaced, and that the
+        # "max band half-width = 0.00302" quoted in issues #277 and #282 is the
+        # maximum STANDARD ERROR, not a half-width -- 1.96x it, 0.00587, is the
+        # 95% half-width.  The conclusion is unchanged; the ratio carries it.
         #
         # The interpolant's own pathology is recorded because it is what made
         # the loss localise where a reviewer looks rather than average out:
