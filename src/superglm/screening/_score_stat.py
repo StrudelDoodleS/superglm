@@ -272,19 +272,25 @@ perturbation ``E`` of the operand::
 
 and over ``||E||_F = c`` that is maximised at ``E = c G / ||G||_F``, giving
 exactly ``c ||G||_F``.  Take ``c = eps ||V_eff||_F`` -- ONE ROUNDING of the
-operand's norm -- and the low edge's worst case is ``eps ||V_eff||_F ||G||_F``.
+operand's norm -- and the low edge's first-order sensitivity is
+``eps ||V_eff||_F ||G||_F``.  **That maximisation is exact for the
+DIFFERENTIAL and is not a bound on the finite response**, since ``edf(V + E)``
+is nonlinear in ``E``; measured realizations reach 1.0617 of it.  ``G`` is the
+TOTAL gradient, including the bracket's own response ``alpha (d edf / d lambda)
+I`` from ``lambda = alpha tr(V_eff)`` -- which changes its norm by at most 1.6%
+here, but only the whole gradient gives the ladder's maximising direction.
 
-**THE RADIUS IS A STATED PROBE AND IT IS DELIBERATELY CONSERVATIVE.**  An
-earlier revision called it "smaller than the error already committed in forming
-the Gram", which asserted a backward-error bound it had not derived.  The
-derivation is Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd
-ed., Ch. 3: ``fl(X'X) = X'X + D`` with ``|D| <= gamma_n |X|'|X|``
-COMPONENTWISE, ``n`` the contraction dimension.  Measured against the probe
-radius, that bound is **98.6x to 204.7x larger**, so the perturbation the
-operand already carries exceeds the one probed here by two orders and the
-figures below are a LOWER bound on the floor rather than an estimate of it.
-Conservative is the safe direction for every claim made from them, and it buys
-a boundary with no fitted constant in it: one rounding against one ulp.
+**THE RADIUS IS A STATED PROBE AND NOTHING MORE, AND TWO OVER-CLAIMS ARE
+WITHDRAWN.**  It is not "smaller than the error already committed in forming
+the Gram" -- that asserted a backward-error bound nobody had derived -- and it
+is not established to be smaller either.  Higham, *Accuracy and Stability of
+Numerical Algorithms*, 2nd ed., Ch. 3 gives ``fl(X'X) = X'X + D`` with
+``|D| <= gamma_n |X|'|X|`` COMPONENTWISE, measured here at 98.6x to 204.7x the
+probe radius -- but that is an UPPER bound, and an upper bound puts no floor
+under the actual error, which may be anywhere below it and is zero for exactly
+representable products.  So what follows is the answer's SENSITIVITY to a
+one-rounding probe.  Nothing here certifies an information floor, and the word
+is not used for it.
 
 **THAT FORM IS LOAD-BEARING AND TWO WEAKER ONES WERE REFUSED IN REVIEW.**
 
@@ -312,24 +318,24 @@ ones -- so at the hardest the solve for ``G`` keeps about one digit in its
 smallest direction.  That is disclosure rather than derivation; what makes the
 quantity usable is measured stability, which is what the sweep checks.
 
-**WHAT THE FLOOR IS ON THIS FAMILY, PER DRAW RATHER THAN AS A CONSTANT.**
-Over the 21 draws it spans **1.6298e-15 to 4.9265e-04** -- twelve orders,
+**WHAT THE SENSITIVITY IS ON THIS FAMILY, PER DRAW RATHER THAN AS A
+CONSTANT.**  Over the 21 draws it spans **1.6298e-15 to 4.9265e-04** -- twelve orders,
 tracking the residualized design's smallest singular value, and NOT the tidy
 2% band the ``||S||_2`` form reported before it was corrected.  All ten draws
 whose design is rank deficient sit at ~2.6e-04; the well-conditioned ones sit
 at 1e-15 to 3e-09.
 
-**So the ``abs=1e-5`` the suite asserts at that edge sits ~26x BELOW the floor
-on exactly the draws that can fail it**, and that is the whole of issue #279: a
-bound under a family's own information floor is exceeded by some draw
-eventually.  Seed 1's 1.2574e-05 is 0.049x its own floor of 2.5688e-04 --
-comfortably inside it, and 1.26x the bound.  Nothing was mis-tuned; the number
+**So on exactly the draws that can fail it, the answer's sensitivity is ~26x
+the ``abs=1e-5`` the suite asserts**, and that is the whole of issue #279: the
+bound is far below how far those answers move under a one-rounding probe, so
+which draw is used decides whether it passes.  Seed 1's 1.2574e-05 is 0.049x
+its own 2.5688e-04, and 1.26x the bound.  Nothing was mis-tuned; the number
 was placed against observed errors rather than against a floor, because the
 floor had not been derived.  Do not carry the number to another fixture --
 carry the derivation.
 
-The seed the fixture happens to run has a floor of 2.6282e-04 like its nine
-siblings, and reports an error of 1.37e-10, so it clears the suite's bound by
+The seed the fixture happens to run has a sensitivity of 2.6282e-04 like its
+nine siblings, and reports an error of 1.37e-10, so it clears the suite's bound by
 193x on a draw whose answer is uncertain in the fourth decimal.  A draw is not
 evidence about the family here, and neither is a passing bound.
 
@@ -339,19 +345,22 @@ that level's own spline columns.  Squaring sends such a direction under
 ``eps``; ``1 / lambda`` then multiplies whatever round-off is left there.
 Pinned in
 ``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``,
-which asserts the ceiling against ONE ULP of the answer -- the boundary the
-prose states, with no fitted constant: a one-rounding probe either moves the
-answer within its own representation or it does not.  Worst resolved 0.6283 ulp
-against best unresolved 2.8991e+10 ulp, so the margins are 1.59x and 2.90e+10x
-and are reported rather than engineered.  The thin side is thin because it is
-the real boundary; what makes 1.59x usable is that the quantity is
-BIT-IDENTICAL across 7 microkernels x 2 thread counts on that row.  Separately
-the maximising perturbation attains 0.9425 to 1.0617 of the predicted
-displacement against a derived value of 1.
+which asserts the sensitivity against ONE ULP of the answer -- ``np.spacing``,
+the real adjacent-float distance, not ``eps |edf|``, which is a relative scale
+running 1.045x to 1.679x it.  Worst asserted-resolved 4.0956e-08 ulp against
+best asserted-unresolved 3.0293e+10 ulp, so the boundary clears by 2.44e+07x
+and 3.03e+10x.  Separately the maximising perturbation attains 0.9425 to 1.0617
+of the predicted displacement against a first-order value of 1 -- and that it
+EXCEEDS 1 is the direct evidence that this quantity is a first-order measure
+rather than an upper bound on the finite response.
 
-**AN EARLIER REVISION ASSERTED 1e5 ULP WHILE SAYING ONE**, a midpoint between
-the two observed populations; it would have passed a resolved geometry
-amplified by five orders.  Mutating one by 1e4 now reds three rows.
+**TWO EARLIER REVISIONS GOT THE BOUNDARY WRONG IN OPPOSITE DIRECTIONS.**  One
+asserted 1e5 ulp while the prose said one -- a midpoint of the two observed
+populations, which would have passed a resolved geometry amplified by five
+orders.  The next asserted one ulp but measured it as ``eps |edf|``, which put
+the ``sigma_min = 1e-3`` geometries at a 1.59x margin that the correct spacing
+turns into 1.06x.  Those geometries are transitional and are now measured and
+disclosed rather than asserted on either side.
 
 **A SAMPLED WIDTH WAS TRIED FIRST AND IS NOT SOUND**, which is worth recording
 because it looks convincing.  Taking ``max - min`` of ``edf`` over 32 random

@@ -1744,7 +1744,15 @@ def test_numeric_numeric_moments_match_dense_assembly():
 
 
 def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
-    """The low-edge ``edf``'s CERTIFIED sensitivity, and the displacement realizing it.
+    """The low-edge ``edf``'s FIRST-ORDER sensitivity, and the displacement realizing it.
+
+    **THIS IS A LOCAL FIRST-ORDER MEASURE AND NOT A CERTIFIED WORST CASE.**  An
+    earlier revision called it a ceiling.  The maximisation below is exact for
+    the DIFFERENTIAL at ``V``; ``edf(V + E)`` is nonlinear in ``E``, so the
+    finite response at ``||E||_F = c`` is not bounded by it, and this test's own
+    numbers show it -- realizations reach 1.0617 of the predicted displacement.
+    No finite-radius remainder bound is derived here, so the quantity is
+    described and asserted as a first-order condition measure only.
 
     ``edf = tr(A^-1 V)`` with ``A = V + lambda S`` is exactly
     ``p - lambda tr(A^-1 S)``, so for a perturbation ``E`` of the operand::
@@ -1754,19 +1762,18 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     and over ``||E||_F = c`` that is maximised at ``E = c G / ||G||_F``, giving
     exactly ``c ||G||_F``.
 
-    **THE RADIUS IS A STATED PROBE, AND IT IS DELIBERATELY CONSERVATIVE.**
-    ``c = eps ||V||_F`` is ONE ROUNDING of the operand's norm -- a definition,
-    not a backward-error claim, and an earlier revision wrongly called it "the
-    error already committed in forming the Gram".  What that error actually is
-    follows from Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd
-    ed., Ch. 3: ``fl(X'X) = X'X + D`` with ``|D| <= gamma_n |X|'|X|``
-    COMPONENTWISE, ``n`` the contraction dimension and
-    ``gamma_n = n u / (1 - n u)``.  Measured on these geometries that bound is
-    **98.6x to 204.7x** the probe radius, so the true perturbation the operand
-    already carries is two orders LARGER and the ceiling below is a lower bound
-    on the information floor rather than an estimate of it.  Conservative is
-    the safe direction for every claim made from it, and it buys the clean
-    boundary the test asserts: one rounding against one ulp.
+    **THE RADIUS IS A STATED PROBE AND NOTHING MORE.**  ``c = eps ||V||_F`` is
+    ONE ROUNDING of the operand's norm -- a definition.  Two revisions have now
+    over-claimed it and both are withdrawn: it is not "the error already
+    committed in forming the Gram", and the Gram's error is not known to
+    EXCEED it either.  What is available is an UPPER bound, Higham, *Accuracy
+    and Stability of Numerical Algorithms*, 2nd ed., Ch. 3:
+    ``fl(X'X) = X'X + D`` with ``|D| <= gamma_n |X|'|X|`` COMPONENTWISE, ``n``
+    the contraction dimension.  Measured here that bound is 98.6x to 204.7x the
+    probe radius -- but an upper bound does not put a floor under the actual
+    error, which may be anywhere below it and is zero for exactly representable
+    products.  So this reports the answer's SENSITIVITY to a one-rounding
+    probe, and nothing here establishes an information floor.
 
     **THIS IS A DETERMINISTIC NORM, NOT A SAMPLED WIDTH, AND THAT IS THE
     POINT.**  It replaces a ``max - min`` over 32 fixed random perturbations,
@@ -1801,7 +1808,7 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     rotated ``S`` with eight orders between its largest and smallest
     eigenvalue, in a basis unrelated to the design's.
 
-    Returns the certified ceiling, the displacement the maximising
+    Returns the first-order sensitivity, the displacement the maximising
     perturbation actually produces, and one ulp of the answer.
     """
     rng = np.random.default_rng(0)
@@ -1823,7 +1830,20 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     lam = float(penalized_score_statistic_ladder(U, V, S_ti=S, budgets=(4.0 * p,))[0].lambda0)
 
     A = V + lam * S
-    G = lam * np.linalg.solve(A, np.linalg.solve(A, S).T).T
+    Ainv_S = np.linalg.solve(A, S)
+    G = lam * np.linalg.solve(A, Ainv_S.T).T
+    # THE TOTAL GRADIENT, not the partial one at fixed lambda.  The bracket is
+    # ``lambda = alpha tr(V)`` with ``alpha = 1e-10 / tr(S)``, so
+    # ``d edf = <E, G>_F + (d edf / d lambda) alpha tr(E)``.  Review is right
+    # that dropping the second term misstates the ladder's own sensitivity --
+    # in ONE dimension it cancels the first exactly.  Measured, including it
+    # moves the gradient's norm by 0.0% on the unresolved geometries and at
+    # most 1.6% on a resolved one, so it changes no conclusion here; it is
+    # carried because the maximising DIRECTION is only the ladder's if the
+    # whole gradient is used.
+    alpha = 1e-10 / float(np.trace(S))
+    dedf_dlam = -float(np.trace(Ainv_S)) + lam * float(np.trace(Ainv_S @ Ainv_S))
+    G = G + alpha * dedf_dlam * np.eye(p)
     G = 0.5 * (G + G.T)
     g_norm = float(np.linalg.norm(G, "fro"))
     c = np.finfo(np.float64).eps * float(np.linalg.norm(V, "fro"))
@@ -1851,7 +1871,13 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     # A CENTRED difference, so what is measured is the response and not the
     # response plus whatever the evaluator does to the base point alone.
     realised = abs(edf(V + step) - edf(V - step)) / 2.0
-    return c * g_norm, realised, np.finfo(np.float64).eps * abs(edf(V))
+    # ``np.spacing``, not ``eps * |edf|``.  The latter is a RELATIVE scale and
+    # runs 1.045x to 1.679x the true adjacent-float distance across these
+    # geometries, so a displacement reported as "under one ulp" could be most
+    # of two.  That mattered: at the true spacing the ``1e-3`` geometries read
+    # 0.72 and 0.94 rather than 0.48 and 0.63, which is what moved them out of
+    # the asserted set and into disclosure below.
+    return c * g_norm, realised, float(np.spacing(abs(edf(V))))
 
 
 # ONE BOUNDARY, AND IT IS THE ONE THE PROSE STATES: a probe of one rounding
@@ -1878,7 +1904,7 @@ _LOW_EDGE_REALISED = (0.5, 2.0)
     ("sigma_min", "units", "penalty", "determined"),
     [
         (1e-1, 1.0, "I", True),
-        (1e-3, 1.0, "I", True),
+        (1e-1, 1e3, "I", True),
         (1e-8, 1.0, "I", False),
         (1e-12, 1.0, "I", False),
         # OTHER UNITS.  Rescaling the design changes nothing about it, so a
@@ -1888,13 +1914,12 @@ _LOW_EDGE_REALISED = (0.5, 2.0)
         # sends the ratio up on one and down on the other.
         (1e-8, 1e3, "I", False),
         (1e-8, 1e-3, "I", False),
-        (1e-3, 1e3, "I", True),
         # AN ANISOTROPIC PENALTY, likewise a finding kept as a test: eight
         # orders of penalty spectrum in a rotated basis.  Under the ``||S||_2``
         # normalization this replaces, these read 55.6 to 126.9 and 5924 to
         # 11124 where the theory says 1 -- four orders of understatement, hidden
         # entirely by the ``S = I`` the fixture used to hard-code.
-        (1e-3, 1.0, "rot", True),
+        (1e-1, 1.0, "rot", True),
         (1e-8, 1.0, "rot", False),
         (1e-12, 1.0, "rot", False),
     ],
@@ -1920,43 +1945,55 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
     refusal :mod:`superglm.screening._structured` records at the high edge.
     What IS a property of the pair is how far the answer can move.
 
-    **THE REGIME.**  Against one ulp of ``edf`` the certified displacement
-    separates by more than ten orders, and it is bit-identical across the sweep
-    on every row but the two hardest::
+    **THE REGIME.**  Against one ulp of ``edf`` -- ``np.spacing``, the actual
+    adjacent-float distance -- the first-order sensitivity separates by
+    eighteen orders, and it is bit-identical across the sweep on every row but
+    the two hardest::
 
-        penalty  sigma_min  units   ceiling / ulp over the 14
-        I        1e-1       1       2.2252e-08   (identical)
-        I        1e-3       1       4.8211e-01   (identical)
-        I        1e-3       1e3     4.8211e-01   (identical)
-        I        (1e-5)     1       2.6368e+07   (identical, not asserted)
-        I        1e-8       1       2.8991e+10   (identical)
-        I        1e-8       1e3     2.8991e+10   (identical)
-        I        1e-8       1e-3    2.8991e+10   (identical)
-        I        1e-12      1       6.6422e+10   (identical)
-        rot      1e-1       1       2.7503e-08   (identical)
-        rot      1e-3       1       6.2832e-01   (identical)
-        rot      1e-8       1       2.5951e+11 .. 2.5954e+11
-        rot      1e-12      1       3.6986e+13 .. 3.7254e+13
+        penalty  sigma_min  units   sensitivity / ulp over the 14   asserted
+        I        1e-1       1       3.2839e-08                      resolved
+        I        1e-1       1e3     3.2839e-08                      resolved
+        rot      1e-1       1       4.0956e-08                      resolved
+        I        1e-3       1       7.2316e-01                      no
+        rot      1e-3       1       9.4248e-01                      no
+        I        1e-5       1       3.9388e+07                      no
+        I        1e-8       1 / 1e3 / 1e-3   3.0293e+10             unresolved
+        I        1e-12      1       9.4365e+10                      unresolved
+        rot      1e-8       1       3.0024e+11 .. 3.0027e+11        unresolved
+        rot      1e-12      1       6.2109e+13 .. 6.2554e+13        unresolved
 
-    Worst resolved 6.2832e-01, best unresolved 2.8991e+10, so the cut of 1e5
-    clears by **1.59e+05x** and **2.90e+05x** -- five orders on each side, and
-    near-symmetric rather than tuned to either.
+    Worst asserted-resolved 4.0956e-08 and best asserted-unresolved 3.0293e+10,
+    so the boundary of one ulp clears by **2.44e+07x** and **3.03e+10x**.
+
+    **THE ``1e-3`` ROWS ARE MEASURED AND NOT ASSERTED, and that is a finding
+    rather than a convenience.**  They were asserted as resolved while the ulp
+    was computed as ``eps * |edf|`` -- a relative scale, 1.045x to 1.679x the
+    true spacing here -- which put them at 0.48 and 0.63 with a 1.59x margin.
+    At the real spacing they are 0.72 and 0.94: still under one ulp, but by
+    6% on the binding row, and a binade crossing in ``edf`` would double the
+    ratio outright.  A geometry that close to the boundary is transitional, so
+    it is disclosed with its number instead of being asserted on either side.
+    The alternative -- keeping the assertion and quoting the comfortable
+    margin the wrong ulp produced -- is the failure this whole PR is about.
 
     **THE REALIZATION.**  The maximising perturbation attains 0.9425 to 1.0617
     of the predicted displacement across all 14 configurations, both penalties
-    and all three unit scales, against a derived value of 1.  So the bound of
-    (0.5, 2.0) clears by 1.88x on each side, and it is placed around a number
-    the algebra supplies rather than around observed round-off.  It is checked
-    only where the ceiling is above one ulp, since below that the displacement
-    is the evaluator's rounding and not the response.
+    and all three unit scales, against a first-order value of 1.  So the bound
+    of (0.5, 2.0) clears by 1.88x on each side.  Note that it exceeds 1 --
+    which is the direct evidence that this quantity is a first-order measure
+    and not an upper bound on the finite response, and it is checked only where
+    the sensitivity is above one ulp, since below that the displacement is the
+    evaluator's rounding and not the response.
 
     **What this says about issue #279.**  Over 21 draws of a 20-level
-    spline-by-categorical pair, the same certified floor spans **1.63e-15 to
-    4.93e-04** -- twelve orders, tracking the residualized design's smallest
-    singular value.  All ten draws whose design is rank deficient sit at
-    ~2.6e-04, and the suite asserts ``abs=1e-5`` at that edge, i.e. **26x below
-    the floor** on exactly the draws that can fail it.  The seed dependence
-    #279 reports is that floor being sampled, not a defect appearing.
+    spline-by-categorical pair, the same first-order sensitivity spans
+    **1.63e-15 to 4.93e-04** -- twelve orders, tracking the residualized
+    design's smallest singular value.  All ten draws whose design is rank
+    deficient sit at ~2.6e-04, i.e. **26x the ``abs=1e-5`` the suite asserts**
+    at that edge, on exactly the draws that can fail it.  That is a statement
+    about how far those answers MOVE under a one-rounding probe, not a proof
+    that their error must exceed the bound; what it explains is why the miss is
+    a property of the draw.
 
     **No arithmetic in this module can narrow it**, which is why #279 closed
     without a code change: the information is destroyed by the squaring, before
