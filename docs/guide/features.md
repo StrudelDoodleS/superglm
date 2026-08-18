@@ -362,6 +362,29 @@ level quietly falling through to itself is the silent identity mapping the
 declaration exists to prevent. A grouping built from the full column, as above,
 covers by construction.
 
+#### Where a merged group sits on an ordered axis
+
+`OrderedCategorical` puts every level at a numeric coordinate — the `values=`
+you declare, or an even spacing over `order=` — and the inner basis is evaluated
+there. **A merged group sits at the mean of its members' coordinates**,
+whatever the group is called. Naming the group after one of its members,
+`groups={"Mi001": ["Mi001", "Mi002"]}`, is a convenient way to keep the
+surviving label stable in a rating table and does *not* pin the group to
+`Mi001`'s own coordinate; a label names a table row, and renaming a group never
+changes the fit.
+
+To put a group somewhere else, say so in `values=` — give its members the
+coordinate you want, and the mean of equal values is that value exactly:
+
+```python
+values = {"Mi000": 0.0, "Mi001": 0.1, "Mi002": 0.1, "Mi003": 0.3}
+band = OrderedCategorical(values=values, basis=Spline(kind="cr"), grouping=grouping)
+```
+
+A `Piecewise` or `Polynomial` inner basis is different: it evaluates on level
+*positions* `0..L-1`, where a group is one band with one position and the
+question does not arise.
+
 ## RandomEffect
 
 `RandomEffect()` gives every observed factor level a penalized intercept. REML
@@ -475,18 +498,22 @@ edit. Grouping entirely within a segment stays allowed, and the named break
 follows its level to the new position. The same guard covers `Spline` knots
 given by name.
 
-A grouped term's plot draws the fitted piecewise shape itself — the stated
-break is a vertex of the drawn line, so the kink you declared is the kink you
-see. Collapsing a `Spline` basis is the other case: a merge that moves the
-level axis leaves the fitted curve no longer lined up with the expanded
-markers, so the between-band shape there is display interpolation only. That
-interpolated curve is exported without a confidence band — `term_inference()`
-and `plot_data()` stop carrying `se_log_relativity` / `ci_lower` / `ci_upper`
-for it — rather than hand out a band computed for the fitted curve, which is
-not the line being shown. The panels themselves are unchanged: they draw the
-curve as a bare line and take their error bars per level, so no ribbon
-disappears from a plot. Either way the rated values are the band markers
-themselves, and their standard errors are unaffected.
+A grouped term's plot draws the fitted shape itself, whatever the basis — the
+stated break is a vertex of the drawn line, so the kink you declared is the
+kink you see, and a `Spline` basis draws the spline that was fitted. Expanding
+a grouped term back to its original levels moves the **markers** and nothing
+else: `term_inference()` and `plot_data()` carry the fitted curve with its own
+`se_log_relativity` / `ci_lower` / `ci_upper`, and the rated values are the band
+markers themselves, with their own standard errors.
+
+By default a grouped `OrderedCategorical` panel is drawn **collapsed** — one
+marker per group, at the group's position — which is exactly where the fit is.
+Ask for `grouped_level_display="expanded"` and you get one marker per original
+level at its declared coordinate instead; a merged group's members then sit at
+two coordinates carrying one fitted value, and the curve spans the fitted axis
+rather than the declared one, so a merge at either end leaves the curve short of
+the outermost markers. That is deliberate — the curve is only drawn where the
+model was fitted.
 
 Terms with a `Piecewise` or `Polynomial` basis cannot parent interactions and
 are deferred by interaction screening (the interaction machinery crosses a

@@ -389,6 +389,12 @@ def test_a_grouped_display_band_is_centred_on_the_curve_it_ships_with() -> None:
     merge = {"Mi001+Mi002": ["Mi001", "Mi002"]}
     curve = _grouped_curve(X, y, Spline(kind="cr", n_knots=4), merge).smooth_curve
 
+    # First, or the comparisons below are vacuous: a missing band reaches them
+    # as NaN, and every `<` against NaN is False, so "0 points outside" would
+    # pass on a panel that exports no band at all.
+    assert curve.se_log_relativity is not None
+    assert curve.ci_lower is not None and curve.ci_upper is not None
+
     log_rel = np.asarray(curve.log_relativity, dtype=np.float64)
     se = np.asarray(curve.se_log_relativity, dtype=np.float64)
     lo = np.log(np.asarray(curve.ci_lower, dtype=np.float64))

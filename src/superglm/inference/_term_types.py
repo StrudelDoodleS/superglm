@@ -41,6 +41,13 @@ class SmoothCurve:
     Attached to ``TermInference.smooth_curve`` for features like
     ``OrderedCategorical(basis=Spline(...))`` where the underlying variable is
     categorical but a smooth curve is fit through the level midpoints.
+
+    ``x`` is the curve's own grid and ``level_x`` is marker metadata; NEITHER
+    contains the other.  A grouped term expanded back to its original levels
+    puts a marker at every declared level while the curve stays on the axis it
+    was fitted on -- the group positions -- so a merge at either end of the
+    ordering leaves the curve inside the markers.  A consumer that needs both on
+    one canvas should take the union of their extents, as both renderers do.
     """
 
     x: NDArray

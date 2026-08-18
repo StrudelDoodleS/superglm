@@ -662,9 +662,15 @@ def _plot_ordered_spline_panel(
     rot = 45 if n_levels > 8 else 0
     ha = "right" if rot else "center"
     ax.set_xticklabels(levels, rotation=rot, ha=ha, fontsize=8)
-    # The markers may be group means over a subrange of the fitted curve, so the
-    # limits are the union of the marker padding and the curve's own extent --
-    # padding alone clips the fitted curve wherever the two disagree.
+    # The markers and the fitted curve need not span the same range, so the
+    # limits are the UNION of the marker padding and the curve's own extent and
+    # neither can clip the other.  Which way they disagree depends on the panel:
+    # in ``expanded`` mode the markers sit at the declared level values while
+    # the curve spans the fitted axis (group means), so a leading or trailing
+    # merge leaves the curve short of the outermost markers -- ggplot2's
+    # ``geom_smooth(fullrange=FALSE)`` default, where the smoothing line is not
+    # expanded to the range of the plot.  A detached ``specials=`` block reaches
+    # past the curve on the other side.
     lo = float(x_pos.min()) - spacing / 2.0
     hi = float(x_pos.max()) + spacing / 2.0
     if curve is not None:
