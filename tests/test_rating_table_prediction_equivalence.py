@@ -379,11 +379,16 @@ def _ppform_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     of the interval key, match the half-open interval, normalise, run Horner,
     exponentiate -- and nothing else is available to it.
 
-    The width of a tail row is infinite, so ``u`` there is not a number.  That
-    is why the tails are emitted as constant pieces: ``b = c = d = 0`` means a
-    consumer that short-circuits ``u`` on an unbounded row and one that clamps
-    it arrive at the same factor.  This one short-circuits, which is the reading
-    the design's section 7.2 says a SQL consumer must be safe under.
+    The width of a tail row is infinite, so ``u`` there is not a number -- and
+    ``b = c = d = 0`` does NOT rescue it, because ``0 * nan`` is ``nan``.  A
+    consumer applying the polynomial uniformly gets ``nan`` on exactly the rows
+    that price the extremes of the book.  So an unbounded row is READ rather
+    than evaluated: its factor is ``Relativity``, which is ``exp(a)`` exactly.
+    This evaluator takes that branch because it is the published contract --
+    stated in the block's docstring, in the guide, and in the note the workbook
+    writes beside the block -- and not because the helper happens to find it
+    convenient.  ``test_the_documented_formula_is_nan_on_an_unbounded_row`` is
+    what stops that distinction from being lost again.
     """
     name = block.name
     table = block.table
@@ -403,10 +408,16 @@ def _ppform_multiplier(block, X: pd.DataFrame) -> np.ndarray:
     assert matched.all(), f"{name!r}: {int((~matched).sum())} rows match no interval"
 
     width = hi[row] - lo[row]
+    bounded = np.isfinite(width)
     with np.errstate(invalid="ignore", divide="ignore"):
-        u = np.where(np.isfinite(width), (x - lo[row]) / width, 0.0)
+        u = np.where(bounded, (x - lo[row]) / width, 0.0)
     a, b, c, d = coefficients[row].T
-    return np.exp(a + u * (b + u * (c + u * d)))
+    evaluated = np.exp(a + u * (b + u * (c + u * d)))
+    # The published branch, taken literally: an unbounded row is READ.  Reading
+    # ``Relativity`` rather than substituting ``u = 0`` also puts that column
+    # under test on the tail rows, where the two must agree to machine zero.
+    relativity = table["Relativity"].to_numpy(dtype=np.float64)[row]
+    return np.where(bounded, evaluated, relativity)
 
 
 def _nearest(grid: np.ndarray, x: np.ndarray) -> np.ndarray:
