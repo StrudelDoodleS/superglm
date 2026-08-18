@@ -268,7 +268,22 @@ derivative instead of the noise floor: ``edf = tr(A^-1 V_eff)`` with
 ``A = V_eff + lambda S`` is exactly ``k - lambda tr(A^-1 S)``, so for any
 perturbation ``E`` of the operand::
 
-    d edf = <E, G>_F ,      G := lambda A^-1 S A^-1
+    d edf = <E, G>_F ,      G := lambda A^-1 S A^-1 + alpha (d edf / d lambda) I
+
+**FOR NONSINGULAR ``A`` ONLY.**  The identity above inverts ``A``, so it does
+not cover a pair whose ``V_eff`` and ``S`` share a null space -- a supported
+case, which :func:`_edge` answers through ``pinv``, and on which
+``k - lambda tr(A^-1 S)`` is not evaluable (at ``V = S = diag(1, 0)`` the
+shipped ``edf`` is 1, and substituting a pseudo-inverse while keeping ``k = 2``
+gives the wrong value).  Everything in this section is about the low edge of a
+positive definite pencil; the common-null-space case is discarded before the
+pencil is formed and is not what #279 is about.
+
+The second term is the BRACKET's own response: ``lambda = alpha tr(V_eff)``
+with ``alpha = 1e-10 / tr(S)``, so a probe with nonzero trace moves ``lambda``
+too.  It is part of the gradient, not an afterthought -- an earlier revision
+displayed only the first term here while the test used both, which is a formula
+readers would have carried away different from the quantity asserted.
 
 and over ``||E||_F = c`` that is maximised at ``E = c G / ||G||_F``, giving
 exactly ``c ||G||_F``.  Take ``c = eps ||V_eff||_F`` -- ONE ROUNDING of the
