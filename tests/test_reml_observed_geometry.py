@@ -1163,6 +1163,115 @@ def test_observed_mode_score_is_stable_under_large_feature_translation() -> None
     assert scores[2] == pytest.approx(scores[1], abs=2e-12)
 
 
+def test_an_overflowing_mode_score_is_scored_not_raised() -> None:
+    """A score that overflows describes these coefficients, not a malformed call.
+
+    Nothing the build certifies bounds the score's quotient, and the two
+    clippers that would have to bound it both decline by design: ``stabilize_eta``
+    holds a sqrt eta only back from where squaring overflows, at about 6.7e153,
+    and ``clip_mu`` returns Gaussian means uncapped. So a Gaussian/sqrt row at
+    eta 1e150 carries observed curvature ``w * (6 eta^2 - 2 y)`` -- 6e300, which
+    is finite -- while ``w * (y - mu) * dmu/deta`` is 1e300 times 2e150, which is
+    not. The geometry is built and asserted on first, so what follows is a
+    statement about the score alone rather than about an iterate the build would
+    have refused anyway.
+    """
+    from superglm.reml.observed_geometry import (
+        ObservedGeometryInfeasibleError,
+        classify_reml_curvature,
+    )
+
+    # Gaussian's canonical link is the identity, so sqrt takes the observed
+    # branch -- the only branch that evaluates this score at all.
+    assert classify_reml_curvature(Gaussian(), SqrtLink()) == "observed"
+
+    n = 6
+    X = np.zeros((n, 1))
+    X[0, 0] = 1.0
+    dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=1)
+    result = _result(np.array([1e150]), 1.0)
+    y = np.linspace(1.0, 2.0, n)
+    weights = np.ones(n)
+    penalty = np.zeros((1, 1))
+    geometry = build_observed_reml_geometry(
+        dm=dm,
+        distribution=Gaussian(),
+        link=SqrtLink(),
+        y=y,
+        sample_weight=weights,
+        offset_arr=np.zeros(n),
+        result=result,
+        penalty=penalty,
+    )
+
+    # Every guard the build owns passes on this iterate: the observed rows are
+    # finite, their sum is positive, and the determinant it hands on is real.
+    assert geometry.eta[0] == 1e150, "stabilize_eta clipped the iterate this test needs"
+    assert geometry.mu[0] == geometry.eta[0] ** 2, "clip_mu capped a Gaussian mean"
+    assert geometry.mu[0] > 1e299
+    assert np.all(np.isfinite(geometry.mu))
+    assert np.isfinite(geometry.sum_w) and geometry.sum_w > 0.0
+    assert np.isfinite(geometry.log_det_H)
+
+    with pytest.raises(ObservedGeometryInfeasibleError) as excinfo:
+        observed_penalized_mode_score(
+            dm=dm,
+            distribution=Gaussian(),
+            link=SqrtLink(),
+            y=y,
+            sample_weight=weights,
+            result=result,
+            penalty=penalty,
+            geometry=geometry,
+        )
+
+    assert "penalized mode score is not finite" in str(excinfo.value)
+
+
+def test_a_contract_bug_in_the_mode_score_stays_a_bare_value_error() -> None:
+    """The other half of the retype, and a guard rather than a fix.
+
+    A penalty in the wrong coordinates is a bug in the call at every iterate, so
+    it must not join the retype above and invite a power search to route quietly
+    around it. This cannot fail against the unfixed code -- both sides raise a
+    bare ValueError here -- but it is what stops a later widening of the retype
+    from swallowing the argument checks with it.
+    """
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    n = 6
+    X = np.linspace(-1.0, 1.0, n)[:, None]
+    dm = DesignMatrix([DenseGroupMatrix(X)], n=n, p=1)
+    result = _result(np.array([0.2]), 0.1)
+    y = np.linspace(1.0, 2.0, n)
+    weights = np.ones(n)
+    geometry = build_observed_reml_geometry(
+        dm=dm,
+        distribution=Gamma(),
+        link=LogLink(),
+        y=y,
+        sample_weight=weights,
+        offset_arr=np.zeros(n),
+        result=result,
+        penalty=np.zeros((1, 1)),
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        observed_penalized_mode_score(
+            dm=dm,
+            distribution=Gamma(),
+            link=LogLink(),
+            y=y,
+            sample_weight=weights,
+            result=result,
+            penalty=np.zeros((2, 2)),
+            geometry=geometry,
+        )
+
+    assert not isinstance(excinfo.value, ObservedGeometryInfeasibleError)
+    assert "slope coordinates" in str(excinfo.value)
+
+
 def test_gamma_observed_total_gradient_matches_refitted_laml_finite_difference() -> None:
     """Direct REML must use observed inverse, determinant, rank, and dW rows together."""
     rng = np.random.default_rng(20260718)
@@ -2272,6 +2381,58 @@ def test_a_contract_bug_in_a_trial_is_not_answered_by_a_shorter_step(
     assert "derivative_order" in str(excinfo.value)
 
 
+def test_a_trial_whose_mode_score_refuses_is_answered_by_a_shorter_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backtracking was already the right answer one call earlier in the same trial.
+
+    The trial geometry built immediately above this score answers a refusal by
+    halving the step and counting a rejection. The score reads that geometry,
+    refuses for the same reason about the same iterate, and used to end the fit
+    instead -- two consecutive statements about one trial, answered opposite
+    ways. Only the fit surviving proves it: the counter alone would advance on
+    a refusal the geometry raised.
+    """
+    import pandas as pd
+
+    import superglm.reml.direct as direct
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    rng = np.random.default_rng(99)
+    n = 400
+    x = rng.uniform(1.0, 10.0, n)
+    mu = np.exp(0.3 + 0.1 * np.sin(x))
+    y = rng.gamma(shape=5.0, scale=mu / 5.0)
+    trial_scores = 0
+    original = direct.observed_penalized_mode_score
+
+    def refuse_the_first_trial_score(**kwargs):
+        nonlocal trial_scores
+        # Only the line-search trial asks for an objective-only geometry, so a
+        # missing slope inverse is what separates a trial from the candidate
+        # gate, which has no step left to halve and retypes instead.
+        if kwargs["geometry"].hessian_inverse is None:
+            trial_scores += 1
+            if trial_scores == 1:
+                raise ObservedGeometryInfeasibleError("penalized mode score is not finite")
+        return original(**kwargs)
+
+    monkeypatch.setattr(direct, "observed_penalized_mode_score", refuse_the_first_trial_score)
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0,
+        features={"x": Spline(n_knots=6, penalty="ssp")},
+    )
+
+    model.fit_reml(pd.DataFrame({"x": x}), y)
+
+    assert model._reml_result.converged
+    assert trial_scores >= 2, "the line search never came back with a shorter step"
+    assert model._reml_profile["reml_observed_mode_rejected_trial_count"] >= 1
+
+
 def test_a_structured_factor_that_refuses_an_iterate_is_scored_not_raised() -> None:
     """The structured branch refuses during construction, and numpy speaks ValueError.
 
@@ -2377,6 +2538,115 @@ def test_a_structured_factor_that_refuses_an_iterate_is_scored_not_raised() -> N
     # Retyped, not replaced: the factor's own diagnostic (which level, what
     # curvature) still hangs off the cause for anyone reading the traceback.
     assert isinstance(excinfo.value.__cause__, np.linalg.LinAlgError)
+
+
+def test_a_structural_refusal_from_the_structured_factor_is_not_relabelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same call raises in two dialects, and only one of them is this iterate.
+
+    The companion above pins the dialect that IS the iterate: a level whose local
+    curvature the factor rejects, raised as ``LinAlgError``. This pins the other.
+    ``LinAlgError`` subclasses ``ValueError``, so a catch written for the first
+    also caught partitions that disagree, a cross block of the wrong shape, level
+    labels that do not match K -- and reported a misassembled operator as "the
+    fitted coefficients do not define a valid Laplace mode", burying an assembly
+    bug inside a diagnostic about the data.
+
+    Both arms inject, and both inject a diagnostic the callee really raises,
+    because every public route into that call is already gated: the layout
+    builder rejects group slices that do not cover or do not match their matrix
+    widths, and the penalized operator re-checks its own symmetry and shapes
+    before it is handed over. A misassembled operator is reachable only from
+    inside the assembly, which is exactly why the refusal must not be laundered
+    when it happens. Injecting both arms through one seam also makes the
+    exception type the only difference between them.
+    """
+    import pandas as pd
+
+    import superglm.reml.observed_geometry as observed_geometry
+    from superglm import Numeric, RandomEffect, SuperGLM
+    from superglm.group_matrix import RandomEffectGroupMatrix
+    from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+    rng = np.random.default_rng(2028)
+    n, n_levels = 240, 5
+    z = rng.normal(size=n)
+    codes = rng.integers(0, n_levels, size=n)
+    deviation = rng.normal(scale=0.3, size=n_levels)
+    y = rng.gamma(shape=6.0, scale=np.exp(0.4 + 0.25 * z + deviation[codes]) / 6.0)
+    frame = pd.DataFrame({"z": z, "lvl": [f"L{c}" for c in codes]})
+
+    model = SuperGLM(
+        family="gamma",
+        link="log",
+        selection_penalty=0.0,
+        features={
+            "z": Numeric(),
+            "lvl": RandomEffect(levels=[f"L{i}" for i in range(n_levels)]),
+        },
+        direct_solve="structured",
+    ).fit_reml(frame, y, max_reml_iter=2, runtime_validation="skip")
+    structured_index = next(
+        i
+        for i, matrix in enumerate(model._dm.group_matrices)
+        if isinstance(matrix, RandomEffectGroupMatrix)
+    )
+
+    def build():
+        return build_observed_reml_geometry(
+            dm=model._dm,
+            distribution=Gamma(),
+            link=LogLink(),
+            y=y,
+            sample_weight=np.ones(n),
+            offset_arr=np.zeros(n),
+            result=model.result,
+            penalty=None,
+            derivative_order=0,
+            groups=model._groups,
+            lambdas=model._reml_lambdas,
+            reml_penalties=model._reml_penalties,
+            structured_group_index=structured_index,
+            compute_inverse=False,
+        )
+
+    # The unpatched build reaches the factor and comes back, so each arm below
+    # is a statement about the exception it injects rather than about a geometry
+    # that was never going to assemble.
+    assert build() is not None
+
+    def refuse(error):
+        def refusing(system, penalized):
+            raise error
+
+        return refusing
+
+    monkeypatch.setattr(
+        observed_geometry,
+        "build_augmented_structured_factor",
+        # The scalar builder's own diagnostic for an operator whose partitions
+        # do not agree with the system it augments.
+        refuse(ValueError("Penalized and unpenalized operators must use identical partitions.")),
+    )
+    with pytest.raises(ValueError) as structural:
+        build()
+
+    assert not isinstance(structural.value, ObservedGeometryInfeasibleError)
+    assert "identical partitions" in str(structural.value)
+    assert "Laplace mode" not in str(structural.value)
+
+    monkeypatch.setattr(
+        observed_geometry,
+        "build_augmented_structured_factor",
+        refuse(
+            np.linalg.LinAlgError("Structured term 'lvl' has an invalid minimum local diagonal")
+        ),
+    )
+    with pytest.raises(ObservedGeometryInfeasibleError) as conditioning:
+        build()
+
+    assert isinstance(conditioning.value.__cause__, np.linalg.LinAlgError)
 
 
 @pytest.mark.parametrize(
@@ -2756,6 +3026,73 @@ class TestModeCertificationRecovery:
         assert isinstance(excinfo.value.__cause__, ObservedGeometryInfeasibleError)
         assert "positive finite sum" in str(excinfo.value)
 
+    def test_an_infeasible_mode_score_is_still_scored_not_raised(self, monkeypatch):
+        """The candidate gate's score has the same exposure as its geometry.
+
+        The twin of the test above, one call later. Both describe the accepted
+        candidate at this point, both are answered by a point scored infeasible
+        rather than a failed fit, and a bare ValueError from either walks past
+        every ``except ObservedModeNotCertifiedError`` on the way out.
+        """
+        import superglm.reml.direct as direct_module
+        from superglm.reml.observed_geometry import (
+            ObservedGeometryInfeasibleError,
+            ObservedModeNotConvergedError,
+        )
+
+        X, y, weights = self._tweedie_fixture()
+
+        def unscorable_here(**kwargs):
+            raise ObservedGeometryInfeasibleError("penalized mode score is not finite")
+
+        monkeypatch.setattr(direct_module, "observed_penalized_mode_score", unscorable_here)
+
+        with pytest.raises(ObservedModeNotConvergedError) as excinfo:
+            self._model().fit_reml(X, y, sample_weight=weights)
+
+        assert isinstance(excinfo.value.__cause__, ObservedGeometryInfeasibleError)
+        assert "not finite" in str(excinfo.value)
+
+    def test_an_infeasible_terminal_refit_is_infeasible_not_fatal(self, monkeypatch):
+        """The terminal refit is a place the power search names, so it must speak the type.
+
+        Publication runs one more observed build after the search has accepted a
+        lambda, through a different module's binding, and it can refuse an
+        iterate for the reasons every other build can. Left a bare ValueError it
+        sails past the handler in ``model/profile_ops.py`` that exists to score
+        this power infeasible -- so one power near a bound kills a search whose
+        optimum sits well inside the feasible region.
+        """
+        import superglm.model.reml_finalize as finalize_module
+        from superglm.reml.observed_geometry import ObservedGeometryInfeasibleError
+
+        X, y, weights = self._tweedie_fixture()
+        original = finalize_module.build_observed_reml_geometry
+        refused: list[float] = []
+
+        def infeasible_in_the_upper_region(**kwargs):
+            # The shape observed on real data, and the shape the sibling
+            # candidate-gate test uses: feasible below a ceiling, not above.
+            power = getattr(kwargs.get("distribution"), "p", 0.0)
+            if power > 1.6:
+                refused.append(float(power))
+                raise ObservedGeometryInfeasibleError(
+                    "observed intercept curvature must have a positive finite sum"
+                )
+            return original(**kwargs)
+
+        monkeypatch.setattr(
+            finalize_module, "build_observed_reml_geometry", infeasible_in_the_upper_region
+        )
+
+        result = self._model().estimate_p(
+            X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
+        )
+
+        assert refused, "the fixture never reached the infeasible region"
+        assert 1.05 <= result.p_hat <= 1.6
+        assert np.isfinite(result.nll)
+
     def test_message_does_not_offer_one_family_s_remedy_to_another(self, monkeypatch):
         """Observed geometry is the default branch, so this reaches many families."""
         import pandas as pd
@@ -2952,12 +3289,14 @@ class TestModeCertifiesAtTheRoundOffFloor:
             if any(reason == "max_iter" for _, reason in records):
                 stalled.append(seed)
         assert len(stalled) >= 5, (
-            f"only {len(stalled)} of 8 draws exhausted a PIRLS budget (seeds "
-            f"{stalled}), against the 6 of 8 measured here -- seeds 0, 2, 4, 5, "
-            "6 and 7 stall, 1 and 3 do not -- and a threshold of 5. Below that "
-            "most of the sweep no longer reaches the round-off floor it exists "
-            "to regress, and the cases above are passing on draws that would "
-            "pass against the unfixed gate too."
+            f"MEASURED NOW: {len(stalled)} of 8 draws exhausted a PIRLS budget "
+            f"(seeds {stalled}), against a threshold of 5. MEASURED THEN: 6 of "
+            "8, on numpy 2.4.2 / scipy 1.18.0, 2026-08-18 -- a baseline, not a "
+            "set this run should have reproduced, because WHICH draw stalls "
+            "moves with the numeric stack. Below the threshold most of the "
+            "sweep no longer reaches the round-off floor it exists to regress, "
+            "and the cases above are passing on draws that would pass against "
+            "the unfixed gate too."
         )
 
     def test_the_recorder_watches_every_gate_that_defers(self):
@@ -3029,6 +3368,92 @@ class TestModeCertifiesAtTheRoundOffFloor:
         # that the vocabulary is complete is the solver's own assertion.
         for reason in (*sorted(PIRLS_TERMINATION_REASONS - {"max_iter"}), None):
             assert not ended(reason), reason
+
+    def test_no_solver_writes_a_termination_reason_the_vocabulary_omits(self):
+        """Read the literals out of the source, because a set cannot list its own gaps.
+
+        The test above drives its sweep from ``PIRLS_TERMINATION_REASONS``, which
+        by construction cannot notice a literal that was never declared -- and
+        the type annotation that would is checked by a gate carrying a backlog
+        ceiling, so one new diagnostic does not red the build. This parses both
+        loops instead and asks the opposite question: does every string that
+        reaches ``termination_reason`` appear in the vocabulary the consumers
+        switch on? A guard rather than a fix, and green today by construction;
+        it earns its place by reddening on a literal nobody declared.
+
+        The walk collects string constants anywhere inside the assigned
+        expression, so a reason hidden in a conditional is still seen. That is a
+        deliberate superset: a literal that reaches the field by any expression
+        shape still has to be declared.
+
+        It has to read more than plain assignment to make that claim. The field
+        is also written as a constructor keyword and by ``replace()``, and an
+        earlier version of this guard saw neither -- so a reason introduced as
+        ``PIRLSResult(..., termination_reason="...")`` would have shipped
+        undeclared, which is the one case the guard exists for.
+        """
+        import ast
+        from pathlib import Path
+
+        import superglm.solvers.irls_direct as irls_direct_module
+        import superglm.solvers.pirls as pirls_module
+        from superglm.solvers.pirls import PIRLS_TERMINATION_REASONS
+
+        def names_the_field(target) -> bool:
+            """Does this assignment target write ``termination_reason``?
+
+            Three shapes reach the field: the loop local, an attribute on a
+            result object, and a dict entry in the trace payloads.
+            """
+            if isinstance(target, ast.Name):
+                return target.id == "termination_reason"
+            if isinstance(target, ast.Attribute):
+                return target.attr == "termination_reason"
+            if isinstance(target, ast.Subscript):
+                key = target.slice
+                return isinstance(key, ast.Constant) and key.value == "termination_reason"
+            return False
+
+        def assigned_literals(module) -> set[str]:
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            literals: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.AnnAssign):
+                    # A bare ``termination_reason: TerminationReason`` field
+                    # declaration carries no value to read.
+                    written = [node.target] if node.value is not None else []
+                    value = node.value
+                elif isinstance(node, ast.Assign):
+                    written, value = node.targets, node.value
+                elif isinstance(node, ast.keyword):
+                    # ``PIRLSResult(..., termination_reason="converged")`` and
+                    # ``replace(result, termination_reason=...)`` never bind a
+                    # name, so a target walk alone cannot see them.
+                    written, value = [], node.value
+                    if node.arg != "termination_reason":
+                        continue
+                else:
+                    continue
+                if value is None:
+                    continue
+                if not isinstance(node, ast.keyword) and not any(
+                    names_the_field(target) for target in written
+                ):
+                    continue
+                literals.update(
+                    child.value
+                    for child in ast.walk(value)
+                    if isinstance(child, ast.Constant) and isinstance(child.value, str)
+                )
+            return literals
+
+        written = assigned_literals(pirls_module) | assigned_literals(irls_direct_module)
+        # Without this the test passes by parsing nothing -- a renamed local, a
+        # moved loop, a file that no longer holds either.
+        assert written, "no termination_reason literal was found in either solver"
+        assert written <= set(PIRLS_TERMINATION_REASONS), sorted(
+            written - set(PIRLS_TERMINATION_REASONS)
+        )
 
     @staticmethod
     def _stamped_terminal_refit(monkeypatch, *, converged, termination_reason):

@@ -179,17 +179,23 @@ class REMLGeometrySummary:
     column_scale: NDArray
 
 
-# Every terminal condition the two IRLS loops can report. The vocabulary lives
-# here because this module declares both fields that carry it, and both loops
-# assign into a local of this type: a tenth reason is then a type error on the
-# line that invents it, rather than a novel string that reaches the consumers
-# switching on the field. ``mode_certified`` is the one member neither loop
-# writes -- the terminal REML refit stamps it when a mode that exhausted its
-# iteration budget clears its KKT certificate anyway. The fitted-state
-# invalidation path stamps a synthetic marker of its own over the field
-# afterwards, through a dynamic ``setattr`` this annotation cannot see; that
-# records a revision rather than a reason a loop stopped, so it is deliberately
-# not a member.
+# Every value ``termination_reason`` may hold except the marker stamped after
+# the fit, non-terminal sentinel included -- so the set is neither "what the
+# loops write" nor "what the field holds", and reading it as either misleads.
+# The vocabulary lives here because this module declares both fields that carry
+# it, and both loops assign into a local of this type, so a reason invented
+# inside a loop is a type error on the line that invents it rather than a novel
+# string reaching the consumers that switch on the field. ``continue`` is the
+# sentinel: it labels an iteration that ended without ending the loop, so it
+# reaches the per-iteration diagnostics and the trace but never a result, which
+# carries only a reason that actually ended the fit. ``mode_certified`` is the
+# member neither loop writes -- the terminal REML refit stamps it when a mode
+# that exhausted its iteration budget clears its KKT certificate anyway. The
+# gap runs the other way exactly once, and deliberately: the fitted-state
+# invalidation path stamps a synthetic marker of its own over the field through
+# a dynamic ``setattr`` this annotation cannot see, and that records a revision
+# rather than a reason a loop stopped, so it stays out of the vocabulary even
+# though the field does hold it at runtime.
 type TerminationReason = Literal[
     "curvature_fallback",
     "curvature_rescue",

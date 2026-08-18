@@ -26,6 +26,7 @@ from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.observed_geometry import (
+    ObservedGeometryInfeasibleError,
     ObservedModeNotCertifiedError,
     ObservedModeNotConvergedError,
     classify_scop_reml_curvature,
@@ -672,21 +673,30 @@ def _evaluate_scop_reml_mode(
         fisher_sum_w=fisher_sum_w,
     )
     if mode_score is None:
-        mode_score = scop_penalized_mode_score(
-            dm=context.dm,
-            distribution=context.distribution,
-            link=context.link,
-            y=context.y,
-            sample_weight=context.sample_weight,
-            offset_arr=context.offset_arr,
-            result=result,
-            latent_penalty=penalty,
-            scop_states=scop_states,
-            centered_fisher_gram=centered_xtwx,
-            fisher_mean_x=fisher_mean_x,
-            fisher_sum_w=sum_w,
-            eta_unclipped=eta_unclipped,
-        )
+        try:
+            mode_score = scop_penalized_mode_score(
+                dm=context.dm,
+                distribution=context.distribution,
+                link=context.link,
+                y=context.y,
+                sample_weight=context.sample_weight,
+                offset_arr=context.offset_arr,
+                result=result,
+                latent_penalty=penalty,
+                scop_states=scop_states,
+                centered_fisher_gram=centered_xtwx,
+                fisher_mean_x=fisher_mean_x,
+                fisher_sum_w=sum_w,
+                eta_unclipped=eta_unclipped,
+            )
+        except ObservedGeometryInfeasibleError as exc:
+            # An unscoreable mode is one more infeasible point to a power
+            # search, not a dead search. Left untyped it escapes as a bare
+            # ValueError past every `except ObservedModeNotCertifiedError`
+            # handler, because that family is RuntimeError-derived.
+            raise ObservedModeNotConvergedError(
+                f"SCOP could not score its penalized coefficient mode at this point: {exc}"
+            ) from exc
 
     def terminal_fisher_weights() -> NDArray:
         eta_raw = (
@@ -1049,21 +1059,30 @@ def _fit_scop_reml_mode(
     )
     sum_w = fisher_sum_w
     if scop_states:
-        mode_score = scop_penalized_mode_score(
-            dm=context.dm,
-            distribution=context.distribution,
-            link=context.link,
-            y=context.y,
-            sample_weight=context.sample_weight,
-            offset_arr=context.offset_arr,
-            result=result,
-            latent_penalty=penalty,
-            scop_states=scop_states,
-            centered_fisher_gram=centered_xtwx,
-            fisher_mean_x=fisher_mean_x,
-            fisher_sum_w=sum_w,
-            eta_unclipped=working_cache.get("eta_unclipped"),
-        )
+        try:
+            mode_score = scop_penalized_mode_score(
+                dm=context.dm,
+                distribution=context.distribution,
+                link=context.link,
+                y=context.y,
+                sample_weight=context.sample_weight,
+                offset_arr=context.offset_arr,
+                result=result,
+                latent_penalty=penalty,
+                scop_states=scop_states,
+                centered_fisher_gram=centered_xtwx,
+                fisher_mean_x=fisher_mean_x,
+                fisher_sum_w=sum_w,
+                eta_unclipped=working_cache.get("eta_unclipped"),
+            )
+        except ObservedGeometryInfeasibleError as exc:
+            # An unscoreable mode is one more infeasible point to a power
+            # search, not a dead search. Left untyped it escapes as a bare
+            # ValueError past every `except ObservedModeNotCertifiedError`
+            # handler, because that family is RuntimeError-derived.
+            raise ObservedModeNotConvergedError(
+                f"SCOP could not score its penalized coefficient mode at this point: {exc}"
+            ) from exc
     else:
         mode_score = SCOPModeScore(
             intercept=0.0,

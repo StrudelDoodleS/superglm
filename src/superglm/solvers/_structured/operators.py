@@ -179,7 +179,13 @@ class SumToZeroBlockOperator:
         if self.structured_indices.shape != (n_levels - 1, block_size):
             raise ValueError("SZ public indices must have shape (K - 1, k).")
         if not all(np.all(np.isfinite(values)) for values in (self.A, self.C, self.D)):
-            raise ValueError("SZ operator blocks must be finite.")
+            # Non-finite blocks are what THIS iterate's weights produced, not a
+            # malformed call, and callers separate the two by type: the
+            # observed-geometry build scores a LinAlgError as a point with no
+            # usable penalized mode and routes around it, while a ValueError
+            # stops the fit. The shape and partition checks around this one stay
+            # ValueError for exactly that reason -- no iterate can cause them.
+            raise np.linalg.LinAlgError("SZ operator blocks must be finite.")
         if not np.allclose(self.A, self.A.T, rtol=0.0, atol=1e-13):
             raise ValueError("SZ ordinary block must be symmetric.")
         if not np.allclose(self.D, self.D.transpose(0, 2, 1), rtol=0.0, atol=1e-13):

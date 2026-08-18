@@ -102,6 +102,16 @@ class ScalarSchurFactor:
             raise ValueError(f"C shape {self.C.shape} does not match ({k}, {q}).")
         if self.d.shape != (k,):
             raise ValueError(f"d shape {self.d.shape} does not match ({k},).")
+        # Only `d` was checked here. A non-finite A or C reaches no guard at
+        # all: `np.linalg.norm(..., ord=2)` returns nan for an inf input rather
+        # than raising, so the factor builds and carries a nan scale into the
+        # REML criterion. A refusal with the wrong class still stops something;
+        # silent acceptance distorts smoothing-parameter selection while every
+        # accuracy metric stays flat.
+        if not np.all(np.isfinite(self.A)) or not np.all(np.isfinite(self.C)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {term_name!r} has non-finite ordinary or cross blocks."
+            )
         self.minimum_local_diagonal = float(np.min(self.d)) if k else float("inf")
         if np.any(self.d <= 0) or not np.all(np.isfinite(self.d)):
             raise np.linalg.LinAlgError(
@@ -551,9 +561,16 @@ class BlockSchurFactor:
             raise ValueError("small_indices width does not match A.")
         if self.structured_indices.shape != (self.n_levels, self.block_size):
             raise ValueError("structured_indices shape does not match C and D.")
-        if not np.all(np.isfinite(self.D)):
+        # A and C join D for the reason given in ScalarSchurFactor above: an inf
+        # in either passes every remaining check and only shows up later as a
+        # nan logdet.
+        if (
+            not np.all(np.isfinite(self.A))
+            or not np.all(np.isfinite(self.C))
+            or not np.all(np.isfinite(self.D))
+        ):
             raise np.linalg.LinAlgError(
-                f"Structured term {term_name!r} has non-finite local blocks."
+                f"Structured term {term_name!r} has non-finite ordinary, cross, or local blocks."
             )
         if not np.allclose(self.D, self.D.transpose(0, 2, 1), rtol=0.0, atol=1e-13):
             raise ValueError("Every local D block must be symmetric.")

@@ -17,7 +17,10 @@ from superglm._group_matrix._group_matrix_centered import (
 from superglm.distributions import _VARIANCE_FLOOR, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
-from superglm.reml.observed_geometry import compute_scop_observed_information_weights
+from superglm.reml.observed_geometry import (
+    ObservedGeometryInfeasibleError,
+    compute_scop_observed_information_weights,
+)
 from superglm.solvers.centered_system import (
     build_anchor_centered_system,
     build_centered_system,
@@ -193,8 +196,13 @@ def scop_penalized_mode_score(
         eta_raw = dm.matvec(beta_mapped) + result.intercept + offset_arr
     else:
         eta_raw = np.asarray(eta_unclipped, dtype=np.float64)
-        if eta_raw.shape != (dm.n,) or not np.all(np.isfinite(eta_raw)):
-            raise ValueError("SCOP mode-score eta must be finite and match the design rows")
+        # An eta of the wrong width is a caller handing in a state built against
+        # another design; a non-finite one is this iterate having diverged. Only
+        # the second is a point to route around.
+        if eta_raw.shape != (dm.n,):
+            raise ValueError("SCOP mode-score eta must match the design rows")
+        if not np.all(np.isfinite(eta_raw)):
+            raise ObservedGeometryInfeasibleError("SCOP mode-score eta must be finite")
     eta = stabilize_eta(eta_raw, link)
     mu = clip_mu(link.inverse(eta), distribution)
     variance = np.maximum(
@@ -204,8 +212,13 @@ def scop_penalized_mode_score(
     derivative = np.asarray(link.deriv_inverse(eta), dtype=np.float64)
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         row_score = sample_weight * (y - mu) * derivative / variance
+    # The ordinary path's twin of this quotient is an infeasible-iterate signal,
+    # and this one says the same thing about the same expression: nothing an
+    # accepted geometry certifies bounds a residual times a derivative over a
+    # floored variance. Typed so a caller scores the point rather than dying on
+    # it, which is what the two call sites in scop_efs now do with it.
     if not np.all(np.isfinite(row_score)):
-        raise ValueError("SCOP penalized mode score is not finite")
+        raise ObservedGeometryInfeasibleError("SCOP penalized mode score is not finite")
 
     intercept_score = math.fsum(float(value) for value in row_score)
     mapped_scale = np.sqrt(np.maximum(np.diag(centered_fisher_gram), 0.0) / fisher_sum_w)
@@ -447,7 +460,7 @@ def _decompose_with_factor_certification(
     """Apply the shared Gram-first policy and consult rows only in its uncertainty band."""
     try:
         decomposition = decompose_gram(matrix)
-    except ValueError:
+    except (np.linalg.LinAlgError, ValueError):
         if certifier is None:
             raise
         return certifier(center)
@@ -760,7 +773,7 @@ def build_cached_scop_joint_geometry(
                 # observed Gram truncates one, let the established fallback
                 # below replace the entire geometry with Fisher curvature.
                 raise ValueError("observed curvature is singular on the certified full space")
-    except ValueError:
+    except (np.linalg.LinAlgError, ValueError):
         centered = expected_centered
         decomposition = _decompose_with_factor_certification(
             centered,
@@ -1007,7 +1020,7 @@ def build_observed_scop_joint_geometry(
     sum_w = observed_sum_w
     try:
         decomposition = decompose_gram(centered)
-    except ValueError:
+    except (np.linalg.LinAlgError, ValueError):
         if fisher_XtWX is None or fisher_XtW1 is None or fisher_sum_W is None:
             raise
         fisher_XtWX = np.asarray(fisher_XtWX, dtype=np.float64)
