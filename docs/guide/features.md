@@ -377,8 +377,15 @@ To put a group somewhere else, say so in `values=` — give its members the
 coordinate you want, and the mean of equal values is that value exactly:
 
 ```python
-values = {"Mi000": 0.0, "Mi001": 0.1, "Mi002": 0.1, "Mi003": 0.3}
-band = OrderedCategorical(values=values, basis=Spline(kind="cr"), grouping=grouping)
+from superglm import OrderedCategorical, Spline, collapse_levels
+
+order = ["A", "B", "C", "D"]
+grouping = collapse_levels(df["BonusClass"], groups={"B": ["B", "C"]}, order=order)
+# B and C share B's coordinate, so their group sits exactly there
+values = {"A": 0.0, "B": 0.1, "C": 0.1, "D": 0.3}
+bonus_class = OrderedCategorical(
+    values=values, basis=Spline(kind="cr", n_knots=2), grouping=grouping
+)
 ```
 
 A `Piecewise` or `Polynomial` inner basis is different: it evaluates on level
