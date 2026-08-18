@@ -271,10 +271,20 @@ perturbation ``E`` of the operand::
     d edf = <E, G>_F ,      G := lambda A^-1 S A^-1
 
 and over ``||E||_F = c`` that is maximised at ``E = c G / ||G||_F``, giving
-exactly ``c ||G||_F``.  Take ``c = eps ||V_eff||_F`` -- SMALLER than the error
-already committed in forming ``V_eff`` from the moments, so the perturbed
-operand is an equally faithful reading of the same design -- and the low edge's
-certified worst case is ``eps ||V_eff||_F ||G||_F``.
+exactly ``c ||G||_F``.  Take ``c = eps ||V_eff||_F`` -- ONE ROUNDING of the
+operand's norm -- and the low edge's worst case is ``eps ||V_eff||_F ||G||_F``.
+
+**THE RADIUS IS A STATED PROBE AND IT IS DELIBERATELY CONSERVATIVE.**  An
+earlier revision called it "smaller than the error already committed in forming
+the Gram", which asserted a backward-error bound it had not derived.  The
+derivation is Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd
+ed., Ch. 3: ``fl(X'X) = X'X + D`` with ``|D| <= gamma_n |X|'|X|``
+COMPONENTWISE, ``n`` the contraction dimension.  Measured against the probe
+radius, that bound is **98.6x to 204.7x larger**, so the perturbation the
+operand already carries exceeds the one probed here by two orders and the
+figures below are a LOWER bound on the floor rather than an estimate of it.
+Conservative is the safe direction for every claim made from them, and it buys
+a boundary with no fitted constant in it: one rounding against one ulp.
 
 **THAT FORM IS LOAD-BEARING AND TWO WEAKER ONES WERE REFUSED IN REVIEW.**
 
@@ -291,9 +301,16 @@ certified worst case is ``eps ||V_eff||_F ||G||_F``.
   up to four orders: where the theory says 1 it reads 55.6 to 126.9 and 5924 to
   11124.  ``G`` carries ``S`` in the right place and needs no such proxy.
 
-``G`` costs only solves against ``A``, which ``lambda`` REGULARISES -- the
-bracket sets ``cond(A) ~ 1e10`` by construction rather than letting the data's
-null direction set it -- so nothing here divides by an unresolved quantity.
+``G`` costs only solves against ``A``.  An earlier revision claimed ``lambda``
+bounds ``cond(A)`` at about 1e10 "by construction"; **that is false for an
+anisotropic penalty and is withdrawn.**  The only available bound is
+``||A||_2 / (lambda lambda_min(S))``, which a rotated penalty makes vacuous
+(1.6e+18) and a singular ``S`` makes unavailable outright.  Measured instead,
+``cond(A)`` runs 1.0e+02 and 1.0e+06 on resolved geometries, 1.9e+11 and
+2.2e+11 on isotropic unresolved ones, and 5.8e+12 and **5.4e+14** on rotated
+ones -- so at the hardest the solve for ``G`` keeps about one digit in its
+smallest direction.  That is disclosure rather than derivation; what makes the
+quantity usable is measured stability, which is what the sweep checks.
 
 **WHAT THE FLOOR IS ON THIS FAMILY, PER DRAW RATHER THAN AS A CONSTANT.**
 Over the 21 draws it spans **1.6298e-15 to 4.9265e-04** -- twelve orders,
@@ -322,11 +339,19 @@ that level's own spline columns.  Squaring sends such a direction under
 ``eps``; ``1 / lambda`` then multiplies whatever round-off is left there.
 Pinned in
 ``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``,
-which asserts the certified ceiling against ONE ULP of the answer -- worst
-resolved 0.63 ulp against best unresolved 2.90e+10 ulp, ten orders apart, and
-bit-identical across 7 microkernels x 2 thread counts on every row but the two
-hardest -- and separately that the maximising perturbation attains 0.9425 to
-1.0617 of the predicted displacement against a derived value of 1.
+which asserts the ceiling against ONE ULP of the answer -- the boundary the
+prose states, with no fitted constant: a one-rounding probe either moves the
+answer within its own representation or it does not.  Worst resolved 0.6283 ulp
+against best unresolved 2.8991e+10 ulp, so the margins are 1.59x and 2.90e+10x
+and are reported rather than engineered.  The thin side is thin because it is
+the real boundary; what makes 1.59x usable is that the quantity is
+BIT-IDENTICAL across 7 microkernels x 2 thread counts on that row.  Separately
+the maximising perturbation attains 0.9425 to 1.0617 of the predicted
+displacement against a derived value of 1.
+
+**AN EARLIER REVISION ASSERTED 1e5 ULP WHILE SAYING ONE**, a midpoint between
+the two observed populations; it would have passed a resolved geometry
+amplified by five orders.  Mutating one by 1e4 now reds three rows.
 
 **A SAMPLED WIDTH WAS TRIED FIRST AND IS NOT SOUND**, which is worth recording
 because it looks convincing.  Taking ``max - min`` of ``edf`` over 32 random
@@ -335,6 +360,18 @@ range, where the theory supplies only an upper bound on sensitivity.  It moves
 with both of its own arbitrary constants: 0.2548 at 4 draws against 0.8653 at
 128, and 0.5063 to 0.8085 over 24 perturbation seeds at one configuration.  A
 deterministic norm has neither axis.
+
+**THE PROBE ALSO DRIVES THE LADDER RATHER THAN ``_edge`` AT A PINNED LAMBDA**,
+because the bracket is ``1e-10 tr(V_eff) / tr(S)`` and ``G`` is PSD, so a probe
+along it moves ``lambda`` too.  Review is right that the omitted term can
+cancel the response outright -- in ONE dimension ``edf = V / (V + 1e-10 V)`` is
+constant in ``V`` while a fixed-lambda calculation reports a move.  It does not
+cancel here, because the response is carried by the near-null direction at
+``1 / (lambda s)`` while the bracket shifts with the TOTAL trace, which the
+saturated directions dominate: measured, the ladder's displacement equals the
+fixed-lambda one to **1.000 on all eight geometries**, with ``lambda`` moving 0
+to 7.9e-16 relative.  The ladder is driven anyway, because one extra call
+removes an argument.
 
 **No arrangement of the arithmetic below narrows this.**  It is the same
 architectural ceiling as the high edge, reached by a different route, and it
