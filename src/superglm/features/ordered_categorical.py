@@ -653,6 +653,27 @@ class OrderedCategorical:
                 vals = [by_text[str(o)] for o in originals if str(o) in by_text]
                 if vals:
                     grouped_ltv[glev] = group_axis_position(vals)
+                # A group is only AT its members' mean if every member has a
+                # declared value. Filtering silently and averaging the rest puts
+                # the group at the mean of a SUBSET -- a coordinate the declared
+                # partition never asks for -- and the model fits there. Measured
+                # on `order=["A","B","C","D"]` against a column that also holds
+                # "E", grouped `{"CDE": ["C","D","E"]}`: the group landed at
+                # mean(v_C, v_D) = 0.8333, the fit succeeded, and the mistake
+                # surfaced two modules away as a bare `KeyError: 'E'` out of
+                # `_expand_grouped_term`. Named here instead, beside the group
+                # that caused it.
+                undeclared = [str(o) for o in originals if str(o) not in by_text]
+                if vals and undeclared and str(glev) not in special_set:
+                    raise ValueError(
+                        f"OrderedCategorical grouping puts undeclared level(s) "
+                        f"{undeclared!r} in group {glev!r}, whose other members are "
+                        f"declared. A group's numeric position is the mean of its "
+                        f"members' positions, so a partly-declared group has no "
+                        f"well-defined position; declared levels are "
+                        f"{sorted(by_text)}. Declare those levels, or leave them out "
+                        "of the grouping."
+                    )
             # Specials are exempt by construction: a free level never receives a
             # coordinate on the spline's axis, so having no numeric position is
             # correct for them and only for them.

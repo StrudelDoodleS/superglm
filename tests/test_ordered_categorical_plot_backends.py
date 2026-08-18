@@ -271,6 +271,71 @@ def test_single_group_collapse_still_shows_the_whole_curve(single_group_collapse
     assert lo < float(curve_x.min()) and hi > float(curve_x.max())
 
 
+def test_plotly_expanded_panel_shows_a_curve_narrower_than_its_markers(
+    collapsed_ordered_spline_model,
+):
+    """The combination issue #282 creates, on the backend that does not union.
+
+    ``expanded`` mode is the only place the axis mismatch survives: the markers
+    sit at the declared level values (21 .. 72) while the curve spans the axis
+    the smooth was fitted on (31 .. 72), because the leading group sits at its
+    members' mean. That is the ggplot2 ``geom_smooth(fullrange=FALSE)``
+    arrangement -- the line is not expanded to the range of the plot -- and the
+    panel has to hold both.
+
+    matplotlib guarantees it by unioning the marker padding with the curve's
+    extent, which ``test_collapsed_panel_x_limits_hold_the_whole_curve`` pins.
+    Plotly gets there differently: it sets no x-range at all and lets autorange
+    cover every trace. That is arguably more robust, since it also covers the
+    exposure bars and a detached ``specials=`` block -- but it is an absence
+    rather than a guarantee, and a single ``update_xaxes(range=...)`` added
+    later for an unrelated reason would clip the curve with nothing failing.
+    So the property is asserted here rather than left to the absence.
+    """
+    go = pytest.importorskip("plotly.graph_objects")
+
+    X, sample_weight, model = collapsed_ordered_spline_model
+    ti = model.term_inference("age_band")
+    curve_x = np.asarray(ti.smooth_curve.x, dtype=np.float64)
+    declared = np.asarray(sorted(AGE_VALUES.values()), dtype=np.float64)
+
+    # the premise: the fitted curve really is narrower than the drawn markers
+    assert float(curve_x.min()) > float(declared.min())
+    assert float(curve_x.max()) == pytest.approx(float(declared.max()))
+
+    fig = model.plot(
+        ["age_band", "mileage"],
+        engine="plotly",
+        X=X,
+        sample_weight=sample_weight,
+        grouped_level_display="expanded",
+    )
+    curve = next(
+        trace
+        for trace in fig.data
+        if isinstance(trace, go.Scatter) and trace.name == "Smooth curve"
+    )
+    np.testing.assert_allclose(np.asarray(curve.x, dtype=np.float64), curve_x)
+
+    # No explicit range is set, on either the initial layout or the term
+    # dropdown's update, so autorange covers every trace on the axis.
+    for axis in ("xaxis", "xaxis2"):
+        layout_axis = fig.layout[axis] if axis in fig.layout else None
+        if layout_axis is not None:
+            assert layout_axis.range is None, f"{axis} pins a range, which can clip the curve"
+    # The Y range IS pinned per term (it is computed from that term's
+    # relativities); it is only an X range that could clip the curve.
+    for button in fig.layout.updatemenus[-1].buttons:
+        for key in button.args[1] if len(button.args) > 1 else {}:
+            assert not (key.startswith("xaxis") and key.endswith(".range")), (
+                f"{key} pins an x-range on a term switch, which can clip the curve"
+            )
+
+    # and the declared markers really are on the panel beside the narrower curve
+    tickvals = np.asarray(fig.layout.xaxis.tickvals, dtype=np.float64)
+    np.testing.assert_allclose(np.sort(tickvals), declared)
+
+
 def test_collapsed_curve_is_dropped_when_it_has_no_level_positions(ordered_spline_model):
     # A curve without level_x cannot be re-positioned onto the collapsed
     # markers, and handing the uncollapsed curve to a display term with fewer

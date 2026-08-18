@@ -47,7 +47,11 @@ class SmoothCurve:
     puts a marker at every declared level while the curve stays on the axis it
     was fitted on -- the group positions -- so a merge at either end of the
     ordering leaves the curve inside the markers.  A consumer that needs both on
-    one canvas should take the union of their extents, as both renderers do.
+    one canvas should take the union of their extents.  The bundled renderers
+    both end up there, by different routes: the matplotlib panel unions the two
+    explicitly, while the plotly one sets no x-range at all and lets autorange
+    cover every trace.  Only the first is a guarantee -- the second holds as
+    long as nobody adds a range.
     """
 
     x: NDArray
