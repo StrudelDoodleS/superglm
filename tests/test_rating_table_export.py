@@ -3121,3 +3121,37 @@ def _as_general_renders(value: float) -> float | None:
     integer_characters = max(exponent + 1, 1)
     decimals = max(_GENERAL_DISPLAY_CHARACTERS - integer_characters - 1, 0)
     return float(f"{value:.{decimals}f}")
+
+
+def test_a_discrete_offset_level_is_certified_relative_to_its_own_multiplier():
+    """An absolute tolerance certifies a lookup that mis-rates by 40%.
+
+    The old absolute tolerance dominated at a multiplier near it: the check
+    ``atol + rtol*representative`` is the floor, so multipliers of
+    1e-13 and 2e-13 in one level both sit within 1e-12 of their geometric mean
+    and the level is published as exact, mis-rating its rows by 41.4% and
+    29.3%.  A multiplier is a scale-free quantity, so the only meaningful
+    tolerance is relative to the representative -- the same argument that
+    already governs the per-unit branch, applied to its sibling.
+    """
+    rng = np.random.default_rng(2)
+    n = 400
+    multiplier = np.where(np.arange(n) % 2 == 0, 1e-13, 2e-13)
+    X = pd.DataFrame({"region": rng.choice(["A", "B"], n), "lvl": np.full(n, "L1", dtype=object)})
+    offset = np.log(multiplier)
+    y = rng.poisson(0.5, n).astype(float)
+    model = SuperGLM(
+        family="poisson", selection_penalty=0.0, features={"region": Categorical(base="first")}
+    )
+    model.fit(X, y, offset=offset)
+
+    with pytest.raises(ValueError, match="multiple offset multipliers"):
+        build_rating_table_payload(
+            model,
+            X,
+            y,
+            offset=offset,
+            offset_source="lvl",
+            offset_name="Lvl",
+            offset_kind="discrete",
+        )
