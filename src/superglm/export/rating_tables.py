@@ -1245,13 +1245,23 @@ def _offset_per_unit_block(
         np.exp(np.average(log_ratio, weights=weights) if total > 0.0 else log_ratio.mean())
     )
 
-    if not np.allclose(
-        np.exp(log_ratio), scale, rtol=offset_mapping_rtol, atol=offset_mapping_atol
-    ):
-        worst = float(np.max(np.abs(np.exp(log_ratio) / scale - 1.0)))
+    # Purely RELATIVE to the scale, rather than ``np.allclose``'s
+    # ``atol + rtol*scale``.  A multiplier is a scale-free quantity, so an
+    # absolute floor is a relative tolerance of ``atol/scale``: at
+    # ``scale = 1e-6`` the ``1e-12`` default admits a 1e-6 relative departure --
+    # four orders looser than the rtol that was asked for -- and it keeps
+    # loosening in proportion below that, on the one block whose entire claim
+    # is exactness.  Measured: the same 1e-8 departure is refused on
+    # ``log(SumInsured)`` and accepted on ``log(SumInsured/1e6)``.  This is the
+    # argument ``_significant_digits`` already makes for rounding (issue #303).
+    # ``offset_mapping_atol`` still governs the discrete path, where the
+    # comparison is between multipliers rather than against a scale.
+    worst = float(np.max(np.abs(np.exp(log_ratio) / scale - 1.0)))
+    if not np.isfinite(worst) or worst > offset_mapping_rtol:
         raise OffsetRelationError(
             f"Offset is not proportional to {source_name!r}: the worst row deviates by "
-            f"{worst:.3e}, outside offset_mapping_rtol/atol. A per-unit offset block "
+            f"{worst:.3e} relative, outside offset_mapping_rtol={offset_mapping_rtol:g}. "
+            "A per-unit offset block "
             "states one relation for every row, so it cannot describe this offset. "
             "Declare the column the offset is actually a function of, or keep the "
             "offset calculation outside the rating table."
@@ -1715,10 +1725,23 @@ def build_rating_table_payload(
     ``offset_max_exact_levels`` governs BOTH paths --
     the declared one reached through ``offset_source=``, and the undeclared one
     that has nothing but the fitted offset vector.  No more than that many
-    distinct multipliers makes a lookup worth printing; more makes a single
-    per-unit row.  Neither is an approximation, and cardinality is not deciding
-    exactness: an offset is never estimated, so it carries no estimation error
-    for a binning to trade against.
+    levels makes a lookup worth printing; more makes a single per-unit row.
+    Neither is an approximation, and cardinality is not deciding exactness: an
+    offset is never estimated, so it carries no estimation error for a binning
+    to trade against.
+
+    One cap, but the two paths COUNT DIFFERENT THINGS, and the difference is
+    reachable rather than theoretical.  The DECLARED path counts the number of
+    distinct values of the SOURCE column, ``source.nunique(dropna=False)``,
+    because that column is what the block's rows are keyed on.  The UNDECLARED
+    path has no column to count, so it counts distinct MULTIPLIERS --
+    ``exp(offset)`` rounded to 12 significant digits, the rounding being there
+    to stop the float noise of ``exp(log(x))`` splitting one tariff level into
+    thousands.  A 25-level source whose offset takes only 3 distinct
+    multipliers is therefore refused by the declared path under
+    ``offset_kind="discrete"`` and published as a 3-row lookup by the
+    undeclared one.  Both answers are exact; what differs is what each path can
+    see.
 
     The undeclared row is keyed on the MULTIPLIER itself, because no column was
     declared and the exporter does not guess one from ``X``.  Its ``Relativity``
@@ -1777,10 +1800,16 @@ def build_rating_table_payload(
     is out by 9.99e-16.
 
     The relation is DERIVED on the log scale and VERIFIED on the multiplier
-    scale against ``offset_mapping_rtol``/``offset_mapping_atol``, on every row.
-    A declared source the offset is not proportional to is refused by name
-    rather than approximated, because a block whose whole value is exactness
-    must not be written when it is not exact.
+    scale against ``offset_mapping_rtol`` alone, RELATIVE to the block's own
+    scale, on every row.  Not against an absolute floor as well: a multiplier
+    is scale-free, so ``offset_mapping_atol`` would be a relative tolerance of
+    ``atol/scale`` and would loosen without limit as the scale shrinks -- at
+    ``log(SumInsured/1e6)`` the ``1e-12`` default admits a 1e-6 departure.
+    ``offset_mapping_atol`` governs the DISCRETE path, whose comparison is
+    between one level's multipliers rather than against a scale.  A declared
+    source the offset is not proportional to is refused by name rather than
+    approximated, because a block whose whole value is exactness must not be
+    written when it is not exact.
 
     A bin of the ``offset_kind="binned"`` summary with no exposure reports the
     MIDPOINT of its own interval, weight zero.  It used to report ``0.0``, which is not a summary

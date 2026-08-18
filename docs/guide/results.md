@@ -336,8 +336,12 @@ rows with 5,998 distinct values — binned, all 6,000 receive a factor that is n
 worst is out by **1.022e+00**, more than double; per-unit, the worst row is out by **9.99e-16**.
 
 The relation is derived on the log scale and verified on the multiplier scale against
-`offset_mapping_rtol`/`offset_mapping_atol`, on every row. A column the offset is not proportional
-to is refused by name rather than approximated.
+`offset_mapping_rtol`, relative to the block's own scale, on every row. Relative and not also
+absolute: a multiplier is scale-free, so `offset_mapping_atol` would act as a tolerance of
+`atol/scale` and loosen without limit as the scale shrinks — on `log(SumInsured/1e6)` the `1e-12`
+default would admit a 1e-6 departure. `offset_mapping_atol` governs the discrete path instead, whose
+comparison is between one level's multipliers rather than against a scale. A column the offset is
+not proportional to is refused by name rather than approximated.
 
 Low cardinality is left alone: `Term ∈ {12, 36}` still exports as the two-row lookup `12 → 1`,
 `36 → 3`, because for a handful of levels a lookup already *is* the exact answer and asks nothing
