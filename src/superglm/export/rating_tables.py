@@ -214,8 +214,21 @@ def _format_number(value: float) -> str:
     return repr(float(value))
 
 
-def _format_interval(left: float, right: float) -> str:
-    return f"[{_format_number(left)}, {_format_number(right)})"
+def _format_interval(left: float, right: float, *, closed_right: bool = False) -> str:
+    """One half-open interval key, or the one CLOSED key the export ever emits.
+
+    Every row of every banded block is ``[lo, hi)``, so that each row's upper
+    bound is identically the next row's lower bound and no value falls between
+    two rows.  The single exception is the last row of a ppform block under
+    ``extrapolation="error"``, which has no next row to hand the endpoint to:
+    the block stops at the boundary knot, and a right-open key there leaves the
+    boundary itself matching nothing.  That value is normally the observed
+    training maximum, and the model rates it -- so the table would fail to rate
+    a row the model rates.  The bracket carries which rule applies, so a
+    consumer reads it off the key rather than being told separately.
+    """
+    bracket = "]" if closed_right else ")"
+    return f"[{_format_number(left)}, {_format_number(right)}{bracket}"
 
 
 def _format_axis_value(value: float) -> str:
@@ -384,6 +397,18 @@ def _continuous_ppform_block(
         lo = segments.breaks[:-1]
         hi = segments.breaks[1:]
         coefficients = segments.coefficients
+        # The last row alone is CLOSED on the right.  ``error`` declines to
+        # price ABOVE the boundary knot; it does not decline to price AT it,
+        # and ``model.predict`` accepts it.  With every key right-open the
+        # boundary matches no row, so the block cannot rate a value the model
+        # rates -- and because the boundary knot is the observed maximum
+        # whenever knots are data-driven, that is a row of the training frame.
+        # Measured on a 6-knot fit: boundary 79.94164283974858, accepted by
+        # ``predict``, matched by no exported row, one training row sitting on
+        # it.  Only under ``error``: every other mode hands the endpoint to a
+        # trailing row, so closing it there would make two rows match it.
+        closed_right = np.zeros(len(lo), dtype=bool)
+        closed_right[-1] = True
     else:
         lo = np.concatenate([[-np.inf], segments.breaks[:-1], [segments.breaks[-1]]])
         hi = np.concatenate([[segments.breaks[0]], segments.breaks[1:], [np.inf]])
@@ -398,6 +423,9 @@ def _continuous_ppform_block(
                 [boundary_high, *_PPFORM_TAIL_COEFFICIENTS],
             ]
         )
+        # The trailing row runs to ``inf`` and takes every value above the last
+        # knot, boundary included, so no key needs closing.
+        closed_right = np.zeros(len(lo), dtype=bool)
 
     # ``a`` is the log relativity at u = 0, so exp(a) is the factor a step-function
     # reader applies across the row -- the same convention the exact blocks use.
@@ -412,7 +440,10 @@ def _continuous_ppform_block(
     exact_form = dict(zip(_PPFORM_COLUMNS, coefficients.T, strict=True))
     table = pd.DataFrame(
         {
-            name: [_format_interval(left, right) for left, right in zip(lo, hi, strict=True)],
+            name: [
+                _format_interval(left, right, closed_right=bool(closed))
+                for left, right, closed in zip(lo, hi, closed_right, strict=True)
+            ],
             "Relativity": relativity,
             "Weight": weight_by_row,
             **exact_form,
@@ -848,6 +879,50 @@ def _require_unsaturated_predictor_export(
     )
 
 
+def _ppform_reachable_relativities(table: pd.DataFrame) -> NDArray:
+    """Every factor a ppform row can produce, not only the one it prints.
+
+    ``Relativity`` on a ppform row is ``exp(a)``, the curve at ``u = 0``.  That
+    is one point of a cubic the consumer evaluates across the whole interval,
+    so validating the printed column alone validates the row's left edge and
+    nothing else: a piece with ordinary endpoints can still cross the usable
+    band at an interior extremum, and on rows where another term cancels it the
+    total-predictor gate stays silent too -- the same cancellation argument
+    ``_require_usable_relativities_export`` already makes for checking per
+    block rather than on the product, one level further down.
+
+    Exactly, not by sampling.  A cubic's extrema on ``[0, 1]`` are the roots of
+    ``b + 2cu + 3du**2`` inside the open interval, plus the two endpoints, and
+    those roots are closed form.  A grid could step over a narrow spike; this
+    cannot, and it is cheaper.
+
+    The tail rows come through unchanged: ``b = c = d = 0`` leaves the
+    derivative identically zero, so no root is admitted and both endpoints
+    evaluate to ``exp(a)``.
+    """
+    a, b, c, d = (np.asarray(table[col], dtype=np.float64) for col in _PPFORM_COLUMNS)
+
+    # Endpoints always; interior stationary points where they exist and lie
+    # strictly inside.  ``u`` outside (0, 1) is another row's business.
+    points = [np.zeros_like(a), np.ones_like(a)]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        # Quadratic 3d*u**2 + 2c*u + b.  Where d == 0 it degenerates to the
+        # linear -b/(2c), and where c == 0 too there is no stationary point.
+        discriminant = 4.0 * c**2 - 12.0 * b * d
+        root = np.sqrt(np.where(discriminant > 0.0, discriminant, np.nan))
+        quadratic = [(-2.0 * c + root) / (6.0 * d), (-2.0 * c - root) / (6.0 * d)]
+        linear = np.where(c != 0.0, -b / (2.0 * c), np.nan)
+        points.extend(np.where(d != 0.0, candidate, linear) for candidate in quadratic)
+
+    values = []
+    for u in points:
+        inside = np.isfinite(u) & (u > 0.0) & (u < 1.0)
+        u_safe = np.where(inside | (u == 0.0) | (u == 1.0), np.nan_to_num(u), 0.0)
+        with np.errstate(over="ignore", under="ignore"):
+            values.append(np.exp(a + u_safe * (b + u_safe * (c + u_safe * d))))
+    return np.concatenate(values)
+
+
 def _emitted_relativities(block: RatingTableBlock | InteractionTableBlock) -> NDArray:
     """Every number one exported block asks a consumer to multiply by.
 
@@ -867,6 +942,17 @@ def _emitted_relativities(block: RatingTableBlock | InteractionTableBlock) -> ND
     """
     if isinstance(block, InteractionTableBlock):
         return np.asarray(block.table.iloc[:, 1:].to_numpy(), dtype=np.float64).ravel()
+    if block.kind == "continuous_ppform":
+        # The printed column is one point of each row's cubic; the consumer
+        # evaluates all of it.  Returned ALONGSIDE ``Relativity`` rather than
+        # instead of it, so the left edge is still covered by the same
+        # comparison and nothing is traded away for the extra coverage.
+        return np.concatenate(
+            [
+                np.asarray(block.table["Relativity"], dtype=np.float64),
+                _ppform_reachable_relativities(block.table),
+            ]
+        )
     if "Relativity" not in block.table:
         raise ValueError(
             f"Rating-table block {block.name!r} (kind {block.kind!r}) has no 'Relativity' "
