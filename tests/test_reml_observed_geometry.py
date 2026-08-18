@@ -118,36 +118,79 @@ def test_a_tweedie_power_search_reaches_the_canonical_pair_it_cannot_avoid() -> 
     assert curvature == ["observed", "fisher", "observed"]
 
 
-def test_a_gradient_stage_refusal_does_not_publish_a_pirls_failure() -> None:
-    """The reason a power search records must name the stage that actually failed.
+def test_the_default_infeasible_wording_is_pinned_to_its_text() -> None:
+    """Asserting the constant against itself would hold for any value it took.
 
-    ``relative_max`` is pinned non-finite on this class, so the profile takes
-    the "describe the condition" branch and writes the reason straight into
-    ``_infeasible_powers``, where it reaches the user. The default asserts
-    PIRLS found no mode -- true at almost every raise site, false at the W(rho)
-    seam, where PIRLS converged and the correction built from its mode is what
-    refused.
+    Every raise site that means "PIRLS never reached a mode" publishes these
+    two strings, so their text is the contract with the user, not an internal
+    detail. Pinned literally so a reword has to be deliberate.
     """
-    from superglm.reml.observed_geometry import (
-        _NO_MODE_DETAIL,
-        _NO_MODE_REASON,
-        ObservedModeNotConvergedError,
-    )
+    from superglm.reml.observed_geometry import _NO_MODE_DETAIL, _NO_MODE_REASON
+
+    assert _NO_MODE_REASON == "no converged penalized mode (PIRLS found no mode to certify)"
+    assert _NO_MODE_DETAIL == "no converged penalized mode"
+
+
+def test_a_stage_refusal_renders_without_asserting_a_pirls_failure() -> None:
+    """`_publication_mode_failure` is the surface this reaches the user through.
+
+    The stored profile reason is read for truthiness only; this renderer is
+    what a user actually sees, so it is what the wording has to be right in.
+    """
+    from superglm.model.profile_ops import _publication_mode_failure
+    from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 
     default = ObservedModeNotConvergedError("no mode")
-    assert default.infeasible_reason == _NO_MODE_REASON
-    assert default.infeasible_detail == _NO_MODE_DETAIL
+    assert default.infeasible_detail is None
+    rendered = str(_publication_mode_failure(default, parameter="p", value=1.5, decoupled=False))
+    assert "PIRLS found no converged penalized mode" in rendered
 
     staged = ObservedModeNotConvergedError(
         "W(rho) correction has no usable curvature",
-        infeasible_reason="no differentiable REML gradient (W(rho) correction has no usable curvature)",
-        infeasible_detail="no usable W(rho) curvature",
+        infeasible_detail="the W(rho) correction has no usable curvature",
     )
-    assert "PIRLS" not in staged.infeasible_reason
-    assert "found no mode" not in staged.infeasible_reason
-    assert "W(rho)" in staged.infeasible_reason
-    # Routing is unchanged: the parent handler still scores the point infeasible.
+    rendered = str(_publication_mode_failure(staged, parameter="p", value=1.5, decoupled=False))
+    assert "PIRLS" not in rendered
+    assert "W(rho)" in rendered
+    # Routing is untouched: the parent handler still scores the point infeasible.
     assert not np.isfinite(staged.relative_max)
+
+
+def test_the_w_correction_seam_names_its_own_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drives a real refusal through the seam, so deleting the keyword reds.
+
+    Asserting on an exception the test itself constructs would stay green if
+    `infeasible_detail=` were dropped from `optimize_direct_reml`. This raises
+    the LinAlgError where the seam actually catches it.
+    """
+    import pandas as pd
+
+    import superglm.reml.direct as direct
+    from superglm import SuperGLM
+    from superglm.features.spline import Spline
+    from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+
+    rng = np.random.default_rng(99)
+    n = 400
+    x = rng.uniform(1.0, 10.0, n)
+    mu = np.exp(0.3 + 0.1 * np.sin(x))
+    y = rng.gamma(shape=5.0, scale=mu / 5.0)
+
+    def refuse_curvature(*args, **kwargs):
+        raise np.linalg.LinAlgError("SZ operator blocks must be finite.")
+
+    monkeypatch.setattr(direct, "reml_w_correction", refuse_curvature)
+    model = SuperGLM(
+        family="gamma",
+        selection_penalty=0,
+        features={"x": Spline(n_knots=6, penalty="ssp")},
+    )
+    with pytest.raises(ObservedModeNotConvergedError) as caught:
+        model.fit_reml(pd.DataFrame({"x": x}), y)
+
+    detail = caught.value.infeasible_detail
+    assert detail is not None, "the W(rho) seam must name its stage, not inherit the PIRLS default"
+    assert "W(rho)" in detail
 
 
 def test_ordinary_reml_curvature_classifier_requires_consistent_custom_protocol() -> None:
