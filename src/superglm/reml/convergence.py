@@ -178,10 +178,12 @@ def trial_counts_as_precision_evidence(converged: bool, objective: float) -> boo
 
     On the Fisher path an exhausted-PIRLS trial is still scored; its
     objective sits at a non-stationary beta, so an Armijo rejection of it
-    proves nothing about the true profile objective. Only a converged
-    trial with a finite objective counts -- the same standard the
-    observed-geometry path enforces by skipping unconverged trials before
-    evaluation.
+    proves nothing about the true profile objective. Only a STATIONARY
+    trial with a finite objective counts. On the Fisher path the
+    step-length flag is the only available evidence of that; under observed
+    geometry the caller passes the KKT certificate's verdict instead, which
+    is strictly stronger and, unlike the flag, can still be reached when the
+    step tolerance sits below the iteration's round-off floor.
     """
     return bool(converged) and bool(np.isfinite(objective))
 

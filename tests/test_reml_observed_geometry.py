@@ -2722,7 +2722,10 @@ class TestModeCertifiesAtTheRoundOffFloor:
     def test_an_uncertifiable_mode_is_still_refused(self, monkeypatch):
         """Fail-closed: the certificate, not the step test, is what guards the gate."""
         import superglm.reml.direct as direct_module
-        from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+        from superglm.reml.observed_geometry import (
+            ObservedModeNotCertifiedError,
+            ObservedModeNotConvergedError,
+        )
 
         frame, y, weight, offset = self._burn_cost_fixture(seed=0)
         monkeypatch.setattr(
@@ -2730,8 +2733,13 @@ class TestModeCertifiesAtTheRoundOffFloor:
             "observed_penalized_mode_score",
             lambda **kwargs: SimpleNamespace(relative_max=1.0e-3),
         )
-        with pytest.raises(ObservedModeNotCertifiedError):
+        with pytest.raises(ObservedModeNotCertifiedError) as excinfo:
             self._model().fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
+        # ObservedModeNotConvergedError SUBCLASSES the error asserted above, so
+        # a bare raises() cannot tell the certificate's refusal from the gate's
+        # own, and passes against the unfixed code.
+        assert not isinstance(excinfo.value, ObservedModeNotConvergedError)
+        assert "certify the penalized coefficient mode" in str(excinfo.value)
 
     def test_only_budget_exhaustion_defers_to_the_certificate(self):
         """Every other termination reason names something the score cannot judge."""
@@ -2741,12 +2749,17 @@ class TestModeCertifiesAtTheRoundOffFloor:
             return stopped_on_iteration_budget(SimpleNamespace(termination_reason=reason))
 
         assert ended("max_iter")
+        # The full set irls_direct can terminate with, so a reason added there
+        # cannot silently change which door it takes here.
         for reason in (
             "constraint_infeasible",
             "constraint_kkt_incomplete",
+            "curvature_fallback",
+            "curvature_rescue",
             "nonfinite_deviance",
             "step_rejected",
             "converged",
+            "continue",
             None,
         ):
             assert not ended(reason), reason

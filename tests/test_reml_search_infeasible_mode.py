@@ -67,7 +67,9 @@ def test_bracket_endpoint_without_a_converged_mode_is_routed_around(n):
     # judged on its KKT residual instead of on PIRLS's step-length flag. The
     # sizes retained here still miss the 1e-9 bar (scores 1.8e-4 at 5000 and
     # 1.5e-7 at 4000); 6000 no longer fails at all, having failed only
-    # because the step test could not fire at its round-off floor.
+    # because the step test could not fire at its round-off floor. The 4000
+    # arm clears the bar by ~150x rather than the 5000 arm's ~1e5, so it is
+    # the one to re-derive first if a BLAS or numpy change moves it.
     with pytest.raises(ObservedModeNotCertifiedError) as excinfo:
         _model(features, p=1.95).fit_reml(frame, y, sample_weight=weights, offset=offset)
     assert "certify the penalized coefficient mode" in str(excinfo.value)
@@ -82,10 +84,13 @@ def test_bracket_endpoint_without_a_converged_mode_is_routed_around(n):
 def test_decoupled_search_already_survives_what_the_coupled_search_does_not():
     """The ML-mode search never fits REML at the failing power, so it completes.
 
-    This pins the asymmetry: the documented "approximation" is strictly more
-    robust here than the regime it approximates.
+    Re-derived 6000 -> 5000 with the sibling test above and for the same
+    reason: at 6000 the p=1.95 probe now certifies, so the coupled search met
+    no infeasible power and this compared two unstressed searches. At 5000 the
+    probe still misses the bar, so the coupled arm must route around it to
+    reach the same answer as the arm that never fits REML there at all.
     """
-    frame, y, weights, offset, features = _fixture(6_000)
+    frame, y, weights, offset, features = _fixture(5_000)
 
     decoupled = _model(features).estimate_p(
         frame,
