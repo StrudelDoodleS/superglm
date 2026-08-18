@@ -1924,6 +1924,22 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
 # design factors collapsing the sensitivity by ten orders (#257) -- is caught
 # by the boundary below on its own.
 _LOW_EDGE_ULP = 1.0
+# ...WITH ONE EXCEPTION, AND IT EXISTS BECAUSE REMOVING THE OTHER LEFT A HOLE.
+#
+# ``ceiling`` is computed from this test's own ``A`` and ``G``; the only
+# production quantity left in the boundary is ``edf(V)`` inside ``ulp``.  So an
+# ``_edge`` that returned an edf INDEPENDENT of ``V`` while still reporting its
+# lambda would keep every row green.  That is a regression this test exists to
+# catch and, after the realization assertion came out, nothing caught it.
+#
+# So the production response IS asserted -- but only on the ISOTROPIC
+# unresolved rows, where ``cond(A)`` is ~2e+11 rather than the 5.4e+14 the
+# rotated penalty reaches.  That is the distinction the earlier refusal turned
+# on: bounding a difference of two evaluations at 5.4e+14 asserts backend
+# round-off, while the same check on a three-orders-better-conditioned operand
+# pins the caller path.  The window stays an order either side of the
+# first-order value of 1, against a measured 0.9425-1.0617.
+_LOW_EDGE_RESPONSE = (0.1, 10.0)
 
 
 @pytest.mark.parametrize(
@@ -2070,6 +2086,16 @@ def test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from(
         f"ratio {against_ulp:.4e} ulp, boundary {_LOW_EDGE_ULP:.0f} ulp, "
         f"separation {separation:.3e}x)"
     )
+    if not determined and penalty == "I":
+        low, high = _LOW_EDGE_RESPONSE
+        attained = realised / ceiling
+        assert low < attained < high, (
+            f"the production response no longer tracks the analytic gradient: the "
+            f"maximising perturbation moved the ladder's edf by {attained:.4f} of the "
+            f"predicted displacement {where}.  This is the one assertion on the caller "
+            f"path itself, and it is here because the boundary below is computed from "
+            f"this test's own A and G -- an _edge independent of V would otherwise pass."
+        )
     assert separation > 1.0, (
         (
             f"a design the Gram RESOLVES left the low-edge edf sensitive {where}; "
