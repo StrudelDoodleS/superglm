@@ -1774,8 +1774,14 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     # that, and the bound is proportional to the retained basis's conditioning
     # precisely so that a badly conditioned -- but correctly assembled -- pair
     # widens the bar instead of tripping it.  Measured over 1382 profiles x 14
-    # microkernel/thread configurations, the worst observed residual is 0.408
-    # of this bound, so nothing in this suite's bank reaches it.
+    # microkernel/thread configurations, the worst observed residual is **0.204
+    # of the bound computed on the next line**, i.e. 4.90x of headroom, so
+    # nothing in this suite's bank reaches it.  DENOMINATOR NAMED ON PURPOSE:
+    # the 0.408 quoted elsewhere in this module is against the UNFACTORED
+    # ``n_terms eps kappa``, and the two differ by exactly
+    # :data:`_ORTHONORMALITY_FACTOR` -- which is the constant a reader would be
+    # weighing when they read this comment, so quoting the wrong one here
+    # reports 2.45x of headroom at the site that runs on 4.90x.
     bound = _orthonormality_bound(L * k_a, rank, conditioning)
     if defect > bound:
         raise _UnstableStructuredEDFError(
@@ -1964,7 +1970,8 @@ def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float
     that would break the fold is high rank at LOW ``kappa``, where the bound is
     smallest.  The sweeps do reach it: rank 34 at ``kappa`` 65 reads 0.0015,
     rank 44 at ``kappa`` 94 reads 0.0010, and the worst ratio in the starved
-    sweep is at its LOWEST rank and lowest ``kappa`` (15, 22), not its highest.
+    sweep is at the LOW end of both -- rank 15 against a 14-to-44 range, and
+    ``kappa`` 22, its floor -- rather than at its highest.
     So the ratio falls as rank grows here rather than rising, which is the
     opposite of a fold running out -- but that is an observation over two
     families and not a derivation, and the honest statement of it is "nothing
