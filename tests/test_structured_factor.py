@@ -312,6 +312,53 @@ def test_scalar_schur_uses_diagnostic_small_svd_fallback_for_singular_schur():
     )
 
 
+def test_scalar_schur_keeps_exact_tiny_decoupled_pivot():
+    """A pivot that is merely tiny is not cancellation residue.
+
+    One ordinary-block column carries a near-zero decoupled diagonal entry --
+    the working-Gram signature of an unpenalized level whose weights have
+    collapsed under separation, nested inside one heavy local level.  Its
+    Schur pivot equals its own diagonal exactly (nothing large is subtracted
+    at that coordinate), so the factorization must keep the Cholesky path,
+    full rank, and the exact positive-definite log-determinant even though
+    the pivot sits far below any floor scaled by the global norms.
+    """
+    rng = np.random.default_rng(11)
+    q, k = 6, 12
+    M = rng.standard_normal((q + 3, q))
+    A = (M.T @ M + np.diag(np.full(q, 50.0))) * 1e4
+    tiny = 1e-9
+    A[-1, :] = 0.0
+    A[:, -1] = 0.0
+    A[-1, -1] = tiny
+    d = rng.uniform(1e3, 1e5, k)
+    C = rng.standard_normal((k, q)) * np.sqrt(d)[:, None] * 1e-2
+    C[:, -1] = 0.0
+    C[0, -1] = tiny
+
+    factor = ScalarSchurFactor(
+        A=A,
+        C=C,
+        d=d,
+        small_indices=np.arange(q, dtype=np.intp),
+        structured_indices=np.arange(q, q + k, dtype=np.intp),
+        term_name="collapsed",
+    )
+    H = np.zeros((q + k, q + k))
+    H[:q, :q] = A
+    H[q:, q:] = np.diag(d)
+    H[q:, :q] = C
+    H[:q, q:] = C.T
+    sign, expected_logdet = np.linalg.slogdet(H)
+
+    assert not factor.used_dense_fallback
+    assert factor.rank == q + k
+    assert not factor.rank_truncated
+    assert sign > 0
+    assert factor.logdet() == pytest.approx(expected_logdet, rel=1e-9)
+    assert bool(np.all(factor.coefficient_estimable()))
+
+
 def test_scalar_schur_rejects_cancellation_created_coupled_null_space():
     rng = np.random.default_rng(0)
     d = 10.0 ** rng.uniform(-6.0, 6.0, 42)
@@ -351,6 +398,58 @@ def test_block_schur_rejects_cancellation_created_coupled_null_space():
             structured_indices=np.arange(1, len(d) + 1, dtype=np.intp)[:, None],
             term_name="factor_smooth",
         )
+
+
+def test_block_schur_keeps_exact_tiny_decoupled_pivot():
+    """A block-path pivot that is merely tiny is not cancellation residue.
+
+    Block twin of the scalar keep test above: one ordinary-block column
+    carries a near-zero decoupled diagonal entry, so its Schur pivot equals
+    its own diagonal exactly and nothing large is subtracted at that
+    coordinate.  The factorization must keep the Cholesky path, full rank,
+    and the exact positive-definite log-determinant even though the pivot
+    sits far below any floor scaled by the global norms; a global floor
+    reroutes this geometry to the truncating SVD fallback, which drops the
+    direction and publishes the wrong log-determinant.
+    """
+    rng = np.random.default_rng(11)
+    q, k, b = 6, 8, 3
+    M = rng.standard_normal((q + 3, q))
+    A = (M.T @ M + np.diag(np.full(q, 50.0))) * 1e4
+    tiny = 1e-9
+    A[-1, :] = 0.0
+    A[:, -1] = 0.0
+    A[-1, -1] = tiny
+    X = rng.standard_normal((k, b, b + 2))
+    D = np.einsum("kij,klj->kil", X, X) * 1e3 + np.eye(b)[None, :, :] * 1e3
+    C = rng.standard_normal((k, b, q)) * 10.0
+    C[:, :, -1] = 0.0
+    C[0, 0, -1] = tiny
+
+    factor = BlockSchurFactor(
+        A=A,
+        C=C,
+        D=D,
+        small_indices=np.arange(q, dtype=np.intp),
+        structured_indices=np.arange(q, q + k * b, dtype=np.intp).reshape(k, b),
+        term_name="collapsed_block",
+    )
+    n = q + k * b
+    H = np.zeros((n, n))
+    H[:q, :q] = A
+    for level in range(k):
+        start = q + level * b
+        H[start : start + b, start : start + b] = D[level]
+        H[start : start + b, :q] = C[level]
+        H[:q, start : start + b] = C[level].T
+    sign, expected_logdet = np.linalg.slogdet(H)
+
+    assert not factor.used_dense_fallback
+    assert factor.rank == n
+    assert not factor.rank_truncated
+    assert sign > 0
+    assert factor.logdet() == pytest.approx(expected_logdet, rel=1e-9)
+    assert bool(np.all(factor.coefficient_estimable()))
 
 
 def test_symmetric_block_operator_is_frozen_and_owns_read_only_arrays():

@@ -40,6 +40,32 @@ def _schur_absolute_cutoff(reference_scale: float, width: int) -> float:
     return np.finfo(np.float64).eps * float(reference_scale) * max(int(width), 1) * 10.0
 
 
+def _cancellation_pivot_floor(
+    A_diagonal: NDArray,
+    eliminated_diagonal: NDArray,
+    Q_diagonal: NDArray,
+    pivot_squares: NDArray,
+    width: int,
+) -> NDArray:
+    """Per-pivot cancellation floors for an unpivoted Schur-complement Cholesky.
+
+    A pivot is untrustworthy when it is the small residue of a large
+    subtraction, and the mass actually subtracted AT THAT COORDINATE is what
+    bounds its rounding error: ``Q_jj = A_jj - (C' D^-1 C)_jj`` first, then
+    ``L_jj^2 = Q_jj - sum_i L_ji^2`` during the factorization, whose
+    accumulated term is recovered as ``Q_jj - L_jj^2`` (exact in real
+    arithmetic; within relative round-off for the computed factor).  A single floor scaled
+    by the GLOBAL norms instead classifies every small pivot as cancellation
+    residue, including a column that is merely small -- an unpenalized level
+    whose working weight has collapsed under separation carries an exact tiny
+    pivot with no cancellation anywhere near it, and truncating it freezes a
+    coefficient PIRLS still needs to move.
+    """
+    accumulated = np.maximum(Q_diagonal - pivot_squares, 0.0)
+    scale = np.abs(A_diagonal) + np.abs(eliminated_diagonal) + accumulated
+    return np.finfo(np.float64).eps * max(int(width), 1) * 10.0 * scale
+
+
 def _reject_coupled_schur_null_space(
     F: NDArray,
     Vh: NDArray,
@@ -53,6 +79,19 @@ def _reject_coupled_schur_null_space(
     an uncoupled Schur null space.  A coupled null direction is changed by the
     non-orthogonal block elimination, so multiplying local determinants by a
     Schur pseudo-determinant would publish the wrong REML geometry.
+
+    The tolerance is calibrated to the quantity the refusal protects.  With
+    ``H = L' diag(Q, D) L`` for the unimodular ``L = [[I, 0], [F, I]]``, a
+    truncated Schur direction ``u`` with coupling ``c = ||F u||`` perturbs the
+    published log pseudo-determinant by exactly ``log1p(c^2) <= c^2`` (the
+    null vector of ``H`` is ``(u, -F u)`` with squared volume ``1 + c^2``).
+    Coupling below ``sqrt(eps) * max(1, ||F||)`` therefore moves the REML
+    geometry by at most round-off, while a structural alias (a small-block
+    column reproduced by the local blocks) produces ``c = O(||F||)``, several
+    orders above.  An eps-scale tolerance here would instead test whether the
+    coupling is distinguishable from exact zero, refusing harmless geometry:
+    an unpenalized separated level whose working-Gram column is mid-collapse
+    couples at ``eps``-to-``sqrt(eps)`` scale without carrying any structure.
     """
     if np.all(positive):
         return
@@ -60,9 +99,7 @@ def _reject_coupled_schur_null_space(
     flat_F = np.asarray(F, dtype=np.float64).reshape(-1, F.shape[-1])
     coupling = flat_F @ null_basis
     reference = max(float(np.linalg.norm(flat_F, ord=2)), 1.0)
-    tolerance = (
-        np.finfo(np.float64).eps * max(flat_F.shape[0], flat_F.shape[1], 1) * reference * 10.0
-    )
+    tolerance = float(np.sqrt(np.finfo(np.float64).eps)) * reference
     if float(np.linalg.norm(coupling, ord=2)) > tolerance:
         raise np.linalg.LinAlgError(
             f"Structured term {term_name!r} has a coupled rank-deficient Schur null space."
@@ -171,9 +208,17 @@ class ScalarSchurFactor:
                         f"Schur Cholesky residual {residual:.3g} exceeds 1e-6"
                     )
                 diagonal = np.abs(np.diag(self._Q_cholesky))
-                if float(np.min(diagonal * diagonal)) <= absolute_cutoff:
+                pivot_squares = diagonal * diagonal
+                pivot_floor = _cancellation_pivot_floor(
+                    np.diag(self.A),
+                    np.sum(self.C * self._F, axis=0),
+                    np.diag(self._Q),
+                    pivot_squares,
+                    q,
+                )
+                if np.any(pivot_squares <= pivot_floor):
                     raise np.linalg.LinAlgError(
-                        "Schur Cholesky pivot is below the absolute cancellation floor"
+                        "Schur Cholesky pivot is below its cancellation floor"
                     )
                 self.schur_condition_estimate = float(
                     (diagonal.max() / max(diagonal.min(), 1e-300)) ** 2
@@ -658,9 +703,17 @@ class BlockSchurFactor:
                         f"Schur Cholesky residual {residual:.3g} exceeds 1e-6"
                     )
                 diagonal = np.abs(np.diag(self._Q_cholesky))
-                if float(np.min(diagonal * diagonal)) <= absolute_cutoff:
+                pivot_squares = diagonal * diagonal
+                pivot_floor = _cancellation_pivot_floor(
+                    np.diag(self.A),
+                    np.einsum("kiq,kiq->q", self.C, self._F, optimize=True),
+                    np.diag(self._Q),
+                    pivot_squares,
+                    q,
+                )
+                if np.any(pivot_squares <= pivot_floor):
                     raise np.linalg.LinAlgError(
-                        "Schur Cholesky pivot is below the absolute cancellation floor"
+                        "Schur Cholesky pivot is below its cancellation floor"
                     )
                 self.schur_condition_estimate = float(
                     (diagonal.max() / max(diagonal.min(), 1e-300)) ** 2
