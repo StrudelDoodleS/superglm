@@ -317,9 +317,15 @@ class TestCategoricalInteractionBuild:
         info = ci.build(x1, x2, {"c1": cat1, "c2": cat2})
         assert info.n_cols == 4  # 2 * 2
 
-    def test_sparse_indicators(self):
-        import scipy.sparse as sp
+    def test_one_hot_indicators_carried_as_codes(self):
+        """The block is one-hot, so it travels as codes rather than a CSR matrix.
 
+        Every row falls in exactly one ``(level1, level2)`` cell, so a single
+        integer describes it; rows at either parent's base level sit off the
+        emitted grid and code as ``-1``.  The columns are unchanged -- this
+        asserts the indicator semantics the CSR form guaranteed, on the
+        representation that replaced it.
+        """
         cat1 = Categorical(base="first")
         cat2 = Categorical(base="first")
         x1 = np.array(["A", "B"] * 50)
@@ -330,9 +336,14 @@ class TestCategoricalInteractionBuild:
 
         ci = CategoricalInteraction("c1", "c2")
         info = ci.build(x1, x2, {"c1": cat1, "c2": cat2})
-        assert sp.issparse(info.columns)
+        assert info.columns is None
+        assert info.cat_codes is not None
+        assert len(info.cat_codes) == len(x1)
+        assert info.cat_codes.max() < info.n_cols
 
-        arr = info.columns.toarray()
+        arr = np.zeros((len(x1), info.n_cols), dtype=np.float64)
+        on_grid = info.cat_codes >= 0
+        arr[np.flatnonzero(on_grid), info.cat_codes[on_grid]] = 1.0
         assert set(np.unique(arr)).issubset({0.0, 1.0})
         assert np.all(arr.sum(axis=1) <= 1)
 

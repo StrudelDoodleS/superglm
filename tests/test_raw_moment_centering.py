@@ -20,10 +20,16 @@ from superglm.solvers.centered_system import build_centered_system
 
 def _fitted_design(n=20_000, seed=0, with_numeric=False):
     rng = np.random.default_rng(seed)
+    # Continuous, not integer-valued: an axis on few distinct values is
+    # losslessly row-compressed, which makes the whole design eligible for the
+    # packed rung above -- and the packed rung would then answer before this
+    # one ever ran.  The general raw-moment rung exists for the ordinary
+    # spline design that no support-indexed rung can serve, so the fixture has
+    # to be one.
     frame = pd.DataFrame(
         {
-            "a": rng.integers(18, 90, n).astype(float),
-            "b": rng.integers(50, 130, n).astype(float),
+            "a": rng.uniform(18.0, 90.0, n),
+            "b": rng.uniform(50.0, 130.0, n),
             "cat": rng.choice(list("XYZ"), n),
         }
     )
@@ -82,3 +88,45 @@ def test_raw_moment_rung_declines_for_ill_located_columns():
     slow = build_centered_system(**kwargs, profile={}, _force_chunked=True)
 
     np.testing.assert_allclose(fast.data_gram, slow.data_gram, rtol=1e-7, atol=1e-7)
+
+
+def test_a_compressible_spline_design_is_served_by_the_packed_rung_instead():
+    """The counterpart to the fixture note above.
+
+    When every axis lands on few distinct values the blocks are losslessly
+    row-compressed, the packed rung accepts the design, and the raw-moment
+    rung is never consulted.  That is the intended ordering -- packed is the
+    cheaper build and needs no location certificate -- so it is pinned here
+    rather than left as an accident of fixture data.
+    """
+    rng = np.random.default_rng(0)
+    n = 20_000
+    frame = pd.DataFrame(
+        {
+            "a": rng.integers(18, 90, n).astype(float),
+            "b": rng.integers(50, 130, n).astype(float),
+            "cat": rng.choice(list("XYZ"), n),
+        }
+    )
+    weights = rng.uniform(0.4, 1.0, n)
+    response = rng.poisson(0.2, n) / weights
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=None,
+        discrete=False,
+        features={
+            "a": Spline(kind="ps", k=8),
+            "b": Spline(kind="ps", k=8),
+            "cat": Categorical(base="first"),
+        },
+    )
+    model._build_design_matrix(frame, response, weights, None)
+    kwargs = _systems(model, weights)
+
+    profile: dict = {}
+    fast = build_centered_system(**kwargs, profile=profile)
+    slow = build_centered_system(**kwargs, profile={}, _force_chunked=True)
+
+    np.testing.assert_allclose(fast.data_gram, slow.data_gram, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(fast.rhs, slow.rhs, rtol=1e-9, atol=1e-9)
+    assert profile.get("centered_raw_moment_hits", 0) == 0

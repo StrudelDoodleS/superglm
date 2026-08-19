@@ -7,6 +7,21 @@ import pytest
 from superglm import OrderedCategorical, Spline, SuperGLM
 from superglm.types import GroupInfo
 
+
+def _special_block(info) -> np.ndarray:
+    """Dense indicator block for a specials ``GroupInfo``.
+
+    The block is one-hot -- a row carries at most one special -- so it is
+    carried as ``cat_codes`` rather than a CSR matrix.  These tests assert
+    the columns, which are unchanged; only the container moved.
+    """
+    assert info.cat_codes is not None
+    block = np.zeros((len(info.cat_codes), info.n_cols), dtype=np.float64)
+    on_grid = info.cat_codes >= 0
+    block[np.flatnonzero(on_grid), info.cat_codes[on_grid]] = 1.0
+    return block
+
+
 ORDERED = [str(i) for i in range(1, 11)]
 SPECIAL = "MISSING"
 
@@ -233,7 +248,7 @@ def test_special_indicator_columns_follow_the_declared_special_order():
     _, special_info = spec.build(band, frame["exposure"].to_numpy())
     assert spec._specials == [SPECIAL, second]
     assert special_info.n_cols == 2
-    indicators = np.asarray(special_info.columns.todense())
+    indicators = _special_block(special_info)
     for j, lev in enumerate(spec._specials):
         assert np.array_equal(indicators[:, j] == 1.0, band == lev)
 
@@ -246,7 +261,7 @@ def test_spline_block_is_zero_on_special_rows():
     spline_cols = np.asarray(spline_info.columns.todense())
     assert np.allclose(spline_cols[is_special], 0.0)
     assert not np.allclose(spline_cols[~is_special], 0.0)
-    indicator = np.asarray(special_info.columns.todense()).ravel()
+    indicator = _special_block(special_info).ravel()
     assert np.array_equal(indicator == 1.0, is_special)
 
 
@@ -326,7 +341,7 @@ def test_assembled_design_with_intercept_is_full_rank():
         [
             np.ones(len(frame)),
             centered,
-            np.asarray(special_info.columns.todense()),
+            _special_block(special_info),
         ]
     )
     assert np.linalg.matrix_rank(design) == design.shape[1]
@@ -443,7 +458,7 @@ def test_a_non_string_special_label_builds_and_transforms():
     x = np.array([1, 2, 3, 4, 5, 9, 9], dtype=object)
     spline_info, special_info = spec.build(x, np.ones(len(x)))
     assert special_info.n_cols == 1
-    indicator = np.asarray(special_info.columns.todense()).ravel()
+    indicator = _special_block(special_info).ravel()
     np.testing.assert_array_equal(indicator == 1.0, np.array(x) == 9)
     out = spec.transform(x)
     n_spline = spline_info.columns.shape[1]
@@ -463,7 +478,7 @@ def test_a_non_string_special_label_builds_on_a_float_column():
     x = np.array([1, 2, 3, 4, 5, 9, 9], dtype=float)
     spline_info, special_info = spec.build(x, np.ones(len(x)))
     assert special_info.n_cols == 1
-    indicator = np.asarray(special_info.columns.todense()).ravel()
+    indicator = _special_block(special_info).ravel()
     np.testing.assert_array_equal(indicator == 1.0, x == 9.0)
     out = spec.transform(x)
     n_spline = spline_info.columns.shape[1]
@@ -493,7 +508,7 @@ def test_numeric_order_with_a_string_special_builds_and_transforms():
     x = np.array([1, 2, 3, 4, 5, 6, "MISSING", "MISSING"], dtype=object)
     spline_info, special_info = spec.build(x, np.ones(len(x)))
     assert special_info.n_cols == 1
-    indicator = np.asarray(special_info.columns.todense()).ravel()
+    indicator = _special_block(special_info).ravel()
     np.testing.assert_array_equal(indicator == 1.0, np.array(x) == "MISSING")
     out = spec.transform(x)
     n_spline = spline_info.columns.shape[1]
@@ -686,7 +701,7 @@ def test_a_numerically_equal_special_is_popped_from_a_float_order():
     # smooth carries the other four.
     x = np.array([1.0, 2.0, 3.0, 4.0, 9.0, 9.0], dtype=float)
     _, special_info = spec.build(x, np.ones(len(x)))
-    indicator = np.asarray(special_info.columns.todense()).ravel()
+    indicator = _special_block(special_info).ravel()
     np.testing.assert_array_equal(indicator == 1.0, x == 9.0)
 
 
@@ -858,7 +873,7 @@ class TestThinSpecialsPin:
         with pytest.warns(UserWarning, match=r"GHOST.*zero contribution"):
             _, special_info = spec.build(band, frame["exposure"].to_numpy())
         assert special_info.n_cols == 1
-        indicator = np.asarray(special_info.columns.todense()).ravel()
+        indicator = _special_block(special_info).ravel()
         np.testing.assert_array_equal(indicator == 1.0, band == SPECIAL)
 
     def test_reconstruct_reports_a_pinned_special_at_zero_effect(self):
