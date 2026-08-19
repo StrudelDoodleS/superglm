@@ -1532,16 +1532,28 @@ def _fit_pirls_inner(
             group_edf[original_group.name] = float(np.sum(selected_edf[selected_group.sl]))
     else:
         # Preserve Breheny-Huang (2009) group-lasso EDF allocation.
+        #
+        # The ``p_g`` of ``p_g - (p_g - 1) * shrink`` is the same group
+        # dimension the ``sqrt(p_g)`` weight is built from, so it is the width
+        # the group SPANS, not the width it emits.  A spec that withholds
+        # structurally unidentifiable columns still spans them; pricing the df
+        # at the emitted width would report the narrower block as carrying
+        # less df and move ``phi`` -- and with it every standard error and
+        # information criterion -- on what is meant to be a reparametrisation.
+        # The per-column allocation on the last line divides by the EMITTED
+        # width on purpose: ``effective_df`` is a sum over emitted columns, so
+        # only that denominator makes the columns add back up to ``df_group``.
         lam = penalty.lambda1 if penalty.lambda1 is not None else 0.0
         for is_selected, group in zip(group_selected, groups, strict=True):
             if not is_selected:
                 continue
             norm_g = float(np.linalg.norm(beta[group.sl]))
+            spanned = group.penalty_size
             if not penalty_targets_group(penalty, group) or not can_zero_groups:
-                df_group = float(group.size)
+                df_group = float(spanned)
             else:
                 shrink = min(1.0, lam * group.weight / max(norm_g, 1e-300))
-                df_group = float(group.size - (group.size - 1) * shrink)
+                df_group = float(spanned - (spanned - 1) * shrink)
             group_edf[group.name] = df_group
             feature_edf[group.sl] = df_group / group.size
 
