@@ -33,7 +33,7 @@ import pandas as pd
 import pytest
 
 import superglm.features.interaction as interaction_mod
-from superglm import Adaptive, GroupLasso, SuperGLM
+from superglm import Adaptive, GroupLasso, SparseGroupLasso, SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import CategoricalInteraction
 from superglm.types import GroupInfo
@@ -595,6 +595,94 @@ class TestAliasDropVersusEmptyDrop:
         assert pruned._interaction_specs["c1:c2"]._pruned_pairs
         assert pruned.result.effective_df == pytest.approx(unpruned.result.effective_df, rel=1e-9)
         assert pruned.result.phi == pytest.approx(unpruned.result.phi, rel=1e-9)
+
+    # Only grids with an EMPTY cell still prune while a selection penalty
+    # suppresses the alias half; an alias-only grid emits its full width there.
+    @pytest.mark.parametrize("cells", [EMPTY_ONLY, BOTH])
+    def test_the_breheny_huang_df_branch_reads_the_spanned_width(self, cells):
+        """The df ledger has a second, weight-free path, and it needs p_g too.
+
+        ``effective_df`` is read off the hat trace only when the penalty
+        contributes built-in inference curvature.  That contribution is
+        limited to ``Ridge``/``GroupLasso``/``GroupElasticNet`` by exact type,
+        so any other selection penalty -- ``SparseGroupLasso``, or a user
+        subclass of ``GroupLasso`` -- falls back to the Breheny-Huang (2009)
+        allocation ``p_g - (p_g - 1) * shrink``.  That formula's ``p_g`` is the
+        same group dimension as the weight's, so it has to be the SPANNED
+        width; reading the emitted width instead reports a narrower group as
+        carrying less df, moving ``phi`` and every information criterion on
+        what is supposed to be a reparametrisation.
+
+        The predictions are bit-identical here -- ``SparseGroupLasso`` never
+        reads ``group.size`` -- so nothing but the df ledger can fail this.
+        """
+        X, y = _frame(cells)
+        penalty = SparseGroupLasso(lambda1=0.05, alpha=0.9)
+        pruned = _fit(X, y, family="gaussian", penalty=penalty)
+        with unpruned_interaction():
+            unpruned = _fit(
+                X, y, family="gaussian", penalty=SparseGroupLasso(lambda1=0.05, alpha=0.9)
+            )
+        g_pruned = next(g for g in pruned._groups if g.feature_name == "c1:c2")
+        g_unpruned = next(g for g in unpruned._groups if g.feature_name == "c1:c2")
+        assert pruned._interaction_specs["c1:c2"]._pruned_pairs
+        # Not vacuous: the emitted block really is narrower, and the arms
+        # agree on everything the df ledger is NOT responsible for.
+        assert g_pruned.size < g_unpruned.size
+        assert g_pruned.penalty_size == g_unpruned.penalty_size
+        assert g_pruned.weight == pytest.approx(g_unpruned.weight)
+        np.testing.assert_allclose(pruned.predict(X), unpruned.predict(X), rtol=0, atol=0)
+
+        df_pruned = pruned._group_edf["c1:c2"]
+        df_unpruned = unpruned._group_edf["c1:c2"]
+        assert df_pruned == pytest.approx(df_unpruned, rel=1e-12)
+        assert pruned.result.effective_df == pytest.approx(unpruned.result.effective_df, rel=1e-12)
+        assert pruned.result.phi == pytest.approx(unpruned.result.phi, rel=1e-12)
+
+        # The branch really is the shrinking one, and the emitted width would
+        # have given a materially different answer -- so a regression here
+        # cannot hide behind a degenerate shrink of 0 or 1.
+        norm_g = float(np.linalg.norm(pruned.result.beta[g_pruned.sl]))
+        shrink = min(1.0, 0.05 * g_pruned.weight / norm_g)
+        assert 0.0 < shrink < 1.0, shrink
+        spanned = g_pruned.penalty_size
+        emitted = g_pruned.size
+        assert df_unpruned == pytest.approx(spanned - (spanned - 1) * shrink, rel=1e-9)
+        assert abs((emitted - (emitted - 1) * shrink) - df_unpruned) > 1e-3
+
+        # The per-column ledger still adds back up to the group's df, so
+        # ``effective_df`` (a sum over columns) and ``group_edf`` agree.
+        assert float(np.sum(pruned.result.rank_info.feature_edf[g_pruned.sl])) == pytest.approx(
+            df_pruned, rel=1e-12
+        )
+
+    # Only grids with an EMPTY cell still prune while a selection penalty
+    # suppresses the alias half; an alias-only grid emits its full width there.
+    @pytest.mark.parametrize("cells", [EMPTY_ONLY, BOTH])
+    def test_the_df_of_a_group_the_penalty_skips_is_the_spanned_width(self, cells):
+        """The unshrunk arm of the same branch: ``df_g = p_g`` outright.
+
+        A group the selection penalty does not target keeps its full nominal
+        dimension.  Reading the emitted width there is the same defect without
+        the shrinkage arithmetic -- it reports a whole missing degree of
+        freedom per pruned cell.
+        """
+        X, y = _frame(cells)
+
+        def penalty():
+            return SparseGroupLasso(lambda1=0.05, alpha=0.9, features=["c1", "c2"])
+
+        pruned = _fit(X, y, family="gaussian", penalty=penalty())
+        with unpruned_interaction():
+            unpruned = _fit(X, y, family="gaussian", penalty=penalty())
+        g_pruned = next(g for g in pruned._groups if g.feature_name == "c1:c2")
+        g_unpruned = next(g for g in unpruned._groups if g.feature_name == "c1:c2")
+        assert pruned._interaction_specs["c1:c2"]._pruned_pairs
+        assert g_pruned.size < g_unpruned.size
+        np.testing.assert_allclose(pruned.predict(X), unpruned.predict(X), rtol=0, atol=0)
+        assert pruned._group_edf["c1:c2"] == pytest.approx(float(g_pruned.penalty_size))
+        assert pruned._group_edf["c1:c2"] == pytest.approx(unpruned._group_edf["c1:c2"])
+        assert pruned.result.effective_df == pytest.approx(unpruned.result.effective_df, rel=1e-12)
 
     # Only grids with an EMPTY cell still prune while a selection penalty
     # suppresses the alias half; an alias-only grid emits its full width there.
