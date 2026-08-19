@@ -1383,10 +1383,20 @@ class OrderedCategorical:
             # slice, penalty and selection list downstream, so the term returns
             # the shape it has without specials -- which is what it now is.
             return spline_info
-        indicators = sp.csr_matrix(special_mask[:, self._active_specials].astype(np.float64))
+        # A row carries at most one special -- they are distinct levels of one
+        # column, and grouping may not merge them -- so this block is one-hot
+        # and codes describe it exactly.  Carried as cat_codes rather than CSR
+        # so the group reaches the structured kernels: a sparse block here is
+        # enough on its own to disqualify a whole design from the packed
+        # centering path and send it to the chunked dense fallback.
+        active = special_mask[:, self._active_specials]
+        special_codes = np.where(active.any(axis=1), active.argmax(axis=1), -1).astype(
+            np.intp, copy=False
+        )
         special_info = GroupInfo(
-            columns=indicators,
+            columns=None,
             n_cols=len(self._active_specials),
+            cat_codes=special_codes,
             penalty_matrix=None,
             reparametrize=False,
             penalized=False,
