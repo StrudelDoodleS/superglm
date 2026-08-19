@@ -34,7 +34,8 @@ from superglm.reml.observed_geometry import (
 from superglm.reml.penalty_algebra import (
     build_penalty_matrix,
     compute_logdet_s_derivatives,
-    penalty_component_dense_matrix,
+    penalty_component_quadratic,
+    penalty_component_trace,
 )
 from superglm.reml.result import REMLResult
 from superglm.reml.scale import prepare_gamma_reml_scale_data
@@ -416,26 +417,6 @@ def _merge_scop_penalty_components(
     return ordinary + scop_components
 
 
-def _component_penalty_matrix(pc: PenaltyComponent) -> NDArray:
-    """Return one component's penalty over the full width of its coefficient block.
-
-    Only ``dense`` components keep their penalty in ``omega_ssp``.  The
-    structured kinds carry their geometry in ``penalty_kind`` instead: an
-    ``identity`` component (a random effect) stores no matrix at all, and a
-    ``repeated`` or ``sum_to_zero`` component stores one small local block that
-    has to be expanded across its repeats.  Reading ``omega_ssp`` directly is
-    therefore wrong for every structured term -- it yields ``None`` for a random
-    effect, which is how one used to reach a matmul as a 0-d operand, and a
-    single local block for a factor smooth, which is the wrong shape.
-    """
-    if pc.penalty_kind != "dense":
-        return penalty_component_dense_matrix(pc)
-    omega = pc.omega_ssp
-    if omega is None:
-        omega = pc.omega_raw
-    return omega
-
-
 def compute_scop_aware_penalty_quad(
     result_beta: NDArray,
     S: NDArray,
@@ -480,8 +461,7 @@ def compute_scop_aware_penalty_quad(
         )
         if matching:
             for component in matching:
-                omega = _component_penalty_matrix(component)
-                pq += lambdas[component.name] * float(beta_eff @ omega @ beta_eff)
+                pq += lambdas[component.name] * penalty_component_quadratic(component, beta_eff)
         else:
             lam = lambdas.get(st["group_name"], 0.0)
             pq += lam * float(beta_eff @ st["S_scop"] @ beta_eff)
@@ -1505,7 +1485,6 @@ def scop_efs_lambda_update(
         This function uses the old fixed-point formula and is kept only for
         backward compatibility.
     """
-    omega_g = _component_penalty_matrix(pc)
     sl = pc.group_sl
 
     scop_st = _is_scop_component(pc, scop_states)
@@ -1517,8 +1496,8 @@ def scop_efs_lambda_update(
     if np.linalg.norm(beta_g) < 1e-12:
         return lam_old
 
-    quad = float(beta_g @ omega_g @ beta_g)
-    trace_term = float(np.trace(H_joint_inv[sl, sl] @ omega_g))
+    quad = penalty_component_quadratic(pc, beta_g)
+    trace_term = penalty_component_trace(pc, H_joint_inv[sl, sl])
 
     r_j = pc.rank
     denom = inv_phi * quad + trace_term
@@ -1664,7 +1643,6 @@ def _joint_efs_lambda_step(
         if pc.name not in estimated_names:
             continue
 
-        omega_g = _component_penalty_matrix(pc)
         sl = pc.group_sl
 
         scop_st = _is_scop_component(pc, scop_states)
@@ -1678,8 +1656,13 @@ def _joint_efs_lambda_step(
             continue
 
         # pSp and sEDF
-        pSp = float(beta_g @ omega_g @ beta_g)
-        sEDF = float(np.trace(H_joint_inv[sl, sl] @ omega_g))
+        # Kind-aware reductions, not a materialized penalty: an identity block
+        # would otherwise allocate eye(L) and run an O(L^3) matmul every outer
+        # EFS iteration to produce what is beta @ beta and trace(H_inv), and a
+        # repeated block would rebuild kron(I_L, omega_local) each time. These
+        # are exactly the kinds this guard newly admits.
+        pSp = penalty_component_quadratic(pc, beta_g)
+        sEDF = penalty_component_trace(pc, H_joint_inv[sl, sl])
 
         # Residual EDF — keep raw for suppression check, floor for log.
         # The rank shortcut is exact only for an isolated penalty block.  For

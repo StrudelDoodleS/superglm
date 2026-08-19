@@ -227,17 +227,22 @@ def _reject_structured_fit_constraints(model) -> None:
     operand. That is fixed at the read (see ``scop_efs._component_penalty_matrix``).
 
     What survives is one specification, not one pair of term types: a SCOP
-    smooth of ``v`` beside a ``basis="fs"`` factor smooth *of the same ``v``*.
-    An ``fs`` factor smooth carries its own main effect, so that model states the
-    effect of ``v`` twice -- once confined to a shape cone and once free. The
-    free copy absorbs whatever the constrained copy is forbidden to do, the two
-    compensate for each other, and no coefficient mode is reached (measured 0/7
-    across seed, rows, level count and basis size).
+    constraint on a column that a ``basis="fs"`` factor smooth also spans. An
+    ``fs`` factor smooth carries its own main effect, so such a model states that
+    effect twice -- once confined to a shape cone and once free. The free copy
+    absorbs whatever the constrained copy is forbidden to do, the two compensate
+    for each other, and no coefficient mode is reached.
 
-    Everything adjacent to it converges (7/7 each): ``basis="sz"`` on the same
-    variable, which excludes the main effect and so states it once; an ``fs``
-    factor smooth of a *different* variable; and the constraint sitting on a
-    different variable from the factor smooth. The unconstrained version of the
+    A factor smooth spans BOTH its parents, and the duplication is reachable on
+    either. Along ``variable`` the free copy is the marginal smooth (measured
+    0/7); along ``group`` it is the per-level null-space blocks, which are a
+    per-level effect of the grouping column, reachable when that column carries
+    an ``OrderedCategorical`` SCOP constraint (measured 0/6). Testing only
+    ``variable`` would let the second through.
+
+    Everything adjacent converges (7/7 each): ``basis="sz"``, which excludes the
+    main effect and so states it once; and an ``fs`` factor smooth sharing
+    neither parent with a constrained term. The unconstrained version of the
     duplicated model converges too, which is what localises this to constrained
     duplication rather than to duplication or to SCOP-with-FactorSmooth.
 
@@ -262,10 +267,14 @@ def _reject_structured_fit_constraints(model) -> None:
         defines no SCOP method, so asking the wrapper reports QP for every basis
         including the SCOP ones. Resolve to the inner spline before asking.
 
-        Read directly rather than through ``getattr(..., default)``: the
-        property's ``AttributeError`` on a pre-0.24 step pickle must not be
-        swallowed. Such a spec cannot answer ``constraint_kind`` either, so it is
-        filtered out by the declaration test above and never arrives here.
+        A pre-0.24 step pickle never reaches this function: the declaration test
+        above reads ``constraint_kind`` through ``getattr(spec, name, default)``,
+        which is the one spelling that swallows the ``AttributeError``
+        ``_basis_spline`` raises, so such a spec answers ``None`` and is filtered
+        out before the engine question is asked. The direct read here is
+        therefore not what protects that case -- do not read it as a refusal of
+        step pickles, which the guard does not perform. It is written directly
+        only because there is no default that would be correct if one did arrive.
         """
         return spec._basis_spline if isinstance(spec, OrderedCategorical) else spec
 
@@ -279,22 +288,26 @@ def _reject_structured_fit_constraints(model) -> None:
     if not scop_constrained:
         return
 
-    # Only a main-effect-carrying factor smooth OF A CONSTRAINED VARIABLE
-    # duplicates that variable's effect. ``sz`` excludes the main effect, and a
-    # factor smooth of any other variable states nothing twice.
+    # A main-effect-carrying factor smooth duplicates a constrained effect on
+    # EITHER of its two axes, so test both parents. Along ``variable`` the
+    # duplicate is the marginal smooth; along ``group`` it is the per-level
+    # null-space blocks, which are a per-level effect of the grouping column.
+    # Both were measured non-convergent (0/7 and 0/6). ``sz`` excludes the main
+    # effect, and a factor smooth sharing neither parent states nothing twice.
     constrained_set = set(scop_constrained)
     duplicated = [
-        (spec.variable, name)
+        (sorted(set(spec.parent_names) & constrained_set), name)
         for name, spec in model._interaction_specs.items()
         if isinstance(spec, FactorSmooth)
         and spec.basis == "fs"
-        and spec.variable in constrained_set
+        and set(spec.parent_names) & constrained_set
     ]
     if not duplicated:
         return
 
     joined = ", ".join(
-        f"{iname!r} (of {var!r}, which is shape-constrained)" for var, iname in duplicated
+        f"{iname!r} (sharing shape-constrained {', '.join(repr(p) for p in parents)})"
+        for parents, iname in duplicated
     )
     raise NotImplementedError(
         f"fit-time SCOP shape constraints are not supported with FactorSmooth "

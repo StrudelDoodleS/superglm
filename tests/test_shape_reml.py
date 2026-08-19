@@ -288,6 +288,46 @@ def test_scop_constraint_rejects_a_main_effect_factor_smooth_of_the_same_variabl
         model.fit_reml(X, y)
 
 
+def test_scop_constraint_rejects_a_factor_smooth_grouped_by_the_constrained_column() -> None:
+    """The duplication is reachable on the factor smooth's OTHER parent too.
+
+    A factor smooth spans two columns. Along ``variable`` the free copy of the
+    effect is the marginal smooth; along ``group`` it is the per-level
+    null-space blocks, which are a per-level effect of the grouping column. So
+    constraining the *grouping* column duplicates just as constraining the
+    smoothed one does -- reachable when the grouping column carries an
+    ``OrderedCategorical`` SCOP constraint, since that is what lets a
+    categorical column be shape-constrained at all.
+
+    Measured 0/6 across seed, rows, level count and basis size. A guard keyed on
+    ``spec.variable`` alone passes this straight through to that failure, which
+    is what an earlier form of this change did.
+    """
+    from superglm import OrderedCategorical
+
+    rng = np.random.default_rng(0)
+    n, n_levels = 1500, 10
+    levels = [f"L{index:02d}" for index in range(n_levels)]
+    codes = rng.integers(0, n_levels, n)
+    x = rng.uniform(0.0, 1.0, n)
+    y = 0.25 * codes + np.sin(3.0 * x) + rng.normal(0.0, 0.3, n)
+    X = pd.DataFrame({"x": x, "g": [levels[code] for code in codes]})
+
+    model = SuperGLM(
+        family="gaussian",
+        features={
+            "g": OrderedCategorical(
+                order=levels,
+                basis=Spline(kind="ps", n_knots=6, constraint=Constraint.fit.increasing),
+            )
+        },
+        interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
+    )
+
+    with pytest.raises(NotImplementedError, match=r"stated twice"):
+        model.fit_reml(X, y)
+
+
 @pytest.mark.parametrize(
     ("features_for", "interaction_for", "case"),
     [
@@ -401,13 +441,40 @@ def test_scop_constraints_fit_alongside_a_random_effect() -> None:
     assert np.isfinite(random_effect.smoothing_lambda)
 
 
-def test_scop_constraint_with_random_effect_is_slack_when_truth_is_monotone() -> None:
-    """Equivalence control: a non-binding constraint must change nothing.
+@pytest.mark.parametrize(
+    ("spline_cls", "engine", "rel"),
+    [
+        pytest.param(BSplineSmooth, "qp", 1e-12, id="qp-engine"),
+        pytest.param(PSpline, "scop", 1e-3, id="scop-engine"),
+    ],
+)
+def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(
+    spline_cls,
+    engine: str,
+    rel: float,
+) -> None:
+    """Equivalence control: a non-binding constraint must not move the fit.
 
     A fit that merely runs proves little. On a monotone truth the increasing
     constraint is inactive, so the constrained fit has to reproduce the
-    unconstrained one -- including the variance component, which is the
-    quantity a shape constraint has no business perturbing.
+    unconstrained one -- variance component included, that being the quantity a
+    shape constraint has no business perturbing.
+
+    The two engines earn different bars, and the difference is structural rather
+    than a tolerance chosen for comfort:
+
+    * QP reaches the free fit **exactly**. Its automatic-lambda path is an
+      unconstrained REML pass followed by a constrained refit, so a slack
+      constraint makes the refit a no-op: measured ``0`` on the variance
+      component and ``2.1e-16`` on the deviance across five seeds, i.e. pure
+      round-off. ``1e-12`` is that with room, and would catch any real drift.
+    * SCOP reaches it only to ``~1e-4``, because the two arms are optimized by
+      *different routines* -- the free arm by ``optimize_reml_best``, the
+      constrained one by ``run_scop_efs_reml`` -- which stop at slightly
+      different lambdas. Measured worst case over the same five seeds is
+      ``1.13e-4`` on the variance component and ``8.4e-5`` on the deviance;
+      ``1e-3`` is an order of magnitude above that and still an order below the
+      perturbation this control exists to detect.
     """
     rng = np.random.default_rng(5)
     n, n_levels = 1200, 20
@@ -421,7 +488,7 @@ def test_scop_constraint_with_random_effect_is_slack_when_truth_is_monotone() ->
         kwargs = {"constraint": constraint} if constraint is not None else {}
         model = SuperGLM(
             family="gaussian",
-            features={"x": PSpline(n_knots=10, **kwargs), "group": RandomEffect()},
+            features={"x": spline_cls(n_knots=10, **kwargs), "group": RandomEffect()},
         )
         model.fit_reml(X, y)
         return model
@@ -431,5 +498,5 @@ def test_scop_constraint_with_random_effect_is_slack_when_truth_is_monotone() ->
 
     free_re = free.random_effects("group")
     constrained_re = constrained.random_effects("group")
-    assert constrained_re.variance_component == pytest.approx(free_re.variance_component, rel=5e-2)
-    assert constrained.result.deviance == pytest.approx(free.result.deviance, rel=5e-2)
+    assert constrained_re.variance_component == pytest.approx(free_re.variance_component, rel=rel)
+    assert constrained.result.deviance == pytest.approx(free.result.deviance, rel=rel)
