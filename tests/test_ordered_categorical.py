@@ -962,22 +962,19 @@ class TestOrderedCategoricalShapeDispatch:
         """The wrapper must not change which engine the guard thinks it holds.
 
         ``OrderedCategorical`` delegates its build to an inner spline, so the
-        inner basis picks the engine -- ``ps`` routes through SCOP -- while the
-        wrapper defines ``_build_monotone_constraints_raw`` unconditionally, so
+        inner basis picks the engine -- ``ps`` routes through SCOP. The wrapper
+        itself defines ``_build_monotone_constraints_raw`` unconditionally, so
         that the builder can find raw geometry through it, and defines no SCOP
         method at all. Asking the WRAPPER therefore reads QP for every basis,
         including the SCOP ones.
 
-        The observable consequence is the exception a same-variable factor
-        smooth produces. ``ps`` resolves to SCOP, so the shape guard claims it
-        first; ``cr`` resolves to QP, so the guard passes and the request falls
-        through to ``FactorSmooth``'s own numeric-variable check. Asserting the
-        two differ is asserting the resolution happened.
-
-        Note what this does NOT show. An ordinal feature's column is
-        categorical, so a factor smooth of it is never buildable either way --
-        that is what the ``cr`` arm's ``TypeError`` says. This pins
-        classification, not a live modelling path.
+        The case below is the one where that misreading would do damage. An
+        ordinal feature is the only way a *categorical* column carries a shape
+        constraint, and a factor smooth grouped by that column duplicates its
+        effect through the per-level null-space blocks. So ``ps`` must be
+        refused and ``cr`` -- a QP engine, which pairs with a factor smooth
+        normally -- must fit. Both are real, buildable models, and the outcome
+        differs only because the wrapper was resolved to its inner spline.
 
         This test formerly asserted that a wrapped constraint beside a
         ``RandomEffect`` was refused. That refusal was withdrawn: a variance
@@ -987,9 +984,13 @@ class TestOrderedCategoricalShapeDispatch:
         from superglm import FactorSmooth, RandomEffect
         from superglm.features.spline import Spline
 
-        X, y, levels, _ = dipping_ordinal_data
-        X = X.copy()
-        X["grp"] = np.array([f"g{i % 6}" for i in range(len(X))], dtype=object)
+        rng = np.random.default_rng(0)
+        n, n_levels = 1500, 10
+        levels = [f"L{index:02d}" for index in range(n_levels)]
+        codes = rng.integers(0, n_levels, n)
+        x = rng.uniform(0.0, 1.0, n)
+        y = 0.25 * codes + np.sin(3.0 * x) + rng.normal(0.0, 0.3, n)
+        X = pd.DataFrame({"x": x, "g": [levels[code] for code in codes]})
 
         def band(kind):
             return OrderedCategorical(
@@ -997,26 +998,32 @@ class TestOrderedCategoricalShapeDispatch:
                 basis=Spline(kind=kind, n_knots=6, constraint=Constraint.fit.increasing),
             )
 
-        def fit_with_same_variable_factor_smooth(kind):
-            model = SuperGLM(
+        def grouped_factor_smooth(kind):
+            return SuperGLM(
                 family="gaussian",
-                features={"band": band(kind)},
-                interactions=[FactorSmooth("band", group="grp", basis="fs", k=5)],
+                features={"g": band(kind)},
+                interactions=[FactorSmooth("x", group="g", basis="fs", k=5)],
             )
-            model.fit_reml(X, y)
 
-        with pytest.raises(NotImplementedError, match="stated twice"):
-            fit_with_same_variable_factor_smooth("ps")
-        with pytest.raises(TypeError, match="must be numeric"):
-            fit_with_same_variable_factor_smooth("cr")
+        with pytest.raises(NotImplementedError, match=r"stated twice"):
+            grouped_factor_smooth("ps").fit_reml(X, y)
 
-        # Either engine pairs with a random effect, and neither is refused.
+        qp_model = grouped_factor_smooth("cr")
+        qp_model.fit_reml(X, y)
+        assert qp_model.result.converged
+
+        # Either engine pairs with a random effect, and neither is refused. The
+        # grouping is drawn independently of ``g``: nesting it inside the
+        # constrained ordinal would confound the two terms and test the fixture
+        # rather than the guard.
+        independent = rng.integers(0, 6, n)
+        frame = X.assign(grp2=[f"r{code}" for code in independent])
         for kind in ("ps", "cr"):
             model = SuperGLM(
                 family="gaussian",
-                features={"band": band(kind), "grp": RandomEffect()},
+                features={"g": band(kind), "grp2": RandomEffect()},
             )
-            model.fit_reml(X, y)
+            model.fit_reml(frame, y)
             assert model.result.converged
 
     @pytest.mark.parametrize("basis", ["piecewise", "polynomial"])

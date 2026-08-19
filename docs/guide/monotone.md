@@ -190,13 +190,16 @@ These combinations are intentionally guarded:
 - fit-time shape constraints with `selection_penalty > 0`
 - fit-time shape constraints with `select=True`
 - mixed SCOP and QP constrained engines in the same model
-- a **SCOP** fit-time constraint on a variable that also carries a
-  `basis="fs"` `FactorSmooth`. An `fs` factor smooth includes its own main
-  effect, so such a model states that variable's effect twice — once confined
-  to the shape cone and once free — and reaches no coefficient mode. Use
-  `basis="sz"`, which excludes the main effect, or a QP-engine spline. Nothing
-  adjacent is restricted: a factor smooth of a *different* variable is fine,
-  and so is a `RandomEffect` on either engine. Note that an
+- a **SCOP** fit-time constraint on a column that a `basis="fs"` `FactorSmooth`
+  also spans — **either** of its two parents. An `fs` factor smooth includes its
+  own main effect, so such a model states that effect twice, once confined to
+  the shape cone and once free, and reaches no coefficient mode. Along the
+  smoothed variable the free copy is the marginal smooth; along the grouping
+  column it is the per-level null-space blocks, which is reachable when that
+  column carries an `OrderedCategorical` constraint. Use `basis="sz"`, which
+  excludes the main effect, or a QP-engine spline. Nothing adjacent is
+  restricted: a factor smooth sharing neither parent with a constrained term is
+  fine, and so is a `RandomEffect` on either engine. Note that an
   `OrderedCategorical` is classified by its inner basis, so
   `basis=Spline(kind="ps")` is a SCOP term and `kind="cr"`/`"bs"` are QP ones
 - `kind="ns"` fit-time shape constraints
