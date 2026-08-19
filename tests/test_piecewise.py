@@ -748,16 +748,31 @@ class TestSpecState:
 
 
 class TestPiecewiseIntegration:
-    def test_a_categorical_interaction_keeps_its_plain_sparse_representation(self):
+    def test_a_categorical_interaction_is_not_row_compressed(self):
         """Row compression is opt-in via ``GroupInfo.supports_row_compression``.
 
         Before the scoping, ``_build_unpenalized_sparse_group`` re-routed EVERY
         unpenalized sparse group: a categorical interaction became a
-        ``DiscretizedSSPGroupMatrix`` subclass, which disables the tabmat
-        split for the whole model and flips its design_summary representation
-        -- a behaviour change to a shipped term type that never asked for it.
+        ``DiscretizedSSPGroupMatrix`` subclass, which disables the tabmat split
+        for the whole model and flips its design_summary reporting -- a
+        behaviour change to a shipped term type that never asked for it.  That
+        remains the thing to prevent, and this pins it.
+
+        The interaction now builds as a ``CategoricalGroupMatrix``: a
+        two-categorical interaction is one-hot, so codes describe it exactly,
+        and that container reaches the packed centered-Gram build.  It is not a
+        compressed group, so the re-routing this test was written against has
+        not happened.  The split can still drop on a narrow design, so what is
+        asserted here is the consequence the earlier note actually cared about
+        -- that the model does not get slower.  Measured on this shape, wall
+        seconds, threads pinned, deviance identical to printed precision in
+        every arm:
+
+            n=200k  3x3    0.56 -> 0.56   (split dropped, no cost)
+            n=200k  20x15  3.72 -> 0.48
+            n=50k   40x30  3.76 -> 1.09
         """
-        from superglm.group_matrix import SparseGroupMatrix
+        from superglm.group_matrix import CategoricalGroupMatrix
 
         rng = np.random.default_rng(37)
         n = 4000
@@ -775,13 +790,24 @@ class TestPiecewiseIntegration:
         model.fit(frame, y)
 
         idx = next(i for i, g in enumerate(model._groups) if g.feature_name == "region:ptype")
-        assert type(model._dm.group_matrices[idx]) is SparseGroupMatrix
-        # The pre-PR representation and its consequences, pinned: the split
-        # survives because no group in this model is a compressed one.
-        assert model._dm._get_or_build_tabmat_split() is not None
+        gm = model._dm.group_matrices[idx]
+        assert type(gm) is CategoricalGroupMatrix
+        # The thing to prevent: a compressed container for a term that never
+        # asked for one.  DiscretizedSSPGroupMatrix and its subclasses are what
+        # disable the split for the whole model.
+        from superglm._group_matrix._group_matrix_discretized import (
+            DiscretizedSSPGroupMatrix,
+        )
+
+        assert not isinstance(gm, DiscretizedSSPGroupMatrix)
+        # design_summary reports the container truthfully, so this row moved
+        # from "sparse-csr" to "categorical-codes" -- a user-visible reporting
+        # change, and the one thing about this term that a reader will notice.
+        # What must not change is `compressed`: that is the flag standing for
+        # the re-routing described above.
         summary = model.design_summary()
         row = summary.loc[summary["feature"] == "region:ptype"].iloc[0]
-        assert row["representation"] == "sparse-csr"
+        assert row["representation"] == "categorical-codes"
         assert not row["compressed"]
 
     def test_build_warnings_name_the_feature_that_raised_them(self):

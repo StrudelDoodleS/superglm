@@ -36,7 +36,14 @@ def _materialize(result) -> np.ndarray:
     infos = result if isinstance(result, list) else [result]
     blocks = []
     for info in infos:
-        if info.columns is not None:
+        if info.cat_codes is not None:
+            # One-hot carried as codes: a row off the emitted grid codes as -1
+            # and contributes an all-zero row, which is what the equality-mask
+            # representation produced for it.
+            block = np.zeros((len(info.cat_codes), info.n_cols), dtype=np.float64)
+            on_grid = info.cat_codes >= 0
+            block[np.flatnonzero(on_grid), info.cat_codes[on_grid]] = 1.0
+        elif info.columns is not None:
             block = info.columns.toarray() if sp.issparse(info.columns) else info.columns
         elif info.spline_cat_basis is not None:
             block = info.spline_cat_basis.toarray()
