@@ -200,6 +200,16 @@ class GroupInfo:
     factor_smooth_transform: NDArray | None = None
     factor_smooth_levels: tuple[Any, ...] | None = None
     repeated_penalty_components: tuple[tuple[str, NDArray], ...] | None = None
+    # The dimension the PENALTY should price this group at, when a spec emits
+    # fewer columns than the term nominally spans.  ``n_cols`` is the emitted
+    # width and always governs the block's algebra; ``penalty_width`` governs
+    # only the quantities that price the group as a whole -- ``sqrt(p_g)`` in
+    # the group-lasso weight and the Breheny-Huang degree-of-freedom
+    # allocation.  Set it when the withheld columns are structurally
+    # unidentifiable (an empty or exactly aliased interaction cell), so that
+    # withholding them buys rank rather than shrinkage.  ``None`` means "the
+    # emitted width", which is right for every spec that emits what it spans.
+    penalty_width: int | None = None
 
     def __post_init__(self):
         if self.columns is None:
@@ -303,6 +313,11 @@ class GroupSlice:
     constraints: LinearConstraintSet | None = None
     monotone_engine: str | None = None
     scop_reparameterization: SCOPSolverReparam | None = None
+    # Dimension the penalty prices this group at; ``None`` means ``size``.
+    # See ``GroupInfo.penalty_width``: it differs from ``size`` only when the
+    # spec withheld columns the design cannot identify.  Read it through
+    # ``penalty_size``, never directly.
+    penalty_dim: int | None = None
 
     def __post_init__(self):
         if self.feature_name is _FEATURE_NAME_UNSET:
@@ -311,6 +326,18 @@ class GroupSlice:
     @property
     def size(self) -> int:
         return self.end - self.start
+
+    @property
+    def penalty_size(self) -> int:
+        """Group dimension for penalty and degree-of-freedom purposes.
+
+        Equals :attr:`size` unless the spec emitted fewer columns than the
+        term spans because the missing ones are structurally unidentifiable.
+        Use this wherever ``p_g`` enters a penalty formula -- the group-lasso
+        ``sqrt(p_g)`` weight, the Breheny-Huang df allocation -- and
+        :attr:`size` wherever the block's own algebra is meant.
+        """
+        return self.size if self.penalty_dim is None else int(self.penalty_dim)
 
     @property
     def sl(self) -> slice:

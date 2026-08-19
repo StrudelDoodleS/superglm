@@ -554,6 +554,22 @@ def add_interaction(
 # ═══════════════════════════════════════════════════════════════════
 
 
+def _penalty_dimension(info: GroupInfo, n_cols: int) -> int:
+    """The dimension the penalty should price a group at.
+
+    Normally the emitted width.  A spec that withholds columns the design
+    cannot identify -- an interaction cell no row occupies, or one that is an
+    exact linear combination of the main effects beside it -- reports the
+    width it spans through ``penalty_width``.  Pricing such a group at its
+    emitted width would let the same ``lambda1`` buy less shrinkage purely
+    because a structurally dead column was dropped, so the group-lasso weight
+    and the df allocation both read this instead.
+    """
+    if info.penalty_width is None:
+        return int(n_cols)
+    return int(info.penalty_width)
+
+
 def _process_info(
     info: GroupInfo,
     *,
@@ -852,12 +868,23 @@ def build_design_matrix(
     n_bins_config: int | dict[str, int],
     lambda2: float | dict,
     level_bindings: dict | None = None,
+    alias_prune: bool = True,
 ) -> BuildResult:
     """Build features, groups, and design matrix from specs.
 
     Returns a BuildResult. Mutates ``interaction_specs``,
     ``interaction_order`` (resolves pending), ``pending_interactions``
     (empties it), and ``specs`` (via set_reparametrisation calls).
+
+    ``alias_prune`` controls only the *aliased*-cell half of categorical
+    interaction pruning.  Dropping an aliased cell picks one representative
+    of a rank deficiency that spans the interaction and its parent main
+    effect; that is a free choice exactly while the solver's rank convention
+    is what picks it.  A group selection penalty picks a different one -- the
+    representative minimising the group norms -- so the caller passes False
+    whenever a nonzero lambda1 will reach this block.  Empty cells are
+    unconditional: their columns are identically zero in the weighted
+    geometry, so no penalty can prefer any other representative.
     """
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
@@ -1163,7 +1190,8 @@ def build_design_matrix(
                     name=f"{name}{subgroup_suffix}",
                     start=col_offset,
                     end=col_offset + n_cols,
-                    weight=np.sqrt(n_cols),
+                    weight=np.sqrt(_penalty_dimension(info, n_cols)),
+                    penalty_dim=info.penalty_width,
                     penalized=info.penalized,
                     feature_name=name,
                     subgroup_type=info.subgroup_name,
@@ -1252,7 +1280,10 @@ def build_design_matrix(
                 sample_weight=sample_weight,
             )
         else:
-            result = ispec.build(x1, x2, parent_specs, sample_weight=sample_weight)
+            build_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
+            if getattr(ispec, "accepts_alias_prune_flag", False):
+                build_kwargs["alias_prune"] = alias_prune
+            result = ispec.build(x1, x2, parent_specs, **build_kwargs)
 
         pi_kwargs = dict(
             B_unique=B_unique_inter,
@@ -1280,7 +1311,8 @@ def build_design_matrix(
                             name=f"{iname}{subgroup_suffix}",
                             start=col_offset,
                             end=col_offset + n_cols,
-                            weight=np.sqrt(n_cols),
+                            weight=np.sqrt(_penalty_dimension(info, n_cols)),
+                            penalty_dim=info.penalty_width,
                             penalized=info.penalized,
                             feature_name=iname,
                             subgroup_type=info.subgroup_name,
@@ -1306,7 +1338,8 @@ def build_design_matrix(
                             name=f"{iname}[{level}]",
                             start=col_offset,
                             end=col_offset + n_cols,
-                            weight=np.sqrt(n_cols),
+                            weight=np.sqrt(_penalty_dimension(info, n_cols)),
+                            penalty_dim=info.penalty_width,
                             penalized=True,
                             feature_name=iname,
                             constraints=info.constraints,
@@ -1325,7 +1358,8 @@ def build_design_matrix(
                 name=iname,
                 start=col_offset,
                 end=col_offset + n_cols,
-                weight=np.sqrt(n_cols),
+                weight=np.sqrt(_penalty_dimension(result, n_cols)),
+                penalty_dim=result.penalty_width,
                 penalized=True,
                 feature_name=iname,
                 constraints=result.constraints,

@@ -106,6 +106,7 @@ def _grouped_active_state(model, selected_names: set[str]):
                 start=col,
                 end=col + group.size,
                 weight=group.weight,
+                penalty_dim=group.penalty_dim,
                 penalized=group.penalized,
                 feature_name=group.feature_name,
                 subgroup_type=group.subgroup_type,

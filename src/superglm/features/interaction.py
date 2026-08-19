@@ -868,6 +868,10 @@ class CategoricalInteraction:
     all non-base level pairs.
     """
 
+    # The builder asks for this by name: only a spec that prunes ALIASED
+    # cells needs telling whether the fit's penalty makes that unsafe.
+    accepts_alias_prune_flag = True
+
     def __init__(self, cat1_name: str, cat2_name: str):
         self.cat1_name = cat1_name
         self.cat2_name = cat2_name
@@ -901,6 +905,7 @@ class CategoricalInteraction:
         x_cat2: NDArray,
         parent_specs: dict,
         sample_weight: NDArray | None = None,
+        alias_prune: bool = True,
     ) -> GroupInfo:
         from superglm.features.categorical import Categorical, _codes_against
 
@@ -983,22 +988,23 @@ class CategoricalInteraction:
         grid_occupied = effective > 0.0
         if bool(grid_occupied.any()):
             drop = ~grid_occupied
-            idx1 = _codes_against(x_cat1, self._non_base1)
-            idx2 = _codes_against(x_cat2, self._non_base2)
-            positive = weights > 0.0
-            nb2 = len(self._non_base2)
-            for i1 in range(len(self._non_base1)):
-                rows = (idx1 == i1) & positive
-                if rows.any() and bool(np.all(idx2[rows] >= 0)):
-                    cells = np.flatnonzero(grid_occupied[i1 * nb2 : (i1 + 1) * nb2])
-                    if cells.size:
-                        drop[i1 * nb2 + cells[-1]] = True
-            for i2 in range(nb2):
-                rows = (idx2 == i2) & positive
-                if rows.any() and bool(np.all(idx1[rows] >= 0)):
-                    cells = np.flatnonzero(grid_occupied[i2::nb2])
-                    if cells.size:
-                        drop[cells[-1] * nb2 + i2] = True
+            if alias_prune:
+                idx1 = _codes_against(x_cat1, self._non_base1)
+                idx2 = _codes_against(x_cat2, self._non_base2)
+                positive = weights > 0.0
+                nb2 = len(self._non_base2)
+                for i1 in range(len(self._non_base1)):
+                    rows = (idx1 == i1) & positive
+                    if rows.any() and bool(np.all(idx2[rows] >= 0)):
+                        cells = np.flatnonzero(grid_occupied[i1 * nb2 : (i1 + 1) * nb2])
+                        if cells.size:
+                            drop[i1 * nb2 + cells[-1]] = True
+                for i2 in range(nb2):
+                    rows = (idx2 == i2) & positive
+                    if rows.any() and bool(np.all(idx1[rows] >= 0)):
+                        cells = np.flatnonzero(grid_occupied[i2::nb2])
+                        if cells.size:
+                            drop[cells[-1] * nb2 + i2] = True
             kept = np.flatnonzero(~drop)
             if len(kept) == 0:
                 # The alias rule would empty the block (e.g. a fully nested
@@ -1014,7 +1020,20 @@ class CategoricalInteraction:
                 self._pairs = [self._pairs[i] for i in kept]
                 n_pairs = len(kept)
 
-        return GroupInfo(columns=None, n_cols=n_pairs, cat_codes=codes)
+        # The penalty must keep pricing this block at the width the term
+        # SPANS, not the width it emits.  A pruned cell is structurally
+        # unidentifiable -- its coefficient is exactly zero in the unpruned
+        # parametrisation -- so dropping it is meant to buy rank, not
+        # shrinkage.  Leaving the group-lasso ``sqrt(p_g)`` weight to follow
+        # the emitted width would make the same ``lambda1`` shrink a pruned
+        # block less than an unpruned one, which is a change in the fit and
+        # not a reparametrisation.
+        return GroupInfo(
+            columns=None,
+            n_cols=n_pairs,
+            cat_codes=codes,
+            penalty_width=len(self._all_pairs),
+        )
 
     def _pruned_codes(self, x_cat1: NDArray, x_cat2: NDArray) -> NDArray:
         """Row codes in EMITTED column space; ``-1`` off-grid or pruned.

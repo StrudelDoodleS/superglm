@@ -1171,7 +1171,12 @@ def _fit_path_in_workspace(
     )
 
     _auto_detect_specs_if_needed(model, X, sample_weight_ref)
-    y, sample_weight, offset = model_build_design_matrix(model, X, y, sample_weight, offset)
+    # A path sweeps lambda1 over a positive grid on ONE design, so the design
+    # has to be the one a positive lambda1 requires, whatever the model was
+    # configured with.
+    y, sample_weight, offset = model_build_design_matrix(
+        model, X, y, sample_weight, offset, selection_active=True
+    )
     sample_weight, offset = _store_fit_arrays(model, sample_weight, offset)
     _clear_fit_inference_caches(model)
     _clear_reml_state(model)
