@@ -307,8 +307,11 @@ class TestCategoricalInteractionBuild:
     def test_correct_n_cols(self):
         cat1 = Categorical(base="first")
         cat2 = Categorical(base="first")
+        # Coprime periods (3 and 4) so the parents genuinely cross: every cell
+        # of the grid is occupied and neither level nests in the other, which
+        # is what makes the full (L1-1)*(L2-1) width the right expectation.
         x1 = np.array(["A", "B", "C"] * 100)
-        x2 = np.array(["X", "Y", "Z"] * 100)
+        x2 = np.array(["X", "Y", "Z", "X"] * 75)
 
         cat1.build(x1)
         cat2.build(x2)
@@ -363,6 +366,133 @@ class TestCategoricalInteractionBuild:
     def test_parent_names(self):
         ci = CategoricalInteraction("region", "type")
         assert ci.parent_names == ("region", "type")
+
+
+class TestCategoricalInteractionCellPruning:
+    """Build-time pruning of empty and exactly-nested interaction cells.
+
+    An empty cell's column is identically zero, so its coefficient is exactly
+    zero and pruning it cannot move the fit.  An exactly nested level's last
+    occupied cell duplicates what the rank machinery's earliest-representative
+    convention zeroes at every certified solve, so pruning it keeps the same
+    fit while making the block full-rank by construction.
+    """
+
+    @staticmethod
+    def _built(x1, x2, sample_weight=None):
+        cat1 = Categorical(base="first")
+        cat2 = Categorical(base="first")
+        cat1.build(x1, sample_weight=sample_weight)
+        cat2.build(x2, sample_weight=sample_weight)
+        ci = CategoricalInteraction("c1", "c2")
+        info = ci.build(x1, x2, {"c1": cat1, "c2": cat2}, sample_weight=sample_weight)
+        return ci, info
+
+    def test_empty_cell_pruned_from_emitted_block(self):
+        # Lockstep parents: (B,Z) and (C,Y) never co-occur.
+        x1 = np.array(["A", "B", "C"] * 100)
+        x2 = np.array(["X", "Y", "Z"] * 100)
+        ci, info = self._built(x1, x2)
+        assert len(ci._all_pairs) == 4
+        assert info.n_cols == len(ci._pairs) < 4
+        assert ("B", "Z") in ci._pruned_pairs
+        assert ("C", "Y") in ci._pruned_pairs
+        # transform matches the emitted width and the codes remap.
+        T = ci.transform(x1, x2)
+        assert T.shape == (len(x1), info.n_cols)
+        beta = np.arange(1.0, info.n_cols + 1)
+        np.testing.assert_array_equal(ci.score(x1, x2, beta), T @ beta)
+
+    def test_nested_level_drops_its_last_occupied_cell(self):
+        # Level B of the first parent only ever appears with non-base levels
+        # of the second parent, so its main-effect indicator is exactly the
+        # sum of its occupied cells: one genuine aliasing direction.  The last
+        # occupied cell of the circuit is the one the solver's representative
+        # rule zeroes, and the one build-time pruning must drop.
+        x1 = np.array(["A", "A", "A", "A", "B", "B", "B", "C", "C", "C"])
+        x2 = np.array(["X", "Y", "Z", "X", "Y", "Z", "Y", "X", "Y", "Z"])
+        ci, info = self._built(x1, x2)
+        assert ("B", "Z") in ci._pruned_pairs
+        assert ("B", "Y") in ci._pairs
+        assert info.n_cols == len(ci._pairs)
+        # Rows in the dropped cell still transform/score to zero contribution.
+        T = ci.transform(x1, x2)
+        dropped_rows = (x1 == "B") & (x2 == "Z")
+        assert np.all(T[dropped_rows] == 0.0)
+
+    def test_fully_nested_single_cell_grid_keeps_its_cell(self):
+        # A 2x2-level grid has one cell; when the alias rule would drop it the
+        # block must fall back to the occupied grid rather than emit nothing.
+        x1 = np.array(["A", "A", "B"])
+        x2 = np.array(["X", "Y", "Y"])
+        ci, info = self._built(x1, x2)
+        assert info.n_cols == 1
+        assert ci._pairs == [("B", "Y")]
+
+    def test_zero_weight_rows_do_not_occupy_a_cell(self):
+        x1 = np.array(["A", "A", "A", "B", "B", "B"])
+        x2 = np.array(["X", "Y", "Z", "X", "Y", "Z"])
+        w = np.array([1.0, 1.0, 1.0, 1.0, 0.0, 1.0])
+        ci, info = self._built(x1, x2, sample_weight=w)
+        # The cell seen only through a zero-weight row is empty for this fit.
+        assert any(pair in ci._pruned_pairs for pair in [("B", "Y")])
+
+    def test_reconstruct_reinstates_pruned_cells_at_exact_zero(self):
+        x1 = np.array(["A", "B", "C"] * 100)
+        x2 = np.array(["X", "Y", "Z"] * 100)
+        ci, info = self._built(x1, x2)
+        beta = np.arange(1.0, info.n_cols + 1)
+        raw = ci.reconstruct(beta)
+        # Full-grid shape survives pruning: downstream tables keep their rows.
+        assert raw["pairs"] == ci._all_pairs
+        assert len(raw["log_relativities"]) == len(ci._all_pairs)
+        for lev1, lev2 in ci._pruned_pairs:
+            assert raw["log_relativities"][f"{lev1}:{lev2}"] == 0.0
+            assert raw["relativities"][f"{lev1}:{lev2}"] == 1.0
+        # Kept cells report their own coefficients.
+        for j, (lev1, lev2) in enumerate(ci._pairs):
+            assert raw["log_relativities"][f"{lev1}:{lev2}"] == beta[j]
+        assert raw["pruned_pairs"] == ci._pruned_pairs
+
+    def test_model_fit_predicts_through_pruned_cells(self):
+        # End-to-end: a fit whose interaction carries an empty cell and an
+        # exactly nested level must build, fit, predict on rows that land in
+        # pruned cells, and reconstruct the full grid.
+        rng = np.random.default_rng(7)
+        n = 400
+        lev1 = np.array(["A", "B", "C", "D"])[rng.integers(0, 4, n)]
+        lev2 = np.array(["X", "Y", "Z"])[rng.integers(0, 3, n)]
+        # Nest level D: it never appears at the second factor's base level.
+        lev2[lev1 == "D"] = np.where(rng.random((lev1 == "D").sum()) < 0.5, "Y", "Z")
+        # Empty a cell: C never co-occurs with Z.
+        lev2[(lev1 == "C") & (lev2 == "Z")] = "X"
+        X = pd.DataFrame({"c1": lev1, "c2": lev2})
+        y = rng.poisson(2.0, n).astype(float)
+        model = SuperGLM(
+            family="poisson",
+            features={"c1": Categorical(base="first"), "c2": Categorical(base="first")},
+            interactions=[("c1", "c2")],
+            selection_penalty=0.0,
+        )
+        model.fit(X, y)
+        ispec = model._interaction_specs["c1:c2"]
+        assert ispec._pruned_pairs, "fixture no longer exercises pruning"
+        igroup = next(g for g in model._groups if g.feature_name == "c1:c2")
+        assert igroup.end - igroup.start == len(ispec._pairs)
+        pred = model.predict(X)
+        assert np.all(np.isfinite(pred)) and np.all(pred > 0)
+        raw = model.reconstruct_feature("c1:c2")
+        assert len(raw["pairs"]) == len(ispec._all_pairs)
+        for lev_a, lev_b in ispec._pruned_pairs:
+            assert raw["log_relativities"][f"{lev_a}:{lev_b}"] == 0.0
+
+    def test_fully_crossed_grid_is_untouched(self):
+        x1 = np.array(["A", "B", "C"] * 100)
+        x2 = np.array(["X", "Y", "Z", "X"] * 75)
+        ci, info = self._built(x1, x2)
+        assert info.n_cols == 4
+        assert ci._pruned_pairs == []
+        assert ci._grid_to_col is None
 
 
 class TestNumericInteractionBuild:

@@ -877,6 +877,13 @@ class CategoricalInteraction:
         self._base1: str = ""
         self._base2: str = ""
         self._pairs: list[tuple[str, str]] = []
+        # Build-time cell pruning: ``_pairs`` is the EMITTED (kept) cells, in
+        # fitted-coefficient order; ``_all_pairs`` is the full non-base grid in
+        # build order; ``_grid_to_col`` maps a full-grid cell index to its
+        # emitted column, -1 when the cell was pruned.
+        self._all_pairs: list[tuple[str, str]] = []
+        self._pruned_pairs: list[tuple[str, str]] = []
+        self._grid_to_col: NDArray | None = None
         self._cat1_grouping = None
         self._cat2_grouping = None
         self._cat1_levels: list = []
@@ -895,7 +902,7 @@ class CategoricalInteraction:
         parent_specs: dict,
         sample_weight: NDArray | None = None,
     ) -> GroupInfo:
-        from superglm.features.categorical import Categorical
+        from superglm.features.categorical import Categorical, _codes_against
 
         cat1_spec = parent_specs[self.cat1_name]
         cat2_spec = parent_specs[self.cat2_name]
@@ -939,7 +946,90 @@ class CategoricalInteraction:
         # block and a weighted crosstab against every other categorical,
         # instead of a sparse sandwich and a per-column rmatvec loop.
         codes = _pair_codes(x_cat1, x_cat2, self._non_base1, self._non_base2)
+
+        # Prune the cells this fit cannot identify, exactly as Categorical.build
+        # pins levels with no effective rows.  Two kinds of cell go:
+        #
+        # * Empty cells: no positive-weight training row occupies them.  Their
+        #   columns are identically zero in the weighted geometry, so their
+        #   coefficients are exactly zero under any penalty and the fitted
+        #   values cannot move -- but each one contributes a structural null
+        #   direction to X'WX.
+        # * One aliased cell per exactly nested parent level: when every
+        #   positive-weight row at a non-base level of one parent sits on the
+        #   other parent's non-base grid, that level's main-effect indicator
+        #   equals the sum of the level's occupied cells row for row -- an
+        #   identity in X, so it holds under EVERY working weight.  The rank
+        #   machinery's earliest-representative convention resolves that
+        #   circuit by zeroing its last column whenever Gram certification
+        #   succeeds; dropping the same cell at build time gives the identical
+        #   fit through a certifiably full-rank system, instead of forcing
+        #   every PIRLS iteration onto the dense streamed-QR fallback.
+        #
+        # Pruning degrades gracefully: a grid with no occupied cell, or one
+        # where the alias rule would empty the block, keeps its columns and
+        # leaves rank handling to the solver, exactly as before.
+        self._all_pairs = list(self._pairs)
+        self._pruned_pairs = []
+        self._grid_to_col = None
+        n = len(codes)
+        weights = (
+            np.ones(n, dtype=np.float64)
+            if sample_weight is None
+            else np.asarray(sample_weight, dtype=np.float64)
+        )
+        on_grid = codes >= 0
+        effective = np.bincount(codes[on_grid], weights=weights[on_grid], minlength=n_pairs)
+        grid_occupied = effective > 0.0
+        if bool(grid_occupied.any()):
+            drop = ~grid_occupied
+            idx1 = _codes_against(x_cat1, self._non_base1)
+            idx2 = _codes_against(x_cat2, self._non_base2)
+            positive = weights > 0.0
+            nb2 = len(self._non_base2)
+            for i1 in range(len(self._non_base1)):
+                rows = (idx1 == i1) & positive
+                if rows.any() and bool(np.all(idx2[rows] >= 0)):
+                    cells = np.flatnonzero(grid_occupied[i1 * nb2 : (i1 + 1) * nb2])
+                    if cells.size:
+                        drop[i1 * nb2 + cells[-1]] = True
+            for i2 in range(nb2):
+                rows = (idx2 == i2) & positive
+                if rows.any() and bool(np.all(idx1[rows] >= 0)):
+                    cells = np.flatnonzero(grid_occupied[i2::nb2])
+                    if cells.size:
+                        drop[cells[-1] * nb2 + i2] = True
+            kept = np.flatnonzero(~drop)
+            if len(kept) == 0:
+                # The alias rule would empty the block (e.g. a fully nested
+                # one-cell grid).  Keep the occupied cells and let the solver
+                # resolve the aliasing at runtime, as it always has.
+                kept = np.flatnonzero(grid_occupied)
+            if len(kept) < n_pairs:
+                remap = np.full(n_pairs, -1, dtype=np.intp)
+                remap[kept] = np.arange(len(kept), dtype=np.intp)
+                codes = np.where(on_grid, remap[np.maximum(codes, 0)], -1)
+                self._grid_to_col = remap
+                self._pruned_pairs = [self._pairs[i] for i in range(n_pairs) if remap[i] < 0]
+                self._pairs = [self._pairs[i] for i in kept]
+                n_pairs = len(kept)
+
         return GroupInfo(columns=None, n_cols=n_pairs, cat_codes=codes)
+
+    def _pruned_codes(self, x_cat1: NDArray, x_cat2: NDArray) -> NDArray:
+        """Row codes in EMITTED column space; ``-1`` off-grid or pruned.
+
+        ``_pair_codes`` indexes the full non-base grid.  After build-time
+        pruning the emitted columns are a subset, so grid codes must pass
+        through the stored remap; a pruned cell routes to ``-1`` and
+        contributes zero -- exactly the coefficient its column carries in
+        the unpruned parametrisation.
+        """
+        codes = _pair_codes(x_cat1, x_cat2, self._non_base1, self._non_base2)
+        grid_to_col = getattr(self, "_grid_to_col", None)
+        if grid_to_col is not None:
+            codes = np.where(codes >= 0, grid_to_col[np.maximum(codes, 0)], -1)
+        return codes
 
     def transform(self, x_cat1: NDArray, x_cat2: NDArray) -> NDArray:
         x_cat1 = _categorical_predict_labels(
@@ -960,7 +1050,7 @@ class CategoricalInteraction:
         n_pairs = len(self._pairs)
         if n_pairs == 0:
             return np.empty((n, 0))
-        codes = _pair_codes(x_cat1, x_cat2, self._non_base1, self._non_base2)
+        codes = self._pruned_codes(x_cat1, x_cat2)
         out = np.zeros((n, n_pairs), dtype=np.float64)
         on_grid = codes >= 0
         out[np.flatnonzero(on_grid), codes[on_grid]] = 1.0
@@ -982,27 +1072,38 @@ class CategoricalInteraction:
             context=self.cat2_name,
         )
         beta = np.asarray(beta, dtype=np.float64).ravel()
-        codes = _pair_codes(x_cat1, x_cat2, self._non_base1, self._non_base2)
+        codes = self._pruned_codes(x_cat1, x_cat2)
         # Pad with a zero sink so the off-grid rows (-1) gather 0.0.
         beta_ext = np.zeros(len(self._pairs) + 1, dtype=np.float64)
         beta_ext[: len(self._pairs)] = beta[: len(self._pairs)]
         return beta_ext[np.where(codes < 0, len(self._pairs), codes)]
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
+        beta = np.asarray(beta, dtype=np.float64).ravel()
+        # Report the FULL non-base grid.  A pruned cell -- empty, or dropped to
+        # resolve an exact nesting -- carries exactly the coefficient the
+        # solver's rank truncation assigns its column in the unpruned
+        # parametrisation: zero.  Downstream table shapes therefore do not
+        # depend on which cells a particular training slice happened to occupy.
+        all_pairs = getattr(self, "_all_pairs", None) or self._pairs
+        grid_to_col = getattr(self, "_grid_to_col", None)
         log_rels = {}
         rels = {}
-        for i, (lev1, lev2) in enumerate(self._pairs):
+        for g, (lev1, lev2) in enumerate(all_pairs):
+            col = g if grid_to_col is None else int(grid_to_col[g])
+            value = float(beta[col]) if col >= 0 else 0.0
             label = f"{lev1}:{lev2}"
-            log_rels[label] = float(beta[i])
-            rels[label] = float(np.exp(beta[i]))
+            log_rels[label] = value
+            rels[label] = float(np.exp(value))
         return {
-            "pairs": self._pairs,
+            "pairs": list(all_pairs),
             "log_relativities": log_rels,
             "relativities": rels,
             "levels1": [self._base1] + self._non_base1,
             "levels2": [self._base2] + self._non_base2,
             "base_level1": self._base1,
             "base_level2": self._base2,
+            "pruned_pairs": list(getattr(self, "_pruned_pairs", [])),
             "interaction": True,
         }
 
