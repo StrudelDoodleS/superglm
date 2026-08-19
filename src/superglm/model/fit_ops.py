@@ -224,7 +224,9 @@ def _reject_structured_fit_constraints(model) -> None:
     What the refusal was really standing in for was a plumbing defect: the EFS
     lambda step read ``PenaltyComponent.omega_ssp`` directly, which is ``None``
     for an identity penalty, so a random effect arrived at a matmul as a 0-d
-    operand. That is fixed at the read (see ``scop_efs._component_penalty_matrix``).
+    operand. That is fixed at the read: the EFS step now reduces through
+    ``penalty_algebra.penalty_component_quadratic`` and ``penalty_component_trace``,
+    which are kind-aware and never materialize a structured penalty.
 
     What survives is one specification, not one pair of term types: a SCOP
     constraint on a column that a ``basis="fs"`` factor smooth also spans. An
