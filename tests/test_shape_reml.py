@@ -442,15 +442,14 @@ def test_scop_constraints_fit_alongside_a_random_effect() -> None:
 
 
 @pytest.mark.parametrize(
-    ("spline_cls", "engine", "rel"),
+    ("spline_cls", "rel"),
     [
-        pytest.param(BSplineSmooth, "qp", 1e-12, id="qp-engine"),
-        pytest.param(PSpline, "scop", 1e-3, id="scop-engine"),
+        pytest.param(BSplineSmooth, 1e-12, id="qp-engine"),
+        pytest.param(PSpline, 1e-3, id="scop-engine"),
     ],
 )
 def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(
     spline_cls,
-    engine: str,
     rel: float,
 ) -> None:
     """Equivalence control: a non-binding constraint must not move the fit.
@@ -468,6 +467,9 @@ def test_slack_constraint_with_a_random_effect_reproduces_the_free_fit(
       constraint makes the refit a no-op: measured ``0`` on the variance
       component and ``2.1e-16`` on the deviance across five seeds, i.e. pure
       round-off. ``1e-12`` is that with room, and would catch any real drift.
+      Note ``pytest.approx`` keeps its default ``abs=1e-12`` alongside ``rel``,
+      so on a variance component of order 0.3 the effective bar is that absolute
+      floor rather than ``3e-13`` -- still four orders inside the measurement.
     * SCOP reaches it only to ``~1e-4``, because the two arms are optimized by
       *different routines* -- the free arm by ``optimize_reml_best``, the
       constrained one by ``run_scop_efs_reml`` -- which stop at slightly
