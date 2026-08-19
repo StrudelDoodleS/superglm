@@ -33,7 +33,7 @@ import pandas as pd
 import pytest
 
 import superglm.features.interaction as interaction_mod
-from superglm import SuperGLM
+from superglm import Adaptive, GroupLasso, SuperGLM
 from superglm.features.categorical import Categorical
 from superglm.features.interaction import CategoricalInteraction
 from superglm.types import GroupInfo
@@ -43,14 +43,19 @@ from superglm.types import GroupInfo
 _PRUNED_BUILD = CategoricalInteraction.build
 
 
-def _unpruned_build(self, x_cat1, x_cat2, parent_specs, sample_weight=None):
+def _unpruned_build(self, x_cat1, x_cat2, parent_specs, sample_weight=None, alias_prune=True):
     """The pre-pruning contract: every non-base cell gets a column.
 
     Runs the real build first so all level bookkeeping (bases, non-base sets,
     grouping resolution, label validation) is byte-identical, then restores
-    the full grid and re-derives the codes against it.
+    the full grid and re-derives the codes against it.  ``alias_prune`` is
+    accepted and forwarded so the builder can call this exactly as it calls
+    the real build; it makes no difference here, since the full grid is
+    restored either way.
     """
-    info = _PRUNED_BUILD(self, x_cat1, x_cat2, parent_specs, sample_weight=sample_weight)
+    info = _PRUNED_BUILD(
+        self, x_cat1, x_cat2, parent_specs, sample_weight=sample_weight, alias_prune=alias_prune
+    )
     if getattr(self, "_grid_to_col", None) is None:
         return info
     labels1 = interaction_mod._categorical_build_labels(
@@ -451,22 +456,32 @@ class TestAliasDropVersusEmptyDrop:
             "to a different cell"
         )
 
-    def test_group_lasso_weight_follows_the_pruned_width(self):
-        """The one place pruning is NOT a reparametrisation.
+    # Only grids with an EMPTY cell still prune while a selection penalty
+    # suppresses the alias half; an alias-only grid emits its full width there.
+    @pytest.mark.parametrize("cells", [EMPTY_ONLY, BOTH])
+    def test_group_lasso_weight_follows_the_spanned_width_not_the_emitted_one(self, cells):
+        """The group must be priced at the width it SPANS.
 
-        ``GroupSlice.weight`` is ``sqrt(n_cols)``, and the group penalty is
-        ``lambda1 * weight * ||beta_g||``.  Pruning narrows the group, so the
-        same lambda1 buys a different amount of shrinkage on the interaction
-        even though the fitted directions are unchanged.
+        ``GroupSlice.weight`` is ``sqrt(p_g)`` and the group penalty is
+        ``lambda1 * weight * ||beta_g||``.  If ``p_g`` followed the emitted
+        width, pruning would narrow the group and the same lambda1 would buy
+        less shrinkage -- a change in the fit, not a reparametrisation.  The
+        pruned columns are structurally unidentifiable, so the block still
+        spans the full non-base grid and is priced at it.
         """
-        X, y = _frame(EMPTY_ONLY)
+        X, y = _frame(cells)
         pruned = _fit(X, y, family="gaussian", selection_penalty=0.5)
         with unpruned_interaction():
             unpruned = _fit(X, y, family="gaussian", selection_penalty=0.5)
         g_pruned = next(g for g in pruned._groups if g.feature_name == "c1:c2")
         g_unpruned = next(g for g in unpruned._groups if g.feature_name == "c1:c2")
-        assert g_pruned.weight == pytest.approx(np.sqrt(3))
-        assert g_unpruned.weight == pytest.approx(np.sqrt(4))
+        spec = pruned._interaction_specs["c1:c2"]
+        assert spec._pruned_pairs, "fixture no longer exercises pruning"
+        # The emitted block really is narrower -- this is not a vacuous pass.
+        assert g_pruned.size < g_unpruned.size
+        assert g_pruned.penalty_size == g_unpruned.penalty_size == len(spec._all_pairs)
+        assert g_pruned.weight == pytest.approx(np.sqrt(len(spec._all_pairs)))
+        assert g_pruned.weight == pytest.approx(g_unpruned.weight)
 
     def test_selection_penalty_that_exempts_the_interaction_is_exact(self):
         """Pruning is exact at any lambda1 while the block carries no group penalty."""
@@ -476,31 +491,131 @@ class TestAliasDropVersusEmptyDrop:
         )
         np.testing.assert_allclose(p_pruned, p_unpruned, rtol=1e-10, atol=1e-12)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "FINDING: with the interaction group inside the selection penalty, pruning "
-            "narrows the group and so changes sqrt(n_cols) in the group-lasso weight. "
-            "The fit is then NOT invariant -- measured 1.2e-4 relative at lambda1=0.05 "
-            "rising to 5.7e-3 at lambda1=3.2 -- and it bites the provably-safe EMPTY "
-            "cell prune too, not just the alias prune."
-        ),
-    )
     @pytest.mark.parametrize("cells", [EMPTY_ONLY, ALIAS_ONLY])
     def test_pruning_is_fit_invariant_under_a_selection_penalty(self, cells):
         X, y = _frame(cells)
         _, _, p_pruned, p_unpruned = _ab(X, y, family="gaussian", selection_penalty=0.5)
         np.testing.assert_allclose(p_pruned, p_unpruned, rtol=1e-9, atol=1e-12)
 
-    def test_the_selection_penalty_gap_grows_with_lambda1(self):
-        """Pin the direction and the scale of the finding above."""
+    def test_the_alias_prune_stands_down_under_a_selection_penalty(self):
+        """The gate itself, stated so the invariance results cannot go vacuous.
+
+        Dropping an aliased cell picks one representative of a rank deficiency
+        spanning the interaction and its parent main effect.  That is free
+        while the solver's rank convention picks it, and it is NOT free under
+        a group penalty, which picks the representative minimising the group
+        norms instead.  So the alias half stands down and the empty half --
+        whose columns are identically zero under every penalty -- does not.
+        """
+        X, y = _frame(ALIAS_ONLY)
+        unpenalized = _fit(X, y, family="gaussian", selection_penalty=0.0)
+        penalized = _fit(X, y, family="gaussian", selection_penalty=0.5)
+        assert unpenalized._interaction_specs["c1:c2"]._pruned_pairs == [("C", "Z")]
+        assert penalized._interaction_specs["c1:c2"]._pruned_pairs == []
+        assert penalized._interaction_specs["c1:c2"]._grid_to_col is None
+
+        # ...but an EMPTY cell goes in both, because nothing can want it back.
+        Xb, yb = _frame(BOTH)
+        both_penalized = _fit(Xb, yb, family="gaussian", selection_penalty=0.5)
+        spec = both_penalized._interaction_specs["c1:c2"]
+        assert spec._pruned_pairs == [("C", "Z")], spec._pruned_pairs
+        occupied = _occupied_cells(spec, np.asarray(Xb.c1), np.asarray(Xb.c2))
+        assert ("C", "Z") not in occupied, "this must be the EMPTY drop"
+
+    def test_auto_selection_penalty_also_stands_the_alias_prune_down(self):
+        """``"auto"`` is not calibrated until the design exists, so the gate
+        has to read the intent rather than the resolved value."""
+        X, y = _frame(ALIAS_ONLY)
+        model = _fit(X, y, family="gaussian", selection_penalty="auto")
+        # The configured intent is still the string; only the fit resolves it.
+        assert model.penalty.lambda1 == "auto"
+        assert model.selection_penalty_ > 0.0
+        assert model._interaction_specs["c1:c2"]._pruned_pairs == []
+
+    def test_fit_path_stands_the_alias_prune_down_whatever_it_was_configured_with(self):
+        """A path builds ONE design and sweeps lambda1 over a positive grid.
+
+        The configured value says nothing about the grid, so a path must build
+        the design a positive lambda1 requires even when it starts from zero.
+        """
+        X, y = _frame(ALIAS_ONLY)
+        model = SuperGLM(
+            features={"c1": Categorical(base="first"), "c2": Categorical(base="first")},
+            interactions=[("c1", "c2")],
+            selection_penalty=0.0,
+        )
+        model.fit_path(X, y, n_lambda=4)
+        assert model._interaction_specs["c1:c2"]._pruned_pairs == []
+
+    def test_no_selection_penalty_gap_at_any_lambda1(self):
+        """The gap this file used to pin, across the lambda1 range that showed it.
+
+        It ran 1.2e-4 relative at lambda1=0.05 and rose monotonically to
+        5.7e-3 at lambda1=3.2 while ``sqrt(p_g)`` followed the emitted width.
+        Every one of those must now be at round-off.
+        """
         X, y = _frame(EMPTY_ONLY)
-        gaps = []
         for lam in (0.05, 0.5, 3.2):
             _, _, p_pruned, p_unpruned = _ab(X, y, family="gaussian", selection_penalty=lam)
-            gaps.append(np.abs(p_pruned - p_unpruned).max() / np.abs(p_unpruned).max())
-        assert gaps[0] < gaps[1] < gaps[2], gaps
-        assert gaps[0] > 1e-5 and gaps[-1] > 1e-3, gaps
+            gap = np.abs(p_pruned - p_unpruned).max() / np.abs(p_unpruned).max()
+            assert gap < 1e-9, (lam, gap)
+
+    # Only grids with an EMPTY cell still prune while a selection penalty
+    # suppresses the alias half; an alias-only grid emits its full width there.
+    @pytest.mark.parametrize("cells", [EMPTY_ONLY, BOTH])
+    def test_auto_selection_penalty_resolves_to_the_same_lambda1(self, cells):
+        """``selection_penalty="auto"`` calibrates off lambda_max, which reads
+        the group weights.  A weight that followed the emitted width would move
+        the whole path, not just the shrinkage at one lambda1."""
+        X, y = _frame(cells)
+        pruned, unpruned, p_pruned, p_unpruned = _ab(
+            X, y, family="gaussian", selection_penalty="auto"
+        )
+        assert pruned._interaction_specs["c1:c2"]._pruned_pairs
+        np.testing.assert_allclose(p_pruned, p_unpruned, rtol=1e-9, atol=1e-12)
+
+    # Only grids with an EMPTY cell still prune while a selection penalty
+    # suppresses the alias half; an alias-only grid emits its full width there.
+    @pytest.mark.parametrize("cells", [EMPTY_ONLY, BOTH])
+    def test_the_df_ledger_is_invariant_under_a_selection_penalty(self, cells):
+        """The group weight enters the df ledger, not just the coefficients.
+
+        A group-lasso lambda1 contributes local curvature ``lambda1 * weight``
+        to the inference geometry, so the hat trace reads the weight directly.
+        A weight that followed the emitted width would move ``effective_df``
+        and with it ``phi``, hence every standard error and every information
+        criterion -- on a change that is supposed to be a reparametrisation.
+        At lambda1=0 there is no such curvature and both arms already agree,
+        which is why this is pinned at lambda1 > 0.
+        """
+        X, y = _frame(cells)
+        pruned = _fit(X, y, family="gaussian", selection_penalty=0.5)
+        with unpruned_interaction():
+            unpruned = _fit(X, y, family="gaussian", selection_penalty=0.5)
+        assert pruned._interaction_specs["c1:c2"]._pruned_pairs
+        assert pruned.result.effective_df == pytest.approx(unpruned.result.effective_df, rel=1e-9)
+        assert pruned.result.phi == pytest.approx(unpruned.result.phi, rel=1e-9)
+
+    # Only grids with an EMPTY cell still prune while a selection penalty
+    # suppresses the alias half; an alias-only grid emits its full width there.
+    @pytest.mark.parametrize("cells", [EMPTY_ONLY, BOTH])
+    def test_an_adaptive_flavor_reweights_from_the_spanned_width(self, cells):
+        """``Adaptive`` re-derives ``sqrt(p_g)`` from the slice it is handed.
+
+        It is the one consumer that does not inherit the constructed weight,
+        so it needs the spanned width in its own right; otherwise the fix
+        holds for a plain group lasso and silently lapses the moment a caller
+        attaches a flavour.
+        """
+        X, y = _frame(cells)
+        # A fresh penalty per arm: the fit resolves lambda1 onto the object.
+        pruned = _fit(X, y, family="gaussian", penalty=GroupLasso(lambda1=0.5, flavor=Adaptive()))
+        with unpruned_interaction():
+            unpruned = _fit(
+                X, y, family="gaussian", penalty=GroupLasso(lambda1=0.5, flavor=Adaptive())
+            )
+        assert pruned._interaction_specs["c1:c2"]._pruned_pairs
+        np.testing.assert_allclose(pruned.predict(X), unpruned.predict(X), rtol=1e-9, atol=1e-12)
 
 
 # ══ Attack 3: sample_weight ═══════════════════════════════════════

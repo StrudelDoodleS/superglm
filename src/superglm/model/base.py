@@ -957,18 +957,44 @@ def model_add_interaction(model, feat1: str, feat2: str, name: str | None = None
         model._config_revision += 1
 
 
+def selection_penalty_is_active(model, *, force: bool = False) -> bool:
+    """Whether a nonzero lambda1 will reach this fit's groups.
+
+    Read at *build* time, so it cannot consult the resolved value --
+    ``"auto"`` has not been calibrated yet, and under ``fit_path`` the grid
+    is not known until the design exists.  Only the yes/no answer is needed,
+    and it is the same for every point of a path, so callers that sweep
+    lambda1 pass ``force=True`` rather than the value they start from.
+    """
+    if force:
+        return True
+    intent = normalize_selection_penalty(getattr(configured_penalty(model), "lambda1", None))
+    return intent is not None and intent != 0.0
+
+
 def model_build_design_matrix(
     model,
     X: EagerFrame | FrameLike,
     y: NDArray,
     sample_weight: NDArray,
     offset: NDArray | None,
+    *,
+    selection_active: bool | None = None,
 ) -> tuple[NDArray, NDArray, NDArray | None]:
     """Build features, groups, design matrix.
 
     Sets model._dm, model._groups, model._distribution, model._link.
     Returns (y, sample_weight, offset) as float64 arrays.
+
+    ``selection_active`` says whether a nonzero lambda1 will reach this fit.
+    It suppresses the aliased-cell half of categorical interaction pruning,
+    which is only free while the solver's rank convention chooses the
+    representative of a cross-group rank deficiency; a group penalty chooses
+    a different one.  ``None`` reads the model's configured intent, which is
+    right for every caller that does not sweep lambda1 itself.
     """
+    if selection_active is None:
+        selection_active = selection_penalty_is_active(model)
     frame = as_eager_frame(X)
     pending_interactions = list(model._pending_interactions)
     result = build_design_matrix(
@@ -989,6 +1015,7 @@ def model_build_design_matrix(
         level_bindings=(
             dict(model._level_bindings) if getattr(model, "_level_bindings", None) else None
         ),
+        alias_prune=not selection_active,
     )
     model._distribution = result.distribution
     model._link = result.link

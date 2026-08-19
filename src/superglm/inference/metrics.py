@@ -92,6 +92,7 @@ def _selected_group_state(
                 start=column,
                 end=column + group.size,
                 weight=group.weight,
+                penalty_dim=group.penalty_dim,
                 penalized=group.penalized,
                 feature_name=group.feature_name,
                 subgroup_type=group.subgroup_type,

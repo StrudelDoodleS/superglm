@@ -61,7 +61,7 @@ class Adaptive:
                 norm_g = np.linalg.norm(fitted) / np.sqrt(len(fitted))
             else:
                 norm_g = np.linalg.norm(beta_init[g.sl])
-            adaptive_w = np.sqrt(g.size) / (norm_g + self.eps) ** self.expon
+            adaptive_w = np.sqrt(g.penalty_size) / (norm_g + self.eps) ** self.expon
             new_g = copy.copy(g)
             new_g.weight = adaptive_w
             new_groups.append(new_g)
