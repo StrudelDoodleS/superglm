@@ -64,9 +64,9 @@ def _categorical_predict_labels(
     a KNOWN level, and validating against the emitted columns would reject data
     the parent itself accepts.
 
-    Routing needs no code of its own.  Every derived block is an equality mask
-    over the emitted levels, so a label matching none of them -- pinned or
-    novel -- already contributes zero, which is exactly base routing.  All
+    Routing needs no code of its own.  Every derived block indexes the emitted
+    levels, so a label matching none of them -- pinned or novel -- codes as
+    ``-1`` and already contributes zero, which is exactly base routing.  All
     ``unseen="base"`` has to do is stop erroring and name what it let through.
     """
     x = _resolve_categorical_labels(
@@ -837,6 +837,30 @@ class NumericCategorical:
 # ── CategoricalInteraction ────────────────────────────────────
 
 
+def _pair_codes(
+    x_cat1: NDArray,
+    x_cat2: NDArray,
+    non_base1: list,
+    non_base2: list,
+) -> NDArray:
+    """Row-wise index into the non-base level pairs, ``-1`` off the grid.
+
+    A two-categorical interaction is itself categorical: every row falls in
+    exactly one ``(level1, level2)`` cell, so the block of indicator columns
+    is one-hot and a row is fully described by one integer.  Rows at either
+    parent's base level have no column at all and take ``-1``.
+
+    The code is ``i1 * len(non_base2) + i2``, which is the order the pair
+    list is generated in, so codes and columns agree by construction.
+    """
+    from superglm.features.categorical import _codes_against
+
+    idx1 = _codes_against(x_cat1, non_base1)
+    idx2 = _codes_against(x_cat2, non_base2)
+    on_grid = (idx1 >= 0) & (idx2 >= 0)
+    return np.where(on_grid, idx1 * len(non_base2) + idx2, -1).astype(np.intp, copy=False)
+
+
 class CategoricalInteraction:
     """Cross-product interaction between two categorical features.
 
@@ -901,20 +925,7 @@ class CategoricalInteraction:
             cat2_spec,
             context=self.cat2_name,
         )
-        n = len(x_cat1)
-
-        self._pairs = []
-        rows_list = []
-        cols_list = []
-        col_idx = 0
-        for lev1 in self._non_base1:
-            for lev2 in self._non_base2:
-                self._pairs.append((lev1, lev2))
-                mask = np.where((x_cat1 == lev1) & (x_cat2 == lev2))[0]
-                rows_list.append(mask)
-                cols_list.append(np.full(len(mask), col_idx))
-                col_idx += 1
-
+        self._pairs = [(lev1, lev2) for lev1 in self._non_base1 for lev2 in self._non_base2]
         n_pairs = len(self._pairs)
         if n_pairs == 0:
             raise ValueError(
@@ -922,12 +933,13 @@ class CategoricalInteraction:
                 "produced 0 pairs — at least one parent has only 1 level."
             )
 
-        rows_arr = np.concatenate(rows_list) if rows_list else np.array([], dtype=int)
-        cols_arr = np.concatenate(cols_list) if cols_list else np.array([], dtype=int)
-        data = np.ones(len(rows_arr), dtype=np.float64)
-        columns = sp.csr_matrix((data, (rows_arr, cols_arr)), shape=(n, n_pairs))
-
-        return GroupInfo(columns=columns, n_cols=n_pairs)
+        # One-hot over the occupied cells, carried as codes rather than a CSR
+        # block.  The builder turns cat_codes into a CategoricalGroupMatrix,
+        # which reaches the structured Gram kernels: a bincount for its own
+        # block and a weighted crosstab against every other categorical,
+        # instead of a sparse sandwich and a per-column rmatvec loop.
+        codes = _pair_codes(x_cat1, x_cat2, self._non_base1, self._non_base2)
+        return GroupInfo(columns=None, n_cols=n_pairs, cat_codes=codes)
 
     def transform(self, x_cat1: NDArray, x_cat2: NDArray) -> NDArray:
         x_cat1 = _categorical_predict_labels(
@@ -945,10 +957,14 @@ class CategoricalInteraction:
             context=self.cat2_name,
         )
         n = len(x_cat1)
-        cols = []
-        for lev1, lev2 in self._pairs:
-            cols.append(((x_cat1 == lev1) & (x_cat2 == lev2)).astype(np.float64))
-        return np.column_stack(cols) if cols else np.empty((n, 0))
+        n_pairs = len(self._pairs)
+        if n_pairs == 0:
+            return np.empty((n, 0))
+        codes = _pair_codes(x_cat1, x_cat2, self._non_base1, self._non_base2)
+        out = np.zeros((n, n_pairs), dtype=np.float64)
+        on_grid = codes >= 0
+        out[np.flatnonzero(on_grid), codes[on_grid]] = 1.0
+        return out
 
     def score(self, x_cat1: NDArray, x_cat2: NDArray, beta: NDArray) -> NDArray:
         x_cat1 = _categorical_predict_labels(
@@ -966,12 +982,11 @@ class CategoricalInteraction:
             context=self.cat2_name,
         )
         beta = np.asarray(beta, dtype=np.float64).ravel()
-        out = np.zeros(len(x_cat1), dtype=np.float64)
-        for i, (lev1, lev2) in enumerate(self._pairs):
-            mask = (x_cat1 == lev1) & (x_cat2 == lev2)
-            if np.any(mask):
-                out[mask] = beta[i]
-        return out
+        codes = _pair_codes(x_cat1, x_cat2, self._non_base1, self._non_base2)
+        # Pad with a zero sink so the off-grid rows (-1) gather 0.0.
+        beta_ext = np.zeros(len(self._pairs) + 1, dtype=np.float64)
+        beta_ext[: len(self._pairs)] = beta[: len(self._pairs)]
+        return beta_ext[np.where(codes < 0, len(self._pairs), codes)]
 
     def reconstruct(self, beta: NDArray) -> dict[str, Any]:
         log_rels = {}

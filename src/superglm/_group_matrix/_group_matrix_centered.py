@@ -755,9 +755,17 @@ def packed_centered_gram_rhs(
 
     supports: list[_CenteredSupport] = []
     widths: list[int] = []
+    # isinstance, not `type(gm) in`: SupportCompressedSSPGroupMatrix is a
+    # DiscretizedSSPGroupMatrix that adds no state (`__slots__ = ()`) and is
+    # numerically identical over the same basis -- its bin_idx indexes exact
+    # distinct rows rather than bins, so the packed build is *more* justified
+    # for it than for its binned parent.  An exact-type test rejected it, and
+    # one such group sent the whole design to the chunked dense fallback.
+    # SCOP and SplineCategorical are separate hierarchies, so this widening
+    # admits nothing that lacks B_unique/bin_idx/R_inv.
     eligible_types = (DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix)
     if any(
-        type(gm) not in eligible_types and not isinstance(gm, CategoricalGroupMatrix)
+        not isinstance(gm, eligible_types) and not isinstance(gm, CategoricalGroupMatrix)
         for gm in dm.group_matrices
     ):
         return None
@@ -784,7 +792,7 @@ def packed_centered_gram_rhs(
                 return factored
 
     for gm in dm.group_matrices:
-        if type(gm) in eligible_types:
+        if isinstance(gm, eligible_types):
             supports.append(
                 _anchor_center_support(
                     values=gm.B_unique,
