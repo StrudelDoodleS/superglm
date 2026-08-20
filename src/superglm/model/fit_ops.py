@@ -27,6 +27,7 @@ from superglm.model.fit_state import (
     capture_fit_state,
     configured_family,
     configured_lambda2,
+    configured_link,
     configured_penalty,
 )
 from superglm.model.fit_workspace import FitWorkspace
@@ -205,6 +206,96 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
             f"FactorSmooth interaction(s) {joined} are only supported with "
             f"fit_reml(), not {method}()."
         )
+
+
+def _claim_free_categorical_levels(values: NDArray, positive: NDArray) -> int:
+    """Count levels that carry rows but no positively weighted positive response."""
+
+    def levels(array: NDArray) -> set:
+        return {
+            value
+            for value in set(array.tolist())
+            if not (isinstance(value, float) and value != value)
+        }
+
+    return len(levels(values) - levels(values[positive]))
+
+
+def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
+    """Detect REML random effects beside separating unpenalised categoricals.
+
+    A ``Categorical`` level with exposure but no positive response has no
+    finite MLE under a log link with a zero-mass family (Tweedie ``1<p<2``,
+    Poisson): its unpenalised coefficient drifts toward ``-inf`` while the
+    marginal likelihood goes nearly flat in any neighbouring ``RandomEffect``
+    variance. On such designs the REML variance component is poorly
+    determined, and for the estimated-scale Tweedie criterion additionally
+    biased upward (the current criterion profiles the dispersion with a
+    Gaussian-style deviance count in which every zero row participates; the
+    exact Tweedie likelihood carries no per-observation ``log(phi)`` term for
+    zero rows, so on zero-heavy data the criterion under-weights shrinkage
+    relative to exact-likelihood REML). Returns the warning message, or
+    ``None`` when the configuration is not affected. ``OrderedCategorical``
+    levels are spline-penalised and are deliberately out of scope.
+    """
+    from superglm.distributions import Poisson
+    from superglm.features.categorical import Categorical
+    from superglm.features.random_effect import RandomEffect
+    from superglm.links import LogLink, resolve_link
+
+    distribution = resolve_distribution(configured_family(model))
+    if not isinstance(distribution, Tweedie | Poisson):
+        return None
+    try:
+        link = resolve_link(configured_link(model), distribution)
+    except (TypeError, ValueError):
+        # An unresolvable link configuration is the fit's error to raise,
+        # with its own context; the hazard scan must not preempt it.
+        return None
+    if not isinstance(link, LogLink):
+        return None
+    random_effect_names = [
+        name
+        for name, spec in model._specs.items()
+        if isinstance(spec, RandomEffect)
+        and (spec._lambda_policy is None or spec._lambda_policy.mode == "estimate")
+    ]
+    if not random_effect_names:
+        return None
+    y_arr = np.asarray(y, dtype=np.float64)
+    weight_arr = np.asarray(sample_weight, dtype=np.float64)
+    positive = (y_arr > 0.0) & (weight_arr > 0.0)
+    findings = []
+    for name, spec in model._specs.items():
+        if not isinstance(spec, Categorical):
+            continue
+        claim_free = _claim_free_categorical_levels(X.column_array(name), positive)
+        if claim_free:
+            findings.append(f"{name!r} ({claim_free} claim-free level(s))")
+    if not findings:
+        return None
+    tweedie_clause = (
+        " With an estimated Tweedie dispersion the REML criterion profiles the "
+        "scale with a Gaussian-style deviance count, which on zero-heavy data "
+        "can settle the variance component an order of magnitude above "
+        "exact-likelihood REML."
+        if isinstance(distribution, Tweedie)
+        else ""
+    )
+    return (
+        "RandomEffect variance component(s) "
+        + ", ".join(repr(name) for name in random_effect_names)
+        + " are REML-estimated beside unpenalised Categorical feature(s) with "
+        "claim-free levels: "
+        + ", ".join(findings)
+        + ". A level with exposure but no positive response separates under a "
+        "log link (its unpenalised coefficient has no finite MLE), leaving the "
+        "marginal likelihood nearly flat in the random-effect variance, so the "
+        "fitted variance component and its shrinkage are poorly determined."
+        + tweedie_clause
+        + " Consider grouping or penalising the claim-free levels, or "
+        "validating the variance component against external evidence."
+    )
 
 
 def _reject_structured_fit_constraints(model) -> None:
@@ -1284,6 +1375,11 @@ def fit_reml(
     sample_weight_ref = sample_weight
     offset_ref = offset
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
+    separation_message = _random_effect_separation_hazard(model, X, y, sample_weight)
+    if separation_message is not None:
+        import warnings
+
+        warnings.warn(separation_message, UserWarning, stacklevel=3)
     validated_inputs = (X, y, sample_weight, offset)
     workspace = FitWorkspace.start(model, mode="fit_reml", validated_inputs=validated_inputs)
     debug_recorder = _fit_reml_in_workspace(
