@@ -985,6 +985,145 @@ def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> No
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")
 
 
+#: Maximum REML refits when alternating theta with fit_reml to the joint
+#: fixed point. The alternation typically converges in 1-3 refits because
+#: lambda-hat is almost theta-insensitive; 15 matches the audit probe's cap.
+_NB_JOINT_MAX_REFITS = 15
+
+#: Relative tolerance on theta for the joint theta/REML fixed point.
+_NB_JOINT_RELATIVE_TOL = 1e-3
+
+
+def _refine_nb_theta_to_reml_fixed_point(
+    model,
+    X,
+    y,
+    sample_weight,
+    offset,
+    *,
+    X_ref,
+    y_ref,
+    sample_weight_ref,
+    offset_ref,
+    durable_retain_fit_state,
+    debug_recorder,
+    refit_kwargs,
+):
+    """Re-estimate auto NB theta at the REML fit and alternate to a fixed point.
+
+    ``_maybe_estimate_nb_theta`` calibrates theta before REML runs, at the
+    model's configured smoothing. Lack-of-fit at that smoothing is absorbed
+    into overdispersion, biasing theta downward by however far the truth is
+    from what the configured penalty can follow, while the REML lambda itself
+    is almost theta-insensitive. This helper removes the freeze bias by
+    alternating a safeguarded theta profile solve at the REML fitted mean
+    with a warm-started ``fit_reml`` at the updated theta until theta is
+    stationary — the fixed point of the alternating scheme of Venables &
+    Ripley (2002, ch. 7.4) with the penalized fit taking the place of the
+    GLM fit. Joint Newton over (theta, log-lambda) in the LAML criterion
+    (Wood, Pya & Saefken 2016) is the eventual destination; the alternation
+    reaches the same fixed point for these coordinates without new
+    derivative machinery.
+
+    The published family and ``_nb_profile_result`` always describe the fit
+    that is installed: on exit, ``family.theta`` is the theta of the final
+    refit and the profile result is republished against its fitted mean.
+    """
+    import warnings
+
+    from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning, _theta_ml
+
+    nb_seed = getattr(model, "_nb_profile_result", None)
+    if nb_seed is None or getattr(model, "_reml_result", None) is None:
+        return debug_recorder
+    family = configured_family(model)
+    if not isinstance(family, NegativeBinomial):
+        return debug_recorder
+    y_arr = nb_seed._y
+    if y_arr is None:
+        return debug_recorder
+
+    theta = float(family.theta)
+    cache = dict(nb_seed.cache)
+    refits = 0
+    joint_converged = False
+    final_solve = None
+    while True:
+        mu = model._fit_mu
+        weights = model._fit_weights
+        if mu is None or weights is None:  # pragma: no cover - retention contract
+            raise RuntimeError("NB joint refinement requires retained fit rows")
+        solve = _theta_ml(y_arr, mu, weights, theta)
+        final_solve = solve
+        if abs(solve.theta - theta) <= _NB_JOINT_RELATIVE_TOL * max(abs(theta), 1e-12):
+            joint_converged = True
+            break
+        if refits >= _NB_JOINT_MAX_REFITS:
+            warnings.warn(
+                "NB2 theta / REML alternation did not reach a joint fixed "
+                f"point in {_NB_JOINT_MAX_REFITS} refits; publishing the last "
+                f"iterate theta={theta:g} with converged=False.",
+                UserWarning,
+                stacklevel=3,
+            )
+            break
+        # Round to the same six significant digits the calibration estimate
+        # publishes so family.theta and theta_hat stay exactly equal.
+        theta = float(f"{solve.theta:.6g}")
+        refits += 1
+        model.family = NegativeBinomial(theta=theta)
+        warm_lambdas = dict(model._reml_result.lambdas)
+        debug_recorder = _fit_reml_in_workspace(
+            model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            lambda2_init=warm_lambdas,
+            durable_retain_fit_state=durable_retain_fit_state,
+            **refit_kwargs,
+        )
+        cache[round(theta, 6)] = _nb_joint_nll(y_arr, model, theta)
+
+    at_bound = final_solve is not None and final_solve.at_bound
+    if at_bound:
+        assert final_solve is not None
+        side = "lower" if final_solve.at_lower else "upper"
+        warnings.warn(
+            f"NB2 theta re-estimated at the REML fit sits on the {side} "
+            "search bound; theta_hat is a constrained boundary value and the "
+            "profile result reports converged=False.",
+            NBThetaBoundWarning,
+            stacklevel=3,
+        )
+    refreshed = NBProfileResult(
+        theta_hat=theta,
+        nll=float(nb_seed.nll),
+        n_evaluations=int(nb_seed.n_evaluations) + refits,
+        converged=bool(nb_seed.converged) and joint_converged and not at_bound,
+        cache=cache,
+    )
+    model._nb_profile_result = refreshed._published_with_data(
+        y_arr,
+        model._fit_mu,
+        model._fit_weights,
+    )
+    if refits:
+        logger.info(f"NB theta refined at the REML fit: {theta:.4f} after {refits} joint refit(s)")
+    return debug_recorder
+
+
+def _nb_joint_nll(y_arr, model, theta: float) -> float:
+    """Weighted mean NB2 NLL of the current workspace fit at ``theta``."""
+    from superglm.profiling.nb import _nb2_nll
+
+    return _nb2_nll(y_arr, model._fit_mu, model._fit_weights, theta)
+
+
 def _solve_coefficients(
     model,
     y,
@@ -1408,7 +1547,29 @@ def fit_reml(
 
             warnings.warn(separation_message, SeparationWarning, stacklevel=3)
     validated_inputs = (X, y, sample_weight, offset)
-    workspace = FitWorkspace.start(model, mode="fit_reml", validated_inputs=validated_inputs)
+    family_intent = configured_family(model)
+    nb_auto = isinstance(family_intent, NegativeBinomial) and family_intent.theta == "auto"
+    # Auto-theta fits alternate theta with warm-started REML refits after the
+    # first attempt, and the refinement reads the fitted rows between refits.
+    # Force row retention on the private workspace for that window; the
+    # durable retention intent is restored (and honored) before publication.
+    workspace = FitWorkspace.start(
+        model,
+        mode="fit_reml",
+        validated_inputs=validated_inputs,
+        config_overrides={"retain_fit_state": True} if nb_auto else None,
+    )
+    durable_retain = bool(getattr(model, "_retain_fit_state", True))
+    attempt_kwargs = dict(
+        max_reml_iter=max_reml_iter,
+        reml_tol=reml_tol,
+        pirls_tol=pirls_tol,
+        max_pirls_iter=max_pirls_iter,
+        interaction_mode=interaction_mode,
+        runtime_validation=runtime_validation,
+        verbose=verbose,
+        w_correction_order=w_correction_order,
+    )
     debug_recorder = _fit_reml_in_workspace(
         workspace.model,
         X,
@@ -1419,16 +1580,28 @@ def fit_reml(
         y_ref=y_ref,
         sample_weight_ref=sample_weight_ref,
         offset_ref=offset_ref,
-        max_reml_iter=max_reml_iter,
-        reml_tol=reml_tol,
-        pirls_tol=pirls_tol,
-        max_pirls_iter=max_pirls_iter,
         lambda2_init=lambda2_init,
-        interaction_mode=interaction_mode,
-        runtime_validation=runtime_validation,
-        verbose=verbose,
-        w_correction_order=w_correction_order,
+        durable_retain_fit_state=durable_retain if nb_auto else None,
+        **attempt_kwargs,
     )
+    if nb_auto:
+        debug_recorder = _refine_nb_theta_to_reml_fixed_point(
+            workspace.model,
+            X,
+            y,
+            sample_weight,
+            offset,
+            X_ref=X_ref,
+            y_ref=y_ref,
+            sample_weight_ref=sample_weight_ref,
+            offset_ref=offset_ref,
+            durable_retain_fit_state=durable_retain,
+            debug_recorder=debug_recorder,
+            refit_kwargs=attempt_kwargs,
+        )
+        if not durable_retain:
+            workspace.model._retain_fit_state = False
+            _maybe_release_fit_state(workspace.model)
     candidate = capture_fit_state(
         workspace,
         model,

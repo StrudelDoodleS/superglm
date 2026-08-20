@@ -10,6 +10,9 @@ Fixture provenance (all synthetic):
 - ``nb_clamp005.csv``: n=4000, mu = exp(1.2 + 0.8 sin(2 pi x)), theta_true=0.05
   (heavy but realistic overdispersion). mgcv ``nb()`` theta: 0.05068.
   v0.28.0 published theta_hat = 50.0 with converged=True and no warning.
+- ``nb_worst.csv``: n=3000, mu = exp(0.8 + 1.5 sin(6 pi x)), theta_true=1.0
+  (high-frequency truth the pre-REML calibration smoothing cannot follow).
+  mgcv ``nb()`` theta: 0.99574. v0.28.0 published theta_hat = 0.5541 (-45%).
 """
 
 from pathlib import Path
@@ -25,6 +28,7 @@ from superglm.features.spline import CubicRegressionSpline
 FIXTURES = Path(__file__).parent / "fixtures"
 
 MGCV_THETA_CLAMP005 = 0.05068
+MGCV_THETA_HIFREQ = 0.99574
 
 
 def _fit_auto_theta(csv_name: str, n_knots: int) -> SuperGLM:
@@ -118,3 +122,27 @@ class TestThetaWrongRootAndClamp:
         # The bracketed solve stops at the *near* end of the constraint.
         assert result.theta_hat == pytest.approx(0.1, rel=1e-6)
         assert not result.converged
+
+
+class TestThetaFrozenBeforeReml:
+    """Finding B1: theta was calibrated before REML at the configured
+    smoothing and never revisited, converting lack-of-fit at lambda2=0.1
+    into spurious overdispersion."""
+
+    def test_hifreq_design_reaches_the_joint_fixed_point(self):
+        """theta_true=1 with a high-frequency truth must land near mgcv.
+
+        On v0.28.0 the pre-REML freeze publishes theta_hat = 0.5541 (-45%):
+        the calibration fit at lambda2=0.1 cannot follow sin(6 pi x) and the
+        misfit is absorbed into theta. mgcv nb() on the same CSV: 0.99574.
+        """
+        model = _fit_auto_theta("nb_worst.csv", n_knots=20)
+        theta_hat = float(model._distribution.theta)
+        assert theta_hat == pytest.approx(MGCV_THETA_HIFREQ, rel=0.05)
+        result = model._nb_profile_result
+        assert result.converged
+        assert float(result.theta_hat) == theta_hat
+        # The profile CI must be evaluated at the REML fit and bracket the
+        # published estimate.
+        ci_lo, ci_hi = result.ci()
+        assert ci_lo < theta_hat < ci_hi
