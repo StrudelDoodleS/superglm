@@ -481,10 +481,15 @@ def profile_tweedie_reml_scale(
         raise ValueError("penalized_deviance must be positive and finite")
     if not np.isfinite(penalty_nullity) or penalty_nullity < 0.0:
         raise ValueError("penalty_nullity must be finite and non-negative")
-    # Each positive row's saturated density decays like 1/phi as phi grows,
-    # so Q has slope (n_positive - Mp/2) in log(phi) at the upper end; a
-    # finite interior optimum needs that slope positive.
-    if 2.0 * profile_data.n_positive <= penalty_nullity:
+    # Each positive row's saturated density decays like phi**(-1/(p-1)) as
+    # phi grows (the Dunn-Smyth series is dominated by its single-event term,
+    # whose weight carries phi**(-(alpha+1)) with alpha+1 = 1/(p-1); verified
+    # numerically at p in {1.2, 1.5, 1.8} to 1e-6), NOT like 1/phi - assuming
+    # the Gaussian-shaped 1/phi tail here is the same substitution this
+    # profiler exists to remove, one level down. Q's upper-tail slope in
+    # log(phi) is therefore n_positive/(p-1) - Mp/2, and a finite interior
+    # optimum needs that positive.
+    if 2.0 * profile_data.n_positive <= (profile_data.power - 1.0) * penalty_nullity:
         raise ValueError("Tweedie REML scale profile has no finite interior optimum")
 
     def criterion(log_phi: float) -> float:
