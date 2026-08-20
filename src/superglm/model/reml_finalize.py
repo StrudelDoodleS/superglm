@@ -717,6 +717,20 @@ def finalize_reml_fit(
     # constrained QP passthrough refit can change both beta'S beta and deviance.
     if isinstance(model._distribution, Tweedie) and not qp_passthrough:
         phi_fixed = float(final_pirls.phi)
+    elif isinstance(model._distribution, Tweedie) and terminal_evaluation is not None:
+        # QP passthrough keeps publishing the deviance-form dispersion with
+        # the terminal evaluation's identified nullity. The evaluation now
+        # carries the exact Tweedie scale profile for the criterion itself,
+        # but unifying the three published Tweedie dispersions (Pearson here
+        # above, profile MLE in estimate_p, deviance form on this path) is
+        # deliberately deferred to a release that measures its own
+        # before/after; see the families guide's dispersion inventory.
+        penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
+        phi_fixed = max(
+            float(terminal_evaluation.penalized_deviance)
+            / max(float(len(y)) - penalty_nullity, 1.0),
+            1.0e-10,
+        )
     elif terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
         phi_fixed = terminal_evaluation.profiled_scale.phi
     elif terminal_evaluation is not None and not getattr(
