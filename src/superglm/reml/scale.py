@@ -22,6 +22,12 @@ _TWEEDIE_LOG_PHI_STEP = 15.0
 _TWEEDIE_LOG_PHI_LIMIT = 45.0
 _TWEEDIE_LOG_PHI_XATOL = 1e-9
 _TWEEDIE_LOG_PHI_EDGE_TOL = 1e-6
+# Central-difference step (in log phi) for the profile curvature. The
+# preferred arm differences the family's ANALYTIC log-phi score, so
+# evaluation noise eps enters the curvature at O(eps/step); the value-form
+# fallback (analytic scores unavailable on some saddlepoint rows) pays
+# O(eps/step^2) and uses the smaller step to bound its truncation instead.
+_TWEEDIE_SCORE_CURVATURE_STEP = 1e-3
 _TWEEDIE_CURVATURE_STEP = 1e-4
 
 
@@ -338,6 +344,11 @@ class TweedieScaleProfileData:
         repr=False,
         compare=False,
     )
+    _saturated_score_cache: dict[float, float] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
 
     def saturated_log_likelihood(self, phi: float) -> float:
         """Exact saturated log-likelihood at dispersion ``phi``.
@@ -360,6 +371,37 @@ class TweedieScaleProfileData:
                 f"Tweedie saturated log-likelihood is not finite at phi={key:g}"
             )
         self._saturated_cache[key] = value
+        return value
+
+    def saturated_nll_log_phi_score(self, phi: float) -> float | None:
+        """Analytic d(-l_sat)/d(log phi) at ``phi``, or None if unavailable.
+
+        The density evaluator's per-row log-phi score is the closed-form
+        derivative of the negative log-density (it agrees with numerical
+        differentiation of the log-density to ~1e-10 relative); it is
+        unavailable only when a row's evaluation lands on a branch without
+        an analytic score, in which case the caller falls back to
+        differencing the criterion itself.
+        """
+        key = float(phi)
+        cached = self._saturated_score_cache.get(key)
+        if cached is not None:
+            return cached if np.isfinite(cached) else None
+        from superglm.profiling.tweedie import _evaluate_tweedie_density
+
+        evaluation = _evaluate_tweedie_density(
+            self.prepared_positive,
+            key,
+            compute_score=True,
+        )
+        if not evaluation.score_valid or evaluation.log_phi_score is None:
+            self._saturated_score_cache[key] = float("nan")
+            return None
+        value = float(np.sum(evaluation.log_phi_score, dtype=np.float64))
+        if not np.isfinite(value):
+            self._saturated_score_cache[key] = float("nan")
+            return None
+        self._saturated_score_cache[key] = value
         return value
 
 
@@ -480,10 +522,29 @@ def profile_tweedie_reml_scale(
         raise FloatingPointError("Tweedie REML scale profile is not representable")
 
     criterion_value = float(solution.fun)
-    step = _TWEEDIE_CURVATURE_STEP
-    log_phi_curvature = (
-        criterion(log_phi - step) - 2.0 * criterion_value + criterion(log_phi + step)
-    ) / (step * step)
+    # Profile curvature in log(phi). The deviance arm Dp/(2 phi) is analytic;
+    # the saturated arm is a central difference of the family's ANALYTIC
+    # log-phi score T(u) = sum d(-log f)/d(log phi), so d2(l_sat)/du2 = -T'(u)
+    # and Q''(u) = Dp e^{-u}/2 + T'(u). Differencing an analytic first
+    # derivative keeps evaluation noise eps at O(eps/step) in the curvature;
+    # differencing the criterion value amplifies it by O(eps/step^2), which
+    # is stack-sensitive (an older special-function stack's eps reached the
+    # published d(1/phi)/d(Dp) at test-visible size). Truncation is
+    # O(step^2 * T'''/6), a curvature relative error around 1e-6 at the 1e-3
+    # step. The value-difference fallback below runs only when a saddlepoint
+    # row carries no analytic score.
+    score_step = _TWEEDIE_SCORE_CURVATURE_STEP
+    score_hi = profile_data.saturated_nll_log_phi_score(float(np.exp(log_phi + score_step)))
+    score_lo = profile_data.saturated_nll_log_phi_score(float(np.exp(log_phi - score_step)))
+    if score_hi is not None and score_lo is not None:
+        log_phi_curvature = 0.5 * penalized_deviance * float(np.exp(-log_phi)) + (
+            score_hi - score_lo
+        ) / (2.0 * score_step)
+    else:
+        step = _TWEEDIE_CURVATURE_STEP
+        log_phi_curvature = (
+            criterion(log_phi - step) - 2.0 * criterion_value + criterion(log_phi + step)
+        ) / (step * step)
     if not np.isfinite(log_phi_curvature) or log_phi_curvature <= 0.0:
         raise FloatingPointError("Tweedie REML scale profile has non-positive curvature")
 
