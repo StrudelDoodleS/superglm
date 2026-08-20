@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,6 +21,8 @@ from superglm.solvers._structured.overrides import (
 )
 from superglm.types import GroupSlice
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class StructuredGroupSelection:
@@ -32,16 +35,54 @@ class StructuredGroupSelection:
 
 @dataclass(frozen=True)
 class StructuredBackendDecision:
-    """Resolved direct backend and the selected dominant block."""
+    """Resolved direct backend and the selected dominant block.
+
+    ``auto_cost_ratio`` carries the crossover model's predicted
+    structured/dense factorization flop ratio whenever ``direct_solve="auto"``
+    reached the cost comparison, for either outcome.  It is ``None`` for
+    forced backends and for eligibility (non-cost) fallbacks.  Callers put it
+    in the fit profile beside the realized timings so the crossover constants
+    can be recalibrated against real fits (issue #343).
+    """
 
     use_structured: bool
     group_index: int | None
     group_name: str | None
     fallback_reason: str | None
+    auto_cost_ratio: float | None = None
 
 
 _AUTO_MIN_COEFFICIENT_WIDTH = 32
-_AUTO_MAX_STRUCTURED_COST_RATIO = 0.75
+# Measured crossover, August 2026 (issue #343).  The flop ratio compares only
+# the two factorizations, but on n >> p fits the factorization is a small
+# minority of per-iteration work -- the shared O(n)-row moment build dominates
+# (the standard operations count for this fitting problem is O(n p^2 + M p^3),
+# Wood 2015, JRSS-C 64(1); both terms belong in any method comparison).  The
+# structured path also carries per-outer-iteration derivative machinery the
+# dense path does not.  So a "25% cheaper factorization" prediction is a
+# prediction about a term that does not decide the fit time, and the previous
+# 0.75 bound admitted wide-border cases where the structured backend was
+# measured ~2x slower end to end.  Block elimination pays off when it
+# eliminates most of the matrix and keeps the dense border small -- the regime
+# every established user of this factorization occupies (lme4's sparse
+# Cholesky, Bates et al. 2015, JSS 67(1); doubly-bordered block-diagonal
+# solvers).  End-to-end anchors on a real ~67k-row Tweedie(1.5) log-link
+# pricing workload, exact REML path, single-threaded:
+#
+#   ratio 0.596 (K=23  beside q=77):  structured 2.03x slower
+#   ratio 0.316 (K=39  beside q=49):  structured 1.66x slower
+#   ratio 0.148 (K=80  beside q=49):  structured 1.41x slower
+#   ratio 0.104 (K=105 beside q=49):  structured 1.10x slower
+#   ratio 0.033 (K=225 beside q=49):  structured 1.56x FASTER
+#
+# Synthetic FactorSmooth ("fs" and "sz") sweeps reproduce the same ordering
+# (mid-ratio loses, tiny-ratio wins), and the discrete cached-W path is
+# insensitive at mid ratio (measured a tie), so one constant governs all three
+# geometries.  0.05 splits the measured bracket [0.033, 0.104] with margin on
+# both sides.  For the scalar geometry the ratio has the closed form
+# ((q+1)/(p+1))^2, so this bound equivalently requires the dominant block to
+# span at least ~78% of the augmented width.
+_AUTO_MAX_STRUCTURED_COST_RATIO = 0.05
 
 
 def _structured_auto_is_beneficial(
@@ -50,10 +91,11 @@ def _structured_auto_is_beneficial(
 ) -> tuple[bool, float]:
     """Apply the measured scalar-Schur crossover and return its cost ratio.
 
-    July 2026 end-to-end REML profiles found dense wins below 32 slope
-    coefficients, while scalar Schur wins materially at and above that width
-    when its leading factor/solve work is no more than 75% of dense work.
-    The intercept is included in both algebra estimates.
+    The width floor keeps tiny systems dense regardless of shape.  The ratio
+    bound (see ``_AUTO_MAX_STRUCTURED_COST_RATIO``) demands that the scalar
+    Schur elimination remove the overwhelming majority of the augmented
+    width; for this geometry the ratio reduces to ``((q+1)/(p+1))**2``.  The
+    intercept is included in both algebra estimates.
     """
     if dominant_size < 1 or small_size < 0:
         raise ValueError("Structured auto dimensions must be non-negative with a dominant block.")
@@ -170,12 +212,55 @@ def _structured_auto_cost_decision(
             f"require p >= {_AUTO_MIN_COEFFICIENT_WIDTH} and ratio <= "
             f"{_AUTO_MAX_STRUCTURED_COST_RATIO:.2f})"
         )
+    logger.debug(
+        "structured auto crossover: %s %s (p=%d, %s, estimated_cost_ratio=%.4f)",
+        geometry_name,
+        "selected" if use_structured else "declined",
+        coefficient_width,
+        dimensions,
+        cost_ratio,
+    )
     return StructuredBackendDecision(
         use_structured=use_structured,
         group_index=selection.group_index,
         group_name=selection.group_name,
         fallback_reason=fallback_reason,
+        auto_cost_ratio=cost_ratio,
     )
+
+
+def record_auto_backend_decision(
+    profile: dict | None,
+    direct_solve: str,
+    decision: StructuredBackendDecision,
+    *,
+    log: bool = True,
+) -> None:
+    """Record one automatic crossover decision for offline recalibration.
+
+    Writes the predicted factorization cost ratio and the choice into the fit
+    profile, where they sit beside the realized per-phase timings
+    (``irls_gram_s``, ``irls_solve_s``, ``reml_*_s``) that a forced-backend
+    rerun can be compared against.  Emits one INFO line when ``auto`` commits
+    to the structured backend; drivers that resolve once per fit pass
+    ``log=True``, per-solve callers pass ``log=False`` so repeated inner
+    resolutions stay quiet.
+    """
+    if direct_solve != "auto" or decision.auto_cost_ratio is None:
+        return
+    if profile is not None:
+        profile["structured_auto_cost_ratio"] = decision.auto_cost_ratio
+        profile["structured_auto_selected"] = decision.use_structured
+    if log and decision.use_structured:
+        logger.info(
+            "direct_solve='auto' chose the structured backend for group %r "
+            "(estimated factorization cost ratio %.4f <= %.2f). The fit "
+            "profile records this prediction beside realized timings; compare "
+            "against a direct_solve='gram' rerun to recalibrate the crossover.",
+            decision.group_name,
+            decision.auto_cost_ratio,
+            _AUTO_MAX_STRUCTURED_COST_RATIO,
+        )
 
 
 def _selection_failure(

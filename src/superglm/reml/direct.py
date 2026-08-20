@@ -67,7 +67,7 @@ from superglm.solvers.centered_system import TabmatCenteringState
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
-from superglm.solvers.structured import resolve_structured_backend
+from superglm.solvers.structured import record_auto_backend_decision, resolve_structured_backend
 from superglm.types import GroupSlice, PenaltyComponent
 
 # The solve ceiling and the certification bar both live in observed_geometry
@@ -179,6 +179,7 @@ def optimize_direct_reml(
         lambda2=lambdas,
     )
     use_structured = structured_decision.use_structured
+    record_auto_backend_decision(profile, direct_solve, structured_decision)
     if use_observed_geometry:
         validate_observed_derivative_capability(distribution, link, w_correction_order)
     observed_tabmat_state = TabmatCenteringState() if use_observed_geometry else None

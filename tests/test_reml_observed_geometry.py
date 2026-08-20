@@ -3722,6 +3722,12 @@ class TestModeCertifiesAtTheRoundOffFloor:
             selection_penalty=0.0,
             features=features,
             interactions=[FactorSmooth("x", group="grp", basis=basis, kind="ps", k=6)],
+            # The stall this test regresses arises on the structured backend's
+            # trajectory, which this shape used to receive from `auto` before
+            # the issue-343 crossover recalibration sent K=2 blocks beside a
+            # wide dense border to the dense path.  Pin the backend so the
+            # certification-at-the-round-off-floor scenario stays reachable.
+            direct_solve="structured",
         )
         columns = ["x", "grp"] + [f"cat{j}" for j in range(n_cat)]
 
