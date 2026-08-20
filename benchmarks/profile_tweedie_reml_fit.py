@@ -461,6 +461,78 @@ def build_random_effect_model(discrete: bool):
     )
 
 
+
+# --- burn-cost shaped workload (synthetic reproduction of the target shape) ---
+#
+# 67k rows, Tweedie(1.5) log link, sample weights + offset, five ordered-
+# categorical banded axes (13-24 levels) plus four plain categoricals (3-23
+# levels), ~83% zero response with gamma-distributed positives.  No real data
+# is read: the level universes, the level effects and the exposure are drawn
+# from a fixed seed.
+
+_BURN_OC_LEVELS = (13, 17, 20, 24, 15)
+_BURN_CAT_LEVELS = (3, 8, 12, 23)
+_BURN_INTERCEPT = 5.70
+_BURN_PHI = 167.5
+
+
+def load_burn_cost(n_rows: int, seed: int = 2026):
+    from superglm.profiling.tweedie import generate_tweedie_cpg
+
+    if n_rows <= 0:
+        n_rows = 67_000
+    rng = np.random.default_rng(seed)
+    cols: dict[str, np.ndarray] = {}
+    eta = np.zeros(n_rows)
+
+    for axis, n_lev in enumerate(_BURN_OC_LEVELS):
+        # Banded axes are concentrated in the middle of the range, as real
+        # pre-binned pricing axes are.
+        raw = rng.normal(0.5, 0.22, n_rows)
+        codes = np.clip((raw * n_lev).astype(np.int64), 0, n_lev - 1)
+        labels = np.array([f"b{j:02d}" for j in range(n_lev)])
+        cols[f"band{axis}"] = labels[codes]
+        # A smooth (mostly monotone) effect along the level axis.
+        pos = np.linspace(-1.0, 1.0, n_lev)
+        shape = (0.55 - 0.14 * axis) * pos + (0.20 - 0.03 * axis) * pos**2
+        eta += shape[codes]
+
+    for j, n_lev in enumerate(_BURN_CAT_LEVELS):
+        codes = rng.integers(0, n_lev, n_rows)
+        labels = np.array([f"f{j}_{k:02d}" for k in range(n_lev)])
+        cols[f"fac{j}"] = labels[codes]
+        eff = rng.normal(0.0, 0.18, n_lev)
+        eff -= eff.mean()
+        eta += eff[codes]
+
+    # Exposure-like sample weights and a log-term offset.
+    weights = np.clip(rng.gamma(shape=3.0, scale=0.30, size=n_rows), 0.02, 3.0)
+    offset = np.log(np.clip(rng.gamma(shape=6.0, scale=2.0, size=n_rows), 1.0, 36.0) / 12.0)
+
+    # Burn cost per unit exposure: currency-scaled, so the Wright argument
+    # t = 4 w^2 y / phi^2 lands in the same decades a real book produces.
+    intercept = _BURN_INTERCEPT
+    mu = np.exp(intercept + eta + offset)
+    phi = _BURN_PHI
+    y = generate_tweedie_cpg(n_rows, mu, phi / weights, 1.5, rng)
+    X = pd.DataFrame(cols)
+    return X, y, weights, offset
+
+
+def build_burn_cost_model(discrete: bool):
+    from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, families
+
+    features: dict = {}
+    for axis, n_lev in enumerate(_BURN_OC_LEVELS):
+        order = [f"b{j:02d}" for j in range(n_lev)]
+        features[f"band{axis}"] = OrderedCategorical(
+            order=order, basis=Spline(kind="cr", k=min(10, n_lev - 2))
+        )
+    for j, n_lev in enumerate(_BURN_CAT_LEVELS):
+        features[f"fac{j}"] = Categorical()
+    return SuperGLM(family=families.tweedie(p=1.5), discrete=discrete, features=features)
+
+
 WORKLOADS = {
     "fremtpl2": (load_fremtpl2, build_fremtpl2_model),
     "synthetic": (load_synthetic, build_synthetic_model),
@@ -469,6 +541,7 @@ WORKLOADS = {
         build_synthetic_model,
     ),
     "random-effect": (load_random_effect, build_random_effect_model),
+    "burn-cost": (load_burn_cost, build_burn_cost_model),
 }
 
 
@@ -511,7 +584,12 @@ def harvest(model, X, elapsed_wall: float, elapsed_cpu: float, y) -> dict:
 
 def run_once(args) -> dict:
     loader, builder = WORKLOADS[args.dataset]
-    X, y, w = loader(args.rows)
+    loaded = loader(args.rows)
+    offset = None
+    if len(loaded) == 4:
+        X, y, w, offset = loaded
+    else:
+        X, y, w = loaded
 
     import superglm
 
@@ -529,7 +607,7 @@ def run_once(args) -> dict:
     t_cpu = time.process_time()
     if prof is not None:
         prof.enable()
-    model.fit_reml(X, y, sample_weight=w)
+    model.fit_reml(X, y, sample_weight=w, offset=offset)
     if prof is not None:
         prof.disable()
     elapsed_wall = time.perf_counter() - t_wall
