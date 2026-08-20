@@ -110,6 +110,7 @@ from superglm.solvers.structured import (
     build_penalized_structured_operator,
     build_structured_system,
     get_structured_layout,
+    record_auto_backend_decision,
     resolve_structured_backend,
 )
 from superglm.solvers.sum_to_zero import (
@@ -2759,6 +2760,8 @@ def _fit_irls_direct_once(
     if profile is not None:
         profile["direct_backend"] = _resolved_direct_backend
         profile["direct_fallback_reason"] = _direct_fallback_reason
+        # Repeated inner solves stay quiet; the REML drivers own the INFO line.
+        record_auto_backend_decision(profile, direct_solve, structured_decision, log=False)
         if structured_factor is not None:
             profile["structured_dominant_group"] = structured_factor.dominant_group_name
             profile["structured_minimum_local_diagonal"] = structured_factor.minimum_local_diagonal

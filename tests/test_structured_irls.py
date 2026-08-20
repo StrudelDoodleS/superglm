@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 import numpy as np
@@ -687,8 +688,17 @@ def test_auto_records_dense_fallback_reason_for_constraints():
     [
         pytest.param(20, 4, False, id="small-total-width-stays-dense"),
         pytest.param(30, 4, True, id="measured-scalar-crossover"),
-        pytest.param(20, 20, True, id="larger-small-block-crossover"),
+        # Ratio ((q+1)/(p+1))**2 = 0.26 here.  A real ~67k-row fit measured the
+        # structured backend ~1.7x SLOWER end to end at this shape class
+        # (issue #343): the factorization the ratio prices is a small minority
+        # of per-iteration work beside the shared O(n) moment build, so a wide
+        # dense border must stay on the dense path.
+        pytest.param(20, 20, False, id="wide-border-stays-dense"),
         pytest.param(4, 28, False, id="insufficient-schur-cost-reduction"),
+        # Ratio 0.0009: the dominant block spans nearly the whole width.  This
+        # is the measured-win regime (1.5x-3.9x faster on real and synthetic
+        # fits) that the recalibrated bound must keep structured.
+        pytest.param(300, 8, True, id="dominant-block-spans-width"),
     ],
 )
 def test_auto_backend_uses_measured_structured_crossover(
@@ -724,6 +734,130 @@ def test_auto_backend_uses_measured_structured_crossover(
         assert decision.group_name == "policy"
     else:
         assert "crossover" in decision.fallback_reason
+    # Either way the cost model ran, and its prediction must be published for
+    # calibration.  For the scalar geometry it has closed form ((q+1)/(p+1))^2.
+    expected_ratio = ((small_width + 1) / (small_width + dominant_width + 1)) ** 2
+    assert decision.auto_cost_ratio == pytest.approx(expected_ratio)
+
+
+@pytest.mark.parametrize(
+    ("dominant_width", "small_width", "expect_structured"),
+    [
+        pytest.param(300, 8, True, id="pick-structured"),
+        pytest.param(20, 20, False, id="decline-on-cost"),
+    ],
+)
+def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
+    dominant_width: int,
+    small_width: int,
+    expect_structured: bool,
+):
+    """Issue #343: every automatic cost decision lands in the fit profile.
+
+    The profile pairs the crossover model's prediction with the realized
+    per-phase timings recorded by the same fit, which is the record a
+    recalibration against real workloads reads.
+    """
+    rng = np.random.default_rng(343)
+    n = 4 * dominant_width
+    codes = np.asarray(np.arange(n) % dominant_width, dtype=np.intp)
+    numeric = rng.normal(size=(n, small_width))
+    y = 0.05 * numeric[:, 0] + rng.normal(scale=0.3, size=n)
+    matrices = [
+        DenseGroupMatrix(numeric),
+        RandomEffectGroupMatrix(codes, dominant_width),
+    ]
+    groups = [
+        GroupSlice(name="numeric", start=0, end=small_width, penalized=False),
+        GroupSlice(
+            name="policy",
+            start=small_width,
+            end=small_width + dominant_width,
+            penalized=True,
+        ),
+    ]
+    dm = DesignMatrix(matrices, n=n, p=small_width + dominant_width)
+    penalties = [
+        PenaltyComponent(
+            name="policy",
+            group_name="policy",
+            group_index=1,
+            group_sl=groups[1].sl,
+            omega_raw=None,
+            penalty_kind="identity",
+        )
+    ]
+    profile: dict = {}
+
+    result, _ = irls_direct.fit_irls_direct(
+        X=dm,
+        y=y,
+        weights=np.ones(n),
+        family=Gaussian(),
+        link=IdentityLink(),
+        groups=groups,
+        lambda2={"policy": 1.5},
+        direct_solve="auto",
+        reml_penalties=penalties,
+        profile=profile,
+    )
+
+    expected_backend = "structured" if expect_structured else "gram"
+    assert result.direct_backend == expected_backend
+    assert profile["structured_auto_selected"] is expect_structured
+    expected_ratio = ((small_width + 1) / (small_width + dominant_width + 1)) ** 2
+    assert profile["structured_auto_cost_ratio"] == pytest.approx(expected_ratio)
+
+
+def test_record_auto_backend_decision_logs_only_structured_auto_picks(caplog):
+    """One INFO line per automatic structured pick; silence otherwise."""
+    from superglm.solvers.structured import (
+        StructuredBackendDecision,
+        record_auto_backend_decision,
+    )
+
+    pick = StructuredBackendDecision(
+        use_structured=True,
+        group_index=1,
+        group_name="policy",
+        fallback_reason=None,
+        auto_cost_ratio=0.01,
+    )
+    profile: dict = {}
+    with caplog.at_level(logging.INFO, logger="superglm.solvers._structured.selection"):
+        record_auto_backend_decision(profile, "auto", pick)
+    assert profile == {
+        "structured_auto_cost_ratio": 0.01,
+        "structured_auto_selected": True,
+    }
+    assert sum("chose the structured backend" in r.message for r in caplog.records) == 1
+
+    caplog.clear()
+    decline = StructuredBackendDecision(
+        use_structured=False,
+        group_index=1,
+        group_name="policy",
+        fallback_reason="below the measured structured crossover",
+        auto_cost_ratio=0.26,
+    )
+    quiet_profile: dict = {}
+    with caplog.at_level(logging.INFO, logger="superglm.solvers._structured.selection"):
+        record_auto_backend_decision(quiet_profile, "auto", decline)
+        # Forced backends and eligibility fallbacks carry no prediction and
+        # must write nothing.
+        record_auto_backend_decision(quiet_profile, "structured", pick)
+        no_ratio = StructuredBackendDecision(
+            use_structured=False,
+            group_index=None,
+            group_name=None,
+            fallback_reason="no structured term",
+        )
+        record_auto_backend_decision({}, "auto", no_ratio)
+    assert quiet_profile == {
+        "structured_auto_cost_ratio": 0.26,
+        "structured_auto_selected": False,
+    }
+    assert not caplog.records
 
 
 def test_auto_missing_compact_penalties_falls_back_but_forced_rejects():

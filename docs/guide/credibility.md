@@ -242,7 +242,11 @@ model.fit_reml(train, y, offset=offset)
 ```
 
 `direct_solve="auto"` retains Gram fitting for small terms and switches to the
-structured backend at the measured crossover. `direct_solve="structured"`
+structured backend at the measured crossover, which is reached only when the
+structured term spans the large majority of the coefficient width: the
+factorization saving has to clear the per-iteration moment work both backends
+share, so a wide random effect beside an equally wide dense border fits faster
+on Gram and stays there. `direct_solve="structured"`
 requires eligible geometry and is useful for reproducible benchmarking.
 Locally rank-deficient SZ levels remain eligible because the exact
 sum-to-zero constraint can make the full system identifiable. If that global

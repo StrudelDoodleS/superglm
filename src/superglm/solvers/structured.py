@@ -124,6 +124,7 @@ from superglm.solvers._structured.selection import (
     _selection_failure,
     _structured_auto_is_beneficial,
     _sum_to_zero_structured_auto_is_beneficial,
+    record_auto_backend_decision,
     resolve_structured_backend,
     select_structured_group,
 )
@@ -242,6 +243,7 @@ __all__ = [
     "get_scalar_structured_layout",
     "get_structured_layout",
     "materialize_compact_operator",
+    "record_auto_backend_decision",
     "resolve_structured_backend",
     "select_structured_group",
     "solve_cached_block_structured",

@@ -61,6 +61,7 @@ from superglm.solvers.structured import (
     BlockStructuredSystem,
     ScalarStructuredSystem,
     SumToZeroBlockStructuredSystem,
+    record_auto_backend_decision,
     resolve_structured_backend,
     solve_cached_structured,
 )
@@ -274,6 +275,7 @@ def optimize_discrete_reml_cached_w(
         lambda2=lambdas,
     )
     use_structured = structured_decision.use_structured
+    record_auto_backend_decision(profile, direct_solve, structured_decision)
 
     lambda_history: list[dict[str, float]] = [lambdas.copy()]
     warm_beta: NDArray | None = None

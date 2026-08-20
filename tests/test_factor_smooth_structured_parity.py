@@ -44,7 +44,7 @@ def _factor_smooth_problem(
 ):
     rng = np.random.default_rng(819)
     n = 480
-    n_levels = 8
+    n_levels = 16
     block_size = 4
     x = rng.uniform(-1.0, 1.0, size=n)
     codes = rng.integers(0, n_levels, size=n, dtype=np.intp)
@@ -1508,7 +1508,16 @@ def test_single_factor_smooth_dominates_wider_random_effect(basis: str):
     auto = model("auto").fit_reml(X, y, runtime_validation="skip")
     structured = model("structured").fit_reml(X, y, runtime_validation="skip")
 
-    assert auto.result.direct_backend == "structured"
+    # Selection still nominates the single FactorSmooth as the dominant block
+    # over the wider RandomEffect -- forced structured factors around it -- but
+    # for `auto` this shape is now on the dense side of the measured crossover
+    # (issue #343): the whole RandomEffect sits in the dense border, so the
+    # elimination removes a minority of the width and was measured slower than
+    # the dense path on shapes like it.  The recorded reason proves both
+    # halves: FactorSmooth won the dominance choice, and cost declined it.
+    assert auto.result.direct_backend == "gram"
+    assert "FactorSmooth" in auto.result.direct_fallback_reason
+    assert "crossover" in auto.result.direct_fallback_reason
     assert structured.result.direct_backend == "structured"
     np.testing.assert_allclose(auto.predict(X), gram.predict(X), atol=3e-8)
     np.testing.assert_allclose(structured.predict(X), gram.predict(X), atol=3e-8)
