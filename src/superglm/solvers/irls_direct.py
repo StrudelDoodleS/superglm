@@ -2336,6 +2336,11 @@ def _fit_irls_direct_once(
             pinned = bool(np.any((eta != eta_unclipped) & (weights > 0)))
             exhausted_stagnant = (
                 not converged
+                # A warm-started micro-budget solve (REML performance
+                # iterations run max_iter=1) exhausts its budget by
+                # construction; only a real budget makes exhaustion-with-
+                # stagnation evidence of a drift (the field trace ran 100).
+                and max_iter >= 10
                 and it + 1 >= max_iter
                 and not step_rejected
                 and abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < STAGNANT_DEVIANCE_DELTA
