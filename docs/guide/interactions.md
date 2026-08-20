@@ -221,6 +221,10 @@ column whose active rows have no positive response — is caught at the end of
 the solve instead: a fit whose linear predictor is pinned at the link's
 overflow guard with an extreme working-weight range reports the same
 `SeparationWarning` (or `SeparationError` under `separation="error"`).
+This backstop fires only when the walk reaches the guard or exhausts a
+real iteration budget: a deviance-converged stop at moderate drift, and
+binomial-logit numeric indicators generally (the logit eta clip keeps the
+working-weight range below the trigger), still return quietly.
 
 ## Hierarchical make/model/trim data
 
