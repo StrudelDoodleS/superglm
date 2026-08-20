@@ -207,6 +207,95 @@ class TestLargeThetaScoreStability:
         assert not solve.converged
 
 
+class TestAlternationToleranceIsRelative:
+    """Review round 2, P2: an absolute xatol=1e-2 accepts order-of-magnitude
+    jumps below theta=0.01 now that the search range admits them."""
+
+    def test_small_theta_steps_do_not_satisfy_the_absolute_reading(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from superglm.features import Numeric
+        from superglm.profiling import nb as nb_module
+
+        X = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 24)})
+        y = np.resize(np.array([1.0, 2.0, 3.0]), len(X))
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+
+        def result_for(dm):
+            return SimpleNamespace(
+                beta=np.zeros(dm.p),
+                intercept=float(np.log(np.mean(y))),
+                n_iter=1,
+                converged=True,
+            )
+
+        monkeypatch.setattr(
+            nb_module, "fit_irls_direct", lambda **kwargs: (result_for(kwargs["X"]), None)
+        )
+        monkeypatch.setattr(nb_module, "fit_pirls", lambda **kwargs: result_for(kwargs["X"]))
+        # A scripted alternation still moving 60% per step at theta ~ 0.002:
+        # the absolute reading (|0.002 - 0.005| = 0.003 < 0.01) stops on the
+        # second iterate; the relative reading continues to the settled one.
+        script = iter([0.005, 0.002, 0.0019998, 0.0019998])
+        monkeypatch.setattr(
+            nb_module,
+            "_theta_ml",
+            lambda *args, **kwargs: nb_module._ThetaSolve(
+                theta=next(script),
+                converged=True,
+                at_lower=False,
+                at_upper=False,
+                n_score_evaluations=1,
+            ),
+        )
+        result = nb_module.estimate_nb_theta(model, X, y, maxiter=10)
+        assert result.theta_hat == pytest.approx(0.0019998, rel=1e-9)
+
+
+class TestProfilePlotSmallTheta:
+    """Review round 2, P2: the plot grid's fixed 0.01 floor made every
+    estimate in the newly admitted (1e-8, 0.01) band unplottable."""
+
+    def test_profile_plot_reaches_a_small_theta_estimate(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        matplotlib.use("Agg")
+
+        from superglm.features import Numeric
+        from superglm.profiling.nb import estimate_nb_theta
+
+        rng = np.random.default_rng(41)
+        n = 4000
+        x = rng.uniform(-1.0, 1.0, n)
+        mu_true = np.exp(1.0 + 0.2 * x)
+        theta_true = 0.003
+        y = rng.negative_binomial(theta_true, theta_true / (theta_true + mu_true)).astype(
+            np.float64
+        )
+        model = SuperGLM(
+            family=NegativeBinomial(theta=1.0),
+            selection_penalty=0.0,
+            features={"x": Numeric()},
+        )
+        result = estimate_nb_theta(model, pd.DataFrame({"x": x}), y)
+        assert result.theta_hat < 0.01, "fixture must land in the sub-0.01 band"
+        figure = result.profile_plot()
+        try:
+            axis = figure.axes[0]
+            # The profile CURVE itself must reach below the estimate; the
+            # axes' xlim is no instrument (the MLE axvline extends it even
+            # when the curve's grid never gets there).
+            curve_grid_lo = float(np.min(axis.get_lines()[0].get_xdata()))
+            assert curve_grid_lo < float(result.theta_hat)
+        finally:
+            import matplotlib.pyplot as plt
+
+            plt.close(figure)
+
+
 class TestThetaFrozenBeforeReml:
     """Finding B1: theta was calibrated before REML at the configured
     smoothing and never revisited, converting lack-of-fit at lambda2=0.1

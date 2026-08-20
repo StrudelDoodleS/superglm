@@ -233,9 +233,11 @@ class NBProfileResult:
 
         ci_lo, ci_hi = self.ci(alpha=alpha)
 
-        # Grid extends beyond CI for visual context
+        # Grid extends beyond CI for visual context. The positive floor must
+        # scale with the estimate: a fixed 0.01 made every theta in the newly
+        # admitted (1e-8, 0.01) band unplottable.
         margin = 0.3 * (ci_hi - ci_lo)
-        grid_lo = max(0.01, ci_lo - margin)
+        grid_lo = max(min(0.01, 0.1 * self.theta_hat), ci_lo - margin)
         grid_hi = ci_hi + margin
         theta_grid = np.linspace(grid_lo, grid_hi, n_points)
 
@@ -554,7 +556,14 @@ def estimate_nb_theta(
         ``NBThetaBoundWarning`` is emitted — a bounded value is a constrained
         boundary report, never a silent interior estimate.
     xatol : float
-        Convergence tolerance on theta (absolute) for the outer alternation.
+        Convergence tolerance on theta for the outer alternation, applied
+        RELATIVE to the current estimate (with the lower search bound as the
+        scale floor): the alternation stops when
+        ``|theta_new - theta| <= xatol * max(|theta_new|, lower_bound)``.
+        The historical absolute reading was only sound over the old
+        (0.1, 50.0) range; across (1e-8, 1e8) an absolute 1e-2 would accept
+        order-of-magnitude jumps below 0.01 and demand needless precision
+        near the top.
     maxiter : int
         Maximum outer iterations (GLM fits).
     verbose : bool
@@ -705,7 +714,8 @@ def estimate_nb_theta(
                 f"nll={nll:.4f}  pirls_iters={pirls_result.n_iter}"
             )
 
-        if abs(theta_new - theta) < xatol:
+        convergence_scale = max(abs(theta_new), float(theta_bounds[0]))
+        if abs(theta_new - theta) <= xatol * convergence_scale:
             theta = theta_new
             converged = True
             break
