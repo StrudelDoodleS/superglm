@@ -791,6 +791,23 @@ def packed_centered_gram_rhs(
             if factored is not None:
                 return factored
 
+    # Reject an oversized support BEFORE materialising it.  A categorical
+    # block's anchor support is a dense ``(K+1, K)`` identity and its Gram
+    # costs O(K^3); for a crossed interaction K is ``(L1-1)*(L2-1)``, so it
+    # grows multiplicatively in the parents' cardinalities.  The pairwise cell
+    # check below runs too late to prevent the allocation, and cannot catch a
+    # single wide block paired with a narrow one at all.  Falling back here
+    # costs the chunked path, which is what this design got before.
+    for gm in dm.group_matrices:
+        if isinstance(gm, eligible_types):
+            support_rows = int(gm.B_unique.shape[0])
+        elif isinstance(gm, CategoricalGroupMatrix):
+            support_rows = int(gm.n_levels) + 1
+        else:
+            continue
+        if support_rows * support_rows > _MAX_PACKED_HIST_CELLS:
+            return None
+
     for gm in dm.group_matrices:
         if isinstance(gm, eligible_types):
             supports.append(

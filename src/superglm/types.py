@@ -143,10 +143,13 @@ class GroupInfo:
     penalized: bool = True  # whether this group is subject to the penalty
     # Opt-in: the builder may losslessly deduplicate this group's repeated
     # sparse rows into a support-compressed container.  Set only by specs
-    # whose repeated rows are the norm (Piecewise).  Other unpenalized sparse
-    # producers (CategoricalInteraction, a two-level OrderedCategorical step)
-    # keep the plain CSR representation, its tabmat-split eligibility and its
-    # design_summary reporting.
+    # whose repeated rows are the norm (Piecewise).  A producer that emits
+    # ``cat_codes`` does not need this and must not set it -- one code per row
+    # already IS the compressed form, and the builder routes it to a
+    # CategoricalGroupMatrix.  Everything else keeps the plain CSR
+    # representation, its tabmat-split eligibility and its design_summary
+    # reporting; do not widen this flag to a producer merely because its rows
+    # repeat.
     supports_row_compression: bool = False
     cat_codes: NDArray | None = None  # (n,) integer codes for categorical features
     # select=True subgroup support for double-penalty decomposition
