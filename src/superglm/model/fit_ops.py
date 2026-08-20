@@ -1105,11 +1105,19 @@ def _refine_nb_theta_to_reml_fixed_point(
             NBThetaBoundWarning,
             stacklevel=3,
         )
+    # The published flag must describe the PUBLISHED state. Theta being
+    # stationary at an unfinished REML fit is not a joint fixed point: if the
+    # final (warm-started) attempt exhausted max_reml_iter, lambda never
+    # reached the optimum theta was measured against, and claiming
+    # converged=True there is the same defect class this release exists to
+    # remove - a clamped/unfinished estimate reporting success.
+    final_reml = getattr(model, "_reml_result", None)
+    reml_converged = bool(getattr(final_reml, "converged", False))
     refreshed = NBProfileResult(
         theta_hat=theta,
         nll=float(nb_seed.nll),
         n_evaluations=int(nb_seed.n_evaluations) + refits,
-        converged=bool(nb_seed.converged) and joint_converged and not at_bound,
+        converged=bool(nb_seed.converged) and joint_converged and not at_bound and reml_converged,
         cache=cache,
     )
     model._nb_profile_result = refreshed._published_with_data(

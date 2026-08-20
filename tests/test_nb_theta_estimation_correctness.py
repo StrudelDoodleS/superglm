@@ -359,6 +359,32 @@ class TestSmallThetaSurvivability:
         assert all(key > 0.0 for key in published.cache)
 
 
+class TestJointConvergenceHonesty:
+    """Review round 3, P2 (most serious): theta stationarity at an
+    unfinished REML fit is not a joint fixed point."""
+
+    def test_budget_exhausted_reml_is_not_published_as_converged(self):
+        """A max_reml_iter budget that exhausts must surface in the NB flag.
+
+        Warm-started alternation can bring theta to stationarity across
+        refits whose final REML attempt still reports converged=False (here:
+        the hi-freq fixture under max_reml_iter=1 reaches theta = 1.006, the
+        joint answer, while lambda's optimizer never finished). Publishing
+        converged=True there is the defect class this release exists to
+        remove - an unfinished estimate reporting success - reintroduced one
+        level up.
+        """
+        data = pd.read_csv(FIXTURES / "nb_worst.csv")
+        model = SuperGLM(
+            features={"x": CubicRegressionSpline(n_knots=20)},
+            family=NegativeBinomial("auto"),
+        )
+        model.fit_reml(data[["x"]], data["y"].to_numpy(dtype=np.float64), max_reml_iter=1)
+        assert model._reml_result.converged is False
+        result = model._nb_profile_result
+        assert result.converged is False
+
+
 class TestThetaFrozenBeforeReml:
     """Finding B1: theta was calibrated before REML at the configured
     smoothing and never revisited, converting lack-of-fit at lambda2=0.1
