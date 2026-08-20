@@ -323,8 +323,49 @@ class _ThetaSolve:
         return self.at_lower or self.at_upper
 
 
+#: Above this theta the profile score switches to its large-theta expansion.
+#: The naive form obtains an O(theta^-2) score by cancelling digamma,
+#: logarithm, and ratio terms whose leading parts are O(theta^-1) computed
+#: from O(log theta)-sized intermediates, so float64 loses the sign to
+#: roundoff around theta ~ 1e7-1e8 -- exactly the near-Poisson regime the
+#: widened bounds admit. At 1e5 the expansion's dropped psi tail is
+#: O(theta^-5) while the score itself is O(theta^-2): eleven orders of
+#: headroom, and the naive form is still accurate there, so the two branches
+#: agree to ~1e-9 relative across the switch.
+_THETA_SCORE_ASYMPTOTIC_MIN = 1e5
+
+
 def _theta_profile_score(y: NDArray, mu: NDArray, weights: NDArray, theta: float) -> float:
-    """Closed-form NB2 profile score dl/dtheta at fixed mu (Lawless 1987)."""
+    """Closed-form NB2 profile score dl/dtheta at fixed mu (Lawless 1987).
+
+    For large theta the direct expression cancels catastrophically: each of
+    ``digamma(y+theta) - digamma(theta)``, ``log(theta) - log(theta+mu)``,
+    and ``1 - (y+theta)/(mu+theta)`` is O(theta^-1) while their sum is
+    O(theta^-2), so beyond ~1e7 the sign that drives the bracketing solve is
+    roundoff rather than likelihood geometry. Above the switch point the
+    score is evaluated by a controlled expansion built from the asymptotic
+    psi series (Abramowitz & Stegun 6.3.18):
+
+        psi(theta+y) - psi(theta)
+            = log((theta+y)/theta) + (1/theta - 1/(theta+y))/2
+              + (1/theta^2 - 1/(theta+y)^2)/12 - O(theta^-4)
+
+    which combines with the remaining terms into
+
+        score_i = [log1p(x) - x] + y/(2 theta (theta+y))
+                  + (1/theta^2 - 1/(theta+y)^2)/12,
+        x = (y - mu)/(theta + mu),
+
+    every term individually O(theta^-2) with no cancellation: log1p(x) - x
+    is -x^2/2 + O(x^3) evaluated with error ~eps*|x|, negligible against the
+    other O(theta^-2) terms whenever it matters.
+    """
+    if theta >= _THETA_SCORE_ASYMPTOTIC_MIN:
+        shifted = theta + y
+        x = (y - mu) / (theta + mu)
+        core = np.log1p(x) - x
+        psi_tail = 0.5 * y / (theta * shifted) + (1.0 / theta**2 - 1.0 / shifted**2) / 12.0
+        return float(np.sum(weights * (core + psi_tail)))
     return float(
         np.sum(
             weights
