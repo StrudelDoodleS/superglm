@@ -124,6 +124,89 @@ class TestThetaWrongRootAndClamp:
         assert not result.converged
 
 
+class TestLargeThetaScoreStability:
+    """Review round 2, P1: the naive profile score cancels catastrophically
+    in the near-Poisson decades the widened bounds newly admit."""
+
+    @staticmethod
+    def _poisson_rows():
+        rng = np.random.default_rng(29)
+        n = 4000
+        mu = np.exp(1.2 + 0.8 * np.sin(2 * np.pi * rng.uniform(0, 1, n)))
+        y = rng.poisson(mu).astype(np.float64)
+        return y, mu, np.ones(n)
+
+    def test_large_theta_score_is_likelihood_geometry_not_roundoff(self):
+        """theta^2 * score must be a stable positive constant on Poisson data.
+
+        The true profile score on exactly-Poisson data is positive for every
+        theta (the likelihood increases toward the Poisson limit) and decays
+        as theta^-2. The naive digamma/log/ratio form obtains that O(th^-2)
+        value by cancelling O(th^-1) pieces computed from O(log th)-sized
+        intermediates: measured on this fixture it drifts to +661/th^2 at
+        1e7 and flips sign to -4854/th^2 at 1e8 - a bracketing solve reads
+        that flip as a root and publishes an arbitrary interior estimate
+        with converged=True, silently, exactly in the regime the widened
+        bounds enabled. The stable large-theta expansion holds
+        theta^2 * score at +316.88 through 1e9.
+        """
+        from superglm.profiling.nb import _theta_profile_score
+
+        y, mu, weights = self._poisson_rows()
+        scaled = {
+            theta: theta * theta * _theta_profile_score(y, mu, weights, theta)
+            for theta in (1e6, 1e7, 1e8)
+        }
+        for theta, value in scaled.items():
+            assert value > 0.0, f"score sign lost to roundoff at theta={theta:g}"
+        reference = scaled[1e6]
+        for theta, value in scaled.items():
+            assert value == pytest.approx(reference, rel=0.02), (
+                f"theta^2 * score is not stable at theta={theta:g}"
+            )
+
+    def test_branches_agree_where_both_are_accurate(self):
+        """The expansion must join the naive form seamlessly at the switch."""
+        from scipy.special import digamma
+
+        from superglm.profiling import nb as nb_module
+
+        y, mu, weights = self._poisson_rows()
+        theta = 2.0e4  # naive form still accurate; force the expansion here
+
+        def naive(theta_value):
+            return float(
+                np.sum(
+                    weights
+                    * (
+                        digamma(y + theta_value)
+                        - digamma(theta_value)
+                        + np.log(theta_value)
+                        + 1.0
+                        - np.log(theta_value + mu)
+                        - (y + theta_value) / (mu + theta_value)
+                    )
+                )
+            )
+
+        original = nb_module._THETA_SCORE_ASYMPTOTIC_MIN
+        try:
+            nb_module._THETA_SCORE_ASYMPTOTIC_MIN = 1.0
+            expansion = nb_module._theta_profile_score(y, mu, weights, theta)
+        finally:
+            nb_module._THETA_SCORE_ASYMPTOTIC_MIN = original
+        assert expansion == pytest.approx(naive(theta), rel=1e-6)
+
+    def test_poisson_data_reports_the_ceiling_honestly(self):
+        """With a trustworthy sign the solve walks to the bound and says so."""
+        from superglm.profiling.nb import _theta_ml
+
+        y, mu, weights = self._poisson_rows()
+        solve = _theta_ml(y, mu, weights, 1.0)
+        assert solve.at_upper
+        assert not solve.converged
+
+
 class TestThetaFrozenBeforeReml:
     """Finding B1: theta was calibrated before REML at the configured
     smoothing and never revisited, converting lack-of-fit at lambda2=0.1
