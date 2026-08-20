@@ -171,3 +171,38 @@ def test_packed_and_chunked_builds_agree() -> None:
     gram_chunked, rhs_chunked = centered_gram_rhs(dm=dm, W=W, mean_x=mean_x, z_centered=z_centered)
     np.testing.assert_allclose(gram_packed, gram_chunked, rtol=1e-9, atol=1e-10)
     np.testing.assert_allclose(rhs_packed, rhs_chunked, rtol=1e-9, atol=1e-10)
+
+
+def test_a_wide_categorical_support_is_rejected_before_it_is_materialised(monkeypatch):
+    """One wide block must fall back without building its dense support first.
+
+    A categorical block's anchor support is a dense ``(K + 1, K)`` identity and
+    its Gram costs O(K^3).  Once a crossed interaction builds as a categorical
+    block, ``K`` is ``(L1 - 1) * (L2 - 1)`` -- multiplicative in the parents'
+    cardinalities rather than additive.  The pairwise cell check cannot see
+    this case at all: with a single categorical block there is no pair to
+    compare, so nothing rejects the plan and the identity is both materialized
+    and cubed.
+    """
+    from superglm._group_matrix import _group_matrix_centered as centered
+
+    rng = np.random.default_rng(3)
+    n, levels = 400, 24
+    group = CategoricalGroupMatrix(rng.integers(-1, levels, size=n).astype(np.intp), levels)
+    dm = DesignMatrix([group], n, group.shape[1])
+    support_rows = levels + 1
+
+    W = rng.uniform(0.5, 2.0, n)
+    z = rng.normal(size=n)
+    z_centered = z - float(np.dot(W, z) / W.sum())
+
+    # A cap this block's own support exceeds, but that no PAIR could trip:
+    # there is only one support, so ``supports[i + 1:]`` is always empty.
+    monkeypatch.setattr(centered, "_MAX_PACKED_HIST_CELLS", support_rows * support_rows - 1)
+    assert centered.packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered) is None, (
+        "an oversized support must fall back, not be materialized and cubed"
+    )
+
+    # Directly under the cap it still builds, so the guard is not blanket-off.
+    monkeypatch.setattr(centered, "_MAX_PACKED_HIST_CELLS", support_rows * support_rows)
+    assert centered.packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered) is not None
