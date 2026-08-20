@@ -295,6 +295,31 @@ class TestScaleProfileUnit:
             finite_difference, rel=1e-3
         )
 
+    def test_sparse_positive_boundary_admits_power_dependent_profiles(self):
+        """The finite-profile test must use the Tweedie tail, not a Gaussian one.
+
+        A positive saturated row's density decays as phi**(-1/(p-1)) at large
+        phi, so the criterion's upper-tail slope is n_positive/(p-1) - Mp/2.
+        The first cut of the profiler tested 2*n_positive <= Mp (a 1/phi
+        tail - the very substitution the profiler exists to remove), which
+        rejected valid sparse-positive profiles: at p=1.5 one positive row
+        against nullity 3 has upper-tail slope +0.5 and an interior optimum,
+        yet raised ValueError.
+        """
+        from superglm.reml.scale import (
+            prepare_tweedie_reml_scale_data,
+            profile_tweedie_reml_scale,
+        )
+
+        data = prepare_tweedie_reml_scale_data(np.array([1.3]), np.array([1.0]), 1.5)
+        profiled = profile_tweedie_reml_scale(data, 4.0, 3.0)
+        assert np.isfinite(profiled.phi) and profiled.phi > 0.0
+        assert np.isfinite(profiled.criterion)
+        # Genuinely degenerate: 2*n_positive <= (p-1)*Mp has no interior
+        # optimum and must still refuse.
+        with pytest.raises(ValueError, match="no finite interior optimum"):
+            profile_tweedie_reml_scale(data, 4.0, 9.0)
+
     def test_custom_estimated_scale_family_warns_on_the_fallback(self):
         """A custom scale_known=False family must warn, not substitute silently."""
         from types import SimpleNamespace
