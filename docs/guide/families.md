@@ -129,6 +129,16 @@ print(result.theta_hat)  # estimated dispersion
 Here `y` contains raw counts, so exposure enters through the log offset rather
 than through `sample_weight`.
 
+With `NegativeBinomial("auto")`, `fit()` and `fit_reml()` estimate theta
+automatically. Under `fit_reml`, theta is first calibrated at the configured
+smoothing and then — since 0.29.0 — **re-estimated at the REML fit and
+alternated with warm-started refits to a joint fixed point**, because a theta
+frozen before smoothing selection absorbs lack-of-fit at the calibration
+smoothing into spurious overdispersion (biasing theta low and overstating
+`V(mu) = mu + mu²/theta`). The published `family.theta`,
+`model._nb_profile_result.theta_hat`, and the fit always describe the same
+final state.
+
 `estimate_theta()` uses the classical alternating scheme (Venables & Ripley
 2002, ch. 7.4): fit the GLM at the current theta, then update theta by a
 bracketed root find on the closed-form NB2 profile score given the fitted
@@ -310,3 +320,74 @@ result.profile_plot()  # dense profile curve; may fit additional uncached p valu
 `estimate_p()`, making it the cheap diagnostic. `profile_plot()` evaluates a dense
 grid and fits any uncached *p* values, so it can be substantially expensive when
 `phi_method="mle"`.
+
+## How REML treats the dispersion
+
+For the estimated-scale families — Gaussian, Gamma, and Tweedie — `fit_reml`
+profiles the dispersion out of the Laplace-approximate REML criterion using
+the family's **exact saturated log-likelihood** (Wood 2011, Eq. 4; Wood, Pya
+& Säfken 2016, §3.3). For Tweedie this matters structurally: the compound
+Poisson–gamma response has an atom at zero, so a zero row's saturated
+contribution is dispersion-free while positive rows carry the Dunn–Smyth
+series normalizer. Since 0.29.0 the criterion evaluates that likelihood
+exactly; earlier releases substituted a Gaussian-shaped
+`0.5·(n − Mp)·log(Dp)` term that overweighted the deviance arm in proportion
+to the zero fraction, which mis-set smoothing on zero-heavy Tweedie fits and
+could run weakly identified variance components to the boundary. Poisson,
+negative binomial, and binomial fix `phi = 1` and never enter this profile.
+
+A custom, user-supplied distribution with `scale_known=False` has no exact
+profiler; `fit_reml` falls back to the Gaussian-shaped substitution and warns
+that smoothing selection is approximate for such a family.
+
+## Which dispersion a Tweedie fit publishes
+
+Three entry points publish three different (individually standard) Tweedie
+dispersion estimators. They agree to a few percent on well-behaved data but
+are **not** interchangeable:
+
+- **`fit_reml`** publishes the Pearson estimator
+  `phi = sum(w·(y−mu)²/V(mu)) / (n − edf)` in `result.phi`. The REML
+  criterion internally uses the exact profile MLE to choose the smoothing;
+  the published value remains Pearson.
+- **`estimate_p`** publishes the profile **MLE** of phi, re-profiled at the
+  published fit's mean (`result.phi_hat`).
+- The **QP monotone passthrough** path publishes the deviance-based
+  `Dp / (n − Mp)`.
+
+This inventory is deliberate documentation of the current state, not an
+endorsement: a future release may unify them (the exact MLE is already
+computed internally). Until then, compare dispersions across entry points
+only with this table in hand. For reference, mgcv's default reported scale
+is a Fletcher-(2012)-improved Pearson estimator, which is a fourth
+convention again.
+
+## What AIC/BIC count — and what they do not
+
+`metrics().aic` is `−2·loglik(mu_hat, phi_hat) + 2·edf` with `edf = tr(F)`,
+and BIC uses the same likelihood with a `log(n)·edf` complexity term (`n` is
+the family's likelihood size: `sum(w)` for frequency-weighted families,
+the row count for Tweedie prior weights). Two deliberate limitations:
+
+- **No estimated family parameter is counted.** An auto-estimated NB2 theta,
+  an estimated Tweedie power `p`, and the estimated dispersion `phi` add
+  zero to the complexity term. Within one family this matches statsmodels
+  (which never counts the scale) though not R's `logLik.glm` (which counts
+  the Gaussian sigma); across families it means a
+  `Poisson` vs `NegativeBinomial("auto")` comparison, or a fixed-`p` vs
+  `estimate_p` comparison, gives the model with the extra estimated
+  parameter that parameter for free. Penalize such comparisons by hand
+  (one parameter ≈ 2 AIC points) or compare on held-out deviance.
+- **No smoothing-uncertainty correction.** `edf = tr(F)` is the conditional
+  effective dimension given the selected lambdas; the Wood–Pya–Säfken (2016)
+  corrected AIC, which accounts for smoothing-parameter estimation, is not
+  implemented.
+
+## No quasi families
+
+There is no quasi-Poisson or quasi-binomial path: Poisson and Binomial pin
+`phi = 1` with no overdispersion escape hatch. For overdispersed counts use
+`NegativeBinomial("auto")` (theta absorbs the overdispersion) or a Tweedie
+in `1 < p < 2`; for overdispersed binary data no shipped family applies.
+`Binomial` is Bernoulli-only by contract — grouped binomial data must be
+expanded to one row per trial (or use frequency weights on 0/1 rows).
