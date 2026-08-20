@@ -1427,6 +1427,10 @@ def _fit_pirls_inner(
             pinned = bool(np.any((retained.eta != retained.eta_unclipped) & (weights > 0)))
             exhausted_stagnant = (
                 not converged
+                # Only a real budget makes exhaustion-with-stagnation
+                # evidence of a drift; warm-started micro-budget solves
+                # exhaust theirs by construction (see irls_direct).
+                and max_iter_outer >= 10
                 and outer + 1 >= max_iter_outer
                 and not step_rejected
                 and objective_relative_change is not None
