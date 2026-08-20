@@ -554,20 +554,49 @@ def add_interaction(
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _penalty_dimension(info: GroupInfo, n_cols: int) -> int:
-    """The dimension the penalty should price a group at.
+def _priced_group_dimension(
+    info: GroupInfo, n_cols: int, group_pricing: str
+) -> tuple[int, int | None]:
+    """``(p_g, penalty_dim)``: what the penalty prices a group at, and its stamp.
 
-    Normally the emitted width.  A spec that withholds columns the design
-    cannot identify -- an interaction cell no row occupies, or one that is an
-    exact linear combination of the main effects beside it -- reports the
-    width it spans through ``penalty_width``.  Pricing such a group at its
-    emitted width would let the same ``lambda1`` buy less shrinkage purely
-    because a structurally dead column was dropped, so the group-lasso weight
-    and the df allocation both read this instead.
+    A spec that withholds columns the design cannot identify -- an
+    interaction cell no row occupies, or one that is an exact linear
+    combination of the main effects beside it -- reports the width the term
+    SPANS through ``info.penalty_width``.  ``group_pricing`` decides what the
+    penalty and the df ledger do with that report:
+
+    - ``"rank"`` (default): price at the emitted width, the group's
+      identifiable dimension.  The ``sqrt(p_g)`` convention is calibrated to
+      the df of the group's score statistic under a standing full-rank
+      assumption (Yuan & Lin 2006 orthonormalise each block, and their
+      two-way ANOVA example carries ``(I-1)(J-1)``, not ``I*J``; Meier, van
+      de Geer & Buhlmann 2008 name the quantity ``df_g`` and count a 4-level
+      factor as 3).  A structurally-zero column contributes nothing to that
+      score (Lounici, Pontil, Tsybakov & van de Geer 2011 build the penalty
+      level from trace/eigenvalue functionals of the group Gram), and the
+      rank-deficient generalisations price the identifiable space only
+      (Breheny & Huang 2015 sec. 2.1 fit "in a lower-dimensional parameter
+      space"; Simon & Tibshirani 2012's ridged weight gives a zero singular
+      value exactly zero df).  The stamp is ``None`` so
+      ``GroupSlice.penalty_size`` follows the emitted width everywhere the
+      weight and the df ledger read it.
+    - ``"spanned"``: price at the width the term spans (the historical
+      behaviour), so withholding a structurally dead column changes nothing
+      the penalty or the df ledger sees, and pruning is a pure
+      reparametrisation of the fit.
+
+    Both consumers -- the group-lasso ``sqrt(p_g)`` weight and the
+    Breheny-Huang df allocation -- read this one decision, so they cannot
+    disagree about whether a dead column is a parameter.
     """
-    if info.penalty_width is None:
-        return int(n_cols)
-    return int(info.penalty_width)
+    if info.penalty_width is None or group_pricing == "rank":
+        return int(n_cols), None
+    return int(info.penalty_width), int(info.penalty_width)
+
+
+def _validate_group_pricing(group_pricing: str) -> None:
+    if group_pricing not in ("rank", "spanned"):
+        raise ValueError(f"group_pricing must be 'rank' or 'spanned', got {group_pricing!r}")
 
 
 def _process_info(
@@ -871,6 +900,7 @@ def build_design_matrix(
     alias_prune: bool = True,
     separation: str = "warn",
     selection_penalty: object | None = None,
+    group_pricing: str = "rank",
 ) -> BuildResult:
     """Build features, groups, and design matrix from specs.
 
@@ -895,7 +925,14 @@ def build_design_matrix(
     ``selection_penalty`` is the model's lambda1-style penalty object when a
     nonzero lambda1 will reach this fit, else ``None``; terms that penalty
     targets have bounded optima and are exempt from the scan.
+
+    ``group_pricing`` decides the dimension the selection penalty and the
+    fallback df ledger price a group at when its spec emits fewer columns
+    than the term spans: ``"rank"`` (default) prices the emitted,
+    identifiable width; ``"spanned"`` reproduces the historical behaviour of
+    pricing the width the term spans.  See ``_priced_group_dimension``.
     """
+    _validate_group_pricing(group_pricing)
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
     distribution = resolve_distribution(family)
@@ -1211,13 +1248,14 @@ def build_design_matrix(
 
             group_matrices.append(gm)
             subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
+            priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
             groups.append(
                 GroupSlice(
                     name=f"{name}{subgroup_suffix}",
                     start=col_offset,
                     end=col_offset + n_cols,
-                    weight=np.sqrt(_penalty_dimension(info, n_cols)),
-                    penalty_dim=info.penalty_width,
+                    weight=np.sqrt(priced),
+                    penalty_dim=penalty_dim,
                     penalized=info.penalized,
                     feature_name=name,
                     subgroup_type=info.subgroup_name,
@@ -1334,13 +1372,14 @@ def build_design_matrix(
 
                     group_matrices.append(gm)
                     subgroup_suffix = f":{info.subgroup_name}" if info.subgroup_name else ""
+                    priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
                     groups.append(
                         GroupSlice(
                             name=f"{iname}{subgroup_suffix}",
                             start=col_offset,
                             end=col_offset + n_cols,
-                            weight=np.sqrt(_penalty_dimension(info, n_cols)),
-                            penalty_dim=info.penalty_width,
+                            weight=np.sqrt(priced),
+                            penalty_dim=penalty_dim,
                             penalized=info.penalized,
                             feature_name=iname,
                             subgroup_type=info.subgroup_name,
@@ -1361,13 +1400,14 @@ def build_design_matrix(
                         r_inv_dict[level] = r_inv
 
                     group_matrices.append(gm)
+                    priced, penalty_dim = _priced_group_dimension(info, n_cols, group_pricing)
                     groups.append(
                         GroupSlice(
                             name=f"{iname}[{level}]",
                             start=col_offset,
                             end=col_offset + n_cols,
-                            weight=np.sqrt(_penalty_dimension(info, n_cols)),
-                            penalty_dim=info.penalty_width,
+                            weight=np.sqrt(priced),
+                            penalty_dim=penalty_dim,
                             penalized=True,
                             feature_name=iname,
                             constraints=info.constraints,
@@ -1382,12 +1422,13 @@ def build_design_matrix(
             # Single group (CategoricalInteraction, NumericCategorical,
             # NumericInteraction, PolynomialInteraction, TensorInteraction)
             gm, r_inv, n_cols = _process_info(result, **pi_kwargs)
+            priced, penalty_dim = _priced_group_dimension(result, n_cols, group_pricing)
             g_new = GroupSlice(
                 name=iname,
                 start=col_offset,
                 end=col_offset + n_cols,
-                weight=np.sqrt(_penalty_dimension(result, n_cols)),
-                penalty_dim=result.penalty_width,
+                weight=np.sqrt(priced),
+                penalty_dim=penalty_dim,
                 penalized=True,
                 feature_name=iname,
                 constraints=result.constraints,

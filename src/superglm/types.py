@@ -203,15 +203,18 @@ class GroupInfo:
     factor_smooth_transform: NDArray | None = None
     factor_smooth_levels: tuple[Any, ...] | None = None
     repeated_penalty_components: tuple[tuple[str, NDArray], ...] | None = None
-    # The dimension the PENALTY should price this group at, when a spec emits
-    # fewer columns than the term nominally spans.  ``n_cols`` is the emitted
-    # width and always governs the block's algebra; ``penalty_width`` governs
-    # only the quantities that price the group as a whole -- ``sqrt(p_g)`` in
-    # the group-lasso weight and the Breheny-Huang degree-of-freedom
-    # allocation.  Set it when the withheld columns are structurally
-    # unidentifiable (an empty or exactly aliased interaction cell), so that
-    # withholding them buys rank rather than shrinkage.  ``None`` means "the
-    # emitted width", which is right for every spec that emits what it spans.
+    # The width this term SPANS, reported when a spec emits fewer columns
+    # than that (an empty or exactly aliased interaction cell withheld as
+    # structurally unidentifiable).  ``n_cols`` is the emitted width and
+    # always governs the block's algebra.  The builder decides what the
+    # penalty does with this report via ``group_pricing``
+    # (``dm_builder._priced_group_dimension``): under ``"rank"`` (default)
+    # the ``sqrt(p_g)`` group-lasso weight and the Breheny-Huang df
+    # allocation price the emitted, identifiable width and this report is
+    # informational; under ``"spanned"`` they price this width, so that
+    # withholding a dead column changes nothing the penalty sees.  ``None``
+    # means "the emitted width", right for every spec that emits what it
+    # spans.
     penalty_width: int | None = None
 
     def __post_init__(self):
@@ -317,9 +320,11 @@ class GroupSlice:
     monotone_engine: str | None = None
     scop_reparameterization: SCOPSolverReparam | None = None
     # Dimension the penalty prices this group at; ``None`` means ``size``.
-    # See ``GroupInfo.penalty_width``: it differs from ``size`` only when the
-    # spec withheld columns the design cannot identify.  Read it through
-    # ``penalty_size``, never directly.
+    # Stamped only under ``group_pricing="spanned"`` builds, where it carries
+    # ``GroupInfo.penalty_width`` (the width the term spans) for a spec that
+    # withheld columns the design cannot identify; under the default
+    # ``"rank"`` pricing it stays ``None`` and the penalty follows the
+    # emitted width.  Read it through ``penalty_size``, never directly.
     penalty_dim: int | None = None
 
     def __post_init__(self):
@@ -334,11 +339,13 @@ class GroupSlice:
     def penalty_size(self) -> int:
         """Group dimension for penalty and degree-of-freedom purposes.
 
-        Equals :attr:`size` unless the spec emitted fewer columns than the
-        term spans because the missing ones are structurally unidentifiable.
-        Use this wherever ``p_g`` enters a penalty formula -- the group-lasso
-        ``sqrt(p_g)`` weight, the Breheny-Huang df allocation -- and
-        :attr:`size` wherever the block's own algebra is meant.
+        Equals :attr:`size` unless the build ran under
+        ``group_pricing="spanned"`` and the spec emitted fewer columns than
+        the term spans because the missing ones are structurally
+        unidentifiable.  Use this wherever ``p_g`` enters a penalty formula
+        -- the group-lasso ``sqrt(p_g)`` weight, the Breheny-Huang df
+        allocation -- and :attr:`size` wherever the block's own algebra is
+        meant.
         """
         return self.size if self.penalty_dim is None else int(self.penalty_dim)
 

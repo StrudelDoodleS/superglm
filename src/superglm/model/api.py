@@ -87,6 +87,7 @@ class SuperGLM:
         convergence: str = "deviance",
         retain_fit_state: bool = True,
         separation: str = "warn",
+        group_pricing: Literal["rank", "spanned"] = "rank",
     ):
         """
         Parameters
@@ -189,6 +190,19 @@ class SuperGLM:
             governs the in-solver backstop that fires when an exhausted,
             stagnant IRLS run shows the extreme-working-weight signature of
             separation the build scan cannot see.
+        group_pricing : {"rank", "spanned"}
+            Dimension ``p_g`` at which the selection penalty and the fallback
+            df ledger price a group whose spec emits fewer columns than the
+            term spans (a categorical interaction with empty or nested
+            cells).  ``"rank"`` (default) prices the emitted, identifiable
+            width, following the group-lasso literature's derivation of
+            ``sqrt(p_g)`` from the df of the group's score statistic.
+            ``"spanned"`` prices the width the term spans -- the historical
+            behaviour -- so cell pruning is a pure reparametrisation of the
+            fit.  The choice moves fitted results only for models with
+            ``selection_penalty > 0`` and such an interaction, and moves the
+            reported ``effective_df``/``phi``/AIC/BIC of any fit whose df
+            falls back to the Breheny-Huang allocation.
         """
         if splines is not None:
             import warnings
@@ -222,6 +236,7 @@ class SuperGLM:
             convergence=convergence,
             retain_fit_state=retain_fit_state,
             separation=separation,
+            group_pricing=group_pricing,
         )
 
     def __repr__(self) -> str:

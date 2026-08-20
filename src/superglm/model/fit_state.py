@@ -109,6 +109,11 @@ class ModelConfig:
     # frame (cross_validate) resolves one level universe per categorical term
     # and every attempt materialized from this configuration binds to it.
     level_bindings: tuple[tuple[Hashable, LevelBinding], ...] | None = None
+    # Dimension the selection penalty and the fallback df ledger price a
+    # group at when its spec emits fewer columns than the term spans.  New
+    # models default to "rank"; configurations pickled before the field
+    # existed restore to "spanned", the behaviour they were fitted under.
+    group_pricing: str = "rank"
 
     def __getattr__(self, name: str) -> object:
         """Supply fields absent from models pickled before config migrations."""
@@ -129,6 +134,13 @@ class ModelConfig:
                 "features_explicit",
                 bool(state.get("feature_templates", ())),
             )
+        if "group_pricing" not in state:
+            # Pre-field pickles were fitted under spanned pricing; restoring
+            # them must reproduce the behaviour they recorded, not adopt the
+            # new default.  This backfill is the only migration mechanism:
+            # the field's dataclass default is a class attribute, so a
+            # missing instance value would silently resolve to "rank".
+            object.__setattr__(self, "group_pricing", "spanned")
 
     @classmethod
     def capture(cls, model) -> ModelConfig:
@@ -166,6 +178,7 @@ class ModelConfig:
             retain_fit_state=bool(model._retain_fit_state),
             separation=str(getattr(model, "_separation", "warn")),
             level_bindings=copy.deepcopy(getattr(model, "_level_bindings", None)),
+            group_pricing=str(getattr(model, "_group_pricing", "spanned")),
         )
 
     def with_value(self, **changes: object) -> ModelConfig:
@@ -208,6 +221,7 @@ class ModelConfig:
             "convergence": self.convergence,
             "retain_fit_state": self.retain_fit_state,
             "separation": self.separation,
+            "group_pricing": self.group_pricing,
         }
 
     def materialize(self, model_type):
@@ -227,6 +241,7 @@ class ModelConfig:
             "_direct_solve": self.direct_solve,
             "_discrete": self.discrete,
             "_n_bins": copy.deepcopy(self.n_bins),
+            "_group_pricing": self.group_pricing,
             "_tol": self.tol,
             "_max_iter": self.max_iter,
             "_retain_fit_state": self.retain_fit_state,
