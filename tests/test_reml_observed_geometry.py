@@ -2323,7 +2323,10 @@ def test_qp_passthrough_tweedie_scale_uses_terminal_penalty_nullity() -> None:
         return_evaluation=True,
     )
     assert isinstance(evaluation, REMLObjectiveEvaluation)
-    assert evaluation.profiled_scale is None
+    # The evaluation itself now carries the exact Tweedie scale profile
+    # (0.29.0, audit finding A); the *published* passthrough dispersion
+    # stays the deviance form with the terminal identified nullity.
+    assert evaluation.profiled_scale is not None
     assert evaluation.penalty_nullity is not None
     expected_phi = evaluation.penalized_deviance / (n - evaluation.penalty_nullity)
 
@@ -3271,12 +3274,17 @@ class TestModeCertifiesAtTheRoundOffFloor:
     """
 
     @staticmethod
-    def _burn_cost_fixture(n=20_000, k=3, seed=0, phi=150.0, p=1.5):
+    def _burn_cost_fixture(n=20_000, k=3, seed=0, phi=225.0, p=1.5):
         """A small imitation of a burn-cost book, at the scale that matters.
 
         The round-off floor scales with the magnitude of the weighted sums,
         so the response scale is load-bearing: shrink ``phi`` and the mean
         and the floor drops back under the ceiling and the bug vanishes.
+        ``phi`` was re-derived from 150 to 225 for 0.29.0: the exact Tweedie
+        scale profile changes the lambda path the outer optimizer walks, so
+        which PIRLS solves park at the round-off floor redistributed (2 of 8
+        draws stalled at phi=150 under the exact criterion). 225 restores
+        the sweep to its calibrated 6-of-8 operating point.
         """
         import pandas as pd
 
@@ -3400,7 +3408,9 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert len(stalled) >= 5, (
             f"MEASURED NOW: {len(stalled)} of 8 draws exhausted a PIRLS budget "
             f"(seeds {stalled}), against a threshold of 5. MEASURED THEN: 6 of "
-            "8, on numpy 2.4.2 / scipy 1.18.0, 2026-08-18 -- a baseline, not a "
+            "8, on numpy 2.4.2 / scipy 1.18.0, 2026-08-20, phi=225 under the "
+            "exact Tweedie scale profile (re-derived from the 2026-08-18 "
+            "phi=150 baseline) -- a baseline, not a "
             "set this run should have reproduced, because WHICH draw stalls "
             "moves with the numeric stack. Below the threshold most of the "
             "sweep no longer reaches the round-off floor it exists to regress, "
