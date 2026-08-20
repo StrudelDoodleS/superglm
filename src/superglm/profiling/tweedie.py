@@ -457,6 +457,26 @@ def _tweedie_positive_unit_deviance(y: NDArray, mu: NDArray, p: float) -> NDArra
         np.asarray(y, dtype=np.float64),
         np.asarray(mu, dtype=np.float64),
     )
+    zero_mask = y_array == 0.0
+    if np.any(zero_mask):
+        # A zero response has the closed form 2 mu**(2-p) / (2-p). The general
+        # machinery below reproduces it through its delta == -1 recovery
+        # branch (log(0), exp) at several transcendental evaluations per row;
+        # on zero-inflated fits those rows are the bulk of every deviance
+        # evaluation. The two routes are bitwise identical: the recovery
+        # branch's g reduces to exactly 0.0 - (0.0 - 1.0)/(2.0 - p) and both
+        # multiply the same power the same way.
+        deviance = np.empty_like(mu_array)
+        with np.errstate(over="ignore"):
+            deviance[zero_mask] = 2.0 * np.power(mu_array[zero_mask], 2.0 - p) * (1.0 / (2.0 - p))
+        positive_mask = ~zero_mask
+        if np.any(positive_mask):
+            deviance[positive_mask] = _tweedie_positive_unit_deviance(
+                y_array[positive_mask],
+                mu_array[positive_mask],
+                p,
+            )
+        return deviance
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         delta = (y_array - mu_array) / mu_array
     extreme_positive = np.isposinf(delta)
