@@ -3274,17 +3274,19 @@ class TestModeCertifiesAtTheRoundOffFloor:
     """
 
     @staticmethod
-    def _burn_cost_fixture(n=20_000, k=3, seed=0, phi=225.0, p=1.5):
+    def _burn_cost_fixture(n=20_000, k=3, seed=0, phi=150.0, p=1.5):
         """A small imitation of a burn-cost book, at the scale that matters.
 
         The round-off floor scales with the magnitude of the weighted sums,
         so the response scale is load-bearing: shrink ``phi`` and the mean
         and the floor drops back under the ceiling and the bug vanishes.
-        ``phi`` was re-derived from 150 to 225 for 0.29.0: the exact Tweedie
-        scale profile changes the lambda path the outer optimizer walks, so
-        which PIRLS solves park at the round-off floor redistributed (2 of 8
-        draws stalled at phi=150 under the exact criterion). 225 restores
-        the sweep to its calibrated 6-of-8 operating point.
+        Whether any given draw's natural floor lands above the 1e-10 step
+        ceiling is a razor-edge property of the numeric stack and of the
+        lambda path the criterion walks — measured across two pinned stacks
+        and a 100x response-scale ladder, 2 to 6 of 8 seeded draws stall
+        with the stalling set shuffling — so no test below counts natural
+        stalls; the gate's engagement is regressed deterministically
+        instead (see test_budget_exhausted_pirls_defers_to_the_certificate).
         """
         import pandas as pd
 
@@ -3325,11 +3327,13 @@ class TestModeCertifiesAtTheRoundOffFloor:
     def _recording_pirls():
         """Record ``(gate, termination reason)`` for every observed-geometry PIRLS call.
 
-        A fixture that stops stalling stops testing anything, and it can stop
-        silently: the round-off floor moves with the numeric stack, so a draw
-        that exercised the defect on one numpy can certify on the next. The
-        tests below assert the stall was actually reached, so a fixture that
-        goes vacuous fails loudly instead of passing for the wrong reason.
+        A fixture that never stalls tests nothing, and whether a draw stalls
+        naturally moves with the numeric stack: the round-off floor shifts
+        with numpy and the BLAS, so a draw that exercised the defect on one
+        stack can certify on the next. The deferral is therefore regressed
+        by driving budget exhaustion deterministically (a sub-convergence
+        ``max_pirls_iter``) rather than by counting which draws happen to
+        reach their natural floor.
 
         Three gates defer to the certificate and each reads a DIFFERENT
         module-level ``fit_irls_direct``: ``reml/direct.py`` holds the
@@ -3382,41 +3386,52 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert model.reml_diagnostics()["converged"] is True
         assert np.all(np.isfinite(model.predict(frame, offset=offset)))
 
-    def test_the_sweep_still_reaches_the_stall_it_regresses(self):
-        """Guard against the fixture going vacuous -- see ``_recording_pirls``.
+    def test_budget_exhausted_pirls_defers_to_the_certificate(self):
+        """The gate's deferral, engaged deterministically on every stack.
 
-        Counted per seed and held to a majority. A sum over the whole sweep --
-        over draws, and over every PIRLS call within a draw -- lets one stall
-        anywhere stand in for all eight: seeds 1 and 3 never stall here and
-        both pass against the unfixed code, so two of the eight cases above
-        already regress nothing while a summed count reports the fixture
-        healthy. The threshold is a majority rather than a named set of seeds
-        because WHICH draw stalls is decided by a round-off floor that moves
-        with numpy and the BLAS. Pinning individual seeds would red on a stack
-        where the defect is merely differently distributed; a majority still
-        catches the failure that matters, the fixture going vacuous everywhere.
+        The natural round-off stall has no stack-invariant operating point:
+        whether a draw's attainable floor sits above the 1e-10 step ceiling
+        is decided by the numeric stack and by the lambda path the criterion
+        walks (measured 6-of-8 stalling draws on one pinned stack and
+        2-of-8 on another at the same fixture scale, and 4-6 of 8 with the
+        stalling set shuffling across a 100x response-scale ladder). A count
+        of natural stalls is therefore a coin flip, not a regression test.
+
+        This test forces the same terminal state the floor produces —
+        PIRLS exhausting its budget with the step test never having fired —
+        by running the fit under a sub-convergence iteration budget. The
+        margins are arithmetic, not floating-point: the cold-start candidate
+        PIRLS needs ~100 iterations on this fixture, so a budget of 8
+        exhausts it with a >10x margin on any stack, while the warm-started
+        line-search and terminal calls converge in 1-4 iterations, leaving
+        the published mode certifiable (terminal KKT residual ~1e-15
+        against the 1e-9 bar, seven orders of margin). Reverting the fix —
+        letting the step-length flag veto the mode instead of deferring to
+        the certificate — fails this on every stack, every run.
         """
-        stalled = []
-        for seed in range(8):
-            frame, y, weight, offset = self._burn_cost_fixture(seed=seed)
-            with self._recording_pirls() as records:
-                self._model().fit_reml(
-                    frame, y, sample_weight=weight, offset=offset, max_reml_iter=30
-                )
-            if any(reason == "max_iter" for _, reason in records):
-                stalled.append(seed)
-        assert len(stalled) >= 5, (
-            f"MEASURED NOW: {len(stalled)} of 8 draws exhausted a PIRLS budget "
-            f"(seeds {stalled}), against a threshold of 5. MEASURED THEN: 6 of "
-            "8, on numpy 2.4.2 / scipy 1.18.0, 2026-08-20, phi=225 under the "
-            "exact Tweedie scale profile (re-derived from the 2026-08-18 "
-            "phi=150 baseline) -- a baseline, not a "
-            "set this run should have reproduced, because WHICH draw stalls "
-            "moves with the numeric stack. Below the threshold most of the "
-            "sweep no longer reaches the round-off floor it exists to regress, "
-            "and the cases above are passing on draws that would pass against "
-            "the unfixed gate too."
+        frame, y, weight, offset = self._burn_cost_fixture(seed=0)
+        with self._recording_pirls() as records:
+            model = self._model()
+            model.fit_reml(
+                frame,
+                y,
+                sample_weight=weight,
+                offset=offset,
+                max_reml_iter=30,
+                max_pirls_iter=8,
+            )
+
+        stalled_purposes = {purpose for purpose, reason in records if reason == "max_iter"}
+        assert "reml_candidate" in stalled_purposes, (
+            "the sub-convergence budget must exhaust the cold-start candidate "
+            f"PIRLS; budget-exhausted purposes: {sorted(stalled_purposes)}"
         )
+        assert model.reml_diagnostics()["converged"] is True
+        assert np.all(np.isfinite(model.predict(frame, offset=offset)))
+        from superglm.reml.observed_geometry import observed_mode_certification_bar
+
+        residual = model._reml_profile["reml_terminal_observed_mode_residual"]
+        assert residual <= observed_mode_certification_bar()
 
     def test_the_recorder_watches_every_gate_that_defers(self):
         """The terminal publication refit is a gate too, with its own binding.
