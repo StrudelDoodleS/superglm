@@ -1020,14 +1020,15 @@ class CategoricalInteraction:
                 self._pairs = [self._pairs[i] for i in kept]
                 n_pairs = len(kept)
 
-        # The penalty must keep pricing this block at the width the term
-        # SPANS, not the width it emits.  A pruned cell is structurally
-        # unidentifiable -- its coefficient is exactly zero in the unpruned
-        # parametrisation -- so dropping it is meant to buy rank, not
-        # shrinkage.  Leaving the group-lasso ``sqrt(p_g)`` weight to follow
-        # the emitted width would make the same ``lambda1`` shrink a pruned
-        # block less than an unpruned one, which is a change in the fit and
-        # not a reparametrisation.
+        # Report the width this term SPANS alongside the emitted width.  A
+        # pruned cell is structurally unidentifiable -- its coefficient is
+        # exactly zero in the unpruned parametrisation -- so the emitted
+        # width is the block's identifiable rank.  The spec only REPORTS
+        # both; whether the group-lasso ``sqrt(p_g)`` weight and the df
+        # ledger price the rank (``group_pricing="rank"``, the default) or
+        # the spanned width (``"spanned"``, under which pruning is a pure
+        # reparametrisation of the fit) is the builder's decision in
+        # ``dm_builder._priced_group_dimension``.
         return GroupInfo(
             columns=None,
             n_cols=n_pairs,

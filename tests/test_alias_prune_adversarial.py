@@ -459,20 +459,21 @@ class TestAliasDropVersusEmptyDrop:
     # Only grids with an EMPTY cell still prune while a selection penalty
     # suppresses the alias half; an alias-only grid emits its full width there.
     @pytest.mark.parametrize("cells", [EMPTY_ONLY, BOTH])
-    def test_group_lasso_weight_follows_the_spanned_width_not_the_emitted_one(self, cells):
-        """The group must be priced at the width it SPANS.
+    def test_group_lasso_weight_follows_the_spanned_width_under_spanned_pricing(self, cells):
+        """``group_pricing="spanned"`` prices the group at the width it SPANS.
 
         ``GroupSlice.weight`` is ``sqrt(p_g)`` and the group penalty is
-        ``lambda1 * weight * ||beta_g||``.  If ``p_g`` followed the emitted
-        width, pruning would narrow the group and the same lambda1 would buy
-        less shrinkage -- a change in the fit, not a reparametrisation.  The
-        pruned columns are structurally unidentifiable, so the block still
-        spans the full non-base grid and is priced at it.
+        ``lambda1 * weight * ||beta_g||``.  Under spanned pricing -- the
+        historical behaviour, kept as the compatibility mode -- ``p_g`` is
+        the full non-base grid, so pruning never narrows the group and the
+        same lambda1 buys the same shrinkage: pruning is a pure
+        reparametrisation.  The default ``"rank"`` pricing deliberately
+        breaks this (see ``TestRankPricingDefault``).
         """
         X, y = _frame(cells)
-        pruned = _fit(X, y, family="gaussian", selection_penalty=0.5)
+        pruned = _fit(X, y, family="gaussian", selection_penalty=0.5, group_pricing="spanned")
         with unpruned_interaction():
-            unpruned = _fit(X, y, family="gaussian", selection_penalty=0.5)
+            unpruned = _fit(X, y, family="gaussian", selection_penalty=0.5, group_pricing="spanned")
         g_pruned = next(g for g in pruned._groups if g.feature_name == "c1:c2")
         g_unpruned = next(g for g in unpruned._groups if g.feature_name == "c1:c2")
         spec = pruned._interaction_specs["c1:c2"]
@@ -493,8 +494,13 @@ class TestAliasDropVersusEmptyDrop:
 
     @pytest.mark.parametrize("cells", [EMPTY_ONLY, ALIAS_ONLY])
     def test_pruning_is_fit_invariant_under_a_selection_penalty(self, cells):
+        # Fit invariance of pruning is the spanned-pricing contract; the
+        # default rank pricing prices the emitted width, so there the pruned
+        # arm is deliberately shrunk less (see TestRankPricingDefault).
         X, y = _frame(cells)
-        _, _, p_pruned, p_unpruned = _ab(X, y, family="gaussian", selection_penalty=0.5)
+        _, _, p_pruned, p_unpruned = _ab(
+            X, y, family="gaussian", selection_penalty=0.5, group_pricing="spanned"
+        )
         np.testing.assert_allclose(p_pruned, p_unpruned, rtol=1e-9, atol=1e-12)
 
     def test_the_alias_prune_stands_down_under_a_selection_penalty(self):
@@ -547,16 +553,21 @@ class TestAliasDropVersusEmptyDrop:
         model.fit_path(X, y, n_lambda=4)
         assert model._interaction_specs["c1:c2"]._pruned_pairs == []
 
-    def test_no_selection_penalty_gap_at_any_lambda1(self):
-        """The gap this file used to pin, across the lambda1 range that showed it.
+    def test_no_selection_penalty_gap_at_any_lambda1_under_spanned_pricing(self):
+        """Under spanned pricing the pruned/unpruned gap sits at round-off.
 
-        It ran 1.2e-4 relative at lambda1=0.05 and rose monotonically to
-        5.7e-3 at lambda1=3.2 while ``sqrt(p_g)`` followed the emitted width.
-        Every one of those must now be at round-off.
+        Before #338 the gap ran 1.2e-4 relative at lambda1=0.05 rising to
+        5.7e-3 at lambda1=3.2 on this fixture, because ``sqrt(p_g)``
+        followed the emitted width while pruning was billed as a
+        reparametrisation.  Spanned pricing keeps that reparametrisation
+        contract; the default rank pricing re-opens the gap on purpose and
+        prices the emitted width as the group's identifiable rank.
         """
         X, y = _frame(EMPTY_ONLY)
         for lam in (0.05, 0.5, 3.2):
-            _, _, p_pruned, p_unpruned = _ab(X, y, family="gaussian", selection_penalty=lam)
+            _, _, p_pruned, p_unpruned = _ab(
+                X, y, family="gaussian", selection_penalty=lam, group_pricing="spanned"
+            )
             gap = np.abs(p_pruned - p_unpruned).max() / np.abs(p_unpruned).max()
             assert gap < 1e-9, (lam, gap)
 
@@ -565,11 +576,13 @@ class TestAliasDropVersusEmptyDrop:
     @pytest.mark.parametrize("cells", [EMPTY_ONLY, BOTH])
     def test_auto_selection_penalty_resolves_to_the_same_lambda1(self, cells):
         """``selection_penalty="auto"`` calibrates off lambda_max, which reads
-        the group weights.  A weight that followed the emitted width would move
-        the whole path, not just the shrinkage at one lambda1."""
+        the group weights.  Under spanned pricing pruning leaves every weight
+        unchanged, so the resolved lambda1 and the whole path stay put; under
+        the default rank pricing a pruned argmax group moves lambda_max by
+        exactly sqrt(spanned/emitted) (see TestRankPricingDefault)."""
         X, y = _frame(cells)
         pruned, unpruned, p_pruned, p_unpruned = _ab(
-            X, y, family="gaussian", selection_penalty="auto"
+            X, y, family="gaussian", selection_penalty="auto", group_pricing="spanned"
         )
         assert pruned._interaction_specs["c1:c2"]._pruned_pairs
         np.testing.assert_allclose(p_pruned, p_unpruned, rtol=1e-9, atol=1e-12)
@@ -586,12 +599,13 @@ class TestAliasDropVersusEmptyDrop:
         and with it ``phi``, hence every standard error and every information
         criterion -- on a change that is supposed to be a reparametrisation.
         At lambda1=0 there is no such curvature and both arms already agree,
-        which is why this is pinned at lambda1 > 0.
+        which is why this is pinned at lambda1 > 0.  Invariance is the
+        spanned-pricing contract; rank pricing moves the ledger on purpose.
         """
         X, y = _frame(cells)
-        pruned = _fit(X, y, family="gaussian", selection_penalty=0.5)
+        pruned = _fit(X, y, family="gaussian", selection_penalty=0.5, group_pricing="spanned")
         with unpruned_interaction():
-            unpruned = _fit(X, y, family="gaussian", selection_penalty=0.5)
+            unpruned = _fit(X, y, family="gaussian", selection_penalty=0.5, group_pricing="spanned")
         assert pruned._interaction_specs["c1:c2"]._pruned_pairs
         assert pruned.result.effective_df == pytest.approx(unpruned.result.effective_df, rel=1e-9)
         assert pruned.result.phi == pytest.approx(unpruned.result.phi, rel=1e-9)
@@ -615,13 +629,19 @@ class TestAliasDropVersusEmptyDrop:
 
         The predictions are bit-identical here -- ``SparseGroupLasso`` never
         reads ``group.size`` -- so nothing but the df ledger can fail this.
+        Spanned pricing is the mode under which that ledger must not move;
+        the default rank pricing prices the emitted width instead.
         """
         X, y = _frame(cells)
         penalty = SparseGroupLasso(lambda1=0.05, alpha=0.9)
-        pruned = _fit(X, y, family="gaussian", penalty=penalty)
+        pruned = _fit(X, y, family="gaussian", penalty=penalty, group_pricing="spanned")
         with unpruned_interaction():
             unpruned = _fit(
-                X, y, family="gaussian", penalty=SparseGroupLasso(lambda1=0.05, alpha=0.9)
+                X,
+                y,
+                family="gaussian",
+                penalty=SparseGroupLasso(lambda1=0.05, alpha=0.9),
+                group_pricing="spanned",
             )
         g_pruned = next(g for g in pruned._groups if g.feature_name == "c1:c2")
         g_unpruned = next(g for g in unpruned._groups if g.feature_name == "c1:c2")
@@ -662,19 +682,19 @@ class TestAliasDropVersusEmptyDrop:
     def test_the_df_of_a_group_the_penalty_skips_is_the_spanned_width(self, cells):
         """The unshrunk arm of the same branch: ``df_g = p_g`` outright.
 
-        A group the selection penalty does not target keeps its full nominal
-        dimension.  Reading the emitted width there is the same defect without
-        the shrinkage arithmetic -- it reports a whole missing degree of
-        freedom per pruned cell.
+        Under spanned pricing a group the selection penalty does not target
+        keeps its full nominal dimension, so pruning removes no df from the
+        ledger.  Under the default rank pricing the same arm reports the
+        emitted width -- one fewer df per pruned cell, deliberately.
         """
         X, y = _frame(cells)
 
         def penalty():
             return SparseGroupLasso(lambda1=0.05, alpha=0.9, features=["c1", "c2"])
 
-        pruned = _fit(X, y, family="gaussian", penalty=penalty())
+        pruned = _fit(X, y, family="gaussian", penalty=penalty(), group_pricing="spanned")
         with unpruned_interaction():
-            unpruned = _fit(X, y, family="gaussian", penalty=penalty())
+            unpruned = _fit(X, y, family="gaussian", penalty=penalty(), group_pricing="spanned")
         g_pruned = next(g for g in pruned._groups if g.feature_name == "c1:c2")
         g_unpruned = next(g for g in unpruned._groups if g.feature_name == "c1:c2")
         assert pruned._interaction_specs["c1:c2"]._pruned_pairs
@@ -691,16 +711,27 @@ class TestAliasDropVersusEmptyDrop:
         """``Adaptive`` re-derives ``sqrt(p_g)`` from the slice it is handed.
 
         It is the one consumer that does not inherit the constructed weight,
-        so it needs the spanned width in its own right; otherwise the fix
+        so it needs ``penalty_size`` in its own right; otherwise the mode
         holds for a plain group lasso and silently lapses the moment a caller
-        attaches a flavour.
+        attaches a flavour.  Pinned under spanned pricing, where the flavour
+        must re-derive the spanned width from the slice it is handed.
         """
         X, y = _frame(cells)
         # A fresh penalty per arm: the fit resolves lambda1 onto the object.
-        pruned = _fit(X, y, family="gaussian", penalty=GroupLasso(lambda1=0.5, flavor=Adaptive()))
+        pruned = _fit(
+            X,
+            y,
+            family="gaussian",
+            penalty=GroupLasso(lambda1=0.5, flavor=Adaptive()),
+            group_pricing="spanned",
+        )
         with unpruned_interaction():
             unpruned = _fit(
-                X, y, family="gaussian", penalty=GroupLasso(lambda1=0.5, flavor=Adaptive())
+                X,
+                y,
+                family="gaussian",
+                penalty=GroupLasso(lambda1=0.5, flavor=Adaptive()),
+                group_pricing="spanned",
             )
         assert pruned._interaction_specs["c1:c2"]._pruned_pairs
         np.testing.assert_allclose(pruned.predict(X), unpruned.predict(X), rtol=1e-9, atol=1e-12)

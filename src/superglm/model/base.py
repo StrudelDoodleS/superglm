@@ -689,6 +689,7 @@ def init_model(
     convergence: str = "deviance",
     retain_fit_state: bool = True,
     separation: str = "warn",
+    group_pricing: str = "rank",
 ):
     """Initialize model state (body of SuperGLM.__init__)."""
     if features is not None and splines is not None:
@@ -715,6 +716,9 @@ def init_model(
     model._direct_solve = direct_solve
     model._discrete = discrete
     model._n_bins = copy.deepcopy(n_bins)
+    if group_pricing not in ("rank", "spanned"):
+        raise ValueError(f"group_pricing must be 'rank' or 'spanned', got {group_pricing!r}")
+    model._group_pricing = group_pricing
     model._tol = tol
     model._max_iter = max_iter
     model._retain_fit_state = bool(retain_fit_state)
@@ -1022,6 +1026,9 @@ def model_build_design_matrix(
         alias_prune=not selection_active,
         separation=getattr(model, "_separation", "warn"),
         selection_penalty=configured_penalty(model) if selection_active else None,
+        # Models pickled before ``group_pricing`` existed keep the behaviour
+        # they were fitted under, matching the ModelConfig unpickle backfill.
+        group_pricing=getattr(model, "_group_pricing", "spanned"),
     )
     model._distribution = result.distribution
     model._link = result.link
