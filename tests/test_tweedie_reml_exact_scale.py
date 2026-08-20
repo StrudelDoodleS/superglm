@@ -320,6 +320,56 @@ class TestScaleProfileUnit:
         with pytest.raises(ValueError, match="no finite interior optimum"):
             profile_tweedie_reml_scale(data, 4.0, 9.0)
 
+    def test_profile_optimum_is_a_root_of_the_analytic_score(self):
+        """phi-hat must be pinned by the score's zero, not bracket placement.
+
+        A bounded scalar minimizer leaves O(xatol) freedom in where inside
+        its final bracket it stops, and which side it stops on flips on
+        machine-classed summation rounding - measured ~2e-8 placement
+        scatter in log phi across trivially equivalent solver windows, which
+        downstream gradient differencing amplified ~2500x into a 2e-6
+        machine-dependent Hessian discrepancy on CI. The polished optimum is
+        a root of the analytic profile score: placement freedom gone, and
+        the returned phi is identical across solver windows to floating
+        precision.
+        """
+        from superglm.reml import scale as scale_module
+        from superglm.reml.scale import (
+            prepare_tweedie_reml_scale_data,
+            profile_tweedie_reml_scale,
+        )
+
+        rng = np.random.default_rng(17)
+        n = 300
+        mu = np.exp(0.2 + rng.normal(0.0, 0.4, n))
+        y = generate_tweedie_cpg(n, mu, phi=1.2, p=1.5, rng=rng)
+        weights = np.ones(n)
+        data = prepare_tweedie_reml_scale_data(y, weights, 1.5)
+        penalized_deviance, nullity = 400.0, 2.0
+        profiled = profile_tweedie_reml_scale(data, penalized_deviance, nullity)
+        log_phi = float(np.log(profiled.phi))
+        score = (
+            -0.5 * penalized_deviance * float(np.exp(-log_phi))
+            + data.saturated_nll_log_phi_score(profiled.phi)
+            - 0.5 * nullity
+        )
+        # Score residual at the published optimum: the bounded minimizer
+        # alone leaves |score| ~ curvature * placement ~ 1e-5; the root
+        # polish leaves evaluation roundoff.
+        assert abs(score) < 1e-8
+        # Placement invariance across a trivially shifted solver window.
+        original_window = scale_module._TWEEDIE_LOG_PHI_WINDOW
+        try:
+            scale_module._TWEEDIE_LOG_PHI_WINDOW = original_window + 3.0e-7
+            shifted = profile_tweedie_reml_scale(
+                prepare_tweedie_reml_scale_data(y, weights, 1.5),
+                penalized_deviance,
+                nullity,
+            )
+        finally:
+            scale_module._TWEEDIE_LOG_PHI_WINDOW = original_window
+        assert abs(float(np.log(shifted.phi)) - log_phi) < 1e-12
+
     def test_custom_estimated_scale_family_warns_on_the_fallback(self):
         """A custom scale_known=False family must warn, not substitute silently."""
         from types import SimpleNamespace

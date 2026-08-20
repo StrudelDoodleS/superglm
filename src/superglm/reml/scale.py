@@ -28,6 +28,12 @@ _TWEEDIE_LOG_PHI_EDGE_TOL = 1e-6
 # fallback (analytic scores unavailable on some saddlepoint rows) pays
 # O(eps/step^2) and uses the smaller step to bound its truncation instead.
 _TWEEDIE_SCORE_CURVATURE_STEP = 1e-3
+
+
+class _ScoreUnavailableInBracketError(Exception):
+    """An analytic log-phi score branch dropped out inside a polish bracket."""
+
+
 _TWEEDIE_CURVATURE_STEP = 1e-4
 
 
@@ -526,7 +532,59 @@ def profile_tweedie_reml_scale(
     ):
         raise FloatingPointError("Tweedie REML scale profile is not representable")
 
-    criterion_value = float(solution.fun)
+    # Polish the bounded minimizer to a root of the ANALYTIC profile score
+    # S(u) = -Dp e^{-u}/2 + T(u) - Mp/2 (T = d(-l_sat)/d log phi, closed
+    # form). Bounded Brent leaves O(xatol) placement freedom in WHERE inside
+    # its final bracket it stops, and which side it stops on is decided by
+    # late golden-section comparisons that can flip on machine-classed
+    # summation rounding: measured placement scatter across trivially
+    # equivalent solver configurations is ~2e-8 in log phi around a score
+    # residual of 1e-13. Downstream consumers difference gradients built on
+    # this optimum at O(1e-4) steps, amplifying that freedom ~2500x into
+    # their comparisons. A root of the analytic score has no placement
+    # freedom: cross-machine variation reduces to the score evaluation's
+    # own rounding divided by the score slope. When the analytic score is
+    # unavailable (saddlepoint rows without scores) the bounded minimizer
+    # stands, with its documented tolerance.
+    def profile_score(u: float) -> float | None:
+        t_value = profile_data.saturated_nll_log_phi_score(float(np.exp(u)))
+        if t_value is None:
+            return None
+        return -0.5 * penalized_deviance * float(np.exp(-u)) + t_value - 0.5 * penalty_nullity
+
+    polish_window = 64.0 * _TWEEDIE_LOG_PHI_XATOL
+    while polish_window <= 1e-2:
+        bracket_lo = max(log_phi - polish_window, log_phi_lo)
+        bracket_hi = min(log_phi + polish_window, log_phi_hi)
+        score_bracket_lo = profile_score(bracket_lo)
+        score_bracket_hi = profile_score(bracket_hi)
+        if score_bracket_lo is None or score_bracket_hi is None:
+            break
+        if score_bracket_lo < 0.0 < score_bracket_hi:
+
+            def bracketed_score(u: float) -> float:
+                value = profile_score(u)
+                if value is None:  # pragma: no cover - branch flip inside a tiny bracket
+                    raise _ScoreUnavailableInBracketError
+                return value
+
+            try:
+                log_phi = float(
+                    brentq(
+                        bracketed_score,
+                        bracket_lo,
+                        bracket_hi,
+                        xtol=1e-15,
+                        rtol=4.0 * np.finfo(np.float64).eps,
+                        maxiter=100,
+                    )
+                )
+            except _ScoreUnavailableInBracketError:  # pragma: no cover - see above
+                pass
+            break
+        polish_window *= 8.0
+
+    criterion_value = float(criterion(log_phi))
     # Profile curvature in log(phi). The deviance arm Dp/(2 phi) is analytic;
     # the saturated arm is a central difference of the family's ANALYTIC
     # log-phi score T(u) = sum d(-log f)/d(log phi), so d2(l_sat)/du2 = -T'(u)
