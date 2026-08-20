@@ -21,7 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import _raw_centering_well_scaled
-from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
+from superglm.distributions import _VARIANCE_FLOOR, Gamma, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.objective import reml_laml_objective
@@ -38,7 +38,10 @@ from superglm.reml.penalty_algebra import (
     penalty_component_trace,
 )
 from superglm.reml.result import REMLResult
-from superglm.reml.scale import prepare_gamma_reml_scale_data
+from superglm.reml.scale import (
+    prepare_gamma_reml_scale_data,
+    prepare_tweedie_reml_scale_data,
+)
 from superglm.reml.scop_geometry import (
     SCOPJointGeometry,
     SCOPModeScore,
@@ -180,6 +183,7 @@ class _SCOPREMLFitContext:
     debug_recorder: Any
     likelihood_size: float
     gamma_scale_data: Any
+    tweedie_scale_data: Any
 
 
 @dataclass(frozen=True)
@@ -776,6 +780,7 @@ def _evaluate_scop_reml_mode(
         scop_states=scop_states,
         likelihood_size=context.likelihood_size,
         gamma_scale_data=context.gamma_scale_data,
+        tweedie_scale_data=context.tweedie_scale_data,
         return_evaluation=True,
     )
     return _SCOPREMLMode(
@@ -1536,6 +1541,11 @@ def fit_fixed_scop_reml(
     gamma_scale_data = (
         prepare_gamma_reml_scale_data(y, sample_weight) if isinstance(distribution, Gamma) else None
     )
+    tweedie_scale_data = (
+        prepare_tweedie_reml_scale_data(y, sample_weight, distribution.p)
+        if isinstance(distribution, Tweedie)
+        else None
+    )
     context = _SCOPREMLFitContext(
         dm=dm,
         distribution=distribution,
@@ -1552,6 +1562,7 @@ def fit_fixed_scop_reml(
         debug_recorder=debug_recorder,
         likelihood_size=likelihood_size,
         gamma_scale_data=gamma_scale_data,
+        tweedie_scale_data=tweedie_scale_data,
     )
     mode = _fit_scop_reml_mode(
         context,
@@ -1784,6 +1795,11 @@ def optimize_scop_efs_reml(
     gamma_scale_data = (
         prepare_gamma_reml_scale_data(y, sample_weight) if isinstance(distribution, Gamma) else None
     )
+    tweedie_scale_data = (
+        prepare_tweedie_reml_scale_data(y, sample_weight, distribution.p)
+        if isinstance(distribution, Tweedie)
+        else None
+    )
     fit_context = _SCOPREMLFitContext(
         dm=dm,
         distribution=distribution,
@@ -1800,6 +1816,7 @@ def optimize_scop_efs_reml(
         debug_recorder=debug_recorder,
         likelihood_size=likelihood_size,
         gamma_scale_data=gamma_scale_data,
+        tweedie_scale_data=tweedie_scale_data,
     )
     lambdas = lambdas.copy()
 

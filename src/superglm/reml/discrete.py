@@ -19,7 +19,7 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import Gamma, Gaussian, clip_mu
+from superglm.distributions import Gamma, Gaussian, Tweedie, clip_mu
 from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
@@ -49,9 +49,12 @@ from superglm.reml.penalty_algebra import (
 from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.reml.scale import (
     GammaScaleProfileData,
+    TweedieScaleProfileData,
     prepare_gamma_reml_scale_data,
+    prepare_tweedie_reml_scale_data,
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
+    profile_tweedie_reml_scale,
 )
 from superglm.solvers.hessian_factor import as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
@@ -227,10 +230,13 @@ def optimize_discrete_reml_cached_w(
     scale_known = getattr(distribution, "scale_known", True)
     likelihood_size: float | None = None
     gamma_scale_data: GammaScaleProfileData | None = None
+    tweedie_scale_data: TweedieScaleProfileData | None = None
     if isinstance(distribution, Gaussian):
         likelihood_size = float(np.sum(sample_weight, dtype=np.float64))
     elif isinstance(distribution, Gamma):
         gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
+    elif isinstance(distribution, Tweedie):
+        tweedie_scale_data = prepare_tweedie_reml_scale_data(y, sample_weight, distribution.p)
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
@@ -454,6 +460,15 @@ def optimize_discrete_reml_cached_w(
             )
             boot_phi = boot_scale.phi
             boot_inv_phi = boot_scale.inverse_phi
+        elif isinstance(distribution, Tweedie):
+            assert tweedie_scale_data is not None
+            boot_scale = profile_tweedie_reml_scale(
+                tweedie_scale_data,
+                penalized_deviance,
+                M_p,
+            )
+            boot_phi = boot_scale.phi
+            boot_inv_phi = boot_scale.inverse_phi
         else:
             boot_phi = max(
                 penalized_deviance / max(len(y) - M_p, 1.0),
@@ -641,6 +656,7 @@ def optimize_discrete_reml_cached_w(
             tensor_pair_evaluations=cand_tensor_pair_evals,
             likelihood_size=likelihood_size,
             gamma_scale_data=gamma_scale_data,
+            tweedie_scale_data=tweedie_scale_data,
             return_evaluation=True,
         )
 
@@ -1144,6 +1160,7 @@ def optimize_discrete_reml_cached_w(
                 tensor_pair_evaluations=trial_tensor_pair_evals,
                 likelihood_size=likelihood_size,
                 gamma_scale_data=gamma_scale_data,
+                tweedie_scale_data=tweedie_scale_data,
             )
             _n_linesearch_full_evals += 1
 
@@ -1237,6 +1254,7 @@ def optimize_discrete_reml_cached_w(
                 tensor_pair_evaluations=trial_tensor_pair_evals,
                 likelihood_size=likelihood_size,
                 gamma_scale_data=gamma_scale_data,
+                tweedie_scale_data=tweedie_scale_data,
             )
             _t_linesearch_full_obj += _time.perf_counter() - _tls0
             _n_linesearch_full_evals += 1
@@ -1438,6 +1456,7 @@ def optimize_discrete_reml_cached_w(
         tensor_pair_evaluations=final_tensor_pair_evals,
         likelihood_size=likelihood_size,
         gamma_scale_data=gamma_scale_data,
+        tweedie_scale_data=tweedie_scale_data,
     )
     _t_objective += _time.perf_counter() - _t0
     # Always use the final refit -- it is the authoritative result from

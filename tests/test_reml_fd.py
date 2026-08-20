@@ -25,10 +25,6 @@ class TestREMLFiniteDifference:
         from superglm.group_matrix import DiscretizedSSPGroupMatrix
         from superglm.reml import build_penalty_caches
         from superglm.reml.penalty_algebra import compute_penalty_nullity
-        from superglm.reml.scale import (
-            prepare_gamma_reml_scale_data,
-            profile_gamma_reml_scale,
-        )
         from superglm.solvers.irls_direct import (
             _build_penalty_matrix,
             fit_irls_direct,
@@ -100,15 +96,9 @@ class TestREMLFiniteDifference:
         assert pirls_result.reml_hessian_rank is not None
         M_p = compute_penalty_nullity(S, hessian_rank=pirls_result.reml_hessian_rank)
         phi_hat = 1.0
-        if isinstance(m._distribution, Gamma):
-            scale_profile = profile_gamma_reml_scale(
-                prepare_gamma_reml_scale_data(y, sample_weight),
-                pirls_result.deviance + pq,
-                M_p,
-            )
-            phi_hat = scale_profile.phi
-        elif not getattr(m._distribution, "scale_known", True):
-            phi_hat = max((pirls_result.deviance + pq) / max(n - M_p, 1.0), 1e-10)
+        phi_hat, inverse_phi_derivative = TestREMLFiniteDifference._dispatch_phi(
+            m, y, sample_weight, pirls_result, pq, M_p, n
+        )
 
         return (
             m,
@@ -123,8 +113,43 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            inverse_phi_derivative,
             n,
         )
+
+    @staticmethod
+    def _dispatch_phi(m, y, sample_weight, pirls_result, pq, M_p, n):
+        """Mirror production's estimated-scale dispatch for gradient/Hessian FD.
+
+        Gaussian, Gamma, and Tweedie consume the exact Wood Eq. (4) profile
+        (phi and its d(1/phi)/d(Dp) contract) exactly as direct REML does; an
+        unknown estimated-scale family falls back to the implicit
+        Dp/(n - Mp) dispersion the reduced criterion pairs with.
+        """
+        from superglm.reml.scale import (
+            prepare_gamma_reml_scale_data,
+            prepare_tweedie_reml_scale_data,
+            profile_gamma_reml_scale,
+            profile_tweedie_reml_scale,
+        )
+
+        if isinstance(m._distribution, Gamma):
+            scale_profile = profile_gamma_reml_scale(
+                prepare_gamma_reml_scale_data(y, sample_weight),
+                pirls_result.deviance + pq,
+                M_p,
+            )
+            return scale_profile.phi, scale_profile.d_inverse_phi_d_penalized_deviance
+        if isinstance(m._distribution, Tweedie):
+            scale_profile = profile_tweedie_reml_scale(
+                prepare_tweedie_reml_scale_data(y, sample_weight, m._distribution.p),
+                pirls_result.deviance + pq,
+                M_p,
+            )
+            return scale_profile.phi, scale_profile.d_inverse_phi_d_penalized_deviance
+        if not getattr(m._distribution, "scale_known", True):
+            return max((pirls_result.deviance + pq) / max(n - M_p, 1.0), 1e-10), None
+        return 1.0, None
 
     @pytest.mark.parametrize("family", ["poisson", "gamma", "nb2", "tweedie"])
     def test_gradient_matches_fd(self, family):
@@ -142,6 +167,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            inverse_phi_derivative,
             n,
         ) = self._setup_model(family)
 
@@ -212,6 +238,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            inverse_phi_derivative,
             n,
         ) = self._setup_model(family)
 
@@ -233,6 +260,7 @@ class TestREMLFiniteDifference:
             pirls_result=pirls_result,
             n_obs=n,
             phi_hat=phi_hat,
+            d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
         )
 
         eps = 1e-4
@@ -271,7 +299,9 @@ class TestREMLFiniteDifference:
                         S_pert,
                         hessian_rank=result_pert.reml_hessian_rank,
                     )
-                    phi_pert = max((result_pert.deviance + pq_pert) / max(n - M_p, 1.0), 1e-10)
+                    phi_pert, _ = self._dispatch_phi(
+                        m, y, sample_weight, result_pert, pq_pert, M_p, n
+                    )
 
                 grad_pert = m._reml_direct_gradient(
                     result_pert,
@@ -334,6 +364,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            inverse_phi_derivative,
             n,
         ) = self._setup_model(family)
 
@@ -429,6 +460,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            inverse_phi_derivative,
             n,
         ) = self._setup_model(family)
 
@@ -478,6 +510,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            inverse_phi_derivative,
             n,
         ) = self._setup_model(family)
 
@@ -528,6 +561,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            _inverse_phi_derivative,
             n,
         ) = self._setup_model("gamma")
 
@@ -558,6 +592,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            inverse_phi_derivative,
             n,
         ) = self._setup_model(family)
 
@@ -604,6 +639,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            inverse_phi_derivative,
             n,
         ) = self._setup_model(family)
 
@@ -638,6 +674,7 @@ class TestREMLFiniteDifference:
             pirls_result=pirls_result,
             n_obs=n,
             phi_hat=phi_hat,
+            d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
             dH_extra=dH_extra,
         )
 
@@ -652,6 +689,7 @@ class TestREMLFiniteDifference:
             pirls_result=pirls_result,
             n_obs=n,
             phi_hat=phi_hat,
+            d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
             dH_extra=None,
         )
 
@@ -692,7 +730,9 @@ class TestREMLFiniteDifference:
                         S_pert,
                         hessian_rank=result_pert.reml_hessian_rank,
                     )
-                    phi_pert = max((result_pert.deviance + pq_pert) / max(n - M_p, 1.0), 1e-10)
+                    phi_pert, _ = self._dispatch_phi(
+                        m, y, sample_weight, result_pert, pq_pert, M_p, n
+                    )
 
                 # Total gradient = partial + W correction
                 grad_pert = m._reml_direct_gradient(
@@ -762,6 +802,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            _inverse_phi_derivative,
             n,
         ) = self._setup_model("poisson")
 
@@ -802,6 +843,7 @@ class TestREMLFiniteDifference:
             pirls_result=pirls_result,
             n_obs=n,
             phi_hat=phi_hat,
+            d_inverse_phi_d_penalized_deviance=_inverse_phi_derivative,
             dH_extra=dH_extra,
         )
 
@@ -816,6 +858,7 @@ class TestREMLFiniteDifference:
             pirls_result=pirls_result,
             n_obs=n,
             phi_hat=phi_hat,
+            d_inverse_phi_d_penalized_deviance=_inverse_phi_derivative,
             dH_extra=dH_extra,
         )
 
@@ -851,6 +894,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            _inverse_phi_derivative,
             n,
         ) = self._setup_model("poisson")
 
@@ -892,6 +936,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             _XtWX,
             _phi_hat,
+            _inverse_phi_derivative,
             _n,
         ) = self._setup_model("nb2")
 
@@ -972,6 +1017,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             _XtWX,
             _phi_hat,
+            _inverse_phi_derivative,
             _n,
         ) = self._setup_model("nb2")
         correction = m._reml_w_correction(
@@ -1060,6 +1106,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            _inverse_phi_derivative,
             n,
         ) = self._setup_model("poisson")
         del penalty_ranks, XtWX, phi_hat, n
@@ -1137,6 +1184,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             XtWX,
             phi_hat,
+            _inverse_phi_derivative,
             n,
         ) = self._setup_model("poisson")
 
@@ -1231,6 +1279,7 @@ class TestREMLFiniteDifference:
             _XtWX_S_inv,
             _XtWX,
             _phi_hat,
+            _inverse_phi_derivative,
             _n,
         ) = self._setup_model("poisson")
         penalties = coerce_reml_penalties(
@@ -1295,6 +1344,7 @@ class TestREMLFiniteDifference:
             XtWX_S_inv,
             _XtWX,
             phi_hat,
+            _inverse_phi_derivative,
             n,
         ) = self._setup_model("poisson")
         grad_partial = m._reml_direct_gradient(
