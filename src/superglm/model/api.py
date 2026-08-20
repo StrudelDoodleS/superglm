@@ -199,10 +199,12 @@ class SuperGLM:
             ``sqrt(p_g)`` from the df of the group's score statistic.
             ``"spanned"`` prices the width the term spans -- the historical
             behaviour -- so cell pruning is a pure reparametrisation of the
-            fit.  The choice moves fitted results only for models with
-            ``selection_penalty > 0`` and such an interaction, and moves the
-            reported ``effective_df``/``phi``/AIC/BIC of any fit whose df
-            falls back to the Breheny-Huang allocation.
+            fit.  The choice moves fitted results only for models that
+            combine such an interaction with an active group penalty --
+            ``selection_penalty > 0`` or an explicit ``penalty=`` whose
+            ``lambda1 > 0`` -- and moves the reported
+            ``effective_df``/``phi``/AIC/BIC of any fit whose df falls back
+            to the Breheny-Huang allocation.
         """
         if splines is not None:
             import warnings
