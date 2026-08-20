@@ -249,3 +249,49 @@ def test_runtime_backstop_silent_on_healthy_fit():
     model = SuperGLM(family=Tweedie(p=1.5), features={"z": Numeric()}, max_iter=100)
     sep = fit_catching(model, df, y, np.ones(n))
     assert sep == []
+
+
+def test_runtime_backstop_is_silent_when_the_budget_ends_mid_descent(monkeypatch):
+    """Exhausting a budget is not evidence of separation on its own.
+
+    The gate reads the LAST iteration's deviance movement.  That value has to
+    be captured inside the loop, before ``dev_prev`` advances: read afterwards
+    it is identically zero whenever the loop exhausts ``max_iter``, which makes
+    the stagnation clause vacuously true and brands every extreme-weight fit
+    that merely ran out of budget -- slow convergence, not separation.
+
+    The weight threshold is lowered so the gate is reachable at all; the point
+    under test is the stagnation clause, not the threshold.
+    """
+    import superglm.diagnostics.separation as separation_module
+
+    monkeypatch.setattr(separation_module, "EXTREME_WEIGHT_RATIO", 1.0)
+
+    rng = np.random.default_rng(0)
+    n = 4000
+    x = rng.normal(0.0, 4.0, n)
+    mu = np.exp(1.0 + 2.5 * x)
+    y = np.where(rng.random(n) < 0.3, rng.gamma(2.0, np.clip(mu, 1e-8, 1e8) / 2.0), 0.0)
+
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        link="log",
+        features={"x": Numeric()},
+        max_iter=10,
+        tol=1e-14,
+        separation="warn",
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit(pd.DataFrame({"x": x}), y)
+
+    # Non-vacuity: the budget really did run out, so the gate was reached.
+    assert not model.result.converged
+
+    exhaustion = [
+        str(w.message)
+        for w in caught
+        if issubclass(w.category, separation_module.SeparationWarning)
+        and "budget" in str(w.message)
+    ]
+    assert exhaustion == [], f"budget exhaustion alone must not read as separation: {exhaustion}"

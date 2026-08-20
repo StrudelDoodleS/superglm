@@ -1347,6 +1347,15 @@ def _fit_irls_direct_once(
     # they have never been shown.
     termination_reason: TerminationReason
 
+    # Captured inside the loop, BEFORE ``dev_prev`` advances, because the
+    # post-loop separation backstop needs the final iteration's movement.
+    # Reading ``abs(dev - dev_prev)`` after the loop cannot work: ``dev_prev``
+    # is assigned ``dev`` as the loop's last statement, so budget exhaustion
+    # makes that difference identically zero and any stagnation test on it
+    # vacuous.  ``inf`` until an iteration completes, so a fit that never
+    # finishes one is never called stagnant.
+    deviance_relative_change = float("inf")
+
     for it in range(max_iter):
         beta_prev = committed.beta
         intercept_prev = committed.intercept
@@ -2201,9 +2210,10 @@ def _fit_irls_direct_once(
                 )
             )
 
+        deviance_relative_change = abs(dev - dev_prev) / (abs(dev_prev) + 1)
         logger.info(
             f"  irls_direct iter={it + 1:3d}  "
-            f"dev={dev:12.1f}  delta={abs(dev - dev_prev) / (abs(dev_prev) + 1):10.2e}"
+            f"dev={dev:12.1f}  delta={deviance_relative_change:10.2e}"
         )
 
         if not np.isfinite(dev):
@@ -2344,7 +2354,7 @@ def _fit_irls_direct_once(
                 and max_iter >= 10
                 and it + 1 >= max_iter
                 and not step_rejected
-                and abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < STAGNANT_DEVIANCE_DELTA
+                and deviance_relative_change < STAGNANT_DEVIANCE_DELTA
             )
             if pinned or exhausted_stagnant:
                 max_abs = float(np.max(np.abs(beta))) if beta.size else 0.0

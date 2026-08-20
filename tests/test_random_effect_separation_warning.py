@@ -96,3 +96,56 @@ def test_no_warning_for_gaussian_family():
         warnings.simplefilter("always")
         _fit(df, y, family="gaussian")
     assert _messages(caught) == []
+
+
+def test_the_hazard_is_a_separation_warning_and_obeys_the_separation_seam():
+    """This release added ``SeparationWarning`` for exactly this proposition.
+
+    A model-risk pipeline filtering on it should catch all three separation
+    diagnostics, and ``separation="ignore"`` should quiet all three.  Raised as
+    a bare ``UserWarning`` outside the seam, this one is invisible to both.
+    """
+    from superglm import SeparationWarning
+
+    df, y = _frame(claim_free_level=True)
+
+    with pytest.warns(SeparationWarning, match=_MATCH):
+        _fit(df, y)
+
+    model = SuperGLM(
+        family=Tweedie(p=1.5),
+        link="log",
+        selection_penalty=0.0,
+        separation="ignore",
+        features={"band": Categorical(base="most_exposed"), "cell": RandomEffect()},
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.fit_reml(df, y, max_reml_iter=2, max_pirls_iter=400)
+    assert _messages(caught) == [], 'separation="ignore" must quiet the hazard too'
+
+
+def test_the_hazard_reads_levels_after_grouping_is_applied():
+    """Taking the warning's own advice must silence it.
+
+    The message tells the caller to group the claim-free level.  Scanning the
+    RAW column ignores ``grouping=``, so the collapsed level is still counted
+    and the warning fires again -- on a model where it no longer has a
+    coefficient.
+    """
+    from superglm import collapse_levels
+
+    df, y = _frame(claim_free_level=True)
+    grouping = collapse_levels(df["band"], groups={"uz": ["u", "z"], "v": ["v"], "w": ["w"]})
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _fit(
+            df,
+            y,
+            features={
+                "band": Categorical(base="most_exposed", grouping=grouping),
+                "cell": RandomEffect(),
+            },
+        )
+    assert _messages(caught) == [], "a collapsed level no longer separates and must not be named"
