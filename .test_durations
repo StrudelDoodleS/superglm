@@ -6588,6 +6588,8 @@
     "tests/test_structured_irls.py::test_forced_structured_exact_irls_matches_dense_oracle[tweedie]": 0.01672071701614186,
     "tests/test_structured_irls.py::test_forced_structured_rejects_constrained_coefficients": 0.0005760790081694722,
     "tests/test_structured_irls.py::test_record_auto_backend_decision_logs_only_structured_auto_picks": 0.001,
+    "tests/test_structured_irls.py::test_reml_driver_emits_one_info_line_per_structured_auto_pick[discrete-driver]": 0.02,
+    "tests/test_structured_irls.py::test_reml_driver_emits_one_info_line_per_structured_auto_pick[exact-driver]": 0.17,
     "tests/test_structured_irls.py::test_structured_correlated_override_rejects_dominant_random_effect_block": 0.023253283987287432,
     "tests/test_structured_irls.py::test_structured_factor_matches_dense_fixed_weight_reml_derivatives": 0.09006094301003031,
     "tests/test_structured_irls.py::test_structured_irls_handles_all_small_group_kernels_and_penalties": 0.16776863898849115,

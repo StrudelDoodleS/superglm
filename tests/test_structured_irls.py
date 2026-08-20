@@ -860,6 +860,54 @@ def test_record_auto_backend_decision_logs_only_structured_auto_picks(caplog):
     assert not caplog.records
 
 
+@pytest.mark.parametrize("discrete", [False, True], ids=["exact-driver", "discrete-driver"])
+def test_reml_driver_emits_one_info_line_per_structured_auto_pick(caplog, discrete):
+    """Issue #343: the fit-owning REML driver emits the INFO line exactly once.
+
+    The inner PIRLS solves re-resolve the same decision many times per fit and
+    must stay quiet (``log=False``); the driver-level call is the only INFO
+    emission point.  This pins the driver integration end to end -- deleting
+    the ``record_auto_backend_decision`` call in either REML driver, or
+    promoting the per-solve call to ``log=True``, must fail this test.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, RandomEffect, SuperGLM
+    from superglm.distributions import Gaussian as GaussianFamily
+
+    rng = np.random.default_rng(3430)
+    n, n_levels = 900, 300
+    codes = rng.integers(0, n_levels, size=n)
+    cats = rng.integers(0, 5, size=n)
+    frame = pd.DataFrame(
+        {
+            "grp": np.array([f"L{code:03d}" for code in codes], dtype=object),
+            "cat": np.array([f"v{code}" for code in cats], dtype=object),
+        }
+    )
+    y = 0.2 + 0.4 * rng.normal(size=n_levels)[codes] + rng.normal(scale=0.3, size=n)
+
+    model = SuperGLM(
+        family=GaussianFamily(),
+        selection_penalty=0.0,
+        features={"cat": Categorical(), "grp": RandomEffect()},
+        direct_solve="auto",
+        discrete=discrete,
+    )
+    with caplog.at_level(logging.INFO, logger="superglm.solvers._structured.selection"):
+        model.fit_reml(frame, y, max_reml_iter=3, runtime_validation="skip")
+
+    profile = model.reml_diagnostics()["profile"]
+    assert profile["direct_backend"] == "structured"
+    assert profile["structured_auto_selected"] is True
+    q = 4
+    observed_levels = frame["grp"].nunique()
+    expected_ratio = ((q + 1) / (observed_levels + q + 1)) ** 2
+    assert profile["structured_auto_cost_ratio"] == pytest.approx(expected_ratio)
+    picks = [r for r in caplog.records if "chose the structured backend" in r.message]
+    assert len(picks) == 1
+
+
 def test_auto_missing_compact_penalties_falls_back_but_forced_rejects():
     rng = np.random.default_rng(20260727)
     n_levels = 40

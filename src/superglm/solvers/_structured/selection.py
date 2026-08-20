@@ -82,6 +82,17 @@ _AUTO_MIN_COEFFICIENT_WIDTH = 32
 # both sides.  For the scalar geometry the ratio has the closed form
 # ((q+1)/(p+1))^2, so this bound equivalently requires the dominant block to
 # span at least ~78% of the augmented width.
+#
+# Known boundary (adversarial review, August 2026): every anchor above is
+# n >> p, the regime this backend exists for.  When the factorization itself
+# dominates (n comparable to p), the flop ratio becomes predictive again and
+# this bound points the wrong way: synthetic Tweedie(1.5) fits at n=2,000
+# measured forced-structured 1.7x-2.1x FASTER at ratio ~0.064 (K=600 beside
+# q=200: 10.5s vs 17.6s dense; K=300 beside q=100: 0.86s vs 1.83s), shapes
+# the previous 0.75 bound routed structured.  The constant knowingly trades
+# that small-n corner for the measured 2x win on wide-border n >> p fits;
+# a shape-aware bound needs anchors in both regimes, which the recorded
+# ``structured_auto_cost_ratio`` exists to collect.
 _AUTO_MAX_STRUCTURED_COST_RATIO = 0.05
 
 
