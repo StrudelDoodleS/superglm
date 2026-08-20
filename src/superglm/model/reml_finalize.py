@@ -349,6 +349,12 @@ def finalize_reml_fit(
     model._reml_penalties = reml_penalties
     model._reml_result = best
     lambdas = best.lambdas
+    # The optimizer already built and filled a per-fit Tweedie saturated-density
+    # cache; without this the terminal evaluations below construct a cold one and
+    # re-solve a (Dp, Mp) the search has already solved (measured: 20 of 177
+    # fresh density passes on a burn-cost-shaped fit).  Same pure inputs, so the
+    # reconstructed object is value-identical -- only its memo dicts differ.
+    terminal_tweedie_scale_data = getattr(best, "tweedie_scale_data", None)
     n_reml_iter = best.n_reml_iter
     converged = best.converged
 
@@ -506,6 +512,7 @@ def finalize_reml_fit(
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
+            tweedie_scale_data=terminal_tweedie_scale_data,
             return_evaluation=True,
         )
         if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
@@ -663,6 +670,7 @@ def finalize_reml_fit(
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
+            tweedie_scale_data=terminal_tweedie_scale_data,
             return_evaluation=True,
         )
         if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
@@ -706,6 +714,7 @@ def finalize_reml_fit(
             S_override=S_final,
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
+            tweedie_scale_data=terminal_tweedie_scale_data,
             return_evaluation=True,
         )
         if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover

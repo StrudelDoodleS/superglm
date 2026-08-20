@@ -1598,6 +1598,7 @@ def fit_fixed_scop_reml(
         inner_iter_history=[int(result.n_iter)],
         objective_history=[float(mode.evaluation.value)],
         curvature_source=mode.curvature_source,
+        tweedie_scale_data=tweedie_scale_data,
         termination_reason="fixed_lambdas",
         scop_step_norms=[step_norms] if step_norms else None,
         scop_fisher_fallbacks=int(fisher_fallbacks),
@@ -2231,4 +2232,5 @@ def optimize_scop_efs_reml(
         managed_cleanup_frozen_history=(
             managed_cleanup_frozen_history if managed_cleanup_frozen_history else None
         ),
+        tweedie_scale_data=tweedie_scale_data,
     )

@@ -67,6 +67,12 @@ class REMLResult:
     managed_cleanup_active_history: list[list[str]] | None = None
     # Accepted post-update frozen managed names per outer step.
     managed_cleanup_frozen_history: list[list[str]] | None = None
+    # Fit-invariant Tweedie saturated-density state built by the optimizer.
+    # Carried so the terminal REML evaluations in finalize re-enter the SAME
+    # per-fit phi cache the search filled, instead of rebuilding a cold one and
+    # re-solving an already-solved (Dp, Mp).  Excluded from equality and repr:
+    # it is a memo, not part of the result's identity.
+    tweedie_scale_data: object | None = field(default=None, repr=False, compare=False)
 
 
 def _map_beta_between_bases(

@@ -400,6 +400,16 @@ class TweedieScaleProfileData:
             key,
             compute_score=True,
         )
+        # The score pass fills ``logpdf`` too and ``compute_score`` does not
+        # touch it, so the saturated VALUE at this phi is already computed and
+        # would otherwise be thrown away.  brentq returns its last evaluated
+        # point, so the criterion evaluation at the polished optimum lands on
+        # exactly one of these keys: cross-filling turns it into a cache hit
+        # for the cost of one log-sum.  Only finite values are stored, so
+        # ``saturated_log_likelihood``'s FloatingPointError contract is intact.
+        saturated_value = float(np.sum(evaluation.logpdf, dtype=np.float64))
+        if np.isfinite(saturated_value):
+            self._saturated_cache.setdefault(key, saturated_value)
         if not evaluation.score_valid or evaluation.log_phi_score is None:
             self._saturated_score_cache[key] = float("nan")
             return None
