@@ -121,7 +121,7 @@ model = SuperGLM(
 )
 model.fit(df, y, offset=log_exposure)
 
-# Profile estimate theta (MASS-style alternating GLM + Newton update)
+# Profile estimate theta (alternating GLM fit + safeguarded profile solve)
 result = model.estimate_theta(df, y, offset=log_exposure)
 print(result.theta_hat)  # estimated dispersion
 ```
@@ -129,7 +129,14 @@ print(result.theta_hat)  # estimated dispersion
 Here `y` contains raw counts, so exposure enters through the log offset rather
 than through `sample_weight`.
 
-`estimate_theta()` uses the MASS-style alternating algorithm: fit the GLM at current theta, then take a Newton step on the NB2 profile log-likelihood for theta given the fitted means. Converges in 2–3 outer iterations.
+`estimate_theta()` uses the classical alternating scheme (Venables & Ripley
+2002, ch. 7.4): fit the GLM at the current theta, then update theta by a
+bracketed root find on the closed-form NB2 profile score given the fitted
+means (Lawless 1987), started from a method-of-moments estimate. Converges
+in 2–3 outer iterations. The theta search range defaults to the numerical
+guard rails `(1e-8, 1e8)`; an estimate that lands on an active bound is
+reported with `converged=False` plus an `NBThetaBoundWarning` rather than
+published as a converged interior value.
 
 ### Profile confidence interval
 
