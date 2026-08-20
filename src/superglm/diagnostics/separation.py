@@ -23,9 +23,12 @@ for the block structure it covers -- and O(n) rather than an LP.
 
 The scan runs at design-build time, before any IRLS iteration, on both the
 dense and ``discrete=True`` paths (they share the builder).  A term whose
-block is bounded by an active selection penalty is skipped: a group-lasso or
-ridge penalty grows without bound along any recession direction, so the
-penalised optimum is finite and the term is estimable as specified.
+block is bounded by an active SELECTION penalty is skipped: that penalty grows
+without bound along any recession direction, so the penalised optimum is finite
+and the term is estimable as specified.  Only ``selection_penalty`` is
+consulted (``dm_builder`` at the exemption site) -- a ridge would bound the
+term too, but ``Categorical`` blocks carry no ``lambda2``, so there is nothing
+to check and claiming otherwise would describe a test that does not run.
 """
 
 from __future__ import annotations

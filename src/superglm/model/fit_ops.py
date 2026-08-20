@@ -208,17 +208,37 @@ def _reject_random_effect_selection_fit(model, method: str) -> None:
         )
 
 
-def _claim_free_categorical_levels(values: NDArray, positive: NDArray) -> int:
-    """Count levels that carry rows but no positively weighted positive response."""
+def _claim_free_categorical_levels(values: NDArray, spec, positive: NDArray, valid: NDArray) -> int:
+    """Count FITTED levels carrying exposure but no positively weighted response.
 
-    def levels(array: NDArray) -> set:
+    Two corrections over a set difference on the raw column, both mirroring
+    what the build-time scan already does (:mod:`superglm.diagnostics.separation`):
+
+    * levels are read AFTER ``grouping=`` is applied, so a caller who takes
+      this warning's own advice and collapses the offending level is not told
+      again about a level that no longer carries a coefficient;
+    * a level counts as occupied only through positive-weight rows, since a
+      zero-weight row contributes no likelihood and its level is pinned to
+      base at build time rather than estimated.
+
+    The grouping is applied from ``original_to_group`` directly rather than
+    through ``_categorical_build_labels``, because this runs BEFORE the build
+    and the spec has not learned its level universe yet.
+    """
+    labels = np.asarray(values).ravel()
+    grouping = getattr(spec, "_grouping", None)
+    if grouping is not None:
+        remap = grouping.original_to_group
+        labels = np.asarray([remap.get(value, value) for value in labels.tolist()], dtype=object)
+
+    def levels(mask: NDArray) -> set:
         return {
             value
-            for value in set(array.tolist())
+            for value in set(labels[mask].tolist())
             if not (isinstance(value, float) and value != value)
         }
 
-    return len(levels(values) - levels(values[positive]))
+    return len(levels(valid) - levels(positive))
 
 
 def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
@@ -265,11 +285,12 @@ def _random_effect_separation_hazard(model, X, y, sample_weight) -> str | None:
     y_arr = np.asarray(y, dtype=np.float64)
     weight_arr = np.asarray(sample_weight, dtype=np.float64)
     positive = (y_arr > 0.0) & (weight_arr > 0.0)
+    valid = weight_arr > 0.0
     findings = []
     for name, spec in model._specs.items():
         if not isinstance(spec, Categorical):
             continue
-        claim_free = _claim_free_categorical_levels(X.column_array(name), positive)
+        claim_free = _claim_free_categorical_levels(X.column_array(name), spec, positive, valid)
         if claim_free:
             findings.append(f"{name!r} ({claim_free} claim-free level(s))")
     if not findings:
@@ -1375,11 +1396,17 @@ def fit_reml(
     sample_weight_ref = sample_weight
     offset_ref = offset
     X, y, sample_weight, offset = _validate_entrypoint_input(model, X, y, sample_weight, offset)
-    separation_message = _random_effect_separation_hazard(model, X, y, sample_weight)
-    if separation_message is not None:
-        import warnings
+    # Governed by the same seam as the other separation diagnostics, so a
+    # caller filtering on SeparationWarning catches all three and
+    # ``separation="ignore"`` quiets all three.
+    if getattr(model, "_separation", "warn") != "ignore":
+        separation_message = _random_effect_separation_hazard(model, X, y, sample_weight)
+        if separation_message is not None:
+            import warnings
 
-        warnings.warn(separation_message, UserWarning, stacklevel=3)
+            from superglm.diagnostics.separation import SeparationWarning
+
+            warnings.warn(separation_message, SeparationWarning, stacklevel=3)
     validated_inputs = (X, y, sample_weight, offset)
     workspace = FitWorkspace.start(model, mode="fit_reml", validated_inputs=validated_inputs)
     debug_recorder = _fit_reml_in_workspace(
