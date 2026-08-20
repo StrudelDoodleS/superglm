@@ -63,7 +63,7 @@ not exist.
 
 All magnitudes below are **measured**, not estimated.
 
-### 1. `selection_penalty > 0` with an interaction containing empty or nested cells
+### 1. An active group penalty (`selection_penalty > 0`, or an explicit `penalty=` with `lambda1 > 0`) with an interaction containing empty or nested cells
 
 The affected group's weight drops from `sqrt(spanned)` to `sqrt(emitted)`,
 so a pinned `lambda1` shrinks it slightly **less** (always in that
