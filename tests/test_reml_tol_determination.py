@@ -32,11 +32,26 @@ CAT_LEVELS = {"f0": 6, "f1": 9, "f2": 4, "f3": 11, "f4": 13, "f5": 11}
 OC_LEVELS = {"f6": 16, "f7": 24}
 
 
-def _flat_lambda_fixture(n: int = 12_000, seed: int = 4):
+def _flat_lambda_fixture(n: int = 12_000, seed: int = 4, *, informative_smooths: bool = False):
     """Tweedie frame whose saturated cr terms leave log-lambda nearly flat.
 
     On this realisation the exact-Newton optimizer at reml_tol=1e-6 stops five
     iterations before the tight answer, moving a published SE by ~92%.
+
+    ``informative_smooths=True`` adds penalty-visible curvature to the two
+    ordinal smooths' level profiles (one sine cycle on f6, two on f7). The
+    default realisation's ordinal signal is purely linear in the level index,
+    which lies in the cr penalty's null space: nothing in the data then ties
+    those smoothing parameters down, so whether their log-lambda directions
+    read as "informative" was decided entirely by the criterion's error
+    terms. Under the pre-0.29.0 reduced Tweedie scale profile (which charged
+    this fixture's 83% zero rows a log-phi the exact saturated likelihood
+    does not contain) they measured informative; under the exact criterion
+    they are genuinely null — the 1-D exact-criterion profile decreases
+    monotonically toward the lambda cap and the optimizer's terminal beats
+    the reduced-criterion answer by 0.7 (12k) to 9.0 (400k). Tests about
+    *informative* directions must therefore opt into curvature the penalty
+    can see; tests about flat directions use the default.
     """
     rng = np.random.default_rng(seed)
     cols: dict[str, np.ndarray] = {}
@@ -52,6 +67,10 @@ def _flat_lambda_fixture(n: int = 12_000, seed: int = 4):
         idx = rng.integers(0, k, n)
         cols[name] = np.array(levels)[idx]
         eta += 0.02 * (idx - k / 2)
+        if informative_smooths:
+            cycles = 1.0 if name == "f6" else 2.0
+            amplitude = 0.10 if name == "f6" else 0.25
+            eta += amplitude * np.sin(2.0 * np.pi * cycles * idx / (k - 1))
         orders[name] = levels
     frame = pd.DataFrame(cols)
     weights = rng.uniform(1.19e-5, 1.0, n)
@@ -1193,11 +1212,22 @@ class TestFlatDirectionFloor:
     def test_large_n_keeps_the_informative_directions_active(self):
         """score_scale = 1+|objective| grows with the row count while
         log-lambda curvature saturates (measured f6: 0.25 at 12k, 0.62 at
-        1e6). Judged against score_scale, the old bar froze f7 at 400k rows
-        and everything at 1e6 rows by iteration 3, publishing lambdas a
-        factor e^5.6 from the floor-off optimum with SEs off by up to 87%.
-        The curvature-relative arm keeps the bar n-free."""
-        frame, y, weights, offset, features = _flat_lambda_fixture(400_000)
+        1e6, on the pre-0.29.0 criterion). Judged against score_scale, the
+        old bar froze f7 at 400k rows and everything at 1e6 rows by
+        iteration 3, publishing lambdas a factor e^5.6 from the floor-off
+        optimum with SEs off by up to 87%. The curvature-relative arm keeps
+        the bar n-free.
+
+        Re-derived for 0.29.0: the informative_smooths realisation gives the
+        two smooths penalty-visible curvature, because the default
+        realisation's smooth directions are informative only under the
+        reduced Tweedie criterion this release removes (see the fixture's
+        docstring; per-dimension curvature measured here 1.3e-1 and 2.6e-1
+        against the 1e-3 bar). The lambda pins are the exact-criterion
+        determined answer."""
+        frame, y, weights, offset, features = _flat_lambda_fixture(
+            400_000, informative_smooths=True
+        )
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         model.fit_reml(frame, y, sample_weight=weights, offset=offset, runtime_validation="skip")
 
@@ -1207,13 +1237,12 @@ class TestFlatDirectionFloor:
         assert r.converged
         assert not frozen["f6"]
         assert not frozen["f7"]
-        # The determined answer, pinned (stock froze f7 at 1.50 -- a
-        # factor e^3.8 from here). Timing/memory/dispatch comparisons
+        # The determined answer, pinned. Timing/memory/dispatch comparisons
         # live in the complete-fit baseline (PR record), tested
         # separately from numerical correctness per the test policy.
         assert str(r.termination_reason) == "score_objective_tolerance"
-        assert float(r.lambdas["f6"]) == pytest.approx(3.2598, rel=0.05)
-        assert float(r.lambdas["f7"]) == pytest.approx(68.773, rel=0.05)
+        assert float(r.lambdas["f6"]) == pytest.approx(16.928, rel=0.05)
+        assert float(r.lambdas["f7"]) == pytest.approx(0.47106, rel=0.05)
         assert int(r.n_reml_iter) <= 25
 
     def test_a_high_rank_random_effect_does_not_freeze_the_low_rank_spline(self):
@@ -1249,10 +1278,17 @@ class TestFlatDirectionFloor:
         assert float(r.lambdas["x"]) == pytest.approx(0.182, rel=0.25)
 
     def test_informative_slow_directions_do_not_freeze(self):
-        """flat_12k's stress smooths are the tightest informative curvature
-        (|H_ii|/scale ~ 1.5e-6): they are exactly what the determination
-        work exists to pin, and the floor must not freeze them."""
-        frame, y, weights, offset, features = _flat_lambda_fixture()
+        """The tightest informative curvature must stay active: it is exactly
+        what the determination work exists to pin, and the floor must not
+        freeze it.
+
+        Re-derived for 0.29.0 with the informative_smooths realisation: on
+        the default realisation these directions were informative only under
+        the reduced Tweedie criterion (see the fixture's docstring). Here f6
+        measures 5.9e-3 per penalty dimension against the 1e-3 bar — the
+        informative-but-slow band this class characterises as the tightest
+        real signal — and f7 5.5e-2."""
+        frame, y, weights, offset, features = _flat_lambda_fixture(informative_smooths=True)
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         model.fit_reml(frame, y, sample_weight=weights, offset=offset, runtime_validation="skip")
 
