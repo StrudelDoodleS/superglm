@@ -296,6 +296,69 @@ class TestProfilePlotSmallTheta:
             plt.close(figure)
 
 
+class TestSmallThetaSurvivability:
+    """Review round 3, P2s: absolute-scale leftovers of the (0.1, 50) era in
+    the CI root find and the iteration cache, below theta = 1e-4."""
+
+    @staticmethod
+    def _tiny_theta_rows(theta_true=3e-5, n=30_000, seed=53):
+        rng = np.random.default_rng(seed)
+        mu = np.full(n, 2.0)
+        y = rng.negative_binomial(theta_true, theta_true / (theta_true + mu)).astype(np.float64)
+        return y, mu, np.ones(n)
+
+    def test_ci_endpoints_sit_on_the_lrt_crossing_at_tiny_theta(self):
+        """profile_ci_theta must return the chi-squared crossing, not an
+        arbitrary in-bracket point.
+
+        With theta_hat ~ 3e-5 the whole lower bracket is narrower than the
+        historical absolute xtol=1e-4, so brentq declared convergence
+        anywhere inside it; the defining property |LRT(endpoint) - cutoff|
+        was violated by orders of magnitude. Relative tolerances restore it
+        at every scale.
+        """
+        from scipy.stats import chi2
+
+        from superglm.profiling.nb import _nb2_nll, _theta_ml, profile_ci_theta
+
+        y, mu, weights = self._tiny_theta_rows()
+        solve = _theta_ml(y, mu, weights, 1.0)
+        assert solve.converged and solve.theta < 1e-4
+        theta_hat = solve.theta
+        ci_lo, ci_hi = profile_ci_theta(y, mu, weights, theta_hat)
+        assert 0.0 < ci_lo < theta_hat < ci_hi
+        w_sum = float(np.sum(weights))
+        nll_hat = _nb2_nll(y, mu, weights, theta_hat)
+        cutoff = float(chi2.ppf(0.95, 1))
+        for endpoint in (ci_lo, ci_hi):
+            lrt = 2.0 * w_sum * (_nb2_nll(y, mu, weights, endpoint) - nll_hat)
+            assert lrt == pytest.approx(cutoff, rel=0.02), (
+                f"endpoint {endpoint:g} is not on the LRT crossing: {lrt:.4f}"
+            )
+
+    def test_cache_keys_survive_below_the_decimal_rounding_floor(self):
+        """A theta below 5e-7 must not record the impossible cache key 0.0.
+
+        Decimal rounding collapsed it there, and profile_plot then fed the
+        zero shape parameter to the NB2 likelihood.
+        """
+        from superglm.profiling.nb import NBProfileResult
+
+        y = np.array([0.0, 0.0, 3.0, 0.0, 11.0])
+        mu = np.full(5, 1.5)
+        weights = np.ones(5)
+        result = NBProfileResult(
+            theta_hat=3e-7,
+            nll=1.0,
+            n_evaluations=1,
+            converged=True,
+            cache={},
+        )
+        published = result._published_with_data(y, mu, weights)
+        assert 0.0 not in published.cache
+        assert all(key > 0.0 for key in published.cache)
+
+
 class TestThetaFrozenBeforeReml:
     """Finding B1: theta was calibrated before REML at the configured
     smoothing and never revisited, converting lack-of-fit at lambda2=0.1

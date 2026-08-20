@@ -1031,7 +1031,12 @@ def _refine_nb_theta_to_reml_fixed_point(
     """
     import warnings
 
-    from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning, _theta_ml
+    from superglm.profiling.nb import (
+        NBProfileResult,
+        NBThetaBoundWarning,
+        _theta_cache_key,
+        _theta_ml,
+    )
 
     nb_seed = getattr(model, "_nb_profile_result", None)
     if nb_seed is None or getattr(model, "_reml_result", None) is None:
@@ -1087,7 +1092,7 @@ def _refine_nb_theta_to_reml_fixed_point(
             durable_retain_fit_state=durable_retain_fit_state,
             **refit_kwargs,
         )
-        cache[round(theta, 6)] = _nb_joint_nll(y_arr, model, theta)
+        cache[_theta_cache_key(theta)] = _nb_joint_nll(y_arr, model, theta)
 
     at_bound = final_solve is not None and final_solve.at_bound
     if at_bound:

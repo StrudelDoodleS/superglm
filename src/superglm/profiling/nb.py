@@ -65,6 +65,19 @@ _THETA_DEFAULT_BOUNDS: tuple[float, float] = (1e-8, 1e8)
 _THETA_BRACKET_FACTOR = 10.0
 
 
+def _theta_cache_key(value: float) -> float:
+    """Cache key for a theta iterate: six SIGNIFICANT digits.
+
+    Decimal rounding (``round(value, 6)``) collapses every theta below 5e-7
+    onto the impossible key 0.0 - which ``profile_plot`` then feeds to the
+    NB2 likelihood as a zero shape parameter - and merges distinct small-
+    theta iterates onto one entry. Significant-digit rounding matches how
+    ``theta_hat`` itself is published, so the publication lookup and the
+    iteration entries share one convention at every scale.
+    """
+    return float(f"{float(value):.6g}")
+
+
 class NBThetaBoundWarning(UserWarning):
     """The NB2 theta estimate sits on an active search bound.
 
@@ -112,7 +125,7 @@ class NBProfileResult:
         weights_owned = _immutable_array_copy(np.asarray(weights, dtype=np.float64))
         nll = _nb2_nll(y_owned, mu_owned, weights_owned, float(self.theta_hat))
         cache = dict(self.cache)
-        cache[round(float(self.theta_hat), 6)] = nll
+        cache[_theta_cache_key(self.theta_hat)] = nll
         published = type(self)(
             theta_hat=float(self.theta_hat),
             nll=nll,
@@ -695,7 +708,7 @@ def estimate_nb_theta(
         theta_new = theta_solve.theta
 
         nll = _nb2_nll(y_arr, mu, w_arr, theta_new)
-        cache[round(theta_new, 6)] = nll
+        cache[_theta_cache_key(theta_new)] = nll
         if trace_callback is not None:
             trace_callback(
                 {
@@ -807,13 +820,22 @@ def profile_ci_theta(
     lo = min(theta_range[0], theta_hat / 100.0)
     hi = max(theta_range[1], theta_hat * 100.0)
 
+    # Root tolerances must scale with the endpoint, not sit at a fixed
+    # absolute 1e-4: below theta_hat ~ 1e-4 that constant exceeded the
+    # entire lower bracket, so brentq returned an arbitrary in-bracket point
+    # instead of the LRT crossing. A relative tolerance pins each endpoint
+    # to six significant digits at every scale (an endpoint's own magnitude
+    # is the only correct yardstick - even a theta_hat-proportional absolute
+    # tolerance mis-scales when the lower endpoint sits far below
+    # theta_hat); the near-zero xtol merely satisfies brentq's positivity
+    # requirement.
     try:
-        ci_lower = brentq(objective, lo, theta_hat, xtol=1e-4)
+        ci_lower = brentq(objective, lo, theta_hat, xtol=1e-300, rtol=1e-6)
     except ValueError:
         ci_lower = lo
 
     try:
-        ci_upper = brentq(objective, theta_hat, hi, xtol=1e-4)
+        ci_upper = brentq(objective, theta_hat, hi, xtol=1e-300, rtol=1e-6)
     except ValueError:
         ci_upper = hi
 
