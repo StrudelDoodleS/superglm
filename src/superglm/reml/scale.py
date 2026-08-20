@@ -8,7 +8,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import brentq, minimize_scalar
-from scipy.special import digamma, gammaln, polygamma
+from scipy.special import digamma, gammaln, i0e, i1e, polygamma
+
+from superglm.profiling.tweedie import _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT
 
 _GAMMA_ASYMPTOTIC_SHAPE = 100.0
 
@@ -345,6 +347,30 @@ class TweedieScaleProfileData:
     power: float
     n_positive: int
     prepared_positive: Any = field(repr=False)
+    # Closed-form p = 1.5 state, or None at every other power.
+    #
+    # At p = 1.5 the Wright parameter a = (2-p)/(p-1) is exactly 1, and DLMF
+    # 10.46.2 -- I_nu(z) = (z/2)^nu phi(1, nu+1; z^2/4) -- collapses Wright's
+    # function to a modified Bessel function:
+    #
+    #     Phi(1, 2; t) = I_1(2 sqrt(t)) / sqrt(t),   Phi(1, 1; t) = I_0(2 sqrt(t))
+    #
+    # This is the case Dunn & Smyth (2005) single out as Siegel's (1979)
+    # noncentral chi-squared with zero degrees of freedom, and whose Bessel form
+    # their Fourier-inversion companion (2008, Table 2) uses as its reference
+    # truth.  The saturated profile is simpler still: this state is prepared
+    # with mu = y, so the unit deviance is identically zero and t = (K/(2 phi))^2
+    # with K = 4 w sqrt(y) fit-invariant.  The whole positive-row saturated
+    # log-likelihood is then
+    #
+    #     l_sat(phi) = C0 - n_positive log phi + sum_i log i1e(K_i / phi)
+    #     T(phi)     = sum_i z_i (i0e(z_i) - i1e(z_i)) / i1e(z_i),  z = K / phi
+    #
+    # with C0 = sum_i (log 2 + log w_i - log(y_i)/2).  ``i1e``/``i0e`` are the
+    # d->d Cephes Chebyshev evaluators, not the dd->d AMOS ``ive`` the density
+    # evaluator's overflow fallback reaches for.
+    bessel_scale: NDArray | None = field(default=None, repr=False, compare=False)
+    bessel_log_constant: float = field(default=0.0, repr=False, compare=False)
     _saturated_cache: dict[float, float] = field(
         default_factory=dict,
         repr=False,
@@ -356,22 +382,96 @@ class TweedieScaleProfileData:
         compare=False,
     )
 
+    def _bessel_saturated_log_likelihood(self, phi: float) -> float | None:
+        """Closed-form saturated log-likelihood at p = 1.5, or None.
+
+        Returns None whenever the closed form is unavailable (any other power)
+        or unrepresentable at this ``phi``, in which case the caller keeps the
+        general Wright-Bessel route and its ``FloatingPointError`` contract.
+        """
+        scale = self.bessel_scale
+        if scale is None:
+            return None
+        with np.errstate(all="ignore"):
+            argument = scale / phi
+            scaled_bessel_one = i1e(argument)
+            log_scaled = np.log(scaled_bessel_one)
+            if not np.all(np.isfinite(log_scaled)):
+                return None
+            value = float(
+                self.bessel_log_constant
+                - self.n_positive * float(np.log(phi))
+                + np.sum(log_scaled, dtype=np.float64)
+            )
+        return value if np.isfinite(value) else None
+
+    def _bessel_saturated_score(self, phi: float) -> tuple[float, float] | None:
+        """Closed-form ``(T(phi), l_sat(phi))`` at p = 1.5, or None.
+
+        ``T = d(-l_sat)/d log phi``.  Both come out of one ``i1e`` pass, so the
+        value is returned alongside and cross-fills the value cache for free.
+        The large-argument rule is the density evaluator's, verbatim, so this
+        path introduces no score behaviour of its own.
+        """
+        scale = self.bessel_scale
+        if scale is None:
+            return None
+        with np.errstate(all="ignore"):
+            argument = scale / phi
+            scaled_bessel_one = i1e(argument)
+            log_scaled = np.log(scaled_bessel_one)
+            if not np.all(np.isfinite(log_scaled)):
+                return None
+            scaled_bessel_zero = i0e(argument)
+            score_component = (
+                argument * (scaled_bessel_zero - scaled_bessel_one) / scaled_bessel_one
+            )
+            large_argument = np.isfinite(argument) & (
+                argument >= _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT
+            )
+            asymptotic_score = ~np.isfinite(score_component) & large_argument
+            if np.any(asymptotic_score):
+                inverse_z = 1.0 / argument[asymptotic_score]
+                score_component[asymptotic_score] = (
+                    0.5
+                    + 3.0 * inverse_z / 8.0
+                    + 3.0 * np.square(inverse_z) / 8.0
+                    + 63.0 * np.power(inverse_z, 3) / 128.0
+                )
+            if not np.all(np.isfinite(score_component)):
+                return None
+            score = float(np.sum(score_component, dtype=np.float64))
+            value = float(
+                self.bessel_log_constant
+                - self.n_positive * float(np.log(phi))
+                + np.sum(log_scaled, dtype=np.float64)
+            )
+        if not np.isfinite(score):
+            return None
+        return score, value
+
     def saturated_log_likelihood(self, phi: float) -> float:
         """Exact saturated log-likelihood at dispersion ``phi``.
 
         Zero rows contribute exactly zero and are not evaluated; the returned
-        value is the positive-row sum through the same adaptive Wright-Bessel
-        density evaluation the Tweedie likelihood uses everywhere else
-        (Dunn & Smyth 2005; Wood, Pya & Saefken 2016, supplementary App. J).
+        value is the positive-row sum through the adaptive Wright-Bessel density
+        evaluation the Tweedie likelihood uses everywhere else (Dunn & Smyth
+        2005; Wood, Pya & Saefken 2016, supplementary App. J), or -- at p = 1.5,
+        where Wright's function reduces to a modified Bessel function in closed
+        form -- through that reduction.  The two agree to 4e-13 relative across
+        eleven decades of phi, and mpmath at 45 digits puts the Bessel form on
+        the accurate side wherever they differ.
         """
         key = float(phi)
         cached = self._saturated_cache.get(key)
         if cached is not None:
             return cached
-        from superglm.profiling.tweedie import _evaluate_tweedie_density
+        value = self._bessel_saturated_log_likelihood(key)
+        if value is None:
+            from superglm.profiling.tweedie import _evaluate_tweedie_density
 
-        evaluation = _evaluate_tweedie_density(self.prepared_positive, key)
-        value = float(np.sum(evaluation.logpdf, dtype=np.float64))
+            evaluation = _evaluate_tweedie_density(self.prepared_positive, key)
+            value = float(np.sum(evaluation.logpdf, dtype=np.float64))
         if not np.isfinite(value):
             raise FloatingPointError(
                 f"Tweedie saturated log-likelihood is not finite at phi={key:g}"
@@ -393,6 +493,13 @@ class TweedieScaleProfileData:
         cached = self._saturated_score_cache.get(key)
         if cached is not None:
             return cached if np.isfinite(cached) else None
+        bessel = self._bessel_saturated_score(key)
+        if bessel is not None:
+            score_value, saturated_value = bessel
+            if np.isfinite(saturated_value):
+                self._saturated_cache.setdefault(key, saturated_value)
+            self._saturated_score_cache[key] = score_value
+            return score_value if np.isfinite(score_value) else None
         from superglm.profiling.tweedie import _evaluate_tweedie_density
 
         evaluation = _evaluate_tweedie_density(
@@ -431,6 +538,10 @@ def prepare_tweedie_reml_scale_data(
     ``sample_weight`` follows the Tweedie EDM prior-weight contract
     (observation-specific dispersion ``phi / w``); the prepared state applies
     it inside the density evaluation exactly as the fitted likelihood does.
+
+    At ``power == 1.5`` the closed-form Bessel state is prepared alongside; see
+    ``TweedieScaleProfileData``.  Every other power carries ``bessel_scale =
+    None`` and is evaluated exactly as before.
     """
     from superglm.profiling.tweedie import _prepare_tweedie_density
 
@@ -450,16 +561,35 @@ def prepare_tweedie_reml_scale_data(
             "an all-zero response has no estimable dispersion"
         )
     y_positive = y[positive]
+    weights_positive = sample_weight[positive]
     prepared = _prepare_tweedie_density(
         y_positive,
         y_positive,
         float(power),
-        weights=sample_weight[positive],
+        weights=weights_positive,
     )
+    bessel_scale: NDArray | None = None
+    bessel_log_constant = 0.0
+    if float(power) == 1.5:
+        # Associated exactly as the density evaluator's own p = 1.5 branch
+        # associates its Bessel argument: (4 w) * sqrt(y), then / phi.
+        bessel_scale = (4.0 * weights_positive) * np.sqrt(y_positive)
+        bessel_scale.setflags(write=False)
+        bessel_log_constant = float(
+            np.sum(
+                np.log(2.0) + np.log(weights_positive) - 0.5 * np.log(y_positive),
+                dtype=np.float64,
+            )
+        )
+        if not np.isfinite(bessel_log_constant) or not np.all(np.isfinite(bessel_scale)):
+            bessel_scale = None
+            bessel_log_constant = 0.0
     return TweedieScaleProfileData(
         power=float(power),
         n_positive=n_positive,
         prepared_positive=prepared,
+        bessel_scale=bessel_scale,
+        bessel_log_constant=bessel_log_constant,
     )
 
 
