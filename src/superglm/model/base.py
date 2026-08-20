@@ -688,6 +688,7 @@ def init_model(
     max_iter: int = 100,
     convergence: str = "deviance",
     retain_fit_state: bool = True,
+    separation: str = "warn",
 ):
     """Initialize model state (body of SuperGLM.__init__)."""
     if features is not None and splines is not None:
@@ -731,6 +732,9 @@ def init_model(
             stacklevel=3,
         )
     model._convergence = convergence
+    from superglm.diagnostics.separation import validate_separation_mode
+
+    model._separation = validate_separation_mode(separation)
 
     model._specs: dict[Hashable, FeatureSpec] = {}
     model._feature_order: list[Hashable] = []
@@ -1016,6 +1020,8 @@ def model_build_design_matrix(
             dict(model._level_bindings) if getattr(model, "_level_bindings", None) else None
         ),
         alias_prune=not selection_active,
+        separation=getattr(model, "_separation", "warn"),
+        selection_penalty=configured_penalty(model) if selection_active else None,
     )
     model._distribution = result.distribution
     model._link = result.link

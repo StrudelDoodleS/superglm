@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+import warnings
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -439,6 +440,7 @@ def fit_irls_direct(
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
     _compute_scop_postfit_inference: bool = True,
+    separation: str = "warn",
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS, retrying automatic globally-ineligible SZ fits on Gram."""
     if max_iter < 1:
@@ -483,6 +485,7 @@ def fit_irls_direct(
             trace_run=trace_run,
             trace_purpose=trace_purpose,
             _compute_scop_postfit_inference=_compute_scop_postfit_inference,
+            separation=separation,
         )
 
     try:
@@ -534,6 +537,7 @@ def _fit_irls_direct_once(
     trace_run: TraceRun | None = None,
     trace_purpose: str = "fit",
     _compute_scop_postfit_inference: bool = True,
+    separation: str = "warn",
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -2303,6 +2307,50 @@ def _fit_irls_direct_once(
 
     t_elapsed = time.perf_counter() - t_start
     logger.info(f"  IRLS direct done: {it + 1} iters, {t_elapsed:.2f}s")
+
+    # Runtime separation backstop (issue #341).  Two terminal signatures mark
+    # a coefficient that walked toward +/-infinity instead of converging:
+    #
+    # * the retained linear predictor is pinned at the link's overflow guard
+    #   on rows that carry weight -- the guard, not the likelihood, stopped
+    #   the walk, and it also manufactures "convergence" by freezing the
+    #   coefficient once eta saturates;
+    # * the budget ran out with a frozen deviance while the coefficient
+    #   criterion still failed -- the field trace of issue #340/#341.
+    #
+    # Both require the extreme working-weight range that a drifting cell
+    # produces.  The build-time scan names cell separation before fitting
+    # starts; this catches what the design scan cannot see (non-categorical
+    # indicator structure), promoting a debug-level log line to a named
+    # warning or, in strict mode, an error.
+    if separation != "ignore" and np.isfinite(dev):
+        from superglm.diagnostics.separation import (
+            EXTREME_WEIGHT_RATIO,
+            STAGNANT_DEVIANCE_DELTA,
+            SeparationError,
+            SeparationWarning,
+            format_runtime_message,
+        )
+
+        if w_ratio > EXTREME_WEIGHT_RATIO:
+            pinned = bool(np.any((eta != eta_unclipped) & (weights > 0)))
+            exhausted_stagnant = (
+                not converged
+                and it + 1 >= max_iter
+                and not step_rejected
+                and abs(dev - dev_prev) / (abs(dev_prev) + 1.0) < STAGNANT_DEVIANCE_DELTA
+            )
+            if pinned or exhausted_stagnant:
+                max_abs = float(np.max(np.abs(beta))) if beta.size else 0.0
+                drifting = [
+                    g.name
+                    for g in groups
+                    if beta[g.sl].size and float(np.max(np.abs(beta[g.sl]))) >= max_abs - 2.0
+                ][:5]
+                message = format_runtime_message(w_ratio, it + 1, drifting, pinned)
+                if separation == "error":
+                    raise SeparationError(message)
+                warnings.warn(message, SeparationWarning, stacklevel=2)
 
     if has_constraints:
         if A_all is None or b_all is None:  # pragma: no cover - construction invariant

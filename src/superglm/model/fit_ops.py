@@ -911,6 +911,7 @@ def _solve_coefficients(
             record_diagnostics=record_diagnostics,
             direct_solve=model._direct_solve,
             convergence=convergence,
+            separation=getattr(model, "_separation", "warn"),
         )
         return result
 
@@ -929,6 +930,7 @@ def _solve_coefficients(
         lambda2=lambda2,
         record_diagnostics=record_diagnostics,
         convergence=convergence,
+        separation=getattr(model, "_separation", "warn"),
     )
 
 

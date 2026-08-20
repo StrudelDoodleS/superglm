@@ -101,6 +101,10 @@ class ModelConfig:
     max_iter: int
     convergence: str
     retain_fit_state: bool
+    # Class-attribute default doubles as the migration value for pickles
+    # captured before the field existed (frozen dataclasses fall back to the
+    # class attribute when the instance never stored one).
+    separation: str = "warn"
     # Fit-machinery intent, not constructor API: a caller that knows the whole
     # frame (cross_validate) resolves one level universe per categorical term
     # and every attempt materialized from this configuration binds to it.
@@ -160,6 +164,7 @@ class ModelConfig:
             max_iter=int(model._max_iter),
             convergence=str(model._convergence),
             retain_fit_state=bool(model._retain_fit_state),
+            separation=str(getattr(model, "_separation", "warn")),
             level_bindings=copy.deepcopy(getattr(model, "_level_bindings", None)),
         )
 
@@ -202,6 +207,7 @@ class ModelConfig:
             "max_iter": self.max_iter,
             "convergence": self.convergence,
             "retain_fit_state": self.retain_fit_state,
+            "separation": self.separation,
         }
 
     def materialize(self, model_type):
@@ -225,6 +231,7 @@ class ModelConfig:
             "_max_iter": self.max_iter,
             "_retain_fit_state": self.retain_fit_state,
             "_convergence": self.convergence,
+            "_separation": self.separation,
             "_specs": {name: copy.deepcopy(spec) for name, spec in self.feature_templates},
             "_level_bindings": copy.deepcopy(self.level_bindings),
             "_feature_order": [name for name, _ in self.feature_templates],
