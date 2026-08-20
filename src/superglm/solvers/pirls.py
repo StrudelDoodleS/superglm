@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import time
+import warnings
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Literal, cast, get_args
@@ -748,6 +749,7 @@ def _fit_pirls_inner(
     trace_run: TraceRun | None = None,
     trace_basis_id: int | None = None,
     trace_purpose: str = "fit",
+    separation: str = "warn",
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with a composite block-coordinate inner solver."""
     n, p = dm.shape
@@ -1404,6 +1406,43 @@ def _fit_pirls_inner(
         f"  PIRLS done: {outer + 1} outer iters, {total_inner_iters} total BCD cycles, "
         f"{t_elapsed:.2f}s total"
     )
+
+    # Runtime separation backstop (issue #341), mirroring irls_direct: a
+    # retained predictor pinned at the link's overflow guard, or an exhausted
+    # budget with a frozen objective, both under an exploded working-weight
+    # range, mark a coefficient drifting to +/-infinity.  Reachable here only
+    # for groups the selection penalty does not bound (penalty_features
+    # restrictions); cell separation in those groups is already named at
+    # build time, so this catches what the design scan cannot see.
+    if separation != "ignore" and np.isfinite(dev):
+        from superglm.diagnostics.separation import (
+            EXTREME_WEIGHT_RATIO,
+            STAGNANT_DEVIANCE_DELTA,
+            SeparationError,
+            SeparationWarning,
+            format_runtime_message,
+        )
+
+        if w_ratio > EXTREME_WEIGHT_RATIO:
+            pinned = bool(np.any((retained.eta != retained.eta_unclipped) & (weights > 0)))
+            exhausted_stagnant = (
+                not converged
+                and outer + 1 >= max_iter_outer
+                and not step_rejected
+                and objective_relative_change is not None
+                and objective_relative_change < STAGNANT_DEVIANCE_DELTA
+            )
+            if pinned or exhausted_stagnant:
+                max_abs = float(np.max(np.abs(beta))) if beta.size else 0.0
+                drifting = [
+                    g.name
+                    for g in groups
+                    if beta[g.sl].size and float(np.max(np.abs(beta[g.sl]))) >= max_abs - 2.0
+                ][:5]
+                message = format_runtime_message(w_ratio, outer + 1, drifting, pinned)
+                if separation == "error":
+                    raise SeparationError(message)
+                warnings.warn(message, SeparationWarning, stacklevel=2)
     extra = ""
     if active_set:
         total_group_updates = total_inner_iters * n_groups
@@ -1630,6 +1669,7 @@ def fit_pirls(
     convergence: str = "deviance",
     S_override: NDArray | None = None,
     trace_run: TraceRun | None = None,
+    separation: str = "warn",
 ) -> PIRLSResult:
     """Fit a penalised GLM via PIRLS with proximal Newton BCD.
 
@@ -1679,6 +1719,9 @@ def fit_pirls(
         trace_run=trace_run,
         trace_basis_id=trace_basis_id,
         trace_purpose="initial_flavor_fit" if penalty.flavor is not None else "fit",
+        # A flavored stage-1 fit is discarded scaffolding; only the final
+        # returned fit carries the separation backstop.
+        separation="ignore" if penalty.flavor is not None else separation,
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -1708,6 +1751,7 @@ def fit_pirls(
             trace_run=trace_run,
             trace_basis_id=trace_basis_id,
             trace_purpose="adjusted_flavor_fit",
+            separation=separation,
         )
 
     return result

@@ -83,6 +83,11 @@ print(f"Gini ratio: {result.gini_ratio:.4f}")
 The Gini ratio measures ranking power relative to perfect foresight. It is the
 standard quick view of segmentation quality.
 
+Do not score models on gini and balance alone: a fit with
+[separated interaction cells](interactions.md#separated-cells-exposure-without-response)
+can move out-of-sample deviance by orders of magnitude while both stay
+healthy. Keep out-of-sample deviance in every comparison.
+
 ### Double Lift Chart
 
 Use the CAS-style double-lift chart when you need business-facing evidence that

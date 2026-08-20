@@ -26,6 +26,7 @@ sklearn-compatible API:
 from superglm import families
 from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
 from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
+from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
@@ -204,6 +205,8 @@ __all__ = [
     "SplineMetadata",
     "MonotoneRepairResult",
     "MonotoneRepairer",
+    "SeparationError",
+    "SeparationWarning",
     "SplineRedundancyReport",
     "cross_validate",
     "CrossValidationResult",

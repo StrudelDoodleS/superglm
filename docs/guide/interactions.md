@@ -168,6 +168,60 @@ population = model.predict(test, random_effects="population")
 contributions while retaining fixed effects and the global spline. For SZ,
 that is exactly the global curve.
 
+## Separated cells: exposure without response
+
+A crossed categorical cell that carries exposure but whose responses all sit
+on the response boundary — no positive claim under a log-link Tweedie or
+Poisson fit — has **no finite maximum-likelihood effect**. The likelihood
+keeps improving as the cell's coefficient walks toward −∞, so IRLS drifts
+until the objective stagnates and the cell's fitted values collapse to zero.
+The same applies to a main-effect level with exposure and no positive
+response; interactions just make such cells far more common. This is the
+classical nonexistence problem for log-linear MLEs (Haberman 1974; Fienberg &
+Rinaldo 2012), the binomial version of which is complete/quasi-complete
+separation (Albert & Anderson 1984).
+
+The fit is checked for this **at build time, before any IRLS iteration**,
+controlled by the `separation` constructor parameter:
+
+```python
+model = SuperGLM(
+    features={"make": Categorical(), "region": Categorical()},
+    interactions=[("make", "region")],
+    separation="error",  # "warn" (default) | "error" | "ignore"
+)
+```
+
+- `"warn"` (default) emits a `SeparationWarning` naming every separated cell
+  and the remedies, then fits anyway.
+- `"error"` refuses the design with a `SeparationError`.
+- `"ignore"` disables the check.
+
+Remedies: collapse the affected levels into neighbours (`collapse_levels` /
+`Categorical(grouping=...)`), model the crossed factor with a `RandomEffect`
+(its ridge bounds every cell), or target the term with a selection penalty
+(penalised terms are exempt from the check because their optima are finite).
+A cell with few rows but at least one positive response is *not* separated
+and is never flagged — thin is not separated.
+
+!!! warning "Rank and aggregate metrics cannot detect this failure"
+
+    On a measured 5-fold comparison, a separated crossed interaction moved
+    out-of-sample deviance by a factor of ~27,000 while normalised gini moved
+    by 0.004 and balance actually *improved*. The collapse concentrates in a
+    handful of rows, which rank metrics shrug off and aggregate balance
+    averages away — only the likelihood notices, because only the likelihood
+    is unbounded. A model-selection procedure scoring on gini and balance
+    alone will ship a separated model without a single number looking wrong.
+    Always include out-of-sample deviance (or another proper scoring rule)
+    when interactions are on the table.
+
+Separation the design scan cannot see — for example a numeric 0/1 indicator
+column whose active rows have no positive response — is caught at the end of
+the solve instead: a fit whose linear predictor is pinned at the link's
+overflow guard with an extreme working-weight range reports the same
+`SeparationWarning` (or `SeparationError` under `separation="error"`).
+
 ## Hierarchical make/model/trim data
 
 Sparse nested vehicle levels can be represented with explicit composite IDs,

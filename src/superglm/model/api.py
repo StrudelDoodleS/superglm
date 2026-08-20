@@ -86,6 +86,7 @@ class SuperGLM:
         max_iter: int = 100,
         convergence: str = "deviance",
         retain_fit_state: bool = True,
+        separation: str = "warn",
     ):
         """
         Parameters
@@ -171,6 +172,23 @@ class SuperGLM:
             compact inference state after fitting, then releases row-scale
             training caches while preserving prediction, summaries, and term
             confidence intervals.
+        separation : {"warn", "error", "ignore"}
+            Build-time check for separated categorical cells: levels or
+            crossed-interaction cells that carry exposure but whose responses
+            all sit on the response boundary (e.g. no positive response under
+            a log-link Tweedie/Poisson fit). Such cells have no finite
+            maximum-likelihood effect, IRLS drifts until the objective
+            stagnates, and the affected predictions collapse to the boundary
+            while rank and aggregate metrics (gini, balance) still look
+            healthy -- only out-of-sample likelihood/deviance exposes the
+            damage. ``"warn"`` (default) emits a ``SeparationWarning`` naming
+            the offending cells and the remedies before fitting; ``"error"``
+            refuses the design with a ``SeparationError``; ``"ignore"``
+            disables the check. Terms bounded by an active selection penalty
+            are exempt, as their penalised optima are finite. The same mode
+            governs the in-solver backstop that fires when an exhausted,
+            stagnant IRLS run shows the extreme-working-weight signature of
+            separation the build scan cannot see.
         """
         if splines is not None:
             import warnings
@@ -203,6 +221,7 @@ class SuperGLM:
             max_iter=max_iter,
             convergence=convergence,
             retain_fit_state=retain_fit_state,
+            separation=separation,
         )
 
     def __repr__(self) -> str:

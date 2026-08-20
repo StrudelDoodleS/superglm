@@ -869,6 +869,8 @@ def build_design_matrix(
     lambda2: float | dict,
     level_bindings: dict | None = None,
     alias_prune: bool = True,
+    separation: str = "warn",
+    selection_penalty: object | None = None,
 ) -> BuildResult:
     """Build features, groups, and design matrix from specs.
 
@@ -885,6 +887,14 @@ def build_design_matrix(
     whenever a nonzero lambda1 will reach this block.  Empty cells are
     unconditional: their columns are identically zero in the weighted
     geometry, so no penalty can prefer any other representative.
+
+    ``separation`` controls the build-time separated-cell scan (see
+    :mod:`superglm.diagnostics.separation`): ``"warn"`` (default) names the
+    offending cells in a ``SeparationWarning``, ``"error"`` refuses the
+    design with a ``SeparationError``, ``"ignore"`` skips the scan.
+    ``selection_penalty`` is the model's lambda1-style penalty object when a
+    nonzero lambda1 will reach this fit, else ``None``; terms that penalty
+    targets have bounded optima and are exempt from the scan.
     """
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
@@ -898,9 +908,21 @@ def build_design_matrix(
     if offset is not None:
         offset = np.asarray(offset, dtype=np.float64)
     link = resolve_link(link_spec, distribution)
+    from superglm.diagnostics.separation import response_boundaries
+    from superglm.features.categorical import Categorical
+    from superglm.features.interaction import CategoricalInteraction
     from superglm.features.ordered_categorical import OrderedCategorical
     from superglm.features.piecewise import Piecewise
     from superglm.features.spline import _SplineBase
+
+    # Build-time separation scan (issues #340/#341): terms recorded during the
+    # loops below, scanned once the GroupSlices exist so an active selection
+    # penalty can exempt the blocks it bounds.  An empty boundary tuple means
+    # this family/link cannot separate, and the scan costs nothing.
+    separation_boundaries = (
+        response_boundaries(distribution, link) if separation != "ignore" else ()
+    )
+    separation_records: list[tuple] = []
 
     # Non-Tweedie weights are frequency mass for learned spline geometry.
     # Tweedie weights are EDM prior weights, so spline knot placement and
@@ -931,6 +953,10 @@ def build_design_matrix(
         if isinstance(spec, OrderedCategorical):
             spec._inner_geometry_physical_rows = geometry_weight is None
         x_col = X.column_array(name)
+        if separation_boundaries and isinstance(spec, Categorical):
+            # Scanned after the loops, once the spec has learned its levels
+            # and the GroupSlices exist for the penalty exemption.
+            separation_records.append(("cat", name, spec, x_col))
         # Universe sources the spec cannot see for itself, in precedence order
         # (spec 2026-08-11 §3.1): the column's own dtype declaration, then a
         # caller's full-frame binding. Both hooks decline when the spec already
@@ -1222,6 +1248,8 @@ def build_design_matrix(
         p1, p2 = ispec.parent_names
         spec1, x1 = resolve_interaction_parent_of(ispec, specs.get(p1), X.column_array(p1))
         spec2, x2 = resolve_interaction_parent_of(ispec, specs.get(p2), X.column_array(p2))
+        if separation_boundaries and isinstance(ispec, CategoricalInteraction):
+            separation_records.append(("inter", iname, spec1, spec2, x1, x2, p1, p2))
         if spec1 is specs.get(p1) and spec2 is specs.get(p2):
             parent_specs = specs
         else:
@@ -1376,6 +1404,52 @@ def build_design_matrix(
 
     validate_term_name_namespace(specs, interaction_specs)
     validate_fitted_group_names(groups)
+
+    if separation_records:
+        from superglm.diagnostics.separation import (
+            emit_separation_findings,
+            scan_categorical_term,
+            scan_interaction_term,
+        )
+        from superglm.penalties.base import penalty_targets_group
+
+        findings = []
+        for record in separation_records:
+            term_name = record[1]
+            if selection_penalty is not None and any(
+                penalty_targets_group(selection_penalty, g)
+                for g in groups
+                if g.feature_name == term_name
+            ):
+                # A nonzero lambda1 reaches this block: the penalty grows
+                # without bound along any recession direction, so the
+                # penalised optimum is finite and the term is estimable.
+                continue
+            if record[0] == "cat":
+                _, name_c, spec_c, x_c = record
+                findings.extend(
+                    scan_categorical_term(
+                        name_c, spec_c, x_c, y, sample_weight, separation_boundaries
+                    )
+                )
+            else:
+                _, name_i, spec1_i, spec2_i, x1_i, x2_i, p1_i, p2_i = record
+                findings.extend(
+                    scan_interaction_term(
+                        name_i,
+                        spec1_i,
+                        spec2_i,
+                        x1_i,
+                        x2_i,
+                        p1_i,
+                        p2_i,
+                        y,
+                        sample_weight,
+                        separation_boundaries,
+                    )
+                )
+        emit_separation_findings(findings, separation)
+
     dm = DesignMatrix(group_matrices, n, col_offset)
     return BuildResult(
         dm=dm,
