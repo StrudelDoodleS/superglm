@@ -1,29 +1,44 @@
-"""Negative Binomial theta estimation via alternating GLM + Newton.
+"""Negative Binomial theta estimation via alternating GLM + safeguarded solve.
 
-Implements the MASS::glm.nb algorithm: alternate between fitting the GLM
-at the current theta (PIRLS) and updating theta via Newton on the closed-form
-profile score (digamma/trigamma). Converges in 3-5 outer iterations instead
-of the ~14 black-box evaluations required by Brent profiling.
+Alternates between fitting the GLM at the current theta (PIRLS) and updating
+theta on the closed-form NB2 profile score (digamma/trigamma). The alternating
+scheme is the standard one described by Venables & Ripley (2002, ch. 7.4);
+the profile score and information are classical NB2 maximum-likelihood theory
+(Lawless 1987). Converges in 3-5 outer iterations instead of the ~14
+black-box evaluations required by Brent profiling.
 
 For NB2: V(mu) = mu + mu^2/theta. The key insight is that given fitted mu,
 the profile likelihood for theta has a closed-form score and information,
 so theta can be updated analytically without refitting the GLM.
 
+The inner theta update is a bracketed scalar root find (Brent) on the profile
+score, started from a method-of-moments estimate. An unsafeguarded Newton
+iteration on this score can ascend the negative log-likelihood from a poor
+start (the profile information is not globally positive), and a silent clip
+into narrow bounds then publishes the wrong end of the parameter space with
+``converged=True``; the bracketing solve removes both failure modes and any
+remaining active bound is reported honestly.
+
 References
 ----------
 - Venables & Ripley (2002): Modern Applied Statistics with S, Ch 7.4
-- MASS::glm.nb and MASS::theta.ml source code
+  (alternating GLM fit / profile-score update for the NB shape).
+- Lawless (1987): Negative binomial and mixed Poisson regression,
+  Canadian Journal of Statistics 15(3), 209-225 (NB2 profile score,
+  information, and moment estimation).
 """
 
 from __future__ import annotations
 
 import copy
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.special import digamma, gammaln, polygamma
+from scipy.optimize import brentq
+from scipy.special import digamma, gammaln
 
 from superglm._frame import as_eager_frame
 from superglm.distributions import clip_mu
@@ -37,6 +52,29 @@ from superglm.model.fit_state import (
 from superglm.penalties.base import penalty_has_targets
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
+
+#: Default search range for the NB2 shape parameter. Deliberately wide: these
+#: are numerical guard rails for the bracketed solve, not a statistical prior.
+#: The historical default of (0.1, 50.0) excluded routinely occurring true
+#: values at both ends (heavy overdispersion sits below 0.1; near-Poisson data
+#: pushes the profile optimum far above 50) and, combined with an
+#: unsafeguarded Newton step, published the wrong clamp end silently.
+_THETA_DEFAULT_BOUNDS: tuple[float, float] = (1e-8, 1e8)
+
+#: Geometric step used to bracket a sign change of the profile score.
+_THETA_BRACKET_FACTOR = 10.0
+
+
+class NBThetaBoundWarning(UserWarning):
+    """The NB2 theta estimate sits on an active search bound.
+
+    The reported ``theta_hat`` is the constrained boundary value, not an
+    interior maximum-likelihood estimate, and the accompanying result carries
+    ``converged=False``. An active upper bound usually means the data are no
+    more dispersed than Poisson at the fitted mean (the profile likelihood
+    increases toward the Poisson limit ``theta -> inf``); an active lower
+    bound means overdispersion beyond the searchable range.
+    """
 
 
 @dataclass
@@ -270,27 +308,25 @@ class NBProfileResult:
         return fig
 
 
-def _theta_ml(
-    y: NDArray,
-    mu: NDArray,
-    weights: NDArray,
-    theta: float,
-    *,
-    bounds: tuple[float, float] = (0.1, 50.0),
-    max_iter: int = 10,
-    eps: float = 1e-6,
-) -> float:
-    """Newton iteration for NB2 theta given fitted mu.
+@dataclass(frozen=True)
+class _ThetaSolve:
+    """One safeguarded solve of the fixed-mu NB2 profile score."""
 
-    Equivalent to MASS::theta.ml. Maximises the NB2 profile log-likelihood
-    over theta with mu held fixed. Typically converges in 2-4 iterations.
+    theta: float
+    converged: bool
+    at_lower: bool
+    at_upper: bool
+    n_score_evaluations: int
 
-    The score and information have closed forms in terms of digamma/trigamma,
-    so each Newton step is O(n) with no matrix operations.
-    """
-    for _ in range(max_iter):
-        # Score: dℓ/dθ
-        score = np.sum(
+    @property
+    def at_bound(self) -> bool:
+        return self.at_lower or self.at_upper
+
+
+def _theta_profile_score(y: NDArray, mu: NDArray, weights: NDArray, theta: float) -> float:
+    """Closed-form NB2 profile score dl/dtheta at fixed mu (Lawless 1987)."""
+    return float(
+        np.sum(
             weights
             * (
                 digamma(y + theta)
@@ -301,26 +337,117 @@ def _theta_ml(
                 - (y + theta) / (mu + theta)
             )
         )
-        # Information: -d²ℓ/dθ²
-        info = np.sum(
-            weights
-            * (
-                -polygamma(1, y + theta)
-                + polygamma(1, theta)
-                - 1.0 / theta
-                + 2.0 / (mu + theta)
-                - (y + theta) / (mu + theta) ** 2
-            )
+    )
+
+
+def _theta_moment_start(y: NDArray, mu: NDArray, weights: NDArray) -> float | None:
+    """Method-of-moments start for theta from V(mu) = mu + mu^2/theta.
+
+    Solves ``sum(w * ((y - mu)^2 - mu)) = sum(w * mu^2) / theta`` for theta.
+    Returns None when the weighted excess dispersion is non-positive (the data
+    are at most Poisson-dispersed at this mu), in which case the profile
+    optimum lies at or beyond the upper search bound.
+    """
+    numerator = float(np.sum(weights * mu * mu))
+    denominator = float(np.sum(weights * ((y - mu) ** 2 - mu)))
+    if (
+        not np.isfinite(numerator)
+        or not np.isfinite(denominator)
+        or numerator <= 0.0
+        or denominator <= 0.0
+    ):
+        return None
+    return numerator / denominator
+
+
+def _theta_ml(
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    theta: float,
+    *,
+    bounds: tuple[float, float] = _THETA_DEFAULT_BOUNDS,
+    max_iter: int = 100,
+    eps: float = 1e-8,
+) -> _ThetaSolve:
+    """Safeguarded maximization of the NB2 profile log-likelihood over theta.
+
+    Maximises the fixed-mu profile log-likelihood by bracketing a sign change
+    of the closed-form profile score (geometric expansion from the start
+    value) and solving it with Brent's method. Every accepted iterate is
+    therefore on the correct side of the likelihood: the solve cannot ascend
+    the negative log-likelihood the way an unguarded Newton step can when the
+    profile information turns negative away from the optimum.
+
+    If the score does not change sign inside ``bounds`` the profile optimum
+    lies at or beyond the corresponding bound; the bound value is returned
+    with ``converged=False`` and the matching ``at_lower``/``at_upper`` flag
+    set, so callers can report the active constraint instead of publishing it
+    as a converged interior estimate.
+
+    Each score evaluation is O(n) with no matrix operations.
+    """
+    lower = float(bounds[0])
+    upper = float(bounds[1])
+    if not (0.0 < lower < upper) or not np.isfinite(lower) or not np.isfinite(upper):
+        raise ValueError(f"theta bounds must satisfy 0 < lower < upper < inf, got {bounds!r}")
+    theta0 = float(min(max(float(theta), lower), upper))
+
+    evaluations = 0
+
+    def score(value: float) -> float:
+        nonlocal evaluations
+        evaluations += 1
+        return _theta_profile_score(y, mu, weights, value)
+
+    s0 = score(theta0)
+    if not np.isfinite(s0):
+        raise FloatingPointError("NB2 profile score is not finite at the starting theta")
+    if s0 == 0.0:
+        return _ThetaSolve(theta0, True, theta0 <= lower, theta0 >= upper, evaluations)
+
+    if s0 > 0.0:
+        # Likelihood increasing: the optimum lies to the right of theta0.
+        bracket_lo = theta0
+        current = theta0
+        while True:
+            if current >= upper:
+                return _ThetaSolve(upper, False, False, True, evaluations)
+            current = min(current * _THETA_BRACKET_FACTOR, upper)
+            s_current = score(current)
+            if not np.isfinite(s_current):
+                raise FloatingPointError("NB2 profile score overflowed while bracketing theta")
+            if s_current <= 0.0:
+                bracket_hi = current
+                break
+            bracket_lo = current
+    else:
+        # Likelihood decreasing: the optimum lies to the left of theta0.
+        bracket_hi = theta0
+        current = theta0
+        while True:
+            if current <= lower:
+                return _ThetaSolve(lower, False, True, False, evaluations)
+            current = max(current / _THETA_BRACKET_FACTOR, lower)
+            s_current = score(current)
+            if not np.isfinite(s_current):
+                raise FloatingPointError("NB2 profile score overflowed while bracketing theta")
+            if s_current >= 0.0:
+                bracket_lo = current
+                break
+            bracket_hi = current
+
+    root = float(
+        brentq(
+            score,
+            bracket_lo,
+            bracket_hi,
+            xtol=np.finfo(np.float64).tiny,
+            rtol=max(float(eps), 4.0 * np.finfo(np.float64).eps),
+            maxiter=int(max_iter),
         )
-        if abs(info) < 1e-20:
-            break
-        delta = score / info
-        theta_new = np.clip(theta + delta, bounds[0], bounds[1])
-        if abs(theta_new - theta) / (theta + 1e-10) < eps:
-            theta = float(theta_new)
-            break
-        theta = float(theta_new)
-    return theta
+    )
+    return _ThetaSolve(root, True, False, False, evaluations)
 
 
 def _immutable_array_copy(value: NDArray) -> NDArray:
@@ -348,18 +475,20 @@ def estimate_nb_theta(
     sample_weight=None,
     offset=None,
     *,
-    theta_bounds: tuple[float, float] = (0.1, 50.0),
+    theta_bounds: tuple[float, float] = _THETA_DEFAULT_BOUNDS,
     xatol: float = 1e-2,
     maxiter: int = 30,
     verbose: bool = False,
     trace_callback=None,
 ) -> NBProfileResult:
-    """Estimate NB2 theta via alternating GLM fit + Newton (MASS::glm.nb).
+    """Estimate NB2 theta via alternating GLM fit + safeguarded profile solve.
 
-    Algorithm:
+    Algorithm (Venables & Ripley 2002, ch. 7.4):
       1. Build design matrix once, calibrate lambda.
       2. Alternate: fit GLM at current theta (PIRLS with warm starts)
-         → update theta via Newton on the profile score (MASS::theta.ml).
+         → update theta by a bracketed root find on the closed-form profile
+         score (Lawless 1987), started from a method-of-moments estimate on
+         the first pass and warm-started thereafter.
       3. Converge when |theta_new - theta_old| < xatol (~3-5 iterations).
 
     Parameters
@@ -378,9 +507,13 @@ def estimate_nb_theta(
     offset : array-like, optional
         Offset added to the linear predictor.
     theta_bounds : tuple
-        Bounds for theta, default (0.1, 50.0).
+        Search range for theta, default ``(1e-8, 1e8)``. These are numerical
+        guard rails, not a statistical prior. If the estimate lands on a
+        bound the result reports ``converged=False`` and an
+        ``NBThetaBoundWarning`` is emitted — a bounded value is a constrained
+        boundary report, never a silent interior estimate.
     xatol : float
-        Convergence tolerance on theta (absolute).
+        Convergence tolerance on theta (absolute) for the outer alternation.
     maxiter : int
         Maximum outer iterations (GLM fits).
     verbose : bool
@@ -447,11 +580,16 @@ def estimate_nb_theta(
             )
 
     # --- Alternating estimation ---
-    theta = 1.0  # initial value (MASS also starts simple)
+    # theta = 1.0 only seeds the first working GLM fit (the fitted mean is
+    # weakly theta-sensitive); the first profile solve restarts from a
+    # method-of-moments estimate at that mean, so the search begins where the
+    # data point instead of at an arbitrary fixed value.
+    theta = 1.0
     warm_beta = None
     warm_intercept = None
     cache: dict[float, float] = {}
     converged = False
+    theta_solve: _ThetaSolve | None = None
 
     for iteration in range(maxiter):
         # Step 1: Fit GLM at current theta (warm-started after first iter)
@@ -493,8 +631,18 @@ def estimate_nb_theta(
         warm_beta = pirls_result.beta
         warm_intercept = pirls_result.intercept
 
-        # Step 2: Newton update for theta given mu
-        theta_new = _theta_ml(y_arr, mu, w_arr, theta, bounds=theta_bounds)
+        # Step 2: safeguarded profile solve for theta given mu
+        if iteration == 0:
+            moment_start = _theta_moment_start(y_arr, mu, w_arr)
+            # A non-positive moment denominator means the data are at most
+            # Poisson-dispersed at this mean: the profile optimum sits at or
+            # beyond the upper bound, so start the solve there and let the
+            # score decide.
+            theta_start = moment_start if moment_start is not None else theta_bounds[1]
+        else:
+            theta_start = theta
+        theta_solve = _theta_ml(y_arr, mu, w_arr, theta_start, bounds=theta_bounds)
+        theta_new = theta_solve.theta
 
         nll = _nb2_nll(y_arr, mu, w_arr, theta_new)
         cache[round(theta_new, 6)] = nll
@@ -522,14 +670,36 @@ def estimate_nb_theta(
             break
         theta = theta_new
 
-    theta_hat = round(theta, 6)
+    # Round to six significant digits (not six decimals: a decimal round would
+    # collapse a small-theta estimate toward zero and poison the likelihood).
+    theta_hat = float(f"{theta:.6g}")
+    at_bound = theta_solve is not None and theta_solve.at_bound
+    if at_bound:
+        assert theta_solve is not None
+        side = "lower" if theta_solve.at_lower else "upper"
+        bound_value = theta_bounds[0] if theta_solve.at_lower else theta_bounds[1]
+        interpretation = (
+            "the data show overdispersion beyond the searchable range"
+            if theta_solve.at_lower
+            else "the profile likelihood increases toward the Poisson limit"
+            " (the data are at most Poisson-dispersed at the fitted mean)"
+        )
+        warnings.warn(
+            f"NB2 theta estimate hit the {side} search bound {bound_value:g}: "
+            f"{interpretation}. theta_hat={theta_hat:g} is a constrained "
+            "boundary value, not an interior optimum, and the result reports "
+            "converged=False. Widen theta_bounds to search further, or "
+            "reconsider the family.",
+            NBThetaBoundWarning,
+            stacklevel=2,
+        )
     nll_final = cache.get(theta_hat, _nb2_nll(y_arr, mu, w_arr, theta_hat))
 
     result = NBProfileResult(
         theta_hat=theta_hat,
         nll=nll_final,
         n_evaluations=iteration + 1,
-        converged=converged,
+        converged=converged and not at_bound,
         cache=cache,
         _y=y_arr,
         _mu=mu,
@@ -572,7 +742,6 @@ def profile_ci_theta(
     -------
     (ci_lower, ci_upper) : tuple of float
     """
-    from scipy.optimize import brentq
     from scipy.stats import chi2
 
     w_sum = float(np.sum(weights))
@@ -582,15 +751,16 @@ def profile_ci_theta(
     def objective(theta: float) -> float:
         return 2.0 * w_sum * (_nb2_nll(y, mu, weights, theta) - nll_hat) - cutoff
 
-    # Find lower bound
-    lo = theta_range[0]
+    # The search range must contain theta_hat, which the widened default
+    # theta estimation bounds no longer guarantee for the fixed default range.
+    lo = min(theta_range[0], theta_hat / 100.0)
+    hi = max(theta_range[1], theta_hat * 100.0)
+
     try:
         ci_lower = brentq(objective, lo, theta_hat, xtol=1e-4)
     except ValueError:
         ci_lower = lo
 
-    # Find upper bound
-    hi = theta_range[1]
     try:
         ci_upper = brentq(objective, theta_hat, hi, xtol=1e-4)
     except ValueError:

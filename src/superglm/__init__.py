@@ -83,7 +83,7 @@ from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.plotting import plot_term_comparison
-from superglm.profiling.nb import NBProfileResult, estimate_nb_theta
+from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning, estimate_nb_theta
 from superglm.profiling.tweedie import (
     TweedieProfileCIDensityProvenance,
     TweedieProfileCIDetails,
@@ -182,6 +182,7 @@ __all__ = [
     "Ridge",
     "Adaptive",
     "NBProfileResult",
+    "NBThetaBoundWarning",
     "REMLResult",
     "LambdaPolicy",
     "LinearConstraintSet",
