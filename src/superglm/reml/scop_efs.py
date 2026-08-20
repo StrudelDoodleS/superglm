@@ -183,7 +183,7 @@ class _SCOPREMLFitContext:
     debug_recorder: Any
     likelihood_size: float
     gamma_scale_data: Any
-    tweedie_scale_data: Any
+    tweedie_scale_data: Any = None
 
 
 @dataclass(frozen=True)
