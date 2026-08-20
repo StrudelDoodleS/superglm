@@ -19,6 +19,18 @@ class RandomEffect:
     with no training rows is not pinned the way an unpenalized dummy is: it
     keeps its own coefficient and shrinks to the population value through the
     variance component, exactly as a thinly observed level does.
+
+    Notes
+    -----
+    When a REML-estimated ``RandomEffect`` is fitted beside an unpenalised
+    ``Categorical`` whose levels include some with exposure but no positive
+    response (under a log link with a zero-mass family such as Tweedie or
+    Poisson), those levels separate -- their coefficients have no finite MLE
+    -- and the marginal likelihood becomes nearly flat in this term's
+    variance.  The fitted variance component is then poorly determined, and
+    for the estimated-scale Tweedie criterion it is additionally biased
+    upward relative to exact-likelihood REML.  ``fit_reml`` warns on that
+    configuration; treat the published ``tau_squared`` with care there.
     """
 
     requires_reml = True
