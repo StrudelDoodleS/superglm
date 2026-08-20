@@ -3,7 +3,12 @@
 # Internal submodules: import siblings directly, not through this __init__.
 """
 
-from superglm.profiling.nb import NBProfileResult, estimate_nb_theta, profile_ci_theta
+from superglm.profiling.nb import (
+    NBProfileResult,
+    NBThetaBoundWarning,
+    estimate_nb_theta,
+    profile_ci_theta,
+)
 from superglm.profiling.tweedie import (
     TweedieProfileCIDensityProvenance,
     TweedieProfileCIDetails,
@@ -19,6 +24,7 @@ from superglm.profiling.tweedie import (
 
 __all__ = [
     "NBProfileResult",
+    "NBThetaBoundWarning",
     "TweedieProfileCIDetails",
     "TweedieProfileCIDensityProvenance",
     "TweedieProfileCIEndpoint",

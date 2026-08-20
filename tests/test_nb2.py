@@ -247,7 +247,17 @@ class TestNB2ProfileTheta:
 
         monkeypatch.setattr(nb_module, "fit_irls_direct", fake_direct)
         monkeypatch.setattr(nb_module, "fit_pirls", fake_pirls)
-        monkeypatch.setattr(nb_module, "_theta_ml", lambda *args, **kwargs: 1.0)
+        monkeypatch.setattr(
+            nb_module,
+            "_theta_ml",
+            lambda *args, **kwargs: nb_module._ThetaSolve(
+                theta=1.0,
+                converged=True,
+                at_lower=False,
+                at_upper=False,
+                n_score_evaluations=1,
+            ),
+        )
 
         estimate_nb_theta(model, X, y, maxiter=1)
 
