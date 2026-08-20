@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, Gamma, Gaussian, Poisson, clip_mu
+from superglm.distributions import _VARIANCE_FLOOR, Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import (
@@ -25,9 +25,12 @@ from superglm.reml.penalty_algebra import (
 from superglm.reml.scale import (
     GammaScaleProfileData,
     ProfiledScaleTerm,
+    TweedieScaleProfileData,
     prepare_gamma_reml_scale_data,
+    prepare_tweedie_reml_scale_data,
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
+    profile_tweedie_reml_scale,
 )
 from superglm.reml.scop_geometry import decompose_on_scop_resolved_range
 from superglm.solvers.pirls import PIRLSResult
@@ -69,14 +72,21 @@ def reml_laml_objective(
     tensor_pair_evaluations: dict | None = None,
     likelihood_size: float | None = None,
     gamma_scale_data: GammaScaleProfileData | None = None,
+    tweedie_scale_data: TweedieScaleProfileData | None = None,
     return_evaluation: bool = False,
 ) -> float | REMLObjectiveEvaluation:
     """Laplace REML/LAML objective up to additive constants.
 
     Wood (2011) Section 2, Eqs (4)-(5): V(rho) = -l(beta_hat) + 0.5*beta_hat'S*beta_hat +
     0.5*log|H| - 0.5*log|S|_+. Known-scale: nll + 0.5*(penalty_quad + logdet_m -
-    logdet_s). Estimated-scale: phi profiled out -> 0.5*(n-Mp)*log(D+beta_hat'S*beta_hat)
-    replaces the nll + 0.5*penalty_quad terms.
+    logdet_s). Estimated-scale: phi is profiled out of the exact criterion
+    min_phi [Dp/(2 phi) - l_sat(phi) - (Mp/2) log(2 pi phi)] with the family's
+    exact saturated log-likelihood l_sat (Wood, Pya & Saefken 2016, Sec. 3.3);
+    Gaussian, Gamma, and Tweedie have exact profilers in ``reml.scale``. A
+    custom estimated-scale family without a profiler falls back to the
+    Gaussian-shaped substitution 0.5*(n-Mp)*log(D+beta_hat'S*beta_hat) with a
+    warning, since that form is exact only for a -(n/2)log(phi)-shaped
+    saturated likelihood.
 
     Parameters
     ----------
@@ -307,9 +317,43 @@ def reml_laml_objective(
                 M_p,
             )
             scale_term = profiled_scale.criterion
+        elif isinstance(distribution, Tweedie):
+            if tweedie_scale_data is None:
+                tweedie_scale_data = prepare_tweedie_reml_scale_data(
+                    y,
+                    sample_weight,
+                    distribution.p,
+                )
+            profiled_scale = profile_tweedie_reml_scale(
+                tweedie_scale_data,
+                penalized_deviance,
+                M_p,
+            )
+            scale_term = profiled_scale.criterion
         else:
-            # Compatibility for estimated-scale families that do not yet have
-            # an explicit Wood Eq. (4) profiler (notably Tweedie).
+            # Every shipped estimated-scale family now has an exact Wood
+            # Eq. (4) profiler above; only a user-supplied custom distribution
+            # with scale_known=False can land here. The Gaussian-shaped
+            # substitution below is exact only when the family's saturated
+            # log-likelihood is -(n/2) log(phi)-shaped, so keep it as a
+            # documented approximation rather than a hard failure — but say
+            # so out loud instead of silently substituting (the silent form
+            # of this branch is exactly how the Tweedie criterion defect
+            # shipped).
+            import warnings
+
+            warnings.warn(
+                "REML is using a Gaussian-shaped scale profile for "
+                f"estimated-scale family {type(distribution).__name__!r}, "
+                "which has no exact saturated-likelihood profiler. This is "
+                "exact only when the family's saturated log-likelihood is "
+                "-(n/2)*log(phi)-shaped; otherwise smoothing selection is "
+                "approximate. Provide scale_known=True with a fixed "
+                "dispersion, or use a shipped estimated-scale family "
+                "(Gaussian, Gamma, Tweedie).",
+                UserWarning,
+                stacklevel=2,
+            )
             d_plus_pq = max(penalized_deviance, 1e-300)
             scale_term = 0.5 * max(n - M_p, 1.0) * np.log(d_plus_pq)
         evaluation = REMLObjectiveEvaluation(

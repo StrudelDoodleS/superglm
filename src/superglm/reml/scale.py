@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.optimize import brentq
+from scipy.optimize import brentq, minimize_scalar
 from scipy.special import digamma, gammaln, polygamma
 
 _GAMMA_ASYMPTOTIC_SHAPE = 100.0
+
+_LOG_TWO_PI = float(np.log(2.0 * np.pi))
+
+# Initial log-phi search window for the Tweedie profile, expanded on demand up
+# to the hard limit. The window is a numerical bracket, not a model bound: a
+# profile optimum outside the representable window raises rather than clamps.
+_TWEEDIE_LOG_PHI_WINDOW = 12.0
+_TWEEDIE_LOG_PHI_STEP = 15.0
+_TWEEDIE_LOG_PHI_LIMIT = 45.0
+_TWEEDIE_LOG_PHI_XATOL = 1e-9
+_TWEEDIE_LOG_PHI_EDGE_TOL = 1e-6
+_TWEEDIE_CURVATURE_STEP = 1e-4
 
 
 @dataclass(frozen=True)
@@ -302,10 +315,210 @@ def profile_gamma_reml_scale(
     )
 
 
+@dataclass(frozen=True)
+class TweedieScaleProfileData:
+    """Fit-invariant state for exact Tweedie saturated log-likelihoods.
+
+    The Tweedie saturated log-likelihood decomposes exactly over the
+    zero/positive split of the response (Joergensen 1997): a zero row's
+    saturated contribution is the log of an atom probability at ``mu = y = 0``,
+    which is exactly ``0`` for every dispersion, while a positive row
+    contributes the log-density normalizer evaluated at ``mu = y`` (its unit
+    deviance vanishes there). Only the positive rows therefore vary with
+    ``phi``, and their prepared density state (validation, base measure) is
+    hoisted here once per fit so each profile evaluation is a single series
+    pass over positive rows.
+    """
+
+    power: float
+    n_positive: int
+    prepared_positive: Any = field(repr=False)
+    _saturated_cache: dict[float, float] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
+
+    def saturated_log_likelihood(self, phi: float) -> float:
+        """Exact saturated log-likelihood at dispersion ``phi``.
+
+        Zero rows contribute exactly zero and are not evaluated; the returned
+        value is the positive-row sum through the same adaptive Wright-Bessel
+        density evaluation the Tweedie likelihood uses everywhere else
+        (Dunn & Smyth 2005; Wood, Pya & Saefken 2016, supplementary App. J).
+        """
+        key = float(phi)
+        cached = self._saturated_cache.get(key)
+        if cached is not None:
+            return cached
+        from superglm.profiling.tweedie import _evaluate_tweedie_density
+
+        evaluation = _evaluate_tweedie_density(self.prepared_positive, key)
+        value = float(np.sum(evaluation.logpdf, dtype=np.float64))
+        if not np.isfinite(value):
+            raise FloatingPointError(
+                f"Tweedie saturated log-likelihood is not finite at phi={key:g}"
+            )
+        self._saturated_cache[key] = value
+        return value
+
+
+def prepare_tweedie_reml_scale_data(
+    y: NDArray,
+    sample_weight: NDArray,
+    power: float,
+) -> TweedieScaleProfileData:
+    """Validate rows once and hoist the phi-invariant Tweedie density state.
+
+    ``sample_weight`` follows the Tweedie EDM prior-weight contract
+    (observation-specific dispersion ``phi / w``); the prepared state applies
+    it inside the density evaluation exactly as the fitted likelihood does.
+    """
+    from superglm.profiling.tweedie import _prepare_tweedie_density
+
+    y = np.asarray(y, dtype=np.float64)
+    sample_weight = np.asarray(sample_weight, dtype=np.float64)
+    if y.ndim != 1 or sample_weight.shape != y.shape or y.size == 0:
+        raise ValueError("y and sample_weight must be one-dimensional with matching shape")
+    if not np.all(np.isfinite(y)) or np.any(y < 0.0):
+        raise ValueError("Tweedie scale profiling requires finite non-negative y")
+    if not np.all(np.isfinite(sample_weight)) or np.any(sample_weight <= 0.0):
+        raise ValueError("Tweedie scale profiling requires strictly positive prior weights")
+    positive = y > 0.0
+    n_positive = int(np.count_nonzero(positive))
+    if n_positive == 0:
+        raise ValueError(
+            "Tweedie scale profiling requires at least one positive response; "
+            "an all-zero response has no estimable dispersion"
+        )
+    y_positive = y[positive]
+    prepared = _prepare_tweedie_density(
+        y_positive,
+        y_positive,
+        float(power),
+        weights=sample_weight[positive],
+    )
+    return TweedieScaleProfileData(
+        power=float(power),
+        n_positive=n_positive,
+        prepared_positive=prepared,
+    )
+
+
+def profile_tweedie_reml_scale(
+    profile_data: TweedieScaleProfileData,
+    penalized_deviance: float,
+    penalty_nullity: float,
+) -> ProfiledScaleTerm:
+    """Profile Tweedie dispersion while retaining Wood's saturated likelihood.
+
+    Minimizes the exact scale-dependent part of the Wood (2011) Eq. (4) /
+    Wood, Pya & Saefken (2016) Sec. 3.3 criterion over ``log(phi)``:
+
+        Q(phi) = Dp / (2 phi) - l_sat(phi) - (Mp / 2) log(2 pi phi)
+
+    with ``l_sat`` the exact compound Poisson-gamma saturated log-likelihood
+    (zero rows are an atom and contribute a phi-free 0; positive rows carry
+    the Dunn-Smyth series normalizer). This replaces the Gaussian-shaped
+    substitution ``0.5 (n - Mp) log(Dp)``, which charges every zero row a
+    ``log phi`` the exact saturated likelihood does not contain and thereby
+    overweights the deviance arm in proportion to the zero fraction.
+
+    The solve is a bounded scalar minimization in ``log(phi)`` with an
+    expanding bracket; the ``d(1/phi)/d(Dp)`` contract required by the outer
+    REML Newton follows from implicit differentiation of the profile score,
+    with the log-phi curvature measured by a central difference of ``Q``
+    around the optimum (the same quantity the Gaussian and Gamma profilers
+    obtain in closed form).
+    """
+    if not isinstance(profile_data, TweedieScaleProfileData):
+        raise TypeError("profile_data must be TweedieScaleProfileData")
+    penalized_deviance = float(penalized_deviance)
+    penalty_nullity = float(penalty_nullity)
+    if not np.isfinite(penalized_deviance) or penalized_deviance <= 0.0:
+        raise ValueError("penalized_deviance must be positive and finite")
+    if not np.isfinite(penalty_nullity) or penalty_nullity < 0.0:
+        raise ValueError("penalty_nullity must be finite and non-negative")
+    # Each positive row's saturated density decays like 1/phi as phi grows,
+    # so Q has slope (n_positive - Mp/2) in log(phi) at the upper end; a
+    # finite interior optimum needs that slope positive.
+    if 2.0 * profile_data.n_positive <= penalty_nullity:
+        raise ValueError("Tweedie REML scale profile has no finite interior optimum")
+
+    def criterion(log_phi: float) -> float:
+        phi = float(np.exp(log_phi))
+        return float(
+            0.5 * penalized_deviance / phi
+            - profile_data.saturated_log_likelihood(phi)
+            - 0.5 * penalty_nullity * (_LOG_TWO_PI + log_phi)
+        )
+
+    log_phi_lo = -_TWEEDIE_LOG_PHI_WINDOW
+    log_phi_hi = _TWEEDIE_LOG_PHI_WINDOW
+    while True:
+        solution = minimize_scalar(
+            criterion,
+            bounds=(log_phi_lo, log_phi_hi),
+            method="bounded",
+            options={"xatol": _TWEEDIE_LOG_PHI_XATOL},
+        )
+        log_phi = float(solution.x)
+        if (
+            log_phi - log_phi_lo < _TWEEDIE_LOG_PHI_EDGE_TOL
+            and log_phi_lo > -_TWEEDIE_LOG_PHI_LIMIT
+        ):
+            log_phi_lo = max(log_phi_lo - _TWEEDIE_LOG_PHI_STEP, -_TWEEDIE_LOG_PHI_LIMIT)
+            continue
+        if log_phi_hi - log_phi < _TWEEDIE_LOG_PHI_EDGE_TOL and log_phi_hi < _TWEEDIE_LOG_PHI_LIMIT:
+            log_phi_hi = min(log_phi_hi + _TWEEDIE_LOG_PHI_STEP, _TWEEDIE_LOG_PHI_LIMIT)
+            continue
+        break
+    if (
+        log_phi - log_phi_lo < _TWEEDIE_LOG_PHI_EDGE_TOL
+        or log_phi_hi - log_phi < _TWEEDIE_LOG_PHI_EDGE_TOL
+    ):
+        raise FloatingPointError("Tweedie REML scale profile is not representable")
+
+    criterion_value = float(solution.fun)
+    step = _TWEEDIE_CURVATURE_STEP
+    log_phi_curvature = (
+        criterion(log_phi - step) - 2.0 * criterion_value + criterion(log_phi + step)
+    ) / (step * step)
+    if not np.isfinite(log_phi_curvature) or log_phi_curvature <= 0.0:
+        raise FloatingPointError("Tweedie REML scale profile has non-positive curvature")
+
+    phi = float(np.exp(log_phi))
+    inverse_phi = float(np.exp(-log_phi))
+    # At the optimum Q'(xi) = 0, so d2Q/d(log phi)2 = xi^2 * Q''(xi) with
+    # xi = 1/phi, and implicit differentiation of the profile score gives
+    # d(xi)/d(Dp) = -1/2 / Q''(xi). (For the Gaussian profile this reduces to
+    # the closed form -(n - Mp)/Dp^2 published by profile_gaussian_reml_scale.)
+    log_derivative_magnitude = float(np.log(0.5) - 2.0 * log_phi - np.log(log_phi_curvature))
+    log_smallest = float(np.log(np.nextafter(0.0, 1.0)))
+    if log_derivative_magnitude > float(np.log(np.finfo(np.float64).max)):
+        raise FloatingPointError("Tweedie REML scale derivative is not representable")
+    derivative = (
+        -0.0
+        if log_derivative_magnitude < log_smallest
+        else float(-np.exp(log_derivative_magnitude))
+    )
+    if not np.isfinite(phi) or not np.isfinite(criterion_value):
+        raise FloatingPointError("Tweedie REML scale profile produced a non-finite result")
+    return ProfiledScaleTerm(
+        phi=phi,
+        inverse_phi=inverse_phi,
+        criterion=criterion_value,
+        d_inverse_phi_d_penalized_deviance=derivative,
+    )
+
+
 __all__ = [
     "GammaScaleProfileData",
     "ProfiledScaleTerm",
+    "TweedieScaleProfileData",
     "prepare_gamma_reml_scale_data",
+    "prepare_tweedie_reml_scale_data",
     "profile_gamma_reml_scale",
     "profile_gaussian_reml_scale",
+    "profile_tweedie_reml_scale",
 ]

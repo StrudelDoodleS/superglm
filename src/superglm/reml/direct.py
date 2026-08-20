@@ -17,7 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import Gamma, Gaussian
+from superglm.distributions import Gamma, Gaussian, Tweedie
 from superglm.group_matrix import DesignMatrix
 from superglm.reml.convergence import (
     classify_dead_feasible_exit,
@@ -58,9 +58,12 @@ from superglm.reml.penalty_algebra import (
 from superglm.reml.result import REMLResult
 from superglm.reml.scale import (
     GammaScaleProfileData,
+    TweedieScaleProfileData,
     prepare_gamma_reml_scale_data,
+    prepare_tweedie_reml_scale_data,
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
+    profile_tweedie_reml_scale,
 )
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
 from superglm.solvers.centered_system import TabmatCenteringState
@@ -158,10 +161,13 @@ def optimize_direct_reml(
     scale_known = getattr(distribution, "scale_known", True)
     likelihood_size: float | None = None
     gamma_scale_data: GammaScaleProfileData | None = None
+    tweedie_scale_data: TweedieScaleProfileData | None = None
     if isinstance(distribution, Gaussian):
         likelihood_size = float(np.sum(sample_weight, dtype=np.float64))
     elif isinstance(distribution, Gamma):
         gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
+    elif isinstance(distribution, Tweedie):
+        tweedie_scale_data = prepare_tweedie_reml_scale_data(y, sample_weight, distribution.p)
     use_observed_geometry = (
         isinstance(dm, DesignMatrix)
         and classify_reml_curvature(
@@ -340,6 +346,15 @@ def optimize_direct_reml(
             assert gamma_scale_data is not None
             boot_scale = profile_gamma_reml_scale(
                 gamma_scale_data,
+                penalized_deviance,
+                boot_penalty_nullity,
+            )
+            boot_phi = boot_scale.phi
+            boot_inv_phi = boot_scale.inverse_phi
+        elif isinstance(distribution, Tweedie):
+            assert tweedie_scale_data is not None
+            boot_scale = profile_tweedie_reml_scale(
+                tweedie_scale_data,
                 penalized_deviance,
                 boot_penalty_nullity,
             )
@@ -605,6 +620,7 @@ def optimize_direct_reml(
             reml_penalties=penalties,
             likelihood_size=likelihood_size,
             gamma_scale_data=gamma_scale_data,
+            tweedie_scale_data=tweedie_scale_data,
             return_evaluation=True,
         )
 
@@ -1198,6 +1214,7 @@ def optimize_direct_reml(
                 reml_penalties=penalties,
                 likelihood_size=likelihood_size,
                 gamma_scale_data=gamma_scale_data,
+                tweedie_scale_data=tweedie_scale_data,
                 return_evaluation=True,
             )
             trial_obj = (
