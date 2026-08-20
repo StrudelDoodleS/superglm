@@ -56,9 +56,9 @@ Callers: `superglm/__init__.py:84–93` (public re-exports; **imported at packag
 ### 1.5 `profiling/nb.py` — NB2 theta estimation (599 lines)
 
 - `NBProfileResult` (nb.py:42–270): result dataclass with publication-locking `__setattr__` (:60), immutability plumbing (`_published_with_data` :65, `_detached_public_copy` :91, `__deepcopy__` :108, `__getstate__/__setstate__` :129–144), `ci()` (:146), `profile_plot` (:162).
-- `_theta_ml` (:273–323): MASS::theta.ml Newton on the closed-form digamma/trigamma profile score, O(n) per step, ≤10 steps.
+- `_theta_ml` (:273–323): Newton on the closed-form digamma/trigamma NB2 profile score (Lawless 1987), O(n) per step, ≤10 steps.
 - `_nb2_nll` (:332): weighted mean NB2 NLL (duplicates `NegativeBinomial.log_likelihood` algebra, distributions.py:215–225).
-- `estimate_nb_theta` (:344–538): MASS::glm.nb alternation — build design once (**mutating the caller's model**, :409–419), then per outer iteration: warm-started GLM fit (`fit_irls_direct` :460 with optional REML penalty context :438–447, or `fit_pirls` :475) → `_theta_ml` update; converge on |Δθ| < xatol (~3–5 iterations).
+- `estimate_nb_theta` (:344–538): alternating GLM-fit/profile-score-update scheme (Venables & Ripley 2002, ch. 7.4) — build design once (**mutating the caller's model**, :409–419), then per outer iteration: warm-started GLM fit (`fit_irls_direct` :460 with optional REML penalty context :438–447, or `fit_pirls` :475) → `_theta_ml` update; converge on |Δθ| < xatol (~3–5 iterations).
 - `profile_ci_theta` (:541–599): fixed-μ LRT inversion via brentq, O(n) per evaluation.
 
 Callers: model/profile_ops.py:292,316 (`SuperGLM.estimate_theta`), model/fit_ops.py:647–653 (`_maybe_estimate_nb_theta`, auto-run during `fit()`/`fit_reml()` when `theta="auto"`, call sites :802, :1155), `superglm/__init__.py:83`.
