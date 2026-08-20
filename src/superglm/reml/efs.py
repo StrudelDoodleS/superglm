@@ -5,6 +5,24 @@ Anderson(1) acceleration, and two-tier iteration.
 
 Used when lambda1 > 0 (group lasso + REML smoothing).
 
+.. warning:: **Dead code with a known-defective dispersion — fix before
+   reviving.** ``fit_reml`` validates and coerces ``lambda1 = 0``, so this
+   driver is unreachable from the public API; the SCOP EFS loop that does
+   run resolves phi correctly through the objective's profiled scale. This
+   module's own phi estimate (here and in the iteration body) deviates from
+   the criterion the rest of the codebase optimizes in three ways measured
+   by the 2026-08-20 distribution-estimation audit (finding C1): it uses
+   the total penalty **rank** where Wood's M_p is the **nullity**,
+   ``len(y)`` where the frequency-weight contract is ``sum(w)``, and a
+   deviance-form estimate where Gamma's Eq.-(4) profile is a digamma root
+   (and Tweedie's is the exact saturated-likelihood profile in
+   ``reml.scale``). Measured on a frequency-weighted Gamma: phi off 3.2x,
+   displacing the EFS fixed point 1.87x in lambda. Whichever release
+   revives lambda1 + REML must first route this phi through the
+   ``reml.scale`` profilers / ``solvers.dispersion`` size contract, or
+   delete the driver; the audit's probe C1 numbers are its acceptance
+   spec.
+
 References
 ----------
 Wood & Fasiolo (2017). A generalized Fellner-Schall method for smoothing
