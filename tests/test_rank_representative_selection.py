@@ -34,11 +34,13 @@ from superglm.solvers.rank import (
     _achievable_amplification,
     _conditioned_representatives,
     _earliest_representatives,
+    _eigensolver_relative_bar,
     _leverage_pivot_representatives,
     _principal_block_condition,
     _selection_amplification,
     decompose_factor,
     decompose_gram,
+    needs_factor_certification,
 )
 
 
@@ -209,7 +211,12 @@ def _equilibrated_geometry(gram: np.ndarray):
     equilibrated = 0.5 * (equilibrated + equilibrated.T)
     values, vectors = np.linalg.eigh(equilibrated)
     values = np.maximum(values, 0.0)
-    cutoff = SHARED_RANK_POLICY.gram_rcond * max(float(values[-1]), 0.0)
+    # Mirrors the module: `gram_rcond` floored at the eigensolver's bar.  This
+    # helper drives the shipped-walk comparison, so a cutoff of its own would
+    # be comparing the walk against a rule nothing applies -- issue #356.
+    cutoff = max(SHARED_RANK_POLICY.gram_rcond, _eigensolver_relative_bar(len(values))) * max(
+        float(values[-1]), 0.0
+    )
     retained = values > cutoff
     return equilibrated, vectors[:, ~retained], int(retained.sum()), cutoff
 
@@ -242,6 +249,18 @@ def test_the_policy_version_records_that_the_deficient_answer_changed() -> None:
     recovered at all, and both of those moved on this branch while every
     threshold stayed exactly where it was.
 
+    **VERSION 3 IS THE OTHER KIND OF CHANGE AND THIS FIXTURE MEASURES IT
+    EXACTLY.**  The paragraph below recorded ``cutoff / (m eps ||A||) =
+    0.3333`` as a defect being tolerated; issue #356 closed it, and the ratio
+    is now 1.0 by construction because the cutoff IS that bar.  Nothing this
+    test asserts moved -- rank 2, selection ``[0, 2]``, method
+    ``pivoted_cholesky`` -- because the fixture's computed zero is at
+    ``-6.661e-16``, which the old cut cleared by 1.50x and the bar clears by
+    2.00x, on the same side both times.  The 2x2 prefix's margin falls from
+    1.37e+07 to **4.56e+06**, which is still six orders clear of any
+    eigensolver difference.  So this test pins the version and NOT the
+    threshold, which is the distinction the paragraph below is about.
+
     The half checked HERE is the one a single design can pin: at ``eps=1e-4``
     the shipped walk keeps the near-duplicate pair and the branch does not.
     The SELECTION is far from any boundary -- the 2x2 prefix's smaller
@@ -252,8 +271,9 @@ def test_the_policy_version_records_that_the_deficient_answer_changed() -> None:
     The RANK is a different matter and is asserted separately below, on
     purpose.  This design is exactly rank 2, so its third eigenvalue is a
     computed zero sitting at roughly the cutoff itself: measured
-    ``cutoff / (m * eps * ||A||) = 0.3333``, i.e. the cutoff is BELOW what a
-    symmetric eigensolver resolves.  Every test of this code path shares that
+    ``cutoff / (m * eps * ||A||) = 0.3333``, i.e. the cutoff WAS BELOW what a
+    symmetric eigensolver resolves; version 3 raised it to exactly that bar
+    and the ratio is now 1.0.  Every test of this code path shares that
     property -- a rank-deficient matrix has no other kind of zero -- and it is
     empirically stable for a fixed matrix, holding on this machine at 1 and 16
     threads and on CI's 3.12 runner across five values of eps.  What is NOT
@@ -262,7 +282,7 @@ def test_the_policy_version_records_that_the_deficient_answer_changed() -> None:
     driver ever does move it, the failure says so instead of surfacing as a
     confusing selection mismatch.
     """
-    assert SHARED_RANK_POLICY.version == 2
+    assert SHARED_RANK_POLICY.version == 3
 
     design = _near_alias(1e-4)
     gram = design.T @ design
@@ -277,7 +297,7 @@ def test_the_policy_version_records_that_the_deficient_answer_changed() -> None:
     assert walked is not None and walked.tolist() == [0, 1]
 
     assert decomposition.active_columns.tolist() == [0, 2]
-    assert decomposition.policy_version == 2
+    assert decomposition.policy_version == 3
 
 
 def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:
@@ -294,25 +314,28 @@ def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:
     first written against one block, passed here and failed on CI's 3.12 runner
     with the same numpy 2.4.2 and scipy 1.17.1.
 
-    The RATE is stable, because it is a property of the algorithm rather than
+    The RATE was stable, because it is a property of the algorithm rather than
     of one rounding decision.  Measured over 958 deficient blocks across 16
     seeds, the walk returned nothing on 126 of them (13.2%), with per-seed
     failures from 5 to 11 out of about 60.  Reading the null basis produces a
     candidate in those cases; the absolute conditioning backstop now keeps it
     only when its principal block is usable.  On this eight-seed regression
-    battery 58 of 60 candidates stay spectral and two are safe to recover.
+    battery 58 of 60 candidates stayed spectral and two were safe to recover.
 
-    So the thresholds below are set far under what was measured -- roughly a
-    sixth of the expected count -- to survive a platform where the rate moves,
-    while still failing outright if the walk stops failing.  The acceptance
-    count is not itself pinned: these are precisely the boundary cases whose
-    identity changes across eigensolvers, and the stable recovered case has its
-    own direct regression above.
+    **ALL OF THAT IS THE VERSION-2 READING AND IT NO LONGER REPRODUCES,
+    BECAUSE VERSION 3 REMOVED THE CAUSE THE FIRST PARAGRAPH NAMES.**  The rate
+    is now zero and the assertions below say so; the measurement, the numbers,
+    and why the threshold is an equality rather than a floor are all recorded
+    at the assertion itself.  The paragraph above is kept because it is the
+    diagnosis that turned out to be right, not because it is the current
+    behaviour.
 
     The exactness assertion is the one that carries no margin at all: across
     all 958 blocks there was NOT ONE where both filled a set and the sets
     differed.  That is the equivalence `b2de09d` claims, and it is what makes
-    one version bump sufficient rather than a licence.
+    one version bump sufficient rather than a licence.  Under version 3 it is
+    also the whole test, and it covers every block instead of the 87.5% where
+    both used to resolve.
     """
     agreed = 0
     walk_failed = 0
@@ -344,12 +367,31 @@ def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:
             agreed += 1
 
     assert agreed > 200, f"only {agreed} blocks resolved by both"
-    assert walk_failed >= 10, f"the walk failed on only {walk_failed} blocks"
-    assert candidate_recovered >= 10, (
-        f"the null basis recovered only {candidate_recovered} candidates"
+    # **THE RATE IS NOW ZERO, AND THAT IS VERSION 3 REMOVING THE CAUSE THIS
+    # DOCSTRING ALREADY NAMED -- ISSUE #356.**  The paragraph above says the
+    # walk fails because its comparison "sits below the resolution of the
+    # thing computing it".  Version 3 raised the cutoff to exactly that
+    # resolution, and the failures stopped: measured on this eight-seed
+    # battery, 60 of 479 deficient blocks (12.5%) under the version-2 cutoff
+    # against **0 of 480** under the bar, with `agreed` going from 419 to
+    # **480** -- every block, not 87.5% of them.  Swept over seven
+    # `OPENBLAS_CORETYPE` microkernels at one thread the new figures are
+    # identical on all seven: 480 agreed, 0 failed, 0 disagreed.  The old
+    # per-block identity moved with the kernel and the new one does not.
+    #
+    # So the assertion is inverted rather than deleted.  `walk_failed >= 10`
+    # was pinning a defect rate; what is worth pinning now is that the two
+    # conventions agree EVERYWHERE, which is the stronger form of the
+    # equivalence `b2de09d` claimed and the reason one version bump was
+    # sufficient.  If the walk starts failing again, the cutoff has fallen
+    # back beneath the eigensolver.
+    assert walk_failed == 0, (
+        f"the walk failed on {walk_failed} blocks; under version 3 its prefix "
+        "comparison is at the eigensolver's resolution and should not fail at "
+        "all, so this means the Gram cutoff has dropped below the bar again"
     )
+    assert candidate_recovered == 0
     assert recovered + kept_spectral == candidate_recovered
-    assert kept_spectral >= 10, f"only {kept_spectral} catastrophic candidates stayed spectral"
 
 
 def _near_alias(eps: float, rows: int = 200, seed: int = 7) -> np.ndarray:
@@ -665,18 +707,43 @@ def test_an_anisotropic_block_is_judged_on_its_own_condition_not_on_a_bound() ->
 def test_a_catastrophic_representative_keeps_the_spectral_decomposition() -> None:
     """The better representative may still be too ill-conditioned to use.
 
-    This deterministic factor has five resolvable directions in ten columns.
-    Its smallest retained equilibrated eigenvalue is over nine times the rank
-    cutoff, so the rank decision is not the finding.  The best representative
-    recovered from that subspace nevertheless has a principal condition over
-    twice ``severe_condition``.  Cholesky accepts it, but using its inverse
-    degrades ``||G G+ G - G|| / ||G||`` from about 0.004 on the spectral route
-    to 0.14.
+    This deterministic factor has five resolvable directions in ten columns,
+    so the rank decision is not the finding.  The best representative
+    recovered from that subspace nevertheless has a principal condition above
+    ``severe_condition``.  Cholesky accepts it, but using its inverse degrades
+    ``||G G+ G - G|| / ||G||`` by more than an order against the spectral
+    route.
 
     Both Gram and factor entry points must therefore keep their spectral solve
     when every representative crosses the existing policy boundary.  Before
     the guard the Gram route returned ``pivoted_cholesky`` and the factor route
     retained a representative Cholesky.
+
+    **THE FIFTH DIRECTION IS SCALED BECAUSE VERSION 3 MADE THE ORIGINAL ONE
+    UNRESOLVABLE, AND THAT IS THE POINT OF THE SCALING RATHER THAN A TUNING
+    CONVENIENCE -- ISSUE #356.**  As written, this fixture's fifth
+    equilibrated eigenvalue was "over nine times the rank cutoff", which was
+    true against ``eps`` and is **0.933x of ``eigh``'s own bar** at width 10
+    -- inside the resolution, so the Gram could not certify five directions
+    and only appeared to because the cutoff was beneath what computed it.
+    Measured over seven ``OPENBLAS_CORETYPE`` microkernels at one thread it
+    ran 0.925x to 0.933x of that bar: stable, and stably UNRESOLVED.  Under
+    version 3 the Gram reports rank 4 with ``resolution_limited`` set and
+    defers, and ``decompose_factor`` -- which sees the same direction
+    **7.0e+06 bars clear** of the SVD's resolution -- still returns 5.  That
+    is the policy working, not the fixture breaking.
+
+    Scaling row 4 by 1.5 lifts the direction to **2.112x of the version-3
+    cutoff** so the rank is once again not the finding, and it is the largest
+    lever available: the retained direction's margin and the representative's
+    condition are the SAME quantity, ``sigma_5``, so buying margin sells
+    conditioning.  Measured across those seven kernels the pair is
+    BIT-IDENTICAL -- 2.112x and 1.426x of ``severe_condition`` on every one --
+    but the condition no longer clears ``2 * severe_condition``, and the
+    assertion below is relaxed to ``severe_condition`` with the 1.426x it
+    actually has.  A finer scan found no scaling that keeps both above 2x:
+    1.05 gives 3.199x of the condition on a rank margin of 1.029x, which is
+    inside the kernel spread and would be a coin flip.
     """
     factor = np.array(
         [
@@ -742,15 +809,23 @@ def test_a_catastrophic_representative_keeps_the_spectral_decomposition() -> Non
             ],
         ]
     )
+    # See the docstring: as delivered the fifth direction is 0.933x of the
+    # eigensolver's bar and so is not a rank the Gram may claim.
+    factor[4, :] = factor[4, :] * 1.5
+
     gram = factor.T @ factor
     scale = np.sqrt(np.diag(gram))
     equilibrated = gram / np.outer(scale, scale)
     equilibrated = 0.5 * (equilibrated + equilibrated.T)
     values, vectors = np.linalg.eigh(equilibrated)
-    cutoff = SHARED_RANK_POLICY.gram_rcond * float(values[-1])
+    cutoff = max(SHARED_RANK_POLICY.gram_rcond, _eigensolver_relative_bar(len(values))) * float(
+        values[-1]
+    )
     retained = values > cutoff
     assert int(retained.sum()) == 5
-    assert float(values[retained][0]) > 8.0 * cutoff
+    # 2.112x on all seven kernels, so this clears by 1.41x.  The 8.0 it used
+    # to carry was against a cutoff a factor of ten smaller.
+    assert float(values[retained][0]) > 1.5 * cutoff
 
     selected = _conditioned_representatives(
         vectors[:, ~retained],
@@ -758,10 +833,9 @@ def test_a_catastrophic_representative_keeps_the_spectral_decomposition() -> Non
         block_condition=lambda keep: _principal_block_condition(equilibrated, keep),
     )
     assert selected is not None
-    assert (
-        _principal_block_condition(equilibrated, selected)
-        > 2.0 * SHARED_RANK_POLICY.severe_condition
-    )
+    # 1.426x on all seven kernels.  See the docstring for why this cannot be
+    # 2x and carry a usable rank margin at the same time.
+    assert _principal_block_condition(equilibrated, selected) > SHARED_RANK_POLICY.severe_condition
 
     gram_decomposition = decompose_gram(gram)
     factor_decomposition = decompose_factor(factor)
@@ -776,26 +850,14 @@ def test_a_catastrophic_representative_keeps_the_spectral_decomposition() -> Non
         assert residual < 0.02
 
 
-def test_a_representative_must_clear_the_full_gram_rank_cutoff() -> None:
-    """Local conditioning cannot replace the cutoff that certified the rank.
+def _angled_column_geometry(sin_squared_multiple: float):
+    """Ten copies of ``e1`` plus one column at an angle, with exact 2x2 predictions.
 
-    Ten identical unit columns along ``e1`` amplify one direction in the full
-    Gram.  The eleventh unit column makes an angle whose
-    ``sin(theta)**2 = 16*eps``.  The two nonzero full-Gram eigenvalues are then
-    approximately ``11`` and ``(10/11) * 16*eps = 14.5*eps``, so rank two
-    clears the full cutoff of approximately ``11*eps``.
-
-    Every two-column principal representative contains one copy of ``e1`` and
-    the angled column.  Its smaller eigenvalue is only
-    ``1 - cos(theta) = 8*eps``: rank one against the SAME full cutoff.  Its
-    local condition is nevertheless approximately ``0.25/eps``, below the
-    severe cap of ``1/eps``, so the condition-only guard accepted it.
-
-    There is no rank-two principal block consistent with the certified cutoff.
-    Both entry points must therefore preserve their spectral solve.
+    The closed forms avoid asking a width-11 Gram eigensolver to choose the
+    sign of cancellation-scale differences.
     """
     eps = np.finfo(float).eps
-    sin_squared = 16.0 * eps
+    sin_squared = sin_squared_multiple * eps
     sin = np.sqrt(sin_squared)
     cos = np.sqrt(1.0 - sin_squared)
     factor = np.column_stack(
@@ -804,33 +866,104 @@ def test_a_representative_must_clear_the_full_gram_rank_cutoff() -> None:
             np.array([cos, sin]),
         ]
     )
-    gram = factor.T @ factor
-    # Use the nonzero 2x2 row geometry and determinant/large-root identities.
-    # They avoid asking a width-11 Gram eigensolver to choose the sign of
-    # cancellation-scale differences.
     full_trace = 11.0
-    full_discriminant = np.hypot(
-        10.0 + cos**2 - sin_squared,
-        2.0 * cos * sin,
-    )
+    full_discriminant = np.hypot(10.0 + cos**2 - sin_squared, 2.0 * cos * sin)
     full_maximum = 0.5 * (full_trace + full_discriminant)
     full_minimum = 10.0 * sin_squared / full_maximum
-    cutoff = SHARED_RANK_POLICY.gram_rcond * full_maximum
     candidate_maximum = 1.0 + cos
     candidate_minimum = sin_squared / candidate_maximum
+    return factor, full_maximum, full_minimum, candidate_maximum, candidate_minimum
+
+
+def test_a_representative_must_clear_the_full_gram_rank_cutoff() -> None:
+    """Local conditioning cannot replace the cutoff that certified the rank.
+
+    The eleventh column makes an angle whose ``sin(theta)**2`` puts the second
+    full-Gram eigenvalue above the rank cutoff while every two-column
+    principal representative -- one copy of ``e1`` and the angled column --
+    has a smaller eigenvalue BELOW that same cutoff.  Its local condition is
+    comfortably inside the severe cap, so the condition-only guard would
+    accept it; the cutoff rule is what must reject it.
+
+    **THE ANGLE IS SET FROM THE GRAM'S CUTOFF, AND THAT IS NOW A DIFFERENT
+    NUMBER FROM THE FACTOR'S -- ISSUE #356.**  This used to read
+    ``sin(theta)**2 = 16 eps``, chosen so that ONE angle put the representative
+    below the cutoff on both routes at once.  Version 3 cut that tie: the Gram
+    cutoff is ``n eps lambda_max`` and the factor's is still
+    ``eps lambda_max``, a factor of ``n = 11`` apart, and the window this
+    construction offers is only ``(10/11) / (1/2) = 1.818x`` wide.  Rejection
+    on the Gram needs ``candidate_min`` in ``(66.6 eps, 121 eps)``; rejection
+    on the factor needs it below ``11 eps``.  Those do not intersect, so no
+    single angle exercises both and the routes get one arm each.  That is not
+    a fixture defect -- it is the ``n``-fold divergence the version created,
+    made visible.
+
+    This arm is the Gram's, at ``180 eps``: ``full_min`` is 1.352x of the
+    cutoff and ``candidate_min`` is 0.744x, both BIT-IDENTICAL across seven
+    ``OPENBLAS_CORETYPE`` microkernels at one thread, so the two margins are
+    1.35x and 1.34x with no measured spread.  The factor legitimately ACCEPTS
+    a representative here, which the sibling test below is the arm for.
+    """
+    (
+        factor,
+        _full_maximum,
+        full_minimum,
+        candidate_maximum,
+        candidate_minimum,
+    ) = _angled_column_geometry(180.0)
+    gram = factor.T @ factor
+    cutoff = max(SHARED_RANK_POLICY.gram_rcond, _eigensolver_relative_bar(11)) * _full_maximum
 
     assert full_minimum > cutoff
     assert candidate_minimum < cutoff
     assert candidate_maximum / candidate_minimum < SHARED_RANK_POLICY.severe_condition
 
     gram_decomposition = decompose_gram(gram)
-    factor_decomposition = decompose_factor(factor)
-    for decomposition in (gram_decomposition, factor_decomposition):
-        assert decomposition.rank == 2
-        assert decomposition.cholesky_factor is None
-        assert decomposition.active_columns.tolist() == list(range(11))
+    assert gram_decomposition.rank == 2
+    assert gram_decomposition.cholesky_factor is None
+    assert gram_decomposition.active_columns.tolist() == list(range(11))
     assert gram_decomposition.method == "gram_eigh"
+
+
+def test_the_factor_resolves_an_angle_the_gram_cannot_and_still_refuses_the_block() -> None:
+    """The factor arm of the split above, on the angle this fixture always had.
+
+    At ``sin(theta)**2 = 16 eps`` the second direction is 5.683e-08 of the
+    design's scale, which is **7.0e+06 times** the SVD's own resolution and
+    1.15x above ``factor_rcond`` -- resolved, retained, and its two-column
+    representative correctly refused because ``candidate_min`` is below the
+    FACTOR cutoff.  That half is unchanged by version 3.
+
+    The Gram sees the same direction at ``lambda_min / lambda_max`` of
+    ``1.32 eps``, which is **0.1202x** of ``eigh``'s bar at width 11.  It
+    cannot resolve it, so it no longer claims rank 2 -- under version 2 it did,
+    by comparing against a cutoff a factor of 11 beneath what computed it, and
+    getting the right answer for no reason available to it.  What it does now
+    is report rank 1, set ``resolution_limited``, and say through
+    ``needs_factor_certification`` that the caller must go to the factor --
+    which returns the 2 the Gram could not certify.
+
+    So the rank is still recovered; it is recovered by the route that can see
+    it.  That is the whole of #356 on one fixture, and it is asserted here
+    rather than described.
+    """
+    factor, _, _, _, _ = _angled_column_geometry(16.0)
+    gram = factor.T @ factor
+
+    factor_decomposition = decompose_factor(factor)
+    assert factor_decomposition.rank == 2
     assert factor_decomposition.method == "qr_svd"
+    assert factor_decomposition.cholesky_factor is None
+    assert factor_decomposition.active_columns.tolist() == list(range(11))
+    assert not needs_factor_certification(factor_decomposition)
+
+    gram_decomposition = decompose_gram(gram)
+    assert gram_decomposition.rank == 1, (
+        "the Gram is certifying a direction at 0.12x of its eigensolver's bar "
+        "again; the version-3 cutoff has stopped binding"
+    )
+    assert gram_decomposition.resolution_limited
+    assert needs_factor_certification(gram_decomposition)
 
 
 @pytest.mark.parametrize(

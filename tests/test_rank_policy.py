@@ -38,6 +38,7 @@ from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
+    _eigensolver_relative_bar,
     _symmetric_part,
     decompose_factor,
     decompose_gram,
@@ -155,6 +156,108 @@ def test_shared_rank_policy_matches_normal_equation_boundary() -> None:
     assert SHARED_RANK_POLICY.certification_band == 32.0
     assert SHARED_RANK_POLICY.warning_condition == pytest.approx(1.0 / np.sqrt(eps))
     assert SHARED_RANK_POLICY.severe_condition == pytest.approx(1.0 / eps)
+
+
+def _reflected_residue_fixture() -> tuple[np.ndarray, np.ndarray]:
+    """``TestRankGateSeesCollinearityNotScale``'s matrix, and its residue reflected.
+
+    ``H - 2 w0 v v'`` moves the smallest eigenvalue to ``-w0`` through its own
+    eigenvector and leaves the other five untouched, which is the perturbation
+    a different BLAS produces and nothing else.
+    """
+    rng = np.random.default_rng(11)
+    width = 6
+    basis = np.linalg.qr(rng.standard_normal((width, width)))[0]
+    equilibrated = basis @ np.diag([1.0] * (width - 1) + [1e-20]) @ basis.T
+    scale = np.sqrt(np.diag(equilibrated))
+    correlation = equilibrated / np.outer(scale, scale)
+    delivered = 0.5 * (correlation + correlation.T)
+    values, vectors = np.linalg.eigh(delivered)
+    reflected = delivered - 2.0 * float(values[0]) * np.outer(vectors[:, 0], vectors[:, 0])
+    return delivered, reflected
+
+
+@pytest.mark.parametrize("order", [1, 2, 6, 32, 120, 1680])
+def test_the_gram_cutoff_never_sits_below_what_eigh_resolves(order: int) -> None:
+    """The invariant version 3 exists to establish -- issue #356.
+
+    ``gram_rcond`` is ``eps`` and the *LAPACK Users' Guide*, 3rd ed., sec. 4.7
+    bar is ``p(n) eps ||A||_2``, so a cut at ``gram_rcond`` alone is beneath
+    the bar for every order above 1.  That is not a near miss: it means EVERY
+    direction the route was capable of dropping sat inside the eigensolver's
+    own error bar, so the truncation never once fired against a resolved
+    eigenvalue, and which side of it round-off landed on decided the rank.
+
+    Asserted as ``>=`` rather than ``==`` because ``gram_rcond`` is a FLOOR
+    that a coarser policy may raise; what may never happen is the cut falling
+    below the bar.
+    """
+    bar = _eigensolver_relative_bar(order)
+
+    assert bar >= SHARED_RANK_POLICY.gram_rcond, (
+        "the bar has fallen below `gram_rcond`, so the floor is inert and the "
+        "cut is back at a threshold `eigh` cannot resolve"
+    )
+    assert bar == pytest.approx(order * np.finfo(float).eps)
+
+
+def test_reflecting_the_residues_sign_moves_neither_the_rank_nor_the_covariance() -> None:
+    """The measured symptom of #356, asserted on both arms of the coin flip.
+
+    The two matrices differ only in the SIGN of an eigenvalue that is inside
+    ``eigh``'s bar, which is round-off and not data.  Under the version-2 cut
+    they answered differently: measured over seven ``OPENBLAS_CORETYPE``
+    microkernels at one thread, the residue ran **0.10x to 2.93x** of that cut
+    across the fourteen configurations, and the SKYLAKEX/delivered one landed
+    above it -- rank 6 where the other thirteen read 5, and
+    ``||pseudo_inverse||_2`` of **1.817e+15** against 3.638 on the rest.
+
+    Against the bar the same residue runs **0.017x to 0.488x** over the same
+    fourteen and never approaches it, so the direction drops on all of them --
+    worst reading 0.488x, i.e. **2.05x of headroom**, against a min of 0.017x.
+
+    **THE TWO ARMS ARE DIFFERENT MATRICES, SO THE ASSERTION IS AGREEMENT AND
+    NOT IDENTITY.**  ``H`` and ``H - 2 w0 v v'`` differ, and the pseudo-
+    inverses they produce differ in the last bits.  Measured over the seven
+    microkernels at one thread, the relative disagreement runs **2.2524e-16 to
+    2.2524e-15** -- a 10x spread, all of it round-off -- so ``rtol=1e-13``
+    below clears the worst reading by **44x**.  A single run would have
+    suggested 2.25e-16 and a tolerance an order too tight.  What IS
+    bit-identical across all fourteen is ``||pinv||_2 = 3.638481e+00``, and
+    that is asserted separately because it is the quantity the issue measured
+    swinging to 1.817e+15.
+
+    The precondition is asserted rather than assumed: if a future driver
+    resolves this residue, the fixture has stopped being about round-off and
+    the equality below would be pinning something else.
+    """
+    delivered, reflected = _reflected_residue_fixture()
+
+    for matrix in (delivered, reflected):
+        values = np.linalg.eigh(matrix)[0]
+        bar = _eigensolver_relative_bar(len(values)) * float(np.max(np.abs(values)))
+        assert abs(float(values[0])) < bar, (
+            "the residue is now resolved, so this fixture no longer measures "
+            "the sign of round-off and the assertion below is vacuous"
+        )
+
+    delivered_decomposition = decompose_gram(delivered)
+    reflected_decomposition = decompose_gram(reflected)
+
+    assert delivered_decomposition.rank == reflected_decomposition.rank == 5
+    delivered_inverse = delivered_decomposition.pseudo_inverse()
+    reflected_inverse = reflected_decomposition.pseudo_inverse()
+    np.testing.assert_allclose(delivered_inverse, reflected_inverse, rtol=1e-13, atol=0.0)
+    for inverse in (delivered_inverse, reflected_inverse):
+        assert float(np.linalg.norm(inverse, 2)) == pytest.approx(3.638481, abs=1e-6), (
+            "the covariance scale has moved; under version 2 this read 3.638 "
+            "on thirteen of fourteen configurations and 1.817e+15 on the other"
+        )
+    # Both arms are still inside the certification band, which is the separate
+    # and unfixed half of #356: the verdict is computed correctly here and
+    # `inference/covariance.py` does not consult it.
+    assert needs_factor_certification(delivered_decomposition)
+    assert needs_factor_certification(reflected_decomposition)
 
 
 def test_centered_system_avoids_raw_moment_cancellation() -> None:
@@ -570,7 +673,51 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
 
 
 def test_factor_certificate_controls_cutoff_boundary_prediction() -> None:
-    """The certified factor controls the public fit at the cutoff boundary."""
+    """The certified factor controls the public fit at the cutoff boundary.
+
+    **THE UNCERTIFIED GRAM NO LONGER AGREES WITH THE CERTIFICATE, AND THIS
+    TEST IS THE ONE PLACE THAT WAS ENTITLED TO NOTICE -- ISSUE #356.**  The
+    design's singular values are ``[1, 1.55e-8, 1.30e-8]`` against a factor
+    cutoff of ``sqrt(eps) = 1.490e-8``, so the certificate retains two and
+    drops one, and it does so 3.75e+06 SVD bars clear of the boundary between
+    them.  Squared onto the Gram those become ``[1, 2.40e-16, 1.69e-16]``
+    against ``eigh``'s bar of ``3 eps = 6.66e-16``: BOTH are inside it, and
+    they differ from each other by 0.1 of a bar.  The Gram cannot tell them
+    apart at all.
+
+    Under version 2 the preliminary Gram nonetheless read rank 2, matching the
+    certificate, and this test asserted the match.  It was a coincidence at a
+    sub-resolution boundary -- and the test knew it, because the line above
+    the fixture asserts ``needs_factor_certification(preliminary)`` is True,
+    which is the module saying this Gram may not be relied on.
+
+    **AND THE HONEST COST OF VERSION 3 IS VISIBLE HERE RATHER THAN ANYWHERE
+    ELSE IN THE SUITE: THIS FIXTURE'S GRAM RANK BECAME KERNEL-DEPENDENT.**
+    Swept over seven ``OPENBLAS_CORETYPE`` microkernels at one thread, against
+    a cutoff of ``1.99840e-15`` that is IDENTICAL on all seven, the smallest
+    retained eigenvalue reads 1.0027x, 1.2239x (twice), and 1.3348x of it on
+    four kernels -- rank 2 -- and falls below it on SKYLAKEX, HASWELL and ZEN
+    -- rank 1.  Under version 2 it was stably 2, at 3.0x to 4.0x of a cutoff
+    that was itself a third of the resolution, so the direction was ALWAYS
+    unresolved and version 2 simply always kept it.  Stably retaining a
+    direction whose eigenvalue is noise is not better than deciding it
+    unstably; it is the same defect with the evidence removed.
+
+    What version 3 buys is that the uncertainty is now IN the rank, and that
+    every exit is unanimous: ``resolution_limited``,
+    ``needs_factor_certification`` and a ``None`` from
+    ``decompose_gram_if_authoritative`` hold on all seven kernels.  The coin
+    flip moved off a value and onto a route, which is the trade
+    ``screening/_structured.py``'s ``_penalty_root`` docstring makes
+    explicitly for the same reason.
+
+    So the assertion is loosened rather than inverted: what is pinned is that
+    the preliminary Gram never OVERSTATES the certificate and always refuses,
+    not the integer it happens to reach.  Nothing about the fitted output
+    moved -- ``automatic.rank_info.data.rank`` is still 2 and the error bound
+    below still holds -- because the public fit was already taking the
+    certified factor, which is what this test is named for.
+    """
     rng = np.random.default_rng(4274)
     right, _ = np.linalg.qr(rng.normal(size=(3, 3)))
     half_left, _ = np.linalg.qr(rng.normal(size=(8, 3)))
@@ -670,7 +817,14 @@ def test_factor_certificate_controls_cutoff_boundary_prediction() -> None:
     preliminary_beta = preliminary.solve(centered.rhs)
     formed = decompose_gram(factor.T @ factor)
     formed_beta = formed.solve(factor.T @ factor_rhs)
-    assert preliminary.rank == retained_rank
+    # See the docstring.  The RANK here is deliberately not pinned: this
+    # fixture straddles the version-3 cut and reads 1 on three microkernels
+    # and 2 on four.  What is pinned is what is unanimous across all seven --
+    # the Gram never OVERSTATES the certificate, and every route out of it is
+    # a refusal.
+    assert preliminary.rank <= retained_rank
+    assert preliminary.resolution_limited
+    assert decompose_gram_if_authoritative(centered.data_gram) is None
     for mutated_beta in (preliminary_beta, formed_beta):
         hybrid = SimpleNamespace(
             beta=mutated_beta,
