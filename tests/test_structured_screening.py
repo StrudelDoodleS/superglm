@@ -891,7 +891,12 @@ def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
     # 6.459e-15, i.e. **4.68x to 12.98x below**; smallest kept eigenvalue
     # 4.8961, i.e. **1.62e+14x above**.  The cut has fourteen orders of
     # clearance on the side that decides the count.
-    assert int(keep.sum()) == 2, ("the pair is nullity two; rival kept", int(keep.sum()))
+    #
+    # The count asserted is the RANK the rival keeps, which at ``k_a = 4`` is
+    # numerically the same as the nullity it drops.  They are named separately
+    # because they coincide only on this fixture's shape.
+    assert int(keep.sum()) == 2, ("rival kept, want rank 2", int(keep.sum()))
+    assert int((~keep).sum()) == 2, ("rival dropped, want nullity 2", int((~keep).sum()))
     dropped = (Q[:, keep] * np.sqrt(np.abs(w[keep]))).T
     rival = dataclasses.replace(geometry, root_penalty=dropped)
 
@@ -2979,9 +2984,10 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     distinct readings across seven kernels, spanning **3.37e-03 df**, which put
     the previous ``3e-3`` BELOW the observed maximum and left this test red at
     master on any host taking an older kernel.  The bullets keep their original
-    numbers, since they are correct for the axis they were measured on; the
-    kernel spread is recorded beside them and is what the bound is now set
-    from.
+    numbers, since they are correct for the axis they were measured on, and the
+    kernel spread is recorded beside them.  That spread is the FLOOR the bound
+    has to clear, not where the number comes from: the placement is the one
+    this file already uses at this rung, for the reason the bullet below gives.
 
     * NO FLOAT64 ORACLE EXISTS HERE, which is why the constants are hard-coded.
       ``_reference_edf`` itself is 8.15e-05, 2.77e-04 and 2.11e-03 from the
@@ -3008,14 +3014,16 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
       3.013e-03, **9.2x** that floor, where the default kernel reads 5.597e-04
       and is 1.7x it.  So the floor is the right thing to compare a SINGLE
       configuration against and is not a substitute for the sweep.
-    * PLACED, DENSE arm, at ``1e-2`` and NOT at the structured arm's 3e-3.
-      That arm is not changed by this branch and its reproducibility does not
-      support the tighter bound.  Measured on THIS fixture across 1, 2, 4 and
-      8 threads with all six pools set together, its high-edge value moves
-      8.33e-06, 1.04e-05 and **4.05e-04** at the three weights, where the
+    * PLACED, DENSE arm, at ``1e-2`` -- the same number as the structured arm
+      and for a different reason, which is why it keeps its own bullet.  That
+      arm is not changed by this branch.  Measured on THIS fixture across 1, 2,
+      4 and 8 threads with all six pools set together, its high-edge value
+      moves 8.33e-06, 1.04e-05 and **4.05e-04** at the three weights, where the
       structured arm is BIT-IDENTICAL at every setting and every weight.  1e-2
-      is 24.7x that floor; 3e-3 would have been 7.4x, on an arm whose floor
-      was measured at four thread settings on one machine rather than derived.
+      is 24.7x that thread floor and 7.3x its own worst kernel reading of
+      1.365e-03.  The two arms agree on the number and not on the argument for
+      it, and a bullet claiming one is looser than the other would now be
+      describing a split this file no longer has.
       It is the same bound
       ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom``
       already gives the dense arm at this rung for the same reason.
@@ -3182,6 +3190,22 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             # configurations swept: ``|s - d|`` runs 1.365e-10..1.148e-08 at
             # ``1.0``, 2.405e-09..7.391e-09 at ``0.01`` and
             # 6.688e-11..1.341e-08 at ``0.001``.
+            #
+            # Unlike the high edge, this bound has a DERIVED ceiling as well as
+            # an observed floor -- 2e-5 from the two oracle pins against
+            # 1.341e-08 measured -- and 1e-6 sits near the log-midpoint of that
+            # bracket.  So it is placed the way the low edge's own ``1e-5`` is,
+            # and not the way the high edge's ``1e-2`` had to be.
+            #
+            # THE 75x IS KERNEL-AXIS EVIDENCE AND MUST NOT BE READ AS SEED-AXIS
+            # EVIDENCE.  This fixture is seed-sensitive at this very edge -- the
+            # gate above measures the oracle bound at 2.2196e-06 on seed 3 and
+            # 6.6109e-05 on seed 13, over 1e-5 on 6 of 21 seeds -- and the
+            # sibling test records a low-edge parity bound of exactly this size
+            # that turned out to be a property of one lucky draw on 11 of 60.
+            # ``_CERTIFIED_EDGES`` pins this pair to seed 3, so the bound is
+            # right for the fixture the suite runs and is not a claim about the
+            # generator.
             assert s.edf0 == pytest.approx(d.edf0, abs=1e-6), ("parity lo", budget)
             saw_low_edge = True
         else:
@@ -3202,10 +3226,11 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             #   low_weight=0.001  3.187e-05 .. 3.013e-03   <-- binding
             #
             # so the binding measurement is 3.013e-03 on NEHALEM.  The arm is
-            # bit-identical across THREAD settings on every kernel -- all
-            # fourteen readings collapse to five values, one per microkernel --
-            # so what this bound has to carry is the kernel spread alone,
-            # 3.37e-03 df at ``0.001``.
+            # bit-identical across THREAD settings on every kernel, so the
+            # fourteen readings are five distinct values across the seven
+            # kernels -- thread-invariance, plus HASWELL coinciding with ZEN
+            # and PRESCOTT with CORE2 -- and what this bound has to carry is
+            # the kernel spread alone, 3.37e-03 df at ``0.001``.
             #
             # AND IT IS PLACED AT ``1e-2``, NOT AT THE 1.66x THAT MAXIMUM WOULD
             # ALLOW.  Seven x86 microkernels are a sample, not the population --
@@ -3224,11 +3249,15 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             # to catch, which is the ceiling that decides whether a bound has
             # content.
             assert s.edf0 == pytest.approx(edf_hi, abs=1e-2), ("structured hi", budget, s.edf0)
-            # The DENSE arm gets its own, looser bound.  See the docstring:
-            # its high-edge value moves 4.05e-04 with thread count on this very
-            # fixture where the structured arm is bit-identical, so holding it
-            # to the structured arm's bound would pin an arm whose
-            # reproducibility does not support it.
+            # The DENSE arm lands on the same number for a DIFFERENT reason,
+            # which is why it keeps its own line.  Its high-edge value moves
+            # 4.05e-04 with thread count on this very fixture, where the
+            # structured arm is bit-identical on that axis -- so the two arms
+            # are held to 1e-2 by different quantities: the structured one by
+            # the 3.013e-03 kernel spread above (3.3x), this one by that
+            # 4.05e-04 thread floor (24.7x) and its own 1.365e-03 kernel
+            # reading (7.3x).  Neither is the looser bound now; they agree on
+            # the number and not on the argument for it.
             assert d.edf0 == pytest.approx(edf_hi, abs=1e-2), ("dense hi", budget, d.edf0)
             # Parity on top of accuracy: the two are independent implementations
             # -- a dense factorization against an arrow one -- so agreement is
