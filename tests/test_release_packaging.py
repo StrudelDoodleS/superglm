@@ -38,6 +38,35 @@ def test_dataframe_boundary_dependencies_are_explicit() -> None:
     assert "pyarrow" not in project
 
 
+def test_the_two_pyarrow_floors_are_declared_identically() -> None:
+    """Because Dependabot resolves a package to ONE requirement string.
+
+    ``pyarrow`` is declared in both ``dev`` and ``bench``.  When those two
+    strings disagree, Dependabot rewrites the higher one to the lower on every
+    pull request that touches the package -- it did so on #318, and again on
+    #354 after #318 was superseded, whose entire ``pyproject.toml`` diff was
+    that one line.  The value it lands on is whichever is lower, so the
+    disagreement is what creates the rewrite, not the specific numbers.
+
+    ``dev``'s floor is the one with a reason attached and the one that binds:
+    ``dev-ci.yml``'s 3.12 job installs ``dev`` and ``bench`` together and runs
+    pytest with no out-of-band ``--with pyarrow``, so the intersection of the
+    two is its effective constraint.
+
+    Aligning them once is not durable -- nothing stops the next bump moving one
+    and not the other, and then this recurs for a third time.  This asserts the
+    invariant instead, so CI remembers rather than a reader having to.
+    """
+    optional = _toml_section("project.optional-dependencies")
+
+    floors = re.findall(r'"pyarrow([^"]*)"', optional)
+    assert len(floors) == 2, f"expected pyarrow in exactly two extras, found {floors}"
+    assert floors[0] == floors[1], (
+        "the dev and bench pyarrow specifiers have diverged, which is what lets "
+        f"Dependabot normalise the higher one down to the lower: {floors}"
+    )
+
+
 def test_project_exposes_useful_pypi_metadata() -> None:
     project = _toml_section("project")
     urls = _toml_section("project.urls")
