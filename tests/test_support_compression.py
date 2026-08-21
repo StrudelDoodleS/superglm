@@ -727,7 +727,19 @@ def test_spline_cat_compression_leaves_every_fitted_quantity_unchanged(monkeypat
     #   predictions                               rel 5.494e-07 .. 9.615e-07
     #   effective_df                              rel 1.106e-06 .. 1.935e-06
     #
-    # Each bound below clears its binding measurement by 2.8x to 3.1x.
+    # Headroom, per bound and stated honestly rather than as one range: the
+    # deviance clears by 3.00x, the predictions by 3.12x and ``effective_df``
+    # by 3.10x.  beta's two components clear by 2.73x (atol) and 2.76x (rtol)
+    # individually -- both a little under this file's 2.8x convention -- while
+    # the combined ``allclose`` bound they form clears the binding element by
+    # 6.41x, because at that element the two allowances add.  The per-component
+    # figures are the ones to read.
+    #
+    # The predictions ``atol`` is an allowance the sweep above did not measure:
+    # it is stated in relative terms, and on this fixture the smallest absolute
+    # prediction is 0.348, so the ``atol`` never binds.  It is kept for the
+    # shape of the assertion rather than earned, and is named here so it is not
+    # mistaken for a measured number.
     np.testing.assert_allclose(compressed._result.beta, plain._result.beta, rtol=1.5e-4, atol=3e-5)
     np.testing.assert_allclose(compressed._result.deviance, plain._result.deviance, rtol=2e-8)
     np.testing.assert_allclose(

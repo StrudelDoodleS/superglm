@@ -1440,39 +1440,57 @@ def test_small_sum_to_zero_spectrum_filters_gram_eigenspace_leakage(
     )
     centered_design = public_design - np.mean(public_design, axis=0)
     expected = decompose_factor(centered_design)
-    # THE TWO ROUTES ARE COMPARED ON RANK, NOT ON WHICH COLUMNS THEY PICK --
-    # ISSUE #354.  This asserted the two masks were EQUAL, which is a property
-    # of this fixture on one numeric generation rather than of the routes.
-    # Their cuts differ by eight orders BY DESIGN -- ``gram_rcond`` is ``eps``
-    # and ``factor_rcond`` is ``sqrt(eps)`` -- so where a direction sits
-    # between them the two are entitled to disagree about which member of an
-    # aliased set to keep.
+    # THE TWO ROUTES ARE COMPARED ON WHAT THEY RESOLVE, NOT ON WHICH COLUMNS
+    # THEY PICK -- ISSUE #354.  This asserted the two masks were EQUAL, which
+    # is a property of this fixture on one numeric generation rather than of
+    # the routes.
     #
-    # Under numpy 2.5.2 they do, on all 14 configurations swept (7
-    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings): the masks differ
-    # at exactly two positions, index 3 and index 21, in OPPOSITE directions --
-    # the Gram route keeps 3 and drops 21, the factor route the reverse. Both
-    # therefore report **13 estimable columns**, which is the quantity this
-    # test's later assertions actually rest on. ``rank.py``'s own policy notes
-    # record the same behaviour for ``_conditioned_representatives``, which
-    # "changed which columns are chosen" on a near alias without changing how
-    # many.
+    # **AND NOT BECAUSE THE CUTS DIFFER, WHICH THEY DO NOT.**  An earlier
+    # revision of this comment said they were "eight orders apart by design",
+    # ``eps`` against ``sqrt(eps)``.  That is wrong, and
+    # ``test_shared_rank_policy_matches_normal_equation_boundary`` is named
+    # for saying so: ``gram_rcond`` cuts EIGENVALUES while ``factor_rcond``
+    # cuts SINGULAR VALUES, and with ``lambda = sigma^2`` the conditions
+    # ``lambda > eps lambda_max`` and ``sigma > sqrt(eps) sigma_max`` are the
+    # SAME boundary.  There is no band between them for a direction to sit in.
     #
-    # So the rank is asserted, and the representative choice is bounded rather
-    # than pinned. Pinning it would be asserting which of two equally good
-    # aliases a particular LAPACK happened to prefer.
+    # What differs is the arithmetic that reaches that shared boundary.
+    # Forming ``X'X`` squares the conditioning, so a direction near the cut
+    # carries O(1) relative error in the Gram's eigenvalues where the factor's
+    # singular values still resolve it.  That is ``rank.py``'s own account of
+    # why certification exists -- normal equations "retain a different
+    # direction while reporting the same rank" -- and it is why equality was
+    # never the property to assert.
+    #
+    # Under numpy 2.5.2 that is what happens, on all 14 configurations swept
+    # (7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings): the masks
+    # part at exactly positions 3 and 21, in OPPOSITE directions -- the Gram
+    # route keeps 3 and drops 21, the factor route the reverse -- and both
+    # report 13 estimable columns.  The null rows there are parallel to within
+    # 1e-12, so it is one aliased pair, and the fixture carries no second
+    # near-cut pair: the next nearest direction sits 30.8x above the cut.
+    # Under numpy 2.4.2 the masks are equal on every kernel.
+    #
+    # The positions are pinned as a SET rather than counted, because a count
+    # alone would admit a compensating one-in-one-out error elsewhere -- a
+    # clearly estimable column dropped while a clearly aliased one is kept --
+    # which is a real defect shape that equality used to catch.
     gram_expected = decompose_gram(centered_design.T @ centered_design)
     gram_mask = gram_expected.coefficient_estimable()
     factor_mask = expected.coefficient_estimable()
-    assert int(np.count_nonzero(gram_mask)) == int(np.count_nonzero(factor_mask)), (
-        "the Gram and factor routes disagree about the RANK, not merely about "
-        f"which columns represent it: {int(np.count_nonzero(gram_mask))} against "
-        f"{int(np.count_nonzero(factor_mask))}"
+    assert gram_expected.rank == expected.rank, (
+        "the Gram and factor routes disagree about the RANK itself, which is "
+        f"more than a representative choice: {gram_expected.rank} against "
+        f"{expected.rank}"
     )
-    assert int(np.count_nonzero(gram_mask != factor_mask)) <= 2, (
-        "the two routes now choose different representatives at more than the "
-        "two aliased positions this fixture carries: "
-        f"{np.flatnonzero(gram_mask != factor_mask).tolist()}"
+    assert int(np.count_nonzero(gram_mask)) == int(np.count_nonzero(factor_mask)), (
+        "the routes resolve a different NUMBER of estimable columns, not "
+        f"merely a different choice of them: {int(np.count_nonzero(gram_mask))} "
+        f"against {int(np.count_nonzero(factor_mask))}"
+    )
+    assert set(np.flatnonzero(gram_mask != factor_mask).tolist()) <= {3, 21}, (
+        "the routes now part somewhere other than the single aliased pair this "
+        f"fixture carries: {np.flatnonzero(gram_mask != factor_mask).tolist()}"
     )
 
     fallback_calls = 0
@@ -1490,24 +1508,28 @@ def test_small_sum_to_zero_spectrum_filters_gram_eigenspace_leakage(
         "superglm.solvers._structured.geometry._bounded_centered_estimability",
         certified_dense_fallback,
     )
-    # Compared on RANK and a bounded representative disagreement, for the same
-    # reason as the precondition above: ``certified_dense_fallback`` answers
-    # through ``decompose_gram`` while ``expected`` is the factor route, and
-    # the two carry cuts eight orders apart.  Under numpy 2.5.2 they part at
-    # the same two aliased positions, 3 and 21, in opposite directions -- so
-    # the count is identical and only the choice differs.  What this test is
-    # for is that the deflated shift-invert stays compact and reaches the
-    # fallback exactly once, and neither of those turns on which alias won.
+    # Compared on the resolved count and a pinned pair of positions, for the
+    # same reason as the precondition above -- NOT because the two cuts differ,
+    # which they do not: ``certified_dense_fallback`` answers through
+    # ``decompose_gram`` while ``expected`` is the factor route, and squaring
+    # the design to form the Gram is what costs the near-cut direction its
+    # resolution.  Under numpy 2.5.2 they part at the same single aliased pair,
+    # 3 and 21, in opposite directions, so the count is identical and only the
+    # choice differs.  What this test is for is that the deflated shift-invert
+    # stays compact and reaches the fallback exactly once, and neither of those
+    # turns on which alias won.
     operator_mask = centered_operator_coefficient_estimable(operator)
     factor_mask = expected.coefficient_estimable()
     assert int(np.count_nonzero(operator_mask)) == int(np.count_nonzero(factor_mask)), (
-        "the operator route disagrees about the RANK, not merely about which "
-        f"columns represent it: {int(np.count_nonzero(operator_mask))} against "
+        "the operator route resolves a different NUMBER of estimable columns, "
+        f"not merely a different choice of them: "
+        f"{int(np.count_nonzero(operator_mask))} against "
         f"{int(np.count_nonzero(factor_mask))}"
     )
-    assert int(np.count_nonzero(operator_mask != factor_mask)) <= 2, (
-        "the operator route now differs at more than the two aliased positions "
-        f"this fixture carries: {np.flatnonzero(operator_mask != factor_mask).tolist()}"
+    assert set(np.flatnonzero(operator_mask != factor_mask).tolist()) <= {3, 21}, (
+        "the operator route now parts somewhere other than the single aliased "
+        f"pair this fixture carries: "
+        f"{np.flatnonzero(operator_mask != factor_mask).tolist()}"
     )
     assert fallback_calls == 1
 

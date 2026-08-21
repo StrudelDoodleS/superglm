@@ -4188,13 +4188,23 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
     # so it is asserted as a range and not as a value -- the number of lambdas
     # a continuously moving spectrum happens to place inside a fixed band is
     # not something this suite gets to pin.  The published rungs below are
-    # bit-stable to 6e-12 df over the same fourteen.
+    # stable to 1.0e-11 df over the same fourteen under numpy 2.5.2; the
+    # 6e-12 this replaces was the 2.4.2 figure.
     assert refused <= 2, (refused, min(margins))
     assert len(values) == 200 - refused
-    # Nearly monotone too, which the difference form was not: over the same
-    # bracket its worst step UP is measured in whole degrees of freedom.
-    # That is disclosure and not a derived bound -- monotonicity would follow
-    # from nonnegative per-DIRECTION shares, which this route does not deliver.
+    # The curve is flat almost everywhere and steps once, which the difference
+    # form was not: over the same bracket ITS worst step UP is measured in
+    # whole degrees of freedom at many lambdas.  That is disclosure and not a
+    # derived bound -- monotonicity would follow from nonnegative per-DIRECTION
+    # share, which this route does not deliver.
+    #
+    # "Nearly monotone" is no longer the right description and is retired
+    # here.  Under numpy 2.5.2 the worst step reaches 1.347 df, and measuring
+    # where it sits shows it is ONE grid point -- 1.097 -> 2.443 -> 1.292, two
+    # points after an absorption-margin refusal -- with the rest of the curve
+    # flat at edf ~ 1.0 across twenty orders of lambda and only one other step
+    # above 0.1 df.  So this is a single deflation-count flip at the
+    # certify-or-refuse boundary, not a diffusely roughened curve.
     #
     # **THE DISCLOSED NUMBER MOVED FROM 6.9e-05 TO 4.6e-02 .. 8.0e-02 AND THAT
     # IS THE PRICE OF #280.**  The absorption floor is a dimensional convention
@@ -4217,7 +4227,11 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
     # sensitive on two of them where nothing else here is -- is the finding.
     # This geometry is 7 levels x 3 rows against a thirteen-column margin with
     # a border Schur inverse at 1e+10 to 1e+12, so the curve's roughness is
-    # dominated by whatever the last bits of the factorization do.  ``4.0``
+    # dominated by a single deflation-count flip escaping the ``1.01x``
+    # certify-or-refuse band -- one direction's share of about 1.4 df
+    # appearing at the band's edge -- rather than by diffuse roughening.  That
+    # the band is thin enough for a count to move in and out of it on this
+    # geometry is worth its own look and is not settled here.  ``4.0``
     # clears the worst reading by 3.0x and is placed to catch a return of the
     # cancellation blow-up this test exists for -- whole degrees of freedom out
     # of 78, with ``edf`` leaving ``[0, 78]`` entirely -- which the in-loop
@@ -4226,11 +4240,10 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
     #
     # A tighter number would be pinning the roughness of an ill-conditioned
     # curve to the BLAS that measured it, which is what had to be undone here.
-    #
-    # BOUND SET FROM THE SPREAD AND NOT FROM ONE RUN: over 7
-    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings the worst upward
-    # step runs 4.604e-02 to 7.963e-02, so 0.5 leaves 6.3x on the worst of the
-    # fourteen.
+    # The 4.604e-02..7.963e-02 spread that placed the previous 0.5 is the
+    # numpy 2.4.2 measurement and is superseded by the one above; it is not
+    # restated here, because a bound may carry only the spread it was actually
+    # set from.
     assert np.diff(values).max() < 4.0, np.diff(values).max()
 
     # ...and the ladder now scores the pair rather than handing it back.
@@ -5045,7 +5058,24 @@ def test_the_absorption_floor_reads_dimensions_and_never_a_measured_residual():
     # The residual that used to set it is still measured, and still varies over
     # the range below.  This pins that the two are now UNRELATED, not that the
     # residual is small.
-    assert 9.9e-13 <= geometry.orthonormality <= 1.8e-12, geometry.orthonormality
+    #
+    # **BAND RE-PLACED FROM THE SPREAD -- ISSUE #354.**  The previous
+    # ``9.9e-13 .. 1.8e-12`` was the numpy 2.4.2 spread taken as the band
+    # itself, with no headroom at either end: SKYLAKEX sat 0.4% above the floor
+    # and SANDYBRIDGE 0.3% below the ceiling.  numpy 2.5.2 crosses it at BOTH
+    # ends -- PRESCOTT and CORE2 read 8.399e-13, under the floor, and NEHALEM
+    # reads 2.138e-12, over the ceiling.  Measured over 7 microkernels x 2
+    # thread settings on each generation (thread count moves nothing):
+    #
+    #   numpy 2.4.2   9.937e-13 .. 1.795e-12
+    #   numpy 2.5.2   8.399e-13 .. 2.138e-12
+    #
+    # ``3e-13 .. 8e-12`` clears the combined spread by 2.8x below and 3.7x
+    # above.  Widening costs this assertion nothing it was for: what it has to
+    # show is that the residual lives at 1e-12 scale while the floor this test
+    # is about sits at 1.115e-07, and the band's ceiling is still four orders
+    # under that floor.
+    assert 3e-13 <= geometry.orthonormality <= 8e-12, geometry.orthonormality
 
 
 def test_the_closure_residual_refuses_outside_the_bound_its_own_route_allows():

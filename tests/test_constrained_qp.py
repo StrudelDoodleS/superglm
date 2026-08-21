@@ -18,7 +18,7 @@ from superglm.solvers.constrained_qp import (
     _solve_saddle_least_squares,
     solve_constrained_qp,
 )
-from superglm.solvers.rank import decompose_gram
+from superglm.solvers.rank import decompose_gram, needs_factor_certification
 
 
 class TestUnconstrainedFallback:
@@ -2431,31 +2431,85 @@ class TestRankGateSeesCollinearityNotScale:
         correlation = equilibrated / np.outer(scale, scale)
         H = 0.5 * (correlation + correlation.T)
 
-        eigenvalues = np.linalg.eigvalsh(H)
+        # ``eigh`` and NOT ``eigvalsh``: the with-vectors driver is the one
+        # ``decompose_gram`` runs, the two are different LAPACK paths, and they
+        # do not agree here.  Over the sweep ``eigvalsh`` reaches -7.252e-16 on
+        # SANDYBRIDGE where ``eigh`` peaks at +5.504e-16, so a precondition
+        # written on the wrong one would be describing a spectrum the gate
+        # never sees.
+        eigenvalues, _ = np.linalg.eigh(H)
         eigensolver_bar = width * np.finfo(np.float64).eps * float(np.max(np.abs(eigenvalues)))
 
-        # The diagonal plant of the SAME eigenvalue, for the contrast: it
-        # equilibrates to the identity, so the gate is shown a clean 1.0 and
-        # has nothing to decide.  Asserted here rather than left to the sibling
-        # test above, because it is one half of the claim.
         diagonal = np.diag([1.0] * (width - 1) + [1e-20])
         diagonal_scale = np.sqrt(np.diag(diagonal))
-        diagonal_eigenvalues = np.linalg.eigvalsh(
-            diagonal / np.outer(diagonal_scale, diagonal_scale)
-        )
-        assert diagonal_eigenvalues.min() == pytest.approx(1.0, abs=1e-12), (
+        diagonal_correlation = diagonal / np.outer(diagonal_scale, diagonal_scale)
+
+        # PRECONDITIONS.  Neither of these is the assertion -- they establish
+        # that the fixture still shows the gate what the contrast requires,
+        # which is a clean 1.0 on one side and something under the
+        # eigensolver's own resolution on the other.
+        assert np.linalg.eigvalsh(diagonal_correlation).min() == pytest.approx(1.0, abs=1e-12), (
             "the diagonal plant no longer equilibrates to the identity, so the "
             "contrast this test draws has lost one of its two sides"
         )
-
-        # 4x on the worst configuration swept; the fixture is nowhere near
-        # putting this direction ABOVE the bar, which is what would make the
-        # gate's answer meaningful rather than a coin flip.
-        assert abs(float(eigenvalues.min())) < 0.5 * eigensolver_bar, (
+        assert abs(float(eigenvalues.min())) < eigensolver_bar, (
             "the planted direction is no longer inside the eigensolver's "
             f"resolution: |{eigenvalues.min():.6e}| against a bar of "
             f"{eigensolver_bar:.6e}, so the gate is now being shown something "
             "it can resolve and the contrast no longer holds"
+        )
+
+        # THE ASSERTION, AND IT GOES THROUGH THE GATE.  An earlier revision of
+        # this test stopped at the two preconditions above, which was a
+        # mistake worth naming: they are arithmetic on arrays the test builds
+        # itself, so ``decompose_gram`` was never called at all.  Under that
+        # revision, deleting the rank truncation outright -- forcing
+        # ``retained_mask`` all-True, a gate that can never drop a direction --
+        # left this whole class green, and so did replacing ``decompose_gram``
+        # with an unconditional ``raise``.  The old ``rank < width`` caught
+        # both.  Removing a coin-flip assertion is right; removing the call is
+        # not.
+        #
+        # ``needs_factor_certification`` is the stable observable to assert
+        # instead, and it is the module's OWN answer to this ambiguity -- its
+        # docstring is about normal equations that "retain a different
+        # direction while reporting the same rank", which is this fixture.  It
+        # holds on BOTH sides of the rank flip: over 7 ``OPENBLAS_CORETYPE``
+        # microkernels x 2 thread settings the collinear plant certifies on all
+        # 14 while its rank reads 5 on six kernels and 6 on SKYLAKEX, and the
+        # diagonal plant declines to certify on all 14.  That pair IS the
+        # contrast this class is named for, stated in a quantity the round-off
+        # cannot move.
+        #
+        # **AND ITS TEETH ARE STATED RATHER THAN ASSUMED, BECAUSE THEY ARE
+        # NARROWER THAN THE ASSERTION THEY REPLACE.**  Mutation-checked:
+        # replacing ``decompose_gram`` with a ``raise`` reds this, which is
+        # what the previous revision failed to do.  Forcing ``retained_mask``
+        # all-True -- a gate that never truncates -- does NOT red it, and no
+        # assertion on this fixture can.
+        #
+        # That is not a gap that can be closed here, and the reason is issue
+        # #356's substance: the gate drops a direction only when
+        # ``eigenvalue <= gram_rcond * max``, and ``gram_rcond`` is ``eps``,
+        # so **every direction the Gram route is capable of dropping is one
+        # below ``eps * max`` -- beneath the eigensolver's own error bar of
+        # ``n eps max``**.  There is therefore no fixture, here or anywhere,
+        # on which truncation fires against a RESOLVED eigenvalue.  Whether it
+        # fires is round-off on every input, which is why the old assertion
+        # passed by luck rather than by construction, and why the never-
+        # truncate mutation has to be caught by the tests that exercise the
+        # factor route instead.  The sibling above still calls the gate
+        # directly, so the class as a whole retains a live call on both sides
+        # of its contrast.
+        collinear = decompose_gram(H)
+        assert needs_factor_certification(collinear), (
+            "the equilibrated plant no longer reaches the certification band, "
+            f"so the Gram route now believes it resolved this direction (rank "
+            f"{collinear.rank} of {collinear.width})"
+        )
+        assert not needs_factor_certification(decompose_gram(diagonal_correlation)), (
+            "the diagonal plant now demands certification, so the gate is "
+            "seeing scale where the class docstring says it sees nothing"
         )
 
 

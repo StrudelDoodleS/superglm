@@ -934,19 +934,30 @@ def test_streamed_factor_rhs_includes_penalty_rows_without_normal_equation_loss(
     # is how far two orderings of the same projection drift apart, not an
     # accuracy claim about either.
     #
-    # ``atol=1e-9`` was below what that drift reaches.  Measured over 7
-    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings under numpy 2.5.2,
-    # the worst violation runs **1.397e-09 (SKYLAKEX) to 1.436e-09 (NEHALEM)**
-    # on the three kernels that exceed it, and is inside 1e-9 on the other
-    # four; thread count moves nothing.  4e-9 clears the binding measurement by
-    # 2.8x.  Under numpy 2.4.2 every configuration is inside the old bound,
-    # which is why this arrived with a dependency bump rather than a change
-    # here -- see #354.
+    # ``atol=1e-9`` was below what that drift reaches, and the axis it was
+    # below on is the KERNEL, not the numpy version.  Measured over 7
+    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings (thread count
+    # moves nothing on either):
+    #
+    #   numpy 2.5.2   9.313e-10 .. 1.436e-09
+    #   numpy 2.4.2   9.313e-10 .. **2.486e-09**  (PRESCOTT, CORE2)
+    #
+    # So the OLD 1e-9 was already red on eight of the fourteen under the numpy
+    # this repository shipped before #354, and the worst reading anywhere is
+    # under 2.4.2 rather than 2.5.2.  An earlier revision of this comment said
+    # "under numpy 2.4.2 every configuration is inside the old bound, which is
+    # why this arrived with a dependency bump rather than a change here".  That
+    # is false in both halves: what the bump did was move the DEFAULT kernel
+    # across a bound that several non-default kernels had been crossing all
+    # along, which is exactly why CI never saw it.
+    #
+    # The binding measurement across both generations is therefore 2.486e-09,
+    # and 8e-9 clears it by 3.2x.  Refs #354.
     np.testing.assert_allclose(
         augmented_factor @ actual,
         augmented_factor @ expected,
         rtol=2e-10,
-        atol=4e-9,
+        atol=8e-9,
     )
 
 
