@@ -804,7 +804,7 @@ def test_the_psd_clip_refuses_a_block_it_cannot_call_roundoff(monkeypatch):
 
 
 def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
-    """One projection, both halves -- and the gap it closes is 5.9e-02.
+    """One projection, both halves -- and the gap it closes is 3.7e-02 to 6.0e-02.
 
     The ladder chooses lambda from ``edf``, evaluated against ``rootS' rootS``,
     and publishes a statistic beside it.  If the statistic scored ``p.S_a``
@@ -812,11 +812,14 @@ def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
     anything, and the largest ``lambda`` in the bracket is
     ``lambda_hi = 1e10 * scale`` -- a rung the ladder publishes, not a corner.
 
-    Measured on the nullity-two pair, where the penalty's smallest eigenvalue
-    is a ``2.2e-14`` residue: the high-edge statistic reads **2.999250** on the
-    raw pencil and **2.821425** on the projected one, a 5.9e-02 relative gap
-    from a perturbation twelve orders below the penalty's scale.  Which of the
-    two is published is therefore not a detail.
+    Measured on the nullity-two pair, where the penalty's two smallest
+    eigenvalues are round-off residues: at the high edge the statistic on the
+    dropped pencil stands **3.692e-02 to 5.964e-02** relative away from the one
+    on the projected pencil, from a perturbation twelve orders below the
+    penalty's scale.  Which of the two is published is therefore not a detail.
+    The range is the spread over 7 ``OPENBLAS_CORETYPE`` microkernels x 2
+    thread settings, not one run -- see the rival's construction below, where
+    reading that spread as a single number is what issue #332 was.
 
     Since issue #298 there is no second pencil to keep in step with: both
     halves read ``geometry.root_penalty`` off ONE block-angular QR, so this
@@ -842,8 +845,30 @@ def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
     # materially different matrix -- which is what makes "the statistic scores
     # the pencil the edf chose lambda from" an assertion rather than a
     # tautology.
-    w, Q = np.linalg.eigh(0.5 * (pair.S_a + pair.S_a.T))
-    dropped = (Q[:, w > 0.0] * np.sqrt(w[w > 0.0])).T
+    #
+    # **THE DROP IS SELECTED ON ``|w|`` AGAINST THE BAR, AND MAY NOT BE
+    # SELECTED ON THE SIGN OF ``w``.**  This read ``w > 0.0``, which is a
+    # different rival on every machine: the eigenvalues being dropped here are
+    # assembly round-off, and :func:`_penalty_root`'s own docstring records in
+    # terms that their sign "is not [data]" -- "the same fixture at the same
+    # seed measures either sign on different machines".  So on any kernel whose
+    # round-off happens to put BOTH residues on the positive side, ``w > 0.0``
+    # keeps exactly what taking the magnitude keeps, the rival IS the projected
+    # pencil, and the assertion below compares a matrix with itself: measured
+    # over 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings, that is
+    # SANDYBRIDGE, NEHALEM, PRESCOTT and CORE2 -- **8 of the 14** -- reading a
+    # relative gap of exactly ``0.0`` against a bar of ``1e-2``.  The kept-mode
+    # count flipped 3/4 with the sign; issue #332.
+    #
+    # Against the bar it is sign-independent and so is the rival: **2 modes on
+    # all 14 configurations**, and the gap runs **3.692e-02 (NEHALEM) to
+    # 5.964e-02 (HASWELL, ZEN)** -- the binding measurement is 3.692e-02, which
+    # clears the ``1e-2`` below by 3.69x.
+    sym = 0.5 * (pair.S_a + pair.S_a.T)
+    w, Q = np.linalg.eigh(sym)
+    bar = sym.shape[0] * float(np.finfo(np.float64).eps) * float(np.linalg.norm(sym, 2))
+    keep = np.abs(w) > bar
+    dropped = (Q[:, keep] * np.sqrt(np.abs(w[keep]))).T
     rival = dataclasses.replace(geometry, root_penalty=dropped)
 
     on_projected = _wood_stacked_statistic(pair, geometry, lam)
