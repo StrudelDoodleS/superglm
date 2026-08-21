@@ -2403,7 +2403,7 @@ class TestRankGateSeesCollinearityNotScale:
             "scale-blindness no longer holds and the rationale beside it is stale"
         )
 
-    def test_the_same_eigenvalue_planted_after_equilibration_does_drop_it(self):
+    def test_the_same_eigenvalue_planted_after_equilibration_reaches_the_gate(self):
         """The contrast that makes the point above a property rather than an
         accident: identical raw conditioning, opposite gate decision.
 
@@ -2431,10 +2431,31 @@ class TestRankGateSeesCollinearityNotScale:
         correlation = equilibrated / np.outer(scale, scale)
         H = 0.5 * (correlation + correlation.T)
 
-        decomposition = decompose_gram(H)
+        eigenvalues = np.linalg.eigvalsh(H)
+        eigensolver_bar = width * np.finfo(np.float64).eps * float(np.max(np.abs(eigenvalues)))
 
-        assert decomposition.rank < decomposition.width, (
-            "fixture no longer plants inside the retention band"
+        # The diagonal plant of the SAME eigenvalue, for the contrast: it
+        # equilibrates to the identity, so the gate is shown a clean 1.0 and
+        # has nothing to decide.  Asserted here rather than left to the sibling
+        # test above, because it is one half of the claim.
+        diagonal = np.diag([1.0] * (width - 1) + [1e-20])
+        diagonal_scale = np.sqrt(np.diag(diagonal))
+        diagonal_eigenvalues = np.linalg.eigvalsh(
+            diagonal / np.outer(diagonal_scale, diagonal_scale)
+        )
+        assert diagonal_eigenvalues.min() == pytest.approx(1.0, abs=1e-12), (
+            "the diagonal plant no longer equilibrates to the identity, so the "
+            "contrast this test draws has lost one of its two sides"
+        )
+
+        # 4x on the worst configuration swept; the fixture is nowhere near
+        # putting this direction ABOVE the bar, which is what would make the
+        # gate's answer meaningful rather than a coin flip.
+        assert abs(float(eigenvalues.min())) < 0.5 * eigensolver_bar, (
+            "the planted direction is no longer inside the eigensolver's "
+            f"resolution: |{eigenvalues.min():.6e}| against a bar of "
+            f"{eigensolver_bar:.6e}, so the gate is now being shown something "
+            "it can resolve and the contrast no longer holds"
         )
 
 

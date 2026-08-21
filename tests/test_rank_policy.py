@@ -928,11 +928,25 @@ def test_streamed_factor_rhs_includes_penalty_rows_without_normal_equation_loss(
         rcond=SHARED_RANK_POLICY.factor_rcond,
     )[0]
     np.testing.assert_allclose(actual, expected, rtol=2e-9, atol=2e-10)
+    # BOUND SET FROM THE SPREAD.  This compares the FITTED VALUES of two
+    # routes to the same least-squares solution -- the streamed factor solve
+    # against ``lstsq`` on the explicitly augmented system -- so what it bounds
+    # is how far two orderings of the same projection drift apart, not an
+    # accuracy claim about either.
+    #
+    # ``atol=1e-9`` was below what that drift reaches.  Measured over 7
+    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings under numpy 2.5.2,
+    # the worst violation runs **1.397e-09 (SKYLAKEX) to 1.436e-09 (NEHALEM)**
+    # on the three kernels that exceed it, and is inside 1e-9 on the other
+    # four; thread count moves nothing.  4e-9 clears the binding measurement by
+    # 2.8x.  Under numpy 2.4.2 every configuration is inside the old bound,
+    # which is why this arrived with a dependency bump rather than a change
+    # here -- see #354.
     np.testing.assert_allclose(
         augmented_factor @ actual,
         augmented_factor @ expected,
         rtol=2e-10,
-        atol=1e-9,
+        atol=4e-9,
     )
 
 

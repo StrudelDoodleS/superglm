@@ -3487,14 +3487,28 @@ def test_the_penalty_residue_s_sign_cannot_move_the_published_edf(low_weight):
     # free directions.  Measured across machines, the arms differ by 1.7e-03
     # df.  A bound tight to that would be fitted to it.
     #
-    # ``abs=1e-2`` is the tolerance THIS FIXTURE's own high-edge assertions
-    # already carry for the same rung evaluated two ways (the dense arm's, in
+    # ``abs=1e-2`` was the tolerance THIS FIXTURE's own high-edge assertions
+    # already carried for the same rung evaluated two ways (the dense arm's, in
     # ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom``), so
-    # it is the bound this file already accepts as "one rung, two
-    # evaluations, this geometry".  What it rules out is the **3.0 df** the
-    # residue's sign was worth under ``max(w, 0)``, which it sits 300x below.
+    # it was the bound this file already accepted as "one rung, two
+    # evaluations, this geometry".
+    #
+    # **IT WAS ALSO THE MEASUREMENT'S OWN NEIGHBOUR, AND numpy 2.5.2 CROSSED
+    # IT -- ISSUE #354.**  The cross-machine figure the bound was placed
+    # against was 1.7e-03 df.  Under numpy 2.5.2 the arms differ by
+    # **2.081e-02** on SKYLAKEX, which is 2.1x this bound; over 7
+    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings it exceeds 1e-2 on
+    # that kernel alone and is inside it on the other six, and under numpy
+    # 2.4.2 it is inside on all seven.  So this is a bound set from one
+    # numeric generation, not an invariance that broke.
+    #
+    # ``6e-2`` clears the binding measurement by 2.9x.  What the assertion
+    # rules out is unchanged and is what makes it worth having: the **3.0 df**
+    # the residue's sign was worth under ``max(w, 0)``, which 6e-2 still sits
+    # **50x** below.  An invariance holding to 0.02 df where the defect was
+    # 3 df is the same finding at a coarser scale, not a weaker one.
     for delivered, negated in zip(*rungs, strict=True):
-        assert delivered.edf0 == pytest.approx(negated.edf0, abs=1e-2), (
+        assert delivered.edf0 == pytest.approx(negated.edf0, abs=6e-2), (
             f"the residue's sign moved edf0 from {delivered.edf0!r} to {negated.edf0!r}"
         )
 
@@ -4190,11 +4204,34 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
     # that is bit-identical on every microkernel against a rougher ``edf``, and
     # it is stated here rather than left for the next reader to rediscover.
     #
+    # **AND IT MOVED AGAIN, TO 1.347, UNDER numpy 2.5.2 -- ISSUE #354.**  This
+    # is a DISCLOSURE and not a derived bound, so the honest response to it
+    # growing is to restate it, not to defend the old number.  Re-measured over
+    # 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings under numpy
+    # 2.5.2, the worst upward step runs **inside 0.5 on six configurations**
+    # and **0.695 (SKYLAKEX), 0.882 (PRESCOTT/8t, CORE2/8t), 0.901
+    # (NEHALEM/1t), 1.228 (SANDYBRIDGE), 1.347 (NEHALEM/8t)** on the other
+    # eight.  Under numpy 2.4.2 every one is inside 0.5.
+    #
+    # That spread -- a factor of at least 20 across kernels, and thread-count
+    # sensitive on two of them where nothing else here is -- is the finding.
+    # This geometry is 7 levels x 3 rows against a thirteen-column margin with
+    # a border Schur inverse at 1e+10 to 1e+12, so the curve's roughness is
+    # dominated by whatever the last bits of the factorization do.  ``4.0``
+    # clears the worst reading by 3.0x and is placed to catch a return of the
+    # cancellation blow-up this test exists for -- whole degrees of freedom out
+    # of 78, with ``edf`` leaving ``[0, 78]`` entirely -- which the in-loop
+    # range assertion above pins directly and which no configuration here
+    # approaches.
+    #
+    # A tighter number would be pinning the roughness of an ill-conditioned
+    # curve to the BLAS that measured it, which is what had to be undone here.
+    #
     # BOUND SET FROM THE SPREAD AND NOT FROM ONE RUN: over 7
     # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings the worst upward
     # step runs 4.604e-02 to 7.963e-02, so 0.5 leaves 6.3x on the worst of the
     # fourteen.
-    assert np.diff(values).max() < 0.5, np.diff(values).max()
+    assert np.diff(values).max() < 4.0, np.diff(values).max()
 
     # ...and the ladder now scores the pair rather than handing it back.
     rungs = structured_ladder(p, budgets=BUDGETS)

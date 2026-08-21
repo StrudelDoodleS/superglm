@@ -1440,10 +1440,39 @@ def test_small_sum_to_zero_spectrum_filters_gram_eigenspace_leakage(
     )
     centered_design = public_design - np.mean(public_design, axis=0)
     expected = decompose_factor(centered_design)
+    # THE TWO ROUTES ARE COMPARED ON RANK, NOT ON WHICH COLUMNS THEY PICK --
+    # ISSUE #354.  This asserted the two masks were EQUAL, which is a property
+    # of this fixture on one numeric generation rather than of the routes.
+    # Their cuts differ by eight orders BY DESIGN -- ``gram_rcond`` is ``eps``
+    # and ``factor_rcond`` is ``sqrt(eps)`` -- so where a direction sits
+    # between them the two are entitled to disagree about which member of an
+    # aliased set to keep.
+    #
+    # Under numpy 2.5.2 they do, on all 14 configurations swept (7
+    # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings): the masks differ
+    # at exactly two positions, index 3 and index 21, in OPPOSITE directions --
+    # the Gram route keeps 3 and drops 21, the factor route the reverse. Both
+    # therefore report **13 estimable columns**, which is the quantity this
+    # test's later assertions actually rest on. ``rank.py``'s own policy notes
+    # record the same behaviour for ``_conditioned_representatives``, which
+    # "changed which columns are chosen" on a near alias without changing how
+    # many.
+    #
+    # So the rank is asserted, and the representative choice is bounded rather
+    # than pinned. Pinning it would be asserting which of two equally good
+    # aliases a particular LAPACK happened to prefer.
     gram_expected = decompose_gram(centered_design.T @ centered_design)
-    np.testing.assert_array_equal(
-        gram_expected.coefficient_estimable(),
-        expected.coefficient_estimable(),
+    gram_mask = gram_expected.coefficient_estimable()
+    factor_mask = expected.coefficient_estimable()
+    assert int(np.count_nonzero(gram_mask)) == int(np.count_nonzero(factor_mask)), (
+        "the Gram and factor routes disagree about the RANK, not merely about "
+        f"which columns represent it: {int(np.count_nonzero(gram_mask))} against "
+        f"{int(np.count_nonzero(factor_mask))}"
+    )
+    assert int(np.count_nonzero(gram_mask != factor_mask)) <= 2, (
+        "the two routes now choose different representatives at more than the "
+        "two aliased positions this fixture carries: "
+        f"{np.flatnonzero(gram_mask != factor_mask).tolist()}"
     )
 
     fallback_calls = 0
@@ -1461,9 +1490,24 @@ def test_small_sum_to_zero_spectrum_filters_gram_eigenspace_leakage(
         "superglm.solvers._structured.geometry._bounded_centered_estimability",
         certified_dense_fallback,
     )
-    np.testing.assert_array_equal(
-        centered_operator_coefficient_estimable(operator),
-        expected.coefficient_estimable(),
+    # Compared on RANK and a bounded representative disagreement, for the same
+    # reason as the precondition above: ``certified_dense_fallback`` answers
+    # through ``decompose_gram`` while ``expected`` is the factor route, and
+    # the two carry cuts eight orders apart.  Under numpy 2.5.2 they part at
+    # the same two aliased positions, 3 and 21, in opposite directions -- so
+    # the count is identical and only the choice differs.  What this test is
+    # for is that the deflated shift-invert stays compact and reaches the
+    # fallback exactly once, and neither of those turns on which alias won.
+    operator_mask = centered_operator_coefficient_estimable(operator)
+    factor_mask = expected.coefficient_estimable()
+    assert int(np.count_nonzero(operator_mask)) == int(np.count_nonzero(factor_mask)), (
+        "the operator route disagrees about the RANK, not merely about which "
+        f"columns represent it: {int(np.count_nonzero(operator_mask))} against "
+        f"{int(np.count_nonzero(factor_mask))}"
+    )
+    assert int(np.count_nonzero(operator_mask != factor_mask)) <= 2, (
+        "the operator route now differs at more than the two aliased positions "
+        f"this fixture carries: {np.flatnonzero(operator_mask != factor_mask).tolist()}"
     )
     assert fallback_calls == 1
 
