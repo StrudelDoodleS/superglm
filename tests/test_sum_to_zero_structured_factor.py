@@ -1832,3 +1832,78 @@ def test_sum_to_zero_inherent_null_uses_public_design_column_scale(
         centered_operator_coefficient_estimable(operator),
         expected.coefficient_estimable(),
     )
+
+
+@pytest.mark.parametrize("residue_sign", (-1.0, 1.0))
+def test_constrained_null_leverage_beneath_its_noise_floor_is_zero_on_either_sign(
+    residue_sign: float,
+) -> None:
+    """A leverage inside its own noise floor must not decide estimability by sign.
+
+    When the sum-to-zero constraint absorbs a local null space completely, the
+    constrained leverage ``diag(B (I - R'R) B')`` is exactly zero in exact
+    arithmetic and pure cancellation in floating point -- ``R'R`` is ``I`` to
+    round-off, so the subtraction keeps no correct digit and the sign of the
+    result is not a property of the data.
+
+    ``_sum_to_zero_scaled_basis_null_row_norms`` finishes with
+    ``sqrt(maximum(diagonal, 0.0))``, which is asymmetric on exactly that
+    quantity: a negative residue is clipped to ``0.0`` and always reads
+    estimable, while a positive one of the same magnitude survives as
+    ``sqrt(eps)``-scale leverage and fails the ``factor_rcond`` estimability
+    cutoff downstream.  That is the same clip, on the same kind of quantity, as
+    the Gram rank gate in issue #356.
+
+    The guard against it is the ``projector_noise`` floor, which is correctly
+    sized -- but it was gated on ``~ambiguous``, and ``ambiguous`` compared a
+    ``projector_scale``-carrying uncertainty against a bare ``gram_rcond``,
+    making it unconditionally true for any ``projector_scale`` above
+    ``1 / certification_band``.  So the floor was unreachable and the sign
+    decided.
+
+    This plants the residue at a size the floor covers and requires the SAME
+    answer on both signs.  It is deterministic: the plant is four ``eps``
+    against a floor of eight, rather than whatever a given BLAS happens to
+    leave behind.
+    """
+    eps = float(np.finfo(float).eps)
+    block_size, width = 4, 2
+    basis = np.zeros((block_size, width))
+    basis[:width] = np.eye(width)
+
+    # R'R = (1 + d) I, so I - R'R = -d I and the leverage is -d * diag(B B').
+    # The sign of the planted residue is therefore the sign of -d.
+    row_space = np.eye(width) * np.sqrt(1.0 + -residue_sign * 4.0 * eps)
+
+    # Precondition, asserted rather than assumed: the plant really is inside
+    # the floor this test is about, so a machine where it is not fails loudly
+    # instead of quietly testing nothing.
+    removed = row_space.T @ row_space
+    diagonal = np.diag(basis @ (np.eye(width) - removed) @ basis.T)
+    scale = np.abs(np.diag(basis @ basis.T)) + np.abs(np.diag(basis @ removed @ basis.T))
+    floor = 2.0 * width * np.finfo(float).eps * scale
+    planted = diagonal[:width]
+    assert np.all(np.sign(planted) == residue_sign), (
+        f"plant did not land on the requested sign: {planted}"
+    )
+    assert np.all(np.abs(planted) <= floor[:width]), (
+        f"plant escaped the noise floor it is meant to sit inside: "
+        f"{np.abs(planted)} vs {floor[:width]}"
+    )
+
+    row_norm, null_dimension, ambiguous = _sum_to_zero_scaled_basis_null_row_norms(
+        (basis,),
+        row_space,
+    )
+
+    # The leverage first, because that is the quantity estimability reads.  On
+    # the unfixed code this is what the positive sign fails; the negative sign
+    # passes it for the wrong reason -- the clip, not the floor -- and is
+    # caught by the ambiguity assertion below instead.  Both are needed to
+    # state that the two signs agree AND agree for the right reason.
+    np.testing.assert_array_equal(row_norm, np.zeros((1, block_size)))
+    # The constraint spans the local null, so nothing survives it.
+    assert null_dimension == 0
+    # Unresolved is not ambiguous: a certificate cannot help below the floor,
+    # and reporting ambiguity here is what made the floor unreachable.
+    assert not np.any(ambiguous)
