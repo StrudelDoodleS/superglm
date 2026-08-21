@@ -57,12 +57,12 @@ dev = [
     # pandas.read_parquet needs an engine; without one the real-data suites
     # raise ImportError from inside the test body instead of skipping, so a
     # developer holding the gitignored parquet still gets no coverage.
-    "pyarrow>=17",
+    "pyarrow>=10.0",
     "pytest>=7.0",
     "pytest-cov",
     "pytest-split>=0.11.0",
-    "ruff==0.16.1",
-    "ty==0.0.66",
+    "ruff==0.16.3",
+    "ty==0.0.72",
     "polars>=1.42.1",
     "pre-commit",
 ]
