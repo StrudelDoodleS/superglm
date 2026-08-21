@@ -2658,7 +2658,7 @@ requires-dist = [
     { name = "polars", marker = "extra == 'dev'", specifier = ">=1.42.1" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "psutil", marker = "extra == 'dev'", specifier = ">=7.2" },
-    { name = "pyarrow", marker = "extra == 'bench'", specifier = ">=10.0" },
+    { name = "pyarrow", marker = "extra == 'bench'", specifier = ">=17" },
     { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=17" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'" },

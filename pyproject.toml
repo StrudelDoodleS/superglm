@@ -69,7 +69,13 @@ dev = [
 bench = [
     "glum>=3.4.1",
     "statsmodels>=0.14",
-    "pyarrow>=10.0",
+    # Kept byte-identical to the dev floor above, and asserted in
+    # test_the_two_pyarrow_floors_are_declared_identically. Dependabot resolves
+    # a package to one requirement string, so a disagreement here is rewritten
+    # into dev on any pull request that touches pyarrow. Nothing in benchmarks/
+    # imports pyarrow directly -- it reaches it through pandas.read_parquet --
+    # so this entry declares presence rather than an API version.
+    "pyarrow>=17",
 ]
 plotting = [
     "plotly>=5.24",
