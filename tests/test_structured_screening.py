@@ -864,10 +864,34 @@ def test_the_statistic_factors_the_pencil_the_edf_chose_lambda_from():
     # all 14 configurations**, and the gap runs **3.692e-02 (NEHALEM) to
     # 5.964e-02 (HASWELL, ZEN)** -- the binding measurement is 3.692e-02, which
     # clears the ``1e-2`` below by 3.69x.
+    #
+    # The bar comes off the ``eigh`` already taken, as ``n eps max|w|``, which
+    # is the form :func:`_penalty_root` uses and the form this file uses in
+    # ``test_the_psd_clip_refuses_a_block_it_cannot_call_roundoff``.  Not
+    # ``norm(sym, 2)``: that is a second decomposition of a matrix already
+    # decomposed, agreeing with this one only to round-off, and the module is
+    # explicit that a cut and the quantity judged against it must come from one
+    # factorization.
     sym = 0.5 * (pair.S_a + pair.S_a.T)
     w, Q = np.linalg.eigh(sym)
-    bar = sym.shape[0] * float(np.finfo(np.float64).eps) * float(np.linalg.norm(sym, 2))
+    bar = sym.shape[0] * float(np.finfo(np.float64).eps) * float(np.max(np.abs(w)))
     keep = np.abs(w) > bar
+    # THE COUNT IS WHAT MAKES THIS A RIVAL, SO IT IS ASSERTED AND NOT ASSUMED.
+    # Everything below rests on the drop actually dropping something: if a
+    # residue crossed the bar the rival would silently become the projected
+    # pencil again and the failure would surface as a bare ``0.0`` against
+    # ``1e-2``, which is the unnamed symptom issue #332 needed a paragraph to
+    # diagnose.  Naming it here costs one line and turns that back into a
+    # sentence.
+    #
+    # It is not a close call on any configuration swept.  ``bar`` is
+    # BIT-IDENTICAL at 3.0206e-14 on all 14 -- it is built from the LARGEST
+    # eigenvalue, which is the one quantity here that is not round-off -- and
+    # around it the spectrum is: largest dropped residue 2.327e-15 to
+    # 6.459e-15, i.e. **4.68x to 12.98x below**; smallest kept eigenvalue
+    # 4.8961, i.e. **1.62e+14x above**.  The cut has fourteen orders of
+    # clearance on the side that decides the count.
+    assert int(keep.sum()) == 2, ("the pair is nullity two; rival kept", int(keep.sum()))
     dropped = (Q[:, keep] * np.sqrt(np.abs(w[keep]))).T
     rival = dataclasses.replace(geometry, root_penalty=dropped)
 
@@ -2876,10 +2900,22 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     high-precision value rather than to either path, because a reference that
     is only checked against the arms it judges is not one.
 
-    **BOTH BOUNDS ARE DERIVED, AND NEITHER IS SET FROM HEADROOM.**  A tolerance
-    read off an observed error on one machine is how issue #272 happened; each
-    one below is bracketed between a floor the arithmetic cannot beat and the
-    defect it exists to catch, and then placed between them.
+    **THE LOW-EDGE BOUND IS DERIVED AND THE HIGH-EDGE ONES ARE NOT, AND THE
+    DIFFERENCE IS STATED RATHER THAN BLURRED.**  This paragraph used to claim
+    both were derived and neither set from headroom.  That was true of the low
+    edge, where a floor the arithmetic cannot beat and the defect to be caught
+    bracket the bound between them; it is not true of the high edge, where
+    issue #332 established that no floor available here bounds the quantity --
+    ``p eps rho`` is 9.2x under the worst microkernel reading.  Those bounds are
+    set from a MEASURED SPREAD, over 7 ``OPENBLAS_CORETYPE`` microkernels x 2
+    thread settings, and placed with a stated margin against the one-degree-of-
+    freedom defect that is their ceiling.
+
+    A spread over fourteen configurations is much better evidence than the one
+    machine that produced issue #272, and it is still not a derivation.  Saying
+    so is the point: a header asserting a stronger provenance than the bullets
+    below it can support is exactly the failure this file's commentary exists to
+    prevent.
 
     LOW EDGE, ``abs=1e-5``, unchanged from what this file already carried.
 
@@ -2931,7 +2967,8 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     2.29e-11 lambda that is 4.4%, so the pin accepted anything short of a 4%
     move of the bracket.
 
-    HIGH EDGE, ``abs=5e-3``.
+    HIGH EDGE, ``abs=1e-2`` on the structured arm, the dense arm and parity
+    alike.
 
     **THE WHOLE OF THE ACCOUNTING BELOW WAS TAKEN ON ONE MICROKERNEL, AND THAT
     IS WHAT ISSUE #332 WAS.**  Every "OBSERVED" figure in it, and the thread
@@ -2956,9 +2993,15 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
       above the rounding of ``lambda S`` and each of the ``p`` filter factors
       carries ``eps rho`` of it.  ``p eps rho`` = 3.468e-04, 3.282e-04,
       3.280e-04.  No float64 evaluation of this identity beats that.
-    * PLACED, structured arm, at ``5e-3``: 14.4x the floor, 200x below one
-      degree of freedom, and 1.66x the worst reading over 7
-      ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings.
+    * PLACED, structured arm, at ``1e-2``: 28.8x the floor, 100x below one
+      degree of freedom, and 3.3x the worst reading over 7
+      ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings.  It is placed at
+      the number the dense arm and the sibling test already carry at this rung
+      rather than at the 1.66x the sweep maximum alone would license: seven x86
+      kernels are a sample and not the population, the bullet below is that no
+      floor here bounds the spread, and within the sample the readings span 95x
+      at every weight.  A margin set by the largest of seven draws is a margin
+      set by which draws were taken.
     * AND THE DERIVED FLOOR DOES NOT BOUND THE KERNEL SPREAD, which is the
       substantive finding here rather than the new constant.  ``p eps rho`` is
       a first-order estimate of one evaluation's error; the worst kernel reads
@@ -2986,20 +3029,32 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
       4.089e-05..1.365e-03.  Both arms are worst on NEHALEM at every weight,
       and the dense arm's 1.365e-03 is still 7.3x inside its ``1e-2``.
 
-    PARITY, ``abs=8e-3``, RE-SET HERE AND NOT PRE-EXISTING.  Its previous 3e-3
-    was red at master alongside the accuracy bound above, at 4.379e-03 over the
-    same sweep, and issue #332 did not name it only because pytest stops at the
+    PARITY, RE-SET HERE AND SPLIT BY EDGE.  Its previous ``3e-3`` was red at
+    master alongside the accuracy bound above, at 4.379e-03 over the same
+    sweep, and issue #332 did not name it only because pytest stops at the
     first failing assertion -- so repairing the accuracy bound alone would have
     moved this test's failure down a line rather than closed it.
+
+    **IT USED TO BE ONE NUMBER FIRING AT BOTH EDGES, WHICH LEFT IT WITHOUT
+    CONTENT AT ONE OF THEM.**  At the low edge both arms are already pinned to
+    the oracle at ``1e-5``, so the triangle inequality forces ``|s - d| <= 2e-5``
+    and any parity bound above that is implied rather than asserted -- 3e-3 was
+    implied 150x over, and a shared bound wide enough for the high edge would
+    have taken that to 400x.  So:
+
+    * LOW EDGE, ``abs=1e-6``: 20x inside what the two oracle bounds imply, so it
+      still refuses pairs they admit, and 75x above the worst of the fourteen
+      readings (1.365e-10..1.148e-08 / 2.405e-09..7.391e-09 /
+      6.688e-11..1.341e-08).
+    * HIGH EDGE, ``abs=1e-2``: 2.3x the worst reading, the same number both
+      accuracy bounds there now carry, so the triangle permits 2e-2 and this
+      refuses at half of it.
 
     The claim it replaces was that parity "is now carried by the dense arm
     alone", the structured value being bit-stable.  That holds on the thread
     axis and does not hold on the kernel axis: over the sweep the structured
     arm moves 3.37e-03 at ``0.001`` against the dense arm's 1.32e-03, so at
-    this rung parity is carried mostly by the STRUCTURED arm.  8e-3 is 1.83x
-    the worst reading, and the triangle inequality on the two accuracy bounds
-    either side would have permitted 1.5e-2, so it still refuses pairs those
-    two would admit.
+    this rung parity is carried mostly by the STRUCTURED arm.
 
     **WHAT THIS FIXTURE SAYS ABOUT THE FILTER-FACTOR FORM, INCLUDING AGAINST
     IT.**  Against the same certified constants, the rank-differencing form
@@ -3023,7 +3078,7 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     to the microkernel axis: the new form's spread there is 3.37e-03 df at
     ``low_weight = 0.001`` -- the same order as the old form's relabeling
     spread, not nine below it -- which is why the bound above had to widen to
-    5e-3 rather than tighten toward the 1e-12 the relabeling figures would
+    1e-2 rather than tighten toward the 1e-12 the relabeling figures would
     suggest.  A form can be reproducible under one perturbation and not under
     another, and only the axis that was swept is evidence about the axis that
     was swept.
@@ -3114,6 +3169,20 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
                 assert ruler < 1e-5, (name, budget, low_weight, arm.lambda0, ruler)
                 assert reference == pytest.approx(edf_lo, abs=ruler), ("oracle", name, reference)
                 assert arm.edf0 == pytest.approx(reference, abs=1e-5), (name, budget, arm.edf0)
+            # PARITY GETS THE LOW EDGE'S OWN BOUND.  This assertion used to sit
+            # below the branch and fire at both edges on ONE number, which gave
+            # it no content here: both arms are pinned to the oracle at ``1e-5``
+            # three lines up, so the triangle inequality already forces
+            # ``|s - d| <= 2e-5`` and any parity bound above that is implied.
+            # The shared number was 3e-3, implied 150x over, and widening it for
+            # the high edge would have taken it to 400x.
+            #
+            # 1e-6 is 20x INSIDE what the two oracle bounds imply, so it refuses
+            # pairs they admit, and 75x above the worst reading over the 14
+            # configurations swept: ``|s - d|`` runs 1.365e-10..1.148e-08 at
+            # ``1.0``, 2.405e-09..7.391e-09 at ``0.01`` and
+            # 6.688e-11..1.341e-08 at ``0.001``.
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-6), ("parity lo", budget)
             saw_low_edge = True
         else:
             # HIGH edge.  No float64 oracle survives here (``_reference_edf``
@@ -3132,37 +3201,55 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             #   low_weight=0.01   4.176e-06 .. 3.959e-04
             #   low_weight=0.001  3.187e-05 .. 3.013e-03   <-- binding
             #
-            # so the binding measurement is 3.013e-03 on NEHALEM and 5e-3
-            # leaves 1.66x.  The arm is bit-identical across THREAD settings on
-            # every kernel -- all fourteen readings collapse to five values,
-            # one per microkernel -- so what this bound has to carry is the
-            # kernel spread alone, 3.37e-03 df at ``0.001``.
-            assert s.edf0 == pytest.approx(edf_hi, abs=5e-3), ("structured hi", budget, s.edf0)
+            # so the binding measurement is 3.013e-03 on NEHALEM.  The arm is
+            # bit-identical across THREAD settings on every kernel -- all
+            # fourteen readings collapse to five values, one per microkernel --
+            # so what this bound has to carry is the kernel spread alone,
+            # 3.37e-03 df at ``0.001``.
+            #
+            # AND IT IS PLACED AT ``1e-2``, NOT AT THE 1.66x THAT MAXIMUM WOULD
+            # ALLOW.  Seven x86 microkernels are a sample, not the population --
+            # ARM, POWER, reference OpenBLAS, MKL and Accelerate are all outside
+            # it -- and this test's own finding is that ``p eps rho`` does NOT
+            # bound the spread, so nothing here says where it stops.  Within the
+            # sample the readings already span 95x at every weight
+            # (3.187e-05..3.013e-03 at ``0.001``), which is the shape of a
+            # quantity whose tail is not established by seven draws.
+            #
+            # 1e-2 is not a new number in this file: it is what the dense arm
+            # below and both arms of
+            # ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom``
+            # already carry at this same rung.  It is 3.3x the worst reading and
+            # still 100x below the one-degree-of-freedom defect this test exists
+            # to catch, which is the ceiling that decides whether a bound has
+            # content.
+            assert s.edf0 == pytest.approx(edf_hi, abs=1e-2), ("structured hi", budget, s.edf0)
             # The DENSE arm gets its own, looser bound.  See the docstring:
             # its high-edge value moves 4.05e-04 with thread count on this very
             # fixture where the structured arm is bit-identical, so holding it
             # to the structured arm's bound would pin an arm whose
             # reproducibility does not support it.
             assert d.edf0 == pytest.approx(edf_hi, abs=1e-2), ("dense hi", budget, d.edf0)
+            # Parity on top of accuracy: the two are independent implementations
+            # -- a dense factorization against an arrow one -- so agreement is
+            # evidence about the reorganization even where each is separately
+            # pinned to truth.
+            #
+            # ALSO RED AT MASTER, AND ISSUE #332 DID NOT NAME IT.  pytest stops
+            # at the first failing assertion, so the accuracy bound above hid
+            # this one: at ``0.001`` it read 4.379e-03 against its own 3e-3.
+            # Repairing only the reported bound would have moved this test's
+            # failure down a line rather than closed it.  Over the 14
+            # configurations ``|s - d|`` runs 1.308e-05..1.750e-04 at ``1.0``,
+            # 3.451e-05..5.163e-04 at ``0.01`` and **8.845e-05..4.379e-03** at
+            # ``0.001``.
+            #
+            # 1e-2 is 2.3x that worst reading, and is the same number the two
+            # accuracy bounds either side now carry -- so the triangle
+            # inequality permits 2e-2 and this still refuses at half of it,
+            # rather than being implied by them.
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity hi", budget)
             saw_high_edge = True
-        # Parity on top of accuracy at both edges: the two are independent
-        # implementations -- a dense factorization against an arrow one -- so
-        # agreement is evidence about the reorganization even where each is
-        # separately pinned to truth.
-        #
-        # ALSO SET FROM THE SPREAD, AND ALSO RED AT MASTER -- issue #332 named
-        # only the assertion above because pytest stops at the first one, so
-        # repairing that bound alone would have moved the failure down here
-        # rather than closed it.  Over the same 14 configurations ``|s - d|``
-        # runs 1.308e-05..1.750e-04 at ``1.0``, 3.451e-05..5.163e-04 at
-        # ``0.01`` and **8.845e-05..4.379e-03** at ``0.001``; the binding
-        # measurement is 4.379e-03 and 8e-3 leaves 1.83x.
-        #
-        # It keeps its content at that width.  The triangle inequality on the
-        # two bounds either side of it permits ``5e-3 + 1e-2 = 1.5e-2``, so at
-        # 8e-3 this still refuses configurations both accuracy bounds would
-        # admit -- it is not implied by them.
-        assert s.edf0 == pytest.approx(d.edf0, abs=8e-3), ("parity", budget)
         assert s.statistic == pytest.approx(d.statistic, rel=1e-3)
     assert saw_low_edge, "a rung must clamp at the LOW edge or this proves nothing"
     assert saw_high_edge, "a rung must clamp at the HIGH edge or this proves nothing"
