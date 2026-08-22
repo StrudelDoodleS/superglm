@@ -2419,9 +2419,18 @@ class TestRankGateSeesCollinearityNotScale:
         and the mirror image under 2.4.2.
 
         With the cut floored at the bar, the residue is inside it on every
-        configuration -- ``0.017x to 0.245x``, at least 4.1x of clearance --
-        so the drop is now a function of the data and this reads 5 everywhere.
-        Verified on 7 microkernels x both numpy generations.
+        configuration, so the drop is now a function of the data and this reads
+        5 everywhere.
+
+        **Two sweeps measure that residue and only one of them is the
+        portability margin.**  Over 7 microkernels x both numpy generations it
+        runs ``0.017x to 0.245x`` of the bar, i.e. 4.1x of clearance.  Over 7
+        microkernels x {this matrix, this matrix with the residue reflected
+        through its own eigenvector} it runs ``0.017x to 0.488x`` -- **2.05x**
+        -- which is the figure ``rank.py``'s ``_eigensolver_relative_bar``
+        records, and it is the one to quote: that module chose reflection
+        precisely because it is the conservative stand-in for a BLAS this
+        machine cannot run, where a numpy generation is not.  Quote 2.05x.
         """
         rng = np.random.default_rng(11)
         width = 6
@@ -2470,16 +2479,28 @@ class TestRankGateSeesCollinearityNotScale:
         # both.  Removing a coin-flip assertion is right; removing the call is
         # not.
         #
-        # ``needs_factor_certification`` is the stable observable to assert
-        # instead, and it is the module's OWN answer to this ambiguity -- its
-        # docstring is about normal equations that "retain a different
-        # direction while reporting the same rank", which is this fixture.  It
-        # holds on BOTH sides of the rank flip: over 7 ``OPENBLAS_CORETYPE``
-        # microkernels x 2 thread settings the collinear plant certifies on all
-        # 14 while its rank reads 5 on six kernels and 6 on SKYLAKEX, and the
-        # diagonal plant declines to certify on all 14.  That pair IS the
-        # contrast this class is named for, stated in a quantity the round-off
-        # cannot move.
+        # ``needs_factor_certification`` is asserted BESIDE the rank, not
+        # instead of it, and it is the module's OWN answer to this ambiguity --
+        # its docstring is about normal equations that "retain a different
+        # direction while reporting the same rank", which is this fixture.  The
+        # diagonal plant declines to certify on all 14 configurations, and that
+        # pair is the contrast this class is named for.
+        #
+        # **SUPERSEDED, VERSION 2:** the reason for reaching for certification
+        # was that it "holds on BOTH sides of the rank flip -- the collinear
+        # plant certifies on all 14 while its rank reads 5 on six kernels and 6
+        # on SKYLAKEX".  Under version 3 there is no rank flip to hold on both
+        # sides of; the rank reads 5 everywhere, which is what the paragraph
+        # below the assertions records.
+        #
+        # **And on this fixture the certification assertion is now IMPLIED by
+        # the rank one, so it is documentation rather than an independent
+        # observation.**  All six columns are active and ``psd_semantics`` is
+        # True here, so ``rank < 6`` forces ``resolution_limited`` through its
+        # first clause, and ``_certification_required`` then returns True on
+        # ``rank < width and resolution_limited``.  It cannot fail unless the
+        # rank assertion already has.  Kept because it names the contrast in
+        # the module's own vocabulary, not because it adds coverage.
         #
         # **AND ITS TEETH ARE STATED RATHER THAN ASSUMED.**  Mutation-checked:
         # replacing ``decompose_gram`` with a ``raise`` reds this, which is
@@ -2505,7 +2526,8 @@ class TestRankGateSeesCollinearityNotScale:
         assert collinear.rank < collinear.width, (
             f"the equilibrated plant was retained (rank {collinear.rank} of "
             f"{collinear.width}); under version 3 the residue sits at 0.017x to "
-            "0.245x of the eigensolver bar, so dropping it is a property here"
+            "0.488x of the eigensolver bar on the conservative sweep, so dropping "
+            "it is a property here"
         )
         assert needs_factor_certification(collinear), (
             "the equilibrated plant no longer reaches the certification band, "

@@ -720,7 +720,20 @@ def test_spline_cat_compression_leaves_every_fitted_quantity_unchanged(monkeypat
     #
     # Measured over 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings
     # under numpy 2.5.2.  Thread count moves nothing; the kernels split into
-    # two families, {SKYLAKEX, SANDYBRIDGE, NEHALEM} and the other four:
+    # two families, {SKYLAKEX, SANDYBRIDGE, NEHALEM} and the other four.
+    #
+    # **RE-VERIFIED AFTER #360 AND #361**, because this is the only one of this
+    # branch's bounds whose path crosses either: ``_fit_spline_cat`` reaches
+    # ``decompose_gram`` through REML, ``irls_direct`` and ``metrics``, so a
+    # spread recorded before the Gram rank cut moved is a spread measured on a
+    # different tree.  Re-run on the same 14 configurations, all four ranges
+    # reproduce to four significant figures and the two-family split is
+    # unchanged.  A #360-induced problem here would not have been a drift these
+    # bounds could absorb: the change is a factor-of-``n`` coarsening of a RANK
+    # cut, so it either moves nothing or flips a retained direction, and a flip
+    # in one path and not the other moves ``effective_df`` by ~1 df -- six
+    # orders above ``rtol=6e-6``.  The ranges below are therefore current, not
+    # inherited:
     #
     #   beta        abs 6.281e-06 .. 1.099e-05    rel 3.106e-05 .. 5.436e-05
     #   deviance                                  rel 3.805e-09 .. 6.658e-09
