@@ -144,6 +144,7 @@ class TestSSPAudit:
             lambda2=lambdas,
             offset=offset,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
         result_rot, _, _ = fit_irls_direct(
             X=dm_rot,
@@ -155,6 +156,7 @@ class TestSSPAudit:
             lambda2=lambdas,
             offset=offset,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
 
         eta_ref = model._dm.matvec(result_ref.beta) + result_ref.intercept + offset
@@ -186,6 +188,7 @@ class TestSSPAudit:
             lambda2=lambdas,
             offset=offset,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
         result_alt, inv_alt, xtwx_alt = fit_irls_direct(
             X=dm_alt,
@@ -197,6 +200,7 @@ class TestSSPAudit:
             lambda2=lambdas,
             offset=offset,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
 
         reml_groups_ref, penalty_ranks_ref, penalty_caches_ref = _reml_metadata(
@@ -218,6 +222,7 @@ class TestSSPAudit:
             offset,
             XtWX=xtwx_ref,
             penalty_caches=penalty_caches_ref,
+            weight_semantics="frequency",
         )
         obj_alt = reml_laml_objective(
             dm_alt,
@@ -231,6 +236,7 @@ class TestSSPAudit:
             offset,
             XtWX=xtwx_alt,
             penalty_caches=penalty_caches_alt,
+            weight_semantics="frequency",
         )
 
         grad_ref = reml_direct_gradient(

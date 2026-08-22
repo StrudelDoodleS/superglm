@@ -21,7 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import _raw_centering_well_scaled
-from superglm.distributions import _VARIANCE_FLOOR, Gamma, Tweedie, clip_mu
+from superglm.distributions import _VARIANCE_FLOOR, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.objective import reml_laml_objective
@@ -39,8 +39,7 @@ from superglm.reml.penalty_algebra import (
 )
 from superglm.reml.result import REMLResult
 from superglm.reml.scale import (
-    prepare_gamma_reml_scale_data,
-    prepare_tweedie_reml_scale_data,
+    prepare_reml_scale_data,
 )
 from superglm.reml.scop_geometry import (
     SCOPJointGeometry,
@@ -182,8 +181,13 @@ class _SCOPREMLFitContext:
     scop_joint: bool
     debug_recorder: Any
     likelihood_size: float
+    weight_semantics: str
     gamma_scale_data: Any
     tweedie_scale_data: Any = None
+    # Gaussian's weight-only saturated constant, which exists only under the
+    # prior contract; defaulted so a hand-built context needs only the two
+    # fields that decide a number.
+    saturated_log_weight: float | None = None
 
 
 @dataclass(frozen=True)
@@ -779,6 +783,8 @@ def _evaluate_scop_reml_mode(
         reml_penalties=penalty_components,
         scop_states=scop_states,
         likelihood_size=context.likelihood_size,
+        saturated_log_weight=context.saturated_log_weight,
+        weight_semantics=context.weight_semantics,
         gamma_scale_data=context.gamma_scale_data,
         tweedie_scale_data=context.tweedie_scale_data,
         return_evaluation=True,
@@ -993,6 +999,7 @@ def _fit_scop_reml_mode(
         _compute_fit_statistics=False,
         _compute_reml_geometry=False,
         cache_out=working_cache,
+        weight_semantics=context.weight_semantics,
     )
     scop_states: dict[int, dict]
     if len(irls_out) == 4:
@@ -1529,6 +1536,7 @@ def fit_fixed_scop_reml(
     offset_arr: NDArray,
     lambdas: dict[str, float],
     *,
+    weight_semantics: str,
     pirls_tol: float = 1e-6,
     max_pirls_iter: int = 100,
     reml_penalties: list[PenaltyComponent] | None = None,
@@ -1537,14 +1545,25 @@ def fit_fixed_scop_reml(
     debug_recorder=None,
 ) -> REMLResult:
     """Evaluate and publish one fixed-lambda SCOP coefficient mode."""
-    likelihood_size = dispersion_likelihood_size(distribution, sample_weight)
-    gamma_scale_data = (
-        prepare_gamma_reml_scale_data(y, sample_weight) if isinstance(distribution, Gamma) else None
+    (
+        _gaussian_likelihood_size,
+        saturated_log_weight,
+        gamma_scale_data,
+        tweedie_scale_data,
+    ) = prepare_reml_scale_data(
+        distribution,
+        y,
+        sample_weight,
+        weight_semantics=weight_semantics,
     )
-    tweedie_scale_data = (
-        prepare_tweedie_reml_scale_data(y, sample_weight, distribution.p)
-        if isinstance(distribution, Tweedie)
-        else None
+    # Every family needs the plain likelihood size here, not only Gaussian:
+    # the SCOP path publishes a Pearson-style fallback dispersion for modes
+    # whose exact profile is unavailable, and that denominator is the
+    # contract's size whatever the family.  For Gaussian it is the same number
+    # the scale profiler prepared.
+    likelihood_size = dispersion_likelihood_size(
+        sample_weight,
+        weight_semantics=weight_semantics,
     )
     context = _SCOPREMLFitContext(
         dm=dm,
@@ -1561,6 +1580,8 @@ def fit_fixed_scop_reml(
         scop_joint=_scop_joint,
         debug_recorder=debug_recorder,
         likelihood_size=likelihood_size,
+        saturated_log_weight=saturated_log_weight,
+        weight_semantics=weight_semantics,
         gamma_scale_data=gamma_scale_data,
         tweedie_scale_data=tweedie_scale_data,
     )
@@ -1728,6 +1749,7 @@ def optimize_scop_efs_reml(
     lambdas: dict[str, float],
     estimated_names: set[str],
     *,
+    weight_semantics: str,
     max_reml_iter: int = 20,
     reml_tol: float = 1e-6,
     pirls_tol: float = 1e-6,
@@ -1763,7 +1785,7 @@ def optimize_scop_efs_reml(
     y : ndarray
         Response vector.
     sample_weight : ndarray
-        Case/frequency weights for non-Tweedie families and EDM prior weights
+        Observation weights, read under the ``weight_semantics`` supplied
         for Tweedie.
     offset_arr : ndarray
         Offset vector.
@@ -1792,14 +1814,25 @@ def optimize_scop_efs_reml(
         Result with estimated lambdas, final PIRLS result, convergence info.
     """
     scale_known = getattr(distribution, "scale_known", True)
-    likelihood_size = dispersion_likelihood_size(distribution, sample_weight)
-    gamma_scale_data = (
-        prepare_gamma_reml_scale_data(y, sample_weight) if isinstance(distribution, Gamma) else None
+    (
+        _gaussian_likelihood_size,
+        saturated_log_weight,
+        gamma_scale_data,
+        tweedie_scale_data,
+    ) = prepare_reml_scale_data(
+        distribution,
+        y,
+        sample_weight,
+        weight_semantics=weight_semantics,
     )
-    tweedie_scale_data = (
-        prepare_tweedie_reml_scale_data(y, sample_weight, distribution.p)
-        if isinstance(distribution, Tweedie)
-        else None
+    # Every family needs the plain likelihood size here, not only Gaussian:
+    # the SCOP path publishes a Pearson-style fallback dispersion for modes
+    # whose exact profile is unavailable, and that denominator is the
+    # contract's size whatever the family.  For Gaussian it is the same number
+    # the scale profiler prepared.
+    likelihood_size = dispersion_likelihood_size(
+        sample_weight,
+        weight_semantics=weight_semantics,
     )
     fit_context = _SCOPREMLFitContext(
         dm=dm,
@@ -1816,6 +1849,8 @@ def optimize_scop_efs_reml(
         scop_joint=_scop_joint,
         debug_recorder=debug_recorder,
         likelihood_size=likelihood_size,
+        saturated_log_weight=saturated_log_weight,
+        weight_semantics=weight_semantics,
         gamma_scale_data=gamma_scale_data,
         tweedie_scale_data=tweedie_scale_data,
     )

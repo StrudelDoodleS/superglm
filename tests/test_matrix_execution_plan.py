@@ -316,6 +316,7 @@ def test_retained_tabmat_vectors_preserve_full_fit_state() -> None:
         record_diagnostics=True,
         compute_rank_info=False,
         _compute_fit_statistics=False,
+        weight_semantics="frequency",
     )
     candidate, _ = fit_irls_direct(
         candidate_dm,
@@ -331,6 +332,7 @@ def test_retained_tabmat_vectors_preserve_full_fit_state() -> None:
         record_diagnostics=True,
         compute_rank_info=False,
         _compute_fit_statistics=False,
+        weight_semantics="frequency",
     )
 
     assert candidate_dm._tabmat_vector_candidate is True

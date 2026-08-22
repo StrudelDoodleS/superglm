@@ -78,6 +78,7 @@ def test_estimated_scale_f_test_is_invariant_to_frequency_weight_replication():
         family="gaussian",
         selection_penalty=0.0,
         features={"x": Numeric()},
+        weight_semantics="frequency",
     ).fit(X, y, sample_weight=sample_weight)
     weighted_row = weighted_model.drop1(
         X,
@@ -93,6 +94,7 @@ def test_estimated_scale_f_test_is_invariant_to_frequency_weight_replication():
         family="gaussian",
         selection_penalty=0.0,
         features={"x": Numeric()},
+        weight_semantics="frequency",
     ).fit(repeated_X, repeated_y)
     repeated_row = repeated_model.drop1(repeated_X, repeated_y, test="F").iloc[0]
 

@@ -83,6 +83,7 @@ def _build_setup(family: str, seed: int):
         lambda2=lambdas,
         offset=offset_arr,
         return_xtwx=True,
+        weight_semantics="frequency",
     )
 
     return {

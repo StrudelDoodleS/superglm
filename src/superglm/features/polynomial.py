@@ -42,8 +42,8 @@ class Polynomial:
     the same inner product.  When exposure enters through an offset (the
     documented count workflow) ``sample_weight`` stays at ones, so the
     basis is orthonormalized against the row-count measure.  The weights
-    are followed under every family — including Tweedie, where they are
-    EDM prior weights: orthonormalization is inference/selection geometry
+    are followed under either weight contract — including ``"prior"``, where
+    they are precisions: orthonormalization is inference/selection geometry
     (the spanned column space is weight-invariant), not model geometry,
     so the spline physical-rows rule deliberately does not apply.  Under
     Gaussian/fixed-weight fitting this makes the per-power coefficient

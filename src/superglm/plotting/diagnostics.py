@@ -159,9 +159,9 @@ def _validate_diagnostic_weights(family, sample_weight, n_rows: int) -> NDArray:
 def _simulate_response(family, mu, phi, sample_weight, rng) -> NDArray | None:
     """Simulate one response vector from the fitted model.
 
-    Non-Tweedie weights are case/frequency weights, so they do not alter
-    a single row's response distribution. Tweedie weights are EDM prior
-    weights and act through the row dispersion ``phi / sample_weight``.
+    A replication weight does not alter a single row's response
+    distribution -- copies of a draw are draws.  A prior weight does: it acts
+    through the row dispersion ``phi / sample_weight``.
 
     Returns None if the family is not supported (caller should degrade
     gracefully).
@@ -238,7 +238,7 @@ def _diagnostic_rows(
     positive = weights > 0.0
     rounded = np.rint(weights)
     if not np.array_equal(weights, rounded):
-        # Fractional frequency weights have no literal row array. Keep their
+        # Fractional replication weights have no literal row array. Keep their
         # weighted calibration representation while dropping zero-mass rows.
         return (
             y[positive],
@@ -420,8 +420,8 @@ def plot_diagnostics(
     1. **Q-Q with simulation envelope** — observed quantile residuals vs
        simulated reference, with 95% pointwise envelope.
     2. **Calibration** — observed vs predicted values in equal-weight bins.
-       Integer non-Tweedie frequency weights are represented as replicated
-       rows; Tweedie bins use their EDM prior weights.
+       Integer replication weights are represented as replicated rows; prior
+       weights are used as mass.
     3. **Residuals vs Linear Predictor** — quantile residuals vs eta.
     4. **Residual distribution** — histogram with N(0,1) overlay.
 
@@ -434,12 +434,13 @@ def plot_diagnostics(
     y : NDArray
         Response vector.
     sample_weight : NDArray or None
-        Optional observation weights. Non-Tweedie families use nonnegative
-        case/frequency weights, with integer values represented as literal row
-        replication in the randomized diagnostics up to 100,000 diagnostic
-        rows; larger frequency populations use a reproducible
-        weight-proportional sample. Tweedie uses finite, strictly positive EDM
-        prior weights and row dispersion ``phi / w``.
+        Optional observation weights, read under the model's declared
+        ``weight_semantics``.  Under ``"frequency"`` integer values are
+        represented as literal row replication in the randomized diagnostics
+        up to 100,000 diagnostic rows; larger populations use a reproducible
+        weight-proportional sample.  Under ``"prior"`` the weight is part of
+        the row's distribution through ``phi / w``, and a Tweedie fit
+        additionally requires it finite and strictly positive.
     offset : NDArray or None
         Optional offset.
     n_sim : int
@@ -554,9 +555,9 @@ def plot_diagnostics(
 
     phi = m.phi
     resid_df = pearson_residual_degrees_of_freedom(
-        family,
         original_weights,
         m.effective_df,
+        weight_semantics=m._weight_semantics,
     )
     chi2_ratio = m.pearson_chi2 / resid_df
     ax4.set_title(f"Residual Distribution (φ={phi:.3g}, χ²/df={chi2_ratio:.2f})")

@@ -380,6 +380,7 @@ class TestWeightContractDiagnostics:
             family=family,
             features={"x": Numeric()},
             selection_penalty=0.0,
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
         repeated_rows = np.repeat(np.arange(len(y)), weights.astype(np.intp))
         repeated_X = X.iloc[repeated_rows].reset_index(drop=True)

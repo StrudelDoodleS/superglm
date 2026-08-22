@@ -24,7 +24,8 @@ truth — no top-k shortlist.
 
 ## Setup
 
-freMTPL2 frequency, using SuperGLM's Poisson case/frequency-weight contract:
+freMTPL2 frequency, under the replication weight contract
+(`weight_semantics="frequency"`):
 
 ```python
 df["Exposure"] = df["Exposure"].clip(lower=0.01)

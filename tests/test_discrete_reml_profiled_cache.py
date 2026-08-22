@@ -48,6 +48,7 @@ def test_direct_working_cache_retains_stable_profiled_system() -> None:
         compute_rank_info=False,
         _return_working_system=True,
         _compute_fit_statistics=False,
+        weight_semantics="frequency",
     )
 
     assert set(cache) >= {
@@ -87,6 +88,7 @@ def test_cached_trial_matches_full_profiled_objective_after_large_translation(
         compute_rank_info=False,
         _return_working_system=True,
         _compute_fit_statistics=False,
+        weight_semantics="frequency",
     )
 
     beta_cached, intercept_cached, log_det_cached, hessian_rank_cached = (
@@ -113,6 +115,7 @@ def test_cached_trial_matches_full_profiled_objective_after_large_translation(
         S_override=trial_penalty,
         compute_rank_info=False,
         _compute_fit_statistics=False,
+        weight_semantics="frequency",
     )
 
     np.testing.assert_allclose(beta_cached, full_result.beta, rtol=2.0e-11, atol=2.0e-11)
@@ -146,6 +149,7 @@ def test_cached_trial_matches_full_profiled_objective_after_large_translation(
         XtWX=cache["XtWX"],
         log_det_H=log_det_cached,
         S_override=trial_penalty,
+        weight_semantics="frequency",
     )
     full_objective = reml_laml_objective(
         dm,
@@ -160,6 +164,7 @@ def test_cached_trial_matches_full_profiled_objective_after_large_translation(
         XtWX=full_xtwx,
         log_det_H=full_result.log_det_H,
         S_override=trial_penalty,
+        weight_semantics="frequency",
     )
     assert cached_objective == pytest.approx(full_objective, rel=2.0e-11, abs=2.0e-11)
 

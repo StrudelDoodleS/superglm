@@ -13,12 +13,12 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
-from superglm.distributions import Tweedie
+from superglm.distributions import Tweedie, weighted_log_likelihood
 
 # The full-frame binding pass lives in a neutral module so the public
 # SuperGLM.bind_levels runs this exact resolution without importing this one.
 from superglm.model.binding_ops import resolve_level_bindings as _resolve_level_bindings
-from superglm.solvers.dispersion import dispersion_likelihood_size
+from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.validation import _normalized_gini
 
 logger = logging.getLogger(__name__)
@@ -37,11 +37,12 @@ class CrossValidationResult:
     mean_scores : dict
         Equal-weight mean of each per-fold metric across folds. Built-in
         deviance and negative log-likelihood are normalized within each fold
-        by ``sum(sample_weight)`` for non-Tweedie frequency weights and by the
-        physical validation-row count for Tweedie EDM prior weights.
+        by the likelihood size the model's declared ``weight_semantics``
+        implies: ``sum(sample_weight)`` under ``"frequency"``, the count of
+        positive-weight validation rows under ``"prior"``.
     pooled_scores : dict
         Supported overall pooled metrics, computed as ratio-of-sums rather than
-        mean-of-fold-ratios, with the same family-specific denominator.
+        mean-of-fold-ratios, with the same denominator.
     std_scores : dict
         Standard deviation of each metric across folds.
     fold_indices : list[tuple[ndarray, ndarray]] or None
@@ -126,7 +127,10 @@ def _scoring_weights(model, sample_weight, n_rows: int) -> tuple[NDArray, float]
         if sample_weight is None
         else np.asarray(sample_weight, dtype=np.float64)
     )
-    denominator = dispersion_likelihood_size(model._distribution, weights)
+    denominator = dispersion_likelihood_size(
+        weights,
+        weight_semantics=model_weight_semantics(model),
+    )
     if denominator <= 0.0:
         raise ValueError("validation sample_weight must have positive likelihood size")
     return weights, denominator
@@ -144,7 +148,14 @@ def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Mean negative log-likelihood under the family's weight contract."""
     mu = model.predict(X_val, offset=offset)
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
-    ll = model._distribution.log_likelihood(y_val, mu, weights, phi=model.result.phi)
+    ll = weighted_log_likelihood(
+        model._distribution,
+        y_val,
+        mu,
+        weights,
+        model.result.phi,
+        weight_semantics=model_weight_semantics(model),
+    )
     return float(-ll / denominator)
 
 
@@ -166,7 +177,14 @@ def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled negative log-likelihood."""
     mu = model.predict(X_val, offset=offset)
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
-    ll = model._distribution.log_likelihood(y_val, mu, weights, phi=model.result.phi)
+    ll = weighted_log_likelihood(
+        model._distribution,
+        y_val,
+        mu,
+        weights,
+        model.result.phi,
+        weight_semantics=model_weight_semantics(model),
+    )
     return float(-ll), denominator
 
 
@@ -263,12 +281,14 @@ def cross_validate(
         Object with a ``.split(X, y, groups)`` method yielding
         ``(train_idx, test_idx)`` tuples. Any sklearn splitter works.
     sample_weight : array-like, optional
-        Sliced per fold; splitters operate on the physical compact rows. For
-        non-Tweedie families these are nonnegative case/frequency weights:
-        within a fixed train/validation partition and fixed feature geometry,
-        integer values are likelihood-equivalent to literal row replication.
-        For Tweedie they are finite, strictly positive EDM prior weights, with
-        ``Var(Y_i) = phi * mu_i**p / w_i``.
+        Sliced per fold; splitters operate on the physical compact rows, and
+        they are read under the model's declared ``weight_semantics``. Under
+        ``"frequency"``, integer values are likelihood-equivalent to literal
+        row replication
+        within a fixed train/validation partition and fixed feature geometry.
+        Under ``"prior"`` they state a precision,
+        ``Var(Y_i) = phi * V(mu_i) / w_i``; a Tweedie fit additionally
+        requires them finite and strictly positive.
     offset : array-like, optional
         Offset term, sliced per fold.
     groups : array-like, optional
@@ -277,10 +297,10 @@ def cross_validate(
         Which fit method to call on each fold estimator.
     scoring : str, callable, or sequence thereof
         Metrics to evaluate. Built-in: ``"deviance"``, ``"nll"``, ``"gini"``.
-        Built-in deviance and NLL divide their weighted totals by
-        ``sum(sample_weight)`` for non-Tweedie frequency weights and by the
-        physical row count for Tweedie prior weights. Gini remains a separately
-        weighted ranking metric.
+        Built-in deviance and NLL divide their weighted totals by the
+        likelihood size the declared contract implies: ``sum(sample_weight)``
+        under ``"frequency"``, the count of positive-weight rows under
+        ``"prior"``. Gini remains a separately weighted ranking metric.
         Callables must follow ``scorer(model, X, y, *, sample_weight, offset) -> float | dict``.
     return_estimators : bool
         If True, keep the fitted model from each fold.
@@ -323,7 +343,7 @@ def cross_validate(
             raise ValueError("sample_weight must contain only real numeric values") from exc
         if not np.all(np.isfinite(sample_weight)):
             raise ValueError("sample_weight must contain only finite values")
-        if isinstance(model._distribution, Tweedie):
+        if isinstance(model._distribution, Tweedie) and (model_weight_semantics(model) == "prior"):
             if np.any(sample_weight <= 0.0):
                 raise ValueError("Tweedie sample_weight must be strictly positive")
         elif np.any(sample_weight < 0.0):

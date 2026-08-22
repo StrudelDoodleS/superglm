@@ -44,6 +44,7 @@ from superglm.penalties.group_elastic_net import GroupElasticNet
 from superglm.penalties.group_lasso import GroupLasso
 from superglm.penalties.ridge import Ridge
 from superglm.penalties.sparse_group_lasso import SparseGroupLasso
+from superglm.solvers.dispersion import model_weight_semantics, validate_weight_semantics
 from superglm.solvers.pirls import PIRLSResult
 from superglm.types import FeatureSpec, FitStats, GroupSlice
 
@@ -690,6 +691,7 @@ def init_model(
     retain_fit_state: bool = True,
     separation: str = "warn",
     group_pricing: str = "rank",
+    weight_semantics: str = "prior",
 ):
     """Initialize model state (body of SuperGLM.__init__)."""
     if features is not None and splines is not None:
@@ -719,6 +721,7 @@ def init_model(
     if group_pricing not in ("rank", "spanned"):
         raise ValueError(f"group_pricing must be 'rank' or 'spanned', got {group_pricing!r}")
     model._group_pricing = group_pricing
+    model._weight_semantics = validate_weight_semantics(weight_semantics)
     model._tol = tol
     model._max_iter = max_iter
     model._retain_fit_state = bool(retain_fit_state)
@@ -1029,6 +1032,7 @@ def model_build_design_matrix(
         # Models pickled before ``group_pricing`` existed keep the behaviour
         # they were fitted under, matching the ModelConfig unpickle backfill.
         group_pricing=getattr(model, "_group_pricing", "spanned"),
+        weight_semantics=model_weight_semantics(model),
     )
     model._distribution = result.distribution
     model._link = result.link

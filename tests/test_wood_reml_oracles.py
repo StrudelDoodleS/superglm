@@ -69,6 +69,7 @@ def _cached_objective(
         XtW1=xtw1,
         sum_W=sum_w,
         S_override=slope_penalty,
+        weight_semantics="frequency",
     )
 
 
@@ -418,6 +419,7 @@ def test_direct_reml_retains_an_accepted_trial_on_the_final_outer_iteration(
         reml_tol=1e-8,
         verbose=False,
         reml_penalties=[penalty],
+        weight_semantics="frequency",
     )
 
     assert len(fit_lambdas) == 3

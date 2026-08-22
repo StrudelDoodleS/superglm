@@ -39,7 +39,7 @@ def term_importance(
     X : pandas or eager Polars DataFrame
         Data to evaluate on (typically training data).
     sample_weight : array-like, optional
-        Nonnegative case/frequency weights for non-Tweedie models. For
+        Nonnegative observation weights, read under the declared contract. For
         Tweedie models, finite, strictly positive EDM prior weights.
 
     Returns
@@ -58,8 +58,11 @@ def term_importance(
         weights = np.ones(n, dtype=np.float64)
     else:
         from superglm.distributions import Tweedie
+        from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
-        if isinstance(model._distribution, Tweedie):
+        if isinstance(model._distribution, Tweedie) and (
+            model_weight_semantics(model) == PRIOR_WEIGHTS
+        ):
             from superglm._utils import _validate_strict_prior_weights
 
             weights = _validate_strict_prior_weights(sample_weight, n)
@@ -165,7 +168,7 @@ def term_drop_diagnostics(
         objects eligible for same-object holdout fallback.
     sample_weight, offset : array-like, optional
         Training/refit weights and offset. Non-Tweedie weights are
-        case/frequency weights; Tweedie weights are finite, strictly positive
+        replication weights; a Tweedie prior fit needs finite, strictly positive
         EDM prior weights. In holdout mode these are reused only when
         ``X_val is X`` and ``y_val is y``.
     mode : {"refit", "holdout"}
@@ -239,9 +242,15 @@ def _drop_term_refit(model, X, y, sample_weight, offset) -> pd.DataFrame:
         else np.asarray(sample_weight, dtype=np.float64)
     )
 
-    from superglm.solvers.dispersion import dispersion_likelihood_size
+    from superglm.solvers.dispersion import (
+        dispersion_likelihood_size,
+        model_weight_semantics,
+    )
 
-    likelihood_size = dispersion_likelihood_size(model._distribution, weights)
+    likelihood_size = dispersion_likelihood_size(
+        weights,
+        weight_semantics=model_weight_semantics(model),
+    )
 
     full_aic = -2.0 * full_ll + 2.0 * full_edf
     full_bic = -2.0 * full_ll + np.log(likelihood_size) * full_edf

@@ -524,6 +524,7 @@ class TestFitIrlsDirectSOverrideParity:
             groups=m._groups,
             lambda2=lambdas,
             offset=offset,
+            weight_semantics="frequency",
         )
 
         # Fit with S_override (external build)
@@ -537,6 +538,7 @@ class TestFitIrlsDirectSOverrideParity:
             lambda2=lambdas,
             offset=offset,
             S_override=S,
+            weight_semantics="frequency",
         )
 
         np.testing.assert_allclose(res_override.beta, res_internal.beta, rtol=1e-12)
@@ -585,6 +587,7 @@ class TestInvertXtWXPlusPenaltySOverrideParity:
             lambda2=lambdas,
             offset=offset,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
 
         # Build S externally
@@ -707,6 +710,7 @@ class TestEndToEndMultiPenaltyDirect:
             verbose=False,
             penalty_caches=penalty_caches,
             reml_penalties=penalties,
+            weight_semantics="frequency",
         )
 
         # Must converge

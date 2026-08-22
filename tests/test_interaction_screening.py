@@ -1268,6 +1268,7 @@ def test_weighted_gaussian_screen_uses_the_fitted_frequency_weight_scale():
         family="gaussian",
         selection_penalty=0.0,
         features={"x1": Numeric(), "x2": Numeric()},
+        weight_semantics="frequency",
     ).fit(frame, y, sample_weight=weights)
 
     table = model.screen_interactions(

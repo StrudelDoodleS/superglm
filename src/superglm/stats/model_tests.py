@@ -14,6 +14,12 @@ import numpy as np
 from scipy import stats
 from scipy.special import gammaln
 
+from superglm.solvers.dispersion import (
+    PRIOR_WEIGHTS,
+    dispersion_likelihood_size,
+    model_weight_semantics,
+)
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
@@ -87,7 +93,7 @@ def _check_family(model: SuperGLM, allowed: set[str], func_name: str) -> str:
 
 
 def _frequency_weights(sample_weight, n: int) -> tuple[NDArray, float]:
-    """Validate case/frequency weights and return their likelihood size."""
+    """Validate replication weights and return their likelihood size."""
     from superglm.model.input_validation import _finite_vector
 
     if sample_weight is None:
@@ -162,10 +168,12 @@ def _per_obs_log_likelihood(
 ) -> NDArray:
     """Compute per-observation log-likelihood for any supported family.
 
-    Non-Tweedie results are unweighted row log-densities; callers apply
-    case/frequency weights as literal replication. For Tweedie,
-    ``sample_weight`` is an EDM prior weight and is part of each row's
-    density through the dispersion ``phi / w_i``.
+    With ``sample_weight`` omitted the result is the unweighted row log
+    density, which is what the replication contract wants: the caller weights
+    the rows itself.  With a prior weight supplied, the weight is part of each
+    row's density -- through ``phi / w_i``, or through the equivalent scaling
+    of the family's own parameters -- and the rows come back already carrying
+    it.
     """
     from superglm.distributions import (
         Binomial,
@@ -174,12 +182,27 @@ def _per_obs_log_likelihood(
         NegativeBinomial,
         Poisson,
         Tweedie,
+        prior_weight_log_density,
     )
 
     mu = _get_mu(model, X, y, offset)
     y = np.asarray(y, dtype=float)
     family = getattr(model, "_distribution")
     result = model.result
+
+    if sample_weight is not None and not isinstance(family, Tweedie):
+        density = prior_weight_log_density(
+            family,
+            y,
+            mu,
+            np.asarray(sample_weight, dtype=np.float64),
+            float(result.phi),
+        )
+        if density is None:
+            raise ValueError(
+                f"Unsupported family for prior-weight densities: {type(family).__name__}"
+            )
+        return density
 
     if isinstance(family, Poisson):
         return _per_obs_ll_poisson(y, mu)
@@ -217,7 +240,7 @@ def zero_inflation_index(
     """Descriptive zero-inflation index.
 
     Computes the ratio of observed to expected zeros under the assumed family.
-    ``sample_weight`` is a case/frequency weight: both counts and the index
+    ``sample_weight`` is a replication weight here: both counts and the index
     denominator use the corresponding replicated-row measure.
 
     Parameters
@@ -227,7 +250,7 @@ def zero_inflation_index(
     mu : array-like
         Fitted mean values.
     sample_weight : array-like or None
-        Optional nonnegative case/frequency weights. Integer weights are
+        Optional nonnegative replication weights. Integer weights are
         equivalent to literal row replication.
     family : str
         Family assumption: ``"poisson"`` or ``"nb2"``.
@@ -451,12 +474,12 @@ def vuong_test(
     y : array-like
         Observed response values.
     sample_weight : array-like or None
-        Family-specific observation weights. For two non-Tweedie models these
-        are case/frequency weights and integer values are exactly equivalent
-        to row replication. For two Tweedie models they are finite, strictly
-        positive EDM prior weights and enter each density through
-        ``phi_i = phi / w_i``. A weighted Tweedie/non-Tweedie comparison is
-        rejected because a single vector cannot represent both contracts.
+        Observation weights, read under the contract both models declare.
+        Under ``"frequency"`` integer values are exactly equivalent to row
+        replication; under ``"prior"`` they enter each density through
+        ``phi_i = phi / w_i`` or the equivalent scaling of the family's own
+        parameters. A weighted comparison of two models that declare different
+        contracts is rejected, because a single vector cannot represent both.
     offset : array-like or None
         Optional offset.
     correction : str
@@ -478,22 +501,36 @@ def vuong_test(
     n = len(y_raw)
     y_arr = _finite_vector("y", y_raw, n)
 
-    model_a_is_tweedie = isinstance(getattr(model_a, "_distribution"), Tweedie)
-    model_b_is_tweedie = isinstance(getattr(model_b, "_distribution"), Tweedie)
-    mixed_weight_contracts = model_a_is_tweedie != model_b_is_tweedie
+    # The comparison is between two likelihoods, so both models must read the
+    # weights the same way.  That is now a declared contract rather than a
+    # consequence of the families, so two models of different families can be
+    # compared with weights whenever they agree on it, and two models of the
+    # same family cannot when they do not.
+    contract_a = model_weight_semantics(model_a)
+    contract_b = model_weight_semantics(model_b)
+    mixed_weight_contracts = contract_a != contract_b
     if mixed_weight_contracts and sample_weight is not None:
         raise ValueError(
-            "sample_weight has incompatible semantics for a weighted "
-            "Tweedie/non-Tweedie Vuong comparison"
+            "sample_weight has incompatible semantics for a weighted Vuong "
+            f"comparison: model_a declares {contract_a!r} and model_b {contract_b!r}"
         )
 
-    if model_a_is_tweedie and model_b_is_tweedie:
+    if contract_a == PRIOR_WEIGHTS and contract_b == PRIOR_WEIGHTS:
+        strict_prior = isinstance(getattr(model_a, "_distribution"), Tweedie) or isinstance(
+            getattr(model_b, "_distribution"), Tweedie
+        )
         if sample_weight is None:
             prior_weights = None
-        else:
+        elif strict_prior:
             from superglm._utils import _validate_strict_prior_weights
 
             prior_weights = _validate_strict_prior_weights(sample_weight, n)
+        else:
+            prior_weights = _finite_vector("sample_weight", sample_weight, n)
+            if np.any(prior_weights < 0.0):
+                raise ValueError("sample_weight must be nonnegative")
+            if not np.any(prior_weights > 0.0):
+                raise ValueError("sample_weight must not be all zero")
         ll_a = _per_obs_log_likelihood(
             model_a,
             X,
@@ -511,7 +548,11 @@ def vuong_test(
         d = ll_a - ll_b
         mean_m = float(np.mean(d))
         omega = float(np.std(d, ddof=1))
-        likelihood_size = float(n)
+        likelihood_size = (
+            float(n)
+            if prior_weights is None
+            else dispersion_likelihood_size(prior_weights, weight_semantics=PRIOR_WEIGHTS)
+        )
     elif mixed_weight_contracts:
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
         ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)

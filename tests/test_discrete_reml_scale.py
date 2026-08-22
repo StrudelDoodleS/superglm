@@ -41,16 +41,21 @@ def test_discrete_gamma_prepares_once_and_forwards_fd_profile_curvature(
     import superglm.reml.discrete as discrete
 
     X, y, weights = _gamma_data()
-    profile_data = prepare_gamma_reml_scale_data(y, weights)
+    profile_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="prior")
     prepare_calls = 0
     hessian_checks = 0
-    original_prepare = discrete.prepare_gamma_reml_scale_data
+    original_prepare = discrete.prepare_reml_scale_data
     original_hessian = discrete.reml_direct_hessian
 
-    def counted_prepare(actual_y, actual_weights):
+    def counted_prepare(distribution, actual_y, actual_weights, *, weight_semantics):
         nonlocal prepare_calls
         prepare_calls += 1
-        return original_prepare(actual_y, actual_weights)
+        return original_prepare(
+            distribution,
+            actual_y,
+            actual_weights,
+            weight_semantics=weight_semantics,
+        )
 
     def checked_hessian(*args, **kwargs):
         nonlocal hessian_checks
@@ -90,7 +95,7 @@ def test_discrete_gamma_prepares_once_and_forwards_fd_profile_curvature(
         hessian_checks += 1
         return original_hessian(*args, **kwargs)
 
-    monkeypatch.setattr(discrete, "prepare_gamma_reml_scale_data", counted_prepare)
+    monkeypatch.setattr(discrete, "prepare_reml_scale_data", counted_prepare)
     monkeypatch.setattr(discrete, "reml_direct_hessian", checked_hessian)
 
     model = SuperGLM(

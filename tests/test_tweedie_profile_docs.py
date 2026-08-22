@@ -131,25 +131,32 @@ def test_tweedie_profile_api_docstrings_use_prior_weight_convention():
         assert "Frequency weights. Must be frequency weights" not in docstring
 
 
-def test_public_fit_docstrings_explain_family_specific_tweedie_prior_weights():
+def test_public_fit_docstrings_explain_the_declared_weight_contract():
     for function in (SuperGLM.fit, SuperGLM.fit_reml):
         docstring = " ".join((function.__doc__ or "").split())
-        assert "likelihood interpretation is family-specific" in docstring
-        assert "EDM prior weights" in docstring
-        assert "Var(Y_i | x_i) = phi * mu_i**p / w_i" in docstring
-        assert "not replication counts" in docstring
-        assert "do not enter the linear predictor or automatically scale" in docstring
-        assert "case/frequency weights" in docstring
-        assert "once feature geometry is fixed" in docstring
+        assert "declared ``weight_semantics``" in docstring
+        assert "``Var(Y_i | x_i) = phi * V(mu_i) / w_i``" in docstring
+        assert "replication counts" in docstring
         assert "likelihood-equivalent to row replication" in docstring
-        assert "sum(w) - edf" in docstring
+        assert "once feature geometry is fixed" in docstring
+        assert "do not enter the linear predictor or automatically scale" in docstring
+        assert "likelihood interpretation is family-specific" not in docstring
+    fit_docstring = " ".join((SuperGLM.fit.__doc__ or "").split())
+    assert "count of positive-weight rows minus ``edf``" in fit_docstring
+    assert "``sum(w) - edf``" in fit_docstring
+    assert "compound-Poisson normalizer carries ``log w``" in fit_docstring
+    reml_docstring = " ".join((SuperGLM.fit_reml.__doc__ or "").split())
+    assert "likelihood size the REML criterion profiles against" in reml_docstring
+    assert "reaches the selected smoothing parameters" in reml_docstring
 
 
-def test_plotting_docstrings_use_family_specific_weight_language() -> None:
+def test_plotting_docstrings_use_declared_contract_language() -> None:
     for function in (SuperGLM.plot, SuperGLM.plot_diagnostics):
         docstring = " ".join((function.__doc__ or "").split())
-        assert "case/frequency weights for non-Tweedie families" in docstring
-        assert "EDM prior weights for Tweedie" in docstring
+        assert "declared ``weight_semantics``" in docstring
+        assert 'replication counts under ``"frequency"``' in docstring
+        assert 'precisions under ``"prior"``' in docstring
+        assert "case/frequency weights for non-Tweedie families" not in docstring
     plot_docstring = " ".join((SuperGLM.plot_diagnostics.__doc__ or "").split())
     assert "sample-weighted observed vs predicted" in plot_docstring
     assert "exposure-weighted observed vs predicted" not in plot_docstring
@@ -159,7 +166,15 @@ def test_plotting_docstrings_use_family_specific_weight_language() -> None:
     assert "Exposure / frequency weights." not in main_effects
 
 
-def test_family_guide_makes_weight_contracts_mutually_exclusive():
+def test_family_guide_states_the_declared_weight_contract():
+    """The guide must describe a declared parameter, not a family-keyed split.
+
+    The two contracts are still mutually exclusive; what changed is that the
+    family no longer decides which one you get.  The negative assertions guard
+    the specific claims the old text made -- that a Gamma prior-weight fit is
+    unavailable and that the split follows the family -- because those are the
+    sentences a careless revert would bring back.
+    """
     guide = (_ROOT / "docs/guide/families.md").read_text()
     weights = " ".join(
         guide.split("## Weight semantics", maxsplit=1)[1]
@@ -167,61 +182,70 @@ def test_family_guide_makes_weight_contracts_mutually_exclusive():
         .split()
     )
 
-    assert "case/frequency weights" in weights
-    assert "repeating the corresponding rows" in weights
-    assert "`sum(sample_weight) - edf`" in weights
-    assert "EDM prior weights" in weights
-    assert "not replication counts" in weights
-    assert "These contracts are not interchangeable" in weights
-    assert "`n - edf`" in weights
-    assert "Gamma fit does not implement that contract" in weights
-    assert "retain the individual claim-severity rows" in weights
+    assert "declared modelling choice" in weights
+    assert "`weight_semantics`" in weights
+    assert '`"prior"` (default)' in weights
+    assert "statement of *precision*" in weights
+    assert "`Var(Y_i | x_i) = phi * V(mu_i) / w_i`" in weights
+    assert "replication count" in weights
+    assert "exactly equivalent to repeating it" in weights
+    assert "`sum(sample_weight)`" in weights
+    assert "rows carrying positive weight" in weights
+    assert "`beta` and the deviance are" in weights
     assert "conditional on an identical constructed design" in weights
-    assert "`quantile_rows` and `quantile_tempered` knot strategies use frequency mass" in weights
+    assert "`quantile_rows` and" in weights
+    assert "`quantile_tempered` knot strategies use frequency mass" in weights
     assert "ignore zero-weight rows" in weights
-    assert "Tweedie prior weights intentionally leave spline geometry" in weights
+    assert "Prior weights intentionally leave spline geometry" in weights
     assert "tensor-interaction marginal centering" in weights
     assert "categorical/ordered/factor feature geometry" in weights
     assert "fixed or preconstructed feature geometry" in weights
-    assert "derive spline knots from the physical row distribution" not in weights
-    assert "are not removed before feature construction" not in weights
+    assert "Gamma fit does not implement that contract" not in weights
+    assert "retain the individual claim-severity rows" not in weights
+    assert "family-specific contract" not in weights
 
 
-def test_screening_guides_use_the_fitted_family_weight_contract() -> None:
+def test_screening_guides_declare_the_weight_contract_they_measured_under() -> None:
     guide = (_ROOT / "docs/guide/screening.md").read_text()
     evaluation = (_ROOT / "docs/guide/screening-evaluation.md").read_text()
     normalized_guide = " ".join(guide.split())
 
     assert "`sum(sample_weight) - edf`" in normalized_guide
-    assert "Tweedie EDM prior weights use the observation count minus `edf`" in normalized_guide
-    assert "positive-weight-row count" not in guide
-    assert "frequency-weight user can supply their own `phi`" not in guide
+    assert "count of positive-weight rows minus `edf`" in normalized_guide
+    assert "declared `weight_semantics`" in normalized_guide
+    # The worked example's numbers are on the replication scale, so it has to
+    # say so in the fence a reader copies as well as in the prose.
+    assert 'weight_semantics="frequency"' in guide
+    assert 'weight_semantics="frequency"' in evaluation
     assert "house exposure contract" not in guide
     assert "house exposure contract" not in evaluation
-    assert "Poisson case/frequency-weight contract" in evaluation
+    assert "case/frequency" not in guide
+    assert "case/frequency" not in evaluation
 
 
-def test_validation_and_diagnostic_guides_follow_family_weight_contracts() -> None:
+def test_validation_and_diagnostic_guides_follow_the_declared_weight_contract() -> None:
     workflows = " ".join((_ROOT / "docs/guide/workflows.md").read_text().split())
     results = " ".join((_ROOT / "docs/guide/results.md").read_text().split())
     validation = " ".join((_ROOT / "docs/guide/validation.md").read_text().split())
 
     assert "`sum(sample_weight)`" in workflows
     assert "`sum(sample_weight) - edf`" in results
-    for document in (workflows, results):
-        assert "Tweedie EDM prior weights" in document
-        assert "observation count" in document or "`n - edf`" in document
+    for document in (workflows, results, validation):
+        assert 'weight_semantics="frequency"' in document
+        assert "positive-weight row" in document or "count of positive-weight rows" in document
+        assert "case/frequency" not in document
     assert "row's response distribution is unchanged by its weight" in results
     assert r"\(\phi / w_i\)" in results
     assert "diagnose raw claim counts with `log(exposure)` as an offset" in results
     assert "Poisson rate response" in validation
-    assert "exposure is a case/frequency weight" in validation
-    assert "Tweedie uses strictly positive EDM prior weights" in validation
+    assert "exposure is a replication weight" in validation
+    assert 'the default is `"prior"`, an EDM precision' in validation
     assert "portfolio aggregation weight" in validation
     assert "sample-weighted calibration" in validation
     assert "exposure-weighted calibration" not in validation
     assert (
-        "a rate plus frequency weight cannot reconstruct the corresponding count CDF" in validation
+        "a rate plus replication weight cannot reconstruct the corresponding count CDF"
+        in validation
     )
 
 

@@ -158,6 +158,7 @@ def test_primal_feasibility_cannot_replace_the_inner_qp_kkt_certificate(
             max_iter=3,
             tol=1e-10,
             convergence="coefficients",
+            weight_semantics="frequency",
         )
 
     # The outer coefficient criterion is already stationary at beta=0, so
@@ -236,6 +237,7 @@ def test_rejected_poisson_proposal_cannot_reuse_the_previous_working_kkt_certifi
         max_iter=3,
         tol=1e-10,
         convergence="coefficients",
+        weight_semantics="frequency",
     )
 
     assert len(qp_systems) == 2
@@ -521,6 +523,7 @@ def test_constrained_profiled_intercept_matches_full_augmented_reference(
             beta_init=np.zeros(1),
             intercept_init=float(np.mean(y)),
             max_iter=1,
+            weight_semantics="frequency",
         )[0]
 
     ordinary = solve(constrained=False)
@@ -603,6 +606,7 @@ def test_active_constrained_profiled_intercept_matches_full_augmented_kkt(
         beta_init=np.zeros(2),
         intercept_init=float(np.mean(y)),
         max_iter=1,
+        weight_semantics="frequency",
     )
 
     augmented_design = np.column_stack([np.ones(len(y)), X])
@@ -715,6 +719,7 @@ def test_line_searched_infeasible_final_state_is_not_converged(
             max_iter=1,
             tol=1e-6,
             record_diagnostics=True,
+            weight_semantics="frequency",
         )
 
     proposal = np.asarray(accepted["proposal"])
@@ -780,6 +785,7 @@ def test_rejected_infeasible_state_has_one_terminal_reason(
         max_iter=2,
         record_diagnostics=True,
         trace_run=TraceRun("infeasible-rejection", sink=trace_sink),
+        weight_semantics="frequency",
     )
 
     assert not result.converged
@@ -963,6 +969,7 @@ def test_infeasible_committed_state_prefers_finite_feasible_proposal_over_merit(
         intercept_init=0.0,
         max_iter=1,
         record_diagnostics=True,
+        weight_semantics="frequency",
     )
 
     # beta=-1 is an exact but infeasible fit with deviance zero. The
@@ -1006,6 +1013,7 @@ def test_feasible_committed_state_never_accepts_infeasible_trial(
         intercept_init=0.0,
         max_iter=1,
         record_diagnostics=True,
+        weight_semantics="frequency",
     )
 
     # The full beta=-1 proposal has the best merit but violates beta >= 0.
@@ -1040,6 +1048,7 @@ def test_unconstrained_line_search_still_accepts_the_full_merit_improving_propos
         intercept_init=0.0,
         max_iter=1,
         record_diagnostics=True,
+        weight_semantics="frequency",
     )
 
     np.testing.assert_allclose(result.beta, [-1.0], atol=1e-12)

@@ -134,6 +134,7 @@ def _fitted_discrete_tensor_state():
         groups,
         lambda2=0.0,
         tol=1e-12,
+        weight_semantics="frequency",
     )
     model = SimpleNamespace(
         _dm=dm,
@@ -641,6 +642,7 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
         groups,
         lambda2=0.0,
         tol=1e-12,
+        weight_semantics="frequency",
     )
     assert factor_passes == 1
     factor_passes = 0
@@ -658,6 +660,7 @@ def test_cross_block_alias_uses_factor_certification_after_mixed_raw_centering(
         groups,
         lambda2=0.0,
         tol=1e-12,
+        weight_semantics="frequency",
     )
     assert factor_passes == 1
 
@@ -790,6 +793,7 @@ def test_factor_certificate_controls_cutoff_boundary_prediction() -> None:
         lambda2=0.0,
         tol=1e-12,
         direct_solve="auto",
+        weight_semantics="frequency",
     )
     assert automatic.rank_info is not None
     assert automatic.rank_info.data.rank == certified.rank
@@ -884,6 +888,7 @@ def test_exact_gaussian_alias_reuses_factor_certificate_across_iterations(
         groups,
         lambda2=0.0,
         tol=1e-12,
+        weight_semantics="frequency",
     )
 
     assert result.n_iter == 2
@@ -989,6 +994,7 @@ def test_direct_qr_solves_factor_rhs_without_normal_equation_loss() -> None:
         lambda2=0.0,
         direct_solve="qr",
         tol=1e-12,
+        weight_semantics="frequency",
     )
 
     assert result.rank_info is not None
@@ -1031,6 +1037,7 @@ def test_direct_qr_solves_from_factor_rhs_at_rank_boundary() -> None:
         lambda2=0.0,
         direct_solve="qr",
         tol=1e-12,
+        weight_semantics="frequency",
     )
 
     assert result.rank_info is not None
@@ -1741,6 +1748,7 @@ def test_gram_and_qr_share_centered_alias_representation() -> None:
             lambda2=0.0,
             direct_solve=method,
             tol=1e-12,
+            weight_semantics="frequency",
         )
         results[method] = result
         assert result.rank_info is not None
@@ -1771,6 +1779,7 @@ def test_pirls_selection_state_distinguishes_selected_zero_from_zeroed_group() -
         group,
         GroupLasso(lambda1=0.0),
         tol=1e-12,
+        weight_semantics="frequency",
     )
     zeroed = fit_pirls(
         x,
@@ -1781,6 +1790,7 @@ def test_pirls_selection_state_distinguishes_selected_zero_from_zeroed_group() -
         group,
         GroupLasso(lambda1=1e6),
         tol=1e-12,
+        weight_semantics="frequency",
     )
 
     assert selected.beta[0] == pytest.approx(0.0, abs=1e-14)
@@ -1814,6 +1824,7 @@ def test_pirls_pure_l2_penalty_preserves_selected_zero_group(penalty) -> None:
         groups,
         penalty,
         tol=1e-12,
+        weight_semantics="frequency",
     )
 
     assert result.beta[0] == pytest.approx(0.0, abs=1e-14)

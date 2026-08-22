@@ -170,6 +170,7 @@ def test_sz_builder_passes_compact_factor_geometry(discrete: bool) -> None:
         model_discrete=discrete,
         n_bins_config=8,
         lambda2=0.1,
+        weight_semantics="frequency",
     )
 
     [gm] = result.dm.group_matrices

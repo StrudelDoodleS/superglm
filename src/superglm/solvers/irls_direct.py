@@ -442,6 +442,8 @@ def fit_irls_direct(
     trace_purpose: str = "fit",
     _compute_scop_postfit_inference: bool = True,
     separation: str = "warn",
+    *,
+    weight_semantics: str,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS, retrying automatic globally-ineligible SZ fits on Gram."""
     if max_iter < 1:
@@ -487,6 +489,7 @@ def fit_irls_direct(
             trace_purpose=trace_purpose,
             _compute_scop_postfit_inference=_compute_scop_postfit_inference,
             separation=separation,
+            weight_semantics=weight_semantics,
         )
 
     try:
@@ -539,6 +542,8 @@ def _fit_irls_direct_once(
     trace_purpose: str = "fit",
     _compute_scop_postfit_inference: bool = True,
     separation: str = "warn",
+    *,
+    weight_semantics: str,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -558,8 +563,9 @@ def _fit_irls_direct_once(
     y : (n,) array
         Response variable.
     weights : (n,) array
-        Family-specific fitting weights: case/frequency weights for
-        non-Tweedie families and EDM prior weights for Tweedie.
+        Fitting weights.  ``weight_semantics`` says what they mean, and
+        decides only the likelihood size the published dispersion divides by;
+        the working weights themselves are the same under either reading.
     family : Distribution
         GLM family (Poisson, Gamma, NB2, etc.).
     link : Link
@@ -2789,12 +2795,17 @@ def _fit_irls_direct_once(
             profile["structured_used_dense_fallback"] = structured_factor.used_dense_fallback
             profile["structured_fallback_reason"] = structured_factor.fallback_reason
 
-    # Pearson-based phi for estimated-scale families. Gaussian/Gamma weights
-    # are frequency weights; Tweedie weights are EDM prior weights.
+    # Pearson-based phi for estimated-scale families.  The numerator is the
+    # same under either weight contract; only the denominator's likelihood
+    # size distinguishes them.
     if _compute_fit_statistics and not getattr(family, "scale_known", True):
         V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
         pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
-        df_resid = pearson_residual_degrees_of_freedom(family, weights, p_eff)
+        df_resid = pearson_residual_degrees_of_freedom(
+            weights,
+            p_eff,
+            weight_semantics=weight_semantics,
+        )
         phi = pearson_chi2 / df_resid
     else:
         phi = 1.0
@@ -2914,9 +2925,9 @@ def _fit_irls_direct_once(
             V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
             pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
             result.phi = pearson_chi2 / pearson_residual_degrees_of_freedom(
-                family,
                 weights,
                 inference.total_edf,
+                weight_semantics=weight_semantics,
             )
     if _expose_exact_support_state:
         result.scop_states = scop_converged

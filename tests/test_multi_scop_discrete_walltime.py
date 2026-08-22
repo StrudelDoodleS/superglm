@@ -192,6 +192,7 @@ def test_managed_cleanup_can_freeze_floor_pinned_lambda(monkeypatch):
         estimated_names={"DrivAge", "BonusMalus"},
         max_reml_iter=4,
         reml_penalties=penalties,
+        weight_semantics="frequency",
     )
 
     assert active_name_calls == [

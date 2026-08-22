@@ -19,9 +19,9 @@ it with `fit_mode="fit_reml"` so each fold uses the same fitting story as the
 final model.
 
 The fitting examples on this page assume a Poisson rate response
-(`y = claim_count / exposure`), for which exposure is a case/frequency weight.
-Other families retain their own contract: Tweedie uses strictly positive EDM
-prior weights rather than replication weights. See
+(`y = claim_count / exposure`) fitted with `weight_semantics="frequency"`, for
+which exposure is a replication weight. The contract is declared per model and
+the default is `"prior"`, an EDM precision. See
 [Families & Dispersion](families.md#weight-semantics).
 
 ```python
@@ -46,9 +46,9 @@ Key outputs:
 - `result.mean_scores` / `result.std_scores`: summary comparisons
 - `result.oof_predictions`: out-of-fold predictions for every training row
 
-Built-in deviance and NLL averages use the fitted family's likelihood size:
-`sum(sample_weight)` for non-Tweedie case/frequency weights and the physical
-observation count for Tweedie EDM prior weights.
+Built-in deviance and NLL averages use the fitted model's declared likelihood
+size: `sum(sample_weight)` under `weight_semantics="frequency"` and the count
+of positive-weight rows under `"prior"`.
 
 Typical metric interpretation:
 
@@ -69,7 +69,7 @@ evaluate them on holdout.
 
 The `exposure=` argument to the business-validation helpers below is a
 portfolio aggregation weight. It does not change or infer the fitted model's
-family-specific `sample_weight` contract.
+declared `sample_weight` contract.
 
 ### Lorenz Curve And Gini
 
@@ -125,12 +125,12 @@ The four-panel diagnostic figure includes:
 3. residuals versus linear predictor
 4. residual histogram with normal overlay
 
-Diagnostic weighting follows the fitted family too: a non-Tweedie
-case/frequency weight repeats a row's contribution without changing its
-response distribution, while a Tweedie prior weight gives row \(i\)
-observation-specific dispersion \(\phi / w_i\). For exact discrete Poisson
-quantile residuals, diagnose raw claim counts with `log(exposure)` as an offset;
-a rate plus frequency weight cannot reconstruct the corresponding count CDF.
+Diagnostic weighting follows the declared contract too: a replication weight
+repeats a row's contribution without changing its response distribution, while
+a prior weight gives row \(i\) observation-specific dispersion
+\(\phi / w_i\). For exact discrete Poisson quantile residuals, diagnose raw
+claim counts with `log(exposure)` as an offset; a rate plus replication weight
+cannot reconstruct the corresponding count CDF.
 
 For large datasets, the plotting code automatically switches to more efficient
 rendering paths such as hexbin density summaries.

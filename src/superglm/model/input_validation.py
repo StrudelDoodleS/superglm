@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import Distribution, Tweedie, validate_response
+from superglm.solvers.dispersion import PRIOR_WEIGHTS
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,7 @@ def validate_fit_input(
     offset,
     *,
     family: Distribution,
+    weight_semantics: str,
     required_columns: Iterable[object],
     check_all_columns: bool = False,
 ) -> ValidatedFitInput:
@@ -159,7 +161,13 @@ def validate_fit_input(
     y_arr = _finite_vector("y", y, n_rows, require_nonempty=True, check_finite=False)
     if sample_weight is None:
         weight_arr = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(family, Tweedie):
+    elif isinstance(family, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
+        # Strict positivity is a Tweedie density requirement, not a statement
+        # about the weight contract: the compound-Poisson normalizer carries
+        # ``log w``, so a zero prior weight is an unevaluable density rather
+        # than an uninformative row.  Read as a replication count the weight
+        # never enters that normalizer, and zero means what it means for every
+        # other family -- a row that appears no times.
         weight_arr = _validate_strict_prior_weights(sample_weight, n_rows)
     else:
         weight_arr = _finite_vector("sample_weight", sample_weight, n_rows)

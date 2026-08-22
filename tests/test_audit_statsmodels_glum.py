@@ -1,4 +1,8 @@
-"""Calibration oracles for the non-Tweedie frequency-weight contract."""
+"""Calibration oracles for the replication weight contract.
+
+statsmodels' ``freq_weights`` and glum's ``sum(w)`` dispersion denominator are
+the oracles, so every fit here declares ``weight_semantics="frequency"``.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ def _fit_model(
         features={"x": Numeric()},
         tol=1e-12,
         max_iter=500,
+        weight_semantics="frequency",
     ).fit(frame, y, sample_weight=weights)
     return model, model.metrics(frame, y, sample_weight=weights)
 

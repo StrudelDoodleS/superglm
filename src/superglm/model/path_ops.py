@@ -7,6 +7,7 @@ from numbers import Integral
 import numpy as np
 
 from superglm.model.fit_state import configured_lambda2, configured_penalty
+from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.pirls import fit_pirls
 
 
@@ -92,6 +93,7 @@ def run_lambda_path(
             intercept_init=intercept_warm,
             active_set=model._active_set,
             lambda2=lambda2,
+            weight_semantics=model_weight_semantics(model),
         )
         coef_path[i] = result.beta
         intercept_path[i] = result.intercept

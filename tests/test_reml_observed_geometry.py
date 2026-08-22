@@ -40,6 +40,7 @@ from superglm.reml.observed_geometry import (
 from superglm.reml.scale import prepare_gamma_reml_scale_data
 from superglm.reml.w_derivatives import reml_w_correction
 from superglm.solvers.centered_system import grouped_augmented_factor
+from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import (
@@ -1405,7 +1406,7 @@ def test_gamma_observed_total_gradient_matches_refitted_laml_finite_difference()
     offset = np.zeros(n)
     true_mu = np.exp(0.35 + 0.55 * x - 0.3 * np.sin(1.8 * x))
     y = rng.gamma(shape=3.5, scale=true_mu / 3.5)
-    scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
+    scale_data = prepare_gamma_reml_scale_data(y, sample_weight, weight_semantics="frequency")
 
     def evaluate(log_lambda: float, *, need_gradient: bool):
         lam = float(np.exp(log_lambda))
@@ -1424,6 +1425,7 @@ def test_gamma_observed_total_gradient_matches_refitted_laml_finite_difference()
             S_override=penalty,
             reml_penalties=[component],
             tol=1e-10,
+            weight_semantics="frequency",
         )
         geometry = build_observed_reml_geometry(
             dm=dm,
@@ -1454,6 +1456,7 @@ def test_gamma_observed_total_gradient_matches_refitted_laml_finite_difference()
             reml_penalties=[component],
             gamma_scale_data=scale_data,
             return_evaluation=True,
+            weight_semantics="frequency",
         )
         assert isinstance(objective, REMLObjectiveEvaluation)
         if not need_gradient:
@@ -1532,7 +1535,7 @@ def test_gamma_observed_order2_hessian_matches_refitted_gradient_finite_differen
     offset = np.linspace(-0.15, 0.1, n)
     true_mu = np.exp(0.25 + 0.5 * x - 0.25 * np.sin(1.6 * x) + offset)
     y = rng.gamma(shape=4.0, scale=true_mu / 4.0)
-    scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
+    scale_data = prepare_gamma_reml_scale_data(y, sample_weight, weight_semantics="frequency")
 
     def evaluate(log_lambda: float, *, derivative_order: int):
         lam = float(np.exp(log_lambda))
@@ -1552,6 +1555,7 @@ def test_gamma_observed_order2_hessian_matches_refitted_gradient_finite_differen
             reml_penalties=[component],
             tol=1e-12,
             convergence="coefficients",
+            weight_semantics="frequency",
         )
         geometry = build_observed_reml_geometry(
             dm=dm,
@@ -1581,6 +1585,7 @@ def test_gamma_observed_order2_hessian_matches_refitted_gradient_finite_differen
             reml_penalties=[component],
             gamma_scale_data=scale_data,
             return_evaluation=True,
+            weight_semantics="frequency",
         )
         assert isinstance(objective, REMLObjectiveEvaluation)
         assert objective.profiled_scale is not None
@@ -1795,6 +1800,7 @@ def _evaluate_refitted_observed_laml(
         tol=1e-11,
         max_iter=200,
         convergence="coefficients",
+        weight_semantics="prior",
     )
     assert result.converged
     geometry = build_observed_reml_geometry(
@@ -1810,7 +1816,9 @@ def _evaluate_refitted_observed_laml(
         derivative_order=derivative_order,
     )
     gamma_scale_data = (
-        prepare_gamma_reml_scale_data(problem.y, problem.sample_weight)
+        prepare_gamma_reml_scale_data(
+            problem.y, problem.sample_weight, weight_semantics="frequency"
+        )
         if type(problem.distribution) is Gamma
         else None
     )
@@ -1831,6 +1839,7 @@ def _evaluate_refitted_observed_laml(
         reml_penalties=[problem.component],
         gamma_scale_data=gamma_scale_data,
         return_evaluation=True,
+        weight_semantics="frequency",
     )
     assert isinstance(objective, REMLObjectiveEvaluation)
     if derivative_order == 0:
@@ -2085,6 +2094,7 @@ def test_fit_reml_terminal_observed_state_owns_objective_rank_and_scale() -> Non
         S_override=penalty,
         reml_penalties=model._reml_penalties,
         return_evaluation=True,
+        weight_semantics=model_weight_semantics(model),
     )
 
     assert isinstance(evaluation, REMLObjectiveEvaluation)
@@ -2151,6 +2161,7 @@ def test_fit_reml_terminal_fisher_state_owns_objective(discrete: bool) -> None:
         S_override=penalty,
         reml_penalties=model._reml_penalties,
         return_evaluation=True,
+        weight_semantics="frequency",
     )
 
     assert isinstance(evaluation, REMLObjectiveEvaluation)
@@ -2254,6 +2265,7 @@ def test_qp_passthrough_terminal_state_owns_fisher_objective_and_scale() -> None
         S_override=penalty,
         reml_penalties=model._reml_penalties,
         return_evaluation=True,
+        weight_semantics="frequency",
     )
 
     assert model._last_fit_meta["lambda_strategy"] == "qp_passthrough"
@@ -2321,6 +2333,7 @@ def test_qp_passthrough_tweedie_scale_uses_terminal_penalty_nullity() -> None:
         S_override=penalty,
         reml_penalties=model._reml_penalties,
         return_evaluation=True,
+        weight_semantics="prior",
     )
     assert isinstance(evaluation, REMLObjectiveEvaluation)
     # The evaluation itself now carries the exact Tweedie scale profile
@@ -2394,8 +2407,8 @@ def test_qp_passthrough_poisson_fast_objective_keeps_deviance_scale() -> None:
         reml_penalties=model._reml_penalties,
         return_evaluation=True,
     )
-    fast = reml_laml_objective(**shared, S_override=penalty)
-    full = reml_laml_objective(**shared)
+    fast = reml_laml_objective(**shared, S_override=penalty, weight_semantics="prior")
+    full = reml_laml_objective(**shared, weight_semantics="prior")
 
     assert isinstance(fast, REMLObjectiveEvaluation)
     assert isinstance(full, REMLObjectiveEvaluation)

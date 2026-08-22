@@ -750,6 +750,8 @@ def _fit_pirls_inner(
     trace_basis_id: int | None = None,
     trace_purpose: str = "fit",
     separation: str = "warn",
+    *,
+    weight_semantics: str,
 ) -> PIRLSResult:
     """Single-pass PIRLS fit with a composite block-coordinate inner solver."""
     n, p = dm.shape
@@ -1624,10 +1626,15 @@ def _fit_pirls_inner(
     )
     p_eff = rank_info.total_edf
 
-    # Gaussian/Gamma weights are frequency weights; Tweedie weights are EDM
-    # prior weights. The numerator has the same form under either contract.
+    # The Pearson numerator has the same form under either weight contract --
+    # both scale a row's squared residual by its weight -- so only the
+    # denominator's likelihood size distinguishes them.
     pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
-    df_resid = pearson_residual_degrees_of_freedom(family, weights, p_eff)
+    df_resid = pearson_residual_degrees_of_freedom(
+        weights,
+        p_eff,
+        weight_semantics=weight_semantics,
+    )
     phi = pearson_chi2 / df_resid
 
     return PIRLSResult(
@@ -1676,6 +1683,8 @@ def fit_pirls(
     S_override: NDArray | None = None,
     trace_run: TraceRun | None = None,
     separation: str = "warn",
+    *,
+    weight_semantics: str,
 ) -> PIRLSResult:
     """Fit a penalised GLM via PIRLS with proximal Newton BCD.
 
@@ -1728,6 +1737,7 @@ def fit_pirls(
         # A flavored stage-1 fit is discarded scaffolding; only the final
         # returned fit carries the separation backstop.
         separation="ignore" if penalty.flavor is not None else separation,
+        weight_semantics=weight_semantics,
     )
 
     # Stage 2: if flavor, adjust weights and refit (warm-start both beta and intercept)
@@ -1758,6 +1768,7 @@ def fit_pirls(
             trace_basis_id=trace_basis_id,
             trace_purpose="adjusted_flavor_fit",
             separation=separation,
+            weight_semantics=weight_semantics,
         )
 
     return result

@@ -453,7 +453,16 @@ class TestBCDSolver:
         ]
         from superglm.links import LogLink
 
-        result = fit_pirls(X, y, weights, Poisson(), LogLink(), groups, GroupLasso(lambda1=0.01))
+        result = fit_pirls(
+            X,
+            y,
+            weights,
+            Poisson(),
+            LogLink(),
+            groups,
+            GroupLasso(lambda1=0.01),
+            weight_semantics="frequency",
+        )
         assert result.converged
 
     def test_bcd_few_inner_iters(self):
@@ -476,6 +485,7 @@ class TestBCDSolver:
             LogLink(),
             groups,
             GroupLasso(lambda1=0.01),
+            weight_semantics="frequency",
         )
         # Should converge with reasonable outer iters (not maxing out at 50)
         assert result.n_iter < 50
@@ -518,6 +528,7 @@ class TestActiveSet:
             groups,
             GroupLasso(lambda1=0.1),
             active_set=True,
+            weight_semantics="frequency",
         )
         assert result.converged
 
@@ -534,6 +545,7 @@ class TestActiveSet:
             link,
             groups,
             GroupLasso(lambda1=0.1),
+            weight_semantics="frequency",
         )
         active = fit_pirls(
             X,
@@ -544,6 +556,7 @@ class TestActiveSet:
             groups,
             GroupLasso(lambda1=0.1),
             active_set=True,
+            weight_semantics="frequency",
         )
         assert active.deviance == pytest.approx(baseline.deviance, rel=1e-4)
         np.testing.assert_allclose(active.beta, baseline.beta, atol=1e-3)

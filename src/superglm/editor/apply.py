@@ -19,6 +19,7 @@ from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.model.fit_state import FittedStateRevision, invalidate_revised_coefficient_mode
+from superglm.solvers.dispersion import model_weight_semantics
 
 if TYPE_CHECKING:
     from superglm._frame import FrameLike
@@ -555,6 +556,7 @@ def _refresh_fit_statistics(
             validation_offset,
             family=model._distribution,
             required_columns=_required_fit_columns(model),
+            weight_semantics=model_weight_semantics(model),
         )
         X_ref = validated_override.X
         y_arr = validated_override.y
@@ -635,7 +637,14 @@ def _refresh_fit_statistics(
     if mu.size != y_arr.size:
         raise ValueError(f"Predictions have length {mu.size}, expected {y_arr.size}.")
 
-    null_mu = _compute_null_mu(y_arr, weights, offset_arr, model._distribution, model._link)
+    null_mu = _compute_null_mu(
+        y_arr,
+        weights,
+        offset_arr,
+        model._distribution,
+        model._link,
+        weight_semantics=model_weight_semantics(model),
+    )
     deviance = float(np.sum(weights * model._distribution.deviance_unit(y_arr, mu)))
     model._fit_stats = _compute_fit_stats(
         y_arr,
@@ -646,6 +655,7 @@ def _refresh_fit_statistics(
         model._link,
         model.result.phi,
         null_mu=null_mu,
+        weight_semantics=model_weight_semantics(model),
     )
     for result_name in ("_result", "_solver_result"):
         result = getattr(model, result_name, None)

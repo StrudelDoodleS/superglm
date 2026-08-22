@@ -103,10 +103,10 @@ def plot_interaction(
         floor for 3D plotly, contour overlay for matplotlib). Unit row weights
         are used when *sample_weight* is omitted.
     sample_weight : array-like, optional
-        Display weights corresponding to rows of *X*. Non-Tweedie
-        case/frequency weights and Tweedie EDM prior weights are both used
-        only as mass for this empirical density overlay; the display does not
-        reinterpret Tweedie prior precision as replicated statistical rows.
+        Display weights corresponding to rows of *X*. Both contracts' weights
+        are used only as mass for this empirical density overlay; the display
+        does not reinterpret a prior precision as replicated statistical
+        rows.
 
     Returns
     -------

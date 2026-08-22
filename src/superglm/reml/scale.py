@@ -11,6 +11,7 @@ from scipy.optimize import brentq, minimize_scalar
 from scipy.special import digamma, gammaln, i0e, i1e, polygamma
 
 from superglm.profiling.tweedie import _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT
+from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, PRIOR_WEIGHTS
 
 _GAMMA_ASYMPTOTIC_SHAPE = 100.0
 
@@ -51,10 +52,25 @@ class ProfiledScaleTerm:
 
 @dataclass(frozen=True)
 class GammaScaleProfileData:
-    """Fit-invariant sufficient statistics for saturated Gamma likelihoods."""
+    """Fit-invariant sufficient statistics for saturated Gamma likelihoods.
+
+    Under ``"frequency"`` the saturated log-likelihood is ``sum(w)`` copies of
+    one scalar function of the shape, so two scalars are sufficient and the
+    root find never rescans rows.  Under ``"prior"`` row ``i`` has its own
+    shape ``w_i / phi``, and the saturated arm becomes ``sum_i G(w_i k)`` with
+    ``G(a) = a log a - a - log Gamma(a)`` -- the same function, evaluated at a
+    per-row argument.  The weights are therefore retained, collapsed onto
+    their distinct values with multiplicities: the collapse is exact (the
+    summand depends on the row only through its weight) and it makes the
+    unweighted case evaluate one scalar, reproducing the frequency arithmetic
+    to the bit rather than to a tolerance.
+    """
 
     sum_weight: float
     sum_weight_log_y: float
+    weight_semantics: str = FREQUENCY_WEIGHTS
+    distinct_weight: NDArray | None = field(default=None, repr=False, compare=False)
+    weight_multiplicity: NDArray | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         values = np.asarray(
@@ -65,15 +81,94 @@ class GammaScaleProfileData:
             raise ValueError(
                 "Gamma scale sufficient statistics must be finite with positive weight"
             )
+        if self.weight_semantics not in (PRIOR_WEIGHTS, FREQUENCY_WEIGHTS):
+            raise ValueError(
+                f"weight_semantics must be 'prior' or 'frequency', got {self.weight_semantics!r}"
+            )
+        if self.weight_semantics == PRIOR_WEIGHTS and (
+            self.distinct_weight is None or self.weight_multiplicity is None
+        ):
+            raise ValueError("prior-weight Gamma scale data requires the retained row weights")
         object.__setattr__(self, "sum_weight", float(self.sum_weight))
         object.__setattr__(self, "sum_weight_log_y", float(self.sum_weight_log_y))
+
+    def _row_arguments(self, shape: float) -> tuple[NDArray, NDArray]:
+        """Return the per-row shapes and their multiplicities.
+
+        ``__post_init__`` refuses prior-weight data without them, so this
+        narrowing cannot fail; it is written out so the retained arrays carry
+        their non-optional type to every arithmetic site below.
+        """
+        assert self.distinct_weight is not None
+        assert self.weight_multiplicity is not None
+        return self.distinct_weight * shape, self.weight_multiplicity
+
+    def saturated_normalizer(self, shape: float) -> float:
+        """Return the shape-dependent part of the saturated log-likelihood."""
+        if self.weight_semantics == FREQUENCY_WEIGHTS:
+            return self.sum_weight * _gamma_saturated_normalizer(shape)
+        argument, multiplicity = self._row_arguments(shape)
+        return float(np.sum(multiplicity * _gamma_saturated_normalizer_array(argument)))
+
+    def saturated_log_shape_score(self, shape: float) -> float:
+        """Return ``k d(l_sat)/dk``, the saturated arm of the log-shape score."""
+        if self.weight_semantics == FREQUENCY_WEIGHTS:
+            return self.sum_weight * _shape_times_log_minus_digamma(shape)
+        argument, multiplicity = self._row_arguments(shape)
+        return float(np.sum(multiplicity * _shape_times_log_minus_digamma_array(argument)))
+
+    def scaled_curvature(self, shape: float, penalty_nullity: float) -> float:
+        """Return ``k**2 d2Q/dk2`` without squaring extreme shapes.
+
+        The profile curvature can overflow when ``shape**2`` underflows, even
+        though its reciprocal derivative is representable as signed zero.  Work
+        instead with ``shape**2 * curvature``, which stays near ``1`` as the
+        shape vanishes and near ``sum(w)/2`` as it grows.
+
+        The frequency arm keeps its own association of the three expansions
+        verbatim, so this refactor cannot move a number on the contract that
+        was already shipping.
+        """
+        if self.weight_semantics == FREQUENCY_WEIGHTS:
+            sum_weight = self.sum_weight
+            if shape < 1.0e-4:
+                zeta_2 = np.pi**2 / 6.0
+                zeta_3 = 1.2020569031595942
+                zeta_4 = np.pi**4 / 90.0
+                return float(
+                    sum_weight
+                    - 0.5 * penalty_nullity
+                    - sum_weight * shape
+                    + sum_weight
+                    * (zeta_2 * shape**2 - 2.0 * zeta_3 * shape**3 + 3.0 * zeta_4 * shape**4)
+                )
+            if shape < _GAMMA_ASYMPTOTIC_SHAPE:
+                return float(
+                    sum_weight * shape**2 * _trigamma_minus_inverse(shape) - 0.5 * penalty_nullity
+                )
+            inverse = 1.0 / shape
+            return float(
+                0.5 * (sum_weight - penalty_nullity)
+                + sum_weight * (inverse / 6.0 - inverse**3 / 30.0 + inverse**5 / 42.0)
+            )
+        argument, multiplicity = self._row_arguments(shape)
+        return float(
+            np.sum(multiplicity * _scaled_trigamma_minus_inverse_array(argument))
+            - 0.5 * penalty_nullity
+        )
 
 
 def prepare_gamma_reml_scale_data(
     y: NDArray,
     sample_weight: NDArray,
+    *,
+    weight_semantics: str,
 ) -> GammaScaleProfileData:
     """Validate rows once and reduce them to Gamma saturated-likelihood statistics."""
+    if weight_semantics not in (PRIOR_WEIGHTS, FREQUENCY_WEIGHTS):
+        raise ValueError(
+            f"weight_semantics must be 'prior' or 'frequency', got {weight_semantics!r}",
+        )
     y = np.asarray(y, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
     if y.ndim != 1 or sample_weight.shape != y.shape:
@@ -85,30 +180,81 @@ def prepare_gamma_reml_scale_data(
         or np.any(sample_weight < 0.0)
     ):
         raise ValueError("Gamma scale profiling requires positive y and non-negative weights")
+    if weight_semantics == FREQUENCY_WEIGHTS:
+        with np.errstate(over="ignore", invalid="ignore"):
+            sum_weight = float(np.sum(sample_weight, dtype=np.float64))
+            sum_weight_log_y = float(np.sum(sample_weight * np.log(y), dtype=np.float64))
+        if sum_weight <= 0.0:
+            raise ValueError("Gamma scale profiling requires positive total weight")
+        return GammaScaleProfileData(
+            sum_weight=sum_weight,
+            # Elementwise reduction avoids BLAS thread-launch overhead for this
+            # one-vector sufficient statistic (materially slower in measured fits).
+            sum_weight_log_y=sum_weight_log_y,
+            weight_semantics=FREQUENCY_WEIGHTS,
+        )
+    # A zero prior weight is a row observed with infinite variance, so it
+    # leaves the likelihood entirely rather than contributing a saturated term
+    # of its own -- log Gamma(0) is not finite, and the row is not part of the
+    # size the residual d.f. corrects.
+    carried = sample_weight > 0.0
+    likelihood_size = float(np.count_nonzero(carried))
+    if likelihood_size <= 0.0:
+        raise ValueError("Gamma scale profiling requires at least one positive prior weight")
+    distinct_weight, multiplicity = np.unique(sample_weight[carried], return_counts=True)
     with np.errstate(over="ignore", invalid="ignore"):
-        sum_weight = float(np.sum(sample_weight, dtype=np.float64))
-        sum_weight_log_y = float(np.sum(sample_weight * np.log(y), dtype=np.float64))
-    if sum_weight <= 0.0:
-        raise ValueError("Gamma scale profiling requires positive total weight")
+        sum_log_y = float(np.sum(np.log(y[carried]), dtype=np.float64))
     return GammaScaleProfileData(
-        sum_weight=sum_weight,
-        # Elementwise reduction avoids BLAS thread-launch overhead for this
-        # one-vector sufficient statistic (materially slower in measured fits).
-        sum_weight_log_y=sum_weight_log_y,
+        sum_weight=likelihood_size,
+        sum_weight_log_y=sum_log_y,
+        weight_semantics=PRIOR_WEIGHTS,
+        distinct_weight=distinct_weight,
+        weight_multiplicity=multiplicity.astype(np.float64),
     )
+
+
+def gaussian_reml_scale_terms(
+    sample_weight: NDArray,
+    *,
+    weight_semantics: str,
+) -> tuple[float, float]:
+    """Return the Gaussian likelihood size and its weight-only saturated term.
+
+    Under ``"prior"`` each row's saturated density is ``N(y_i; y_i, phi/w_i)``,
+    whose normalizer is ``0.5 log(w_i / (2 pi phi))``.  The ``0.5 log w_i`` part
+    carries no ``phi`` and no ``lambda``, so it cannot move the profiled
+    dispersion or the selected smoothing parameters; it is returned and applied
+    anyway so that the published criterion is the restricted log-likelihood
+    rather than the restricted log-likelihood plus an unnamed constant, which
+    is what makes a cross-package comparison meaningful.
+    """
+    if weight_semantics not in (PRIOR_WEIGHTS, FREQUENCY_WEIGHTS):
+        raise ValueError(
+            f"weight_semantics must be 'prior' or 'frequency', got {weight_semantics!r}",
+        )
+    weights = np.asarray(sample_weight, dtype=np.float64)
+    if weight_semantics == FREQUENCY_WEIGHTS:
+        return float(np.sum(weights, dtype=np.float64)), 0.0
+    carried = weights > 0.0
+    likelihood_size = float(np.count_nonzero(carried))
+    saturated_log_weight = float(0.5 * np.sum(np.log(weights[carried]), dtype=np.float64))
+    return likelihood_size, saturated_log_weight
 
 
 def profile_gaussian_reml_scale(
     penalized_deviance: float,
     likelihood_size: float,
     penalty_nullity: float,
+    *,
+    saturated_log_weight: float = 0.0,
 ) -> ProfiledScaleTerm:
     """Return the full closed-form Gaussian scale term from Wood's criterion."""
     penalized_deviance = float(penalized_deviance)
     likelihood_size = float(likelihood_size)
     penalty_nullity = float(penalty_nullity)
+    saturated_log_weight = float(saturated_log_weight)
     values = np.asarray(
-        [penalized_deviance, likelihood_size, penalty_nullity],
+        [penalized_deviance, likelihood_size, penalty_nullity, saturated_log_weight],
         dtype=np.float64,
     )
     if not np.all(np.isfinite(values)) or penalized_deviance <= 0.0:
@@ -129,7 +275,9 @@ def profile_gaussian_reml_scale(
         if log_derivative_magnitude < log_smallest
         else float(-np.exp(log_derivative_magnitude))
     )
-    criterion = float(0.5 * residual_size * (1.0 + np.log(2.0 * np.pi) + log_phi))
+    criterion = float(
+        0.5 * residual_size * (1.0 + np.log(2.0 * np.pi) + log_phi) - saturated_log_weight
+    )
     if not np.isfinite(criterion):
         raise FloatingPointError("Gaussian REML scale criterion is not representable")
     return ProfiledScaleTerm(
@@ -201,38 +349,103 @@ def _trigamma_minus_inverse(shape: float) -> float:
     )
 
 
-def _gamma_inverse_shape_derivative(
-    shape: float,
-    sum_weight: float,
-    penalty_nullity: float,
-) -> float:
-    """Return ``d(shape) / d(Dp)`` without squaring extreme shapes.
+def _shape_times_log_minus_digamma_array(argument: NDArray) -> NDArray:
+    """Vectorized ``a (log a - digamma(a))``, branch for branch.
 
-    The profile curvature can overflow when ``shape**2`` underflows, even
-    though its reciprocal derivative is representable as signed zero.  Work
-    instead with ``shape**2 * curvature`` and evaluate the final ratio in log
-    space.
+    The prior-weight contract evaluates this at a per-row ``a = w_i k``, and a
+    single fit's weights can straddle all three of the scalar helper's
+    branches.  Each branch is applied to its own rows and nowhere else: the
+    small-shape series diverges at large argument and the asymptotic series is
+    meaningless at small argument, so a ``np.where`` over all three would
+    compute both wrong answers before discarding them, complete with their
+    overflow warnings.
     """
-    if shape < 1.0e-4:
+    result = np.empty_like(argument)
+    is_small = argument < 1.0e-4
+    is_large = argument >= _GAMMA_ASYMPTOTIC_SHAPE
+    is_middle = ~is_small & ~is_large
+    if np.any(is_small):
+        a = argument[is_small]
+        euler_gamma = 0.5772156649015329
         zeta_2 = np.pi**2 / 6.0
         zeta_3 = 1.2020569031595942
         zeta_4 = np.pi**4 / 90.0
-        scaled_curvature = float(
-            sum_weight
-            - 0.5 * penalty_nullity
-            - sum_weight * shape
-            + sum_weight * (zeta_2 * shape**2 - 2.0 * zeta_3 * shape**3 + 3.0 * zeta_4 * shape**4)
+        result[is_small] = (
+            1.0 + a * (np.log(a) + euler_gamma) - zeta_2 * a**2 + zeta_3 * a**3 - zeta_4 * a**4
         )
-    elif shape < _GAMMA_ASYMPTOTIC_SHAPE:
-        scaled_curvature = float(
-            sum_weight * shape**2 * _trigamma_minus_inverse(shape) - 0.5 * penalty_nullity
+    if np.any(is_middle):
+        a = argument[is_middle]
+        result[is_middle] = a * (np.log(a) - digamma(a))
+    if np.any(is_large):
+        inverse = 1.0 / argument[is_large]
+        result[is_large] = 0.5 + inverse / 12.0 - inverse**3 / 120.0 + inverse**5 / 252.0
+    return result
+
+
+def _gamma_saturated_normalizer_array(argument: NDArray) -> NDArray:
+    """Vectorized ``a log a - a - log Gamma(a)``.
+
+    Two branches, matching the scalar helper: nothing cancels as ``a -> 0``
+    (the expression tends to ``log a`` with every term evaluated at its own
+    magnitude), so only the large-shape rows need the Stirling expansion.
+    """
+    result = np.empty_like(argument)
+    is_large = argument >= _GAMMA_ASYMPTOTIC_SHAPE
+    if not np.all(is_large):
+        a = argument[~is_large]
+        result[~is_large] = a * np.log(a) - a - gammaln(a)
+    if np.any(is_large):
+        inverse = 1.0 / argument[is_large]
+        result[is_large] = (
+            0.5 * (np.log(argument[is_large]) - np.log(2.0 * np.pi))
+            - inverse / 12.0
+            + inverse**3 / 360.0
+            - inverse**5 / 1260.0
         )
-    else:
-        inverse = 1.0 / shape
-        scaled_curvature = float(
-            0.5 * (sum_weight - penalty_nullity)
-            + sum_weight * (inverse / 6.0 - inverse**3 / 30.0 + inverse**5 / 42.0)
-        )
+    return result
+
+
+def _scaled_trigamma_minus_inverse_array(argument: NDArray) -> NDArray:
+    """Vectorized ``a**2 (trigamma(a) - 1/a)``.
+
+    The product is what the curvature needs, and forming it as a product would
+    overflow long before the shape itself does: ``trigamma(a) ~ a**-2``, so a
+    weight small enough to put ``a`` near ``1e-160`` sends the factor past the
+    representable range while their product is still exactly ``1``.  The three
+    branches are the same expansions the scalar curvature uses, lifted out of
+    it so that the per-row and the scalar path evaluate one function.
+    """
+    result = np.empty_like(argument)
+    is_small = argument < 1.0e-4
+    is_large = argument >= _GAMMA_ASYMPTOTIC_SHAPE
+    is_middle = ~is_small & ~is_large
+    if np.any(is_small):
+        a = argument[is_small]
+        zeta_2 = np.pi**2 / 6.0
+        zeta_3 = 1.2020569031595942
+        zeta_4 = np.pi**4 / 90.0
+        result[is_small] = 1.0 - a + zeta_2 * a**2 - 2.0 * zeta_3 * a**3 + 3.0 * zeta_4 * a**4
+    if np.any(is_middle):
+        a = argument[is_middle]
+        result[is_middle] = a**2 * (polygamma(1, a) - 1.0 / a)
+    if np.any(is_large):
+        inverse = 1.0 / argument[is_large]
+        result[is_large] = 0.5 + inverse / 6.0 - inverse**3 / 30.0 + inverse**5 / 42.0
+    return result
+
+
+def _gamma_inverse_shape_derivative(
+    shape: float,
+    scaled_curvature: float,
+) -> float:
+    """Return ``d(shape) / d(Dp)`` from the scaled profile curvature.
+
+    Implicit differentiation of the profile score at its root gives
+    ``d(shape)/d(Dp) = -1/2 / Q''(shape)``, and the caller supplies
+    ``shape**2 Q''`` rather than ``Q''`` so that the ratio survives shapes whose
+    square is not representable.  The division is taken in log space for the
+    same reason.
+    """
     if not np.isfinite(scaled_curvature) or scaled_curvature <= 0.0:
         raise FloatingPointError("Gamma REML scale profile has non-positive curvature")
 
@@ -251,9 +464,18 @@ def profile_gamma_reml_scale(
 ) -> ProfiledScaleTerm:
     """Profile Gamma dispersion while retaining Wood's saturated likelihood.
 
-    The non-Tweedie weight contract is frequency weighting, so ``sum(weights)``
-    is the likelihood observation count.  The calculation uses Gamma's scalar
-    sufficient statistics and therefore does not rescan rows during root finding.
+    Under the frequency contract ``sum(weights)`` is the likelihood observation
+    count, the saturated arm is that many copies of one scalar function of the
+    shape, and the root find never rescans rows.  Under the prior contract row
+    ``i`` carries shape ``w_i / phi``, so the saturated arm is a sum over the
+    distinct weights; the deviance arm ``Dp k / 2`` is unchanged, because the
+    weighted deviance ``sum_i w_i d_i`` is already what both contracts put
+    there.
+
+    The likelihood-size guard is the same statement in each: as ``k -> 0`` the
+    saturated arm behaves like ``N log k`` and the criterion's remaining
+    ``log k`` coefficient is ``Mp / 2``, so a finite interior optimum needs
+    ``2 N > Mp`` with ``N`` the contract's own likelihood size.
     """
     if not isinstance(profile_data, GammaScaleProfileData):
         raise TypeError("profile_data must be GammaScaleProfileData")
@@ -264,15 +486,15 @@ def profile_gamma_reml_scale(
     if not np.isfinite(penalty_nullity) or penalty_nullity < 0.0:
         raise ValueError("penalty_nullity must be finite and non-negative")
 
-    sum_weight = profile_data.sum_weight
-    if 2.0 * sum_weight <= penalty_nullity:
+    likelihood_size = profile_data.sum_weight
+    if 2.0 * likelihood_size <= penalty_nullity:
         raise ValueError("Gamma REML scale profile has no finite interior optimum")
 
     def shape_score(log_shape: float) -> float:
         shape = float(np.exp(log_shape))
         return float(
             0.5 * penalized_deviance * shape
-            - sum_weight * _shape_times_log_minus_digamma(shape)
+            - profile_data.saturated_log_shape_score(shape)
             + 0.5 * penalty_nullity
         )
 
@@ -304,7 +526,7 @@ def profile_gamma_reml_scale(
     shape = float(np.exp(log_shape))
     phi = 1.0 / shape
     saturated_log_likelihood = (
-        sum_weight * _gamma_saturated_normalizer(shape) - profile_data.sum_weight_log_y
+        profile_data.saturated_normalizer(shape) - profile_data.sum_weight_log_y
     )
     criterion = (
         0.5 * penalized_deviance * shape
@@ -316,8 +538,7 @@ def profile_gamma_reml_scale(
         raise FloatingPointError("Gamma REML scale profile produced a non-finite result")
     d_inverse_phi_d_penalized_deviance = _gamma_inverse_shape_derivative(
         shape,
-        sum_weight,
-        penalty_nullity,
+        profile_data.scaled_curvature(shape, penalty_nullity),
     )
     if not np.isfinite(d_inverse_phi_d_penalized_deviance):
         raise FloatingPointError("Gamma REML scale derivative is not representable")
@@ -347,6 +568,14 @@ class TweedieScaleProfileData:
     power: float
     n_positive: int
     prepared_positive: Any = field(repr=False)
+    # Under ``"prior"`` the weight is already inside ``prepared_positive`` --
+    # the compound-Poisson normalizer carries it -- and every positive row
+    # contributes once.  Under ``"frequency"`` the prepared state is built at
+    # unit weight and the replication count multiplies each row's contribution
+    # instead, so the weights are retained here and the effective positive size
+    # is their total rather than the row count.
+    weight_semantics: str = PRIOR_WEIGHTS
+    row_weight: NDArray | None = field(default=None, repr=False, compare=False)
     # Closed-form p = 1.5 state, or None at every other power.
     #
     # At p = 1.5 the Wright parameter a = (2-p)/(p-1) is exactly 1, and DLMF
@@ -363,7 +592,7 @@ class TweedieScaleProfileData:
     # with K = 4 w sqrt(y) fit-invariant.  The whole positive-row saturated
     # log-likelihood is then
     #
-    #     l_sat(phi) = C0 - n_positive log phi + sum_i log i1e(K_i / phi)
+    #     l_sat(phi) = C0 - N_pos log phi + sum_i w_i log i1e(K_i / phi)
     #     T(phi)     = sum_i z_i (i0e(z_i) - i1e(z_i)) / i1e(z_i),  z = K / phi
     #
     # with C0 = sum_i (log 2 + log w_i - log(y_i)/2).  ``i1e``/``i0e`` are the
@@ -381,6 +610,21 @@ class TweedieScaleProfileData:
         repr=False,
         compare=False,
     )
+
+    @property
+    def positive_size(self) -> float:
+        """Return the likelihood size the positive rows carry."""
+        if self.weight_semantics == PRIOR_WEIGHTS:
+            return float(self.n_positive)
+        assert self.row_weight is not None
+        return float(np.sum(self.row_weight, dtype=np.float64))
+
+    def _row_total(self, values: NDArray) -> float:
+        """Sum per-row contributions the way this contract accumulates them."""
+        if self.weight_semantics == PRIOR_WEIGHTS:
+            return float(np.sum(values, dtype=np.float64))
+        assert self.row_weight is not None
+        return float(np.sum(self.row_weight * values, dtype=np.float64))
 
     def _bessel_saturated_log_likelihood(self, phi: float) -> float | None:
         """Closed-form saturated log-likelihood at p = 1.5, or None.
@@ -400,8 +644,8 @@ class TweedieScaleProfileData:
                 return None
             value = float(
                 self.bessel_log_constant
-                - self.n_positive * float(np.log(phi))
-                + np.sum(log_scaled, dtype=np.float64)
+                - self.positive_size * float(np.log(phi))
+                + self._row_total(log_scaled)
             )
         return value if np.isfinite(value) else None
 
@@ -440,11 +684,11 @@ class TweedieScaleProfileData:
                 )
             if not np.all(np.isfinite(score_component)):
                 return None
-            score = float(np.sum(score_component, dtype=np.float64))
+            score = self._row_total(score_component)
             value = float(
                 self.bessel_log_constant
-                - self.n_positive * float(np.log(phi))
-                + np.sum(log_scaled, dtype=np.float64)
+                - self.positive_size * float(np.log(phi))
+                + self._row_total(log_scaled)
             )
         if not np.isfinite(score):
             return None
@@ -471,7 +715,7 @@ class TweedieScaleProfileData:
             from superglm.profiling.tweedie import _evaluate_tweedie_density
 
             evaluation = _evaluate_tweedie_density(self.prepared_positive, key)
-            value = float(np.sum(evaluation.logpdf, dtype=np.float64))
+            value = self._row_total(evaluation.logpdf)
         if not np.isfinite(value):
             raise FloatingPointError(
                 f"Tweedie saturated log-likelihood is not finite at phi={key:g}"
@@ -514,13 +758,13 @@ class TweedieScaleProfileData:
         # exactly one of these keys: cross-filling turns it into a cache hit
         # for the cost of one log-sum.  Only finite values are stored, so
         # ``saturated_log_likelihood``'s FloatingPointError contract is intact.
-        saturated_value = float(np.sum(evaluation.logpdf, dtype=np.float64))
+        saturated_value = self._row_total(evaluation.logpdf)
         if np.isfinite(saturated_value):
             self._saturated_cache.setdefault(key, saturated_value)
         if not evaluation.score_valid or evaluation.log_phi_score is None:
             self._saturated_score_cache[key] = float("nan")
             return None
-        value = float(np.sum(evaluation.log_phi_score, dtype=np.float64))
+        value = self._row_total(evaluation.log_phi_score)
         if not np.isfinite(value):
             self._saturated_score_cache[key] = float("nan")
             return None
@@ -532,28 +776,47 @@ def prepare_tweedie_reml_scale_data(
     y: NDArray,
     sample_weight: NDArray,
     power: float,
+    *,
+    weight_semantics: str,
 ) -> TweedieScaleProfileData:
     """Validate rows once and hoist the phi-invariant Tweedie density state.
 
-    ``sample_weight`` follows the Tweedie EDM prior-weight contract
-    (observation-specific dispersion ``phi / w``); the prepared state applies
-    it inside the density evaluation exactly as the fitted likelihood does.
+    Under ``"prior"`` the weight is an EDM precision (observation-specific
+    dispersion ``phi / w``) and the prepared state applies it inside the
+    density evaluation exactly as the fitted likelihood does.  Strictly
+    positive weights are required there and only there: the compound-Poisson
+    normalizer carries ``log w``, so ``w = 0`` is not a row with no
+    information but an unevaluable density.
+
+    Under ``"frequency"`` the density is the unit-weight one and the weight is
+    a replication count applied outside it, so a zero weight is simply a row
+    that appears no times and drops out with the rest of the arithmetic
+    untouched.
 
     At ``power == 1.5`` the closed-form Bessel state is prepared alongside; see
     ``TweedieScaleProfileData``.  Every other power carries ``bessel_scale =
-    None`` and is evaluated exactly as before.
+    None``.
     """
     from superglm.profiling.tweedie import _prepare_tweedie_density
 
+    if weight_semantics not in (PRIOR_WEIGHTS, FREQUENCY_WEIGHTS):
+        raise ValueError(
+            f"weight_semantics must be 'prior' or 'frequency', got {weight_semantics!r}",
+        )
     y = np.asarray(y, dtype=np.float64)
     sample_weight = np.asarray(sample_weight, dtype=np.float64)
     if y.ndim != 1 or sample_weight.shape != y.shape or y.size == 0:
         raise ValueError("y and sample_weight must be one-dimensional with matching shape")
     if not np.all(np.isfinite(y)) or np.any(y < 0.0):
         raise ValueError("Tweedie scale profiling requires finite non-negative y")
-    if not np.all(np.isfinite(sample_weight)) or np.any(sample_weight <= 0.0):
-        raise ValueError("Tweedie scale profiling requires strictly positive prior weights")
+    if weight_semantics == PRIOR_WEIGHTS:
+        if not np.all(np.isfinite(sample_weight)) or np.any(sample_weight <= 0.0):
+            raise ValueError("Tweedie scale profiling requires strictly positive prior weights")
+    elif not np.all(np.isfinite(sample_weight)) or np.any(sample_weight < 0.0):
+        raise ValueError("Tweedie scale profiling requires finite non-negative frequency weights")
     positive = y > 0.0
+    if weight_semantics == FREQUENCY_WEIGHTS:
+        positive = positive & (sample_weight > 0.0)
     n_positive = int(np.count_nonzero(positive))
     if n_positive == 0:
         raise ValueError(
@@ -562,25 +825,30 @@ def prepare_tweedie_reml_scale_data(
         )
     y_positive = y[positive]
     weights_positive = sample_weight[positive]
+    density_weights = (
+        weights_positive if weight_semantics == PRIOR_WEIGHTS else np.ones_like(weights_positive)
+    )
     prepared = _prepare_tweedie_density(
         y_positive,
         y_positive,
         float(power),
-        weights=weights_positive,
+        weights=density_weights,
     )
     bessel_scale: NDArray | None = None
     bessel_log_constant = 0.0
     if float(power) == 1.5:
         # Associated exactly as the density evaluator's own p = 1.5 branch
-        # associates its Bessel argument: (4 w) * sqrt(y), then / phi.
-        bessel_scale = (4.0 * weights_positive) * np.sqrt(y_positive)
+        # associates its Bessel argument: (4 w) * sqrt(y), then / phi.  The
+        # replication count never reaches the argument -- it multiplies the
+        # unit-weight row's contribution instead -- so the frequency arm sends
+        # w = 1 through here and carries the count in the constant and in the
+        # per-row totals.
+        bessel_scale = (4.0 * density_weights) * np.sqrt(y_positive)
         bessel_scale.setflags(write=False)
-        bessel_log_constant = float(
-            np.sum(
-                np.log(2.0) + np.log(weights_positive) - 0.5 * np.log(y_positive),
-                dtype=np.float64,
-            )
-        )
+        row_constant = np.log(2.0) + np.log(density_weights) - 0.5 * np.log(y_positive)
+        if weight_semantics == FREQUENCY_WEIGHTS:
+            row_constant = weights_positive * row_constant
+        bessel_log_constant = float(np.sum(row_constant, dtype=np.float64))
         if not np.isfinite(bessel_log_constant) or not np.all(np.isfinite(bessel_scale)):
             bessel_scale = None
             bessel_log_constant = 0.0
@@ -588,6 +856,8 @@ def prepare_tweedie_reml_scale_data(
         power=float(power),
         n_positive=n_positive,
         prepared_positive=prepared,
+        weight_semantics=weight_semantics,
+        row_weight=None if weight_semantics == PRIOR_WEIGHTS else weights_positive,
         bessel_scale=bessel_scale,
         bessel_log_constant=bessel_log_constant,
     )
@@ -633,9 +903,9 @@ def profile_tweedie_reml_scale(
     # numerically at p in {1.2, 1.5, 1.8} to 1e-6), NOT like 1/phi - assuming
     # the Gaussian-shaped 1/phi tail here is the same substitution this
     # profiler exists to remove, one level down. Q's upper-tail slope in
-    # log(phi) is therefore n_positive/(p-1) - Mp/2, and a finite interior
+    # log(phi) is therefore N_pos/(p-1) - Mp/2, and a finite interior
     # optimum needs that positive.
-    if 2.0 * profile_data.n_positive <= (profile_data.power - 1.0) * penalty_nullity:
+    if 2.0 * profile_data.positive_size <= (profile_data.power - 1.0) * penalty_nullity:
         raise ValueError("Tweedie REML scale profile has no finite interior optimum")
 
     def criterion(log_phi: float) -> float:
@@ -776,11 +1046,59 @@ def profile_tweedie_reml_scale(
     )
 
 
+def prepare_reml_scale_data(
+    distribution: Any,
+    y: NDArray,
+    sample_weight: NDArray,
+    *,
+    weight_semantics: str,
+) -> tuple[
+    float | None, float | None, GammaScaleProfileData | None, TweedieScaleProfileData | None
+]:
+    """Hoist a fit's scale-profiling state once, under the declared contract.
+
+    Returns the Gaussian pair and the Gamma and Tweedie prepared states, of
+    which at most one arm is populated.  Every REML optimizer prepares through
+    here so that the contract enters the scale machinery in exactly one place
+    and cannot be re-derived per evaluation.
+    """
+    from superglm.distributions import Gamma, Gaussian, Tweedie
+
+    if isinstance(distribution, Gaussian):
+        likelihood_size, saturated_log_weight = gaussian_reml_scale_terms(
+            sample_weight,
+            weight_semantics=weight_semantics,
+        )
+        return likelihood_size, saturated_log_weight, None, None
+    if isinstance(distribution, Gamma):
+        return (
+            None,
+            None,
+            prepare_gamma_reml_scale_data(y, sample_weight, weight_semantics=weight_semantics),
+            None,
+        )
+    if isinstance(distribution, Tweedie):
+        return (
+            None,
+            None,
+            None,
+            prepare_tweedie_reml_scale_data(
+                y,
+                sample_weight,
+                distribution.p,
+                weight_semantics=weight_semantics,
+            ),
+        )
+    return None, None, None, None
+
+
 __all__ = [
     "GammaScaleProfileData",
     "ProfiledScaleTerm",
     "TweedieScaleProfileData",
+    "gaussian_reml_scale_terms",
     "prepare_gamma_reml_scale_data",
+    "prepare_reml_scale_data",
     "prepare_tweedie_reml_scale_data",
     "profile_gamma_reml_scale",
     "profile_gaussian_reml_scale",

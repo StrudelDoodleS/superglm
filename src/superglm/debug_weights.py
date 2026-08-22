@@ -51,8 +51,8 @@ def compare_irls_weights(
     y : array-like
         Response variable.
     sample_weight : array-like, optional
-        Family-specific fitting weights: case/frequency weights for
-        non-Tweedie families and EDM prior weights for Tweedie.
+        Fitting weights, read under the model's declared
+        ``weight_semantics``.
     offset : array-like, optional
         Offset term.
     max_iter : int
@@ -246,8 +246,8 @@ def inspect_worst_observations(
     y : array-like
         Response variable.
     sample_weight : array-like, optional
-        Family-specific fitting weights: case/frequency weights for
-        non-Tweedie families and EDM prior weights for Tweedie.
+        Fitting weights, read under the model's declared
+        ``weight_semantics``.
     iteration : int
         Which IRLS iteration to inspect (1-based).
 

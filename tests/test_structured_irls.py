@@ -154,6 +154,7 @@ def test_forced_structured_exact_irls_matches_dense_oracle(
         direct_solve="gram",
         reml_penalties=penalties,
         profile=dense_profile,
+        weight_semantics="prior",
     )
     structured_result, structured_factor, structured_operator = irls_direct.fit_irls_direct(
         X=dm,
@@ -171,6 +172,7 @@ def test_forced_structured_exact_irls_matches_dense_oracle(
         reml_penalties=penalties,
         profile=structured_profile,
         cache_out=structured_cache,
+        weight_semantics="prior",
     )
 
     np.testing.assert_allclose(
@@ -250,6 +252,7 @@ def test_forced_structured_avoids_dense_gram_and_penalty_builders(monkeypatch):
         offset=offset,
         direct_solve="structured",
         reml_penalties=penalties,
+        weight_semantics="frequency",
     )
 
     assert result.converged
@@ -275,6 +278,7 @@ def test_forced_structured_rejects_constrained_coefficients():
             offset=offset,
             direct_solve="structured",
             reml_penalties=penalties,
+            weight_semantics="frequency",
         )
 
 
@@ -391,6 +395,7 @@ def test_structured_irls_handles_all_small_group_kernels_and_penalties():
         direct_solve="gram",
         reml_penalties=penalties,
         tol=1e-11,
+        weight_semantics="frequency",
     )
     profile: dict = {}
     structured_result, structured_factor = irls_direct.fit_irls_direct(
@@ -406,6 +411,7 @@ def test_structured_irls_handles_all_small_group_kernels_and_penalties():
         reml_penalties=penalties,
         profile=profile,
         tol=1e-11,
+        weight_semantics="frequency",
     )
 
     np.testing.assert_allclose(structured_result.beta, dense_result.beta, atol=2e-9)
@@ -445,6 +451,7 @@ def test_structured_irls_handles_all_small_group_kernels_and_penalties():
         direct_solve="structured",
         S_override=S,
         tol=1e-11,
+        weight_semantics="frequency",
     )
     np.testing.assert_allclose(override_result.beta, structured_result.beta, atol=2e-9)
     np.testing.assert_allclose(
@@ -479,6 +486,7 @@ def test_structured_correlated_override_rejects_dominant_random_effect_block():
             direct_solve="structured",
             S_override=correlated_penalty,
             tol=1.0e-11,
+            weight_semantics="frequency",
         )
 
     structured, _ = irls_direct.fit_irls_direct(
@@ -493,6 +501,7 @@ def test_structured_correlated_override_rejects_dominant_random_effect_block():
         direct_solve="structured",
         S_override=diagonal_penalty,
         tol=1.0e-11,
+        weight_semantics="frequency",
     )
     gram, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -506,6 +515,7 @@ def test_structured_correlated_override_rejects_dominant_random_effect_block():
         direct_solve="gram",
         S_override=diagonal_penalty,
         tol=1.0e-11,
+        weight_semantics="frequency",
     )
     np.testing.assert_allclose(structured.beta, gram.beta, atol=2.0e-9)
 
@@ -535,6 +545,7 @@ def test_structured_tiny_scaled_correlated_override_is_not_silently_diagonalized
             direct_solve="structured",
             S_override=correlated_penalty,
             tol=1.0e-11,
+            weight_semantics="frequency",
         )
 
 
@@ -574,6 +585,7 @@ def test_structured_override_is_authoritative_for_zero_lambda_eligibility(
         direct_solve=direct_solve,
         S_override=diagonal_penalty,
         tol=1.0e-11,
+        weight_semantics="frequency",
     )
     gram, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -587,6 +599,7 @@ def test_structured_override_is_authoritative_for_zero_lambda_eligibility(
         direct_solve="gram",
         S_override=diagonal_penalty,
         tol=1.0e-11,
+        weight_semantics="frequency",
     )
 
     assert structured.direct_backend == "structured"
@@ -636,6 +649,7 @@ def test_auto_falls_back_for_incompatible_authoritative_override(
         direct_solve="auto",
         S_override=penalty,
         tol=1.0e-11,
+        weight_semantics="frequency",
     )
     gram, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -649,6 +663,7 @@ def test_auto_falls_back_for_incompatible_authoritative_override(
         direct_solve="gram",
         S_override=penalty,
         tol=1.0e-11,
+        weight_semantics="frequency",
     )
 
     assert automatic.direct_backend == "gram"
@@ -676,6 +691,7 @@ def test_auto_records_dense_fallback_reason_for_constraints():
         direct_solve="auto",
         reml_penalties=penalties,
         profile=profile,
+        weight_semantics="frequency",
     )
 
     assert result.direct_backend == "gram"
@@ -800,6 +816,7 @@ def test_auto_fit_publishes_predicted_cost_ratio_in_profile(
         direct_solve="auto",
         reml_penalties=penalties,
         profile=profile,
+        weight_semantics="frequency",
     )
 
     expected_backend = "structured" if expect_structured else "gram"
@@ -937,6 +954,7 @@ def test_auto_missing_compact_penalties_falls_back_but_forced_rejects():
         groups=groups,
         lambda2={"policy": 1.0},
         direct_solve="auto",
+        weight_semantics="frequency",
     )
 
     assert automatic.direct_backend == "gram"
@@ -954,6 +972,7 @@ def test_auto_missing_compact_penalties_falls_back_but_forced_rejects():
             groups=groups,
             lambda2={"policy": 1.0},
             direct_solve="structured",
+            weight_semantics="frequency",
         )
 
 
@@ -972,6 +991,7 @@ def test_structured_factor_matches_dense_fixed_weight_reml_derivatives():
         direct_solve="gram",
         reml_penalties=penalties,
         tol=1e-10,
+        weight_semantics="frequency",
     )
     structured_result, structured_factor = irls_direct.fit_irls_direct(
         X=dm,
@@ -985,6 +1005,7 @@ def test_structured_factor_matches_dense_fixed_weight_reml_derivatives():
         direct_solve="structured",
         reml_penalties=penalties,
         tol=1e-10,
+        weight_semantics="frequency",
     )
 
     dense_gradient = reml_direct_gradient(
@@ -1037,6 +1058,7 @@ def test_structured_w_derivatives_match_dense_first_and_second_order():
         direct_solve="gram",
         reml_penalties=penalties,
         tol=1e-10,
+        weight_semantics="frequency",
     )
     structured_result, structured_factor = irls_direct.fit_irls_direct(
         X=dm,
@@ -1050,6 +1072,7 @@ def test_structured_w_derivatives_match_dense_first_and_second_order():
         direct_solve="structured",
         reml_penalties=penalties,
         tol=1e-10,
+        weight_semantics="frequency",
     )
     dense_correction = reml_w_correction(
         dm,
@@ -1147,6 +1170,7 @@ def test_structured_reml_objective_uses_compact_penalty_and_gram(monkeypatch):
         reml_penalties=penalties,
         return_xtwx=True,
         tol=1e-10,
+        weight_semantics="frequency",
     )
     structured_result, _, structured_gram = irls_direct.fit_irls_direct(
         X=dm,
@@ -1161,6 +1185,7 @@ def test_structured_reml_objective_uses_compact_penalty_and_gram(monkeypatch):
         reml_penalties=penalties,
         return_xtwx=True,
         tol=1e-10,
+        weight_semantics="frequency",
     )
     dense_penalty = build_penalty_matrix(
         dm.group_matrices,
@@ -1183,6 +1208,7 @@ def test_structured_reml_objective_uses_compact_penalty_and_gram(monkeypatch):
         log_det_H=dense_result.log_det_H,
         S_override=dense_penalty,
         reml_penalties=penalties,
+        weight_semantics="frequency",
     )
 
     def fail_dense_penalty(*args, **kwargs):
@@ -1206,6 +1232,7 @@ def test_structured_reml_objective_uses_compact_penalty_and_gram(monkeypatch):
         XtWX=structured_gram,
         log_det_H=structured_result.log_det_H,
         reml_penalties=penalties,
+        weight_semantics="frequency",
     )
     np.testing.assert_allclose(structured_value, dense_value, atol=2e-9)
 

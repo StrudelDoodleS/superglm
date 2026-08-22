@@ -944,6 +944,7 @@ class TestInformationCriteria:
             family="gaussian",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
 
         repeated_rows = np.repeat(np.arange(n), weights.astype(int))
@@ -953,6 +954,7 @@ class TestInformationCriteria:
             family="gaussian",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(repeated_X, repeated_y)
 
         weighted = weighted_model.metrics(X, y, sample_weight=weights)
@@ -1114,6 +1116,7 @@ class TestNullModel:
             offset,
             Poisson(),
             SqrtLink(),
+            weight_semantics="frequency",
         )
 
         assert shortcut_flags == [True]
@@ -1310,6 +1313,7 @@ class TestResiduals:
             family="poisson",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
 
         compressed = model.metrics(X, y, sample_weight=weights).residuals(kind)
@@ -1451,6 +1455,7 @@ class TestResiduals:
             family="poisson",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
 
         weighted = model.metrics(X, y, sample_weight=weights).residuals(
@@ -1475,6 +1480,7 @@ class TestResiduals:
             family="gaussian",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
 
         repeated_rows = np.repeat(np.arange(n), weights.astype(int))
@@ -1484,6 +1490,7 @@ class TestResiduals:
             family="gaussian",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(repeated_X, repeated_y)
 
         weighted = weighted_model.metrics(X, y, sample_weight=weights).residuals("quantile")
@@ -1958,6 +1965,7 @@ class TestCoefficientSE:
             family="poisson",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
         repeated_rows = np.repeat(np.arange(n), weights.astype(int))
         repeated_X = X.iloc[repeated_rows].reset_index(drop=True)
@@ -1966,6 +1974,7 @@ class TestCoefficientSE:
             family="poisson",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(repeated_X, repeated_y)
 
         weighted = weighted_model.metrics(X, y, sample_weight=weights)
@@ -2315,6 +2324,7 @@ class TestWeightedSmoothInference:
                     penalty="ssp",
                 )
             },
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
 
         repeated_rows = np.repeat(np.arange(n), weights.astype(int))
@@ -2330,6 +2340,7 @@ class TestWeightedSmoothInference:
                     penalty="ssp",
                 )
             },
+            weight_semantics="frequency",
         ).fit(repeated_X, repeated_y)
 
         weighted_row = next(row for row in weighted_model.summary()._coef_rows if row.is_spline)

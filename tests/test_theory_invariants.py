@@ -86,6 +86,7 @@ class TestSolverTheoryInvariants:
                 "x1": Numeric(),
                 "x2": Numeric(),
             },
+            weight_semantics="frequency",
         )
         weighted.fit(X, y, sample_weight=weights)
 
@@ -101,6 +102,7 @@ class TestSolverTheoryInvariants:
                 "x1": Numeric(),
                 "x2": Numeric(),
             },
+            weight_semantics="frequency",
         )
         replicated.fit(X_rep, y_rep)
 

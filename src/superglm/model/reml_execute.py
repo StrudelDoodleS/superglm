@@ -12,6 +12,7 @@ from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
 from superglm.model.reml_setup import promote_estimated_scop_lambdas
 from superglm.reml.observed_geometry import ObservedModeNotConvergedError
+from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 
 # The two optimizer families interpret reml_tol against different criteria, so
@@ -143,6 +144,7 @@ def run_fixed_monotone_reml(
             sample_weight,
             offset_arr,
             lambdas,
+            weight_semantics=model_weight_semantics(model),
             pirls_tol=pirls_tol,
             max_pirls_iter=max_pirls_iter,
             reml_penalties=reml_penalties if reml_penalties else None,
@@ -169,6 +171,7 @@ def run_fixed_monotone_reml(
             reml_penalties=reml_penalties if reml_penalties else None,
             debug_recorder=debug_recorder,
             debug_context={"phase": "fixed_constraint"},
+            weight_semantics=model_weight_semantics(model),
         )
         # Typed like the SCOP and observed-geometry gates: to a power
         # search a QP candidate with no feasible mode (or no complete KKT
@@ -195,7 +198,14 @@ def run_fixed_monotone_reml(
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
-        y, mu, sample_weight, offset, model._distribution, model._link, result.phi
+        y,
+        mu,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+        result.phi,
+        weight_semantics=model_weight_semantics(model),
     )
     model._solver_result = result
     model._last_fit_meta = {
@@ -257,6 +267,7 @@ def run_scop_efs_reml(
         offset_arr=offset_arr,
         lambdas=lambdas,
         estimated_names=estimated_names,
+        weight_semantics=model_weight_semantics(model),
         max_reml_iter=max_reml_iter,
         reml_tol=reml_tol,
         pirls_tol=pirls_tol,
@@ -286,6 +297,7 @@ def run_scop_efs_reml(
         model._distribution,
         model._link,
         best.pirls_result.phi,
+        weight_semantics=model_weight_semantics(model),
     )
     model._solver_result = best.pirls_result
     model._last_fit_meta = {"method": "fit_reml", "discrete": model._discrete}

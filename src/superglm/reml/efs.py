@@ -69,6 +69,7 @@ def optimize_efs_reml(
     penalty_ranks: dict[str, float],
     lambdas: dict[str, float],
     *,
+    weight_semantics: str,
     max_reml_iter: int,
     reml_tol: float,
     verbose: bool,
@@ -124,6 +125,7 @@ def optimize_efs_reml(
         lambda2=boot_lambdas,
         tol=pirls_tol,
         max_iter_outer=max_pirls_iter,
+        weight_semantics=weight_semantics,
     )
 
     # Compute W and X'WX from bootstrap fit
@@ -222,6 +224,7 @@ def optimize_efs_reml(
                 lambda2=lambdas,
                 tol=pirls_tol,
                 max_iter_outer=max_pirls_iter,
+                weight_semantics=weight_semantics,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
@@ -329,6 +332,7 @@ def optimize_efs_reml(
                 XtWX=cached_xtwx,
                 penalty_caches=penalty_caches,
                 reml_penalties=penalties,
+                weight_semantics=weight_semantics,
             )
             obj_trial = reml_laml_objective(
                 dm,
@@ -343,6 +347,7 @@ def optimize_efs_reml(
                 XtWX=cached_xtwx,
                 penalty_caches=penalty_caches,
                 reml_penalties=penalties,
+                weight_semantics=weight_semantics,
             )
             if obj_trial > obj_curr + 1e-8 * max(abs(obj_curr), 1.0):
                 for pc in penalties:
@@ -419,6 +424,7 @@ def optimize_efs_reml(
         lambda2=lambdas,
         tol=pirls_tol,
         max_iter_outer=max_pirls_iter,
+        weight_semantics=weight_semantics,
     )
 
     reml_result = REMLResult(
@@ -439,6 +445,7 @@ def optimize_efs_reml(
             offset_arr,
             penalty_caches=penalty_caches,
             reml_penalties=penalties,
+            weight_semantics=weight_semantics,
         ),
     )
     return reml_result, dm

@@ -337,6 +337,7 @@ def test_direct_sqrt_irls_computes_objective_scale_once_per_fit(monkeypatch) -> 
         _compute_fit_statistics=False,
         _compute_reml_geometry=False,
         _compute_scop_postfit_inference=False,
+        weight_semantics="frequency",
     )
 
     assert result.n_iter == 3
@@ -534,6 +535,7 @@ def test_direct_ridge_moves_away_from_an_interpolating_unpenalized_state() -> No
         intercept_init=0.0,
         tol=1.0e-12,
         max_iter=10,
+        weight_semantics="frequency",
     )
 
     expected_beta = float((x @ y) / (x @ x + penalty))
@@ -561,6 +563,7 @@ def test_pirls_ridge_moves_away_from_an_interpolating_unpenalized_state() -> Non
         max_iter_outer=20,
         max_iter_inner=50,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
 
     expected_beta = float((x @ y) / (x @ x + penalty))
@@ -635,6 +638,7 @@ def _fit_controlled_pirls(
         record_diagnostics=True,
         convergence=convergence,
         trace_run=trace_run,
+        weight_semantics="frequency",
     )
 
 
@@ -710,6 +714,7 @@ def test_pirls_backtracking_reuses_the_endpoint_linear_predictor(monkeypatch) ->
         max_iter_outer=1,
         max_iter_inner=1,
         tol=1e-12,
+        weight_semantics="frequency",
     )
 
     assert result.intercept == pytest.approx(0.5)
@@ -755,6 +760,7 @@ def test_pirls_rejected_proposal_does_not_select_restored_zero_group() -> None:
         max_iter_inner=1,
         tol=1e-12,
         record_diagnostics=True,
+        weight_semantics="frequency",
     )
 
     np.testing.assert_array_equal(result.beta, np.zeros(1))
@@ -923,6 +929,7 @@ def _fit_controlled_direct(
         record_diagnostics=True,
         convergence=convergence,
         trace_run=trace_run,
+        weight_semantics="frequency",
     )
     return result
 
@@ -998,6 +1005,7 @@ def test_direct_backtracking_reuses_the_endpoint_linear_predictor(monkeypatch) -
         intercept_init=0.0,
         max_iter=1,
         tol=1e-12,
+        weight_semantics="frequency",
     )
 
     assert result.intercept == pytest.approx(0.5)
@@ -1120,6 +1128,7 @@ def test_noncanonical_direct_fit_commits_monotone_penalized_merit() -> None:
         max_iter=20,
         tol=1e-9,
         trace_run=TraceRun("poisson-sqrt-monotone", sink=sink),
+        weight_semantics="frequency",
     )
 
     decisions = [event for event in sink.events if event.event_kind == "step_decision"]

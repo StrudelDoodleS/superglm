@@ -504,7 +504,9 @@ class TestPublicationDispersion:
         mu_pub = np.asarray(model.predict(frame), dtype=float)
         y_arr = np.asarray(y, dtype=float)
         ones = np.ones(n)
-        null_mu = _compute_null_mu(y_arr, ones, None, model._distribution, model._link)
+        null_mu = _compute_null_mu(
+            y_arr, ones, None, model._distribution, model._link, weight_semantics="prior"
+        )
         oracle = _compute_fit_stats(
             y_arr,
             mu_pub,
@@ -514,6 +516,7 @@ class TestPublicationDispersion:
             model._link,
             float(result.phi_hat),
             null_mu=null_mu,
+            weight_semantics="prior",
         )
 
         np.testing.assert_allclose(model._fit_mu, mu_pub, rtol=0, atol=0)

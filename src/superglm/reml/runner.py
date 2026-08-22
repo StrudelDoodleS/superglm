@@ -79,6 +79,7 @@ def run_reml_once(
     penalty_ranks: dict[str, float],
     lambdas: dict[str, float],
     *,
+    weight_semantics: str,
     max_reml_iter: int,
     reml_tol: float,
     verbose: bool,
@@ -156,6 +157,7 @@ def run_reml_once(
                 direct_solve=direct_solve,
                 S_override=S_iter,
                 cache_out=direct_cache,
+                weight_semantics=weight_semantics,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
@@ -188,6 +190,7 @@ def run_reml_once(
                 lambda2=lambdas,
                 tol=pirls_tol,
                 max_iter_outer=max_pirls_iter,
+                weight_semantics=weight_semantics,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
@@ -368,6 +371,7 @@ def run_reml_once(
             intercept_init=warm_intercept,
             direct_solve=direct_solve,
             S_override=S_final_rro,
+            weight_semantics=weight_semantics,
         )
     else:
         # BCD/PIRLS path -- S_override not yet supported (Cut 2B)
@@ -386,6 +390,7 @@ def run_reml_once(
             lambda2=lambdas,
             tol=pirls_tol,
             max_iter_outer=max_pirls_iter,
+            weight_semantics=weight_semantics,
         )
 
     final_caches = penalty_caches if use_direct else None
@@ -408,6 +413,7 @@ def run_reml_once(
             penalty_caches=final_caches,
             S_override=S_final_rro if use_direct else None,
             reml_penalties=penalties_rro,
+            weight_semantics=weight_semantics,
         ),
     )
     return reml_result, dm

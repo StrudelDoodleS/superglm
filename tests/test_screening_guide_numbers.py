@@ -44,7 +44,6 @@ import numpy as np
 import pytest
 
 from superglm import Categorical, SuperGLM
-from superglm.distributions import Gaussian
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
 from superglm.solvers.dispersion import (
@@ -352,10 +351,13 @@ def test_screening_guide_ti_floor_survives_the_dispersion_contract_change(guide)
     # (3) with unit weights the retired and current denominators coincide, so
     #     the Gaussian arm that carries the floor is untouched by the change.
     ones = np.ones(64, dtype=np.float64)
-    assert dispersion_likelihood_size(Gaussian(), ones) == pytest.approx(
-        float(np.count_nonzero(ones))
-    )
-    assert pearson_residual_degrees_of_freedom(Gaussian(), ones, 4.0) == pytest.approx(64.0 - 4.0)
+    for semantics in ("prior", "frequency"):
+        assert dispersion_likelihood_size(ones, weight_semantics=semantics) == pytest.approx(
+            float(np.count_nonzero(ones))
+        )
+        assert pearson_residual_degrees_of_freedom(
+            ones, 4.0, weight_semantics=semantics
+        ) == pytest.approx(64.0 - 4.0)
 
 
 # ── the fixture is anchored to the real book (skips without the parquet) ────
@@ -433,7 +435,11 @@ def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
     assert exposure.sum() == pytest.approx(measured["sum_sample_weight"], rel=1e-6)
     assert exposure.sum() < 0.6 * len(df)
 
-    model = SuperGLM(family="poisson", features=_guide_features())
+    model = SuperGLM(
+        family="poisson",
+        features=_guide_features(),
+        weight_semantics="frequency",
+    )
     model.fit_reml(df, y, sample_weight=exposure)
     assert model._result.deviance == pytest.approx(measured["mains_deviance"], rel=1e-6)
     assert model._result.effective_df == pytest.approx(measured["mains_edf"], rel=1e-5)
@@ -479,6 +485,7 @@ def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
             family="poisson",
             features=_guide_features(),
             interactions=[(refit["feature_a"], refit["feature_b"])],
+            weight_semantics="frequency",
         )
         confirm.fit_reml(df, y, sample_weight=exposure)
         gain = model._result.deviance - confirm._result.deviance

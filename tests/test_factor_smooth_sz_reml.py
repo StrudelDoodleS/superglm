@@ -279,10 +279,12 @@ def test_sz_structured_reml_derivatives_and_working_weight_correction_match_dens
     dense_result, dense_inverse = irls_direct.fit_irls_direct(
         **common,
         direct_solve="gram",
+        weight_semantics="frequency",
     )
     result, factor = irls_direct.fit_irls_direct(
         **common,
         direct_solve="structured",
+        weight_semantics="frequency",
     )
 
     dense_gradient = reml_direct_gradient(
@@ -391,6 +393,7 @@ def test_sz_lambda_derivatives_match_central_finite_differences() -> None:
             reml_penalties=model._reml_penalties,
             return_xtwx=True,
             tol=1e-11,
+            weight_semantics="frequency",
         )
         objective = reml_laml_objective(
             model._dm,
@@ -407,6 +410,7 @@ def test_sz_lambda_derivatives_match_central_finite_differences() -> None:
             hessian_rank=result.reml_hessian_rank,
             reml_penalties=model._reml_penalties,
             return_evaluation=True,
+            weight_semantics="frequency",
         )
         assert isinstance(objective, REMLObjectiveEvaluation)
         if not derivatives:

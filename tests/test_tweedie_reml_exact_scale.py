@@ -79,6 +79,7 @@ def _fixed_lambda_evaluation(model, y, lambdas, warm=None):
         S_override=S,
         reml_penalties=penalties,
         **fit_kwargs,
+        weight_semantics="prior",
     )
     objective_kwargs = {}
     if getattr(result, "log_det_H", None) is not None:
@@ -101,6 +102,7 @@ def _fixed_lambda_evaluation(model, y, lambdas, warm=None):
         reml_penalties=penalties,
         return_evaluation=True,
         **objective_kwargs,
+        weight_semantics="prior",
     )
     return result, evaluation
 
@@ -273,14 +275,16 @@ class TestScaleProfileUnit:
         brute = minimize_scalar(
             exact_shape, bounds=(-10, 10), method="bounded", options={"xatol": 1e-10}
         )
-        data = prepare_tweedie_reml_scale_data(y, weights, 1.4)
+        data = prepare_tweedie_reml_scale_data(y, weights, 1.4, weight_semantics="prior")
         profiled = profile_tweedie_reml_scale(data, penalized_deviance, nullity)
         assert profiled.criterion == pytest.approx(float(brute.fun), abs=1e-7)
         assert profiled.phi == pytest.approx(float(np.exp(brute.x)), rel=1e-6)
         # Zero rows are an atom: dropping them must not change the saturated
         # sum at any phi.
         positive = y > 0.0
-        data_positive_only = prepare_tweedie_reml_scale_data(y[positive], weights[positive], 1.4)
+        data_positive_only = prepare_tweedie_reml_scale_data(
+            y[positive], weights[positive], 1.4, weight_semantics="prior"
+        )
         for phi in (0.5, 1.7, 4.0):
             assert data.saturated_log_likelihood(phi) == pytest.approx(
                 data_positive_only.saturated_log_likelihood(phi), rel=1e-12
@@ -311,7 +315,9 @@ class TestScaleProfileUnit:
             profile_tweedie_reml_scale,
         )
 
-        data = prepare_tweedie_reml_scale_data(np.array([1.3]), np.array([1.0]), 1.5)
+        data = prepare_tweedie_reml_scale_data(
+            np.array([1.3]), np.array([1.0]), 1.5, weight_semantics="prior"
+        )
         profiled = profile_tweedie_reml_scale(data, 4.0, 3.0)
         assert np.isfinite(profiled.phi) and profiled.phi > 0.0
         assert np.isfinite(profiled.criterion)
@@ -344,7 +350,7 @@ class TestScaleProfileUnit:
         mu = np.exp(0.2 + rng.normal(0.0, 0.4, n))
         y = generate_tweedie_cpg(n, mu, phi=1.2, p=1.5, rng=rng)
         weights = np.ones(n)
-        data = prepare_tweedie_reml_scale_data(y, weights, 1.5)
+        data = prepare_tweedie_reml_scale_data(y, weights, 1.5, weight_semantics="prior")
         penalized_deviance, nullity = 400.0, 2.0
         profiled = profile_tweedie_reml_scale(data, penalized_deviance, nullity)
         log_phi = float(np.log(profiled.phi))
@@ -362,7 +368,7 @@ class TestScaleProfileUnit:
         try:
             scale_module._TWEEDIE_LOG_PHI_WINDOW = original_window + 3.0e-7
             shifted = profile_tweedie_reml_scale(
-                prepare_tweedie_reml_scale_data(y, weights, 1.5),
+                prepare_tweedie_reml_scale_data(y, weights, 1.5, weight_semantics="prior"),
                 penalized_deviance,
                 nullity,
             )
@@ -416,6 +422,7 @@ class TestScaleProfileUnit:
             return_xtwx=True,
             S_override=S,
             reml_penalties=penalties,
+            weight_semantics="prior",
         )
         custom_family = SimpleNamespace(scale_known=False)
         with pytest.warns(UserWarning, match="Gaussian-shaped scale profile"):
@@ -432,4 +439,5 @@ class TestScaleProfileUnit:
                 XtWX=XtWX,
                 S_override=S,
                 reml_penalties=penalties,
+                weight_semantics="prior",
             )

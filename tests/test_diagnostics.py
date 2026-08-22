@@ -420,6 +420,7 @@ class TestSplineRedundancy:
 
     def test_frequency_weights_match_literal_row_replication(self, fitted_model):
         model, X, _, _ = fitted_model
+        model._weight_semantics = "frequency"
         weights = (1 + np.arange(len(X)) % 4).astype(np.float64)
         rows = np.repeat(np.arange(len(X)), weights.astype(np.int64))
 
@@ -434,9 +435,13 @@ class TestSplineRedundancy:
         )
         assert weighted.effective_rank == repeated.effective_rank
 
-    def test_tweedie_prior_weights_do_not_change_physical_geometry(self, fitted_model):
+    def test_prior_weights_do_not_change_physical_geometry(self, fitted_model):
+        """The rule is now the declared contract's, not the family's: a prior
+        weight leaves learned geometry a function of physical rows whatever the
+        family, and Tweedie is simply the family that used to imply it."""
         model, X, _, _ = fitted_model
         model._distribution = Tweedie(p=1.5)
+        model._weight_semantics = "prior"
         weights = np.linspace(0.2, 3.0, len(X))
 
         unit = model.spline_redundancy(X)["strong"]
@@ -457,6 +462,7 @@ class TestSplineRedundancy:
     )
     def test_validates_frequency_weights(self, fitted_model, weights, message):
         model, X, _, _ = fitted_model
+        model._weight_semantics = "frequency"
         with pytest.raises(ValueError, match=message):
             model.spline_redundancy(X.iloc[:2], sample_weight=weights)
 

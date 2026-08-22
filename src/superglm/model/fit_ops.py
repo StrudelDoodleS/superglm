@@ -19,6 +19,7 @@ from superglm.distributions import (
     Tweedie,
     clip_mu,
     resolve_distribution,
+    weighted_log_likelihood,
 )
 from superglm.links import Link, stabilize_eta
 from superglm.model import path_ops, runtime_canonicalize
@@ -61,6 +62,7 @@ from superglm.model.reml_setup import (
     restore_qp_constraints,
     strip_qp_constraints,
 )
+from superglm.solvers.dispersion import model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.types import FitStats
@@ -441,6 +443,8 @@ def _compute_null_mu(
     offset: NDArray | None,
     distribution: Distribution,
     link: Link,
+    *,
+    weight_semantics: str,
 ) -> NDArray:
     """Null model prediction: intercept-only MLE, offset-aware."""
     from superglm.distributions import Binomial, Gaussian, clip_mu
@@ -474,6 +478,7 @@ def _compute_null_mu(
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
             _compute_scop_postfit_inference=False,
+            weight_semantics=weight_semantics,
         )
         eta_null = stabilize_eta(null_result.intercept + offset, link)
         return clip_mu(link.inverse(eta_null), distribution)
@@ -516,11 +521,20 @@ def _compute_fit_stats(
     link: Link,
     phi: float,
     null_mu: NDArray | None = None,
+    *,
+    weight_semantics: str,
 ) -> FitStats:
     """Compute scalar fit statistics from training arrays."""
 
     if null_mu is None:
-        null_mu = _compute_null_mu(y, weights, offset, distribution, link)
+        null_mu = _compute_null_mu(
+            y,
+            weights,
+            offset,
+            distribution,
+            link,
+            weight_semantics=weight_semantics,
+        )
 
     if isinstance(distribution, Tweedie):
         from superglm.profiling.tweedie import (
@@ -528,20 +542,32 @@ def _compute_fit_stats(
             _tweedie_pearson_contributions,
         )
 
+        # The prior contract puts the weight inside the compound-Poisson
+        # density; the frequency contract evaluates the unit-weight density and
+        # counts each row w times.  The Pearson numerator below scales with the
+        # weight under either reading, so only this pair moves.
+        replication = weight_semantics == "frequency"
         fitted_logpdf, null_logpdf = _tweedie_logpdf_pair(
             y,
             mu,
             null_mu,
             phi,
             distribution.p,
-            weights=weights,
+            weights=np.ones_like(weights) if replication else weights,
         )
+        if replication:
+            fitted_logpdf = weights * fitted_logpdf
+            null_logpdf = weights * null_logpdf
         ll = float(np.sum(fitted_logpdf))
         null_ll = float(np.sum(null_logpdf))
         pearson = float(np.sum(weights * _tweedie_pearson_contributions(y, mu, distribution.p)))
     else:
-        ll = distribution.log_likelihood(y, mu, weights, phi)
-        null_ll = distribution.log_likelihood(y, null_mu, weights, phi)
+        ll = weighted_log_likelihood(
+            distribution, y, mu, weights, phi, weight_semantics=weight_semantics
+        )
+        null_ll = weighted_log_likelihood(
+            distribution, y, null_mu, weights, phi, weight_semantics=weight_semantics
+        )
         V = distribution.variance(mu)
         pearson = float(np.sum(weights * (y - mu) ** 2 / V))
     null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
@@ -599,6 +625,7 @@ def _validate_entrypoint_input(model, X, y, sample_weight, offset):
         family=distribution,
         required_columns=_required_fit_columns(model),
         check_all_columns=config.splines is not None and not config.feature_templates,
+        weight_semantics=model_weight_semantics(model),
     )
     if (
         not config.features_explicit
@@ -901,6 +928,7 @@ def _prime_fit_caches(
             model._fit_offset,
             model._distribution,
             model._link,
+            weight_semantics=model_weight_semantics(model),
         )
     model._fit_mu = mu
     model._fit_null_mu = null_mu
@@ -1176,6 +1204,7 @@ def _solve_coefficients(
             direct_solve=model._direct_solve,
             convergence=convergence,
             separation=getattr(model, "_separation", "warn"),
+            weight_semantics=model_weight_semantics(model),
         )
         return result
 
@@ -1195,6 +1224,7 @@ def _solve_coefficients(
         record_diagnostics=record_diagnostics,
         convergence=convergence,
         separation=getattr(model, "_separation", "warn"),
+        weight_semantics=model_weight_semantics(model),
     )
 
 
@@ -1336,7 +1366,14 @@ def _fit_in_workspace(
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
-    null_mu = _compute_null_mu(y, sample_weight, offset, model._distribution, model._link)
+    null_mu = _compute_null_mu(
+        y,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+        weight_semantics=model_weight_semantics(model),
+    )
     model._fit_stats = _compute_fit_stats(
         y,
         mu,
@@ -1346,6 +1383,7 @@ def _fit_in_workspace(
         model._link,
         model._result.phi,
         null_mu=null_mu,
+        weight_semantics=model_weight_semantics(model),
     )
     model._solver_result = model._result
     _prime_fit_caches(
@@ -1477,7 +1515,14 @@ def _fit_path_in_workspace(
         eta = eta + offset
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
-    null_mu = _compute_null_mu(y, sample_weight, offset, model._distribution, model._link)
+    null_mu = _compute_null_mu(
+        y,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+        weight_semantics=model_weight_semantics(model),
+    )
     model._fit_stats = _compute_fit_stats(
         y,
         mu,
@@ -1487,6 +1532,7 @@ def _fit_path_in_workspace(
         model._link,
         result.phi,
         null_mu=null_mu,
+        weight_semantics=model_weight_semantics(model),
     )
     model._solver_result = result
     _prime_fit_caches(
@@ -1747,7 +1793,14 @@ def _fit_reml_in_workspace(
             eta = eta + offset
         eta = stabilize_eta(eta, model._link)
         mu = clip_mu(model._link.inverse(eta), model._distribution)
-        null_mu = _compute_null_mu(y, sample_weight, offset, model._distribution, model._link)
+        null_mu = _compute_null_mu(
+            y,
+            sample_weight,
+            offset,
+            model._distribution,
+            model._link,
+            weight_semantics=model_weight_semantics(model),
+        )
         model._fit_stats = _compute_fit_stats(
             y,
             mu,
@@ -1757,6 +1810,7 @@ def _fit_reml_in_workspace(
             model._link,
             model._result.phi,
             null_mu=null_mu,
+            weight_semantics=model_weight_semantics(model),
         )
         model._solver_result = model._result
         _prime_fit_caches(

@@ -50,6 +50,12 @@ from superglm.model.fit_state import (
     configured_penalty,
 )
 from superglm.penalties.base import penalty_has_targets
+from superglm.solvers.dispersion import (
+    FREQUENCY_WEIGHTS,
+    PRIOR_WEIGHTS,
+    dispersion_likelihood_size,
+    model_weight_semantics,
+)
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 
@@ -104,6 +110,9 @@ class NBProfileResult:
     _y: NDArray | None = field(default=None, repr=False)
     _mu: NDArray | None = field(default=None, repr=False)
     _weights: NDArray | None = field(default=None, repr=False)
+    # The contract the profile was run under; the interval and the deviance
+    # plot must reuse the same likelihood the estimate came from.
+    _weight_semantics: str = field(default=FREQUENCY_WEIGHTS, repr=False)
 
     _ci_cache: dict[float, tuple[float, float]] = field(default_factory=dict, repr=False)
     _publication_locked: bool = field(default=False, init=False, repr=False, compare=False)
@@ -123,7 +132,13 @@ class NBProfileResult:
         y_owned = _immutable_array_copy(np.asarray(y, dtype=np.float64))
         mu_owned = _immutable_array_copy(np.asarray(mu, dtype=np.float64))
         weights_owned = _immutable_array_copy(np.asarray(weights, dtype=np.float64))
-        nll = _nb2_nll(y_owned, mu_owned, weights_owned, float(self.theta_hat))
+        nll = _nb2_nll(
+            y_owned,
+            mu_owned,
+            weights_owned,
+            float(self.theta_hat),
+            weight_semantics=self._weight_semantics,
+        )
         cache = dict(self.cache)
         cache[_theta_cache_key(self.theta_hat)] = nll
         published = type(self)(
@@ -135,6 +150,7 @@ class NBProfileResult:
             _y=y_owned,
             _mu=mu_owned,
             _weights=weights_owned,
+            _weight_semantics=self._weight_semantics,
         )
         object.__setattr__(published, "_publication_locked", True)
         return published
@@ -206,7 +222,14 @@ class NBProfileResult:
             raise RuntimeError(
                 "Profile CI requires fitted mu. Use estimate_nb_theta() to produce this result."
             )
-        result = profile_ci_theta(self._y, self._mu, self._weights, self.theta_hat, alpha=alpha)
+        result = profile_ci_theta(
+            self._y,
+            self._mu,
+            self._weights,
+            self.theta_hat,
+            weight_semantics=self._weight_semantics,
+            alpha=alpha,
+        )
         self._ci_cache[alpha] = result
         return result
 
@@ -254,11 +277,31 @@ class NBProfileResult:
         grid_hi = ci_hi + margin
         theta_grid = np.linspace(grid_lo, grid_hi, n_points)
 
-        w_sum = float(np.sum(self._weights))
-        nll_hat = _nb2_nll(self._y, self._mu, self._weights, self.theta_hat)
+        w_sum = dispersion_likelihood_size(
+            self._weights,
+            weight_semantics=self._weight_semantics,
+        )
+        nll_hat = _nb2_nll(
+            self._y,
+            self._mu,
+            self._weights,
+            self.theta_hat,
+            weight_semantics=self._weight_semantics,
+        )
         deviance = np.array(
             [
-                2.0 * w_sum * (_nb2_nll(self._y, self._mu, self._weights, t) - nll_hat)
+                2.0
+                * w_sum
+                * (
+                    _nb2_nll(
+                        self._y,
+                        self._mu,
+                        self._weights,
+                        t,
+                        weight_semantics=self._weight_semantics,
+                    )
+                    - nll_hat
+                )
                 for t in theta_grid
             ]
         )
@@ -277,7 +320,18 @@ class NBProfileResult:
             cache_thetas = np.array(sorted(self.cache.keys()))
             cache_dev = np.array(
                 [
-                    2.0 * w_sum * (_nb2_nll(self._y, self._mu, self._weights, t) - nll_hat)
+                    2.0
+                    * w_sum
+                    * (
+                        _nb2_nll(
+                            self._y,
+                            self._mu,
+                            self._weights,
+                            t,
+                            weight_semantics=self._weight_semantics,
+                        )
+                        - nll_hat
+                    )
                     for t in cache_thetas
                 ]
             )
@@ -350,8 +404,23 @@ class _ThetaSolve:
 _THETA_SCORE_ASYMPTOTIC_MIN = 1e5
 
 
-def _theta_profile_score(y: NDArray, mu: NDArray, weights: NDArray, theta: float) -> float:
+def _theta_profile_score(
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    theta: float,
+    *,
+    weight_semantics: str = FREQUENCY_WEIGHTS,
+) -> float:
     """Closed-form NB2 profile score dl/dtheta at fixed mu (Lawless 1987).
+
+    Under the prior contract ``w Y ~ NB2(w mu, w theta)``, and differentiating
+    that in ``theta`` leaves every term below unchanged except the digamma
+    pair, which becomes ``psi(w(y+theta)) - psi(w theta)``.  The rest cancels
+    exactly: ``log(w theta) - log(w theta + w mu)`` is ``log theta -
+    log(theta + mu)``, and ``(w y + w theta)/(w mu + w theta)`` is
+    ``(y + theta)/(mu + theta)``.  At ``w == 1`` the two arms are the same
+    expression.
 
     For large theta the direct expression cancels catastrophically: each of
     ``digamma(y+theta) - digamma(theta)``, ``log(theta) - log(theta+mu)``,
@@ -375,12 +444,39 @@ def _theta_profile_score(y: NDArray, mu: NDArray, weights: NDArray, theta: float
     is -x^2/2 + O(x^3) evaluated with error ~eps*|x|, negligible against the
     other O(theta^-2) terms whenever it matters.
     """
-    if theta >= _THETA_SCORE_ASYMPTOTIC_MIN:
+    prior = weight_semantics == PRIOR_WEIGHTS
+    # The expansion is in the psi argument, which the prior contract scales by
+    # the row weight; switching on the smallest such argument keeps every row
+    # inside the regime the expansion was derived for.
+    switch_argument = theta * float(np.min(weights)) if prior else theta
+    if switch_argument >= _THETA_SCORE_ASYMPTOTIC_MIN:
         shifted = theta + y
         x = (y - mu) / (theta + mu)
         core = np.log1p(x) - x
-        psi_tail = 0.5 * y / (theta * shifted) + (1.0 / theta**2 - 1.0 / shifted**2) / 12.0
+        if prior:
+            # psi(w a) - psi(w b) carries 1/w on the first correction and
+            # 1/w**2 on the second; the leading log term is scale-free.
+            psi_tail = (
+                0.5 * y / (theta * shifted) / weights
+                + (1.0 / theta**2 - 1.0 / shifted**2) / 12.0 / weights**2
+            )
+        else:
+            psi_tail = 0.5 * y / (theta * shifted) + (1.0 / theta**2 - 1.0 / shifted**2) / 12.0
         return float(np.sum(weights * (core + psi_tail)))
+    if prior:
+        return float(
+            np.sum(
+                weights
+                * (
+                    digamma(weights * (y + theta))
+                    - digamma(weights * theta)
+                    + np.log(theta)
+                    + 1.0
+                    - np.log(theta + mu)
+                    - (y + theta) / (mu + theta)
+                )
+            )
+        )
     return float(
         np.sum(
             weights
@@ -422,6 +518,7 @@ def _theta_ml(
     weights: NDArray,
     theta: float,
     *,
+    weight_semantics: str = FREQUENCY_WEIGHTS,
     bounds: tuple[float, float] = _THETA_DEFAULT_BOUNDS,
     max_iter: int = 100,
     eps: float = 1e-8,
@@ -454,7 +551,7 @@ def _theta_ml(
     def score(value: float) -> float:
         nonlocal evaluations
         evaluations += 1
-        return _theta_profile_score(y, mu, weights, value)
+        return _theta_profile_score(y, mu, weights, value, weight_semantics=weight_semantics)
 
     s0 = score(theta0)
     if not np.isfinite(s0):
@@ -512,8 +609,22 @@ def _immutable_array_copy(value: NDArray) -> NDArray:
     return np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(array.shape)
 
 
-def _nb2_nll(y: NDArray, mu: NDArray, weights: NDArray, theta: float) -> float:
-    """Weighted mean negative NB2 log-likelihood."""
+def _nb2_nll(
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    theta: float,
+    *,
+    weight_semantics: str = FREQUENCY_WEIGHTS,
+) -> float:
+    """Mean negative NB2 log-likelihood, per unit of the contract's size."""
+    if weight_semantics == PRIOR_WEIGHTS:
+        from superglm.distributions import NegativeBinomial, prior_weight_log_density
+
+        density = prior_weight_log_density(NegativeBinomial(theta), y, mu, weights, 1.0)
+        assert density is not None
+        size = dispersion_likelihood_size(weights, weight_semantics=PRIOR_WEIGHTS)
+        return -float(np.sum(density, dtype=np.float64)) / size
     ll = (
         gammaln(y + theta)
         - gammaln(theta)
@@ -557,9 +668,12 @@ def estimate_nb_theta(
     y : array-like
         Response variable (counts).
     sample_weight : array-like, optional
-        Frequency weights (sample_weight). Must be frequency weights, not
-        variance weights — theta estimation assumes each observation's
-        log-likelihood contribution is scaled by its sample_weight.
+        Observation weights, read under the model's declared
+        ``weight_semantics``. Under ``"frequency"`` each row's log-likelihood
+        contribution is scaled by its weight; under ``"prior"`` the profile
+        follows ``w Y ~ NB2(w mu, w theta)``, which scales the digamma pair in
+        the score instead. The two agree at unit weight and give different
+        ``theta_hat`` otherwise, because they are different likelihoods.
     offset : array-like, optional
         Offset added to the linear predictor.
     theta_bounds : tuple
@@ -647,6 +761,7 @@ def estimate_nb_theta(
     # weakly theta-sensitive); the first profile solve restarts from a
     # method-of-moments estimate at that mean, so the search begins where the
     # data point instead of at an arbitrary fixed value.
+    weight_semantics = model_weight_semantics(model)
     theta = 1.0
     warm_beta = None
     warm_intercept = None
@@ -671,6 +786,7 @@ def estimate_nb_theta(
                 intercept_init=warm_intercept,
                 direct_solve=getattr(model, "_direct_solve", "auto"),
                 reml_penalties=reml_penalties,
+                weight_semantics=model_weight_semantics(model),
             )
         else:
             pirls_result = fit_pirls(
@@ -685,6 +801,7 @@ def estimate_nb_theta(
                 lambda2=configured_lambda2(model),
                 beta_init=warm_beta,
                 intercept_init=warm_intercept,
+                weight_semantics=model_weight_semantics(model),
             )
 
         eta = stabilize_eta(
@@ -704,7 +821,14 @@ def estimate_nb_theta(
             theta_start = moment_start if moment_start is not None else theta_bounds[1]
         else:
             theta_start = theta
-        theta_solve = _theta_ml(y_arr, mu, w_arr, theta_start, bounds=theta_bounds)
+        theta_solve = _theta_ml(
+            y_arr,
+            mu,
+            w_arr,
+            theta_start,
+            weight_semantics=weight_semantics,
+            bounds=theta_bounds,
+        )
         theta_new = theta_solve.theta
 
         nll = _nb2_nll(y_arr, mu, w_arr, theta_new)
@@ -757,9 +881,13 @@ def estimate_nb_theta(
             NBThetaBoundWarning,
             stacklevel=2,
         )
-    nll_final = cache.get(theta_hat, _nb2_nll(y_arr, mu, w_arr, theta_hat))
+    nll_final = cache.get(
+        theta_hat,
+        _nb2_nll(y_arr, mu, w_arr, theta_hat, weight_semantics=weight_semantics),
+    )
 
     result = NBProfileResult(
+        _weight_semantics=weight_semantics,
         theta_hat=theta_hat,
         nll=nll_final,
         n_evaluations=iteration + 1,
@@ -778,6 +906,7 @@ def profile_ci_theta(
     weights: NDArray,
     theta_hat: float,
     *,
+    weight_semantics: str = FREQUENCY_WEIGHTS,
     alpha: float = 0.05,
     theta_range: tuple[float, float] = (0.01, 500.0),
 ) -> tuple[float, float]:
@@ -808,12 +937,17 @@ def profile_ci_theta(
     """
     from scipy.stats import chi2
 
-    w_sum = float(np.sum(weights))
-    nll_hat = _nb2_nll(y, mu, weights, theta_hat)
+    w_sum = dispersion_likelihood_size(weights, weight_semantics=weight_semantics)
+    nll_hat = _nb2_nll(y, mu, weights, theta_hat, weight_semantics=weight_semantics)
     cutoff = chi2.ppf(1.0 - alpha, 1)
 
     def objective(theta: float) -> float:
-        return 2.0 * w_sum * (_nb2_nll(y, mu, weights, theta) - nll_hat) - cutoff
+        return (
+            2.0
+            * w_sum
+            * (_nb2_nll(y, mu, weights, theta, weight_semantics=weight_semantics) - nll_hat)
+            - cutoff
+        )
 
     # The search range must contain theta_hat, which the widened default
     # theta estimation bounds no longer guarantee for the fixed default range.

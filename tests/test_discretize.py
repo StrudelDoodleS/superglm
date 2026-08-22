@@ -338,6 +338,7 @@ class TestWeightContract:
         bin_strategy,
     ):
         model, frame, y, _ = fitted_model
+        model._weight_semantics = "frequency"
         weights = (1 + np.arange(len(frame)) % 4).astype(np.float64)
         rows = np.repeat(np.arange(len(frame)), weights.astype(np.int64))
 
@@ -417,6 +418,7 @@ class TestWeightContract:
 
     def test_zero_frequency_rows_do_not_widen_uniform_geometry(self, fitted_model):
         model, frame, y, _ = fitted_model
+        model._weight_semantics = "frequency"
         frame = frame.iloc[:80].copy()
         y = y[:80]
         frame.loc[frame.index[-1], "age"] = 1.0e6

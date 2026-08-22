@@ -126,7 +126,9 @@ class TestDirectSolverBasic:
             "S_override": 0.25 * np.eye(2),
         }
 
-        retained, retained_inverse, retained_gram = fit_irls_direct(**common)
+        retained, retained_inverse, retained_gram = fit_irls_direct(
+            **common, weight_semantics="frequency"
+        )
         assert retained.rank_info is not None
         assert retained.rank_info.data.rank == 1
         assert retained.rank_info.augmented.rank == 2
@@ -139,6 +141,7 @@ class TestDirectSolverBasic:
         intermediate, intermediate_inverse, intermediate_gram = fit_irls_direct(
             **common,
             compute_rank_info=False,
+            weight_semantics="frequency",
         )
 
         assert intermediate.rank_info is None
@@ -176,6 +179,7 @@ class TestDirectSolverBasic:
             lambda2=1.0,
             S_override=penalty,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
 
         augmented_penalty = np.zeros((3, 3))
@@ -205,6 +209,7 @@ class TestDirectSolverBasic:
             lambda2=1.0,
             S_override=penalty,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
         assert shifted_result.log_det_H == pytest.approx(result.log_det_H, rel=1e-12)
         np.testing.assert_allclose(shifted_inverse, slope_inverse, rtol=1e-12, atol=1e-12)
@@ -226,6 +231,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             S_override=np.zeros((2, 2)),
             return_xtwx=True,
+            weight_semantics="frequency",
         )
 
         assert result.reml_hessian_rank == 2  # intercept plus one identifiable slope
@@ -275,6 +281,7 @@ class TestDirectSolverBasic:
             _return_working_system=True,
             _compute_fit_statistics=False,
             _deviance_init=initial_deviance,
+            weight_semantics="frequency",
         )
 
         assert build_calls == 1
@@ -329,7 +336,7 @@ class TestDirectSolverBasic:
 
         for name in ("decompose_gram", "decompose_gram_if_authoritative"):
             monkeypatch.setattr(irls_direct, name, _counting(name))
-        retained, _, _ = irls_direct.fit_irls_direct(**common)
+        retained, _, _ = irls_direct.fit_irls_direct(**common, weight_semantics="frequency")
         retained_geometry_calls = decomposition_calls
         assert retained.rank_info is not None
 
@@ -337,7 +344,9 @@ class TestDirectSolverBasic:
             ValueError,
             match="requires rank metadata and fit statistics to be disabled",
         ):
-            irls_direct.fit_irls_direct(**common, _compute_reml_geometry=False)
+            irls_direct.fit_irls_direct(
+                **common, _compute_reml_geometry=False, weight_semantics="frequency"
+            )
 
         decomposition_calls = 0
         candidate, omitted_inverse, candidate_gram = irls_direct.fit_irls_direct(
@@ -345,6 +354,7 @@ class TestDirectSolverBasic:
             compute_rank_info=False,
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
+            weight_semantics="frequency",
         )
 
         assert retained_geometry_calls - decomposition_calls == 3
@@ -406,6 +416,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             max_iter=1,
             record_diagnostics=False,
+            weight_semantics="frequency",
         )
 
         assert stats_calls == 1
@@ -435,6 +446,7 @@ class TestDirectSolverBasic:
             max_iter=1,
             record_diagnostics=False,
             debug_recorder=recorder,
+            weight_semantics="frequency",
         )
 
         assert len(recorder.rows) == 1
@@ -479,6 +491,7 @@ class TestDirectSolverBasic:
             tol=0.0,
             record_diagnostics=False,
             debug_recorder=recorder,
+            weight_semantics="frequency",
         )
 
         assert result.n_iter == 2
@@ -555,6 +568,7 @@ class TestDirectSolverBasic:
             lambda2=0.1,
             max_iter=1,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
 
         assert result.n_iter == 1
@@ -637,6 +651,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             max_iter=5,
             tol=1e-12,
+            weight_semantics="frequency",
         )
 
         assert result.n_iter > 1
@@ -672,6 +687,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             max_iter=5,
             tol=1e-12,
+            weight_semantics="frequency",
         )
 
         monkeypatch.setattr(irls_direct, "_has_constant_irls_weights", lambda *_: False)
@@ -685,6 +701,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             max_iter=5,
             tol=1e-12,
+            weight_semantics="frequency",
         )
 
         np.testing.assert_allclose(cached.beta, uncached.beta, rtol=0, atol=1e-12)
@@ -730,6 +747,7 @@ class TestDirectSolverBasic:
             max_iter=20,
             tol=1e-10,
             direct_solve="gram",
+            weight_semantics="frequency",
         )
         cached_centered_calls = centered_calls
 
@@ -746,6 +764,7 @@ class TestDirectSolverBasic:
             max_iter=20,
             tol=1e-10,
             direct_solve="gram",
+            weight_semantics="frequency",
         )
 
         assert cached.n_iter > 1
@@ -804,6 +823,7 @@ class TestDirectSolverBasic:
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
             _compute_scop_postfit_inference=False,
+            weight_semantics="frequency",
         )
         shortcut_row_calls = row_calls
 
@@ -823,6 +843,7 @@ class TestDirectSolverBasic:
             _compute_fit_statistics=False,
             _compute_reml_geometry=False,
             _compute_scop_postfit_inference=False,
+            weight_semantics="frequency",
         )
         ordinary_row_calls = row_calls - shortcut_row_calls
 
@@ -875,6 +896,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             max_iter=50,
             tol=1e-10,
+            weight_semantics="frequency",
         )
         assert centered_calls > 1
 
@@ -889,6 +911,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             max_iter=50,
             tol=1e-10,
+            weight_semantics="frequency",
         )
 
         assert actual.converged and reference.converged
@@ -931,6 +954,7 @@ class TestDirectSolverBasic:
             max_iter=4,
             tol=0.0,
             profile=profile,
+            weight_semantics="frequency",
         )
 
         assert result.n_iter == 4
@@ -964,6 +988,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             tol=1e-10,
             _use_observed_newton=False,
+            weight_semantics="frequency",
         )
         profile = {}
         controlled, controlled_inverse = fit_irls_direct(
@@ -976,6 +1001,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             tol=1e-10,
             profile=profile,
+            weight_semantics="frequency",
         )
 
         assert controlled.n_iter == fisher.n_iter
@@ -1041,6 +1067,7 @@ class TestDirectSolverBasic:
             max_iter=30,
             profile=profile,
             record_diagnostics=True,
+            weight_semantics="frequency",
         )
 
         assert curvature_requests[:3] == [False, True, False]
@@ -1115,6 +1142,7 @@ class TestDirectSolverBasic:
             max_iter=3,
             tol=0.0,
             profile=profile,
+            weight_semantics="frequency",
         )
 
         assert dm.n * dm.p == 100_000
@@ -1149,6 +1177,7 @@ class TestDirectSolverBasic:
             max_iter=3,
             tol=0.0,
             profile=baseline_profile,
+            weight_semantics="frequency",
         )
 
         assert moment_plan_ids == [id(dm.execution_plan)]
@@ -1197,6 +1226,7 @@ class TestDirectSolverBasic:
             lambda2=0.0,
             max_iter=20,
             tol=1e-12,
+            weight_semantics="frequency",
         )
 
         assert result.n_iter > 1
@@ -1275,6 +1305,7 @@ class TestDirectSolverBasic:
             lambda2=m1.lambda2,
             beta_init=m1.result.beta,
             intercept_init=m1.result.intercept,
+            weight_semantics="frequency",
         )
         # Warm start should need <= 2 iterations
         assert result_warm.n_iter <= 2

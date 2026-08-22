@@ -106,14 +106,17 @@ def summary(
     edf = res.effective_df
     n = fs.n_obs
     ll = fs.log_likelihood
-    from superglm.solvers.dispersion import dispersion_likelihood_size
+    from superglm.solvers.dispersion import (
+        dispersion_likelihood_size,
+        model_weight_semantics,
+    )
 
     likelihood_weights = getattr(model, "_fit_weights", None)
     if likelihood_weights is None:
         likelihood_weights = np.ones(n, dtype=np.float64)
     likelihood_size = dispersion_likelihood_size(
-        model._distribution,
         likelihood_weights,
+        weight_semantics=model_weight_semantics(model),
     )
 
     aic = -2 * ll + 2 * edf
@@ -191,6 +194,14 @@ def summary(
         "method": method_str,
         "n_obs": n,
         "effective_df": edf,
+        # Named only where it can matter.  At unit weight the two contracts
+        # publish the same numbers, so a row saying which one produced them
+        # would be noise on the majority of summaries.
+        "weight_semantics": (
+            model_weight_semantics(model)
+            if likelihood_weights is not None and not np.all(likelihood_weights == 1.0)
+            else None
+        ),
         "lambda1": lam1,
         "phi": res.phi,
         "pearson_chi2": fs.pearson_chi2,
@@ -297,7 +308,7 @@ def summary(
         selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
-        distribution=model._distribution,
+        weight_semantics=model_weight_semantics(model),
         selection_shrunk_group_names=selection_shrunk_group_names(
             fitted_penalty(model), model._groups
         ),

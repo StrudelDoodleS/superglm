@@ -1032,6 +1032,7 @@ class TestREMLBackwardCompat:
             lambda2=lambdas,
             offset=np.zeros(n),
             return_xtwx=True,
+            weight_semantics="frequency",
         )
         corr = m._reml_w_correction(
             pirls_result, inv_beta, lambdas, reml_groups, None, np.ones(n), np.zeros(n)
@@ -1365,6 +1366,7 @@ class TestREMLObjectiveFastPath:
             sample_weight=np.array([1.0]),
             offset_arr=np.array([0.0]),
             XtWX=XtWX,
+            weight_semantics="frequency",
         )
         expected = 0.5 * result.deviance + 0.5 * np.log(2.0)
         np.testing.assert_allclose(val, expected, rtol=1e-12, atol=1e-12)
@@ -1399,6 +1401,7 @@ class TestREMLObjectiveFastPath:
                     lambdas={},
                     sample_weight=np.array([np.finfo(np.float64).max, 1.0]),
                     offset_arr=np.zeros(2),
+                    weight_semantics="frequency",
                 )
 
     def test_weight_derivative_correction_rejects_nonfinite_signed_weights(self, monkeypatch):
@@ -1662,6 +1665,7 @@ class TestDiscreteCachedSolve:
             log_det_H=result.log_det_H,
             S_override=S,
             reml_penalties=penalties,
+            weight_semantics="frequency",
         )
         obj_closed = reml_laml_objective(
             dm,
@@ -1678,6 +1682,7 @@ class TestDiscreteCachedSolve:
             S_override=S,
             reml_penalties=penalties,
             tensor_pair_evaluations=tensor_evals,
+            weight_semantics="frequency",
         )
 
         grad_generic = reml_direct_gradient(

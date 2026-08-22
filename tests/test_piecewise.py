@@ -604,14 +604,17 @@ class TestValidationRules:
 
 
 class TestZeroWeightRows:
-    """A zero weight is zero replicated rows: predictable, but never geometry.
+    """A zero-weight row is predictable, but never geometry, under either contract.
 
     The stated rule is ``_spline_knots.knot_geometry_data``'s, and the spline
     path already follows it; these tests hold ``Piecewise`` to the same
-    contract, mirroring ``test_spline_weight_geometry``.
+    contract, mirroring ``test_spline_weight_geometry``.  A zero replication
+    count is no rows, and a zero prior weight is a row observed with infinite
+    variance -- neither is an observation, so neither may shape a boundary.
     """
 
-    def test_the_fit_is_identical_with_and_without_the_zero_weight_rows(self):
+    @pytest.mark.parametrize("semantics", ["frequency", "prior"])
+    def test_the_fit_is_identical_with_and_without_the_zero_weight_rows(self, semantics):
         case = make_case("zero_weight_rows")
         keep = case.sample_weight > 0.0
         assert not np.all(keep), "fixture must actually carry zero-weight rows"
@@ -622,6 +625,7 @@ class TestZeroWeightRows:
                     "x": Piecewise([25.0, 50.0, 75.0], base=50.0),
                     "region": Categorical(base="first"),
                 },
+                weight_semantics=semantics,
             )
             model.fit(X, y, sample_weight=w)
             return model

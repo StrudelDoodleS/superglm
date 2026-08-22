@@ -7,12 +7,13 @@ from typing import Any
 import numpy as np
 
 from superglm._utils import _explained_deviance
+from superglm.distributions import weighted_log_likelihood
 from superglm.editor.evaluation import (
     EvaluationDataset,
     _validate_evaluation_weights,
     named_metrics_dataset,
 )
-from superglm.solvers.dispersion import dispersion_likelihood_size
+from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 
 METRIC_LABELS = {
     "deviance": "Deviance",
@@ -106,6 +107,7 @@ def compute_dataset_metrics(model, dataset: EvaluationDataset) -> dict[str, floa
         dataset.sample_weight,
         dataset.n_obs,
         family=model._distribution,
+        weight_semantics=model_weight_semantics(model),
     )
     fit_artifacts = _fit_artifact_metrics(model, dataset)
     if fit_artifacts is not None:
@@ -141,7 +143,10 @@ def _fit_artifact_metrics(model, dataset: EvaluationDataset) -> dict[str, float]
     weights = dataset.sample_weight
     if weights is None:
         weights = np.ones(n, dtype=np.float64)
-    likelihood_size = dispersion_likelihood_size(model._distribution, weights)
+    likelihood_size = dispersion_likelihood_size(
+        weights,
+        weight_semantics=model_weight_semantics(model),
+    )
     log_likelihood = float(fit_stats.log_likelihood)
     aic = float(-2.0 * log_likelihood + 2.0 * edf)
     bic = float(-2.0 * log_likelihood + np.log(likelihood_size) * edf)
@@ -172,9 +177,16 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
     family = model._distribution
     phi = float(model.result.phi)
     edf = float(model.result.effective_df)
-    likelihood_size = dispersion_likelihood_size(family, w)
+    likelihood_size = dispersion_likelihood_size(
+        w,
+        weight_semantics=model_weight_semantics(model),
+    )
     deviance = float(np.sum(w * family.deviance_unit(y_arr, mu)))
-    log_likelihood = float(family.log_likelihood(y_arr, mu, w, phi))
+    log_likelihood = float(
+        weighted_log_likelihood(
+            family, y_arr, mu, w, phi, weight_semantics=model_weight_semantics(model)
+        )
+    )
     aic = float(-2.0 * log_likelihood + 2.0 * edf)
     bic = float(-2.0 * log_likelihood + np.log(likelihood_size) * edf)
     denom = likelihood_size - edf - 1.0
@@ -207,6 +219,13 @@ def _null_deviance_and_mu(
 ) -> tuple[float, np.ndarray]:
     from superglm.model.fit_ops import _compute_null_mu
 
-    mu = _compute_null_mu(y, weights, offset, model._distribution, model._link)
+    mu = _compute_null_mu(
+        y,
+        weights,
+        offset,
+        model._distribution,
+        model._link,
+        weight_semantics=model_weight_semantics(model),
+    )
     deviance = float(np.sum(weights * model._distribution.deviance_unit(y, mu)))
     return deviance, mu

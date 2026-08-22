@@ -650,7 +650,7 @@ def double_lift_chart(
     y_pred_current : array-like
         Current/baseline/manual predictions (holdout).
     sample_weight : array-like or None
-        Observation weights (case/frequency weights).
+        Observation weights, read as replication mass by this comparison.
     exposure : array-like or None
         Exposure measure for rate models.
     n_bins : int

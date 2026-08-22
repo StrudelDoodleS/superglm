@@ -122,11 +122,13 @@ def _fit_frequency_comparison(
         family=_family_for_frequency_test(family_name),
         features={"x": Numeric(), "z": Numeric()},
         selection_penalty=0.0,
+        weight_semantics="frequency",
     ).fit(X, y, sample_weight=sample_weight)
     model_b = SuperGLM(
         family=_family_for_frequency_test(family_name),
         features={"x": Numeric()},
         selection_penalty=0.0,
+        weight_semantics="frequency",
     ).fit(X, y, sample_weight=sample_weight)
     return model_a, model_b
 

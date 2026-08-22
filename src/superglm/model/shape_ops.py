@@ -11,7 +11,10 @@ from numpy.typing import NDArray
 from superglm._frame import as_eager_frame
 from superglm.group_matrix import GroupMatrix
 from superglm.model.fit_state import FittedStateRevision
-from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+from superglm.solvers.dispersion import (
+    model_weight_semantics,
+    pearson_residual_degrees_of_freedom,
+)
 from superglm.types import PenaltyComponent
 
 
@@ -756,9 +759,9 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
         variance = np.maximum(model._distribution.variance(mu), _VARIANCE_FLOOR)
         pearson = float(np.sum(weights * (y - mu) ** 2 / variance))
         residual_df = pearson_residual_degrees_of_freedom(
-            model._distribution,
             weights,
             model._solver_result.effective_df,
+            weight_semantics=model_weight_semantics(model),
         )
         phi = pearson / residual_df
 
@@ -778,6 +781,7 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
         model._link,
         float(phi),
         null_mu=model._fit_null_mu,
+        weight_semantics=model_weight_semantics(model),
     )
     model._summary_cache = None
 

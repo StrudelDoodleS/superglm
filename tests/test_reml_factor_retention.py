@@ -50,12 +50,14 @@ def penalized_fit_inputs():
 class TestRemlDecompositionRetention:
     def test_default_call_retains_nothing(self, penalized_fit_inputs):
         kwargs, _X_raw, _S = penalized_fit_inputs
-        result, _inverse, _gram = fit_irls_direct(**kwargs)
+        result, _inverse, _gram = fit_irls_direct(**kwargs, weight_semantics="frequency")
         assert result.reml_slope_decomposition is None
 
     def test_opt_in_retention_matches_independent_oracle(self, penalized_fit_inputs):
         kwargs, X_raw, S = penalized_fit_inputs
-        result, inverse, _gram = fit_irls_direct(**kwargs, _retain_reml_decomposition=True)
+        result, inverse, _gram = fit_irls_direct(
+            **kwargs, _retain_reml_decomposition=True, weight_semantics="frequency"
+        )
         decomposition = result.reml_slope_decomposition
         assert decomposition is not None
 
@@ -103,6 +105,7 @@ class TestRemlDecompositionRetention:
             return_xtwx=True,
             S_override=np.zeros((2, 2)),
             _retain_reml_decomposition=True,
+            weight_semantics="frequency",
         )
         decomposition = result.reml_slope_decomposition
         assert decomposition is not None
@@ -136,6 +139,7 @@ class TestRemlDecompositionRetention:
             _compute_reml_geometry=False,
             _compute_fit_statistics=False,
             compute_rank_info=False,
+            weight_semantics="frequency",
         )
         assert result.reml_slope_decomposition is None
 
@@ -179,6 +183,7 @@ class TestRemlDecompositionRetention:
             direct_solve="structured",
             reml_penalties=penalties,
             _retain_reml_decomposition=True,
+            weight_semantics="frequency",
         )
         assert result.direct_backend == "structured"
         assert result.reml_slope_decomposition is None

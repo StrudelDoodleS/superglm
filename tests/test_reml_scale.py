@@ -77,7 +77,7 @@ def test_gamma_scale_profile_matches_direct_wood_criterion() -> None:
     weights = np.ones_like(y)
     expected_phi, expected_criterion = _brute_gamma_profile(y, weights, 3.7, 2.0)
 
-    profile_data = prepare_gamma_reml_scale_data(y, weights)
+    profile_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency")
     actual = profile_gamma_reml_scale(profile_data, 3.7, 2.0)
 
     assert actual.phi == pytest.approx(expected_phi, rel=2.0e-8)
@@ -99,9 +99,13 @@ def test_gamma_frequency_weights_match_expanded_rows() -> None:
     weights = np.array([1.0, 3.0, 2.0, 4.0])
     repeated_y = np.repeat(y, weights.astype(int))
 
-    weighted = profile_gamma_reml_scale(prepare_gamma_reml_scale_data(y, weights), 5.2, 1.0)
+    weighted = profile_gamma_reml_scale(
+        prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency"), 5.2, 1.0
+    )
     expanded = profile_gamma_reml_scale(
-        prepare_gamma_reml_scale_data(repeated_y, np.ones_like(repeated_y)),
+        prepare_gamma_reml_scale_data(
+            repeated_y, np.ones_like(repeated_y), weight_semantics="frequency"
+        ),
         5.2,
         1.0,
     )
@@ -116,6 +120,7 @@ def test_gamma_scale_profile_rejects_nonpositive_effective_likelihood_size() -> 
             prepare_gamma_reml_scale_data(
                 np.array([1.0, 2.0]),
                 np.array([0.1, 0.1]),
+                weight_semantics="frequency",
             ),
             1.0,
             penalty_nullity=1.0,
@@ -149,7 +154,7 @@ def test_gamma_scale_profile_rejects_invalid_reduced_statistics(
 )
 def test_gamma_scale_preparation_rejects_overflowed_reductions(y, weights) -> None:
     with pytest.raises(ValueError, match="finite"):
-        prepare_gamma_reml_scale_data(y, weights)
+        prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency")
 
 
 def test_gaussian_profile_uses_frequency_weight_likelihood_size() -> None:
@@ -226,7 +231,9 @@ def test_gamma_scale_profile_adaptively_brackets_extreme_valid_optima(
     inverse_phi_bound: float,
     comparison: str,
 ) -> None:
-    profile_data = prepare_gamma_reml_scale_data(np.array([1.0]), np.array([1.0]))
+    profile_data = prepare_gamma_reml_scale_data(
+        np.array([1.0]), np.array([1.0]), weight_semantics="frequency"
+    )
 
     profile = profile_gamma_reml_scale(
         profile_data,
@@ -249,7 +256,9 @@ def test_gamma_scale_profile_adaptively_brackets_extreme_valid_optima(
 
 def test_gamma_scale_profile_handles_curvature_below_square_underflow() -> None:
     """A valid tiny shape must not fail after the root has been found."""
-    profile_data = prepare_gamma_reml_scale_data(np.array([1.0]), np.array([1.0]))
+    profile_data = prepare_gamma_reml_scale_data(
+        np.array([1.0]), np.array([1.0]), weight_semantics="frequency"
+    )
 
     profile = profile_gamma_reml_scale(
         profile_data,
@@ -309,7 +318,7 @@ def test_gamma_scale_profile_is_stationary_across_wide_deviance_sweep(
 ) -> None:
     y = np.array([0.4, 0.8, 1.7, 3.1])
     weights = np.array([0.5, 1.25, 2.0, 1.75])
-    profile_data = prepare_gamma_reml_scale_data(y, weights)
+    profile_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency")
 
     profile = profile_gamma_reml_scale(
         profile_data,

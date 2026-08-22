@@ -37,6 +37,7 @@ def _compile_without_solving(model: SuperGLM, X, y: np.ndarray) -> SuperGLM:
         family=model._config.family,
         required_columns=tuple(model._config.splines or model._feature_order),
         check_all_columns=model._config.splines is not None,
+        weight_semantics="prior",
     )
     if model._splines is not None:
         auto_detect(model, validated.X, validated.sample_weight)

@@ -51,7 +51,11 @@ def _result(
     )
 
 
-def _cached_gaussian_objective(y: np.ndarray, weights: np.ndarray) -> REMLObjectiveEvaluation:
+def _cached_gaussian_objective(
+    y: np.ndarray,
+    weights: np.ndarray,
+    semantics: str = "frequency",
+) -> REMLObjectiveEvaluation:
     evaluation = reml_laml_objective(
         _CachedDesign(),
         Gaussian(),
@@ -66,6 +70,7 @@ def _cached_gaussian_objective(y: np.ndarray, weights: np.ndarray) -> REMLObject
         log_det_H=float(np.log(7.0)),
         S_override=np.array([[2.0]]),
         return_evaluation=True,
+        weight_semantics=semantics,
     )
     assert isinstance(evaluation, REMLObjectiveEvaluation)
     return evaluation
@@ -87,6 +92,24 @@ def test_gaussian_objective_uses_full_wood_scale_criterion_and_frequency_size() 
     assert evaluation.value == pytest.approx(expected, rel=1e-13)
     assert evaluation.profiled_scale == expected_scale
     assert evaluation.penalty_nullity == 1.0
+
+
+def test_gaussian_objective_prior_weights_use_the_row_count_and_the_weight_constant() -> None:
+    y = np.array([0.3, 0.9, 1.7])
+    weights = np.array([2.0, 1.0, 3.0])
+
+    evaluation = _cached_gaussian_objective(y, weights, semantics="prior")
+
+    penalty_quad = 0.4 * 2.0 * 0.4
+    expected_scale = profile_gaussian_reml_scale(
+        penalized_deviance=4.1 + penalty_quad,
+        likelihood_size=float(len(y)),
+        penalty_nullity=1.0,
+        saturated_log_weight=float(0.5 * np.sum(np.log(weights))),
+    )
+    expected = expected_scale.criterion + 0.5 * (np.log(7.0) - np.log(2.0))
+    assert evaluation.value == pytest.approx(expected, rel=1e-13)
+    assert evaluation.profiled_scale == expected_scale
 
 
 def test_gaussian_objective_frequency_weights_match_expanded_rows() -> None:
@@ -225,7 +248,7 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
         qp_saved_state=[],
         profile={},
         total_start=0.0,
-        compute_fit_stats=lambda *args: {},
+        compute_fit_stats=lambda *args, **kwargs: {},
     )
 
     evaluation = reml_laml_objective(
@@ -243,6 +266,7 @@ def test_finalize_profiles_phi_from_post_qp_state(monkeypatch: pytest.MonkeyPatc
         S_override=np.zeros((1, 1)),
         reml_penalties=[],
         return_evaluation=True,
+        weight_semantics="frequency",
     )
     assert isinstance(evaluation, REMLObjectiveEvaluation)
     assert evaluation.profiled_scale is not None
@@ -306,10 +330,15 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
     real_prepare = prepare_gamma_reml_scale_data
     real_objective = reml_laml_objective
 
-    def counted_prepare(actual_y, actual_weights):
+    def counted_prepare(distribution, actual_y, actual_weights, *, weight_semantics):
         nonlocal prepare_calls
         prepare_calls += 1
-        return real_prepare(actual_y, actual_weights)
+        return (
+            None,
+            None,
+            real_prepare(actual_y, actual_weights, weight_semantics=weight_semantics),
+            None,
+        )
 
     fit_calls = 0
 
@@ -325,7 +354,7 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
         forwarded_ids.append(id(kwargs["gamma_scale_data"]))
         return real_objective(*args, **kwargs)
 
-    monkeypatch.setattr(direct, "prepare_gamma_reml_scale_data", counted_prepare)
+    monkeypatch.setattr(direct, "prepare_reml_scale_data", counted_prepare)
     monkeypatch.setattr(direct, "fit_irls_direct", fake_fit)
     monkeypatch.setattr(direct, "reml_laml_objective", captured_objective)
     monkeypatch.setattr(
@@ -355,6 +384,7 @@ def test_direct_gamma_prepares_rows_once_and_reuses_reduced_stats(
         reml_tol=1.0e-8,
         verbose=False,
         reml_penalties=[penalty],
+        weight_semantics="prior",
     )
 
     assert fit_calls >= 3

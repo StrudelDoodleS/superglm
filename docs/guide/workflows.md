@@ -125,10 +125,10 @@ result = cross_validate(
 )
 ```
 
-Built-in deviance and negative-log-likelihood averages use the fitted family's
-likelihood size: `sum(sample_weight)` for non-Tweedie case/frequency weights,
-and the physical observation count for Tweedie EDM prior weights. This keeps
-fold and pooled scores on the same scale as fitting.
+Built-in deviance and negative-log-likelihood averages use the fitted model's
+declared likelihood size: `sum(sample_weight)` under
+`weight_semantics="frequency"`, and the count of positive-weight rows under
+`"prior"`. This keeps fold and pooled scores on the same scale as fitting.
 
 Then refit on all training data and evaluate:
 

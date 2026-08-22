@@ -1284,12 +1284,13 @@ class OrderedCategorical:
         documented inference-geometry rule) and ``Piecewise`` uses them for
         ``base='most_exposed'`` and its support rules.
 
-        The exception is hosted MODEL geometry under a weighted-EDM family:
-        Tweedie weights are prior weights, not frequency mass, so a hosted
+        The exception is hosted MODEL geometry under the prior contract:
+        prior weights are precisions, not frequency mass, so a hosted
         Piecewise's int-mode placement and base selection follow physical rows
         exactly as the numeric-axis term does. The builder stamps
         ``_inner_geometry_physical_rows`` per build because only it knows the
-        family; direct spec-API builds keep the frequency-weight reading.
+        declared contract; direct spec-API builds keep the replication
+        reading.
         """
         from dataclasses import replace
 
