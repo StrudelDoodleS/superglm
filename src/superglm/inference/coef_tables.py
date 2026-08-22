@@ -141,6 +141,7 @@ def build_coef_rows(
     group_matrices: list | None = None,
     sample_weights: NDArray | None = None,
     weight_semantics: str | None = None,
+    recorded_likelihood_size: float | None = None,
     selection_shrunk_group_names: set[str] | None = None,
 ) -> list[_CoefRow]:
     """Build coefficient table rows for summary output.
@@ -230,6 +231,13 @@ def build_coef_rows(
                 effective_df,
                 weight_semantics=weight_semantics,
             )
+        # A released fit (``retain_fit_state=False``) has no weight rows left,
+        # but the fit recorded its own likelihood size before discarding them.
+        # Falling back to ``n_obs`` there would report the row count for a
+        # prior-contract fit carrying zero weights, and ``sum(w)`` is not the
+        # row count under ``"frequency"`` either.
+        if recorded_likelihood_size is not None:
+            return max(float(recorded_likelihood_size) - effective_df, 1.0)
         return max(float(n_obs) - effective_df, 1.0)
 
     # Compute per-group SEs from augmented inverse (accounts for intercept).

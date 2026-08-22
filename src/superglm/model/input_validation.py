@@ -12,8 +12,77 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm._utils import _validate_strict_prior_weights
-from superglm.distributions import Distribution, Tweedie, validate_response
+from superglm.distributions import (
+    Distribution,
+    NegativeBinomial,
+    Poisson,
+    Tweedie,
+    validate_response,
+)
 from superglm.solvers.dispersion import PRIOR_WEIGHTS
+
+
+class PriorWeightLatticeWarning(UserWarning):
+    """A counting family's prior-weighted response left its own support."""
+
+
+#: Relative slack when testing ``w * y`` for integrality.  The product is
+#: formed in floating point from two user arrays, so an exactly-integral
+#: intent (``count / exposure`` times ``exposure``) can land a few ulps away.
+_LATTICE_RELATIVE_TOLERANCE = 1e-9
+
+
+def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semantics: str) -> None:
+    """Warn when a prior-weighted counting response is off its own lattice.
+
+    The prior construction for Poisson and the negative binomial is
+    ``w Y ~ Poisson(w mu)`` and ``w Y ~ NB2(w mu, w theta)``, both supported on
+    the non-negative integers.  Where ``w * y`` is not integral the reported
+    density evaluates ``gammaln`` at a fractional argument, which interpolates
+    the counting density: the value is finite and smooth, but it is not a
+    probability.  The log-likelihood, AIC and BIC are then a quasi-likelihood,
+    and for the negative binomial the interpolated ``Gamma(w y + w theta) /
+    Gamma(w theta)`` factor is theta-dependent, so it reaches ``theta_hat``
+    and its profile interval too.
+
+    This warns rather than raises deliberately.  The canonical case is
+    on-lattice by construction -- ``y = count / exposure`` weighted by
+    ``exposure`` -- and where it is not, the two contracts still share a score
+    equation, so ``beta``, the fitted means and the deviance are unaffected.
+    Refusing an otherwise valid fit over a defect confined to its reported
+    likelihood would cost more than it protects; saying so plainly does not.
+    """
+    if weight_semantics != PRIOR_WEIGHTS:
+        return
+    if not isinstance(family, Poisson | NegativeBinomial):
+        return
+    scaled = weights * y
+    slack = _LATTICE_RELATIVE_TOLERANCE * np.maximum(1.0, np.abs(scaled))
+    off_lattice = np.abs(scaled - np.rint(scaled)) > slack
+    count = int(np.count_nonzero(off_lattice))
+    if count == 0:
+        return
+    import warnings
+
+    name = type(family).__name__
+    warnings.warn(
+        f"{count} of {len(scaled)} rows have a non-integral sample_weight * y "
+        f'under weight_semantics="prior", which puts them off the {name} '
+        "lattice. Coefficients, fitted means and deviance are unaffected -- "
+        "the two weight contracts share a score equation -- but the reported "
+        "log-likelihood, AIC and BIC are a quasi-likelihood rather than an "
+        "exact density"
+        + (
+            ", and theta_hat and its profile interval are affected as well"
+            if isinstance(family, NegativeBinomial)
+            else ""
+        )
+        + ". The canonical weighting (y = count / exposure with "
+        "sample_weight = exposure) is on-lattice; pass "
+        'weight_semantics="frequency" if the weights are replication counts.',
+        PriorWeightLatticeWarning,
+        stacklevel=4,
+    )
 
 
 @dataclass(frozen=True)
@@ -177,4 +246,5 @@ def validate_fit_input(
         raise ValueError("sample_weight must not be all zero")
     offset_arr = None if offset is None else _finite_vector("offset", offset, n_rows)
     validate_response(y_arr, family)
+    _check_counting_lattice(y_arr, weight_arr, family, weight_semantics)
     return ValidatedFitInput(frame, y_arr, weight_arr, offset_arr)

@@ -320,6 +320,7 @@ def summary(
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
         weight_semantics=model_weight_semantics(model),
+        recorded_likelihood_size=likelihood_size,
         selection_shrunk_group_names=selection_shrunk_group_names(
             fitted_penalty(model), model._groups
         ),

@@ -751,3 +751,104 @@ class TestTheContractReachesTheDerivedReports:
             weights[~extreme],
         )
         np.testing.assert_array_equal(with_ignored, deleted)
+
+
+class TestTheCountingLatticeIsDeclared:
+    """The prior construction for counting families has a support.
+
+    ``w Y ~ Poisson(w mu)`` and ``w Y ~ NB2(w mu, w theta)`` live on the
+    non-negative integers.  Off that lattice ``gammaln`` interpolates the
+    counting density, so the reported likelihood is a quasi-likelihood -- said
+    out loud rather than reported as an exact density.
+    """
+
+    def _counts(self, seed=40, n=200):
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        counts = rng.poisson(np.exp(0.5 + 1.2 * frame["x"].to_numpy())).astype(float)
+        exposure = rng.uniform(0.5, 4.0, n)
+        return frame, counts, exposure
+
+    def _fit_warnings(self, frame, y, weights, family, semantics):
+        import warnings
+
+        from superglm import Numeric
+        from superglm.model.input_validation import PriorWeightLatticeWarning
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            SuperGLM(family=family, features={"x": Numeric()}, weight_semantics=semantics).fit(
+                frame, y, sample_weight=weights
+            )
+        return [w for w in caught if issubclass(w.category, PriorWeightLatticeWarning)]
+
+    def test_the_canonical_weighting_is_on_lattice_and_silent(self):
+        """``y = count / exposure`` weighted by ``exposure`` recovers the count."""
+        frame, counts, exposure = self._counts()
+        assert self._fit_warnings(frame, counts / exposure, exposure, Poisson(), "prior") == []
+
+    def test_unit_weights_are_silent(self):
+        frame, counts, _ = self._counts()
+        ones = np.ones(len(frame))
+        assert self._fit_warnings(frame, counts, ones, Poisson(), "prior") == []
+
+    def test_the_frequency_contract_never_scales_the_lattice(self):
+        """A replication count multiplies the density; it does not move the support."""
+        frame, counts, exposure = self._counts()
+        assert self._fit_warnings(frame, counts, exposure, Poisson(), "frequency") == []
+
+    @pytest.mark.parametrize(
+        ("family", "mentions_theta"),
+        [
+            pytest.param(Poisson(), False, id="poisson"),
+            pytest.param(NegativeBinomial(theta=1.5), True, id="negative_binomial"),
+        ],
+    )
+    def test_an_off_lattice_prior_weight_says_so(self, family, mentions_theta):
+        frame, counts, exposure = self._counts()
+        caught = self._fit_warnings(frame, counts, exposure, family, "prior")
+        assert len(caught) == 1
+        message = str(caught[0].message)
+        assert "quasi-likelihood" in message
+        # The NB interpolated factor is theta-dependent, so it reaches the
+        # estimate itself and not only the reported likelihood.
+        assert ("theta_hat" in message) is mentions_theta
+
+    def test_a_released_fit_reports_exactly_what_a_retained_one_does(self):
+        """Releasing the rows must not change a single published number.
+
+        ``retain_fit_state=False`` drops the weights, and every quantity keyed
+        on the likelihood size then had to fall back: BIC and AICc through
+        ``dispersion_likelihood_size``, the smooth terms' Wald reference
+        through ``_wood_residual_df``, and the contract row itself. Comparing
+        the whole rendered summary covers all of them at once, including any
+        added later.
+        """
+        rng, frame = _frame(seed=41, n=140)
+        y = _response(rng, frame, Gamma())
+        weights = rng.uniform(0.5, 3.0, len(frame))
+        weights[:9] = 0.0
+
+        def summarised(retain):
+            model = SuperGLM(
+                family=Gamma(),
+                features={"x": Spline(n_knots=5)},
+                weight_semantics="prior",
+                retain_fit_state=retain,
+            )
+            model.fit(frame, y, sample_weight=weights)
+            return model.summary()
+
+        retained, released = summarised(True), summarised(False)
+
+        # The smooth's Wald p-value is the sharp one: it reads the residual
+        # degrees of freedom directly, and the rendered table rounds to three
+        # decimals where the whole difference hides. Measured without the fix,
+        # 2.739e-06 against 2.408e-06.
+        retained_p = [r.wald_p for r in retained._coef_rows if r.wald_p is not None]
+        released_p = [r.wald_p for r in released._coef_rows if r.wald_p is not None]
+        assert retained_p, "fixture must produce at least one Wald p-value"
+        assert released_p == retained_p
+
+        # And nothing else in the report moved either.
+        assert str(released) == str(retained)

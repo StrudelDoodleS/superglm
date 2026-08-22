@@ -183,6 +183,28 @@ positive weights, because its compound-Poisson normalizer carries `log w`.
 Under `"frequency"` the weight never enters that normalizer, so Tweedie admits
 zero weights there like every other family.
 
+### Counting families have a lattice
+
+The prior construction for Poisson and the negative binomial is
+`w Y ~ Poisson(w mu)` and `w Y ~ NB2(w mu, w theta)`, both supported on the
+non-negative integers. The canonical weighting is on that lattice by
+construction — `y = count / exposure` with `sample_weight = exposure` recovers
+the count — and that is the case this change exists to serve.
+
+Where `w * y` is *not* integral, the density evaluates `gammaln` at a
+fractional argument, which interpolates the counting density: finite, smooth,
+and not a probability. Coefficients, fitted means and deviance are unaffected
+(the two contracts share a score equation), but the reported log-likelihood,
+AIC and BIC are then a quasi-likelihood — and for the negative binomial the
+interpolated `Gamma(w y + w theta) / Gamma(w theta)` factor is
+`theta`-dependent, so it reaches `theta_hat` and its profile interval as well.
+
+A fit in that position emits `PriorWeightLatticeWarning` naming the affected
+row count. It warns rather than raises: refusing an otherwise valid fit over a
+defect confined to its reported likelihood would cost more than it protects.
+If the weights are replication counts, `weight_semantics="frequency"` is the
+right declaration and the lattice question does not arise.
+
 ### One declared limitation
 
 `estimate_p` profiles the Tweedie power against the compound-Poisson density
