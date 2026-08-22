@@ -18,7 +18,7 @@ from superglm.solvers.constrained_qp import (
     _solve_saddle_least_squares,
     solve_constrained_qp,
 )
-from superglm.solvers.rank import decompose_gram
+from superglm.solvers.rank import decompose_gram, needs_factor_certification
 
 
 class TestUnconstrainedFallback:
@@ -2403,7 +2403,7 @@ class TestRankGateSeesCollinearityNotScale:
             "scale-blindness no longer holds and the rationale beside it is stale"
         )
 
-    def test_the_same_eigenvalue_planted_after_equilibration_does_drop_it(self):
+    def test_the_same_eigenvalue_planted_after_equilibration_reaches_the_gate(self):
         """The contrast that makes the point above a property rather than an
         accident: identical raw conditioning, opposite gate decision.
 
@@ -2419,9 +2419,18 @@ class TestRankGateSeesCollinearityNotScale:
         and the mirror image under 2.4.2.
 
         With the cut floored at the bar, the residue is inside it on every
-        configuration -- ``0.017x to 0.245x``, at least 4.1x of clearance --
-        so the drop is now a function of the data and this reads 5 everywhere.
-        Verified on 7 microkernels x both numpy generations.
+        configuration, so the drop is now a function of the data and this reads
+        5 everywhere.
+
+        **Two sweeps measure that residue and only one of them is the
+        portability margin.**  Over 7 microkernels x both numpy generations it
+        runs ``0.017x to 0.245x`` of the bar, i.e. 4.1x of clearance.  Over 7
+        microkernels x {this matrix, this matrix with the residue reflected
+        through its own eigenvector} it runs ``0.017x to 0.488x`` -- **2.05x**
+        -- which is the figure ``rank.py``'s ``_eigensolver_relative_bar``
+        records, and it is the one to quote: that module chose reflection
+        precisely because it is the conservative stand-in for a BLAS this
+        machine cannot run, where a numpy generation is not.  Quote 2.05x.
         """
         rng = np.random.default_rng(11)
         width = 6
@@ -2431,10 +2440,103 @@ class TestRankGateSeesCollinearityNotScale:
         correlation = equilibrated / np.outer(scale, scale)
         H = 0.5 * (correlation + correlation.T)
 
-        decomposition = decompose_gram(H)
+        # ``eigh`` and NOT ``eigvalsh``: the with-vectors driver is the one
+        # ``decompose_gram`` runs, the two are different LAPACK paths, and they
+        # do not agree here.  Over the sweep ``eigvalsh`` reaches -7.252e-16 on
+        # SANDYBRIDGE where ``eigh`` peaks at +5.504e-16, so a precondition
+        # written on the wrong one would be describing a spectrum the gate
+        # never sees.
+        eigenvalues, _ = np.linalg.eigh(H)
+        eigensolver_bar = width * np.finfo(np.float64).eps * float(np.max(np.abs(eigenvalues)))
 
-        assert decomposition.rank < decomposition.width, (
-            "fixture no longer plants inside the retention band"
+        diagonal = np.diag([1.0] * (width - 1) + [1e-20])
+        diagonal_scale = np.sqrt(np.diag(diagonal))
+        diagonal_correlation = diagonal / np.outer(diagonal_scale, diagonal_scale)
+
+        # PRECONDITIONS.  Neither of these is the assertion -- they establish
+        # that the fixture still shows the gate what the contrast requires,
+        # which is a clean 1.0 on one side and something under the
+        # eigensolver's own resolution on the other.
+        assert np.linalg.eigvalsh(diagonal_correlation).min() == pytest.approx(1.0, abs=1e-12), (
+            "the diagonal plant no longer equilibrates to the identity, so the "
+            "contrast this test draws has lost one of its two sides"
+        )
+        assert abs(float(eigenvalues.min())) < eigensolver_bar, (
+            "the planted direction is no longer inside the eigensolver's "
+            f"resolution: |{eigenvalues.min():.6e}| against a bar of "
+            f"{eigensolver_bar:.6e}, so the gate is now being shown something "
+            "it can resolve and the contrast no longer holds"
+        )
+
+        # THE ASSERTION, AND IT GOES THROUGH THE GATE.  An earlier revision of
+        # this test stopped at the two preconditions above, which was a
+        # mistake worth naming: they are arithmetic on arrays the test builds
+        # itself, so ``decompose_gram`` was never called at all.  Under that
+        # revision, deleting the rank truncation outright -- forcing
+        # ``retained_mask`` all-True, a gate that can never drop a direction --
+        # left this whole class green, and so did replacing ``decompose_gram``
+        # with an unconditional ``raise``.  The old ``rank < width`` caught
+        # both.  Removing a coin-flip assertion is right; removing the call is
+        # not.
+        #
+        # ``needs_factor_certification`` is asserted BESIDE the rank, not
+        # instead of it, and it is the module's OWN answer to this ambiguity --
+        # its docstring is about normal equations that "retain a different
+        # direction while reporting the same rank", which is this fixture.  The
+        # diagonal plant declines to certify on all 14 configurations, and that
+        # pair is the contrast this class is named for.
+        #
+        # **SUPERSEDED, VERSION 2:** the reason for reaching for certification
+        # was that it "holds on BOTH sides of the rank flip -- the collinear
+        # plant certifies on all 14 while its rank reads 5 on six kernels and 6
+        # on SKYLAKEX".  Under version 3 there is no rank flip to hold on both
+        # sides of; the rank reads 5 everywhere, which is what the paragraph
+        # below the assertions records.
+        #
+        # **And on this fixture the certification assertion is now IMPLIED by
+        # the rank one, so it is documentation rather than an independent
+        # observation.**  All six columns are active and ``psd_semantics`` is
+        # True here, so ``rank < 6`` forces ``resolution_limited`` through its
+        # first clause, and ``_certification_required`` then returns True on
+        # ``rank < width and resolution_limited``.  It cannot fail unless the
+        # rank assertion already has.  Kept because it names the contrast in
+        # the module's own vocabulary, not because it adds coverage.
+        #
+        # **AND ITS TEETH ARE STATED RATHER THAN ASSUMED.**  Mutation-checked:
+        # replacing ``decompose_gram`` with a ``raise`` reds this, which is
+        # what the revision that stopped at the preconditions failed to do.
+        # Forcing ``retained_mask`` all-True -- a gate that never truncates --
+        # does not red the certification assertion either, which is why the
+        # rank assertion below is kept rather than replaced by it.
+        #
+        # **THAT GAP CLOSED WITH POLICY VERSION 3, AND THE RANK IS ASSERTED
+        # AGAIN BECAUSE OF IT.**  The paragraph above was written against
+        # version 2, where the gate dropped a direction only when
+        # ``eigenvalue <= gram_rcond * max`` with ``gram_rcond = eps`` -- so
+        # everything it could drop lay beneath the eigensolver's own
+        # ``n eps max`` bar, no fixture could make truncation fire against a
+        # RESOLVED eigenvalue, and the rank was round-off on every input.
+        # Version 3 floors the cut AT that bar, so truncation now fires exactly
+        # where the arithmetic can tell, and ``rank < width`` is a property of
+        # the fixture rather than of the machine: measured 5 on all 7
+        # microkernels under both numpy generations.  It is asserted first
+        # because it is the one that catches the never-truncate mutation, which
+        # certification alone does not.
+        collinear = decompose_gram(H)
+        assert collinear.rank < collinear.width, (
+            f"the equilibrated plant was retained (rank {collinear.rank} of "
+            f"{collinear.width}); under version 3 the residue sits at 0.017x to "
+            "0.488x of the eigensolver bar on the conservative sweep, so dropping "
+            "it is a property here"
+        )
+        assert needs_factor_certification(collinear), (
+            "the equilibrated plant no longer reaches the certification band, "
+            f"so the Gram route now believes it resolved this direction (rank "
+            f"{collinear.rank} of {collinear.width})"
+        )
+        assert not needs_factor_certification(decompose_gram(diagonal_correlation)), (
+            "the diagonal plant now demands certification, so the gate is "
+            "seeing scale where the class docstring says it sees nothing"
         )
 
 

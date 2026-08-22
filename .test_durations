@@ -426,7 +426,7 @@
     "tests/test_constrained_qp.py::TestRankGateSeesCollinearityNotScale::test_a_diagonally_planted_eigenvalue_never_drops_the_rank[6-1e-18]": 0.000602099986281246,
     "tests/test_constrained_qp.py::TestRankGateSeesCollinearityNotScale::test_a_diagonally_planted_eigenvalue_never_drops_the_rank[6-1e-20]": 0.0006453479873016477,
     "tests/test_constrained_qp.py::TestRankGateSeesCollinearityNotScale::test_a_diagonally_planted_eigenvalue_never_drops_the_rank[6-2.220446049250313e-16]": 0.0005831310118082911,
-    "tests/test_constrained_qp.py::TestRankGateSeesCollinearityNotScale::test_the_same_eigenvalue_planted_after_equilibration_does_drop_it": 0.0013683360011782497,
+    "tests/test_constrained_qp.py::TestRankGateSeesCollinearityNotScale::test_the_same_eigenvalue_planted_after_equilibration_reaches_the_gate": 0.0013683360011782497,
     "tests/test_constrained_qp.py::TestSimpleConstraints::test_monotone_constraint": 0.0008569970086682588,
     "tests/test_constrained_qp.py::TestSimpleConstraints::test_penalized_monotone": 0.0007428000099025667,
     "tests/test_constrained_qp.py::TestSimpleConstraints::test_single_binding_constraint": 0.0008096440578810871,
