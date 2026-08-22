@@ -283,43 +283,98 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
 
 
 def _feasibility_slack(
-    A: NDArray, beta: NDArray, b: NDArray, *, abs_b: NDArray | None = None
+    A: NDArray,
+    beta: NDArray,
+    b: NDArray,
+    *,
+    abs_b: NDArray | None = None,
+    abs_A: NDArray | None = None,
 ) -> NDArray:
     """Return ``A @ beta - b`` measured against a scale-aware tolerance.
 
-    A step that lands *on* a constraint reproduces ``b_i`` only to about
-    ``eps * |A_i @ beta|``, so a fixed absolute tolerance turns a genuine KKT
-    point into a violation as soon as the constraint row is large: at
-    ``|A_i @ beta| ~ 1e4`` an exactly-active constraint already reads ``-2e-12``.
-    Comparing against ``tol * max(1, |b_i|, |A_i @ beta|)`` keeps the test
-    meaningful under rescaling, and is identical to the absolute test for the
-    well-scaled problems where the scale factor is 1.
+    A step that lands *on* a constraint reproduces ``b_i`` only to within the
+    error of the dot product that computed it, so a fixed absolute tolerance
+    turns a genuine KKT point into a violation as soon as the constraint row is
+    large.  Dividing by a per-row scale keeps the test meaningful under
+    rescaling, and is identical to the absolute test for the well-scaled
+    problems where that scale is 1.
+
+    **The scale is the sum of absolute terms, not the magnitude of their sum.**
+    The standard bound is ``|fl(x'y) - x'y| <= gamma_n sum_i |x_i y_i|`` --
+    Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed. (SIAM
+    2002), sec. 3.1 -- and the two differ by exactly the dot product's
+    cancellation.  Using ``|A_i @ beta|`` was reading the OUTPUT where the error
+    is set by the INPUTS, so a row that cancels reported a scale far under the
+    accuracy it actually had, and the test on it silently became absolute via
+    the ``max(1, ...)`` floor.  Issue #359: a constraint row cancelling by
+    ``1.1e17`` -- output ``3.5e-13`` against ``|A_i| @ |beta| = 3.9e+04`` --
+    read a scale of ``1.0`` and refused a point whose violation was ``0.0044``
+    of its own dot-product bound.
+
+    ``|A_i| @ |beta| >= |A_i @ beta|`` by the triangle inequality, so this scale
+    always dominates the previous one and every bound stated against that one
+    still holds: the normalized slack moves strictly toward zero, never away.
 
     Returns the slack already divided by its per-row scale, so callers can
     compare it against a bare ``-tol``.
 
-    ``abs_b`` lets a caller in a loop pass ``np.abs(b)`` once instead of paying
-    for it every sweep; it must equal ``np.abs(b)``.
+    ``abs_b`` and ``abs_A`` let a caller in a loop pass ``np.abs(b)`` and
+    ``np.abs(A)`` once instead of paying for them every sweep; they must equal
+    those values.
     """
     products = A @ beta
-    return (products - b) / _feasibility_scale(products, b, abs_b=abs_b)
+    magnitude = (np.abs(A) if abs_A is None else abs_A) @ np.abs(beta)
+    return (products - b) / _feasibility_scale(products, b, abs_b=abs_b, abs_products=magnitude)
 
 
-def _feasibility_scale(products: NDArray, b: NDArray, *, abs_b: NDArray | None = None) -> NDArray:
-    """Per-row scale for the relative feasibility test: ``max(1, |b|, |A @ beta|)``.
+def _feasibility_scale(
+    products: NDArray,
+    b: NDArray,
+    *,
+    abs_b: NDArray | None = None,
+    abs_products: NDArray | None = None,
+) -> NDArray:
+    """Per-row scale for the relative feasibility test: ``max(1, |b|, |A| @ |beta|)``.
 
     Exposed separately so the active-set loop can divide *both* its slack and
     its directional derivative by the same factor.  Scaling both leaves the
     step ratio ``slack / -a_step`` numerically unchanged while making the
     decisions built on them -- "is this row already satisfied", "does this step
     move the row at all" -- agree with ``_is_feasible``.
+
+    ``abs_products`` is ``|A| @ |beta|``, the dot-product error scale
+    :func:`_feasibility_slack` documents.  **Every production call site passes
+    it, and the fallback exists for tests that deliberately assert the
+    pre-#359 scale.**  Omitting it silently restores exactly the behaviour
+    #359 removed -- it is a lower bound on the correct scale, so it is
+    conservative and can only refuse a point the full scale would accept -- but
+    conservative here means "reintroduces the defect", so a new caller that
+    reaches this branch is a mistake rather than a trade-off.
     """
-    return np.maximum(1.0, np.maximum(np.abs(b) if abs_b is None else abs_b, np.abs(products)))
+    magnitude = np.abs(products) if abs_products is None else abs_products
+    # ``|A| @ |beta|`` can overflow to ``inf`` where the signed ``A @ beta``
+    # stays finite -- perfect cancellation of terms near the float ceiling.  An
+    # infinite scale makes every slack ``-0.0`` and declares the row feasible
+    # whatever it is violated by, so the scale falls back to the row's own
+    # magnitude there.  Not reachable in-tree (it needs terms at ~1e308 and the
+    # largest drift this module has measured is 4e43), and the pre-#359 scale
+    # had no such branch because ``|A @ beta|`` finite meant a finite scale.
+    magnitude = np.where(np.isfinite(magnitude), magnitude, np.abs(products))
+    return np.maximum(1.0, np.maximum(np.abs(b) if abs_b is None else abs_b, magnitude))
 
 
-def _is_feasible(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> bool:
-    """Whether ``beta`` satisfies ``A @ beta >= b`` to a scale-aware tolerance."""
-    return bool(np.all(_feasibility_slack(A, beta, b) >= -tol))
+def _is_feasible(
+    A: NDArray, beta: NDArray, b: NDArray, tol: float, *, abs_A: NDArray | None = None
+) -> bool:
+    """Whether ``beta`` satisfies ``A @ beta >= b`` to a scale-aware tolerance.
+
+    ``abs_A`` is the loop-invariant ``np.abs(A)``.  The scale needs it on every
+    call, and rebuilding it here is pure waste on the paths that already hold
+    it -- the active-set loop, and ``irls_direct``, which tests the aggregate
+    constraint system two to three times per IRLS iteration plus once per
+    line-search halving.
+    """
+    return bool(np.all(_feasibility_slack(A, beta, b, abs_A=abs_A) >= -tol))
 
 
 def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
@@ -492,51 +547,43 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
 
     Uses the same scale-aware stopping test as the caller's convergence check,
     so the two cannot disagree about what "feasible" means -- but takes the
-    *selection* from the raw violations, the same split round 4 applied to the
-    blocking ratio.  The scale-aware slack is a per-row **clamp**: at ``b = 0``
-    it is ``x / max(1, |x|)``, which is exactly ``-1.0`` for every violation
-    worse than 1, so rows violated by wildly different amounts become
-    indistinguishable and ``argmin`` breaks the exact tie on the lowest index.
-    Measured on a first-difference ``A``: raw violations ``[-3, -8, -3]`` scale
-    to ``[-1, -1, -1]``, and the sweep repairs row 0 while row 1 is three times
-    worse.  Below saturation the two orders agree (``[-0.3, -0.2, -0.4]``
-    scales to itself), which is what pins the clamp as the cause rather than a
-    coincidence of the fixture.  Clamping is monotone nondecreasing at
-    ``b = 0``, so the raw argmin still attains the minimum scaled slack and the
-    stopping decision is unchanged there; the ``min`` below keeps the test
-    correct for a nonzero ``b``, where it is not.
+    *selection* from the raw violations.  Those are two different orderings and
+    the docstring below says where they part.
 
-    **At ``b = 0`` -- every in-tree call site -- this is bitwise ``master``'s
-    projection**, and the claim is an argument rather than a measurement, so it
-    does not decay as fixtures change:
+    **Issue #359 changed the scale under this argument, and the paragraphs it
+    replaced are worth stating because the new behaviour is the point.**  The
+    per-row scale was ``max(1, |b|, |A @ beta|)``, so at ``b = 0`` the slack was
+    the clamp ``x / max(1, |x|)`` -- a monotone nondecreasing function of the
+    raw violation.  That made the raw ``argmin`` attain the minimum scaled slack
+    as well, and made ``slack.min() >= -tol`` the same predicate as
+    ``violations.min() >= -tol`` for ``tol`` in ``(0, 1)``.  It is now
+    ``max(1, |b|, |A| @ |beta|)``, the dot-product error scale, and neither
+    property survives:
 
-    ==========================  ===================================================
-    step                        at ``b = 0``
-    ==========================  ===================================================
-    ``products - b``            ``x - 0.0`` is bitwise ``x``, signed zeros
-                                included; ``master`` forms the same difference.
-    ``argmin(violations)``      the same array, and ``master`` also selected on
-                                the raw violations (``git show e8e31f4``).
-    ``slack.min() >= -tol``     the clamp ``v / max(1, |v|)`` is exactly ``v``
-                                for ``|v| <= 1`` and exactly ``-1`` for
-                                ``v < -1``, so for ``tol`` in ``(0, 1)`` --
-                                enforced at the public boundary -- ``clamp(v) >=
-                                -tol`` and ``v >= -tol`` are the same predicate
-                                row by row, and the clamp is nondecreasing so
-                                ``min`` commutes with it.  ``master``'s test is
-                                ``violations[argmin] >= -1e-12``, and the default
-                                ``tol`` **is** ``1e-12``.
-    repair body                 unchanged, term for term.
-    ==========================  ===================================================
+    * The scale no longer depends on the violation's own magnitude, so it is
+      **not** a clamp and the two orderings can genuinely disagree.  The sweep
+      still repairs the raw-worst row, which is always a real violation and
+      always a valid repair -- but it is no longer guaranteed to be the row
+      with the worst *scaled* slack.  The loop re-tests the scaled slack after
+      every sweep, so this changes which path it takes, not what it accepts.
+    * The stopping test is strictly **weaker** than the raw one, because
+      ``|A| @ |beta| >= |A @ beta|`` makes the new scale dominate the old and
+      every normalized violation move toward zero.  That is the fix, not a
+      side effect: a row whose dot product cancels had its accuracy read off
+      the cancelled output, so the old test refused points that were feasible
+      to every digit the arithmetic had.
 
-    The ``tol`` domain is what makes the third row exact rather than
-    approximate: at ``tol >= 1`` the clamped test accepts violations the raw one
-    rejects, which is the vacuity the boundary check exists to refuse.  A
-    nonzero ``b``, or a ``tol`` outside the default, narrows the claim to
-    "same predicate, possibly different arithmetic" -- no in-tree caller does
-    either, and ``test_the_projection_is_bitwise_masters_at_zero_rhs`` pins the
-    equality against a hand-written reference rather than against a recorded
-    number.
+    So this is **no longer bitwise ``master``'s projection**, and the table that
+    argued it was has been removed rather than qualified.  What still holds
+    term for term is the repair body, and ``products - b`` at ``b = 0`` being
+    bitwise ``products``, signed zeros included.
+
+    The ``tol`` domain still matters here for the reason it always did: at
+    ``tol >= 1`` the scaled test accepts violations the raw one rejects, which
+    is the vacuity the boundary check exists to refuse.
+    ``test_the_projection_stops_no_later_than_the_absolute_predicate`` pins what
+    survives -- the direction of the change -- against a hand-written reference
+    rather than against a recorded number.
 
     Plain raw violation rather than raw over row norm, though the latter is the
     true Euclidean distance to the hyperplane (the sweep moves ``|violation| /
@@ -552,24 +599,40 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     order never picks a row whose *raw* violation is not the worst.
 
     That last clause is about raw violation only, not about the shared
-    predicate: the two come apart for a nonzero ``b``.  With ``b = (0, 1000)``,
-    ``beta = (-0.5, 999)`` and ``tol = 0.01``, row 1 is the worse raw violation
-    (``-1`` against ``-0.5``) yet is already satisfied against its row scale of
-    1000, so the sweep spends budget repairing a row ``_is_feasible`` accepts.
-    Self-limiting -- the stopping test is still the scaled one, so the sweep
-    exits as soon as every row is satisfied -- and unreachable at ``b = 0``,
-    where the two orders coincide.  ``test_the_stopping_test_still_means_every_row``
-    pins that behaviour.
+    predicate: the two come apart whenever a row's scale differs from its
+    violation.  With ``b = (0, 1000)``, ``beta = (-0.5, 999)`` and
+    ``tol = 0.01``, row 1 is the worse raw violation (``-1`` against ``-0.5``)
+    yet is already satisfied against its row scale of 1000, so the sweep spends
+    budget repairing a row ``_is_feasible`` accepts.
+
+    **Since #359 that case is reachable at ``b = 0`` too, which is every
+    in-tree caller, and the previous wording -- "unreachable at ``b = 0``,
+    where the two orders coincide" -- is exactly what this change reverses.**
+    The scale no longer depends on the violation, so a row violated worst can
+    carry the largest scale and be accepted while a less-violated row with a
+    unit scale is not; ``TestProjectionSelectsTheWorstViolation`` demonstrates
+    it with ``b = 0``.  Measured over the monotone and constraint fit suites --
+    8697 constraint rows -- **46% carry a scale above 1**, worst 23.3, so this
+    is an ordinary path rather than a corner.
+
+    It stays self-limiting: the stopping test is the scaled one, so the sweep
+    exits as soon as every row is satisfied, the selection is unchanged from
+    before this branch, and the repair body never reads the scale -- so the
+    iterates are what they were and only the ``break`` moved.
+    ``test_the_stopping_test_still_means_every_row`` pins that behaviour.
     """
     beta = beta.copy()
     # Loop-invariant: only ``A @ beta`` changes between sweeps.
     abs_b = np.abs(b)
+    abs_A = np.abs(A)
     for _ in range(100):
         # Inlined rather than calling ``_feasibility_slack``, which would
         # recompute the matvec; the arithmetic is identical term for term.
         products = A @ beta
         violations = products - b
-        slack = violations / _feasibility_scale(products, b, abs_b=abs_b)
+        slack = violations / _feasibility_scale(
+            products, b, abs_b=abs_b, abs_products=abs_A @ np.abs(beta)
+        )
         if slack.min() >= -tol:
             break
         worst = int(np.argmin(violations))
@@ -610,7 +673,7 @@ def _emit_blocking_decision(
     in its own considered set.
     """
     assert trace_run is not None  # narrowed by the caller's `tracing` guard
-    derived_scale = _feasibility_scale(products, b)
+    derived_scale = _feasibility_scale(products, b, abs_products=np.abs(A) @ np.abs(beta))
     derived_scaled_step = raw_step / derived_scale
     considered = [
         index
@@ -632,6 +695,12 @@ def _emit_blocking_decision(
             "row_b": tuple(float(b[i]) for i in considered),
             "row_raw_step": tuple(float(raw_step[i]) for i in considered),
             "row_scaled_slack": tuple(float(scaled_slack[i]) for i in considered),
+            # The per-row scale the slack was divided by.  Recorded because it
+            # is no longer recoverable from `row_products` and `row_b`: since
+            # #359 it is `max(1, |b|, |A_i| @ |beta|)`, which depends on the
+            # row's inputs rather than on the product they produced, so a
+            # reader cannot rebuild it from the recorded output alone.
+            "row_scale": tuple(float(derived_scale[i]) for i in considered),
             "blocking_row": int(blocking),
             # Independently derived: a row the scaled gate excludes must never
             # be the one blocked on.
@@ -700,29 +769,38 @@ def solve_constrained_qp(
         Tolerance for constraint satisfaction and multiplier signs, required
         to lie in ``(0, 1)``; anything else raises ``ValueError``. The
         constraint test is relative: row ``i`` is satisfied when
-        ``A_i @ beta - b_i >= -tol * max(1, |b_i|, |A_i @ beta|)``, so a
+        ``A_i @ beta - b_i >= -tol * max(1, |b_i|, |A_i| @ |beta|)``, so a
         badly scaled constraint system does not read as infeasible purely
-        because its rows are large. This matters only for callers with a
-        nonzero ``b``: at ``b_i == 0`` the relative test is algebraically
-        identical to the absolute one for any ``tol`` in ``(0, 1)``, and every
-        in-tree caller passes ``b = 0``.
+        because its rows are large. The scale is the **sum of absolute terms**
+        of the dot product rather than the magnitude of their sum, which is the
+        error bound that dot product actually satisfies; see
+        :func:`_feasibility_slack` and issue #359. At ``b_i == 0`` the test is
+        no longer algebraically identical to the absolute one -- it is strictly
+        weaker by the row's cancellation -- and every in-tree caller passes
+        ``b = 0``, so that is the case it changed.
 
-        ``(0, 1)`` is the predicate's actual domain, not a house style. The
-        normalized slack saturates at ``-1`` -- at ``b = 0`` it is
-        ``x / max(1, |x|)``, which is exactly ``-1`` for every violation worse
-        than 1 -- so at ``tol >= 1`` the test accepts *every* finite violation
-        and the solve returns its unconstrained answer with
-        ``converged=True``. Measured on ``H = [[1]]``, ``g = [-100]``,
-        ``beta >= 0``: ``tol = 0.999999`` returns ``beta = 0``, ``tol = 1.0``
-        returns ``beta = -100`` and calls it converged.
+        ``(0, 1)`` is the predicate's actual domain, not a house style, and the
+        scale change strengthens the argument rather than weakening it. The
+        normalized slack still cannot exceed 1 in magnitude, now for a reason
+        that needs no ``max(1, .)`` analysis: ``|A_i @ beta| <= |A_i| @ |beta|``
+        by the triangle inequality, so the numerator is bounded by its own
+        denominator at ``b = 0``. At ``tol >= 1`` the test is
+        ``x >= -tol * scale`` with ``scale >= |x|``, i.e. ``x >= -|x|``, which
+        every violation satisfies -- so the solve returns its unconstrained
+        answer with ``converged=True``. Measured on ``H = [[1]]``,
+        ``g = [-100]``, ``beta >= 0``: ``tol = 0.999999`` returns ``beta = 0``,
+        ``tol = 1.0`` returns ``beta = -100`` and calls it converged. That
+        fixture is a single row with one term, where cancellation is impossible
+        and the two scales coincide, so the measurement is unaffected by the
+        change it is quoted beneath.
 
         Rejecting the value rather than reformulating the predicate is
         deliberate. The vacuity is algebraic, not a rounding artifact: written
         without the division, the test is ``x >= -tol * max(1, |x|)``, and at
         ``tol = 1`` that is ``x >= -|x|``, which holds for every ``x <= 0``
         however it is spelled. The only formulation that cannot saturate is one
-        whose scale excludes ``|A_i @ beta|`` -- which is precisely the term
-        this test grew in order to stop reading an exactly-active large
+        whose scale excludes the row's own magnitude -- which is precisely the
+        term this test grew in order to stop reading an exactly-active large
         constraint row as violated. So a non-vacuous formulation is not a
         reformulation but a revert. Validation is also honest about the other
         two jobs this one parameter does: it is the component-scaled step-norm
@@ -958,6 +1036,12 @@ def solve_constrained_qp(
     # master's iteration count *and* master's active set while only 49 land on
     # master's bytes -- the route is preserved, the arithmetic along it is not.
     kkt_may_be_singular = decomposition.rank < decomposition.width
+
+    # ``A`` is fixed for the whole solve, so the dot-product error scale
+    # ``|A| @ |beta|`` costs one elementwise pass here rather than one per
+    # iteration; only the ``|beta|`` matvec is per-iteration.  See
+    # ``_feasibility_slack``.
+    abs_A = np.abs(A)
 
     for it in range(max_iter):
         # --- Equality-constrained subproblem on active set ---
@@ -1227,7 +1311,7 @@ def solve_constrained_qp(
         # take a backward step.
         beta_new = beta + step
 
-        if _is_feasible(A, beta_new, b, tol):
+        if _is_feasible(A, beta_new, b, tol, abs_A=abs_A):
             # Full step is feasible
             beta = beta_new
         else:
@@ -1237,7 +1321,11 @@ def solve_constrained_qp(
 
             products = A @ beta
             raw_step = A @ step
-            scaled_step = raw_step / _feasibility_scale(products, b)
+            # Same scale ``_is_feasible`` uses, which is what makes "does this
+            # step move the row" agree with "is this row satisfied".
+            scaled_step = raw_step / _feasibility_scale(
+                products, b, abs_products=abs_A @ np.abs(beta)
+            )
             # Set membership, not ``i in active``: the list scan is O(|active|)
             # per row and dominated the rest of this now-vectorized block.
             # ``active`` is only mutated after this loop finishes.
