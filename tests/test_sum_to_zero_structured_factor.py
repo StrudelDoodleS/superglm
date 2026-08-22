@@ -1907,3 +1907,79 @@ def test_constrained_null_leverage_beneath_its_noise_floor_is_zero_on_either_sig
     # Unresolved is not ambiguous: a certificate cannot help below the floor,
     # and reporting ambiguity here is what made the floor unreachable.
     assert not np.any(ambiguous)
+
+
+@pytest.mark.parametrize("residue_sign", (-1.0, 1.0))
+def test_constrained_null_leverage_floor_still_governs_above_the_two_bars_crossing(
+    residue_sign: float,
+) -> None:
+    """The floor must govern on both sides of where it crosses the frozen band.
+
+    Two error bars for the same diagonal coexist here.  ``projector_noise`` is
+    ``2 * width * eps * projector_scale`` and tracks the order; the ambiguity
+    band is ``certification_band * eps * projector_scale`` with ``p`` frozen at
+    32.  **They cross at width 16**, so exactly one of the two branches is
+    inert at any width, and the fix for issue #356 moved which one:
+
+    * ``width <= 15`` -- the ambiguity band contains the floor, so before the
+      precedence flip ``stable_zero`` could never fire and the sign of a
+      round-off residue decided estimability.  That is the regime the
+      companion test plants in, at width 2.
+    * ``width >= 17`` -- the floor contains the ambiguity band, so ``ambiguous``
+      is identically ``False`` and this predicate never asks for a certificate.
+
+    This pins the second regime, which the rest of the file does not reach: the
+    floor must still zero an unresolved diagonal on either sign, and the
+    ambiguity flag must be inert even for a diagonal placed deliberately
+    *outside* the floor, where at a narrow width it would have been raised.
+    """
+    eps = float(np.finfo(float).eps)
+    block_size, width = 20, 17
+    basis = np.zeros((block_size, width))
+    basis[:width] = np.eye(width)
+
+    # Under the floor: R'R = (1 + d) I, so the leverage is -d * diag(B B').
+    row_space = np.eye(width) * np.sqrt(1.0 + -residue_sign * 8.0 * eps)
+    removed = row_space.T @ row_space
+    diagonal = np.diag(basis @ (np.eye(width) - removed) @ basis.T)
+    scale = np.abs(np.diag(basis @ basis.T)) + np.abs(np.diag(basis @ removed @ basis.T))
+    floor = 2.0 * width * eps * scale
+    assert np.all(np.sign(diagonal[:width]) == residue_sign)
+    assert np.all(np.abs(diagonal[:width]) <= floor[:width])
+
+    row_norm, null_dimension, ambiguous = _sum_to_zero_scaled_basis_null_row_norms(
+        (basis,),
+        row_space,
+    )
+    np.testing.assert_array_equal(row_norm, np.zeros((1, block_size)))
+    assert null_dimension == 0
+    assert not np.any(ambiguous)
+
+    # Outside the floor the two signs part, and for opposite reasons -- which
+    # is the pair of behaviours this regime exists to record.
+    outside = np.eye(width) * np.sqrt(1.0 + -residue_sign * 200.0 * eps)
+    outside_diagonal = np.diag(basis @ (np.eye(width) - outside.T @ outside) @ basis.T)
+    assert np.all(np.abs(outside_diagonal[:width]) > floor[:width])
+    _outside_norm, _dimension, outside_ambiguous = _sum_to_zero_scaled_basis_null_row_norms(
+        (basis,),
+        outside,
+    )
+    if residue_sign > 0.0:
+        # A resolved POSITIVE leverage is a genuine one.  Above the crossing
+        # the frozen ambiguity band lies inside the floor, so nothing can be
+        # flagged and it is simply kept.
+        assert not np.any(outside_ambiguous), (
+            "above the width-16 crossing the ambiguity band lies inside the "
+            "floor, so no positive diagonal can be flagged; if this fires the "
+            "two bars have moved relative to each other and the comment in "
+            "geometry.py is stale"
+        )
+    else:
+        # A resolved NEGATIVE leverage is impossible: `B (I - R'R) B'` is PSD
+        # by construction.  It must be flagged rather than answered by the
+        # surviving `maximum(., 0.0)` clip, which would silently return
+        # "estimable" for a broken construction.
+        assert np.all(outside_ambiguous[0, :width]), (
+            "a resolved negative diagonal must be flagged, not clipped -- "
+            "otherwise the one remaining sign clip decides an outcome again"
+        )

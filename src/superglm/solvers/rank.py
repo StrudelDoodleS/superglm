@@ -1468,6 +1468,15 @@ def _decompose_gram(
     # dropped by the cutoff below, which is the coherent outcome rather than a
     # raise.  Widening only -- nothing that raised on a resolved negative
     # eigenvalue stops raising.
+    #
+    # It is also inert on the `allow_indefinite=True` side, which is worth
+    # SHOWING rather than asserting because widening a definiteness test looks
+    # like it should flip semantics.  `eigenvalues[0]` is the MINIMUM, so
+    # admitting it means every negative eigenvalue satisfies `|w| <= n eps *
+    # max(max_abs, 1)`; the equilibrated matrix has a unit diagonal, so
+    # `max_abs >= 1` and that factor is just `max_abs`.  Every such eigenvalue
+    # is therefore at or under the cutoff below and is dropped under either
+    # semantics.  Nothing retained as indefinite stops being retained.
     negative_tolerance = max(100.0 * _EPS, _eigensolver_relative_bar(len(active_columns))) * max(
         max_abs_eigenvalue, 1.0
     )

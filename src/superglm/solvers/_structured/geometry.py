@@ -598,29 +598,58 @@ def _sum_to_zero_scaled_basis_null_row_norms(
         # UNRESOLVED, and the two need opposite treatment -- so the noise floor
         # is tested first and ambiguity is only asked above it.  Issue #356.
         #
-        # The old order asked ambiguity first and gated `stable_zero` on it,
-        # which made this branch unreachable: `rank_uncertainty` carries
-        # `projector_scale` and the `gram_rcond` it was compared against does
-        # not, so for any `projector_scale > 1 / certification_band` the
-        # interval straddles the cutoff whatever the data says.  With
-        # `stable_zero` dead, `np.sqrt(np.maximum(., 0.0))` below decided the
-        # outcome on the SIGN of a round-off residue: a negative one is clipped
-        # to exactly 0.0 and always estimable, while a positive one of the same
-        # magnitude reaches `sqrt` as ~1e-8 and fails `factor_rcond`.  That is
-        # the same clip, and the same defect, as the Gram rank gate.
+        # Routing an unresolved entry to the certificate instead would not save
+        # it, but NOT because a certificate is powerless in principle.  Two of
+        # the three consumers re-read this same floored quantity, so they are
+        # circular; the third, the dense branch, does independent arithmetic --
+        # a sum of squares over discarded modes, with no cancelling subtraction
+        # -- and only fails because ITS selection cut is a bare `gram_rcond`
+        # times the largest eigenvalue, with no residual interval.  That is the
+        # defect this issue is about, one level up.  So when that cut is
+        # floored, the dense branch becomes a genuinely resolving authority and
+        # this precedence deserves revisiting.  Do not inherit the stronger
+        # claim that nothing downstream could ever decide these.
         #
-        # Measured on the wide-deficient SZ fixture over 7 OPENBLAS_CORETYPE
-        # microkernels: the diagonal runs -0.124x to +0.323x of
-        # `projector_noise` -- unresolved on every configuration and of BOTH
-        # signs -- so zero is the correct answer everywhere, and the floor
-        # already sized here clears the worst reading by 3.1x.
+        # The old order asked ambiguity first and gated `stable_zero` on it.
+        # `rank_uncertainty` carries `projector_scale` and the `gram_rcond` it
+        # is compared against does not, so the interval straddles the cutoff
+        # on width alone: `stable_zero` was unreachable for `width <= 15` and
+        # `np.sqrt(np.maximum(., 0.0))` below then decided the outcome on the
+        # SIGN of a round-off residue -- a negative one clipped to exactly 0.0
+        # and always estimable, a positive one of the same magnitude reaching
+        # `sqrt` as ~1e-8 and failing `factor_rcond`.  Same clip, same defect,
+        # as the Gram rank gate.
+        #
+        # THE TWO BARS CROSS AT WIDTH 16, and the fix moves the inert branch
+        # across it rather than removing it: `projector_noise` is `2 width eps
+        # scale` and tracks the order, `rank_uncertainty` is `32 eps scale`
+        # with `p` frozen at `certification_band`, so for `width >= 17`
+        # `ambiguous` is now identically False and this predicate never
+        # requests the certificate.  That is the same frozen-`p` observation
+        # `rank.py`'s policy docstring makes, unfixed here because no constant
+        # in this function moved.  Width is a per-level local null dimension,
+        # so 17 needs a fat structured block; `test_..._at_a_width_above_the_
+        # two_bars_crossing` pins the regime rather than leaving it derived.
         stable_zero = np.abs(constrained_diagonal) <= projector_noise
-        ambiguous[level] = (
+        # A diagonal resolved BELOW zero is not a Higham projection case: `R`
+        # is a column slice of an orthonormal row basis, so `0 <= R'R <= I` and
+        # `B (I - R'R) B'` is PSD by construction.  Past the floor a negative
+        # entry is evidence the construction broke, and letting the clip answer
+        # it returns "estimable" silently.  Flagging it routes it to the
+        # certificate instead, which leaves the surviving `maximum(., 0.0)`
+        # provably inert -- the point of the whole change.
+        resolved_negative = constrained_diagonal < -projector_noise
+        ambiguous[level] = resolved_negative | (
             ~stable_zero
             & (constrained_diagonal - rank_uncertainty <= SHARED_RANK_POLICY.gram_rcond)
             & (constrained_diagonal + rank_uncertainty > SHARED_RANK_POLICY.gram_rcond)
         )
         constrained_diagonal[stable_zero] = 0.0
+        # Measured on the wide-deficient SZ fixture over 7 OPENBLAS_CORETYPE
+        # microkernels: the diagonal runs -0.124x to +0.323x of
+        # `projector_noise` -- unresolved on every configuration and of BOTH
+        # signs -- so zero is the correct answer everywhere, and the floor
+        # already sized here clears the worst reading by 3.1x.
         result[level] = np.sqrt(np.maximum(constrained_diagonal, 0.0))
     return result, null_dimension, ambiguous
 
