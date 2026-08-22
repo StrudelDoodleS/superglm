@@ -20,6 +20,7 @@ from superglm import (
     SuperGLM,
 )
 from superglm.distributions import (
+    Binomial,
     Gamma,
     Gaussian,
     NegativeBinomial,
@@ -302,19 +303,73 @@ class TestWeightContractDiagnostics:
             self.normal_scale = np.asarray(scale)
             return np.asarray(loc, dtype=np.float64)
 
+        def gamma(self, shape, scale):
+            self.gamma_shape = np.asarray(shape)
+            self.gamma_scale = np.asarray(scale)
+            return np.asarray(shape, dtype=np.float64) * np.asarray(scale, dtype=np.float64)
+
+        def binomial(self, n, p):
+            self.binomial_p = np.asarray(p)
+            return np.zeros_like(self.binomial_p, dtype=np.int64)
+
     def test_non_tweedie_simulation_is_frequency_weight_invariant(self):
+        """Copies of a draw are draws, so replication leaves the marginal alone."""
         mu = np.array([0.4, 1.2, 3.5])
         weights = np.array([1.0, 4.0, 9.0])
         rng = self._RecordingRng()
 
-        diagnostics_module._simulate_response(Poisson(), mu, 1.0, weights, rng)
+        diagnostics_module._simulate_response(
+            Poisson(), mu, 1.0, weights, rng, weight_semantics="frequency"
+        )
         np.testing.assert_array_equal(rng.poisson_lam, mu)
 
-        diagnostics_module._simulate_response(Gaussian(), mu, 2.25, weights, rng)
+        diagnostics_module._simulate_response(
+            Gaussian(), mu, 2.25, weights, rng, weight_semantics="frequency"
+        )
         np.testing.assert_array_equal(rng.normal_loc, mu)
         assert rng.normal_scale == pytest.approx(1.5)
 
-    def test_tweedie_simulation_uses_prior_weight_dispersion(self, monkeypatch):
+    def test_prior_weight_simulation_carries_the_row_marginal(self):
+        """The crossed case the family rule could not express.
+
+        Each parameter below is the one ``_quantile_residuals`` inverts for
+        that family, so simulating any other way puts a correct fit outside its
+        own envelope.
+        """
+        mu = np.array([0.4, 1.2, 3.5])
+        weights = np.array([0.5, 4.0, 9.0])
+        phi = 2.25
+        rng = self._RecordingRng()
+
+        diagnostics_module._simulate_response(
+            Poisson(), mu, 1.0, weights, rng, weight_semantics="prior"
+        )
+        np.testing.assert_allclose(rng.poisson_lam, weights * mu)
+
+        diagnostics_module._simulate_response(
+            Gaussian(), mu, phi, weights, rng, weight_semantics="prior"
+        )
+        np.testing.assert_allclose(rng.normal_scale, np.sqrt(phi / weights))
+
+        diagnostics_module._simulate_response(
+            Gamma(), mu, phi, weights, rng, weight_semantics="prior"
+        )
+        np.testing.assert_allclose(rng.gamma_shape, weights / phi)
+        np.testing.assert_allclose(rng.gamma_scale, mu * phi / weights)
+
+        probability = np.array([0.2, 0.5, 0.7])
+        diagnostics_module._simulate_response(
+            Binomial(), probability, phi, weights, rng, weight_semantics="prior"
+        )
+        np.testing.assert_allclose(rng.binomial_p, 1.0 - (1.0 - probability) ** weights)
+
+    @pytest.mark.parametrize(
+        ("semantics", "expected"),
+        [("prior", True), ("frequency", False)],
+    )
+    def test_tweedie_simulation_follows_the_contract_not_the_family(
+        self, monkeypatch, semantics, expected
+    ):
         captured = {}
 
         def fake_generate(n, mu, phi, p, rng=None):
@@ -335,13 +390,91 @@ class TestWeightContractDiagnostics:
             0.8,
             weights,
             rng,
+            weight_semantics=semantics,
         )
 
         np.testing.assert_array_equal(simulated, np.zeros(len(mu)))
-        np.testing.assert_allclose(captured["phi"], 0.8 / weights)
+        want = 0.8 / weights if expected else np.full_like(weights, 0.8)
+        np.testing.assert_allclose(captured["phi"], want)
         assert captured["n"] == len(mu)
         assert captured["p"] == 1.5
         assert captured["rng"] is rng
+
+    def test_row_replication_follows_the_contract_not_the_family(self):
+        """Expanding rows is what "frequency" means, so only it expands."""
+        rng = np.random.default_rng(3)
+        n = 40
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = 1.0 + 2.0 * frame["x"].to_numpy() + rng.normal(0.0, 0.2, n)
+        model = SuperGLM(family=Gaussian(), features={"x": Numeric()})
+        model.fit(frame, y)
+        metrics = model.metrics(frame, y)
+        mu, eta = metrics._mu, metrics.eta
+        qresid = metrics.residuals("quantile", seed=5)
+
+        # A zero weight leaves under both readings; only frequency expands the rest.
+        weights = np.full(n, 2.0)
+        weights[:3] = 0.0
+
+        prior_rows = diagnostics_module._diagnostic_rows(
+            model, y, mu, eta, weights, qresid, 5, rng, weight_semantics="prior"
+        )
+        assert len(prior_rows[0]) == n - 3
+        np.testing.assert_allclose(prior_rows[3], weights[weights > 0.0])
+
+        frequency_rows = diagnostics_module._diagnostic_rows(
+            model, y, mu, eta, weights, qresid, 5, rng, weight_semantics="frequency"
+        )
+        assert len(frequency_rows[0]) == 2 * (n - 3)
+        np.testing.assert_array_equal(frequency_rows[3], np.ones(2 * (n - 3)))
+
+    @pytest.mark.parametrize("family", [Gaussian(), Gamma()], ids=["gaussian", "gamma"])
+    def test_simulated_rows_are_standard_normal_under_their_own_contract(self, family):
+        """The envelope's defining property, stated without reference to the code.
+
+        A Q-Q envelope is only a reference band if data simulated from the
+        fitted model produces quantile residuals that are standard normal.
+        That holds exactly when ``_simulate_response`` draws from the same
+        marginal ``_quantile_residuals`` inverts -- so this fails for any
+        mismatch between the two, whichever side moved.
+        """
+        from scipy import stats as scipy_stats
+
+        from superglm.inference.metrics import ModelMetrics
+
+        rng = np.random.default_rng(404)
+        n = 4000
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        mu_true = np.exp(0.5 + 0.8 * frame["x"].to_numpy())
+        weights = rng.uniform(0.4, 6.0, n)
+        y = rng.gamma(6.0, mu_true / 6.0)
+
+        model = SuperGLM(
+            family=family,
+            features={"x": Numeric()},
+            weight_semantics="prior",
+        )
+        model.fit(frame, y, sample_weight=weights)
+        metrics = model.metrics(frame, y, weights)
+        mu, phi = metrics._mu, metrics.phi
+
+        matched = diagnostics_module._simulate_response(
+            family, mu, phi, weights, np.random.default_rng(7), weight_semantics="prior"
+        )
+        residuals = ModelMetrics(
+            model, y=matched, sample_weight=weights, _mu=mu
+        ).residuals("quantile", seed=11)
+        assert scipy_stats.kstest(residuals, "norm").pvalue > 0.01
+
+        # Mutation check: the pre-fix behaviour simulated every non-Tweedie
+        # family at unit weight, which is the frequency marginal.
+        mismatched = diagnostics_module._simulate_response(
+            family, mu, phi, weights, np.random.default_rng(7), weight_semantics="frequency"
+        )
+        wrong = ModelMetrics(
+            model, y=mismatched, sample_weight=weights, _mu=mu
+        ).residuals("quantile", seed=11)
+        assert scipy_stats.kstest(wrong, "norm").pvalue < 1e-6
 
     @pytest.mark.parametrize(
         ("family", "weights", "match"),

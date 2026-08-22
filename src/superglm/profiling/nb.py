@@ -167,6 +167,7 @@ class NBProfileResult:
             _y=self._y,
             _mu=self._mu,
             _weights=self._weights,
+            _weight_semantics=self._weight_semantics,
             _ci_cache=dict(self._ci_cache),
         )
         object.__setattr__(detached, "_publication_locked", True)
@@ -188,6 +189,7 @@ class NBProfileResult:
                 _y=copy.deepcopy(self._y, memo),
                 _mu=copy.deepcopy(self._mu, memo),
                 _weights=copy.deepcopy(self._weights, memo),
+                _weight_semantics=self._weight_semantics,
                 _ci_cache=copy.deepcopy(self._ci_cache, memo),
             )
         memo[id(self)] = result
@@ -445,9 +447,28 @@ def _theta_profile_score(
     other O(theta^-2) terms whenever it matters.
     """
     prior = weight_semantics == PRIOR_WEIGHTS
+    if prior:
+        # A zero prior weight is a row observed with infinite variance, so it
+        # leaves the likelihood rather than contributing zero to it.  Both
+        # digamma arguments would land on the psi pole and ``0 * (-inf + inf)``
+        # is ``nan``, so the row has to go before the score is formed rather
+        # than be multiplied out after.  ``_nb2_nll`` already satisfies this
+        # row-deletion identity by construction; the score is the arm that did
+        # not.  The frequency arm needs no subset -- a zero replication count
+        # multiplies a finite row contribution -- and keeping its summation
+        # verbatim is what stops shipped numbers drifting.
+        carried = weights > 0.0
+        if not np.all(carried):
+            y = y[carried]
+            mu = mu[carried]
+            weights = weights[carried]
+        if weights.size == 0:
+            return 0.0
     # The expansion is in the psi argument, which the prior contract scales by
     # the row weight; switching on the smallest such argument keeps every row
-    # inside the regime the expansion was derived for.
+    # inside the regime the expansion was derived for.  The minimum is taken
+    # over the carried rows only, so one dropped row cannot pin every theta to
+    # the direct branch.
     switch_argument = theta * float(np.min(weights)) if prior else theta
     if switch_argument >= _THETA_SCORE_ASYMPTOTIC_MIN:
         shifted = theta + y
@@ -831,7 +852,7 @@ def estimate_nb_theta(
         )
         theta_new = theta_solve.theta
 
-        nll = _nb2_nll(y_arr, mu, w_arr, theta_new)
+        nll = _nb2_nll(y_arr, mu, w_arr, theta_new, weight_semantics=weight_semantics)
         cache[_theta_cache_key(theta_new)] = nll
         if trace_callback is not None:
             trace_callback(

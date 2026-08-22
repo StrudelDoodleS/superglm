@@ -1077,6 +1077,12 @@ def _refine_nb_theta_to_reml_fixed_point(
         return debug_recorder
 
     theta = float(family.theta)
+    # The joint alternation re-estimates theta against the same likelihood the
+    # calibration estimate used. Resolving the contract once here keeps the
+    # score, the cached NLLs and the published result on one reading; letting
+    # any of them fall back to the parameter default would silently overwrite
+    # a prior-contract theta with a frequency-contract one.
+    weight_semantics = model_weight_semantics(model)
     cache = dict(nb_seed.cache)
     refits = 0
     joint_converged = False
@@ -1086,7 +1092,7 @@ def _refine_nb_theta_to_reml_fixed_point(
         weights = model._fit_weights
         if mu is None or weights is None:  # pragma: no cover - retention contract
             raise RuntimeError("NB joint refinement requires retained fit rows")
-        solve = _theta_ml(y_arr, mu, weights, theta)
+        solve = _theta_ml(y_arr, mu, weights, theta, weight_semantics=weight_semantics)
         final_solve = solve
         if abs(solve.theta - theta) <= _NB_JOINT_RELATIVE_TOL * max(abs(theta), 1e-12):
             joint_converged = True
@@ -1147,6 +1153,7 @@ def _refine_nb_theta_to_reml_fixed_point(
         n_evaluations=int(nb_seed.n_evaluations) + refits,
         converged=bool(nb_seed.converged) and joint_converged and not at_bound and reml_converged,
         cache=cache,
+        _weight_semantics=weight_semantics,
     )
     model._nb_profile_result = refreshed._published_with_data(
         y_arr,
@@ -1159,10 +1166,20 @@ def _refine_nb_theta_to_reml_fixed_point(
 
 
 def _nb_joint_nll(y_arr, model, theta: float) -> float:
-    """Weighted mean NB2 NLL of the current workspace fit at ``theta``."""
+    """Weighted mean NB2 NLL of the current workspace fit at ``theta``.
+
+    Read under the model's declared contract, so the cache this feeds cannot
+    mix a frequency-likelihood NLL into a prior-contract profile.
+    """
     from superglm.profiling.nb import _nb2_nll
 
-    return _nb2_nll(y_arr, model._fit_mu, model._fit_weights, theta)
+    return _nb2_nll(
+        y_arr,
+        model._fit_mu,
+        model._fit_weights,
+        theta,
+        weight_semantics=model_weight_semantics(model),
+    )
 
 
 def _solve_coefficients(

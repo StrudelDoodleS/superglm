@@ -385,6 +385,113 @@ class TestNegativeBinomialThetaProfile:
             analytic = _theta_profile_score(y, mu, w, theta, weight_semantics="prior")
             assert analytic == pytest.approx(difference, rel=1e-6)
 
+    def test_a_zero_prior_weight_deletes_its_row_from_the_score(self):
+        """A row observed with infinite variance leaves; it does not contribute 0.
+
+        Both digamma arguments sit on the psi pole at ``w == 0``, and
+        ``0 * (-inf + inf)`` is ``nan`` rather than nothing, so the row has to
+        go before the score is formed.  Zero non-Tweedie weights are admitted
+        by validation, which makes this reachable from a plain fit.
+        """
+        from superglm.profiling.nb import _theta_profile_score
+
+        rng = np.random.default_rng(21)
+        n = 50
+        mu = np.exp(0.3 + rng.normal(0.0, 0.4, n))
+        y = rng.poisson(mu).astype(float)
+        w = rng.uniform(0.4, 5.0, n)
+        w[[3, 17, 40]] = 0.0
+        carried = w > 0.0
+
+        # Spans both the direct and the asymptotic branch: the switch is on
+        # w * theta, so the dropped rows must not pin it to the direct one.
+        #
+        # The two arms are equal for different reasons, and the test says so.
+        # The prior arm drops the rows before summing, so both sides reduce the
+        # identical array and agree bitwise.  The frequency arm keeps its
+        # summation over every row verbatim -- that is what stops shipped
+        # numbers drifting -- so its zero-weight rows contribute an exact 0.0
+        # at a different point in the pairwise reduction, and row deletion is
+        # exact only up to that association.  Bound measured over 40 seeds and
+        # four thetas: worst 1.08e-14.
+        for theta in (0.5, 3.0, 25.0, 1e9):
+            prior_full = _theta_profile_score(y, mu, w, theta, weight_semantics="prior")
+            prior_deleted = _theta_profile_score(
+                y[carried], mu[carried], w[carried], theta, weight_semantics="prior"
+            )
+            assert np.isfinite(prior_full)
+            assert prior_full == prior_deleted
+
+            frequency_full = _theta_profile_score(y, mu, w, theta, weight_semantics="frequency")
+            frequency_deleted = _theta_profile_score(
+                y[carried], mu[carried], w[carried], theta, weight_semantics="frequency"
+            )
+            assert frequency_full == pytest.approx(frequency_deleted, rel=1e-12)
+
+    def test_a_zero_prior_weight_still_estimates_theta(self):
+        rng, frame, y = self._counts()
+        weights = rng.uniform(0.5, 3.0, len(frame))
+        weights[:4] = 0.0
+        carried = weights > 0.0
+
+        estimated = self._theta("prior", frame, y, weights)
+        deleted = self._theta(
+            "prior",
+            frame.loc[carried].reset_index(drop=True),
+            y[carried],
+            weights[carried],
+        )
+        assert np.isfinite(estimated.theta_hat)
+        assert estimated.theta_hat == pytest.approx(deleted.theta_hat, rel=1e-9)
+
+    def test_fit_reml_refines_theta_under_the_declared_contract(self):
+        """The joint alternation must not re-estimate on the other likelihood.
+
+        ``fit_reml`` re-solves theta at the REML fit; reading the contract from
+        the parameter default there would overwrite a prior-contract estimate
+        with a frequency-contract one, on the default path.
+
+        The spline is load-bearing: with no penalised term ``fit_reml`` finds
+        no REML-eligible groups, falls back to ``fit`` and leaves
+        ``_reml_result`` unset, so the refinement returns at its first guard
+        and never reaches the code this pins.
+        """
+        rng, frame, y = self._counts(seed=9, n=300)
+        weights = rng.uniform(0.4, 5.0, len(frame))
+
+        fitted = {}
+        for semantics in ("prior", "frequency"):
+            model = SuperGLM(
+                family=NegativeBinomial(theta="auto"),
+                features={"x": Spline(n_knots=6)},
+                weight_semantics=semantics,
+            )
+            model.fit_reml(frame, y, sample_weight=weights)
+            assert model._reml_result is not None
+            fitted[semantics] = model
+
+        for semantics, model in fitted.items():
+            assert model._nb_profile_result._weight_semantics == semantics
+        # Two different likelihoods reach two different optima; equality here
+        # would mean one arm silently ran the other's score.
+        assert fitted["prior"]._nb_profile_result.theta_hat != pytest.approx(
+            fitted["frequency"]._nb_profile_result.theta_hat, rel=1e-6
+        )
+
+    def test_a_copied_profile_keeps_its_contract(self):
+        """A deepcopy must not hand back a handle that evaluates another likelihood."""
+        import copy
+
+        rng, frame, y = self._counts(seed=12)
+        weights = rng.uniform(0.4, 4.0, len(frame))
+        prior = self._theta("prior", frame, y, weights)
+
+        assert prior._weight_semantics == "prior"
+        assert copy.deepcopy(prior)._weight_semantics == "prior"
+        assert prior._detached_public_copy()._weight_semantics == "prior"
+        # The interval reads the same likelihood the estimate came from.
+        assert copy.deepcopy(prior).ci() == pytest.approx(prior.ci(), rel=1e-12)
+
     def test_the_two_score_arms_are_one_expression_at_unit_weight(self):
         from superglm.profiling.nb import _theta_profile_score
 
