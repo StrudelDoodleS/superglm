@@ -343,18 +343,38 @@ def _feasibility_scale(
     move the row at all" -- agree with ``_is_feasible``.
 
     ``abs_products`` is ``|A| @ |beta|``, the dot-product error scale
-    :func:`_feasibility_slack` documents.  It falls back to ``|A @ beta|`` when
-    a caller has only the products; that is the pre-#359 scale and is a lower
-    bound on the correct one, so the fallback is conservative -- it can refuse a
-    point the full scale would accept, never the reverse.
+    :func:`_feasibility_slack` documents.  **Every production call site passes
+    it, and the fallback exists for tests that deliberately assert the
+    pre-#359 scale.**  Omitting it silently restores exactly the behaviour
+    #359 removed -- it is a lower bound on the correct scale, so it is
+    conservative and can only refuse a point the full scale would accept -- but
+    conservative here means "reintroduces the defect", so a new caller that
+    reaches this branch is a mistake rather than a trade-off.
     """
     magnitude = np.abs(products) if abs_products is None else abs_products
+    # ``|A| @ |beta|`` can overflow to ``inf`` where the signed ``A @ beta``
+    # stays finite -- perfect cancellation of terms near the float ceiling.  An
+    # infinite scale makes every slack ``-0.0`` and declares the row feasible
+    # whatever it is violated by, so the scale falls back to the row's own
+    # magnitude there.  Not reachable in-tree (it needs terms at ~1e308 and the
+    # largest drift this module has measured is 4e43), and the pre-#359 scale
+    # had no such branch because ``|A @ beta|`` finite meant a finite scale.
+    magnitude = np.where(np.isfinite(magnitude), magnitude, np.abs(products))
     return np.maximum(1.0, np.maximum(np.abs(b) if abs_b is None else abs_b, magnitude))
 
 
-def _is_feasible(A: NDArray, beta: NDArray, b: NDArray, tol: float) -> bool:
-    """Whether ``beta`` satisfies ``A @ beta >= b`` to a scale-aware tolerance."""
-    return bool(np.all(_feasibility_slack(A, beta, b) >= -tol))
+def _is_feasible(
+    A: NDArray, beta: NDArray, b: NDArray, tol: float, *, abs_A: NDArray | None = None
+) -> bool:
+    """Whether ``beta`` satisfies ``A @ beta >= b`` to a scale-aware tolerance.
+
+    ``abs_A`` is the loop-invariant ``np.abs(A)``.  The scale needs it on every
+    call, and rebuilding it here is pure waste on the paths that already hold
+    it -- the active-set loop, and ``irls_direct``, which tests the aggregate
+    constraint system two to three times per IRLS iteration plus once per
+    line-search halving.
+    """
+    return bool(np.all(_feasibility_slack(A, beta, b, abs_A=abs_A) >= -tol))
 
 
 def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
@@ -558,14 +578,12 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     term for term is the repair body, and ``products - b`` at ``b = 0`` being
     bitwise ``products``, signed zeros included.
 
-    The ``tol`` domain is what makes the third row exact rather than
-    approximate: at ``tol >= 1`` the clamped test accepts violations the raw one
-    rejects, which is the vacuity the boundary check exists to refuse.  A
-    nonzero ``b``, or a ``tol`` outside the default, narrows the claim to
-    "same predicate, possibly different arithmetic" -- no in-tree caller does
-    either, and ``test_the_projection_is_bitwise_masters_at_zero_rhs`` pins the
-    equality against a hand-written reference rather than against a recorded
-    number.
+    The ``tol`` domain still matters here for the reason it always did: at
+    ``tol >= 1`` the scaled test accepts violations the raw one rejects, which
+    is the vacuity the boundary check exists to refuse.
+    ``test_the_projection_stops_no_later_than_the_absolute_predicate`` pins what
+    survives -- the direction of the change -- against a hand-written reference
+    rather than against a recorded number.
 
     Plain raw violation rather than raw over row norm, though the latter is the
     true Euclidean distance to the hyperplane (the sweep moves ``|violation| /
@@ -581,14 +599,27 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     order never picks a row whose *raw* violation is not the worst.
 
     That last clause is about raw violation only, not about the shared
-    predicate: the two come apart for a nonzero ``b``.  With ``b = (0, 1000)``,
-    ``beta = (-0.5, 999)`` and ``tol = 0.01``, row 1 is the worse raw violation
-    (``-1`` against ``-0.5``) yet is already satisfied against its row scale of
-    1000, so the sweep spends budget repairing a row ``_is_feasible`` accepts.
-    Self-limiting -- the stopping test is still the scaled one, so the sweep
-    exits as soon as every row is satisfied -- and unreachable at ``b = 0``,
-    where the two orders coincide.  ``test_the_stopping_test_still_means_every_row``
-    pins that behaviour.
+    predicate: the two come apart whenever a row's scale differs from its
+    violation.  With ``b = (0, 1000)``, ``beta = (-0.5, 999)`` and
+    ``tol = 0.01``, row 1 is the worse raw violation (``-1`` against ``-0.5``)
+    yet is already satisfied against its row scale of 1000, so the sweep spends
+    budget repairing a row ``_is_feasible`` accepts.
+
+    **Since #359 that case is reachable at ``b = 0`` too, which is every
+    in-tree caller, and the previous wording -- "unreachable at ``b = 0``,
+    where the two orders coincide" -- is exactly what this change reverses.**
+    The scale no longer depends on the violation, so a row violated worst can
+    carry the largest scale and be accepted while a less-violated row with a
+    unit scale is not; ``TestProjectionSelectsTheWorstViolation`` demonstrates
+    it with ``b = 0``.  Measured over the monotone and constraint fit suites --
+    8697 constraint rows -- **46% carry a scale above 1**, worst 23.3, so this
+    is an ordinary path rather than a corner.
+
+    It stays self-limiting: the stopping test is the scaled one, so the sweep
+    exits as soon as every row is satisfied, the selection is unchanged from
+    before this branch, and the repair body never reads the scale -- so the
+    iterates are what they were and only the ``break`` moved.
+    ``test_the_stopping_test_still_means_every_row`` pins that behaviour.
     """
     beta = beta.copy()
     # Loop-invariant: only ``A @ beta`` changes between sweeps.
@@ -1280,7 +1311,7 @@ def solve_constrained_qp(
         # take a backward step.
         beta_new = beta + step
 
-        if _is_feasible(A, beta_new, b, tol):
+        if _is_feasible(A, beta_new, b, tol, abs_A=abs_A):
             # Full step is feasible
             beta = beta_new
         else:

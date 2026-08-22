@@ -1,5 +1,6 @@
 """Tests for the active-set constrained penalized least-squares solver."""
 
+import functools
 import inspect
 
 import numpy as np
@@ -1361,18 +1362,25 @@ class TestLoopFeasibilityRouting:
 
         assert saw_infeasible, "no fixture returned an infeasible point; the implication is vacuous"
 
-    def test_zero_rhs_makes_the_scaling_exactly_inert(self):
-        """Every in-tree caller passes b = 0; pin that this is the inert case.
+    def test_zero_rhs_is_inert_only_where_the_row_mass_is_under_one(self):
+        """``b = 0`` is not sufficient for inertness, and #359 is why.
 
-        With ``b_i == 0`` the per-row scale is ``max(1, |A_i @ beta|)``.
-        Measured across 7 monotone/convex/SCOP fits spanning Gaussian,
-        Binomial and Poisson -- 15 QP calls, 189 constraint rows -- the max
-        ``|A_i @ beta|`` inside the ratio block is 0.72, so the scale is
-        exactly 1.0 there and the scaled quantities are bitwise the raw ones.
-        That bound covers ``A @ beta`` inside the ratio block only; the
-        feasibility test keys off ``A @ beta_new`` and ``_project_feasible``
-        off its own iterates, which are different products and are covered by
-        the byte-for-byte fitted-value check rather than by this bound.
+        **The claim this test used to carry has been withdrawn, not weakened.**
+        It said the scaling was "exactly inert" at ``b = 0`` because the per-row
+        scale was ``max(1, |A_i @ beta|)`` and a 189-row measurement put the
+        worst ``|A_i @ beta|`` at 0.72.  The scale is now
+        ``max(1, |A_i| @ |beta|)``, so that measurement is of the wrong
+        quantity, and re-running it on the right one over the monotone and
+        constraint fit suites gives **4003 of 8697 constraint rows -- 46% --
+        with a scale above 1**, worst 23.3.  Inertness at ``b = 0`` is
+        therefore false in general.
+
+        What is still true, and is what this pins, is the condition for it:
+        the scale is 1 exactly when the row's own coefficient mass is, so the
+        guard below is on ``|A| @ |beta|`` and not on ``|A @ beta|``.  Those
+        differ by exactly the dominance this change is about, so guarding the
+        weaker one would let a BLAS change report the fixture healthy while
+        the assertion failed for an unrelated-looking reason.
         """
         rng = np.random.default_rng(3)
         p = 5
@@ -1385,8 +1393,16 @@ class TestLoopFeasibilityRouting:
         result = solve_constrained_qp(H, g, A, b)
 
         products = A @ result.beta
-        assert np.max(np.abs(products)) <= 1.0, "fixture no longer exercises scale == 1"
-        np.testing.assert_array_equal(_feasibility_scale(products, b), np.ones(p - 1))
+        magnitude = np.abs(A) @ np.abs(result.beta)
+        assert np.max(magnitude) <= 1.0, (
+            f"fixture no longer exercises scale == 1: worst row mass "
+            f"{np.max(magnitude):.4g} (the products alone reach only "
+            f"{np.max(np.abs(products)):.4g}, which is the quantity this guard "
+            "used to check and is strictly weaker)"
+        )
+        np.testing.assert_array_equal(
+            _feasibility_scale(products, b, abs_products=magnitude), np.ones(p - 1)
+        )
         np.testing.assert_array_equal(_feasibility_slack(A, result.beta, b), products - b)
 
 
@@ -2017,6 +2033,7 @@ class TestInfeasibleEarlyReturnIsProjected:
     """
 
     @staticmethod
+    @functools.cache
     def _rank_deficient_population(n=2700, seed=20260730):
         """Rank-deficient QPs shaped like the in-tree callers: ``b = 0``, structured ``A``.
 

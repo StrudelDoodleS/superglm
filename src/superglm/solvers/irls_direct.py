@@ -877,6 +877,11 @@ def _fit_irls_direct_once(
     prev_active_set: list[int] | None = None
     A_all: NDArray | None = None
     b_all: NDArray | None = None
+    # The feasibility scale needs ``|A_all|`` on every test, and the aggregate
+    # system is fixed for the whole fit -- so it is built once here rather than
+    # rebuilt two to three times per IRLS iteration plus once per line-search
+    # halving.  See ``constrained_qp._feasibility_slack``.
+    abs_A_all: NDArray | None = None
     if has_constraints:
         A_blocks: list[np.ndarray] = []
         b_blocks: list[np.ndarray] = []
@@ -888,6 +893,7 @@ def _fit_irls_direct_once(
                 b_blocks.append(g.constraints.b)
         A_all = np.vstack(A_blocks)
         b_all = np.concatenate(b_blocks)
+        abs_A_all = np.abs(A_all)
 
     # ── SCOP monotone engine support ──
     _has_scop = any(g.monotone_engine == "scop" for g in groups)
@@ -1899,12 +1905,14 @@ def _fit_irls_direct_once(
                     committed.beta,
                     b_all,
                     _QP_FEASIBILITY_TOL,
+                    abs_A=abs_A_all,
                 )
                 proposal_constraints_feasible = _is_feasible(
                     A_all,
                     proposal.beta,
                     b_all,
                     _QP_FEASIBILITY_TOL,
+                    abs_A=abs_A_all,
                 )
 
                 def constraint_trial_is_invalid(candidate: _IRLSState) -> bool:
@@ -1913,6 +1921,7 @@ def _fit_irls_direct_once(
                         candidate.beta,
                         b_all,
                         _QP_FEASIBILITY_TOL,
+                        abs_A=abs_A_all,
                     )
 
             decision = _select_irls_trial(
@@ -2050,6 +2059,7 @@ def _fit_irls_direct_once(
                 beta,
                 b_all,
                 _QP_FEASIBILITY_TOL,
+                abs_A=abs_A_all,
             )
             # Objective or coefficient stagnation cannot certify a constrained
             # mode whose retained coefficients are outside the feasible set.
@@ -2371,7 +2381,7 @@ def _fit_irls_direct_once(
     if has_constraints:
         if A_all is None or b_all is None:  # pragma: no cover - construction invariant
             raise RuntimeError("constrained fit omitted its aggregate constraint system")
-        if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL):
+        if not _is_feasible(A_all, beta, b_all, _QP_FEASIBILITY_TOL, abs_A=abs_A_all):
             minimum_scaled_slack = float(np.min(_feasibility_slack(A_all, beta, b_all)))
             converged = False
             termination_reason = "constraint_infeasible"
