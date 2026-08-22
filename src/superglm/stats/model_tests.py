@@ -552,8 +552,11 @@ def vuong_test(
         # moments have to agree with that count, or adding a row the test
         # ignores moves the statistic and can flip the selected model. The
         # frequency arm gets this right by weighting both moments.
-        carried = prior_weights > 0.0
-        d = (ll_a - ll_b)[carried]
+        # ``prior_weights`` is None when no sample_weight was supplied, in
+        # which case every row carries weight and there is nothing to exclude.
+        d = ll_a - ll_b
+        if prior_weights is not None:
+            d = d[prior_weights > 0.0]
         mean_m = float(np.mean(d))
         omega = float(np.std(d, ddof=1))
         likelihood_size = (

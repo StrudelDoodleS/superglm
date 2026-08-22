@@ -726,16 +726,15 @@ class OrderedCategorical:
         self._pinned_specials: list[Any] = []
         self._active_specials: list[int] = list(range(len(self._specials)))
 
-        # Stamped by the design-matrix builder per build with the same
-        # geometry weight the numeric-axis terms get, because only the builder
-        # knows the declared contract: the raw weights under `"frequency"`, and
-        # the positive-row indicator under `"prior"`, where hosted Piecewise
-        # MODEL geometry (int-mode placement, most_exposed base) follows
-        # physical rows.  Passing the indicator rather than None is what keeps
-        # a zero-weight row from shaping a hosted boundary it cannot shape at
-        # the top level.  Read with a getattr default so pre-existing pickles
-        # stay valid and direct spec-API builds keep the replication reading.
-        self._inner_geometry_weight: NDArray | None = None
+        # Stamped by the design-matrix builder per build: True under the prior
+        # contract, where hosted Piecewise MODEL geometry (int-mode placement,
+        # most_exposed base) must follow physical rows exactly as the
+        # numeric-axis terms do.  The build then derives the positive-row
+        # indicator from its own weights -- passing ``None`` instead would
+        # count a zero-weight row that shapes no top-level boundary.  Read with
+        # a getattr default so pre-existing pickles stay valid and direct
+        # spec-API builds keep the replication reading.
+        self._inner_geometry_physical_rows: bool = False
 
         # The inner spline this wrapper owns and delegates to (deferred until
         # n_levels is known, because the knot count clamps against it).
@@ -1306,12 +1305,21 @@ class OrderedCategorical:
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
             return inner.build(numeric)
-        if isinstance(inner, Piecewise):
-            stamped = getattr(self, "_inner_geometry_weight", None)
-            info = inner.build(
-                numeric,
-                sample_weight=sample_weight if stamped is None else stamped,
+        if isinstance(inner, Piecewise) and getattr(self, "_inner_geometry_physical_rows", False):
+            # The positive-row indicator, derived HERE from the weights this
+            # call was given rather than from the builder's full-length array:
+            # with ``specials=`` the caller masks rows down to the ordered
+            # levels, so anything stamped whole would not align with
+            # ``numeric``. Deriving it from the already-masked weights is
+            # correct under both shapes, and matches exactly what the
+            # numeric-axis terms receive. ``None`` means every row carries
+            # weight, where the indicator is all ones and so says nothing.
+            geometry_weight = (
+                None
+                if sample_weight is None
+                else (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
             )
+            info = inner.build(numeric, sample_weight=geometry_weight)
         else:
             info = inner.build(numeric, sample_weight=sample_weight)
         if isinstance(info, GroupInfo):

@@ -1014,7 +1014,7 @@ def build_design_matrix(
         # base, its specials identifiability guards, and Polynomial
         # standardization deliberately keep following sample_weight.
         if isinstance(spec, OrderedCategorical):
-            spec._inner_geometry_weight = geometry_weight
+            spec._inner_geometry_physical_rows = physical_rows
         x_col = X.column_array(name)
         if separation_boundaries and isinstance(spec, Categorical):
             # Scanned after the loops, once the spec has learned its levels
