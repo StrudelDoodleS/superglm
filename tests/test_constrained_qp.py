@@ -967,37 +967,66 @@ class TestToleranceDomain:
 class TestProjectionSelectsTheWorstViolation:
     """The scale-aware slack is a stopping test, not a ranking.
 
-    At ``b = 0`` it evaluates to ``x / max(1, |x|)``, which is exactly ``-1.0``
-    for *every* violation past 1, so feeding it to ``argmin`` makes rows
-    violated by wildly different amounts indistinguishable and breaks the exact
-    tie on the lowest index.  Selection therefore comes from the raw
-    violations; only the stopping test stays scale-aware.
+    Its per-row scale is ``max(1, |b|, |A_i| @ |beta|)`` -- the dot product's
+    own error scale, issue #359 -- which depends on the row's *inputs* and not
+    on the size of its violation.  So a row violated far worse than another can
+    carry a far larger scale and rank below it, and feeding the scaled slack to
+    ``argmin`` selects the wrong row to repair.  Selection therefore comes from
+    the raw violations; only the stopping test stays scale-aware.
+
+    Before #359 the scale was ``max(1, |b|, |A_i @ beta|)``, a monotone
+    function of the violation itself, and the two orderings parted only where
+    that clamp *saturated* at ``-1``.  They now part generically, which makes
+    this class's decision more necessary rather than less.
     """
 
     A = np.diff(np.eye(7), axis=0)  # rows e_{i+1} - e_i, the monotone shape
     B = np.zeros(6)
-    # First differences -1.5, -14, -1.5, -14, -1.5, -14: every row past the
-    # clamp, three of them nearly ten times worse than the other three.
+    # First differences -1.5, -14, -1.5, -14, -1.5, -14: three rows violated
+    # more than nine times worse than the other three.
     BETA = np.array([0.0, -1.5, -15.5, -17.0, -31.0, -32.5, -46.5])
 
-    def test_the_clamp_erases_the_ordering(self):
-        """Precondition: the raw violations differ 9x and the scaled ones do not."""
+    def test_the_row_scale_reorders_the_violations(self):
+        """Precondition: the worst raw violation is not the worst scaled one."""
         raw = self.A @ self.BETA - self.B
         np.testing.assert_array_equal(raw, [-1.5, -14.0, -1.5, -14.0, -1.5, -14.0])
-        # Exactly -1.0 on all six -- not merely close, which is what makes the
-        # tie exact and hands the pick to the lowest index.
-        np.testing.assert_array_equal(
-            _feasibility_slack(self.A, self.BETA, self.B), np.full(6, -1.0)
+        # The scale grows along the rows -- |beta_i| + |beta_{i+1}| -- entirely
+        # independently of which rows are violated worst.
+        np.testing.assert_allclose(
+            np.abs(self.A) @ np.abs(self.BETA), [1.5, 17.0, 32.5, 48.0, 63.5, 79.0]
         )
+        scaled = _feasibility_slack(self.A, self.BETA, self.B)
+        np.testing.assert_allclose(
+            scaled,
+            [
+                -1.0,
+                -0.8235294117647058,
+                -0.046153846153846156,
+                -0.2916666666666667,
+                -0.023622047244094488,
+                -0.17721518987341772,
+            ],
+        )
+        # Row 1 is violated 9.3x worse than row 0 and still ranks second.
         assert int(np.argmin(raw)) == 1
-        assert int(np.argmin(_feasibility_slack(self.A, self.BETA, self.B))) == 0
+        assert int(np.argmin(scaled)) == 0
 
-    def test_below_the_clamp_the_two_orderings_agree(self):
-        """Control: the collapse is the cause, not a coincidence of the fixture."""
-        beta = np.array([0.0, -0.3, -0.5, -0.9, -1.1, -1.3, -1.6])
-        raw = self.A @ beta - self.B
-        np.testing.assert_array_equal(raw, _feasibility_slack(self.A, beta, self.B))
-        assert int(np.argmin(raw)) == int(np.argmin(_feasibility_slack(self.A, beta, self.B)))
+    def test_the_two_orderings_agree_when_every_row_shares_one_scale(self):
+        """Control: the reordering is the scale, not a coincidence of the fixture.
+
+        When every row's dot-product scale falls under the ``max(1, .)`` floor
+        the scale is 1 throughout, the slack is the raw violation, and the two
+        selections coincide.  That is the well-scaled case the relative test is
+        documented to leave alone.
+        """
+        A = np.eye(3)
+        b = np.zeros(3)
+        beta = np.array([-0.3, -0.5, -0.2])
+        np.testing.assert_array_equal(np.abs(A) @ np.abs(beta), [0.3, 0.5, 0.2])
+        raw = A @ beta - b
+        scaled = _feasibility_slack(A, beta, b)
+        np.testing.assert_array_equal(raw, scaled)
+        assert int(np.argmin(raw)) == int(np.argmin(scaled)) == 1
 
     def test_the_sweep_budget_is_spent_on_the_worst_row(self):
         """The outcome the ranking buys, not the internal it is spelled with.
@@ -1063,15 +1092,23 @@ class TestProjectionSelectsTheWorstViolation:
             beta += deficit / (a @ a) * a
         return beta
 
-    def test_the_projection_is_bitwise_masters_at_zero_rhs(self):
-        """Every in-tree call site passes ``b = 0`` and the default ``tol``, and
-        on that domain the scale-aware rewrite is the identity.
+    def test_the_projection_stops_no_later_than_the_absolute_predicate(self):
+        """#359 made the stopping test weaker, and it must be weaker ONLY.
 
-        ``products - 0.0`` is bitwise ``products``; the selection is the same
-        raw ``argmin``; and the clamp ``v / max(1, |v|)`` is exactly ``v`` for
-        ``|v| <= 1`` and exactly ``-1`` below, so for ``tol`` in ``(0, 1)`` the
-        clamped and raw stopping tests are the same predicate row by row.  The
-        default ``tol`` is ``1e-12``, which is the literal ``master`` hardcoded.
+        This test used to require the projection to be bitwise the absolute
+        implementation at ``b = 0``.  That is deliberately no longer true: the
+        scale is now ``|A_i| @ |beta|``, which dominates ``|A_i @ beta|``, so a
+        cancelling row is measured against the accuracy its dot product
+        actually has and the stopping test accepts points the absolute one
+        refused.  ``test_a_cancelling_row_is_measured_against_its_own_bound``
+        pins that gain directly.
+
+        What must still hold is the *direction* of the change.  The scale only
+        ever grows, so every normalized violation moves toward zero and the
+        shipped projection can only stop at or before the absolute one -- never
+        after.  Requiring the shipped result to be feasible under the absolute
+        predicate wherever the reference is states exactly that, and would fail
+        for any scale that shrank a row instead of growing it.
         """
         rng = np.random.default_rng(2026)
         checked = repaired = 0
@@ -1096,9 +1133,14 @@ class TestProjectionSelectsTheWorstViolation:
 
             shipped = _project_feasible(beta, A, b, 1e-12)
             reference = self._master_project_feasible(beta, A, b)
-            assert shipped.tobytes() == reference.tobytes(), (
-                f"projection diverged from master at b = 0: {shipped} vs {reference}"
-            )
+            # Wherever the absolute predicate is satisfied by its own result,
+            # the shipped one must be too: a scale that only grows can stop
+            # earlier, never later.
+            if np.all(A @ reference - b >= -1e-12):
+                assert _is_feasible(A, shipped, b, 1e-12), (
+                    f"shipped projection stopped LATER than the absolute one, which a "
+                    f"dominating scale cannot do: {shipped} vs {reference}"
+                )
             checked += 1
             if not np.all(A @ beta - b >= -1e-12):
                 repaired += 1
@@ -1106,6 +1148,48 @@ class TestProjectionSelectsTheWorstViolation:
         assert checked >= 350, f"only {checked} fixtures were built"
         assert repaired >= 100, (
             f"only {repaired} fixtures started infeasible; the comparison is mostly vacuous"
+        )
+
+    def test_a_cancelling_row_is_measured_against_its_own_bound(self):
+        """The gain #359 buys, on a row built to cancel.
+
+        ``A @ beta`` here is ``1e8 - 1e8 - 5e-12``: every term exact, the
+        leading pair cancelling completely, and a result 20 orders under the
+        terms that produced it.  The absolute predicate reads the ``-5e-12``
+        output against a scale of 1 and calls it a violation five times its
+        tolerance.  The dot product's own error bound is
+        ``n * eps * (|A| @ |beta|) = 6.7e-08``, so the point is feasible to
+        every digit the arithmetic has -- ``5e-12`` is ``7.5e-05`` of it.
+        """
+        # The operands are given rather than computed, deliberately.  A row
+        # that cancels this hard has NO summation order it agrees with itself
+        # on -- ``5e-12`` is far under ``ulp(1e8) = 1.5e-08``, so a BLAS that
+        # adds the small term before the cancelling pair loses it entirely and
+        # returns ``0.0``.  Measured: SKYLAKEX, HASWELL, SANDYBRIDGE, NEHALEM
+        # and ZEN return ``-5e-12`` here while PRESCOTT and CORE2 return
+        # ``0.0``.  Asserting a computed product would pin one BLAS's
+        # associativity, which is the class of fixture this repository keeps
+        # having to repair, so the products are supplied and only the scale
+        # rule -- the thing #359 changed -- is under test.
+        products = np.array([-5e-12])
+        b = np.array([0.0])
+        magnitude = np.array([2e8])  # |A_i| @ |beta| for that row
+
+        absolute_scale = np.maximum(1.0, np.maximum(np.abs(b), np.abs(products)))
+        np.testing.assert_array_equal(absolute_scale, [1.0])
+        np.testing.assert_array_equal(
+            _feasibility_scale(products, b, abs_products=magnitude), magnitude
+        )
+
+        # The old scale collapses to the max(1, .) floor, so the test is
+        # absolute and refuses; the dot-product scale accepts.
+        assert float((products - b)[0] / absolute_scale[0]) < -1e-12
+        assert float((products - b)[0] / magnitude[0]) > -1e-12
+
+        bound = 3 * float(np.finfo(float).eps) * float(magnitude[0])
+        assert abs(products[0]) < bound / 1000.0, (
+            f"violation {abs(products[0]):.3e} is not comfortably inside the "
+            f"dot-product bound {bound:.3e}; the fixture no longer makes its point"
         )
 
 
@@ -1460,10 +1544,18 @@ class TestBlockingDecisionTrace:
 
         checked = 0
         for record in records:
-            for products, b_i, scaled_slack in zip(
-                record["row_products"], record["row_b"], record["row_scaled_slack"]
+            for products, b_i, scaled_slack, row_scale in zip(
+                record["row_products"],
+                record["row_b"],
+                record["row_scaled_slack"],
+                record["row_scale"],
             ):
-                row_scale = max(1.0, abs(b_i), abs(products))
+                # Since #359 the scale is `max(1, |b|, |A_i| @ |beta|)` and is
+                # not recoverable from the product, so it is read from the
+                # trace.  That still cross-checks the operands: the slack comes
+                # from an independent `_feasibility_slack` call and the scale
+                # from the loop's own, so a slip that fed one a different
+                # iterate breaks the reconstruction.
                 reconstructed = scaled_slack * row_scale
                 raw_slack = products - b_i
                 # (x / s) * s is within an ulp of x; anything larger means the
@@ -1925,11 +2017,20 @@ class TestInfeasibleEarlyReturnIsProjected:
     """
 
     @staticmethod
-    def _rank_deficient_population(n=900, seed=20260730):
+    def _rank_deficient_population(n=2700, seed=20260730):
         """Rank-deficient QPs shaped like the in-tree callers: ``b = 0``, structured ``A``.
 
         ``x = 0`` is feasible for every one of them, so an infeasible answer is
         a solver defect rather than an infeasible problem.
+
+        **The ensemble grew from 900 to 2700 for #359, and the bars below did
+        not move.**  Correcting the feasibility scale to the dot product's own
+        error bound made fewer solves read as infeasible, which shrank the
+        defect population this class samples: at ``n = 900`` it fell to 26
+        firing and 4 repaired, under bars of 30 and 10.  Lowering the bars would
+        have recorded the improvement as a weaker test.  Tripling the sample
+        restores them with margin instead -- measured 93 firing and 34 repaired,
+        3.1x and 3.4x -- so the assertions still mean what they meant.
         """
         rng = np.random.default_rng(seed)
         cases = []
