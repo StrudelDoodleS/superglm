@@ -212,8 +212,12 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
     projects onto it by roughly that much.  Scaling the threshold with the
     retained conditioning -- rather than fixing it at ``factor_rcond`` -- is
     what keeps a well-posed but ill-conditioned rank-deficient system solvable,
-    since the rank policy truncates at ``gram_rcond`` and so retains blocks far
-    more ill-conditioned than ``factor_rcond`` would tolerate.
+    since the rank policy truncates at ``max(gram_rcond, n eps)`` -- version 3
+    floors it at the eigensolver's bar, issue #356 -- and so still retains
+    blocks far more ill-conditioned than ``factor_rcond`` would tolerate.  The
+    ceiling on a retained condition tightened by exactly ``n`` when that floor
+    landed, from ``1/eps`` to ``1/(n eps)``; the table below is unaffected
+    because its largest entry is ``1e12``.
 
     Sensitivity degrades *gradually* as the retained conditioning grows; there
     is no sharp cutoff.  Measured detection of an injected **spectral** null
@@ -427,9 +431,15 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
     ``rcond`` is deliberately left at ``None``.  The competing proposal is to
     pass ``SHARED_RANK_POLICY.gram_rcond`` so that one rule decides what is
     retained, since the policy keeps ``H`` eigenvalues down to
-    ``gram_rcond * lambda_max`` while ``lstsq`` drops singular values below
-    ``max(M, N) * eps * sigma_max``.  Equilibration is *measured* to settle
-    that disagreement better -- there is no structural argument that it must,
+    ``max(gram_rcond, n eps) * lambda_max`` while ``lstsq`` drops singular
+    values below ``max(M, N) * eps * sigma_max``.  **Version 3 (issue #356)
+    strengthens that proposal without settling it.**  It gave the two rules the
+    same shape -- both are now ``p(dimension) * eps * scale``, where the Gram
+    side used to be a bare ``eps`` -- so the constant is no longer the
+    difference between them.  What remains is that they are taken on different
+    matrices, the ``H`` Gram here and the KKT system there, and the second
+    bullet below measures exactly that difference.  Equilibration is *measured*
+    to settle it better -- there is no structural argument that it must,
     and the two bullets below are the whole of the evidence, so weakening
     either weakens the decline:
 
@@ -437,10 +447,17 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
       constraint keeps a KKT singular value of order that constraint row's
       norm, not of order its ``H`` eigenvalue -- a KKT singular value is not an
       ``H`` eigenvalue.  Over a ``p = 180`` ensemble with 50-row active sets and
-      an in-band ``H`` eigenvalue planted at ``50 * eps * lambda_max``, the
-      smallest retained equilibrated ratio measured ``1.3e-4`` and the largest
-      truncated one ``0``; nothing landed between ``eps`` and ``230 * eps``, so
-      the two candidate cutoffs cannot disagree there.
+      an ``H`` eigenvalue planted at ``50 * eps * lambda_max``, the smallest
+      retained equilibrated ratio measured ``1.3e-4`` and the largest truncated
+      one ``0``; nothing landed between ``eps`` and ``230 * eps``, so the two
+      candidate cutoffs cannot disagree there.  Under version 3 that plant sits
+      *below* the ``180 eps`` cutoff rather than inside the retention band, so
+      the policy now truncates the direction where it used to keep it.  The
+      measurement survives that: what the ensemble established is a property of
+      the KKT singular values -- an active constraint pins such a direction at
+      the constraint row's scale -- and that is unchanged by where the Gram
+      cuts.  The ensemble has not been re-run with the plant moved above
+      ``180 eps``, and nothing is claimed about that case.
     * Where the active rows leave such a direction *free*, it really does fall
       in the band -- and an explicit ``rcond`` is not enough to save it.  With
       ``H = diag(1, eps, 0)`` and ``A_eq = [[1, 0, 0]]`` the raw ratio is

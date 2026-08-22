@@ -32,6 +32,13 @@ class RankPolicy:
     honestly cover what this module decides.  Note that several
     selection-deciding constants live outside this object as module literals,
     so a bump is a claim about the rule as a whole, not about the fields here.
+    **Version 3 is exactly that case, so read "have not moved" narrowly.**
+    ``gram_rcond`` is still ``eps`` and still pins the normal-equation
+    boundary against ``factor_rcond``, but the cutoff the Gram route APPLIES
+    is now that field floored at :func:`_eigensolver_relative_bar` -- a module
+    literal, not a field -- so the effective threshold moved by a factor of
+    the matrix order while every value in this object stayed put.  A reader
+    who takes the field for the cut will be wrong by that factor.
 
     The version reaches a recorded fit through
     ``training_telemetry()["rank_policy"]["version"]``.
@@ -79,13 +86,157 @@ SHARED_RANK_POLICY = RankPolicy(
     # Skipping the eager Gram subspace at certification sites is inside this
     # version and contributes no reason for it: that path returns the same
     # decomposition or none, and was accepted on byte-identical fitted output.
-    version=2,
+    #
+    # Version 3 -- the Gram cutoff is floored at the eigensolver's own error
+    # bar, so the rank it reports stops being a function of round-off's SIGN.
+    # `_eigensolver_relative_bar` carries the derivation and the measurement;
+    # what belongs HERE is why it is a version and not a patch.  It moves the
+    # cutoff from `eps * max|w|` to `n * eps * max|w|`, which is a factor of
+    # `n`, so a direction whose eigenvalue lands in that band is now dropped
+    # where it was retained.  That changes `rank`, and hence `active_columns`,
+    # for the same input under the same `gram_rcond` -- the bump contract
+    # above, exactly.  `factor_rcond` and `gram_rcond` are untouched: the
+    # normal-equation boundary they pin is still `lambda = sigma^2`, and the
+    # floor binds only where that boundary asks for a decision the arithmetic
+    # cannot supply.  See issue #356.
+    version=3,
     factor_rcond=float(np.sqrt(_EPS)),
     gram_rcond=float(_EPS),
     certification_band=32.0,
     warning_condition=float(1.0 / np.sqrt(_EPS)),
     severe_condition=float(1.0 / _EPS),
 )
+
+
+def _eigensolver_relative_bar(order: int) -> float:
+    """``p(n) eps`` -- the relative accuracy a symmetric eigensolver delivers.
+
+    The *LAPACK Users' Guide*, 3rd ed. (SIAM 1999), sec. 4.7, bounds the
+    computed eigenvalues of a symmetric ``A`` by ``|w_i - w_i_exact| <= p(n)
+    eps ||A||_2`` with ``p(n)`` "a modestly growing function of n", and states
+    in the same section that "large eigenvalues ... are computed to high
+    relative accuracy and small ones may not be".  The bound is *absolute* and
+    scaled by ``||A||_2``, so nothing below it is a property of the matrix.
+    ``p(n) = n`` is taken here; the guide's own code fragment displays the
+    bound with ``p(n) = 1``, which is an illustration of the bound and not a
+    rank cut.
+
+    **Every established rank tolerance carries such a factor, and this
+    module's Gram cut was the only one without it.**  ``numpy.linalg.matrix_rank``
+    documents ``S.max() * max(M, N) * eps`` and attributes it to MATLAB's
+    ``rank`` and to *Numerical Recipes*, 3rd ed. (Cambridge 2007), p. 795;
+    the same edition's alternative is ``eps/2 * sqrt(m + n + 1) * S.max()``,
+    described there as based on expected round-off (p. 71).  SuiteSparseQR's
+    documented default is ``20 (m + n) eps * max_j ||A(:,j)||_2`` -- Foster &
+    Davis, "Algorithm 933", *ACM TOMS* 40(1) Art. 7 (2013).  LAPACK's own
+    ``?PSTRF`` -- Cholesky with complete pivoting, which is the closest
+    published analogue of what this module does to a semidefinite Gram --
+    documents its ``TOL`` argument as "If TOL < 0, then N*U*MAX( A(K,K) ) will
+    be used", i.e. ``n u max_k A(k,k)``.  All four are ``p(dimension) * eps *
+    scale`` with ``p`` growing at least linearly; ``p == 1`` is not among
+    them.  ``screening/_structured.py``'s ``_penalty_root`` already uses
+    ``n eps ||S||_2`` in this tree, and cites the same section for it.
+
+    **Why the Gram route needs this floor and the factor route does not.**
+    The two rcond fields pin ONE statistical boundary in two coordinate
+    systems -- ``factor_rcond = sqrt(eps)`` on singular values is
+    ``gram_rcond = eps`` on eigenvalues, because ``lambda = sigma^2``, and
+    ``test_shared_rank_policy_matches_normal_equation_boundary`` holds them
+    there.  Squaring maps the *boundary* exactly and does *not* map the *noise
+    floor*, because the floor is ``p(n) eps`` times the largest value in
+    whichever coordinates you are in:
+
+        factor:  cut sqrt(eps) sigma_max,  floor p(n) eps sigma_max
+                 -> the cut sits 1/(p(n) sqrt(eps)) ~ 6.7e+07/p(n) ABOVE it
+        gram:    cut eps lambda_max,       floor p(n) eps lambda_max
+                 -> the cut sits at 1/p(n) of it, i.e. BENEATH it
+
+    So the same policy that is resolved with seven orders to spare on the
+    factor is beneath resolution on the Gram, and the gap is exactly ``p(n)``.
+    That is not a tolerance that was chosen badly; it is the price of forming
+    ``X'X``, and it is the same price -- half the digits -- that makes the
+    normal equations a documented hazard for the least-squares problem itself
+    -- ``kappa_2(A'A) = kappa_2(A)^2``, the standard argument for preferring QR
+    over the normal equations, Golub & Van Loan, *Matrix Computations*, 4th
+    ed. (JHU Press 2013), ch. 5, "Orthogonalization and Least Squares".
+
+    **What the floor fixes is the sign, which is the part that is not data.**
+    Beneath the floor, an eigenvalue's sign is round-off.  Goulart,
+    Nakatsukasa & Rontsis, "Accuracy of approximate projection to the
+    semidefinite cone", arXiv:1908.01606, say so in the published form -- that
+    "approximations to the small eigenvalues may have the wrong signs", so the
+    computed spectrum "may not contain the correct number of positive
+    eigenvalues" -- and their main result is that this costs the PROJECTION
+    almost nothing (their bound is gap-INDEPENDENT, Thm. 2.1).  It is the
+    *count* that is undetermined, not the matrix.  This module publishes the
+    count, and inverts on it, which is the one use their result does not
+    cover: a retained direction enters ``pseudo_inverse`` as ``1 / w``.
+
+    **The floor is also what makes the PSD clip legitimate rather than a
+    decision.**  ``max(w, 0)`` is the projection onto the semidefinite cone --
+    Higham, *Linear Algebra Appl.* 103:103-118 (1988) for the Frobenius case,
+    Goulart et al. Lemma 2.1 for every unitarily invariant norm -- and it is
+    the right thing to do to a RESOLVED negative eigenvalue.  Applied beneath
+    the floor it was deciding the rank, because a negative round-off residue
+    was clipped to exactly ``0.0`` and always dropped while a positive one of
+    the same magnitude was compared against ``eps max|w|`` and could be kept.
+    With the cut AT the floor the clip can no longer decide anything: inside
+    the bar both signs drop, and outside it the clip only ever meets a
+    genuinely negative eigenvalue, which is precisely Higham's case.  The
+    asymmetry is removed by raising the cut, not by rewriting the comparison.
+
+    **This reconciles the two modules that answered the question oppositely --
+    and they still retain and drop oppositely.**  Issue #356 records that
+    ``screening/_structured.py``'s ``_penalty_root`` *keeps* an in-bar
+    eigenvalue at its magnitude where this module *dropped* it on the sign, with
+    nothing reconciling the two.  The shared rule is not the outcome, it is
+    the question: inside the bar, choose the answer that is a function of the
+    data rather than of the rounding, on the same bar ``n eps ||A||_2``.  The
+    outcomes differ because the objects do.  There, dropping a direction from
+    a *penalty* makes it *free* -- filter factor one, the maximum -- so keeping it
+    at ``|w|`` is the conservative reading.  Here, keeping a direction in a
+    *Hessian* puts ``1/w`` into a covariance, so dropping it is.  Both are
+    sign-independent, which is the property the issue is about; neither is a
+    coin flip; and the module that is wrong in a given direction is now the
+    one whose object says so, rather than whichever one the caller reached.
+
+    **Measured, on the fixture the issue was filed from.**  Seven
+    ``OPENBLAS_CORETYPE`` microkernels at one thread, on
+    ``TestRankGateSeesCollinearityNotScale``'s correlation matrix and on the
+    same matrix with the residue reflected through its own eigenvector
+    (``H - 2 w0 v v'``, which is what a different BLAS produces) -- fourteen
+    configurations.  Against the OLD cut the residue runs **0.10x to 2.93x**,
+    straddling it: rank reads 6 on one configuration and 5 on thirteen, and
+    ``||pseudo_inverse||_2`` reads **1.817e+15** on that one against 1.0 on
+    the rest.  Against this bar the same residue runs **0.017x to 0.488x** and
+    never approaches it, so the direction drops on all fourteen -- worst
+    reading 0.488x, i.e. **2.05x of headroom**, min 0.017x.  One number moved
+    from a 1.8e+15 spread to no spread at all.
+
+    **The module already believed this bar, in another field, to the bit.**
+    ``certification_band * gram_rcond`` is ``32 eps``, which is
+    ``_eigensolver_relative_bar(32)`` EXACTLY -- not approximately, the same
+    float -- and ``_certification_required`` compares a condition number to
+    ``warning_condition / sqrt(certification_band) = 1/sqrt(32 eps) =
+    1.186328e+07``, which is ``1/sqrt(bar)`` at order 32 to six figures.  So
+    the certification band was always a resolution bar with ``p(n)`` frozen at
+    32, applied to the condition number instead of to the cut.  Version 3 does
+    not introduce the quantity; it makes the *cut* use it, and track the actual
+    order rather than assume 32.  The two agree at width 32 by construction,
+    the cut is finer below it and coarser above.
+
+    **What it does not fix, stated because the opposite would be easy to
+    assume.**  This does not bound the pseudo-inverse.  A retained direction
+    may sit just above the bar, giving ``||pinv||_2 ~ 1/(n eps lambda_max)``,
+    and the policy boundary ITSELF admits ``1/(eps lambda_max)`` on both
+    routes by construction -- that is what retaining a ``sigma =
+    sqrt(eps) sigma_max`` direction means.  A large covariance after this
+    change is a conditioning fact about the data.  Before it, it was a fact
+    about the machine.  Only the second is this module's to fix, and callers
+    that need the first refused rather than reported are what
+    ``needs_factor_certification`` is for.
+    """
+    return float(max(order, 1)) * _EPS
 
 
 # Largest entry magnitude for which ``M + M.T`` provably cannot overflow: the
@@ -238,6 +389,28 @@ def needs_factor_certification(
     A certificate governs the retained subspace as well as the integer rank.
     Normal equations can erase a factor-scale direction at the numerical
     boundary, or retain a different direction while reporting the same rank.
+
+    **This shape -- a rank plus a flag saying whether to believe it -- is the
+    published state of the art, not a local invention.**  Foster & Davis,
+    "Algorithm 933", *ACM TOMS* 40(1) Art. 7 (2013), say of the routine they
+    are improving on that it "returns an estimate for the numerical rank that
+    is usually, but not always, correct", and their own contribution is
+    described as reliable "in the sense that ... the numerical rank is
+    accurately determined when a warning flag indicates that the numerical
+    rank should be correct" -- the guarantee is *conditional* on the flag.  The
+    mechanism is singular-value bounds "used to warn the user if the
+    calculated numerical rank may be incorrect".  So the right answer to an
+    ambiguous rank is a verdict, not a better threshold, and version 3's cut
+    at :func:`_eigensolver_relative_bar` is what makes the verdict honest
+    rather than what replaces it.
+
+    **And a verdict only helps where it is read.**  Issue #356 is that roughly
+    twenty call sites take :func:`decompose_gram` directly and never ask.  The
+    load-bearing pair is ``inference/covariance.py``, where the pseudo-inverse
+    IS the published covariance matrix: on the fixture in that issue this
+    predicate is ``True`` on both arms of a round-off coin flip, correctly,
+    and nothing downstream consults it.  That half is *not* fixed by version 3
+    and is tracked separately.
     """
     return _certification_required(
         method=decomposition.method,
@@ -1218,10 +1391,22 @@ def _decompose_gram(
             min_eigenvalue_lower_bound = 1.0 / inverse_factor_frobenius**2
             pocon = scipy.linalg.get_lapack_funcs("pocon", (factor,))
             reciprocal_condition, info = pocon(factor, matrix_norm, uplo="L")
+            # This shortcut returns *full* rank without running `eigh`, so its
+            # threshold has to dominate the cutoff `eigh` would have applied,
+            # or the two paths disagree on the same matrix.  `certification_band
+            # * gram_rcond` is 32 eps and used to dominate a cutoff of eps
+            # outright; against a cutoff floored at `n eps` it stops dominating
+            # at width 32, so the bar is taken here too.  `matrix_norm` is the
+            # 1-norm and `||A||_1 >= ||A||_2 = max|w|` for symmetric `A`, so
+            # clearing this clears the spectral cutoff a fortiori.
             safely_full_rank = (
                 np.isfinite(min_eigenvalue_lower_bound)
                 and min_eigenvalue_lower_bound
-                > policy.certification_band * policy.gram_rcond * matrix_norm
+                > max(
+                    policy.certification_band * policy.gram_rcond,
+                    _eigensolver_relative_bar(len(active_columns)),
+                )
+                * matrix_norm
             )
             if safely_full_rank:
                 probe = np.arange(1.0, len(active_columns) + 1.0)
@@ -1252,7 +1437,15 @@ def _decompose_gram(
                             and reciprocal_condition > 0.0
                             else np.sqrt(matrix_norm / min_eigenvalue_lower_bound)
                         ),
-                        cutoff=policy.gram_rcond * matrix_norm,
+                        # The same floored relative factor the spectral path
+                        # cuts on, so the field means one thing whichever
+                        # branch produced the decomposition.  Informational
+                        # here -- this branch never truncates.
+                        cutoff=max(
+                            policy.gram_rcond,
+                            _eigensolver_relative_bar(len(active_columns)),
+                        )
+                        * matrix_norm,
                         rank_truncated=len(active_columns) < width,
                         used_svd_fallback=False,
                         resolution_limited=False,
@@ -1268,7 +1461,25 @@ def _decompose_gram(
     raw_eigenvalues = eigenvalues
     max_eigenvalue = max(float(eigenvalues[-1]), 0.0)
     max_abs_eigenvalue = float(np.max(np.abs(eigenvalues), initial=0.0))
-    negative_tolerance = 100.0 * _EPS * max(max_abs_eigenvalue, 1.0)
+    # Floored at the same bar as the cutoff, for the same reason: a matrix may
+    # not be REFUSED as indefinite over a quantity `eigh` cannot resolve.  The
+    # 100 eps constant predates the bar and is inert against it up to width
+    # 100; past that the bar governs, and the direction it admits is then
+    # dropped by the cutoff below, which is the coherent outcome rather than a
+    # raise.  Widening only -- nothing that raised on a resolved negative
+    # eigenvalue stops raising.
+    #
+    # It is also inert on the `allow_indefinite=True` side, which is worth
+    # SHOWING rather than asserting because widening a definiteness test looks
+    # like it should flip semantics.  `eigenvalues[0]` is the MINIMUM, so
+    # admitting it means every negative eigenvalue satisfies `|w| <= n eps *
+    # max(max_abs, 1)`; the equilibrated matrix has a unit diagonal, so
+    # `max_abs >= 1` and that factor is just `max_abs`.  Every such eigenvalue
+    # is therefore at or under the cutoff below and is dropped under either
+    # semantics.  Nothing retained as indefinite stops being retained.
+    negative_tolerance = max(100.0 * _EPS, _eigensolver_relative_bar(len(active_columns))) * max(
+        max_abs_eigenvalue, 1.0
+    )
     materially_indefinite = bool(eigenvalues[0] < -negative_tolerance)
     if not allow_indefinite and materially_indefinite:
         raise ValueError(
@@ -1278,9 +1489,23 @@ def _decompose_gram(
         )
     psd_semantics = not materially_indefinite
     if psd_semantics:
+        # This still touches every negative eigenvalue; what it can no longer
+        # do is *decide* one.  Beneath the cutoff below -- now the eigensolver's
+        # bar -- clipping to `0.0` drops the direction and so does comparing
+        # `|w|`, so the outcome is the same on either sign, which is the whole
+        # of issue #356.  The only place the clip changes an outcome is on a
+        # negative eigenvalue *above* the bar, where the negativity is resolved
+        # and clipping is Higham's projection onto the PSD cone -- exactly the
+        # case projection is for.  See `_eigensolver_relative_bar`.
         eigenvalues = np.maximum(eigenvalues, 0.0)
         max_abs_eigenvalue = max_eigenvalue
-    cutoff = policy.gram_rcond * max_abs_eigenvalue
+    # `gram_rcond` is the normal-equation boundary; the bar is what `eigh`
+    # can resolve.  A cut beneath the bar does not decide rank, it decides the
+    # sign of round-off -- so the boundary is FLOORED at the bar rather than
+    # replaced by it, and a coarser `gram_rcond` would still win.
+    cutoff = (
+        max(policy.gram_rcond, _eigensolver_relative_bar(len(active_columns))) * max_abs_eigenvalue
+    )
     retained_mask = eigenvalues > cutoff if psd_semantics else np.abs(eigenvalues) > cutoff
     rank = int(np.count_nonzero(retained_mask))
     positive = np.abs(eigenvalues[np.abs(eigenvalues) > 0.0])

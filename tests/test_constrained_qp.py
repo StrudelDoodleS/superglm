@@ -590,10 +590,15 @@ class TestInconsistentNormalEquations:
     def test_consistent_but_ill_conditioned_systems_still_solve(self, retained_condition):
         """The gate must not refuse systems the rank policy can solve.
 
-        ``decompose_gram`` truncates at ``gram_rcond = eps``, so it retains
-        blocks conditioned far beyond ``factor_rcond``.  A residual-based gate
-        refused almost all of these, because a residual is amplified by exactly
-        that retained condition number.
+        ``decompose_gram`` truncates at ``max(gram_rcond, n eps) * lambda_max``
+        -- version 3 floors the bare ``eps`` this used to say at the
+        eigensolver's bar, issue #356 -- so it still retains blocks
+        conditioned far beyond ``factor_rcond``.  The ceiling on a retained
+        Gram condition moved with it, from ``1/eps = 4.5e+15`` to
+        ``1/(4 eps) = 1.1e+15`` at this fixture's width of 4, which is still
+        **1126x above** the largest condition swept here.  A residual-based
+        gate refused almost all of these, because a residual is amplified by
+        exactly that retained condition number.
         """
         refused = 0
         checked = 0
@@ -2136,9 +2141,14 @@ class TestKKTEquilibration:
         np.testing.assert_allclose(objective, -0.75 * 0.5 * scale, rtol=1e-9)
 
     def test_retained_in_band_direction_is_not_truncated_by_the_kkt_solve(self):
-        """The rank policy retains eigenvalues down to ``gram_rcond * lambda_max
-        = eps * lambda_max``; ``lstsq(rcond=None)`` drops singular values below
-        ``max(M, N) * eps * sigma_max``.  A direction in between is retained by
+        """The rank policy retains eigenvalues down to ``max(gram_rcond, n eps)
+        * lambda_max``, which version 3 made ``n * eps * lambda_max`` (issue
+        #356, where it was ``eps * lambda_max``);
+        ``lstsq(rcond=None)`` drops singular values below
+        ``max(M, N) * eps * sigma_max``.  The two are now the same SHAPE and
+        still not the same number -- they are taken on different matrices, the
+        Gram here and the KKT system there, so the band below is narrower than
+        it was but has not closed.  A direction in between is retained by
         the policy -- ``decomposition.solve`` uses it -- but discarded by the
         KKT solve, so the two solves inside one function disagree about what
         the retained subspace is.
@@ -2277,7 +2287,24 @@ class TestRankGateSeesCollinearityNotScale:
 
     def test_the_same_eigenvalue_planted_after_equilibration_does_drop_it(self):
         """The contrast that makes the point above a property rather than an
-        accident: identical raw conditioning, opposite gate decision."""
+        accident: identical raw conditioning, opposite gate decision.
+
+        **THIS ASSERTION USED TO PASS BY LUCK, AND VERSION 3 IS WHAT MAKES IT
+        A PROPERTY -- ISSUE #356.**  The planted eigenvalue equilibrates into
+        pure round-off, and under version 2 the cut sat at ``eps * lambda_max``,
+        which is BENEATH the eigensolver's own ``n eps lambda_max`` error bar.
+        The residue landed either side of that cut depending on the machine --
+        measured over 7 ``OPENBLAS_CORETYPE`` microkernels at ``0.10x to 1.47x``
+        of it -- and ``np.maximum(w, 0.0)`` then dropped it only when round-off
+        happened to come out NEGATIVE.  So the rank here was decided by a sign
+        that is not data: 5 on six kernels and 6 on SKYLAKEX under numpy 2.5.2,
+        and the mirror image under 2.4.2.
+
+        With the cut floored at the bar, the residue is inside it on every
+        configuration -- ``0.017x to 0.245x``, at least 4.1x of clearance --
+        so the drop is now a function of the data and this reads 5 everywhere.
+        Verified on 7 microkernels x both numpy generations.
+        """
         rng = np.random.default_rng(11)
         width = 6
         basis = np.linalg.qr(rng.standard_normal((width, width)))[0]
