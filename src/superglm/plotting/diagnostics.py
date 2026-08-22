@@ -244,10 +244,13 @@ def _simulate_response(
         return generate_tweedie_cpg(len(mu), mu, row_phi, family.p, rng=rng)
 
     if isinstance(family, Binomial):
-        # validate_response pins y to {0, 1}, and the prior contract reads w as
-        # the trial count, so the row is the indicator of at least one success
-        # in w trials -- the event whose complement is (1 - mu)**w.
-        success = 1.0 - np.power(1.0 - mu, weights) if prior else mu
+        # validate_response pins y to {0, 1} and the prior contract reads w as
+        # a trial count, so y == 1 is the ALL-success outcome of w trials,
+        # probability mu**w -- the same event the quantile residual inverts.
+        # Simulating "at least one success" instead would mask the endpoint
+        # the residual uses. (Those two masses do not sum to one for w != 1,
+        # which is what PriorWeightLatticeWarning is raised about at fit time.)
+        success = np.power(mu, weights) if prior else mu
         return rng.binomial(n=1, p=success).astype(float)
 
     return None

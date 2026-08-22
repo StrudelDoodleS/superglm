@@ -246,7 +246,24 @@ def run_reml_once(
                 )
             else:
                 M_p = compute_total_penalty_rank(penalties_rro)
-            phi_hat = max((pirls_result.deviance + pq) / max(len(y) - M_p, 1.0), 1e-10)
+            # The declared contract's likelihood size, not the row count: this
+            # `inv_phi` scales the quadratic arm of the Fellner-Schall update
+            # below, so a physical-row denominator lets ignored prior rows or
+            # compressed replication counts move the selected lambdas.
+            from superglm.solvers.dispersion import dispersion_likelihood_size
+
+            phi_hat = max(
+                (pirls_result.deviance + pq)
+                / max(
+                    dispersion_likelihood_size(
+                        sample_weight,
+                        weight_semantics=weight_semantics,
+                    )
+                    - M_p,
+                    1.0,
+                ),
+                1e-10,
+            )
             inv_phi = 1.0 / phi_hat
 
         lambdas_new = lambdas.copy()

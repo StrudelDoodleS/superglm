@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import (
+    Binomial,
     Distribution,
     NegativeBinomial,
     Poisson,
@@ -23,13 +24,50 @@ from superglm.solvers.dispersion import PRIOR_WEIGHTS
 
 
 class PriorWeightLatticeWarning(UserWarning):
-    """A counting family's prior-weighted response left its own support."""
+    """A discrete family's prior-weighted response left its own support."""
 
 
 #: Relative slack when testing ``w * y`` for integrality.  The product is
 #: formed in floating point from two user arrays, so an exactly-integral
 #: intent (``count / exposure`` times ``exposure``) can land a few ulps away.
 _LATTICE_RELATIVE_TOLERANCE = 1e-9
+
+
+def _warn_prior_weighted_binomial(weights: NDArray) -> None:
+    """Warn when a prior-weighted binomial response cannot normalise.
+
+    The prior construction is ``w Y ~ Binomial(w, mu)``, whose support is
+    ``{0, 1/w, ..., 1}`` -- but ``validate_response`` pins ``y`` to ``{0, 1}``,
+    so the only reachable outcomes are "no successes" and "all ``w``
+    successes". Their masses are ``(1 - mu)**w`` and ``mu**w``, which sum to 1
+    **only at w == 1**: at ``w = 3, mu = 0.4`` they sum to 0.28, and at
+    fractional ``w`` they exceed 1 (``sqrt(mu) + sqrt(1 - mu)``). The binomial
+    coefficient is exactly 1 at both endpoints, which makes each term look
+    exact in isolation and is why this is easy to miss -- but an exact
+    coefficient is not a normalised distribution.
+
+    So unlike Poisson and the negative binomial, where only a non-integral
+    ``w * y`` leaves the lattice, EVERY non-unit prior weight on a binomial
+    response reports a sub- or super-probability.
+    """
+    off = np.abs(weights - 1.0) > _LATTICE_RELATIVE_TOLERANCE
+    count = int(np.count_nonzero(off))
+    if count == 0:
+        return
+    import warnings
+
+    warnings.warn(
+        f"{count} of {len(weights)} rows carry a non-unit sample_weight under "
+        'weight_semantics="prior" with a Binomial family. The prior '
+        "construction reads w as a trial count, but the response is pinned to "
+        "{0, 1}, so only the all-failure and all-success outcomes are "
+        "reachable and their masses ((1-mu)**w and mu**w) do not sum to one. "
+        "Coefficients, fitted means and deviance are unaffected, but the "
+        "reported log-likelihood, AIC and BIC are not an exact density. Use "
+        'weight_semantics="frequency" if the weights are replication counts.',
+        PriorWeightLatticeWarning,
+        stacklevel=5,
+    )
 
 
 def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semantics: str) -> None:
@@ -53,6 +91,9 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
     likelihood would cost more than it protects; saying so plainly does not.
     """
     if weight_semantics != PRIOR_WEIGHTS:
+        return
+    if isinstance(family, Binomial):
+        _warn_prior_weighted_binomial(weights)
         return
     if not isinstance(family, Poisson | NegativeBinomial):
         return

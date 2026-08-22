@@ -105,11 +105,44 @@ def family_default_weight_semantics(distribution: Distribution | None) -> str:
 
 
 def model_weight_semantics(model: object) -> str:
-    """Return the contract a fitted or configured model resolved at build time."""
+    """Return the contract a fitted or configured model resolved at build time.
+
+    ``_distribution`` is only populated once a model has been fitted, so an
+    UNFITTED legacy pickle would fall through the migration with ``None`` and
+    be handed the non-Tweedie default -- silently flipping a pre-change Tweedie
+    model, which always read prior weights, onto the replication reading the
+    moment it was fitted. The configured family is consulted when there is no
+    fitted one, so the migration answers on what the model actually is.
+    """
     stored = getattr(model, "_weight_semantics", None)
-    if stored is None:
-        return family_default_weight_semantics(getattr(model, "_distribution", None))
-    return validate_weight_semantics(stored)
+    if stored is not None:
+        return validate_weight_semantics(stored)
+    distribution = getattr(model, "_distribution", None)
+    if distribution is None:
+        distribution = _configured_distribution(model)
+    return family_default_weight_semantics(distribution)
+
+
+def _configured_distribution(model: object) -> Distribution | None:
+    """Best-effort family of an unfitted model, for the pickle migration only."""
+    from superglm.distributions import resolve_distribution
+
+    for source in ("_family_config", "_config", None):
+        if source is None:
+            family = getattr(model, "family", None)
+        else:
+            config = getattr(model, source, None)
+            family = getattr(config, "family", None) if config is not None else None
+        if isinstance(family, Distribution):
+            return family
+        if isinstance(family, str):
+            try:
+                return resolve_distribution(family)
+            except ValueError:
+                # Parameterised families cannot be named by string, so a string
+                # here is never Tweedie and the non-Tweedie default is right.
+                return None
+    return None
 
 
 def dispersion_likelihood_size(

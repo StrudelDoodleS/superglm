@@ -106,7 +106,14 @@ def optimize_efs_reml(
     reml_update_names = [
         pc.name for pc in penalties if estimated_names is None or pc.name in estimated_names
     ]
-    n = len(y)
+    # The declared contract's likelihood size, not the physical row count. This
+    # is the denominator of every dispersion update below, and `inv_phi` scales
+    # the quadratic arm of each Fellner-Schall step -- so reading it as `len(y)`
+    # lets an ignored prior-weight row, or a compressed replication count, move
+    # the selected smoothing parameters and the fitted surface.
+    from superglm.solvers.dispersion import dispersion_likelihood_size
+
+    n = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
 
     # -- Bootstrap: one PIRLS with minimal penalty -> one EFS step --
     # Analogous to direct REML bootstrap (optimize_direct_reml lines 417-467).

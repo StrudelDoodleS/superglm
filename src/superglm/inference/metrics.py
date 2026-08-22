@@ -645,12 +645,22 @@ class ModelMetrics:
         # binomial's trial count, and the transform is wrong without it.
         prior = self._weight_semantics == "prior"
         if isinstance(self._family, Binomial):
-            # The prior contract reads w as the trial count, so an all-success
-            # or all-failure row of w trials has probability mu**w or
-            # (1 - mu)**w rather than mu or 1 - mu.
-            failure = np.power(1.0 - mu, w) if prior else 1.0 - mu
-            a = np.where(y == 0, 0.0, failure)
-            b = np.where(y == 0, failure, 1.0)
+            # The prior contract reads w as the trial count, so with y pinned
+            # to {0, 1} the observed grouped count K is 0 or w. The randomized
+            # transform needs that count's own CDF interval, [F(K-1), F(K)]:
+            #
+            #   y == 0  ->  K = 0  ->  [0, P(K = 0)]      = [0, (1-mu)**w]
+            #   y == 1  ->  K = w  ->  [P(K <= w-1), 1]   = [1 - mu**w, 1]
+            #
+            # Starting the all-success row at (1-mu)**w instead would hand it
+            # every intermediate count as well, which is not the transform of
+            # the likelihood being fitted. The two bounds coincide at w == 1.
+            if prior:
+                a = np.where(y == 0, 0.0, 1.0 - np.power(mu, w))
+                b = np.where(y == 0, np.power(1.0 - mu, w), 1.0)
+            else:
+                a = np.where(y == 0, 0.0, 1.0 - mu)
+                b = np.where(y == 0, 1.0 - mu, 1.0)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Poisson):
             count = np.round(w * y) if prior else np.round(y)

@@ -357,11 +357,15 @@ class TestWeightContractDiagnostics:
         np.testing.assert_allclose(rng.gamma_shape, weights / phi)
         np.testing.assert_allclose(rng.gamma_scale, mu * phi / weights)
 
+        # y == 1 is the ALL-success outcome of w trials under the prior
+        # contract, so the draw is mu**w -- the event the quantile residual
+        # inverts. "At least one success" would be a different event and would
+        # mask the residual's endpoint.
         probability = np.array([0.2, 0.5, 0.7])
         diagnostics_module._simulate_response(
             Binomial(), probability, phi, weights, rng, weight_semantics="prior"
         )
-        np.testing.assert_allclose(rng.binomial_p, 1.0 - (1.0 - probability) ** weights)
+        np.testing.assert_allclose(rng.binomial_p, probability**weights)
 
     @pytest.mark.parametrize(
         ("semantics", "expected"),

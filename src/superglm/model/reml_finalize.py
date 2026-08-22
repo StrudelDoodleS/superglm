@@ -46,7 +46,7 @@ from superglm.reml.scale import (
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
 )
-from superglm.solvers.dispersion import model_weight_semantics
+from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.structured import (
     BlockSchurFactor,
@@ -741,6 +741,17 @@ def finalize_reml_fit(
 
     # Profile dispersion from the state that will actually be returned.  A
     # constrained QP passthrough refit can change both beta'S beta and deviance.
+    #
+    # The deviance-form branches below divide by the DECLARED contract's
+    # likelihood size, not the physical row count: `sum(w)` under
+    # `"frequency"`, the positive-row count under `"prior"`.  Reading `len(y)`
+    # there puts the published dispersion -- and every Wald interval drawn from
+    # it -- out of step with both the terminal objective and literal row
+    # replication whenever the weights are not all one.
+    published_likelihood_size = dispersion_likelihood_size(
+        sample_weight,
+        weight_semantics=model_weight_semantics(model),
+    )
     if isinstance(model._distribution, Tweedie) and not qp_passthrough:
         phi_fixed = float(final_pirls.phi)
     elif isinstance(model._distribution, Tweedie) and terminal_evaluation is not None:
@@ -754,7 +765,7 @@ def finalize_reml_fit(
         penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
         phi_fixed = max(
             float(terminal_evaluation.penalized_deviance)
-            / max(float(len(y)) - penalty_nullity, 1.0),
+            / max(published_likelihood_size - penalty_nullity, 1.0),
             1.0e-10,
         )
     elif terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
@@ -767,7 +778,7 @@ def finalize_reml_fit(
         penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
         phi_fixed = max(
             float(terminal_evaluation.penalized_deviance)
-            / max(float(len(y)) - penalty_nullity, 1.0),
+            / max(published_likelihood_size - penalty_nullity, 1.0),
             1.0e-10,
         )
     else:

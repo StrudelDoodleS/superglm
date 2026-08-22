@@ -175,12 +175,20 @@ class TestPriorIsTheEDMLikelihood:
         ],
     )
     def test_the_prior_form_matches_scipy_for_the_known_scale_families(self, family, reference):
-        """These families are closed under the prior-weight construction too.
+        """The prior form is the scaled family's own density, checked against scipy.
 
-        ``w Y`` is the same family at parameters scaled by ``w``, so the prior
-        form is an exact likelihood rather than a quasi-likelihood, and scipy
-        evaluates it independently.  Integer weights keep the reference's
+        ``w Y`` is the same family at parameters scaled by ``w``, and scipy
+        evaluates that independently.  Integer weights keep the reference's
         lattice arguments whole.
+
+        What this does NOT establish is that the result is a normalised
+        likelihood.  For Poisson and the negative binomial it is, on the
+        lattice.  For **Binomial it is not**: ``validate_response`` pins ``y``
+        to ``{0, 1}``, so only the all-failure and all-success outcomes of
+        ``w`` trials are reachable and their masses sum to one only at
+        ``w == 1`` -- see ``TestTheBinomialPriorFormIsNotNormalised``.
+        Agreeing with scipy and being a distribution are different claims, and
+        this test makes only the first.
         """
         rng, frame = _frame(seed=7, n=90)
         y = _response(rng, frame, family)
@@ -852,3 +860,155 @@ class TestTheCountingLatticeIsDeclared:
 
         # And nothing else in the report moved either.
         assert str(released) == str(retained)
+
+
+class TestTheContractReachesTheSmoothingParameters:
+    """Seams where the contract changes lambda or the published dispersion.
+
+    The Fellner-Schall dispersion denominators in ``reml/efs.py`` and
+    ``reml/runner.py`` are corrected in the same change but are NOT pinned
+    here: ``optimize_efs_reml`` runs only when ``use_direct`` is false, which
+    needs ``lam1 > 0``, and ``fit_reml()`` refuses selection penalties
+    outright -- so no public call reaches it. The correction stands on the
+    arithmetic (a dispersion denominator must be the contract's likelihood
+    size, exactly as everywhere else) rather than on a regression.
+    """
+
+    def test_reml_replication_identity_holds_where_lambda_is_identified(self):
+        """A replication count is a repeated row, all the way to lambda.
+
+        Measured across five seeds: where lambda is identified (7.7 to 48.6)
+        the compressed and expanded fits agree to 1.7e-14 to 3.3e-14. Two
+        seeds land at lambda ~3.5e6, effectively infinite smoothing on a flat
+        objective, where the same identity holds only to 7.3e-6 -- so the
+        fixture is chosen to sit in the identified regime, and ``phi``, which
+        agrees to 4.5e-14 in every case including the boundary ones, is
+        asserted alongside it.
+        """
+        rng = np.random.default_rng(50)
+        n = 200
+        x = rng.uniform(0.0, 1.0, n)
+        frame = pd.DataFrame({"x": x})
+        y = rng.gamma(5.0, np.exp(0.4 + 1.1 * x) / 5.0)
+        counts = rng.integers(1, 4, n)
+
+        compressed = SuperGLM(
+            family=Gamma(),
+            features={"x": Spline(n_knots=6)},
+            weight_semantics="frequency",
+        )
+        compressed.fit_reml(frame, y, sample_weight=counts.astype(float))
+        assert compressed._reml_lambdas["x"] < 1e4, "fixture drifted to the lambda boundary"
+
+        expanded = SuperGLM(family=Gamma(), features={"x": Spline(n_knots=6)})
+        expanded.fit_reml(
+            frame.loc[frame.index.repeat(counts)].reset_index(drop=True),
+            np.repeat(y, counts),
+            sample_weight=None,
+        )
+        assert compressed._reml_lambdas["x"] == pytest.approx(
+            expanded._reml_lambdas["x"], rel=1e-11
+        )
+        assert compressed.result.phi == pytest.approx(expanded.result.phi, rel=1e-11)
+
+    def test_an_unfitted_legacy_tweedie_pickle_restores_prior_semantics(self):
+        """``_distribution`` is only set once fitted, so the migration has to
+        consult the configured family or it flips Tweedie to replication."""
+        from superglm.solvers.dispersion import model_weight_semantics
+
+        for family, expected in ((Tweedie(p=1.5), "prior"), (Gamma(), "frequency")):
+            model = SuperGLM(family=family, features={"x": Spline(n_knots=4)})
+            state = model.__dict__.copy()
+            state.pop("_weight_semantics", None)
+            revived = SuperGLM.__new__(SuperGLM)
+            revived.__dict__.update(state)
+            assert getattr(revived, "_distribution", None) is None
+            assert model_weight_semantics(revived) == expected
+
+
+class TestTheBinomialPriorFormIsNotNormalised:
+    """``w Y ~ Binomial(w, mu)`` needs y on ``{0, 1/w, ..., 1}``.
+
+    ``validate_response`` pins y to ``{0, 1}``, so only the all-failure and
+    all-success outcomes are reachable and their masses sum to one only at
+    ``w == 1``.  The binomial coefficient is exactly 1 at both endpoints, which
+    makes each term look exact on its own -- that is what makes this easy to
+    miss, and it is not the same thing as a distribution.
+    """
+
+    def test_the_two_reachable_masses_only_normalise_at_unit_weight(self):
+        """The measurement the warning exists for, stated independently."""
+        mu = 0.4
+        assert stats.binom.pmf(1, 1, mu) + stats.binom.pmf(0, 1, mu) == pytest.approx(1.0)
+        for w in (2, 3):
+            total = stats.binom.pmf(w, w, mu) + stats.binom.pmf(0, w, mu)
+            assert total < 0.99
+        assert stats.binom.pmf(3, 3, mu) + stats.binom.pmf(0, 3, mu) == pytest.approx(0.28)
+
+    @pytest.mark.parametrize(("weights_are_unit", "warns"), [(True, False), (False, True)])
+    def test_a_non_unit_prior_weight_says_so(self, weights_are_unit, warns):
+        import warnings as warnings_module
+
+        from superglm.model.input_validation import PriorWeightLatticeWarning
+
+        rng, frame = _frame(seed=51, n=120)
+        y = _response(rng, frame, Binomial())
+        weights = np.ones(len(frame)) if weights_are_unit else rng.uniform(1.5, 4.0, len(frame))
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            SuperGLM(
+                family=Binomial(),
+                features={"x": Spline(n_knots=4)},
+                weight_semantics="prior",
+            ).fit(frame, y, sample_weight=weights)
+        hits = [c for c in caught if issubclass(c.category, PriorWeightLatticeWarning)]
+        assert bool(hits) is warns
+        if warns:
+            assert "do not sum to one" in str(hits[0].message)
+
+    def test_the_frequency_contract_is_silent(self):
+        import warnings as warnings_module
+
+        from superglm.model.input_validation import PriorWeightLatticeWarning
+
+        rng, frame = _frame(seed=52, n=120)
+        y = _response(rng, frame, Binomial())
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            SuperGLM(
+                family=Binomial(),
+                features={"x": Spline(n_knots=4)},
+                weight_semantics="frequency",
+            ).fit(frame, y, sample_weight=rng.integers(1, 4, len(frame)).astype(float))
+        assert [c for c in caught if issubclass(c.category, PriorWeightLatticeWarning)] == []
+
+    def test_the_residual_inverts_the_all_success_count(self):
+        """y == 1 is K == w, so its interval starts at P(K <= w-1) = 1 - mu**w.
+
+        Starting at (1-mu)**w would hand the all-success row every
+        intermediate count too, which is not the transform of the fitted
+        likelihood.
+        """
+
+        rng, frame = _frame(seed=53, n=150)
+        y = _response(rng, frame, Binomial())
+        weights = np.full(len(frame), 3.0)
+
+        model = SuperGLM(
+            family=Binomial(),
+            features={"x": Spline(n_knots=4)},
+            weight_semantics="prior",
+        )
+        with pytest.warns(UserWarning):
+            model.fit(frame, y, sample_weight=weights)
+        metrics = model.metrics(frame, y, sample_weight=weights)
+        mu = np.asarray(model.predict(frame), dtype=np.float64)
+        residuals = metrics.residuals("quantile", seed=3)
+
+        lower = stats.norm.ppf(1.0 - np.power(mu, weights))
+        success = y == 1
+        # Every all-success row sits above its own K = w lower bound, which is
+        # strictly above the (1-mu)**w bound the previous code used.
+        assert np.all(residuals[success] >= lower[success] - 1e-9)
+        assert np.all(np.power(1.0 - mu, weights) < 1.0 - np.power(mu, weights))

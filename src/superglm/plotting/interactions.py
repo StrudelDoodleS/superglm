@@ -26,12 +26,18 @@ _LINE_COLOR = _PLOTLY_LINE_COLOR
 def _validated_density_weights(model, sample_weight, n_rows: int) -> NDArray:
     """Validate weights used only to display the empirical row density."""
     from superglm.distributions import Tweedie
+    from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
     if n_rows == 0:
         raise ValueError("X must be non-empty")
     if sample_weight is None:
         weights = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(model._distribution, Tweedie):
+    elif isinstance(model._distribution, Tweedie) and (
+        # Strict positivity is a Tweedie DENSITY requirement under the prior
+        # contract only; read as replication counts, a zero weight is a row
+        # that appears no times, which fitting accepts and so must this.
+        model_weight_semantics(model) == PRIOR_WEIGHTS
+    ):
         from superglm._utils import _validate_strict_prior_weights
 
         weights = _validate_strict_prior_weights(sample_weight, n_rows)
