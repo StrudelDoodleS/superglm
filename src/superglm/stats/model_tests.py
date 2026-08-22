@@ -545,7 +545,15 @@ def vuong_test(
             offset,
             sample_weight=prior_weights,
         )
-        d = ll_a - ll_b
+        # A zero prior weight is a row that was not observed, and both models
+        # return exactly 0 for its density -- so leaving it in ``d`` feeds an
+        # artificial zero to the mean and the variance while
+        # ``likelihood_size`` below already counts only the carried rows. The
+        # moments have to agree with that count, or adding a row the test
+        # ignores moves the statistic and can flip the selected model. The
+        # frequency arm gets this right by weighting both moments.
+        carried = prior_weights > 0.0
+        d = (ll_a - ll_b)[carried]
         mean_m = float(np.mean(d))
         omega = float(np.std(d, ddof=1))
         likelihood_size = (

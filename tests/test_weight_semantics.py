@@ -638,3 +638,116 @@ class TestDeclaration:
         revived = ModelConfig.__new__(ModelConfig)
         revived.__setstate__(state)
         assert revived.weight_semantics == restored
+
+
+class TestTheContractReachesTheDerivedReports:
+    """Seams that read the contract second-hand, and got it wrong.
+
+    Each of these produced a number under one contract while the fit ran under
+    the other, in a place no test crossed.
+    """
+
+    def test_a_zero_prior_weight_leaves_the_vuong_moments(self):
+        """The statistic must not move when an unobserved row is added.
+
+        ``likelihood_size`` already counts only the carried rows; a zero-weight
+        row whose density is exactly 0 under both models still fed an
+        artificial zero to the mean and the variance, which can flip the
+        selected model.
+        """
+        from superglm.stats.model_tests import vuong_test
+
+        rng, frame = _frame(seed=31, n=200)
+        y = _response(rng, frame, Poisson())
+        weights = rng.uniform(0.5, 3.0, len(frame))
+
+        def fitted(feature):
+            model = SuperGLM(
+                family=Poisson(),
+                features=feature,
+                weight_semantics="prior",
+            )
+            model.fit(frame, y, sample_weight=weights)
+            return model
+
+        a = fitted({"x": Spline(n_knots=5)})
+        b = fitted({"g": Categorical()})
+        without = vuong_test(a, b, frame, y, sample_weight=weights)
+
+        padded_frame = pd.concat([frame, frame.iloc[:5]], ignore_index=True)
+        padded_y = np.concatenate([y, y[:5]])
+        padded_weights = np.concatenate([weights, np.zeros(5)])
+        with_ignored = vuong_test(a, b, padded_frame, padded_y, sample_weight=padded_weights)
+
+        assert with_ignored.statistic == pytest.approx(without.statistic, rel=1e-12)
+
+    def test_a_released_fit_keeps_its_likelihood_size(self):
+        """``retain_fit_state=False`` drops the weights, not the contract.
+
+        Standing in all-ones reported ``n`` for a prior fit carrying zero
+        weights, which moves BIC and AICc and drops the summary's contract row.
+        """
+        rng, frame = _frame(seed=32, n=120)
+        y = _response(rng, frame, Gamma())
+        weights = rng.uniform(0.5, 3.0, len(frame))
+        weights[:8] = 0.0
+
+        retained = SuperGLM(
+            family=Gamma(), features={"x": Spline(n_knots=5)}, weight_semantics="prior"
+        )
+        retained.fit(frame, y, sample_weight=weights)
+        released = SuperGLM(
+            family=Gamma(),
+            features={"x": Spline(n_knots=5)},
+            weight_semantics="prior",
+            retain_fit_state=False,
+        )
+        released.fit(frame, y, sample_weight=weights)
+
+        assert released._fit_weights is None
+        retained_ic = retained.summary()["information_criteria"]
+        released_ic = released.summary()["information_criteria"]
+        for field in ("bic", "aicc"):
+            assert released_ic[field] == pytest.approx(retained_ic[field], rel=1e-12), field
+        # The rendered row naming the contract survives the release too.
+        assert "prior weights" in str(released.summary())
+
+    def test_a_hosted_piecewise_boundary_ignores_a_zero_weight_row(self):
+        """The physical-rows rule reaches hosted geometry or it is not a rule.
+
+        The builder stamped a boolean and the host passed ``sample_weight=None``,
+        which counts zero-weight rows -- so a row that shaped no top-level
+        boundary still shaped a hosted one.
+        """
+        from superglm import OrderedCategorical, Piecewise
+
+        rng = np.random.default_rng(33)
+        n = 300
+        levels = np.arange(1, 11)
+        x = rng.choice(levels, n)
+        frame = pd.DataFrame({"x": x})
+        y = np.exp(0.4 + 0.1 * x) * rng.gamma(5.0, 0.2, n)
+        weights = rng.uniform(0.5, 3.0, n)
+
+        # Rows carrying no weight, parked at one extreme of the axis.
+        extreme = x >= 9
+        weights[extreme] = 0.0
+
+        def knots(frame_in, y_in, sample_weight):
+            model = SuperGLM(
+                family=Gamma(),
+                features={"x": OrderedCategorical(order=list(levels), basis=Piecewise(3))},
+                weight_semantics="prior",
+            )
+            model.fit(frame_in, y_in, sample_weight=sample_weight)
+            return np.asarray(model._specs["x"]._basis_spline._knots, dtype=np.float64)
+
+        # A zero-weight row must shape the hosted boundary exactly as much as
+        # deleting the row does -- which is not at all.
+        with_ignored = knots(frame, y, weights)
+        deleted = knots(
+            frame.loc[~extreme].reset_index(drop=True),
+            y[~extreme],
+            weights[~extreme],
+        )
+        np.testing.assert_array_equal(with_ignored, deleted)

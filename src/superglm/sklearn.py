@@ -467,6 +467,7 @@ def _fit_common(
             selection_penalty=resolved_sel,
             spline_penalty=resolved_spl,
             features=wrapper.features,
+            weight_semantics=wrapper.weight_semantics,
         )
     else:
         # ── Shorthand wrapper path ────────────────────────────
@@ -520,6 +521,7 @@ def _fit_common(
             n_knots=wrapper.n_knots,
             degree=wrapper.degree,
             categorical_base=cat_base,
+            weight_semantics=wrapper.weight_semantics,
         )
         if features_dict is not None:
             model_kwargs["features"] = features_dict
@@ -622,6 +624,11 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         Base level strategy (``"most_exposed"`` or ``"first"``).
     offset : str, int, list, or None
         Offset column(s) by name or index.
+    weight_semantics : {"prior", "frequency"}
+        What ``sample_weight`` says about a row. ``"prior"`` (default) reads it
+        as a precision, ``Var(Y_i) = phi V(mu_i) / w_i``; ``"frequency"`` reads
+        it as a replication count, where an integer weight is exactly a
+        repeated row. Passed through to :class:`~superglm.SuperGLM`.
     """
 
     def __init__(
@@ -639,6 +646,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         degree: int = 3,
         categorical_base: str = "most_exposed",
         offset: str | int | list[str | int] | None = None,
+        weight_semantics: Literal["prior", "frequency"] = "prior",
     ):
         self.family = family
         self.penalty = penalty
@@ -653,6 +661,7 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.degree = degree
         self.categorical_base = categorical_base
         self.offset = offset
+        self.weight_semantics = weight_semantics
 
     def fit(
         self,
@@ -756,6 +765,11 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         Offset column(s).
     threshold : float
         Classification threshold for ``predict()`` (default 0.5).
+    weight_semantics : {"prior", "frequency"}
+        What ``sample_weight`` says about a row. ``"prior"`` (default) reads it
+        as a precision, ``Var(Y_i) = phi V(mu_i) / w_i``; ``"frequency"`` reads
+        it as a replication count, where an integer weight is exactly a
+        repeated row. Passed through to :class:`~superglm.SuperGLM`.
     """
 
     def __init__(
@@ -773,6 +787,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         categorical_base: str = "most_exposed",
         offset: str | int | list[str | int] | None = None,
         threshold: float = 0.5,
+        weight_semantics: Literal["prior", "frequency"] = "prior",
     ):
         self.penalty = penalty
         self.selection_penalty = selection_penalty
@@ -787,6 +802,7 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         self.categorical_base = categorical_base
         self.offset = offset
         self.threshold = threshold
+        self.weight_semantics = weight_semantics
 
     def fit(
         self,

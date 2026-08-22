@@ -120,6 +120,19 @@ about 736 points is entirely the likelihood's `(y, w)`-only normalizer —
 −735.83. Within one contract they compare models as before; across contracts
 they compare nothing.
 
+**Nor will they match R's `AIC()` on a weighted Gamma, Poisson or negative
+binomial fit**, and this document leans on R elsewhere, so it is worth saying
+plainly. R applies the weight *outside* a common-shape density —
+`sum(w * dgamma(y, 1/disp, scale = mu * disp, log = TRUE))` with
+`disp = deviance / sum(w)`, and `sum(w * dpois(y, mu, log = TRUE))` — whereas
+superglm evaluates the EDM prior form, which scales each row's own shape by
+`w`. Only R's Gaussian arm carries the `0.5 sum(log w)` term that superglm's
+reproduces. Measured with R 4.5.0 as an oracle, R's weighted Gamma `logLik` is
+−1725.469 at `deviance / sum(w)` and −1901.508 at the dispersion its own
+`summary()` prints, so R does not agree with itself here either. superglm's
+form is the exact prior-weight likelihood; it is simply not R's convention,
+and AIC differences within either system remain the comparable quantity.
+
 `beta` is unchanged in substance: the two contracts share a score equation.
 The small movement in predictions above (mean 3.9161137 to 3.9161069) comes
 from the knots, not the likelihood — a fixed or preconstructed knot vector

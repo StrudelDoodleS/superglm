@@ -441,3 +441,16 @@ class FitStats:
     explained_deviance: float
     pearson_chi2: float
     n_obs: int
+    #: The declared contract's likelihood size -- ``sum(w)`` under
+    #: ``"frequency"``, the positive-row count under ``"prior"``.  Recorded at
+    #: fit time because a released fit (``retain_fit_state=False``) drops the
+    #: weights, and reconstructing it from an all-ones stand-in silently
+    #: reports ``n`` for a prior fit carrying zero weights.  Defaults to None
+    #: so fits pickled before this field restore unchanged.
+    likelihood_size: float | None = None
+    #: Whether the fit carried non-unit weights.  Not derivable from
+    #: ``likelihood_size``: under ``"prior"`` that size is the positive-row
+    #: count, which equals ``n_obs`` for any strictly positive weighting
+    #: however uneven.  Reported so a released fit still names the contract
+    #: that produced its numbers.
+    weighted: bool | None = None

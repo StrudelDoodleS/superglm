@@ -726,11 +726,16 @@ class OrderedCategorical:
         self._pinned_specials: list[Any] = []
         self._active_specials: list[int] = list(range(len(self._specials)))
 
-        # Stamped by the design-matrix builder per build: True under a
-        # weighted-EDM family (Tweedie), where hosted Piecewise MODEL geometry
-        # (int-mode placement, most_exposed base) must follow physical rows.
-        # Read with a getattr default so pre-existing pickles stay valid.
-        self._inner_geometry_physical_rows: bool = False
+        # Stamped by the design-matrix builder per build with the same
+        # geometry weight the numeric-axis terms get, because only the builder
+        # knows the declared contract: the raw weights under `"frequency"`, and
+        # the positive-row indicator under `"prior"`, where hosted Piecewise
+        # MODEL geometry (int-mode placement, most_exposed base) follows
+        # physical rows.  Passing the indicator rather than None is what keeps
+        # a zero-weight row from shaping a hosted boundary it cannot shape at
+        # the top level.  Read with a getattr default so pre-existing pickles
+        # stay valid and direct spec-API builds keep the replication reading.
+        self._inner_geometry_weight: NDArray | None = None
 
         # The inner spline this wrapper owns and delegates to (deferred until
         # n_levels is known, because the knot count clamps against it).
@@ -1288,9 +1293,11 @@ class OrderedCategorical:
         prior weights are precisions, not frequency mass, so a hosted
         Piecewise's int-mode placement and base selection follow physical rows
         exactly as the numeric-axis term does. The builder stamps
-        ``_inner_geometry_physical_rows`` per build because only it knows the
-        declared contract; direct spec-API builds keep the replication
-        reading.
+        ``_inner_geometry_weight`` per build because only it knows the declared
+        contract, and it stamps the same array the numeric-axis terms get --
+        the positive-row indicator, not ``None``, so a zero-weight row shapes
+        no hosted boundary either. Direct spec-API builds are unstamped and
+        keep the replication reading.
         """
         from dataclasses import replace
 
@@ -1299,8 +1306,12 @@ class OrderedCategorical:
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
             return inner.build(numeric)
-        if isinstance(inner, Piecewise) and getattr(self, "_inner_geometry_physical_rows", False):
-            info = inner.build(numeric, sample_weight=None)
+        if isinstance(inner, Piecewise):
+            stamped = getattr(self, "_inner_geometry_weight", None)
+            info = inner.build(
+                numeric,
+                sample_weight=sample_weight if stamped is None else stamped,
+            )
         else:
             info = inner.build(numeric, sample_weight=sample_weight)
         if isinstance(info, GroupInfo):

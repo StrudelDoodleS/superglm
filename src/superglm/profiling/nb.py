@@ -394,15 +394,26 @@ class _ThetaSolve:
         return self.at_lower or self.at_upper
 
 
-#: Above this theta the profile score switches to its large-theta expansion.
+#: Above this PSI ARGUMENT the profile score switches to its large-argument
+#: expansion.  The threshold is compared against ``a = theta`` under the
+#: frequency contract and ``a = w * theta`` under the prior one, because the
+#: expansion is in the psi argument and it is that argument, not theta, which
+#: has to be large for the series to converge.
+#:
 #: The naive form obtains an O(theta^-2) score by cancelling digamma,
 #: logarithm, and ratio terms whose leading parts are O(theta^-1) computed
 #: from O(log theta)-sized intermediates, so float64 loses the sign to
 #: roundoff around theta ~ 1e7-1e8 -- exactly the near-Poisson regime the
-#: widened bounds admit. At 1e5 the expansion's dropped psi tail is
-#: O(theta^-5) while the score itself is O(theta^-2): eleven orders of
-#: headroom, and the naive form is still accurate there, so the two branches
-#: agree to ~1e-9 relative across the switch.
+#: widened bounds admit.
+#:
+#: The truncation error is governed by ``a`` alone: the expansion keeps the
+#: Bernoulli terms through ``1/(12 a^2)`` and drops ``1/(120 a^4)``.  Measured
+#: at the switch (``a = 1e5``, across w from 1 down to 1e-4 with theta raised
+#: to match), the dropped tail is **6.7e-17 relative to the score** -- below
+#: eps, and the same figure at every (w, theta) pair with the same product,
+#: which is what confirms the switch belongs on ``a``.  The naive form is
+#: still accurate there, so the two branches agree to ~1e-9 relative across
+#: the switch.
 _THETA_SCORE_ASYMPTOTIC_MIN = 1e5
 
 

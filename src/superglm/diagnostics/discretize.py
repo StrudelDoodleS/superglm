@@ -35,9 +35,9 @@ class DiscretizationResult:
         Per-MAIN-EFFECT rating tables with columns: bin_from, bin_to,
         relativity, log_relativity, n_obs, sample_weight. ``n_obs`` is always
         the physical row count. ``sample_weight`` is the supplied weight total
-        in the bin (replication mass under the frequency contract; prior-weight mass for
-        Tweedie) and is reported for display rather than reinterpreted as a
-        Tweedie replication count.
+        in the bin -- replication mass under the frequency contract, precision
+        mass under the prior one -- and is reported for display rather than
+        reinterpreted as a count under either reading.
     interaction_tables : dict[str, DataFrame]
         Per-INTERACTION grids, one row per grid cell, with two axis-value
         columns named for the parents -- suffixed ``(axis 1)``/``(axis 2)``

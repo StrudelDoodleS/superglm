@@ -435,6 +435,19 @@ def prior_weight_log_density(
     forms below are not finite at ``w = 0`` because their normalizer sits at a
     gamma-function pole.
 
+    "Exact" is unqualified for Gaussian, Gamma and Tweedie, whose supports are
+    continuous, and for Binomial, where ``validate_response`` pins
+    ``y in {0, 1}`` and the scaled coefficient is then exactly 1.  For Poisson
+    and the negative binomial it holds **on the family's lattice**, where
+    ``w * y`` is a non-negative integer -- which is the canonical case here,
+    ``y = count / exposure`` with ``w = exposure``.  Off the lattice
+    ``validate_response`` requires only ``y >= 0``, and the ``gammaln`` factor
+    is then a Gamma-function interpolation of the counting density rather than
+    a density.  For Poisson the interpolated part depends only on ``(y, w)``,
+    so it moves the reported log-likelihood, AIC and BIC and nothing else; for
+    the negative binomial the ``Gamma(w y + w theta) / Gamma(w theta)`` factor
+    is theta-dependent, so it reaches ``theta_hat`` too.
+
     The mean-dependent part is *identical* to the frequency form in every case:
     prior weighting scales the same sufficient statistic, which is why the two
     contracts share a score equation and a ``beta_hat``.  What differs is the

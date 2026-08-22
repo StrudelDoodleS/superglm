@@ -62,7 +62,7 @@ from superglm.model.reml_setup import (
     restore_qp_constraints,
     strip_qp_constraints,
 )
-from superglm.solvers.dispersion import model_weight_semantics
+from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 from superglm.types import FitStats
@@ -581,6 +581,11 @@ def _compute_fit_stats(
         explained_deviance=expl_dev,
         pearson_chi2=pearson,
         n_obs=len(y),
+        likelihood_size=dispersion_likelihood_size(
+            weights,
+            weight_semantics=weight_semantics,
+        ),
+        weighted=bool(not np.all(weights == 1.0)),
     )
 
 
