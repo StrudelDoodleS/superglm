@@ -138,6 +138,38 @@ The small movement in predictions above (mean 3.9161137 to 3.9161069) comes
 from the knots, not the likelihood — a fixed or preconstructed knot vector
 removes it entirely.
 
+### What it costs
+
+The prior contract is slower to fit for Gamma, and only for Gamma. Its
+saturated log-likelihood is `sum_i G(w_i k)` — one special-function evaluation
+per *distinct* weight, re-evaluated at each step of the dispersion root-find —
+where the frequency arm's is `sum(w) G(k)`, a single scalar. That is a
+difference in the likelihood, not in the implementation: there is no way to
+learn `sum_i G(w_i k)` without touching every distinct weight.
+
+Measured on a quiet machine with all thread pools pinned, interleaved
+`A/B/B/A`, six runs per arm:
+
+| fixture | `"frequency"` | `"prior"` | ratio |
+|---|---|---|---|
+| Gamma, 50k rows, every weight distinct | 0.278 s | 0.463 s | **1.67x** |
+| Gamma, 50k rows, 12 distinct weights | 0.264 s | 0.295 s | 1.12x |
+| Gaussian, 50k rows, every weight distinct | 0.112 s | 0.118 s | — |
+
+The Gaussian arms overlap, so that row is noise rather than an effect; its
+prior term is a single `0.5 sum(log w)` constant.
+
+Two things follow. **Repeated weights are nearly free**: the profiler reduces
+over distinct weights with multiplicities, so rounding exposure to a few dozen
+bands recovers almost all of the difference. And **the cost is per distinct
+weight, not per row** — it does not grow when rows share weights.
+
+The breakdown, for anyone tempted to optimise it: at 50k distinct weights a
+single `digamma` call is 917 us of the 1004 us the whole score expression
+takes, so hoisting the surrounding logarithms and products saves about 4%. The
+root-find spends 13 evaluations under `"prior"` against 17 under `"frequency"`,
+so the iteration count is not the lever either.
+
 ### Zero weights
 
 Admissible under both contracts. Under `"frequency"` a zero weight drops out of

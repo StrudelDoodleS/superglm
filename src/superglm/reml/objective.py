@@ -34,7 +34,7 @@ from superglm.reml.scale import (
     profile_tweedie_reml_scale,
 )
 from superglm.reml.scop_geometry import decompose_on_scop_resolved_range
-from superglm.solvers.dispersion import validate_weight_semantics
+from superglm.solvers.dispersion import dispersion_likelihood_size, validate_weight_semantics
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_gram
 from superglm.solvers.structured import SymmetricBlockOperator
@@ -285,7 +285,15 @@ def reml_laml_objective(
     # phi-profiled REML for estimated-scale families
     scale_known = getattr(distribution, "scale_known", True)
     if not scale_known:
-        n = len(y)
+        # The declared contract's likelihood size, not the row count.  The
+        # shipped estimated-scale families reach it through
+        # ``prepare_reml_scale_data`` below; the custom-family fallback used
+        # ``len(y)``, which is the wrong denominator under BOTH readings the
+        # moment the weights are not all one -- ``sum(w)`` under
+        # ``"frequency"`` and the positive-row count under ``"prior"``.  That
+        # fallback is already declared approximate by the warning it emits;
+        # approximate is not a licence to use a size no contract asks for.
+        n = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
         resolved_hessian_rank = hessian_rank
         if resolved_hessian_rank is None and centered_hessian_rank is not None:
             resolved_hessian_rank = 1 + centered_hessian_rank

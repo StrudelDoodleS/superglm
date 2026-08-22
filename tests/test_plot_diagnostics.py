@@ -461,9 +461,9 @@ class TestWeightContractDiagnostics:
         matched = diagnostics_module._simulate_response(
             family, mu, phi, weights, np.random.default_rng(7), weight_semantics="prior"
         )
-        residuals = ModelMetrics(
-            model, y=matched, sample_weight=weights, _mu=mu
-        ).residuals("quantile", seed=11)
+        residuals = ModelMetrics(model, y=matched, sample_weight=weights, _mu=mu).residuals(
+            "quantile", seed=11
+        )
         assert scipy_stats.kstest(residuals, "norm").pvalue > 0.01
 
         # Mutation check: the pre-fix behaviour simulated every non-Tweedie
@@ -471,9 +471,9 @@ class TestWeightContractDiagnostics:
         mismatched = diagnostics_module._simulate_response(
             family, mu, phi, weights, np.random.default_rng(7), weight_semantics="frequency"
         )
-        wrong = ModelMetrics(
-            model, y=mismatched, sample_weight=weights, _mu=mu
-        ).residuals("quantile", seed=11)
+        wrong = ModelMetrics(model, y=mismatched, sample_weight=weights, _mu=mu).residuals(
+            "quantile", seed=11
+        )
         assert scipy_stats.kstest(wrong, "norm").pvalue < 1e-6
 
     @pytest.mark.parametrize(
