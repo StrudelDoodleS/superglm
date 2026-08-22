@@ -2481,27 +2481,32 @@ class TestRankGateSeesCollinearityNotScale:
         # contrast this class is named for, stated in a quantity the round-off
         # cannot move.
         #
-        # **AND ITS TEETH ARE STATED RATHER THAN ASSUMED, BECAUSE THEY ARE
-        # NARROWER THAN THE ASSERTION THEY REPLACE.**  Mutation-checked:
+        # **AND ITS TEETH ARE STATED RATHER THAN ASSUMED.**  Mutation-checked:
         # replacing ``decompose_gram`` with a ``raise`` reds this, which is
-        # what the previous revision failed to do.  Forcing ``retained_mask``
-        # all-True -- a gate that never truncates -- does NOT red it, and no
-        # assertion on this fixture can.
+        # what the revision that stopped at the preconditions failed to do.
+        # Forcing ``retained_mask`` all-True -- a gate that never truncates --
+        # does not red the certification assertion either, which is why the
+        # rank assertion below is kept rather than replaced by it.
         #
-        # That is not a gap that can be closed here, and the reason is issue
-        # #356's substance: the gate drops a direction only when
-        # ``eigenvalue <= gram_rcond * max``, and ``gram_rcond`` is ``eps``,
-        # so **every direction the Gram route is capable of dropping is one
-        # below ``eps * max`` -- beneath the eigensolver's own error bar of
-        # ``n eps max``**.  There is therefore no fixture, here or anywhere,
-        # on which truncation fires against a RESOLVED eigenvalue.  Whether it
-        # fires is round-off on every input, which is why the old assertion
-        # passed by luck rather than by construction, and why the never-
-        # truncate mutation has to be caught by the tests that exercise the
-        # factor route instead.  The sibling above still calls the gate
-        # directly, so the class as a whole retains a live call on both sides
-        # of its contrast.
+        # **THAT GAP CLOSED WITH POLICY VERSION 3, AND THE RANK IS ASSERTED
+        # AGAIN BECAUSE OF IT.**  The paragraph above was written against
+        # version 2, where the gate dropped a direction only when
+        # ``eigenvalue <= gram_rcond * max`` with ``gram_rcond = eps`` -- so
+        # everything it could drop lay beneath the eigensolver's own
+        # ``n eps max`` bar, no fixture could make truncation fire against a
+        # RESOLVED eigenvalue, and the rank was round-off on every input.
+        # Version 3 floors the cut AT that bar, so truncation now fires exactly
+        # where the arithmetic can tell, and ``rank < width`` is a property of
+        # the fixture rather than of the machine: measured 5 on all 7
+        # microkernels under both numpy generations.  It is asserted first
+        # because it is the one that catches the never-truncate mutation, which
+        # certification alone does not.
         collinear = decompose_gram(H)
+        assert collinear.rank < collinear.width, (
+            f"the equilibrated plant was retained (rank {collinear.rank} of "
+            f"{collinear.width}); under version 3 the residue sits at 0.017x to "
+            "0.245x of the eigensolver bar, so dropping it is a property here"
+        )
         assert needs_factor_certification(collinear), (
             "the equilibrated plant no longer reaches the certification band, "
             f"so the Gram route now believes it resolved this direction (rank "
