@@ -119,6 +119,24 @@ def optimize_direct_reml(
         BAM-style cached working/Fisher curvature approximation and bypasses
         ordinary observed-Hessian LAML for noncanonical links.
     """
+
+    # The declared contract's likelihood size, computed once. Every dispersion
+    # denominator and the REML scale term's `0.5 * (n - M_p) * log(D)` must use
+    # THIS, not the physical row count: `sum(w)` under `"frequency"`, the
+    # positive-row count under `"prior"`. The objective, its gradient and its
+    # Hessian all read it, so a row count in any one of them makes the Newton
+    # step inconsistent with the surface it is stepping on.
+    _contract_size_cache: list[float] = []
+
+    def _contract_size() -> float:
+        if not _contract_size_cache:
+            from superglm.solvers.dispersion import dispersion_likelihood_size
+
+            _contract_size_cache.append(
+                dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
+            )
+        return _contract_size_cache[0]
+
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
@@ -365,7 +383,7 @@ def optimize_direct_reml(
             boot_inv_phi = boot_scale.inverse_phi
         else:
             boot_phi = max(
-                penalized_deviance / max(len(y) - boot_penalty_nullity, 1.0),
+                penalized_deviance / max(_contract_size() - boot_penalty_nullity, 1.0),
                 1e-10,
             )
             boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
@@ -671,7 +689,7 @@ def optimize_direct_reml(
                     )
                     penalized_deviance = float(pirls_result.deviance + pq)
                 phi_hat = max(
-                    penalized_deviance / max(len(y) - penalty_nullity, 1.0),
+                    penalized_deviance / max(_contract_size() - penalty_nullity, 1.0),
                     1e-10,
                 )
                 inverse_phi = 1.0 / max(phi_hat, 1e-10)
@@ -880,7 +898,7 @@ def optimize_direct_reml(
                 gradient=grad_partial,
                 penalty_caches=penalty_caches,
                 pirls_result=pirls_result,
-                n_obs=len(y),
+                n_obs=_contract_size(),
                 phi_hat=phi_hat,
                 inverse_phi=inverse_phi,
                 d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
@@ -948,7 +966,7 @@ def optimize_direct_reml(
                 gradient=grad_partial,
                 penalty_caches=penalty_caches,
                 pirls_result=pirls_result,
-                n_obs=len(y),
+                n_obs=_contract_size(),
                 phi_hat=phi_hat,
                 inverse_phi=inverse_phi,
                 d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,

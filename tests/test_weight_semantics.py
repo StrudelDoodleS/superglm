@@ -1012,3 +1012,137 @@ class TestTheBinomialPriorFormIsNotNormalised:
         # strictly above the (1-mu)**w bound the previous code used.
         assert np.all(residuals[success] >= lower[success] - 1e-9)
         assert np.all(np.power(1.0 - mu, weights) < 1.0 - np.power(mu, weights))
+
+
+class TestTheCustomFamilyScaleTermUsesTheContract:
+    """The `0.5 * (n - M_p) * log(D)` fallback, and the Hessian that mirrors it.
+
+    Estimated-scale families with no exact saturated-likelihood profiler fall
+    back to a Gaussian-shaped scale term.  Its ``n`` is the declared contract's
+    likelihood size like every other dispersion denominator, not the physical
+    row count -- and the objective, its gradient and its Hessian must all agree
+    on that ``n`` or the Newton step is inconsistent with its own surface.
+
+    Built on the Wood (2011) oracle harness so the objective is exercised
+    directly; a full custom-family REML fit is not needed to pin the term.
+    """
+
+    def _objective(self, weights, semantics):
+        import warnings
+        from types import SimpleNamespace
+
+        from superglm.links import IdentityLink
+        from superglm.reml.objective import reml_laml_objective
+        from superglm.solvers.pirls import PIRLSResult
+
+        from ._wood_reml_oracles import solve_gaussian_state
+
+        x = np.linspace(-1.4, 1.2, 11)
+        design = np.column_stack((x, x**2 - np.mean(x**2), np.sin(1.7 * x)))
+        y = 0.8 + 1.1 * x - 0.6 * x**2 + 0.25 * np.cos(2.3 * x)
+        slope_penalty = np.diag([2.5, 0.0, 0.0])
+        state = solve_gaussian_state(design, y, slope_penalty)
+        result = PIRLSResult(
+            beta=state.beta.copy(),
+            intercept=state.intercept,
+            n_iter=1,
+            deviance=state.deviance,
+            converged=True,
+            phi=1.0,
+            effective_df=0.0,
+        )
+
+        class _NoMatvecDesign:
+            group_matrices: list = []
+
+            def matvec(self, beta):  # pragma: no cover - must not be reached
+                raise AssertionError("cached objective path must not expand the design")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            value = reml_laml_objective(
+                _NoMatvecDesign(),
+                SimpleNamespace(scale_known=False),
+                IdentityLink(),
+                [],
+                y,
+                result,
+                {},
+                weights,
+                np.zeros_like(y),
+                XtWX=state.slope_xtwx,
+                XtW1=state.full_hessian[1:, 0],
+                sum_W=float(state.full_hessian[0, 0]),
+                S_override=slope_penalty,
+                weight_semantics=semantics,
+            )
+        return value, y, state, result
+
+    def test_the_scale_term_counts_replication_not_rows(self):
+        """Doubling every frequency weight doubles the term's ``n``.
+
+        The two contracts see the same weights here, so the only thing that can
+        move the objective is the size each reads out of them: ``sum(w) = 2n``
+        under ``"frequency"`` against the ``n`` positive rows under
+        ``"prior"``. The gap is therefore exactly one scale term's worth.
+        """
+        n = 11
+        doubled = np.full(n, 2.0)
+        frequency, y, state, result = self._objective(doubled, "frequency")
+        prior, _, _, _ = self._objective(doubled, "prior")
+
+        penalized_deviance = float(result.deviance + state.penalty_quad)
+        expected_gap = 0.5 * (2.0 * n - float(n)) * np.log(penalized_deviance)
+        assert frequency - prior == pytest.approx(expected_gap, rel=1e-10)
+
+    def test_unit_weights_leave_the_term_alone(self):
+        """The regression guard: at w == 1 both sizes are n, so nothing moves."""
+        ones = np.ones(11)
+        frequency, _, _, _ = self._objective(ones, "frequency")
+        prior, _, _, _ = self._objective(ones, "prior")
+        assert frequency == prior
+
+    def test_the_statsmodels_comparison_picks_the_matching_weight_argument(self):
+        """The oracle utility must compare against the contract, not the family.
+
+        `var_weights` IS the prior reading and `freq_weights` IS the frequency
+        one; choosing by Tweedie-ness was the pre-`weight_semantics` rule, and
+        it compares a prior-contract Gamma fit against the wrong statsmodels
+        model -- the exact mismatch the comparison exists to detect.
+        """
+        pytest.importorskip("statsmodels")
+        import superglm.debug_weights as debug_weights
+
+        captured = {}
+
+        class _StubGLM:
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+
+            def fit(self, *args, **kwargs):
+                raise RuntimeError("stop after argument selection")
+
+        rng, frame = _frame(seed=60, n=60)
+        y = _response(rng, frame, Gamma())
+        weights = rng.uniform(0.5, 3.0, len(frame))
+
+        for semantics, expected in (("prior", "var_weights"), ("frequency", "freq_weights")):
+            captured.clear()
+            model = SuperGLM(
+                family=Gamma(),
+                features={"x": Spline(n_knots=4)},
+                weight_semantics=semantics,
+            )
+            model.fit(frame, y, sample_weight=weights)
+            import statsmodels.api as sm
+
+            original = sm.GLM
+            sm.GLM = _StubGLM
+            try:
+                debug_weights.compare_irls_weights(model, frame[["x"]], y, sample_weight=weights)
+            except Exception:
+                pass
+            finally:
+                sm.GLM = original
+            assert expected in captured, f"{semantics} should use {expected}, got {list(captured)}"
+            assert ("freq_weights" in captured) is (expected == "freq_weights")
