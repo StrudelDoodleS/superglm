@@ -1802,6 +1802,71 @@ class TestTheContractWarningNeverPreemptsAValidationError:
             model.fit(X, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))
 
 
+class TestTheIntegralitySlackIsCorrectAtEveryMagnitude:
+    """Swept over the exponent range, not sampled at chosen magnitudes.
+
+    This check has been wrong three times, each time at a magnitude nobody
+    had tried: a 1e-9 relative tolerance died at ``|v| >= 5e8``, a 1e-3
+    absolute ceiling admitted ``1_000_000.0005``, and eight raw ulps died at
+    ``|v| >= 2**48`` where one ulp is 1/16 and eight are exactly a half-count.
+
+    Each was found by a reviewer naming the next magnitude, so testing more
+    named magnitudes would only postpone the fourth. The sweep below asserts
+    the property that actually has to hold -- a representable half-integer is
+    always flagged, an exact integer never is, and a ulp of round-off is
+    absorbed -- at every binade of the double range.
+    """
+
+    def test_every_binade_of_the_double_range(self):
+        from superglm.model.input_validation import _off_integer_lattice
+
+        violations = []
+        for exponent in range(64):
+            magnitude = float(2**exponent)
+            spacing = np.spacing(magnitude)
+
+            if _off_integer_lattice(np.array([magnitude]))[0]:
+                violations.append(f"2^{exponent}: an exact integer was flagged")
+
+            # Where a half-integer is representable it must always be caught:
+            # this is the failure the three previous rules all shared.
+            if spacing <= 0.5:
+                half = magnitude + 0.5
+                assert half - magnitude == 0.5
+                if not _off_integer_lattice(np.array([half]))[0]:
+                    violations.append(f"2^{exponent}: half-integer admitted (spacing={spacing})")
+
+            # Below a half-count a ulp is round-off, and absorbing it is what
+            # the slack is for. At or above it a ulp IS half a count, so the
+            # two cannot be told apart and the property does not apply.
+            if spacing < 0.5:
+                nudged = np.nextafter(magnitude, np.inf)
+                if _off_integer_lattice(np.array([nudged]))[0]:
+                    violations.append(
+                        f"2^{exponent}: one ulp of round-off was flagged (spacing={spacing})"
+                    )
+
+        assert not violations, "\n".join(violations)
+
+    def test_the_slack_never_reaches_a_half_count(self):
+        """The invariant underneath the sweep, stated directly.
+
+        Any slack that reaches 0.5 admits every value, because nothing is
+        further than 0.5 from its nearest integer. Every rule that scales with
+        magnitude eventually crosses it, which is why the ceiling is the fix
+        rather than a larger multiplier.
+        """
+        from superglm.model.input_validation import (
+            _LATTICE_MAXIMUM_SLACK,
+            _LATTICE_ULP_SLACK,
+        )
+
+        assert _LATTICE_MAXIMUM_SLACK < 0.5
+        magnitudes = 2.0 ** np.arange(64, dtype=np.float64)
+        slack = np.minimum(_LATTICE_ULP_SLACK * np.spacing(magnitudes), _LATTICE_MAXIMUM_SLACK)
+        assert np.all(slack < 0.5)
+
+
 class TestTheIntegralitySlackIsUlpScaled:
     """A relative slack cannot express "close to an integer" at any setting.
 
@@ -1819,6 +1884,7 @@ class TestTheIntegralitySlackIsUlpScaled:
             500_000_000.5,
             1_000_000_000.5,  # a 1e-9 relative slack reaches 0.5 here
             1e12 + 0.5,
+            281474976710656.5,  # 2**48: eight raw ulps are exactly 0.5 here
         ],
     )
     def test_an_exactly_representable_fraction_is_never_called_whole(self, value):
@@ -1828,17 +1894,20 @@ class TestTheIntegralitySlackIsUlpScaled:
         assert bool(_off_integer_lattice(np.array([value]))[0])
 
     @pytest.mark.parametrize("magnitude", [1.0, 1e3, 1e6, 1e9, 1e15])
-    def test_a_few_ulps_of_round_off_is_still_absorbed(self, magnitude):
+    def test_a_ulp_of_round_off_is_still_absorbed(self, magnitude):
         """The slack exists for this and must keep covering it.
 
         Measured: over 200,000 trials of ``count / exposure * exposure`` the
         worst deviation from the intended integer was 1.0 ulp.
+
+        One ulp, not several: at 1e15 a ulp is already 0.125, so four of them
+        are a half-count -- the thing the check must never absorb. An earlier
+        version of this test asserted that four ulps are absorbed at every
+        magnitude, which asserted the defect rather than the fix.
         """
         from superglm.model.input_validation import _off_integer_lattice
 
-        nudged = magnitude
-        for _ in range(4):  # four ulps out, inside the eight-ulp allowance
-            nudged = np.nextafter(nudged, np.inf)
+        nudged = np.nextafter(magnitude, np.inf)
         assert not bool(_off_integer_lattice(np.array([nudged]))[0])
 
     def test_the_canonical_exposure_round_trip_does_not_warn(self):

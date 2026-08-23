@@ -50,10 +50,27 @@ _UNIT_WEIGHT_TOLERANCE = 1e-9
 #:
 #: Sized from measurement, not taste.  Over 200,000 trials of
 #: ``count / exposure * exposure`` the worst deviation from the intended
-#: integer was **1.0 ulp**, and summed integer counts were exact.  Eight ulps
-#: is that with room to spare, and stays far below 0.5 across the whole double
-#: range, so the check cannot die at any magnitude.
+#: integer was **1.0 ulp**, and summed integer counts were exact.
 _LATTICE_ULP_SLACK = 8.0
+
+#: Hard ceiling on the slack, and the invariant that makes this check correct
+#: at every magnitude rather than at the magnitudes anyone happened to try.
+#:
+#: Nothing is ever further than 0.5 from its nearest integer, so *any* slack
+#: that reaches 0.5 admits every value and the check silently dies. This has
+#: now been true of three successive rules -- a 1e-9 relative tolerance (dies
+#: at ``|v| >= 5e8``), a 1e-3 absolute ceiling (admits ``1_000_000.0005``),
+#: and eight raw ulps (dies at ``|v| >= 2**48``, where one ulp is 1/16 and
+#: eight of them are exactly a half-count).  Every scale that grows with
+#: magnitude eventually crosses a half, so the ceiling is not a patch for one
+#: more reported magnitude; it is the thing that bounds the whole family.
+#:
+#: A quarter-count is deliberately loose.  It only binds above ``2**48``,
+#: where a ulp is already 1/16 of a count, so it is still four ulps of
+#: round-off there -- not the seven-orders-too-wide allowance that a fixed
+#: absolute tolerance was at ordinary magnitudes.  Above ``2**52`` every
+#: representable double is an integer and the question stops being askable.
+_LATTICE_MAXIMUM_SLACK = 0.25
 
 
 def _off_integer_lattice(values: NDArray) -> NDArray:
@@ -61,8 +78,16 @@ def _off_integer_lattice(values: NDArray) -> NDArray:
 
     Shared by both contract checks so the tolerance rule cannot drift apart
     between them -- it previously did, and was wrong in each copy separately.
+
+    Correct at every magnitude by construction: the slack tracks float64
+    spacing where spacing is the binding scale, and is capped below a
+    half-count everywhere else, so it can never admit a representable
+    half-integer.  ``TestTheIntegralitySlackIsCorrectAtEveryMagnitude`` sweeps
+    the exponent range rather than sampling magnitudes, because sampling is
+    what let this be wrong three times.
     """
-    slack = _LATTICE_ULP_SLACK * np.spacing(np.maximum(1.0, np.abs(values)))
+    spacing = np.spacing(np.maximum(1.0, np.abs(values)))
+    slack = np.minimum(_LATTICE_ULP_SLACK * spacing, _LATTICE_MAXIMUM_SLACK)
     return np.abs(values - np.rint(values)) > slack
 
 
