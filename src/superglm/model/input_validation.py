@@ -74,10 +74,18 @@ _LATTICE_MAXIMUM_SLACK = 0.25
 
 
 def _off_integer_lattice(values: NDArray) -> NDArray:
-    """Which entries sit further from a whole number than round-off explains.
+    """Which entries of a COMPUTED product are further from whole than round-off.
 
-    Shared by both contract checks so the tolerance rule cannot drift apart
-    between them -- it previously did, and was wrong in each copy separately.
+    For ``w * y`` only.  The product is formed here from two user arrays, so an
+    exactly-integral intent lands a ulp or so away and a tolerance is required;
+    measured worst case over 200,000 round-trips of ``count / exposure`` times
+    ``exposure`` was 1.0 ulp.
+
+    Do not use this on a value the caller supplied directly -- see
+    :func:`_not_a_whole_number`, which is deliberately stricter.  Sharing one
+    rule between the two was wrong: it lent the product's round-off allowance
+    to quantities that have no product in them, and admitted representable
+    fractional counts such as ``2**49 + 0.125`` as a result.
 
     Correct at every magnitude by construction: the slack tracks float64
     spacing where spacing is the binding scale, and is capped below a
@@ -89,6 +97,59 @@ def _off_integer_lattice(values: NDArray) -> NDArray:
     spacing = np.spacing(np.maximum(1.0, np.abs(values)))
     slack = np.minimum(_LATTICE_ULP_SLACK * spacing, _LATTICE_MAXIMUM_SLACK)
     return np.abs(values - np.rint(values)) > slack
+
+
+def _not_a_whole_number(values: NDArray) -> NDArray:
+    """Which entries of a SUPPLIED array are not exactly whole numbers.
+
+    For a declared replication count, and for a counting response under the
+    frequency contract.  Both are values the caller hands over and declares to
+    be counts; nothing here forms them, so there is no round-off to forgive and
+    an exact test is the honest one.  ``counts.astype(float)`` is exactly
+    integral, as is anything read from a count column.
+
+    Exact rather than a ulp or two on purpose.  At ``2**49`` a ulp is already
+    ``0.125`` of a count, so any non-zero allowance admits representable
+    fractional counts at large magnitudes -- which is precisely the hole that
+    borrowing the product tolerance opened.  A count that is not exactly an
+    integer is not a count, and saying so is more useful than guessing which
+    near-integers were meant.
+    """
+    return values != np.rint(values)
+
+
+def _warn_frequency_counting_response(y: NDArray, family) -> None:
+    """Warn when a replicated counting response is not a whole count.
+
+    Under ``"frequency"`` the likelihood is ``w log f(y; mu)``: the weight
+    multiplies an ordinary per-row density rather than entering it, so it
+    cannot rescue a response the family does not support.  Poisson and the
+    negative binomial live on the non-negative integers, and a fractional
+    ``y`` evaluates ``gammaln`` at a fractional argument -- finite, smooth, and
+    not a probability.  The reported log-likelihood, AIC and BIC are then a
+    quasi-likelihood, and randomized quantile residuals invert the CDF at a
+    count that cannot occur.
+    """
+    off = _not_a_whole_number(y)
+    count = int(np.count_nonzero(off))
+    if count == 0:
+        return
+    import warnings
+
+    warnings.warn(
+        f"{count} of {len(y)} rows have a non-integral response under "
+        f'weight_semantics="frequency" with a {type(family).__name__} family, '
+        "whose support is the non-negative integers. A replication count "
+        "multiplies the per-row density rather than entering it, so it cannot "
+        "put a fractional response back on the lattice: the density evaluates "
+        "gammaln at a fractional argument, and the reported log-likelihood, "
+        "AIC and BIC are a quasi-likelihood rather than an exact density. "
+        "Coefficients, fitted means and deviance are unaffected. Pass "
+        'weight_semantics="prior" with y = count / exposure and '
+        "sample_weight = exposure if the response is a rate.",
+        PriorWeightLatticeWarning,
+        stacklevel=5,
+    )
 
 
 def _warn_prior_weighted_binomial(weights: NDArray) -> None:
@@ -155,7 +216,7 @@ def _check_frequency_counts(weights: NDArray, weight_semantics: str) -> None:
         return
     carried = weights > 0.0
     values = weights[carried]
-    count = int(np.count_nonzero(_off_integer_lattice(values)))
+    count = int(np.count_nonzero(_not_a_whole_number(values)))
     if count == 0:
         return
     import warnings
@@ -193,6 +254,19 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
     Refusing an otherwise valid fit over a defect confined to its reported
     likelihood would cost more than it protects; saying so plainly does not.
     """
+    if weight_semantics == FREQUENCY_WEIGHTS:
+        # Replication does not move the support.  "This row appeared w times"
+        # leaves each appearance an ordinary draw from the counting family, so
+        # ``y`` itself must still be a whole count -- and unlike the prior arm
+        # the weight never enters that question, so an integral or omitted
+        # weight says nothing about it.  A fractional ``y`` here reaches the
+        # same interpolated ``gammaln`` the prior arm warns about, and did so
+        # with nothing to mark it because this function returned early for
+        # every frequency model.
+        if not isinstance(family, Poisson | NegativeBinomial):
+            return
+        _warn_frequency_counting_response(y, family)
+        return
     if weight_semantics != PRIOR_WEIGHTS:
         return
     if isinstance(family, Binomial):

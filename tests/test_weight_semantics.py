@@ -1958,3 +1958,117 @@ class TestTheEvaluationWarningNeverPreemptsAValidationError:
         model, X, y, n = self._fitted()
         with pytest.warns(FractionalFrequencyWeightWarning):
             model.metrics(X, y, sample_weight=np.full(n, 2.5), offset=np.zeros(n))
+
+
+class TestASuppliedCountIsTestedExactly:
+    """A replication count is handed over, not computed, so nothing forms it.
+
+    The product tolerance exists because ``w * y`` is built here from two user
+    arrays and lands a ulp or so from an integral intent. A weight the caller
+    supplies has no product in it, and lending it that allowance admitted
+    representable fractional counts at large magnitudes -- at ``2**49`` a ulp
+    is already an eighth of a count.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            2.0**49 + 0.125,  # exactly one ulp, and a real eighth of a count
+            2.0**48 + 0.0625,
+            281474976710656.5,
+            1_000_000.0005,
+            1_000_000_000.5,
+        ],
+    )
+    def test_a_representable_fraction_is_flagged_however_small(self, value):
+        from superglm.model.input_validation import _not_a_whole_number
+
+        assert value != np.rint(value), "test needs a genuinely fractional value"
+        assert bool(_not_a_whole_number(np.array([value]))[0])
+
+    @pytest.mark.parametrize("value", [0.0, 1.0, 3.0, 1e6, 2.0**49, 1e15])
+    def test_a_whole_count_is_never_flagged(self, value):
+        from superglm.model.input_validation import _not_a_whole_number
+
+        assert not bool(_not_a_whole_number(np.array([value]))[0])
+
+    def test_counts_read_as_floats_are_exact(self):
+        """The reason exactness costs nothing: real counts are exact."""
+        from superglm.model.input_validation import _not_a_whole_number
+
+        rng = np.random.default_rng(31)
+        counts = rng.integers(0, 10**6, 100_000).astype(float)
+        assert not _not_a_whole_number(counts).any()
+
+    def test_the_product_rule_keeps_its_round_off_allowance(self):
+        """The two rules must stay apart: this one still forgives a ulp."""
+        from superglm.model.input_validation import _off_integer_lattice
+
+        rng = np.random.default_rng(32)
+        counts = rng.integers(0, 10_000, 50_000).astype(float)
+        exposure = rng.uniform(0.01, 50.0, 50_000)
+        assert not _off_integer_lattice((counts / exposure) * exposure).any()
+
+
+class TestAReplicatedCountingResponseStaysOnItsLattice:
+    """Replication does not move the support.
+
+    Under ``"frequency"`` the likelihood is ``w log f(y; mu)`` -- the weight
+    multiplies an ordinary per-row density rather than entering it, so it
+    cannot rescue a response the family does not support. The lattice check
+    returned early for every frequency model, so a fractional ``y`` reached the
+    same interpolated ``gammaln`` the prior arm warns about, with nothing
+    marking it.
+    """
+
+    @staticmethod
+    def _frame(n=40):
+        return pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+
+    @pytest.mark.parametrize("family", [Poisson(), NegativeBinomial(theta=2.0)])
+    def test_a_fractional_response_warns_with_an_integral_weight(self, family):
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[:6] += 0.5
+        model = SuperGLM(family=family, features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(self._frame(n), y, sample_weight=np.full(n, 2.0))
+
+    def test_a_fractional_response_warns_with_no_weight_at_all(self):
+        """The weight never enters the question, so omitting it changes nothing."""
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[:6] += 0.5
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(self._frame(n), y)
+
+    def test_a_whole_response_stays_silent(self):
+        n = 40
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            model.fit(self._frame(n), np.arange(n, dtype=float), sample_weight=np.full(n, 2.0))
+
+    def test_a_continuous_family_is_untouched(self):
+        """Only the counting families have an integer support to leave."""
+        n = 40
+        model = SuperGLM(family=Gaussian(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.fit(self._frame(n), np.linspace(0.5, 4.5, n), sample_weight=np.full(n, 2.0))
+
+    def test_the_evaluation_boundaries_check_it_too(self):
+        """Fit on whole counts, evaluate on fractional ones."""
+        n = 40
+        frame = self._frame(n)
+        y_fit = np.arange(n, dtype=float)
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.fit(frame, y_fit, sample_weight=np.full(n, 2.0))
+        y_eval = y_fit.copy()
+        y_eval[:6] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.metrics(frame, y_eval, sample_weight=np.full(n, 2.0))
