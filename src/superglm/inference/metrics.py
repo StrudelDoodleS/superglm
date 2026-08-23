@@ -337,14 +337,19 @@ class ModelMetrics:
             # residuals would then be silently fabricated -- the residual
             # rounds the impossible count onto a neighbouring lattice point
             # and inverts the CDF there. Re-check at this boundary.
-            from superglm.model.input_validation import _check_counting_lattice
+        # Outside the `sample_weight is not None` branch on purpose:
+        # synthesized all-ones weights still define a counting lattice, so a
+        # fractional response such as `y = 0.5` on an unweighted holdout is
+        # just as off it, and would otherwise reach the interpolated density
+        # and the rounded residual with no warning at all.
+        from superglm.model.input_validation import _check_counting_lattice
 
-            _check_counting_lattice(
-                self._y,
-                self._weights,
-                self._family,
-                self._weight_semantics,
-            )
+        _check_counting_lattice(
+            self._y,
+            self._weights,
+            self._family,
+            self._weight_semantics,
+        )
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
         fit_offset = getattr(model, "_fit_offset", None)
         fit_offset_array = np.zeros(n) if fit_offset is None else np.asarray(fit_offset)

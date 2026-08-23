@@ -148,6 +148,17 @@ def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Mean negative log-likelihood under the family's weight contract."""
     mu = model.predict(X_val, offset=offset)
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
+    # A predefined or custom split can put an off-lattice row only in
+    # validation, so no fold's fit ever warns while both the per-fold and the
+    # pooled NLL quietly use an interpolated pseudo-density.
+    from superglm.model.input_validation import _check_counting_lattice
+
+    _check_counting_lattice(
+        np.asarray(y_val, dtype=np.float64),
+        weights,
+        model._distribution,
+        model_weight_semantics(model),
+    )
     ll = weighted_log_likelihood(
         model._distribution,
         y_val,
@@ -177,6 +188,17 @@ def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled negative log-likelihood."""
     mu = model.predict(X_val, offset=offset)
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
+    # A predefined or custom split can put an off-lattice row only in
+    # validation, so no fold's fit ever warns while both the per-fold and the
+    # pooled NLL quietly use an interpolated pseudo-density.
+    from superglm.model.input_validation import _check_counting_lattice
+
+    _check_counting_lattice(
+        np.asarray(y_val, dtype=np.float64),
+        weights,
+        model._distribution,
+        model_weight_semantics(model),
+    )
     ll = weighted_log_likelihood(
         model._distribution,
         y_val,

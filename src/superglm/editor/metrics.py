@@ -182,6 +182,12 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
         weight_semantics=model_weight_semantics(model),
     )
     deviance = float(np.sum(w * family.deviance_unit(y_arr, mu)))
+    # `compute_dataset_metrics` bypasses `ModelMetrics` entirely, so the
+    # evaluation-boundary check is repeated here for editor validation and
+    # test splits.
+    from superglm.model.input_validation import _check_counting_lattice
+
+    _check_counting_lattice(y_arr, w, family, model_weight_semantics(model))
     log_likelihood = float(
         weighted_log_likelihood(
             family, y_arr, mu, w, phi, weight_semantics=model_weight_semantics(model)

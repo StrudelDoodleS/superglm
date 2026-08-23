@@ -20,11 +20,15 @@ from superglm.distributions import (
     Tweedie,
     validate_response,
 )
-from superglm.solvers.dispersion import PRIOR_WEIGHTS
+from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, PRIOR_WEIGHTS
 
 
 class PriorWeightLatticeWarning(UserWarning):
     """A discrete family's prior-weighted response left its own support."""
+
+
+class FractionalFrequencyWeightWarning(UserWarning):
+    """A replication count that is not a whole number of observations."""
 
 
 #: Relative slack when testing ``w * y`` for integrality.  The product is
@@ -73,6 +77,47 @@ def _warn_prior_weighted_binomial(weights: NDArray) -> None:
         'weight_semantics="frequency" if the weights are replication counts.',
         PriorWeightLatticeWarning,
         stacklevel=5,
+    )
+
+
+def _check_frequency_counts(weights: NDArray, weight_semantics: str) -> None:
+    """Warn when a declared replication count is not a whole number.
+
+    ``"frequency"`` says row ``i`` appears ``w_i`` times, so the likelihood is
+    ``w_i log f(y_i; mu_i, phi)`` and the residual d.f. are ``sum(w) - edf``.
+    Neither statement survives a fractional count: a row cannot appear 0.4
+    times, and ``sum(w)`` stops being a number of observations. The arithmetic
+    still evaluates, so the fit publishes likelihood criteria and REML results
+    that look exact and are not.
+
+    This warns rather than raises. The frequency contract reproduces the
+    pre-``weight_semantics`` behaviour bit for bit, and that behaviour accepted
+    fractional weights -- refusing them now would break code that worked before
+    the contract was declared, to protect a criterion rather than an estimate.
+    Under ``"prior"`` a fractional weight is entirely well defined, which is
+    the whole point of the default, so this fires only on the other reading.
+    """
+    if weight_semantics != FREQUENCY_WEIGHTS:
+        return
+    carried = weights > 0.0
+    values = weights[carried]
+    slack = _LATTICE_RELATIVE_TOLERANCE * np.maximum(1.0, np.abs(values))
+    fractional = np.abs(values - np.rint(values)) > slack
+    count = int(np.count_nonzero(fractional))
+    if count == 0:
+        return
+    import warnings
+
+    warnings.warn(
+        f"{count} of {int(carried.sum())} carried rows have a non-integral "
+        'sample_weight under weight_semantics="frequency", which declares a '
+        "replication count. A row cannot appear a fractional number of times, "
+        "so the reported log-likelihood, AIC, BIC and the sum(w) - edf "
+        "residual degrees of freedom are a quasi-likelihood rather than exact. "
+        'Pass weight_semantics="prior" if the weights are precisions or '
+        "exposure -- fractional values are well defined there.",
+        FractionalFrequencyWeightWarning,
+        stacklevel=4,
     )
 
 
@@ -310,6 +355,7 @@ def validate_fit_input(
         raise ValueError("sample_weight must be nonnegative")
     if not np.any(weight_arr > 0.0):
         raise ValueError("sample_weight must not be all zero")
+    _check_frequency_counts(weight_arr, weight_semantics)
     offset_arr = None if offset is None else _finite_vector("offset", offset, n_rows)
     validate_response(y_arr, family)
     _check_counting_lattice(y_arr, weight_arr, family, weight_semantics)

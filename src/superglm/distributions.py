@@ -576,6 +576,16 @@ def weighted_log_likelihood(
     density = prior_weight_log_density(family, y, mu, weights, phi)
     if density is not None:
         return float(np.sum(density, dtype=np.float64))
+    # At unit weight there is no mismatch to warn about: the two contracts are
+    # the same likelihood, so the family's own `log_likelihood` IS the prior
+    # form rather than a substitute for it. Warning here fired on every
+    # ordinary unweighted custom-family fit -- twice, since the null likelihood
+    # is computed too -- and turned into a hard failure under `-W error`.
+    # Zero-weight rows are carried through the same test because they
+    # contribute nothing under either reading.
+    carried = np.asarray(weights, dtype=np.float64)
+    if np.all((carried == 0.0) | (carried == 1.0)):
+        return float(family.log_likelihood(y, mu, weights, phi))
     import warnings
 
     warnings.warn(

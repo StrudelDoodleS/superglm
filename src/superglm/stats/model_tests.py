@@ -531,6 +531,22 @@ def vuong_test(
                 raise ValueError("sample_weight must be nonnegative")
             if not np.any(prior_weights > 0.0):
                 raise ValueError("sample_weight must not be all zero")
+        # Vuong takes its own evaluation rows, so an off-lattice response --
+        # or a non-unit prior binomial weight -- would otherwise become a
+        # finite pseudo-log-likelihood and produce an apparently valid
+        # statistic, p-value and preferred model. Checked against BOTH
+        # families, and against the synthesized unit weights when none were
+        # supplied, since those still define a lattice.
+        from superglm.model.input_validation import _check_counting_lattice
+
+        lattice_weights = np.ones(n, dtype=np.float64) if prior_weights is None else prior_weights
+        for compared in (model_a, model_b):
+            _check_counting_lattice(
+                y_arr,
+                lattice_weights,
+                compared._distribution,
+                model_weight_semantics(compared),
+            )
         ll_a = _per_obs_log_likelihood(
             model_a,
             X,

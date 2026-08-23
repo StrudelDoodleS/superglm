@@ -1401,3 +1401,213 @@ class TestTheContractsAgreeAtUnitWeightNotAtIntegerWeight:
             str(c.message) for c in caught if issubclass(c.category, PriorWeightLatticeWarning)
         )
         assert message.startswith(f"{n - 5} of {n} rows")
+
+
+class TestTheLatticeCheckReachesEveryEvaluationBoundary:
+    """One fit-time check does not cover code that brings its own rows.
+
+    `ModelMetrics`, the editor's dataset metrics, cross-validation's NLL and
+    the Vuong test each take their own response and weights, so an off-lattice
+    row can reach an interpolated pseudo-density without any fit ever warning.
+    """
+
+    def _counts(self, seed=90, n=150):
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        counts = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        exposure = rng.uniform(0.5, 4.0, n)
+        return frame, counts, exposure
+
+    def _on_lattice_fit(self, frame, counts, exposure):
+        from superglm import Numeric
+
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        model.fit(frame, counts / exposure, sample_weight=exposure)
+        return model
+
+    def test_evaluation_without_explicit_weights_still_checks(self):
+        """Synthesized all-ones weights define a lattice too.
+
+        The earlier boundary check was nested under ``sample_weight is not
+        None``, so an unweighted holdout with a fractional response reached the
+        interpolated density with no warning at all.
+        """
+        from superglm import PriorWeightLatticeWarning
+
+        frame, counts, exposure = self._counts()
+        model = self._on_lattice_fit(frame, counts, exposure)
+
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.metrics(frame, counts / exposure).log_likelihood
+
+    def test_cross_validation_nll_checks_each_validation_slice(self):
+        """A custom split can put the off-lattice row only in validation."""
+        from superglm import Numeric, PriorWeightLatticeWarning
+        from superglm.model_selection import cross_validate
+
+        rng = np.random.default_rng(91)
+        n = 160
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        y[-8:] += 0.5  # off-lattice at unit weight, in the last fold only
+
+        class _Folds:
+            """The off-lattice rows are VALIDATION-ONLY, never trained on.
+
+            If any fold trains on them the fit itself warns and the test
+            passes without the scorer's check ever running -- which is exactly
+            how the first version of this test failed to pin anything.
+            """
+
+            n_splits = 1
+
+            def split(self, X, y=None, groups=None):
+                idx = np.arange(len(X))
+                held_out = idx[-8:]
+                yield np.setdiff1d(idx, held_out), held_out
+
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with pytest.warns(PriorWeightLatticeWarning):
+            cross_validate(model, frame, y, cv=_Folds(), scoring="nll")
+
+    def test_the_vuong_test_checks_both_families(self):
+        from superglm import Categorical, PriorWeightLatticeWarning
+        from superglm.stats.model_tests import vuong_test
+
+        rng, frame = _frame(seed=92, n=200)
+        y = _response(rng, frame, Poisson())
+
+        def fitted(features):
+            model = SuperGLM(family=Poisson(), features=features, weight_semantics="prior")
+            model.fit(frame, y)
+            return model
+
+        a = fitted({"x": Spline(n_knots=5)})
+        b = fitted({"g": Categorical()})
+
+        off_lattice = y.copy()
+        off_lattice[:6] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            vuong_test(a, b, frame, off_lattice)
+
+    def test_editor_dataset_metrics_check_their_own_split(self):
+        from superglm import PriorWeightLatticeWarning
+        from superglm.editor.metrics import compute_dataset_metrics
+
+        frame, counts, exposure = self._counts(seed=93)
+        model = self._on_lattice_fit(frame, counts, exposure)
+
+        from superglm.editor.evaluation import EvaluationDataset
+
+        dataset = EvaluationDataset(
+            name="validation",
+            label="Validation",
+            X=frame,
+            y=counts,  # off-lattice: the fit used counts / exposure
+            sample_weight=exposure,
+        )
+        with pytest.warns(PriorWeightLatticeWarning):
+            compute_dataset_metrics(model, dataset)
+
+
+class TestFractionalReplicationCountsAreDeclared:
+    """A row cannot appear 0.4 times, so `sum(w) - edf` stops being a count."""
+
+    def _fit(self, semantics, weights):
+        from superglm import Numeric
+
+        rng = np.random.default_rng(94)
+        n = 150
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics=semantics)
+        model.fit(frame, y, sample_weight=weights(n, rng))
+        return model
+
+    def test_a_fractional_frequency_weight_says_so(self):
+        from superglm import FractionalFrequencyWeightWarning
+
+        with pytest.warns(FractionalFrequencyWeightWarning, match="quasi-likelihood"):
+            self._fit("frequency", lambda n, rng: rng.uniform(0.5, 4.0, n))
+
+    def test_integer_replication_counts_are_silent(self):
+        import warnings as warnings_module
+
+        from superglm import FractionalFrequencyWeightWarning
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            self._fit("frequency", lambda n, rng: rng.integers(1, 4, n).astype(float))
+        assert [c for c in caught if issubclass(c.category, FractionalFrequencyWeightWarning)] == []
+
+    def test_the_prior_contract_is_silent_at_fractional_weights(self):
+        """Fractional weights are exactly what the prior reading is for."""
+        import warnings as warnings_module
+
+        from superglm import FractionalFrequencyWeightWarning
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            self._fit("prior", lambda n, rng: rng.uniform(0.5, 4.0, n))
+        assert [c for c in caught if issubclass(c.category, FractionalFrequencyWeightWarning)] == []
+
+
+class TestACustomFamilyDoesNotWarnAtUnitWeight:
+    """The two contracts are the same likelihood at ``w == 1``.
+
+    `prior_weight_log_density` returns None for any family it does not ship,
+    so an ordinary unweighted custom-family fit reached the mismatch warning --
+    twice, since the null likelihood is computed too -- and failed outright
+    under ``-W error``.
+    """
+
+    def _custom_family(self):
+        class _CustomFamily:
+            """Genuinely unshipped: a subclass of a shipped family is matched
+            by `isinstance` and never reaches the fallback at all."""
+
+            scale_known = False
+
+            def log_likelihood(self, y, mu, weights, phi):
+                resid = np.asarray(y) - np.asarray(mu)
+                return float(np.sum(np.asarray(weights) * -0.5 * resid**2 / phi))
+
+            def deviance_unit(self, y, mu):
+                return (np.asarray(y) - np.asarray(mu)) ** 2
+
+        return _CustomFamily()
+
+    def test_unit_weights_do_not_warn(self):
+        import warnings as warnings_module
+
+        from superglm.distributions import weighted_log_likelihood
+
+        rng = np.random.default_rng(95)
+        n = 80
+        y = rng.normal(0.0, 1.0, n)
+        mu = np.zeros(n)
+
+        for weights in (np.ones(n), np.where(np.arange(n) < 5, 0.0, 1.0)):
+            with warnings_module.catch_warnings(record=True) as caught:
+                warnings_module.simplefilter("always")
+                value = weighted_log_likelihood(
+                    self._custom_family(), y, mu, weights, 1.0, weight_semantics="prior"
+                )
+            assert [c for c in caught if issubclass(c.category, UserWarning)] == []
+            assert np.isfinite(value)
+
+    def test_non_unit_weights_still_warn(self):
+        from superglm.distributions import weighted_log_likelihood
+
+        rng = np.random.default_rng(96)
+        n = 80
+        y = rng.normal(0.0, 1.0, n)
+        with pytest.warns(UserWarning, match="not a SuperGLM-shipped family"):
+            weighted_log_likelihood(
+                self._custom_family(),
+                y,
+                np.zeros(n),
+                np.full(n, 2.0),
+                1.0,
+                weight_semantics="prior",
+            )
