@@ -663,6 +663,29 @@ class SuperGLMRegressor(BaseEstimator, RegressorMixin):
         self.offset = offset
         self.weight_semantics = weight_semantics
 
+    def __setstate__(self, state: dict) -> None:
+        """Restore an estimator pickled before ``weight_semantics`` existed.
+
+        sklearn reads every constructor parameter off the instance, so a
+        missing attribute breaks ``get_params`` and ``clone`` as well as
+        refitting. The backfill is the contract the estimator was originally
+        fitted under -- the pre-change family rule -- not the new default, so a
+        restored wrapper keeps reproducing what it recorded.
+        """
+        self.__dict__.update(state)
+        if "weight_semantics" not in self.__dict__:
+            from superglm.distributions import resolve_distribution
+            from superglm.solvers.dispersion import family_default_weight_semantics
+
+            family = self.__dict__.get("family")
+            distribution = None
+            if family is not None:
+                try:
+                    distribution = resolve_distribution(family)
+                except ValueError:
+                    distribution = None
+            self.weight_semantics = family_default_weight_semantics(distribution)
+
     def fit(
         self,
         X,
@@ -803,6 +826,29 @@ class SuperGLMClassifier(BaseEstimator, ClassifierMixin):
         self.offset = offset
         self.threshold = threshold
         self.weight_semantics = weight_semantics
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore an estimator pickled before ``weight_semantics`` existed.
+
+        sklearn reads every constructor parameter off the instance, so a
+        missing attribute breaks ``get_params`` and ``clone`` as well as
+        refitting. The backfill is the contract the estimator was originally
+        fitted under -- the pre-change family rule -- not the new default, so a
+        restored wrapper keeps reproducing what it recorded.
+        """
+        self.__dict__.update(state)
+        if "weight_semantics" not in self.__dict__:
+            from superglm.distributions import resolve_distribution
+            from superglm.solvers.dispersion import family_default_weight_semantics
+
+            family = self.__dict__.get("family")
+            distribution = None
+            if family is not None:
+                try:
+                    distribution = resolve_distribution(family)
+                except ValueError:
+                    distribution = None
+            self.weight_semantics = family_default_weight_semantics(distribution)
 
     def fit(
         self,

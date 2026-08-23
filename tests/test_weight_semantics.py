@@ -1170,3 +1170,113 @@ class TestTheCustomFamilyScaleTermUsesTheContract:
                 sm.GLM = original
             assert expected in captured, f"{semantics} should use {expected}, got {list(captured)}"
             assert ("freq_weights" in captured) is (expected == "freq_weights")
+
+
+class TestTheContractSurvivesCloningAndRestoring:
+    """Seams from the third review round: clones, legacy pickles, boundaries."""
+
+    def test_a_feature_subset_clone_keeps_its_contract(self):
+        """`drop1`, term importance and `refit_unpenalised` all clone.
+
+        Falling through to the constructor default turned every
+        frequency-contract model into a prior one the moment a term was
+        dropped.
+        """
+        rng, frame = _frame(seed=70, n=200)
+        y = _response(rng, frame, Gamma())
+        weights = rng.uniform(0.5, 3.0, len(frame))
+
+        for semantics in ("frequency", "prior"):
+            model = SuperGLM(
+                family=Gamma(),
+                features={"x": Spline(n_knots=5), "g": Categorical()},
+                weight_semantics=semantics,
+            )
+            model.fit(frame, y, sample_weight=weights)
+            assert model._clone_without_features({"g"})._weight_semantics == semantics
+
+    @pytest.mark.parametrize(
+        ("family", "expected"),
+        [("poisson", "frequency"), (Tweedie(p=1.5), "prior")],
+        ids=["poisson", "tweedie"],
+    )
+    def test_a_legacy_sklearn_wrapper_restores_and_refits(self, family, expected):
+        """Unpickling one from before the field must not raise.
+
+        sklearn reads every constructor parameter off the instance, so a
+        missing attribute breaks `get_params` and `clone` as well as refitting.
+        """
+        from superglm.sklearn import SuperGLMRegressor
+
+        estimator = SuperGLMRegressor(family=family, numeric_features=["x"])
+        state = estimator.__dict__.copy()
+        state.pop("weight_semantics")
+        revived = SuperGLMRegressor.__new__(SuperGLMRegressor)
+        revived.__setstate__(state)
+
+        assert revived.get_params()["weight_semantics"] == expected
+
+        rng = np.random.default_rng(71)
+        n = 120
+        X = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + X["x"].to_numpy())).astype(float)
+        if not isinstance(family, Tweedie):
+            revived.fit(X, y)
+            assert revived._model._weight_semantics == expected
+
+    def test_evaluating_off_lattice_holdout_rows_warns(self):
+        """The fit-time check does not cover evaluation's own rows.
+
+        A clean fitted model scored on off-lattice holdout rows would publish
+        a fabricated log-likelihood and residuals that round the impossible
+        count onto a neighbour.
+        """
+        from superglm import Numeric, PriorWeightLatticeWarning
+
+        rng = np.random.default_rng(72)
+        n = 150
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        counts = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        exposure = rng.uniform(0.5, 4.0, n)
+
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        model.fit(frame, counts / exposure, sample_weight=exposure)  # on-lattice
+
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.metrics(frame, counts, sample_weight=exposure).log_likelihood
+
+    def test_the_warning_says_when_coefficients_move(self):
+        """At fixed theta only the criterion moves; at ``theta="auto"`` the
+        estimate feeds the variance, so the fit itself moves."""
+        import warnings as warnings_module
+
+        from superglm import Numeric, PriorWeightLatticeWarning
+
+        rng = np.random.default_rng(73)
+        n = 150
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        counts = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        weights = rng.uniform(0.5, 4.0, n)
+
+        def message(family):
+            with warnings_module.catch_warnings(record=True) as caught:
+                warnings_module.simplefilter("always")
+                SuperGLM(family=family, features={"x": Numeric()}, weight_semantics="prior").fit(
+                    frame, counts, sample_weight=weights
+                )
+            return next(
+                str(c.message) for c in caught if issubclass(c.category, PriorWeightLatticeWarning)
+            )
+
+        moves = "coefficients, fitted means and deviance move"
+        assert moves not in message(Poisson())
+        assert moves not in message(NegativeBinomial(theta=1.5))
+        assert moves in message(NegativeBinomial(theta="auto"))
+
+    def test_the_lattice_warning_is_publicly_importable(self):
+        """The migration note tells users to filter on it by name."""
+        import superglm
+        from superglm.model import input_validation
+
+        assert superglm.PriorWeightLatticeWarning is input_validation.PriorWeightLatticeWarning
+        assert "PriorWeightLatticeWarning" in superglm.__all__

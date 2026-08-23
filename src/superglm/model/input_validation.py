@@ -106,19 +106,38 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
     import warnings
 
     name = type(family).__name__
+    # At FIXED theta the two contracts share a score equation, so only the
+    # reported likelihood moves. With ``theta="auto"`` that promise fails:
+    # theta is profiled from the interpolated density and then enters V(mu),
+    # the IRLS working weights and the unit deviance, so the coefficients
+    # themselves move too. Say which case the reader is in.
+    auto_theta = isinstance(family, NegativeBinomial) and getattr(family, "theta", None) in (
+        "auto",
+        None,
+    )
+    if isinstance(family, NegativeBinomial):
+        reach = (
+            " theta_hat is profiled from that interpolated density and then "
+            "enters the variance and the IRLS weights, so the coefficients, "
+            "fitted means and deviance move as well."
+            if auto_theta
+            else " theta_hat and its profile interval are affected as well; "
+            "coefficients, fitted means and deviance are not, because at "
+            "fixed theta the two contracts share a score equation."
+        )
+    else:
+        reach = (
+            " Coefficients, fitted means and deviance are unaffected -- the "
+            "two weight contracts share a score equation."
+        )
     warnings.warn(
         f"{count} of {len(scaled)} rows have a non-integral sample_weight * y "
         f'under weight_semantics="prior", which puts them off the {name} '
-        "lattice. Coefficients, fitted means and deviance are unaffected -- "
-        "the two weight contracts share a score equation -- but the reported "
-        "log-likelihood, AIC and BIC are a quasi-likelihood rather than an "
-        "exact density"
-        + (
-            ", and theta_hat and its profile interval are affected as well"
-            if isinstance(family, NegativeBinomial)
-            else ""
-        )
-        + ". The canonical weighting (y = count / exposure with "
+        "lattice, so the reported log-likelihood, AIC and BIC are a "
+        "quasi-likelihood rather than an exact density, and randomized "
+        "quantile residuals round those rows onto a neighbouring count."
+        + reach
+        + " The canonical weighting (y = count / exposure with "
         "sample_weight = exposure) is on-lattice; pass "
         'weight_semantics="frequency" if the weights are replication counts.',
         PriorWeightLatticeWarning,

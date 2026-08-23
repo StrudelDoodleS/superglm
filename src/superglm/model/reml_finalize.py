@@ -286,7 +286,20 @@ def compute_profiled_phi(
         lambdas=lambdas,
         coefficient_width=p_dim,
     )
-    return float(max(penalized_deviance / max(len(y) - M_p, 1.0), 1e-10))
+    # The declared contract's likelihood size, not the row count. This
+    # fallback is reached by `apply_shape_postfit`'s repair as well as the
+    # terminal publication, so a row-count denominator here republishes the
+    # wrong dispersion -- and every Wald interval drawn from it -- after an
+    # otherwise contract-correct fit.
+    size = (
+        float(likelihood_size)
+        if likelihood_size is not None
+        else dispersion_likelihood_size(
+            sample_weight,
+            weight_semantics=model_weight_semantics(model),
+        )
+    )
+    return float(max(penalized_deviance / max(size - M_p, 1.0), 1e-10))
 
 
 def maybe_qp_passthrough_refit(

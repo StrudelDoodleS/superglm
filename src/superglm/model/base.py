@@ -905,6 +905,12 @@ def clone_without_features(
         max_iter=model._max_iter,
         convergence=model._convergence,
         retain_fit_state=model._retain_fit_state,
+        # A clone is the SAME model with fewer terms, so it must be fitted
+        # under the same likelihood. Falling through to the constructor
+        # default silently turned every frequency-contract model into a prior
+        # one the moment a term was dropped -- which is the path `drop1`,
+        # term importance and `refit_unpenalised` all take.
+        weight_semantics=model_weight_semantics(model),
     )
 
     # Resolve lambda2

@@ -330,6 +330,21 @@ class ModelMetrics:
                     raise ValueError("sample_weight must be nonnegative")
                 if not np.any(self._weights > 0.0):
                     raise ValueError("sample_weight must not be all zero")
+            # Evaluation takes its OWN rows and weights, so the fit-time
+            # lattice check does not cover it: a clean fitted model can be
+            # scored on holdout rows whose `w * y` is not integral, and both
+            # the reported log-likelihood and the randomized quantile
+            # residuals would then be silently fabricated -- the residual
+            # rounds the impossible count onto a neighbouring lattice point
+            # and inverts the CDF there. Re-check at this boundary.
+            from superglm.model.input_validation import _check_counting_lattice
+
+            _check_counting_lattice(
+                self._y,
+                self._weights,
+                self._family,
+                self._weight_semantics,
+            )
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
         fit_offset = getattr(model, "_fit_offset", None)
         fit_offset_array = np.zeros(n) if fit_offset is None else np.asarray(fit_offset)
