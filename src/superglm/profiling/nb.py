@@ -423,7 +423,7 @@ def _theta_profile_score(
     weights: NDArray,
     theta: float,
     *,
-    weight_semantics: str = FREQUENCY_WEIGHTS,
+    weight_semantics: str,
 ) -> float:
     """Closed-form NB2 profile score dl/dtheta at fixed mu (Lawless 1987).
 
@@ -550,7 +550,7 @@ def _theta_ml(
     weights: NDArray,
     theta: float,
     *,
-    weight_semantics: str = FREQUENCY_WEIGHTS,
+    weight_semantics: str,
     bounds: tuple[float, float] = _THETA_DEFAULT_BOUNDS,
     max_iter: int = 100,
     eps: float = 1e-8,
@@ -647,7 +647,7 @@ def _nb2_nll(
     weights: NDArray,
     theta: float,
     *,
-    weight_semantics: str = FREQUENCY_WEIGHTS,
+    weight_semantics: str,
 ) -> float:
     """Mean negative NB2 log-likelihood, per unit of the contract's size."""
     if weight_semantics == PRIOR_WEIGHTS:
@@ -938,7 +938,7 @@ def profile_ci_theta(
     weights: NDArray,
     theta_hat: float,
     *,
-    weight_semantics: str = FREQUENCY_WEIGHTS,
+    weight_semantics: str,
     alpha: float = 0.05,
     theta_range: tuple[float, float] = (0.01, 500.0),
 ) -> tuple[float, float]:
