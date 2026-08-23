@@ -833,7 +833,10 @@ class TestTheCountingLatticeIsDeclared:
         assert "quasi-likelihood" in message
         # The NB interpolated factor is theta-dependent, so it reaches the
         # estimate itself and not only the reported likelihood.
-        assert ("theta_hat" in message) is mentions_theta
+        # "theta" rather than "theta_hat": at a fixed theta this call estimates
+        # nothing, so naming an estimate would be false. The theta-DEPENDENCE
+        # of the interpolated factor is what this asserts, and it still holds.
+        assert ("theta" in message) is mentions_theta
 
     def test_a_released_fit_reports_exactly_what_a_retained_one_does(self):
         """Releasing the rows must not change a single published number.
@@ -2142,15 +2145,26 @@ class TestTheReplicatedResponseCheckObeysItsSiblings:
             model.fit(self._frame(n), y, sample_weight=np.full(n, 2.0))
         message = str(caught[0].message)
         assert ("move as well" in message) is estimates_move
-        assert "are unaffected" not in message
+        # At a fixed theta "unaffected" is the true claim about the estimates,
+        # so forbidding the phrase outright was over-broad. What must never
+        # appear is a theta_hat this call did not produce.
+        assert ("theta_hat" in message) is estimates_move
 
     def test_the_reach_sentence_is_derived_once(self):
         """Both arms answer the same question, so they answer it in one place."""
-        from superglm.model.input_validation import _interpolated_density_reach
+        from superglm.model.input_validation import (
+            THETA_ESTIMATED,
+            THETA_FIXED,
+            _interpolated_density_reach,
+        )
 
-        assert "move as well" in _interpolated_density_reach(NegativeBinomial(theta="auto"))
-        assert "move as well" not in _interpolated_density_reach(NegativeBinomial(theta=2.0))
-        assert "unaffected" in _interpolated_density_reach(Poisson())
+        assert "move as well" in _interpolated_density_reach(
+            NegativeBinomial(theta="auto"), theta_role=THETA_ESTIMATED
+        )
+        assert "move as well" not in _interpolated_density_reach(
+            NegativeBinomial(theta=2.0), theta_role=THETA_FIXED
+        )
+        assert "unaffected" in _interpolated_density_reach(Poisson(), theta_role=THETA_FIXED)
 
 
 class TestTheEvaluationResponseLengthIsCheckedFirst:
@@ -2182,3 +2196,131 @@ class TestTheEvaluationResponseLengthIsCheckedFirst:
         model.fit(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.0))
         with pytest.warns(FractionalFrequencyWeightWarning):
             model.metrics(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))
+
+
+class TestTheStandaloneThetaProfileChecksTheContract:
+    """``profile_ci_theta`` is a public likelihood boundary of its own.
+
+    It takes arrays directly, so no fit-time or evaluation-time check has seen
+    those rows, and every NLL it evaluates reads the same response and weights.
+    An off-contract input returned an apparently exact interval with nothing
+    marking it -- the sixth boundary, and the one this branch missed.
+    """
+
+    @staticmethod
+    def _arrays(n=200, seed=41):
+        rng = np.random.default_rng(seed)
+        y = rng.poisson(4.0, n).astype(float)
+        return y, np.full(n, 4.0), n
+
+    def test_fractional_replication_counts_warn(self):
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            profile_ci_theta(y, mu, np.full(n, 2.5), 3.0, weight_semantics="frequency")
+
+    def test_an_off_lattice_prior_response_warns(self):
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        y = y.copy()
+        y[:20] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            profile_ci_theta(y, mu, np.full(n, 1.5), 3.0, weight_semantics="prior")
+
+    def test_a_fractional_response_warns_under_frequency(self):
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        y = y.copy()
+        y[:20] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics="frequency")
+
+    @pytest.mark.parametrize("semantics", ["prior", "frequency"])
+    def test_an_honoured_contract_stays_silent(self, semantics):
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics=semantics)
+
+    def test_it_reports_the_interval_moving_not_the_coefficients(self):
+        """mu is held fixed here, so nothing can be refitted."""
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        y = y.copy()
+        y[:20] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            profile_ci_theta(y, mu, np.full(n, 1.5), 3.0, weight_semantics="prior")
+        message = str(caught[0].message)
+        assert "profiled theta and its interval" in message
+        assert "move as well" not in message  # the coefficients do not
+
+
+class TestTheImpactClaimMatchesWhatTheCallIsDoing:
+    """The reach depends on what the caller does with theta, not only on the family.
+
+    An auto-theta fit stamps a numeric theta into the family when it finishes,
+    so at evaluation the fitted model is indistinguishable from a fixed-theta
+    one -- and at evaluation nothing is refitted. Deriving the claim from the
+    family alone therefore asserted that ``theta_hat`` and its interval were
+    affected in two places where no theta is estimated at all.
+    """
+
+    @staticmethod
+    def _fractional_response(n=40):
+        y = np.arange(n, dtype=float) + 1.0
+        y[:6] += 0.5
+        return pd.DataFrame({"x": np.linspace(0.0, 1.0, n)}), y, n
+
+    def test_a_fixed_theta_fit_claims_nothing_about_theta_hat(self):
+        frame, y, n = self._fractional_response()
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.0),
+            features={"x": Numeric()},
+            weight_semantics="frequency",
+        )
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            model.fit(frame, y, sample_weight=np.full(n, 2.0))
+        message = str(caught[0].message)
+        assert "theta_hat" not in message
+        assert "unaffected" in message
+
+    def test_an_auto_theta_fit_still_says_the_estimates_move(self):
+        """The control: the fix must not have silenced the case that is real."""
+        frame, y, n = self._fractional_response()
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            features={"x": Numeric()},
+            weight_semantics="frequency",
+        )
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            model.fit(frame, y, sample_weight=np.full(n, 2.0))
+        assert "move as well" in str(caught[0].message)
+
+    @pytest.mark.parametrize(
+        ("role", "expected"),
+        [
+            ("fixed", "unaffected"),
+            ("profiled", "profiled theta and its interval"),
+            ("estimated", "move as well"),
+        ],
+    )
+    def test_each_role_states_only_what_that_call_can_move(self, role, expected):
+        from superglm.model.input_validation import _interpolated_density_reach
+
+        reach = _interpolated_density_reach(NegativeBinomial(theta=2.0), theta_role=role)
+        assert expected in reach
+
+    def test_a_finished_auto_fit_is_a_constant_from_then_on(self):
+        """Evaluation refits nothing, so the claim must not survive the fit."""
+        from superglm.model.input_validation import THETA_FIXED, _theta_role_for
+
+        assert _theta_role_for(NegativeBinomial(theta=2.0)) == THETA_FIXED
+        assert _theta_role_for(Poisson()) == THETA_FIXED
+        assert _theta_role_for(NegativeBinomial(theta="auto")) == "estimated"

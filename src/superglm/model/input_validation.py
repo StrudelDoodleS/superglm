@@ -118,37 +118,79 @@ def _not_a_whole_number(values: NDArray) -> NDArray:
     return values != np.rint(values)
 
 
-def _interpolated_density_reach(family) -> str:
+#: What the caller is doing with theta, which decides how far an interpolated
+#: density reaches.  Deriving this from the family alone is not enough: an
+#: auto-theta fit replaces ``theta`` with a number once it finishes, so the
+#: fitted family is indistinguishable from a fixed-theta one at evaluation --
+#: and at evaluation nothing is refitted, so nothing but the likelihood moves.
+THETA_FIXED = "fixed"  #: given constant, or an already-fitted model being scored
+THETA_PROFILED = "profiled"  #: profiled with mu held fixed (a standalone interval)
+THETA_ESTIMATED = "estimated"  #: profiled and fed back into IRLS (an auto fit)
+
+
+def _interpolated_density_reach(family, *, theta_role: str) -> str:
     """How far an interpolated counting density reaches into the results.
 
     The same question wherever a counting family evaluates ``gammaln`` at a
-    fractional argument, so it is answered in one place: the reach depends on
-    the family and on whether theta is being profiled, never on which contract
-    put the response off the lattice.
+    fractional argument, so it is answered in one place -- but the answer needs
+    to know what the caller is doing, not only which family it holds.
 
-    At FIXED theta only the reported likelihood moves -- the score equation is
-    unchanged, so ``beta``, the fitted means and the deviance are not affected.
-    With ``theta="auto"`` that promise fails: theta is profiled from the
-    interpolated density and then enters ``V(mu)``, the IRLS working weights
-    and the unit deviance, so the estimates move too.  Saying "unaffected" in
-    that case is simply false, which is what a copied message did.
+    ``THETA_FIXED``
+        theta is a given constant, or the model is already fitted and is only
+        being scored.  The score equation is unchanged and nothing is refitted,
+        so only the reported likelihood moves.  Claiming that ``theta_hat`` and
+        its interval are affected here is false twice over: a fixed-theta model
+        has no ``theta_hat``, and an evaluation does not produce one.
+    ``THETA_PROFILED``
+        theta is profiled against the interpolated density with ``mu`` held
+        fixed, as in a standalone confidence interval.  The interval moves; the
+        coefficients cannot, because nothing is refitted.
+    ``THETA_ESTIMATED``
+        theta is profiled and then re-enters ``V(mu)``, the IRLS working
+        weights and the unit deviance, as in an auto-theta fit.  The estimates
+        move as well.
     """
     if not isinstance(family, NegativeBinomial):
         return " Coefficients, fitted means and deviance are unaffected."
-    if getattr(family, "theta", None) in ("auto", None):
+    if theta_role == THETA_FIXED:
+        # Nothing is estimated here, so there is no theta_hat to be affected --
+        # but the interpolated NB factor Gamma(wy + w theta) / Gamma(w theta)
+        # is theta-dependent regardless, so any theta inference later drawn
+        # from this likelihood inherits the interpolation. Say that without
+        # asserting an estimate this call never produced.
+        return (
+            " Coefficients, fitted means and deviance are unaffected. The "
+            "interpolated factor is theta-dependent, so any profile of theta "
+            "taken from this likelihood moves with it."
+        )
+    if theta_role == THETA_ESTIMATED:
         return (
             " theta_hat is profiled from that interpolated density and then "
             "enters the variance and the IRLS weights, so the coefficients, "
             "fitted means and deviance move as well."
         )
     return (
-        " theta_hat and its profile interval are affected as well; "
-        "coefficients, fitted means and deviance are not, because at fixed "
-        "theta the reported likelihood is the only thing that moves."
+        " The profiled theta and its interval are taken from that interpolated "
+        "density and move with it; coefficients, fitted means and deviance are "
+        "not, because mu is held fixed and nothing is refitted."
     )
 
 
-def _warn_frequency_counting_response(y: NDArray, weights: NDArray, family) -> None:
+def _theta_role_for(family) -> str:
+    """Whether this family will have theta profiled back into the fit.
+
+    ``theta="auto"`` means the fitter will profile it and feed it back, so the
+    estimates move.  Any numeric theta -- given by the caller, or stamped in by
+    a finished auto fit -- is a constant from here on.
+    """
+    if isinstance(family, NegativeBinomial) and getattr(family, "theta", None) in ("auto", None):
+        return THETA_ESTIMATED
+    return THETA_FIXED
+
+
+def _warn_frequency_counting_response(
+    y: NDArray, weights: NDArray, family, theta_role: str | None = None
+) -> None:
     """Warn when a replicated counting response is not a whole count.
 
     Under ``"frequency"`` the likelihood is ``w log f(y; mu)``: the weight
@@ -180,7 +222,7 @@ def _warn_frequency_counting_response(y: NDArray, weights: NDArray, family) -> N
         "put a fractional response back on the lattice: the density evaluates "
         "gammaln at a fractional argument, and the reported log-likelihood, "
         "AIC and BIC are a quasi-likelihood rather than an exact density."
-        + _interpolated_density_reach(family)
+        + _interpolated_density_reach(family, theta_role=theta_role or _theta_role_for(family))
         + ' Pass weight_semantics="prior" with y = count / exposure and '
         "sample_weight = exposure if the response is a rate.",
         PriorWeightLatticeWarning,
@@ -270,7 +312,14 @@ def _check_frequency_counts(weights: NDArray, weight_semantics: str) -> None:
     )
 
 
-def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semantics: str) -> None:
+def _check_counting_lattice(
+    y: NDArray,
+    weights: NDArray,
+    family,
+    weight_semantics: str,
+    *,
+    theta_role: str | None = None,
+) -> None:
     """Warn when a prior-weighted counting response is off its own lattice.
 
     The prior construction for Poisson and the negative binomial is
@@ -301,7 +350,7 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
         # every frequency model.
         if not isinstance(family, Poisson | NegativeBinomial):
             return
-        _warn_frequency_counting_response(y, weights, family)
+        _warn_frequency_counting_response(y, weights, family, theta_role)
         return
     if weight_semantics != PRIOR_WEIGHTS:
         return
@@ -317,7 +366,7 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
     import warnings
 
     name = type(family).__name__
-    reach = _interpolated_density_reach(family)
+    reach = _interpolated_density_reach(family, theta_role=theta_role or _theta_role_for(family))
     warnings.warn(
         f"{count} of {len(scaled)} rows have a non-integral sample_weight * y "
         f'under weight_semantics="prior", which puts them off the {name} '
@@ -333,7 +382,14 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
     )
 
 
-def check_weight_contract(y: NDArray, weights: NDArray, family, weight_semantics: str) -> None:
+def check_weight_contract(
+    y: NDArray,
+    weights: NDArray,
+    family,
+    weight_semantics: str,
+    *,
+    theta_role: str | None = None,
+) -> None:
     """Both halves of the declared-contract check, behind one call.
 
     Each contract has its own way of being unhonourable, and each is silent
@@ -349,7 +405,7 @@ def check_weight_contract(y: NDArray, weights: NDArray, family, weight_semantics
     weights. It is the single seam; do not call the halves directly.
     """
     _check_frequency_counts(weights, weight_semantics)
-    _check_counting_lattice(y, weights, family, weight_semantics)
+    _check_counting_lattice(y, weights, family, weight_semantics, theta_role=theta_role)
 
 
 @dataclass(frozen=True)

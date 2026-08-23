@@ -969,6 +969,26 @@ def profile_ci_theta(
     """
     from scipy.stats import chi2
 
+    from superglm.distributions import NegativeBinomial
+    from superglm.model.input_validation import THETA_PROFILED, check_weight_contract
+
+    # A public likelihood boundary of its own: it takes arrays directly, so no
+    # fit-time or evaluation-time check has seen these rows. Every NLL below
+    # reads the same response and weights, and an off-contract input returns an
+    # apparently exact interval with nothing marking it.
+    #
+    # THETA_PROFILED rather than the family-derived role: theta is genuinely
+    # being profiled here, but against a FIXED mu, so the interval moves and
+    # the coefficients cannot. This is the one boundary where saying the
+    # interval is affected is the accurate claim.
+    check_weight_contract(
+        np.asarray(y, dtype=np.float64),
+        np.asarray(weights, dtype=np.float64),
+        NegativeBinomial(theta=theta_hat),
+        weight_semantics,
+        theta_role=THETA_PROFILED,
+    )
+
     w_sum = dispersion_likelihood_size(weights, weight_semantics=weight_semantics)
     nll_hat = _nb2_nll(y, mu, weights, theta_hat, weight_semantics=weight_semantics)
     cutoff = chi2.ppf(1.0 - alpha, 1)
