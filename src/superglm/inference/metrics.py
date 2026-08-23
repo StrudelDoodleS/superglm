@@ -393,6 +393,16 @@ class ModelMetrics:
         # be computed. Ahead of that validation it fires on input that will never
         # reach one, and under `-W error` it surfaces instead of the frame or
         # offset error the caller needs to see.
+        # `predict` validates the frame and the offset but never looks at `y`,
+        # so a length mismatch is still outstanding at this point and would
+        # otherwise be pre-empted by the contract warning under `-W error` --
+        # the same ordering defect as the offset, one argument over.
+        if len(self._y) != len(self._mu):
+            raise ValueError(
+                f"y has {len(self._y)} rows but X predicts {len(self._mu)}; "
+                "they must describe the same observations"
+            )
+
         from superglm.model.input_validation import check_weight_contract
 
         check_weight_contract(

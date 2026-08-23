@@ -2072,3 +2072,113 @@ class TestAReplicatedCountingResponseStaysOnItsLattice:
         y_eval[:6] += 0.5
         with pytest.warns(PriorWeightLatticeWarning):
             model.metrics(frame, y_eval, sample_weight=np.full(n, 2.0))
+
+
+class TestTheReplicatedResponseCheckObeysItsSiblings:
+    """The invariants three sibling checks in the module already held.
+
+    A fourth warning was added in the previous round without adopting them:
+    it did not restrict to carried rows, and it copied an "unaffected" claim
+    that is false when theta is being profiled. Both are now structural --
+    carried-row filtering at the check, and the reach sentence derived once
+    from the family by ``_interpolated_density_reach``.
+    """
+
+    @staticmethod
+    def _frame(n=40):
+        return pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+
+    def test_a_zero_replication_row_is_ignored(self):
+        """A row that appears no times contributes exactly zero."""
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[3] += 0.5
+        weights = np.full(n, 2.0)
+        weights[3] = 0.0
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.fit(self._frame(n), y, sample_weight=weights)
+
+    def test_the_same_row_warns_once_it_is_carried(self):
+        """The control: it is the zero weight that silences it, not the value."""
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[3] += 0.5
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(self._frame(n), y, sample_weight=np.full(n, 2.0))
+
+    def test_the_count_reported_is_of_carried_rows(self):
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[:5] += 0.5  # five fractional rows ...
+        weights = np.full(n, 2.0)
+        weights[:2] = 0.0  # ... two of which are not carried
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(PriorWeightLatticeWarning, match=r"3 of 38 carried rows"):
+            model.fit(self._frame(n), y, sample_weight=weights)
+
+    @pytest.mark.parametrize(
+        ("theta", "estimates_move"),
+        [("auto", True), (2.0, False)],
+    )
+    def test_auto_theta_is_described_as_estimate_affecting(self, theta, estimates_move):
+        """theta profiled from an interpolated density reaches the estimates.
+
+        It enters V(mu) and the IRLS working weights, so saying "coefficients
+        are unaffected" is false there -- and that claim was copied into the
+        frequency warning from a context where it held.
+        """
+        n = 40
+        y = np.arange(n, dtype=float) + 1.0
+        y[:6] += 0.5
+        model = SuperGLM(
+            family=NegativeBinomial(theta=theta),
+            features={"x": Numeric()},
+            weight_semantics="frequency",
+        )
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            model.fit(self._frame(n), y, sample_weight=np.full(n, 2.0))
+        message = str(caught[0].message)
+        assert ("move as well" in message) is estimates_move
+        assert "are unaffected" not in message
+
+    def test_the_reach_sentence_is_derived_once(self):
+        """Both arms answer the same question, so they answer it in one place."""
+        from superglm.model.input_validation import _interpolated_density_reach
+
+        assert "move as well" in _interpolated_density_reach(NegativeBinomial(theta="auto"))
+        assert "move as well" not in _interpolated_density_reach(NegativeBinomial(theta=2.0))
+        assert "unaffected" in _interpolated_density_reach(Poisson())
+
+
+class TestTheEvaluationResponseLengthIsCheckedFirst:
+    """``predict`` validates the frame and the offset, but never ``y``.
+
+    So a length mismatch was still outstanding when the contract warning ran,
+    and under ``-W error`` pre-empted it -- the same ordering defect as the
+    offset, one argument over.
+    """
+
+    def test_a_mismatched_response_length_raises_rather_than_warning(self):
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        model.fit(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.0))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match="same observations"):
+                model.metrics(
+                    frame,
+                    np.arange(n - 3, dtype=float) + 0.5,
+                    sample_weight=np.full(n - 3, 2.5),
+                )
+
+    def test_a_matched_length_still_warns(self):
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        model.fit(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.0))
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            model.metrics(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))

@@ -118,7 +118,37 @@ def _not_a_whole_number(values: NDArray) -> NDArray:
     return values != np.rint(values)
 
 
-def _warn_frequency_counting_response(y: NDArray, family) -> None:
+def _interpolated_density_reach(family) -> str:
+    """How far an interpolated counting density reaches into the results.
+
+    The same question wherever a counting family evaluates ``gammaln`` at a
+    fractional argument, so it is answered in one place: the reach depends on
+    the family and on whether theta is being profiled, never on which contract
+    put the response off the lattice.
+
+    At FIXED theta only the reported likelihood moves -- the score equation is
+    unchanged, so ``beta``, the fitted means and the deviance are not affected.
+    With ``theta="auto"`` that promise fails: theta is profiled from the
+    interpolated density and then enters ``V(mu)``, the IRLS working weights
+    and the unit deviance, so the estimates move too.  Saying "unaffected" in
+    that case is simply false, which is what a copied message did.
+    """
+    if not isinstance(family, NegativeBinomial):
+        return " Coefficients, fitted means and deviance are unaffected."
+    if getattr(family, "theta", None) in ("auto", None):
+        return (
+            " theta_hat is profiled from that interpolated density and then "
+            "enters the variance and the IRLS weights, so the coefficients, "
+            "fitted means and deviance move as well."
+        )
+    return (
+        " theta_hat and its profile interval are affected as well; "
+        "coefficients, fitted means and deviance are not, because at fixed "
+        "theta the reported likelihood is the only thing that moves."
+    )
+
+
+def _warn_frequency_counting_response(y: NDArray, weights: NDArray, family) -> None:
     """Warn when a replicated counting response is not a whole count.
 
     Under ``"frequency"`` the likelihood is ``w log f(y; mu)``: the weight
@@ -130,22 +160,28 @@ def _warn_frequency_counting_response(y: NDArray, family) -> None:
     quasi-likelihood, and randomized quantile residuals invert the CDF at a
     count that cannot occur.
     """
-    off = _not_a_whole_number(y)
-    count = int(np.count_nonzero(off))
+    # Carried rows only, as every sibling check in this module already does.
+    # A zero replication count is a row that appears no times and contributes
+    # exactly zero to the likelihood, so its response cannot put anything off
+    # the lattice -- warning about it would reject an otherwise valid fit
+    # under -W error over a row the fit ignores.
+    carried = weights > 0.0
+    values = y[carried]
+    count = int(np.count_nonzero(_not_a_whole_number(values)))
     if count == 0:
         return
     import warnings
 
     warnings.warn(
-        f"{count} of {len(y)} rows have a non-integral response under "
+        f"{count} of {int(carried.sum())} carried rows have a non-integral response under "
         f'weight_semantics="frequency" with a {type(family).__name__} family, '
         "whose support is the non-negative integers. A replication count "
         "multiplies the per-row density rather than entering it, so it cannot "
         "put a fractional response back on the lattice: the density evaluates "
         "gammaln at a fractional argument, and the reported log-likelihood, "
-        "AIC and BIC are a quasi-likelihood rather than an exact density. "
-        "Coefficients, fitted means and deviance are unaffected. Pass "
-        'weight_semantics="prior" with y = count / exposure and '
+        "AIC and BIC are a quasi-likelihood rather than an exact density."
+        + _interpolated_density_reach(family)
+        + ' Pass weight_semantics="prior" with y = count / exposure and '
         "sample_weight = exposure if the response is a rate.",
         PriorWeightLatticeWarning,
         stacklevel=5,
@@ -265,7 +301,7 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
         # every frequency model.
         if not isinstance(family, Poisson | NegativeBinomial):
             return
-        _warn_frequency_counting_response(y, family)
+        _warn_frequency_counting_response(y, weights, family)
         return
     if weight_semantics != PRIOR_WEIGHTS:
         return
@@ -281,30 +317,7 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
     import warnings
 
     name = type(family).__name__
-    # At FIXED theta the two contracts share a score equation, so only the
-    # reported likelihood moves. With ``theta="auto"`` that promise fails:
-    # theta is profiled from the interpolated density and then enters V(mu),
-    # the IRLS working weights and the unit deviance, so the coefficients
-    # themselves move too. Say which case the reader is in.
-    auto_theta = isinstance(family, NegativeBinomial) and getattr(family, "theta", None) in (
-        "auto",
-        None,
-    )
-    if isinstance(family, NegativeBinomial):
-        reach = (
-            " theta_hat is profiled from that interpolated density and then "
-            "enters the variance and the IRLS weights, so the coefficients, "
-            "fitted means and deviance move as well."
-            if auto_theta
-            else " theta_hat and its profile interval are affected as well; "
-            "coefficients, fitted means and deviance are not, because at "
-            "fixed theta the two contracts share a score equation."
-        )
-    else:
-        reach = (
-            " Coefficients, fitted means and deviance are unaffected -- the "
-            "two weight contracts share a score equation."
-        )
+    reach = _interpolated_density_reach(family)
     warnings.warn(
         f"{count} of {len(scaled)} rows have a non-integral sample_weight * y "
         f'under weight_semantics="prior", which puts them off the {name} '
