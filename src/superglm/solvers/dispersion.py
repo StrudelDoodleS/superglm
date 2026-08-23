@@ -17,11 +17,17 @@ model:
     contribution is ``w_i log f(y_i; mu_i, phi)``.  The data are a compression
     of a longer table.
 
-The two coincide only at integer ``w``, where "measured ``w`` times as
-precisely" and "appears ``w`` times" happen to agree.  At fractional ``w`` only
-the prior reading is a likelihood at all: a row cannot be replicated 0.4 times,
-and the frequency reading's ``sum(w) - edf`` residual d.f. stops counting
-anything.
+The two coincide only at ``w == 1``.  Integer weights do NOT make them agree:
+at ``w == 2`` over ``n`` rows the likelihood size is ``n`` under the prior
+reading and ``2n`` under the frequency one, so the residual d.f., ``phi``,
+every Wald standard error and BIC's penalty all differ -- and the Poisson
+normalizer at ``y = 1, mu = 1, w = 2`` is ``-1.30685`` against ``-2.0``.
+"Measured twice as precisely" and "seen twice" are different statements about
+the world, and the arithmetic keeps them apart.
+
+What IS true of fractional ``w`` is stronger: only the prior reading is a
+likelihood at all there, because a row cannot be replicated 0.4 times and the
+frequency reading's ``sum(w) - edf`` residual d.f. stops counting anything.
 
 Both contracts give the *same* score equations and therefore the same
 ``beta_hat``; they part company over the likelihood's size, which is what this

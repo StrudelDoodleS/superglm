@@ -1280,3 +1280,124 @@ class TestTheContractSurvivesCloningAndRestoring:
 
         assert superglm.PriorWeightLatticeWarning is input_validation.PriorWeightLatticeWarning
         assert "PriorWeightLatticeWarning" in superglm.__all__
+
+
+class TestTheContractsAgreeAtUnitWeightNotAtIntegerWeight:
+    """The rule the docstrings state, checked against the arithmetic.
+
+    Four places -- including the module that defines the contract and the
+    public ``SuperGLM.__init__`` docstring -- said the two readings "agree only
+    at integer weights". They do not. This pins the true rule so the wording
+    cannot drift back.
+    """
+
+    def test_integer_weights_do_not_make_the_contracts_agree(self):
+        weights = np.full(100, 2.0)
+        prior = dispersion_likelihood_size(weights, weight_semantics="prior")
+        frequency = dispersion_likelihood_size(weights, weight_semantics="frequency")
+        assert prior == 100.0
+        assert frequency == 200.0
+
+        assert pearson_residual_degrees_of_freedom(
+            weights, 5.0, weight_semantics="prior"
+        ) == pytest.approx(95.0)
+        assert pearson_residual_degrees_of_freedom(
+            weights, 5.0, weight_semantics="frequency"
+        ) == pytest.approx(195.0)
+
+        # And the reported normalizer differs at integer w too.
+        y, mu, w = np.array([1.0]), np.array([1.0]), np.array([2.0])
+        assert weighted_log_likelihood(
+            Poisson(), y, mu, w, 1.0, weight_semantics="prior"
+        ) == pytest.approx(-1.30685, abs=1e-5)
+        assert weighted_log_likelihood(
+            Poisson(), y, mu, w, 1.0, weight_semantics="frequency"
+        ) == pytest.approx(-2.0, abs=1e-12)
+
+    def test_the_stated_rule_is_unit_weight(self):
+        """Guard on the prose: the old wording must not come back."""
+        from pathlib import Path
+
+        import superglm.solvers.dispersion as dispersion_module
+        from superglm import SuperGLM as _SuperGLM
+
+        sources = [
+            dispersion_module.__doc__ or "",
+            _SuperGLM.__init__.__doc__ or "",
+        ]
+        root = Path(dispersion_module.__file__).resolve().parents[3]
+        for relative in (
+            "docs/guide/families.md",
+            "docs/development/migrations/weight-semantics-prior.md",
+        ):
+            path = root / relative
+            if path.exists():
+                sources.append(path.read_text())
+
+        for text in sources:
+            lowered = text.lower()
+            assert "only at integer" not in lowered
+            assert "coincide only at integer" not in lowered
+
+    def test_a_zero_weight_alone_does_not_trigger_the_binomial_warning(self):
+        """A binomial fit whose every CARRIED row is w == 1 is exact.
+
+        `prior_weight_log_density` returns exactly 0.0 for a zero-weight
+        binomial row, so the reported likelihood is an ordinary Bernoulli one
+        and the warning's "not an exact density" would be false about it.
+        """
+        import warnings as warnings_module
+
+        from superglm import PriorWeightLatticeWarning
+
+        rng = np.random.default_rng(80)
+        n = 200
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        linear = 0.5 + 0.8 * frame["x"].to_numpy()
+        y = rng.binomial(1, 1.0 / (1.0 + np.exp(-linear))).astype(float)
+        weights = np.ones(n)
+        weights[:5] = 0.0
+        carried = weights > 0.0
+
+        def fitted(frame_in, y_in, w_in):
+            model = SuperGLM(
+                family=Binomial(),
+                features={"x": Spline(n_knots=4)},
+                weight_semantics="prior",
+            )
+            model.fit(frame_in, y_in, sample_weight=w_in)
+            return model.metrics(frame_in, y_in, sample_weight=w_in).log_likelihood
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            with_zeros = fitted(frame, y, weights)
+        assert [c for c in caught if issubclass(c.category, PriorWeightLatticeWarning)] == []
+
+        deleted = fitted(frame.loc[carried].reset_index(drop=True), y[carried], weights[carried])
+        assert with_zeros == pytest.approx(deleted, rel=1e-12)
+
+    def test_the_warning_counts_only_the_carried_rows(self):
+        """When it does fire, zero rows must not inflate the figure."""
+        import warnings as warnings_module
+
+        from superglm import PriorWeightLatticeWarning
+
+        rng = np.random.default_rng(81)
+        n = 200
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        linear = 0.5 + 0.8 * frame["x"].to_numpy()
+        y = rng.binomial(1, 1.0 / (1.0 + np.exp(-linear))).astype(float)
+        weights = np.full(n, 3.0)
+        weights[:5] = 0.0
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            SuperGLM(
+                family=Binomial(),
+                features={"x": Spline(n_knots=4)},
+                weight_semantics="prior",
+            ).fit(frame, y, sample_weight=weights)
+        message = next(
+            str(c.message) for c in caught if issubclass(c.category, PriorWeightLatticeWarning)
+        )
+        assert message.startswith(f"{n - 5} of {n} rows")

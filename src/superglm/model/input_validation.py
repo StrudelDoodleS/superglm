@@ -50,7 +50,13 @@ def _warn_prior_weighted_binomial(weights: NDArray) -> None:
     ``w * y`` leaves the lattice, EVERY non-unit prior weight on a binomial
     response reports a sub- or super-probability.
     """
-    off = np.abs(weights - 1.0) > _LATTICE_RELATIVE_TOLERANCE
+    # Carried rows only. A zero weight is admitted for every non-Tweedie
+    # family, and the binomial branch of `prior_weight_log_density` returns
+    # exactly 0.0 there -- so a fit whose every carried row is w == 1 has an
+    # ordinary Bernoulli likelihood, and warning that it is "not an exact
+    # density" would be false about that fit. Counting the zero rows would also
+    # inflate the figure when the warning does fire legitimately.
+    off = (weights > 0.0) & (np.abs(weights - 1.0) > _LATTICE_RELATIVE_TOLERANCE)
     count = int(np.count_nonzero(off))
     if count == 0:
         return

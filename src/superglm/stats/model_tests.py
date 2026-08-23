@@ -557,13 +557,18 @@ def vuong_test(
         d = ll_a - ll_b
         if prior_weights is not None:
             d = d[prior_weights > 0.0]
-        mean_m = float(np.mean(d))
-        omega = float(np.std(d, ddof=1))
         likelihood_size = (
             float(n)
             if prior_weights is None
             else dispersion_likelihood_size(prior_weights, weight_semantics=PRIOR_WEIGHTS)
         )
+        # Sized before the moments are formed: with a single carried row
+        # ``np.std(..., ddof=1)`` divides by zero and emits a numpy
+        # RuntimeWarning ahead of the ValueError this is meant to raise.
+        if likelihood_size <= 1.0:
+            raise ValueError("Vuong test requires an effective likelihood size greater than one")
+        mean_m = float(np.mean(d))
+        omega = float(np.std(d, ddof=1))
     elif mixed_weight_contracts:
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
         ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)

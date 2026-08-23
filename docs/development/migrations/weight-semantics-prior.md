@@ -59,8 +59,10 @@ The two readings are different likelihoods, not different scalings of one:
   `var_weights` / `freq_weights`; Stata `aweight` / `fweight`), and where only
   one exists it is the prior reading (R, glum).
 
-The two coincide only at integer `w`. At fractional `w` only the prior reading
-is a likelihood: a row cannot be replicated 0.4 times, and `sum(w) - edf` stops
+The two coincide only at `w == 1` — integer weights do **not** make them
+agree, and at `w == 2` the residual degrees of freedom, `phi`, every Wald
+standard error and BIC already differ. At fractional `w` only the prior reading
+is a likelihood at all: a row cannot be replicated 0.4 times, and `sum(w) - edf` stops
 counting anything. Exposure is continuous, and in the setting this library
 targets the aggregated `y = incurred / exposure` with `sample_weight = exposure`
 is the ordinary case — so the previous default was wrong for the primary use

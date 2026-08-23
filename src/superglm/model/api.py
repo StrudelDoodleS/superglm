@@ -218,8 +218,9 @@ class SuperGLM:
             weight is exactly equivalent to repeating the row; that is
             statsmodels' ``freq_weights`` and Stata's ``fweight``.
 
-            The two agree only at integer weights, and only the prior reading
-            is a likelihood at fractional ones.  They share a score equation,
+            The two agree only at ``w == 1`` -- integer weights do not make
+            them coincide -- and only the prior reading is a likelihood at
+            fractional ones.  They share a score equation,
             so ``beta`` is unchanged; what moves is ``phi``, every Wald
             standard error and interval, residual degrees of freedom, the
             effective ``n`` in AIC/BIC, and -- through the REML criterion --

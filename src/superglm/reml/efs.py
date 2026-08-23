@@ -12,8 +12,7 @@ Used when lambda1 > 0 (group lasso + REML smoothing).
    module's own phi estimate (here and in the iteration body) deviates from
    the criterion the rest of the codebase optimizes in three ways measured
    by the 2026-08-20 distribution-estimation audit (finding C1): it uses
-   the total penalty **rank** where Wood's M_p is the **nullity**,
-   ``len(y)`` where the frequency-weight contract is ``sum(w)``, and a
+   the total penalty **rank** where Wood's M_p is the **nullity**, and a
    deviance-form estimate where Gamma's Eq.-(4) profile is a digamma root
    (and Tweedie's is the exact saturated-likelihood profile in
    ``reml.scale``). Measured on a frequency-weighted Gamma: phi off 3.2x,

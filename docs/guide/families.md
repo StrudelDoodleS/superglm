@@ -90,9 +90,11 @@ model = SuperGLM(family="gamma", features=features, weight_semantics="frequency"
   an integer weight is exactly equivalent to repeating it. This is
   statsmodels' `freq_weights`, Stata's `fweight`, and SAS `GENMOD`'s `FREQ`.
 
-The two agree only at integer weights, where "measured `w` times as precisely"
-and "appears `w` times" happen to coincide. At fractional weights only the prior
-reading is a likelihood at all: a row cannot be replicated 0.4 times, and the
+The two agree only at `w == 1`. Integer weights do **not** make them coincide:
+at `w == 2` the likelihood size is `n` under `"prior"` and `2n` under
+`"frequency"`, so the residual degrees of freedom, `phi`, every Wald standard
+error and BIC all differ. At fractional weights only the prior reading is a
+likelihood at all: a row cannot be replicated 0.4 times, and the
 frequency reading's `sum(w) - edf` residual degrees of freedom stop counting
 anything. Exposure is continuous, which is why `"prior"` is the default.
 
