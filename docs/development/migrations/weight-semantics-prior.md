@@ -143,32 +143,66 @@ removes it entirely.
 The prior contract is slower to fit for Gamma, and only for Gamma. Its
 saturated log-likelihood is `sum_i G(w_i k)` — one special-function evaluation
 per *distinct* weight, re-evaluated at each step of the dispersion root-find —
-where the frequency arm's is `sum(w) G(k)`, a single scalar. That is a
-difference in the likelihood, not in the implementation: there is no way to
-learn `sum_i G(w_i k)` without touching every distinct weight.
+where the frequency arm's is `sum(w) G(k)`, a single scalar. Some of that is a
+difference in the likelihood rather than in the implementation: there is no way
+to learn `sum_i G(w_i k)` without touching every distinct weight, and no
+sufficient statistic stands in for it under continuous weights.
 
-Measured on a quiet machine with all thread pools pinned, interleaved
-`A/B/B/A`, six runs per arm:
+Measured on a quiet machine with all thread pools pinned, interleaved,
+six runs per arm, after the accelerations described below:
 
 | fixture | `"frequency"` | `"prior"` | ratio |
 |---|---|---|---|
-| Gamma, 50k rows, every weight distinct | 0.278 s | 0.463 s | **1.67x** |
-| Gamma, 50k rows, 12 distinct weights | 0.264 s | 0.295 s | 1.12x |
+| Gamma, 50k rows, every weight distinct | 0.221 s | 0.283 s | **1.28x** |
+| Gamma, 50k rows, 12 distinct weights | 0.236 s | 0.261 s | 1.11x |
 | Gaussian, 50k rows, every weight distinct | 0.112 s | 0.118 s | — |
 
 The Gaussian arms overlap, so that row is noise rather than an effect; its
 prior term is a single `0.5 sum(log w)` constant.
 
-Two things follow. **Repeated weights are nearly free**: the profiler reduces
-over distinct weights with multiplicities, so rounding exposure to a few dozen
-bands recovers almost all of the difference. And **the cost is per distinct
-weight, not per row** — it does not grow when rows share weights.
+**Repeated weights are nearly free**: the profiler reduces over distinct
+weights with multiplicities, so rounding exposure to a few dozen bands recovers
+most of the difference. The cost is per *distinct* weight, not per row.
 
-The breakdown, for anyone tempted to optimise it: at 50k distinct weights a
-single `digamma` call is 917 us of the 1004 us the whole score expression
-takes, so hoisting the surrounding logarithms and products saves about 4%. The
-root-find spends 13 evaluations under `"prior"` against 17 under `"frequency"`,
-so the iteration count is not the lever either.
+#### What the accelerations were, and what the first analysis got wrong
+
+The prior arm was first measured at 1.67x, and that was read as irreducible on
+the strength of a micro-benchmark of the score expression in isolation, where
+`digamma` is 917 us of 1004 us. Profiling the real fit contradicted that on
+three counts, none of which the isolated benchmark could show:
+
+- **A third of the profile calls are exact repeats.** An accepted line-search
+  trial's lambdas are re-evaluated identically at the top of the next outer
+  iteration — 21 calls carrying 14 distinct `(D_p, M_p)` pairs. Whole terms are
+  now memoized on that key.
+- **`polygamma(1, x)` discards a full digamma pass.** SciPy forms
+  `(-1)^(n+1) * gamma(n+1) * zeta(n+1, x)` and then `where`-selects it against
+  `psi(x)`, so requesting the trigamma computes a digamma and a `where` that
+  are thrown away. `zeta(2.0, x)` is the same value by construction, and is
+  verified bitwise identical over 1.2M points spanning the branch's range.
+- **About a quarter of the subsystem was numpy bookkeeping** — boolean masks,
+  fancy-index gather/scatter copies, and a multiplicity multiply that is a
+  no-op when every weight is distinct. Branch dispatch is now by slice, which
+  `np.unique`'s ascending output makes valid.
+
+Two further levers: the root-find is warm-started from a secant predictor over
+the last two roots (falling back to the shipped ±30 window), and the profile
+curvature is deferred until the derivative is read — which rejected trials, the
+boot evaluation and the post-fit `phi` recompute never do.
+
+A safeguarded Newton solve was **refuted analytically** rather than tried:
+`S'(u) = S(u) + C(u)`, so each derivative costs a trigamma pass at 11.6x a
+digamma pass. Newton breaks even only at two iterations or fewer, and
+evaluating the curvature exactly at the final root erases even that.
+Derivative-free is correct at this cost ratio.
+
+None of this touches the answer. The `"frequency"` arm is bitwise identical and
+runs the shipped solver body unchanged, which a test enforces by forbidding it
+from reaching the warm solver or the caches. The prior arm is bitwise identical
+on the all-distinct fixture; the twelve-distinct one moves 3.3e-13 in `edf` and
+8.2e-12 in a `lambda` of 5.1e5 — a flat near-boundary optimum, and inside the
+root-finder's own `xtol=1e-12`. Warm and cold solves answer the same equation
+to the same tolerance and differ within it.
 
 ### Zero weights
 
