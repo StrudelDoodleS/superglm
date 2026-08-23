@@ -1,4 +1,4 @@
-"""Family-aware sample-weight contracts for learned spline geometry."""
+"""Declared sample-weight contracts for learned spline geometry."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def test_zero_frequency_row_is_absent_from_all_main_spline_geometry(strategy):
     np.testing.assert_allclose(weighted.fitted_knots, omitted.fitted_knots, rtol=0.0)
 
 
-def _gaussian_model(strategy: str, *, discrete: bool) -> SuperGLM:
+def _gaussian_model(strategy: str, *, discrete: bool, semantics: str = "frequency") -> SuperGLM:
     return SuperGLM(
         family="gaussian",
         selection_penalty=0.0,
@@ -68,6 +68,7 @@ def _gaussian_model(strategy: str, *, discrete: bool) -> SuperGLM:
         discrete=discrete,
         n_bins=5,
         features={"x": PSpline(n_knots=4, knot_strategy=strategy)},
+        weight_semantics=semantics,
     )
 
 
@@ -124,6 +125,7 @@ def test_zero_frequency_uniform_outlier_matches_literal_omission(discrete):
             discrete=discrete,
             n_bins=2,
             features={"x": PSpline(n_knots=2, knot_strategy="uniform")},
+            weight_semantics="frequency",
         )
 
     weighted = model().fit(frame, y, sample_weight=weight)
@@ -165,14 +167,16 @@ def test_tweedie_prior_weights_keep_physical_row_knot_geometry(strategy):
     )
 
 
-def test_tweedie_prior_weights_do_not_move_piecewise_placement_or_base():
+def test_prior_weights_do_not_move_piecewise_placement_or_base():
     """Piecewise int-mode placement and base selection are model geometry.
 
-    Under Tweedie the weights are EDM prior weights, not frequency mass, so
-    knot placement and ``base='most_exposed'`` follow physical rows -- the
-    same rule the spline strategies above follow (explicit-breaks mode has no
-    learned placement to move).  The Poisson control proves the weights would
-    otherwise have moved the knots, so the equality is not vacuous.
+    A prior weight is a precision, not frequency mass, so knot placement and
+    ``base='most_exposed'`` follow physical rows -- the same rule the spline
+    strategies above follow (explicit-breaks mode has no learned placement to
+    move).  The rule now follows the declared contract rather than the family,
+    which is what the two arms below check: the same Tweedie model moves its
+    knots under ``"frequency"`` and does not under ``"prior"``, so the
+    equality is not vacuous and the family is not what decides it.
     """
     rng = np.random.default_rng(7)
     x = np.round(rng.uniform(0.0, 40.0, 400), 0)
@@ -180,32 +184,37 @@ def test_tweedie_prior_weights_do_not_move_piecewise_placement_or_base():
     y = rng.poisson(2.0, 400).astype(np.float64)
     frame = pd.DataFrame({"x": x})
 
-    def fitted_spec(family, sample_weight):
-        model = SuperGLM(family=family, features={"x": Piecewise(3, base="most_exposed")})
+    def fitted_spec(family, sample_weight, semantics):
+        model = SuperGLM(
+            family=family,
+            features={"x": Piecewise(3, base="most_exposed")},
+            weight_semantics=semantics,
+        )
         model.fit(frame, y, sample_weight=sample_weight)
         return model._specs["x"]
 
-    tweedie_weighted = fitted_spec(Tweedie(p=1.5), weight)
-    tweedie_unweighted = fitted_spec(Tweedie(p=1.5), None)
-    np.testing.assert_array_equal(tweedie_weighted._knots, tweedie_unweighted._knots)
-    assert tweedie_weighted._base_index == tweedie_unweighted._base_index
+    prior_weighted = fitted_spec(Tweedie(p=1.5), weight, "prior")
+    prior_unweighted = fitted_spec(Tweedie(p=1.5), None, "prior")
+    np.testing.assert_array_equal(prior_weighted._knots, prior_unweighted._knots)
+    assert prior_weighted._base_index == prior_unweighted._base_index
 
-    poisson_weighted = fitted_spec("poisson", weight)
-    assert not np.array_equal(poisson_weighted._knots, tweedie_unweighted._knots)
+    frequency_weighted = fitted_spec(Tweedie(p=1.5), weight, "frequency")
+    assert not np.array_equal(frequency_weighted._knots, prior_unweighted._knots)
 
 
-def test_tweedie_prior_weights_do_not_move_hosted_piecewise_geometry():
+def test_prior_weights_do_not_move_hosted_piecewise_geometry():
     """The physical-rows rule reaches an OrderedCategorical's inner Piecewise.
 
     Hosted int-mode placement and ``base='most_exposed'`` are the same MODEL
-    geometry as the numeric term's, so under Tweedie they must match the
-    no-prior-weights result. Observed before the fix: prior weights heaped on
-    the upper bands pulled the placement to [0, 5, 6, 7] with base index 3,
-    against the physical-rows [0, 2, 4, 5, 7] with base index 1 -- identical
-    to the Poisson weighted fit, which is the control proving the equality
-    below is not vacuous. Polynomial standardization deliberately keeps
-    following ``sample_weight`` under every family (the inference-geometry
-    rule), so only the Piecewise inner is pinned here.
+    geometry as the numeric term's, so under the prior contract they must
+    match the no-weights result. Observed before that rule existed: prior
+    weights heaped on the upper bands pulled the placement to [0, 5, 6, 7]
+    with base index 3, against the physical-rows [0, 2, 4, 5, 7] with base
+    index 1 -- which is what the frequency arm below still produces, and is
+    the control proving the equality is not vacuous. Polynomial
+    standardization deliberately keeps following ``sample_weight`` under
+    either contract (the inference-geometry rule), so only the Piecewise inner
+    is pinned here.
     """
     from superglm import OrderedCategorical
 
@@ -217,20 +226,21 @@ def test_tweedie_prior_weights_do_not_move_hosted_piecewise_geometry():
     y = rng.poisson(2.0, 400).astype(np.float64)
     frame = pd.DataFrame({"band": bands})
 
-    def fitted_inner(family, sample_weight):
+    def fitted_inner(family, sample_weight, semantics):
         model = SuperGLM(
             family=family,
             features={
                 "band": OrderedCategorical(order=levels, basis=Piecewise(3, base="most_exposed"))
             },
+            weight_semantics=semantics,
         )
         model.fit(frame, y, sample_weight=sample_weight)
         return model._specs["band"]._spline
 
-    tweedie_weighted = fitted_inner(Tweedie(p=1.5), weight)
-    tweedie_unweighted = fitted_inner(Tweedie(p=1.5), None)
-    np.testing.assert_array_equal(tweedie_weighted._knots, tweedie_unweighted._knots)
-    assert tweedie_weighted._base_index == tweedie_unweighted._base_index
+    prior_weighted = fitted_inner(Tweedie(p=1.5), weight, "prior")
+    prior_unweighted = fitted_inner(Tweedie(p=1.5), None, "prior")
+    np.testing.assert_array_equal(prior_weighted._knots, prior_unweighted._knots)
+    assert prior_weighted._base_index == prior_unweighted._base_index
 
-    poisson_weighted = fitted_inner("poisson", weight)
-    assert not np.array_equal(poisson_weighted._knots, tweedie_unweighted._knots)
+    frequency_weighted = fitted_inner(Tweedie(p=1.5), weight, "frequency")
+    assert not np.array_equal(frequency_weighted._knots, prior_unweighted._knots)

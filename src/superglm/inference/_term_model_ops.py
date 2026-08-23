@@ -293,8 +293,11 @@ def drop1(
         diagnostic_weights = np.ones(n, dtype=np.float64)
     else:
         from superglm.distributions import Tweedie
+        from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
-        if isinstance(model._distribution, Tweedie):
+        if isinstance(model._distribution, Tweedie) and (
+            model_weight_semantics(model) == PRIOR_WEIGHTS
+        ):
             from superglm._utils import _validate_strict_prior_weights
 
             diagnostic_weights = _validate_strict_prior_weights(sample_weight, n)
@@ -332,13 +335,16 @@ def drop1(
             stat = 0.0
             p_value = 1.0
         elif test == "F":
-            from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+            from superglm.solvers.dispersion import (
+                model_weight_semantics,
+                pearson_residual_degrees_of_freedom,
+            )
 
             stat = (delta_dev / delta_df) / phi
             resid_df = pearson_residual_degrees_of_freedom(
-                model._distribution,
                 diagnostic_weights,
                 edf_full,
+                weight_semantics=model_weight_semantics(model),
             )
             p_value = float(f_dist.sf(stat, delta_df, resid_df))
         else:

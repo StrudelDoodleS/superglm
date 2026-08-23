@@ -88,6 +88,7 @@ class SuperGLM:
         retain_fit_state: bool = True,
         separation: str = "warn",
         group_pricing: Literal["rank", "spanned"] = "rank",
+        weight_semantics: Literal["prior", "frequency"] = "prior",
     ):
         """
         Parameters
@@ -205,6 +206,29 @@ class SuperGLM:
             ``lambda1 > 0`` -- and moves the reported
             ``effective_df``/``phi``/AIC/BIC of any fit whose df falls back
             to the Breheny-Huang allocation.
+        weight_semantics : {"prior", "frequency"}
+            What ``sample_weight`` says about a row.  ``"prior"`` (default)
+            reads it as an EDM prior weight -- a statement of precision,
+            ``Var(Y_i) = phi V(mu_i) / w_i`` -- which is what you have when the
+            response is an average: ``incurred / exposure`` weighted by
+            exposure, or an average severity weighted by claim count.  This is
+            the reading R's ``glm`` and glum give their single weight
+            argument, and the one statsmodels calls ``var_weights``.
+            ``"frequency"`` reads it as a replication count, so an integer
+            weight is exactly equivalent to repeating the row; that is
+            statsmodels' ``freq_weights`` and Stata's ``fweight``.
+
+            The two agree only at ``w == 1`` -- integer weights do not make
+            them coincide -- and only the prior reading is a likelihood at
+            fractional ones.  They share a score equation,
+            so ``beta`` is unchanged; what moves is ``phi``, every Wald
+            standard error and interval, residual degrees of freedom, the
+            effective ``n`` in AIC/BIC, and -- through the REML criterion --
+            the smoothing parameters, the effective degrees of freedom and
+            hence the fitted surface.  Spline knot placement moves too:
+            frequency mass shapes the same support as replicated rows, while
+            prior weights leave learned geometry a function of physical rows.
+            Unweighted fits and fits with ``w == 1`` are identical under both.
         """
         if splines is not None:
             import warnings
@@ -239,6 +263,7 @@ class SuperGLM:
             retain_fit_state=retain_fit_state,
             separation=separation,
             group_pricing=group_pricing,
+            weight_semantics=weight_semantics,
         )
 
     def __repr__(self) -> str:
@@ -497,16 +522,19 @@ class SuperGLM:
         y : array-like
             Response variable.
         sample_weight : array-like, optional
-            Observation weights. Their likelihood interpretation is family-specific.
-            Defaults to 1 for all observations.
+            Observation weights, read under the model's declared
+            ``weight_semantics``. Defaults to 1 for all observations.
 
-            For Tweedie, these are finite, strictly positive EDM prior weights:
-            ``Y_i ~ Tw_p(mu_i, phi / w_i)``, so
-            ``Var(Y_i | x_i) = phi * mu_i**p / w_i``. They are not replication counts;
-            zero or non-finite weights are rejected. Other families use non-negative
-            case/frequency weights: once feature geometry is fixed, integer weights are
-            likelihood-equivalent to row replication, and estimated dispersion uses
-            ``sum(w) - edf``.
+            Under ``"prior"`` (the default) they are EDM prior weights:
+            ``Y_i ~ ED(mu_i, phi / w_i)``, so
+            ``Var(Y_i | x_i) = phi * V(mu_i) / w_i``, and estimated dispersion
+            uses the count of positive-weight rows minus ``edf``. Under
+            ``"frequency"`` they are replication counts: once feature geometry
+            is fixed, integer weights are likelihood-equivalent to row
+            replication, and estimated dispersion uses ``sum(w) - edf``. A
+            Tweedie fit under ``"prior"`` additionally requires finite,
+            strictly positive weights, because its compound-Poisson normalizer
+            carries ``log w``.
 
             Weights affect fitting but do not enter the linear predictor or
             automatically scale the conditional mean. The model mean is
@@ -619,14 +647,15 @@ class SuperGLM:
         y : array-like
             Response variable.
         sample_weight : array-like, optional
-            Observation weights. Their likelihood interpretation is family-specific.
-            For Tweedie, these are finite, strictly positive EDM prior weights with
-            ``Var(Y_i | x_i) = phi * mu_i**p / w_i``; they are not replication counts.
-            Weights affect fitting but do not enter the linear predictor or
-            automatically scale the conditional mean. Other families use non-negative
-            case/frequency weights: once feature geometry is fixed, integer weights are
-            likelihood-equivalent to row replication, and estimated dispersion uses
-            ``sum(w) - edf``.
+            Observation weights, read under the model's declared
+            ``weight_semantics``. Under ``"prior"`` (the default) they state a
+            precision, ``Var(Y_i | x_i) = phi * V(mu_i) / w_i``; under
+            ``"frequency"`` they are replication counts and integer weights are
+            likelihood-equivalent to row replication once feature geometry is
+            fixed. The contract sets the likelihood size the REML criterion
+            profiles against, and so reaches the selected smoothing parameters
+            as well as the dispersion. Weights affect fitting but do not enter
+            the linear predictor or automatically scale the conditional mean.
         offset : array-like, optional
             Offset term.
         max_reml_iter : int
@@ -1402,8 +1431,9 @@ class SuperGLM:
             Training data for density overlays.
         sample_weight : array-like, optional
             Observation weights for density overlays. When reusing fitting
-            weights, their semantics remain family-specific: case/frequency
-            weights for non-Tweedie families and EDM prior weights for Tweedie.
+            weights, they keep the model's declared ``weight_semantics``:
+            replication counts under ``"frequency"``, precisions under
+            ``"prior"``.
         show_density : bool
             Show sample-weighted observation density (strip for continuous,
             bars for categorical).  Default True.
@@ -1538,9 +1568,12 @@ class SuperGLM:
         y : NDArray
             Response vector.
         sample_weight : NDArray or None
-            Family-specific observation weights: nonnegative case/frequency
-            weights for non-Tweedie families and strictly positive EDM prior
-            weights for Tweedie.
+            Observation weights, read under the model's declared
+            ``weight_semantics``: replication counts under ``"frequency"``,
+            precisions under ``"prior"``. The quantile residuals below take
+            the row's own marginal distribution from that contract, so a
+            prior weight enters the reference distribution and a replication
+            count does not.
         offset : NDArray or None
             Optional offset.
         n_sim : int
@@ -1768,9 +1801,9 @@ class SuperGLM:
         X : pandas or eager Polars DataFrame
             Training data (used to compute density-based grid weights).
         sample_weight : array-like, optional
-            Family-specific fitting weights used to weight the post-fit
-            projection: case/frequency weights for non-Tweedie families and
-            EDM prior weights for Tweedie.
+            Fitting weights used to weight the post-fit projection, read
+            under the model's declared ``weight_semantics``: replication counts
+            under ``"frequency"``, precisions under ``"prior"``.
         offset : array-like, optional
             Offset term (unused, reserved for deviance computation).
         n_grid : int

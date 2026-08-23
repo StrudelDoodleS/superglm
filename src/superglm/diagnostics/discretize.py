@@ -35,9 +35,9 @@ class DiscretizationResult:
         Per-MAIN-EFFECT rating tables with columns: bin_from, bin_to,
         relativity, log_relativity, n_obs, sample_weight. ``n_obs`` is always
         the physical row count. ``sample_weight`` is the supplied weight total
-        in the bin (frequency mass for non-Tweedie; EDM prior-weight mass for
-        Tweedie) and is reported for display rather than reinterpreted as a
-        Tweedie replication count.
+        in the bin -- replication mass under the frequency contract, precision
+        mass under the prior one -- and is reported for display rather than
+        reinterpreted as a count under either reading.
     interaction_tables : dict[str, DataFrame]
         Per-INTERACTION grids, one row per grid cell, with two axis-value
         columns named for the parents -- suffixed ``(axis 1)``/``(axis 2)``
@@ -73,10 +73,12 @@ def _validated_discretization_weights(
 ) -> tuple[NDArray, NDArray]:
     """Return likelihood/display weights and family-appropriate geometry mass."""
     from superglm.distributions import Tweedie
+    from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
+    weight_semantics = model_weight_semantics(model)
     if sample_weight is None:
         weights = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(model._distribution, Tweedie):
+    elif isinstance(model._distribution, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
         from superglm._utils import _validate_strict_prior_weights
 
         weights = _validate_strict_prior_weights(sample_weight, n_rows)
@@ -93,11 +95,11 @@ def _validated_discretization_weights(
     if not np.isfinite(weight_total):
         raise ValueError("sample_weight must have a finite sum")
 
-    # Non-Tweedie weights are frequency mass and therefore shape the same
-    # support as literal replicated rows. Tweedie weights are prior precision:
+    # Frequency weights are replication mass and therefore shape the same
+    # support as literal replicated rows.  Prior weights are precision:
     # fit-time spline/discrete geometry remains a function of physical rows.
     geometry_weight = (
-        np.ones(n_rows, dtype=np.float64) if isinstance(model._distribution, Tweedie) else weights
+        (weights > 0.0).astype(np.float64) if weight_semantics == PRIOR_WEIGHTS else weights
     )
     return weights, geometry_weight
 
@@ -650,14 +652,15 @@ def discretization_impact(
     everything discretized in the call, which is the error a consumer applying
     the whole table actually gets.
 
-    For non-Tweedie families, ``sample_weight`` is case/frequency mass:
-    bin geometry, bin averages, mean prediction change, and prediction
+    Under ``weight_semantics="frequency"`` ``sample_weight`` is replication
+    mass: bin geometry, bin averages, mean prediction change, and prediction
     correlation match literal integer row replication. Zero-frequency rows
     retain predictions and physical ``n_obs`` entries but cannot change bin
-    geometry or summary metrics. For Tweedie, weights are finite, strictly
-    positive EDM prior weights. They weight deviance and the displayed
-    ``sample_weight`` totals, while bin geometry, bin averages, and pure
-    prediction-comparison summaries use physical rows.
+    geometry or summary metrics. Under ``"prior"`` the weights are precisions:
+    they weight deviance and the displayed ``sample_weight`` totals, while bin
+    geometry, bin averages, and pure prediction-comparison summaries use
+    physical rows. A Tweedie fit under ``"prior"`` additionally requires them
+    finite and strictly positive.
 
     Parameters
     ----------
@@ -668,9 +671,9 @@ def discretization_impact(
     y : NDArray
         Response variable.
     sample_weight : NDArray, optional
-        Nonnegative case/frequency weights for non-Tweedie models. For
-        Tweedie models, finite, strictly positive EDM prior weights. Defaults
-        to ones.
+        Nonnegative observation weights, read under the model's declared
+        ``weight_semantics``; a Tweedie fit under ``"prior"`` requires them
+        strictly positive. Defaults to ones.
     offset : NDArray, optional
         Link-scale offset aligned to ``X``. Used when comparing original and
         discretized predictions for offset-fitted models.
@@ -681,7 +684,7 @@ def discretization_impact(
         places edges at equal geometry-weight mass; ``"uniform"`` uses
         equal-width bins; ``"winsorized"`` uses geometry-weight quantiles on
         the interior [p5, p95] with dedicated tail bins. Geometry weight means
-        frequency mass for non-Tweedie models and unit physical-row mass for
+        replication mass under the frequency contract and unit physical-row mass for
         Tweedie.
     features : list[str], optional
         Subset of names to discretize: spline/polynomial features, and
@@ -822,7 +825,8 @@ def discretization_impact(
         # digitize returns 1-based; clip to valid range
         bin_idx = np.clip(bin_idx, 1, actual_n_bins) - 1
 
-        # Frequency-weighted for non-Tweedie; physical-row mean for Tweedie.
+        # Replication-weighted under the frequency contract; physical-row mean
+        # under the prior one.
         bin_log_rel = np.zeros(actual_n_bins)
         bin_weight = np.zeros(actual_n_bins)
         bin_n_obs = np.zeros(actual_n_bins, dtype=int)
@@ -959,8 +963,8 @@ def discretization_impact(
         100.0 * deviance_change / deviance_original if deviance_original > 0 else 0.0
     )
 
-    # Prediction-only summaries follow geometry semantics: literal frequency
-    # rows for non-Tweedie, physical rows for Tweedie prior weights.
+    # Prediction-only summaries follow the geometry mass: replication rows
+    # under the frequency contract, physical rows under the prior one.
     safe_orig = np.maximum(np.abs(original_predictions), 1e-300)
     abs_pct_change = np.abs(predictions - original_predictions) / safe_orig * 100.0
     summary_active = geometry_weight > 0.0

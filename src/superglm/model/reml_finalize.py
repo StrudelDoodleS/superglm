@@ -41,10 +41,12 @@ from superglm.reml.penalty_algebra import (
 from superglm.reml.result import _map_beta_between_bases
 from superglm.reml.scale import (
     GammaScaleProfileData,
+    gaussian_reml_scale_terms,
     prepare_gamma_reml_scale_data,
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
 )
+from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.structured import (
     BlockSchurFactor,
@@ -243,17 +245,27 @@ def compute_profiled_phi(
             lambdas=lambdas,
             coefficient_width=p_dim,
         )
+        weight_semantics = model_weight_semantics(model)
         if isinstance(distribution, Gaussian):
+            saturated_log_weight = 0.0
             if likelihood_size is None:
-                likelihood_size = float(np.sum(sample_weight, dtype=np.float64))
+                likelihood_size, saturated_log_weight = gaussian_reml_scale_terms(
+                    sample_weight,
+                    weight_semantics=weight_semantics,
+                )
             assert likelihood_size is not None
             return profile_gaussian_reml_scale(
                 penalized_deviance,
                 likelihood_size,
                 M_p,
+                saturated_log_weight=saturated_log_weight,
             ).phi
         if gamma_scale_data is None:
-            gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
+            gamma_scale_data = prepare_gamma_reml_scale_data(
+                y,
+                sample_weight,
+                weight_semantics=weight_semantics,
+            )
         return profile_gamma_reml_scale(
             gamma_scale_data,
             penalized_deviance,
@@ -274,7 +286,20 @@ def compute_profiled_phi(
         lambdas=lambdas,
         coefficient_width=p_dim,
     )
-    return float(max(penalized_deviance / max(len(y) - M_p, 1.0), 1e-10))
+    # The declared contract's likelihood size, not the row count. This
+    # fallback is reached by `apply_shape_postfit`'s repair as well as the
+    # terminal publication, so a row-count denominator here republishes the
+    # wrong dispersion -- and every Wald interval drawn from it -- after an
+    # otherwise contract-correct fit.
+    size = (
+        float(likelihood_size)
+        if likelihood_size is not None
+        else dispersion_likelihood_size(
+            sample_weight,
+            weight_semantics=model_weight_semantics(model),
+        )
+    )
+    return float(max(penalized_deviance / max(size - M_p, 1.0), 1e-10))
 
 
 def maybe_qp_passthrough_refit(
@@ -315,6 +340,7 @@ def maybe_qp_passthrough_refit(
         reml_penalties=reml_penalties,
         trace_run=trace_run,
         trace_purpose="reml_qp_final",
+        weight_semantics=model_weight_semantics(model),
     )
     return qp_output[0]
 
@@ -406,6 +432,7 @@ def finalize_reml_fit(
             reml_penalties=reml_penalties,
             trace_run=trace_run,
             trace_purpose="reml_final",
+            weight_semantics=model_weight_semantics(model),
         )
         if len(final_output) != 3:  # pragma: no cover - return_xtwx contract
             raise RuntimeError("terminal direct REML refit omitted its working Gram")
@@ -513,6 +540,7 @@ def finalize_reml_fit(
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
             tweedie_scale_data=terminal_tweedie_scale_data,
+            weight_semantics=model_weight_semantics(model),
             return_evaluation=True,
         )
         if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
@@ -671,6 +699,7 @@ def finalize_reml_fit(
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
             tweedie_scale_data=terminal_tweedie_scale_data,
+            weight_semantics=model_weight_semantics(model),
             return_evaluation=True,
         )
         if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
@@ -715,6 +744,7 @@ def finalize_reml_fit(
             reml_penalties=reml_penalties,
             tensor_pair_evaluations=terminal_tensor_pair_evaluations,
             tweedie_scale_data=terminal_tweedie_scale_data,
+            weight_semantics=model_weight_semantics(model),
             return_evaluation=True,
         )
         if not isinstance(terminal_value, REMLObjectiveEvaluation):  # pragma: no cover
@@ -724,6 +754,17 @@ def finalize_reml_fit(
 
     # Profile dispersion from the state that will actually be returned.  A
     # constrained QP passthrough refit can change both beta'S beta and deviance.
+    #
+    # The deviance-form branches below divide by the DECLARED contract's
+    # likelihood size, not the physical row count: `sum(w)` under
+    # `"frequency"`, the positive-row count under `"prior"`.  Reading `len(y)`
+    # there puts the published dispersion -- and every Wald interval drawn from
+    # it -- out of step with both the terminal objective and literal row
+    # replication whenever the weights are not all one.
+    published_likelihood_size = dispersion_likelihood_size(
+        sample_weight,
+        weight_semantics=model_weight_semantics(model),
+    )
     if isinstance(model._distribution, Tweedie) and not qp_passthrough:
         phi_fixed = float(final_pirls.phi)
     elif isinstance(model._distribution, Tweedie) and terminal_evaluation is not None:
@@ -737,7 +778,7 @@ def finalize_reml_fit(
         penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
         phi_fixed = max(
             float(terminal_evaluation.penalized_deviance)
-            / max(float(len(y)) - penalty_nullity, 1.0),
+            / max(published_likelihood_size - penalty_nullity, 1.0),
             1.0e-10,
         )
     elif terminal_evaluation is not None and terminal_evaluation.profiled_scale is not None:
@@ -750,7 +791,7 @@ def finalize_reml_fit(
         penalty_nullity = float(terminal_evaluation.penalty_nullity or 0.0)
         phi_fixed = max(
             float(terminal_evaluation.penalized_deviance)
-            / max(float(len(y)) - penalty_nullity, 1.0),
+            / max(published_likelihood_size - penalty_nullity, 1.0),
             1.0e-10,
         )
     else:
@@ -783,7 +824,14 @@ def finalize_reml_fit(
     mu = clip_mu(model._link.inverse(eta), model._distribution)
 
     model._fit_stats = compute_fit_stats(
-        y, mu, sample_weight, offset, model._distribution, model._link, model._result.phi
+        y,
+        mu,
+        sample_weight,
+        offset,
+        model._distribution,
+        model._link,
+        model._result.phi,
+        weight_semantics=model_weight_semantics(model),
     )
     model._solver_result = corrected
 

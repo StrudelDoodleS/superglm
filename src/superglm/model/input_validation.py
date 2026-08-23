@@ -12,7 +12,143 @@ from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, as_eager_frame
 from superglm._utils import _validate_strict_prior_weights
-from superglm.distributions import Distribution, Tweedie, validate_response
+from superglm.distributions import (
+    Binomial,
+    Distribution,
+    NegativeBinomial,
+    Poisson,
+    Tweedie,
+    validate_response,
+)
+from superglm.solvers.dispersion import PRIOR_WEIGHTS
+
+
+class PriorWeightLatticeWarning(UserWarning):
+    """A discrete family's prior-weighted response left its own support."""
+
+
+#: Relative slack when testing ``w * y`` for integrality.  The product is
+#: formed in floating point from two user arrays, so an exactly-integral
+#: intent (``count / exposure`` times ``exposure``) can land a few ulps away.
+_LATTICE_RELATIVE_TOLERANCE = 1e-9
+
+
+def _warn_prior_weighted_binomial(weights: NDArray) -> None:
+    """Warn when a prior-weighted binomial response cannot normalise.
+
+    The prior construction is ``w Y ~ Binomial(w, mu)``, whose support is
+    ``{0, 1/w, ..., 1}`` -- but ``validate_response`` pins ``y`` to ``{0, 1}``,
+    so the only reachable outcomes are "no successes" and "all ``w``
+    successes". Their masses are ``(1 - mu)**w`` and ``mu**w``, which sum to 1
+    **only at w == 1**: at ``w = 3, mu = 0.4`` they sum to 0.28, and at
+    fractional ``w`` they exceed 1 (``sqrt(mu) + sqrt(1 - mu)``). The binomial
+    coefficient is exactly 1 at both endpoints, which makes each term look
+    exact in isolation and is why this is easy to miss -- but an exact
+    coefficient is not a normalised distribution.
+
+    So unlike Poisson and the negative binomial, where only a non-integral
+    ``w * y`` leaves the lattice, EVERY non-unit prior weight on a binomial
+    response reports a sub- or super-probability.
+    """
+    # Carried rows only. A zero weight is admitted for every non-Tweedie
+    # family, and the binomial branch of `prior_weight_log_density` returns
+    # exactly 0.0 there -- so a fit whose every carried row is w == 1 has an
+    # ordinary Bernoulli likelihood, and warning that it is "not an exact
+    # density" would be false about that fit. Counting the zero rows would also
+    # inflate the figure when the warning does fire legitimately.
+    off = (weights > 0.0) & (np.abs(weights - 1.0) > _LATTICE_RELATIVE_TOLERANCE)
+    count = int(np.count_nonzero(off))
+    if count == 0:
+        return
+    import warnings
+
+    warnings.warn(
+        f"{count} of {len(weights)} rows carry a non-unit sample_weight under "
+        'weight_semantics="prior" with a Binomial family. The prior '
+        "construction reads w as a trial count, but the response is pinned to "
+        "{0, 1}, so only the all-failure and all-success outcomes are "
+        "reachable and their masses ((1-mu)**w and mu**w) do not sum to one. "
+        "Coefficients, fitted means and deviance are unaffected, but the "
+        "reported log-likelihood, AIC and BIC are not an exact density. Use "
+        'weight_semantics="frequency" if the weights are replication counts.',
+        PriorWeightLatticeWarning,
+        stacklevel=5,
+    )
+
+
+def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semantics: str) -> None:
+    """Warn when a prior-weighted counting response is off its own lattice.
+
+    The prior construction for Poisson and the negative binomial is
+    ``w Y ~ Poisson(w mu)`` and ``w Y ~ NB2(w mu, w theta)``, both supported on
+    the non-negative integers.  Where ``w * y`` is not integral the reported
+    density evaluates ``gammaln`` at a fractional argument, which interpolates
+    the counting density: the value is finite and smooth, but it is not a
+    probability.  The log-likelihood, AIC and BIC are then a quasi-likelihood,
+    and for the negative binomial the interpolated ``Gamma(w y + w theta) /
+    Gamma(w theta)`` factor is theta-dependent, so it reaches ``theta_hat``
+    and its profile interval too.
+
+    This warns rather than raises deliberately.  The canonical case is
+    on-lattice by construction -- ``y = count / exposure`` weighted by
+    ``exposure`` -- and where it is not, the two contracts still share a score
+    equation, so ``beta``, the fitted means and the deviance are unaffected.
+    Refusing an otherwise valid fit over a defect confined to its reported
+    likelihood would cost more than it protects; saying so plainly does not.
+    """
+    if weight_semantics != PRIOR_WEIGHTS:
+        return
+    if isinstance(family, Binomial):
+        _warn_prior_weighted_binomial(weights)
+        return
+    if not isinstance(family, Poisson | NegativeBinomial):
+        return
+    scaled = weights * y
+    slack = _LATTICE_RELATIVE_TOLERANCE * np.maximum(1.0, np.abs(scaled))
+    off_lattice = np.abs(scaled - np.rint(scaled)) > slack
+    count = int(np.count_nonzero(off_lattice))
+    if count == 0:
+        return
+    import warnings
+
+    name = type(family).__name__
+    # At FIXED theta the two contracts share a score equation, so only the
+    # reported likelihood moves. With ``theta="auto"`` that promise fails:
+    # theta is profiled from the interpolated density and then enters V(mu),
+    # the IRLS working weights and the unit deviance, so the coefficients
+    # themselves move too. Say which case the reader is in.
+    auto_theta = isinstance(family, NegativeBinomial) and getattr(family, "theta", None) in (
+        "auto",
+        None,
+    )
+    if isinstance(family, NegativeBinomial):
+        reach = (
+            " theta_hat is profiled from that interpolated density and then "
+            "enters the variance and the IRLS weights, so the coefficients, "
+            "fitted means and deviance move as well."
+            if auto_theta
+            else " theta_hat and its profile interval are affected as well; "
+            "coefficients, fitted means and deviance are not, because at "
+            "fixed theta the two contracts share a score equation."
+        )
+    else:
+        reach = (
+            " Coefficients, fitted means and deviance are unaffected -- the "
+            "two weight contracts share a score equation."
+        )
+    warnings.warn(
+        f"{count} of {len(scaled)} rows have a non-integral sample_weight * y "
+        f'under weight_semantics="prior", which puts them off the {name} '
+        "lattice, so the reported log-likelihood, AIC and BIC are a "
+        "quasi-likelihood rather than an exact density, and randomized "
+        "quantile residuals round those rows onto a neighbouring count."
+        + reach
+        + " The canonical weighting (y = count / exposure with "
+        "sample_weight = exposure) is on-lattice; pass "
+        'weight_semantics="frequency" if the weights are replication counts.',
+        PriorWeightLatticeWarning,
+        stacklevel=4,
+    )
 
 
 @dataclass(frozen=True)
@@ -140,6 +276,7 @@ def validate_fit_input(
     offset,
     *,
     family: Distribution,
+    weight_semantics: str,
     required_columns: Iterable[object],
     check_all_columns: bool = False,
 ) -> ValidatedFitInput:
@@ -159,7 +296,13 @@ def validate_fit_input(
     y_arr = _finite_vector("y", y, n_rows, require_nonempty=True, check_finite=False)
     if sample_weight is None:
         weight_arr = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(family, Tweedie):
+    elif isinstance(family, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
+        # Strict positivity is a Tweedie density requirement, not a statement
+        # about the weight contract: the compound-Poisson normalizer carries
+        # ``log w``, so a zero prior weight is an unevaluable density rather
+        # than an uninformative row.  Read as a replication count the weight
+        # never enters that normalizer, and zero means what it means for every
+        # other family -- a row that appears no times.
         weight_arr = _validate_strict_prior_weights(sample_weight, n_rows)
     else:
         weight_arr = _finite_vector("sample_weight", sample_weight, n_rows)
@@ -169,4 +312,5 @@ def validate_fit_input(
         raise ValueError("sample_weight must not be all zero")
     offset_arr = None if offset is None else _finite_vector("offset", offset, n_rows)
     validate_response(y_arr, family)
+    _check_counting_lattice(y_arr, weight_arr, family, weight_semantics)
     return ValidatedFitInput(frame, y_arr, weight_arr, offset_arr)

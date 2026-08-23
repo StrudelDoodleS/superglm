@@ -52,6 +52,7 @@ def test_fit_pirls_rejects_non_positive_inner_and_outer() -> None:
             groups=[],
             penalty=None,
             max_iter_outer=0,
+            weight_semantics="frequency",
         )
     with pytest.raises(ValueError, match="max_iter_inner must be at least 1"):
         fit_pirls(
@@ -63,6 +64,7 @@ def test_fit_pirls_rejects_non_positive_inner_and_outer() -> None:
             groups=[],
             penalty=None,
             max_iter_inner=0,
+            weight_semantics="frequency",
         )
 
 
@@ -79,6 +81,7 @@ def test_fit_irls_direct_rejects_zero_max_iter() -> None:
             groups=[],
             lambda2=0.0,
             max_iter=0,
+            weight_semantics="frequency",
         )
 
 

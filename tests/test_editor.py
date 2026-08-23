@@ -274,8 +274,8 @@ def test_polars_editor_loading_edits_and_artifact_validation_match_pandas(
         atol=1e-12,
     )
 
-    pandas_dataset = coerce_dataset("validation", (X, y))
-    polars_dataset = coerce_dataset("validation", (X_polars, y))
+    pandas_dataset = coerce_dataset("validation", (X, y), weight_semantics="frequency")
+    polars_dataset = coerce_dataset("validation", (X_polars, y), weight_semantics="frequency")
     assert polars_dataset is not None
     assert polars_dataset.X is X_polars
     assert polars_dataset.n_obs == len(X_polars)
@@ -332,7 +332,7 @@ def test_serialize_validated_model_round_trip_predictions(editor_model, editor_f
     import joblib
 
     X, y = editor_frame
-    dataset = coerce_dataset("validation", (X, y))
+    dataset = coerce_dataset("validation", (X, y), weight_semantics="frequency")
 
     data, validation = serialize_validated_model(editor_model, dataset=dataset, max_rows=17)
     loaded = joblib.load(io.BytesIO(data))
@@ -374,7 +374,7 @@ def test_serialize_validated_model_slices_spread_rows_and_offset_consistently(
 
     X, y = editor_frame
     offset = np.linspace(-0.2, 0.2, len(X))
-    dataset = coerce_dataset("validation", (X, y, None, offset))
+    dataset = coerce_dataset("validation", (X, y, None, offset), weight_semantics="frequency")
     expected_indices = _spread_row_indices(len(X), 17)
     seen: dict[str, np.ndarray] = {}
     real_load = persistence.joblib_load_bytes
@@ -410,7 +410,7 @@ def test_serialize_validated_model_rejects_bad_loaded_predictions(
     import superglm.editor.persistence as persistence
 
     X, y = editor_frame
-    dataset = coerce_dataset("validation", (X, y))
+    dataset = coerce_dataset("validation", (X, y), weight_semantics="frequency")
     real_load = persistence.joblib_load_bytes
 
     def load_with_bad_predict(data):
@@ -445,7 +445,7 @@ def test_serialize_validated_model_contract_only(editor_model):
 
 def test_serialize_validated_model_empty_dataset_is_contract_only(editor_model, editor_frame):
     X, y = editor_frame
-    dataset = coerce_dataset("validation", (X.iloc[:0], y[:0]))
+    dataset = coerce_dataset("validation", (X.iloc[:0], y[:0]), weight_semantics="frequency")
 
     _, validation = serialize_validated_model(editor_model, dataset=dataset)
 
@@ -5495,6 +5495,7 @@ def test_dataset_metrics_use_offset_aware_null_deviance():
         offset,
         model._distribution,
         model._link,
+        weight_semantics="frequency",
     )
     null_deviance = float(np.sum(sample_weight * model._distribution.deviance_unit(y, null_mu)))
     assert metrics["explained_deviance"] == pytest.approx(1.0 - deviance / null_deviance)

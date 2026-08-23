@@ -250,22 +250,28 @@ features = {
 
 ## Weights And Offsets
 
-Weight semantics are family-specific. For Poisson, negative binomial,
-binomial, Gaussian, and Gamma fits, `sample_weight=` is a case/frequency
-weight: once feature geometry is fixed, integer weights have the same
-likelihood and dispersion semantics as repeating rows. It is not an
-inverse-variance weight. In the Poisson rate example below, exposure is a
-frequency weight.
+Weight semantics are declared, not inferred from the family. `SuperGLM(...,
+weight_semantics=...)` chooses between two readings of `sample_weight=`:
 
-Tweedie is the exception: its weights are strictly positive EDM prior weights,
-with `Var(Y_i | x_i) = phi * mu_i**p / w_i`, and are not replication counts.
-See the [families guide](docs/guide/families.md#weight-semantics) before using
-weighted Gaussian or Gamma averages, where choosing the wrong interpretation
-changes dispersion and inference.
+- **`"prior"` (default)** — an EDM prior weight, a statement of precision:
+  `Var(Y_i | x_i) = phi * V(mu_i) / w_i`. This is what you have when the
+  response is an average, such as `incurred / exposure` weighted by exposure,
+  and it is the reading R's `glm` and glum give their single weight argument.
+- **`"frequency"`** — a replication count: once feature geometry is fixed,
+  integer weights have the same likelihood and dispersion semantics as
+  repeating rows.
+
+They agree at unit weights and differ everywhere else — dispersion, standard
+errors, residual degrees of freedom, REML's smoothing parameters, and learned
+knot placement. See the
+[families guide](docs/guide/families.md#weight-semantics) before carrying one
+spelling into the other, and the
+[migration note](docs/development/migrations/weight-semantics-prior.md) for
+measured before-and-after figures.
 
 The replication equivalence remains conditional on the constructed design.
-Main-effect non-Tweedie spline boundaries and adaptive knots honor frequency
-mass and omit zero-weight rows. Some adaptive interaction and categorical
+Under `"frequency"`, main-effect spline boundaries and adaptive knots honor
+replication mass and omit zero-weight rows. Some adaptive interaction and categorical
 feature geometry can still depend on the physical row layout, however, so use
 fixed or preconstructed feature geometry when exact end-to-end replication
 parity matters.

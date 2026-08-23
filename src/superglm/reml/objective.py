@@ -26,6 +26,7 @@ from superglm.reml.scale import (
     GammaScaleProfileData,
     ProfiledScaleTerm,
     TweedieScaleProfileData,
+    gaussian_reml_scale_terms,
     prepare_gamma_reml_scale_data,
     prepare_tweedie_reml_scale_data,
     profile_gamma_reml_scale,
@@ -33,6 +34,7 @@ from superglm.reml.scale import (
     profile_tweedie_reml_scale,
 )
 from superglm.reml.scop_geometry import decompose_on_scop_resolved_range
+from superglm.solvers.dispersion import dispersion_likelihood_size, validate_weight_semantics
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_gram
 from superglm.solvers.structured import SymmetricBlockOperator
@@ -74,6 +76,9 @@ def reml_laml_objective(
     gamma_scale_data: GammaScaleProfileData | None = None,
     tweedie_scale_data: TweedieScaleProfileData | None = None,
     return_evaluation: bool = False,
+    *,
+    weight_semantics: str,
+    saturated_log_weight: float | None = None,
 ) -> float | REMLObjectiveEvaluation:
     """Laplace REML/LAML objective up to additive constants.
 
@@ -114,7 +119,15 @@ def reml_laml_objective(
     ``gamma_scale_data`` and ``likelihood_size`` let optimizers prepare
     fit-invariant row reductions once. Standalone callers may omit them; the
     objective then computes the required reduction for that evaluation.
+
+    ``weight_semantics`` is required rather than defaulted because there is no
+    safe value: it decides the likelihood the criterion is a criterion *for*.
+    The known-scale branch below is unaffected by it -- the two contracts'
+    log-likelihoods differ there only by a term in ``y`` and ``w``, and this
+    objective is already defined up to additive constants -- so it is used
+    only where it changes a decision.
     """
+    weight_semantics = validate_weight_semantics(weight_semantics)
     mu = None
     retained_geometry_complete = (
         XtWX is None
@@ -272,7 +285,15 @@ def reml_laml_objective(
     # phi-profiled REML for estimated-scale families
     scale_known = getattr(distribution, "scale_known", True)
     if not scale_known:
-        n = len(y)
+        # The declared contract's likelihood size, not the row count.  The
+        # shipped estimated-scale families reach it through
+        # ``prepare_reml_scale_data`` below; the custom-family fallback used
+        # ``len(y)``, which is the wrong denominator under BOTH readings the
+        # moment the weights are not all one -- ``sum(w)`` under
+        # ``"frequency"`` and the positive-row count under ``"prior"``.  That
+        # fallback is already declared approximate by the warning it emits;
+        # approximate is not a licence to use a size no contract asks for.
+        n = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
         resolved_hessian_rank = hessian_rank
         if resolved_hessian_rank is None and centered_hessian_rank is not None:
             resolved_hessian_rank = 1 + centered_hessian_rank
@@ -300,17 +321,25 @@ def reml_laml_objective(
             )
         profiled_scale: ProfiledScaleTerm | None = None
         if isinstance(distribution, Gaussian):
-            if likelihood_size is None:
-                likelihood_size = float(np.sum(sample_weight, dtype=np.float64))
+            if likelihood_size is None or saturated_log_weight is None:
+                likelihood_size, saturated_log_weight = gaussian_reml_scale_terms(
+                    sample_weight,
+                    weight_semantics=weight_semantics,
+                )
             profiled_scale = profile_gaussian_reml_scale(
                 penalized_deviance,
                 likelihood_size,
                 M_p,
+                saturated_log_weight=saturated_log_weight,
             )
             scale_term = profiled_scale.criterion
         elif isinstance(distribution, Gamma):
             if gamma_scale_data is None:
-                gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
+                gamma_scale_data = prepare_gamma_reml_scale_data(
+                    y,
+                    sample_weight,
+                    weight_semantics=weight_semantics,
+                )
             profiled_scale = profile_gamma_reml_scale(
                 gamma_scale_data,
                 penalized_deviance,
@@ -323,6 +352,7 @@ def reml_laml_objective(
                     y,
                     sample_weight,
                     distribution.p,
+                    weight_semantics=weight_semantics,
                 )
             profiled_scale = profile_tweedie_reml_scale(
                 tweedie_scale_data,

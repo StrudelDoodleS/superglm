@@ -56,6 +56,7 @@ def test_direct_pearson_phi_frequency_weights_match_row_replication(distribution
         groups,
         lambda2=0.4,
         _use_observed_newton=False,
+        weight_semantics="frequency",
     )
     repeated, _ = fit_irls_direct(
         X_repeated,
@@ -66,6 +67,7 @@ def test_direct_pearson_phi_frequency_weights_match_row_replication(distribution
         groups,
         lambda2=0.4,
         _use_observed_newton=False,
+        weight_semantics="frequency",
     )
 
     np.testing.assert_allclose(weighted.beta, repeated.beta, rtol=2e-10, atol=2e-10)
@@ -90,6 +92,7 @@ def test_composite_pirls_pearson_phi_frequency_weights_match_row_replication(
         link,
         groups,
         Ridge(lambda1=0.4),
+        weight_semantics="frequency",
     )
     repeated = fit_pirls(
         X_repeated,
@@ -99,6 +102,7 @@ def test_composite_pirls_pearson_phi_frequency_weights_match_row_replication(
         link,
         groups,
         Ridge(lambda1=0.4),
+        weight_semantics="frequency",
     )
 
     np.testing.assert_allclose(weighted.beta, repeated.beta, rtol=2e-9, atol=2e-9)
@@ -128,6 +132,7 @@ def test_scop_pearson_phi_frequency_weights_match_row_replication() -> None:
                     constraint=Constraint.fit.increasing,
                 )
             },
+            weight_semantics="frequency",
         )
 
     weighted = model().fit(frame, y, sample_weight=weights)
@@ -162,6 +167,7 @@ def test_postfit_shape_repair_uses_frequency_weight_likelihood_size() -> None:
                 constraint=Constraint.postfit.increasing,
             )
         },
+        weight_semantics="frequency",
     ).fit(frame, y, sample_weight=weights)
     weighted.apply_shape_postfit(frame, sample_weight=weights, n_grid=80)
 
@@ -191,6 +197,7 @@ def test_postfit_shape_repair_frequency_weights_match_row_replication() -> None:
                     constraint=Constraint.postfit.increasing,
                 )
             },
+            weight_semantics="frequency",
         )
 
     weighted = model().fit(frame, y, sample_weight=weights)

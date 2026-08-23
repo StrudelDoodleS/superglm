@@ -38,6 +38,7 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
+from superglm.solvers.dispersion import model_weight_semantics
 
 
 class EditorSession:
@@ -101,6 +102,7 @@ class EditorSession:
             validation_data=validation_data,
             test_data=test_data,
             family=model._distribution,
+            weight_semantics=model_weight_semantics(model),
         )
         names = list(model._feature_order if terms is None else terms)
         editable = cls._editable_terms_from_model(

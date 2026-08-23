@@ -26,6 +26,7 @@ def test_direct_fit_caches_authoritative_centered_gram() -> None:
         lambda2=0.0,
         S_override=np.array([[0.25]]),
         cache_out=cache,
+        weight_semantics="frequency",
     )
 
     centered = X - np.mean(X, axis=0)

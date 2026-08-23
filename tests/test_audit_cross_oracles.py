@@ -1,4 +1,11 @@
-"""Independent GLM oracles for the documented frequency-weight contract."""
+"""Independent GLM oracles for the replication weight contract.
+
+The oracles are statsmodels' ``freq_weights`` and glum, both of which count a
+weighted row as that many rows in the dispersion denominator, so every fit here
+declares ``weight_semantics="frequency"`` to be compared against the same
+likelihood.  The prior contract has its own oracles -- ``scipy.stats``
+densities -- in ``test_weight_semantics.py``.
+"""
 
 from __future__ import annotations
 
@@ -55,6 +62,7 @@ def _fit_superglm(
         features={name: Numeric() for name in frame.columns},
         tol=1e-11,
         max_iter=300,
+        weight_semantics="frequency",
     ).fit(frame, y, sample_weight=weights)
 
 

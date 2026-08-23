@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
+from superglm.distributions import weighted_log_likelihood
 from superglm.inference._metrics_design import (
     EvaluationDesign,
     MetricsDesign,
@@ -307,6 +308,9 @@ class ModelMetrics:
                 )
         self._uses_fit_rows = bool(same_fit_object and _fit_data_matches)
 
+        from superglm.solvers.dispersion import model_weight_semantics
+
+        self._weight_semantics = model_weight_semantics(model)
         self._y = np.asarray(y, dtype=np.float64)
         n = len(self._y)
         if sample_weight is None:
@@ -314,7 +318,7 @@ class ModelMetrics:
         else:
             from superglm.distributions import Tweedie
 
-            if isinstance(self._family, Tweedie):
+            if isinstance(self._family, Tweedie) and self._weight_semantics == "prior":
                 from superglm._utils import _validate_strict_prior_weights
 
                 self._weights = _validate_strict_prior_weights(sample_weight, n)
@@ -326,6 +330,21 @@ class ModelMetrics:
                     raise ValueError("sample_weight must be nonnegative")
                 if not np.any(self._weights > 0.0):
                     raise ValueError("sample_weight must not be all zero")
+            # Evaluation takes its OWN rows and weights, so the fit-time
+            # lattice check does not cover it: a clean fitted model can be
+            # scored on holdout rows whose `w * y` is not integral, and both
+            # the reported log-likelihood and the randomized quantile
+            # residuals would then be silently fabricated -- the residual
+            # rounds the impossible count onto a neighbouring lattice point
+            # and inverts the CDF there. Re-check at this boundary.
+            from superglm.model.input_validation import _check_counting_lattice
+
+            _check_counting_lattice(
+                self._y,
+                self._weights,
+                self._family,
+                self._weight_semantics,
+            )
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
         fit_offset = getattr(model, "_fit_offset", None)
         fit_offset_array = np.zeros(n) if fit_offset is None else np.asarray(fit_offset)
@@ -441,7 +460,14 @@ class ModelMetrics:
 
     @cached_property
     def log_likelihood(self) -> float:
-        return self._family.log_likelihood(self._y, self._mu, self._weights, self.phi)
+        return weighted_log_likelihood(
+            self._family,
+            self._y,
+            self._mu,
+            self._weights,
+            self.phi,
+            weight_semantics=self._weight_semantics,
+        )
 
     @cached_property
     def _null_mu(self) -> NDArray:
@@ -454,12 +480,20 @@ class ModelMetrics:
             self._offset,
             self._family,
             self._link,
+            weight_semantics=self._weight_semantics,
         )
 
     @cached_property
     def null_log_likelihood(self) -> float:
         """Log-likelihood at the intercept-only (null) model."""
-        return self._family.log_likelihood(self._y, self._null_mu, self._weights, self.phi)
+        return weighted_log_likelihood(
+            self._family,
+            self._y,
+            self._null_mu,
+            self._weights,
+            self.phi,
+            weight_semantics=self._weight_semantics,
+        )
 
     @cached_property
     def null_deviance(self) -> float:
@@ -487,7 +521,10 @@ class ModelMetrics:
         """Family-specific likelihood size used by finite-sample criteria."""
         from superglm.solvers.dispersion import dispersion_likelihood_size
 
-        return dispersion_likelihood_size(self._family, self._weights)
+        return dispersion_likelihood_size(
+            self._weights,
+            weight_semantics=self._weight_semantics,
+        )
 
     @property
     def bic(self) -> float:
@@ -536,12 +573,13 @@ class ModelMetrics:
         """Compute residuals of the specified type.
 
         Deviance and Pearson residuals use a compressed-row aggregate
-        representation: a case/frequency-weighted row is multiplied by
-        ``sqrt(sample_weight)`` so its squared residual equals the sum of the
-        squared residuals from literal replicated rows. Response, working, and
-        quantile residuals retain per-row semantics and are not multiplied by
-        frequency weights. Tweedie weights remain prior precision weights in
-        every diagnostic where the family distribution depends on them.
+        representation: a weighted row is multiplied by ``sqrt(sample_weight)``
+        so its squared residual equals the sum of the squared residuals from
+        literal replicated rows. Response, working, and quantile residuals
+        retain per-row semantics and are not multiplied by the weight. Under
+        ``weight_semantics="prior"`` the weight is part of the row's own
+        distribution and therefore stays in every diagnostic that depends on
+        it.
         Influence diagnostics combine the aggregate residual with compressed
         leverage and therefore describe deletion of the whole weighted cell,
         not deletion of one literal expanded copy.
@@ -583,10 +621,11 @@ class ModelMetrics:
     def _quantile_residuals(self, seed: int | None = 42) -> NDArray:
         """Randomized quantile residuals (Dunn & Smyth 1996).
 
-        Non-Tweedie case/frequency weights do not change an observation's
-        family CDF; integer weights represent repeated copies of that same
-        response. Tweedie EDM prior weights do change the per-row distribution
-        through ``phi / w`` and therefore remain in its CDF construction.
+        A replication weight does not change an observation's family CDF:
+        integer weights represent repeated copies of that same response. A
+        prior weight does change the per-row distribution -- through
+        ``phi / w``, or the equivalent scaling of the family's own parameters
+        -- and therefore stays in the CDF construction.
 
         For discrete families (Poisson, NB2, Binomial), uses jittered
         uniform on the CDF interval [F(y-1), F(y)]. For continuous
@@ -612,44 +651,71 @@ class ModelMetrics:
 
         y, mu, w = self._y, self._mu, self._weights
         rng = np.random.default_rng(seed)
-
+        # A randomized quantile residual is a probability-integral transform, so
+        # it needs the row's own marginal distribution.  A replicated row has the
+        # unit-weight marginal -- copies of a draw are draws -- so the frequency
+        # contract evaluates every CDF below at w = 1.  A prior weight is part of
+        # the row's distribution: it scales the Gaussian's variance, the Gamma's
+        # shape, the Poisson's and negative binomial's lattice, and the
+        # binomial's trial count, and the transform is wrong without it.
+        prior = self._weight_semantics == "prior"
         if isinstance(self._family, Binomial):
-            # Bernoulli: w is case/frequency weight, not trials.
-            # CDF is the same regardless of weight.
+            # Binomial is deliberately CONTRACT-INVARIANT here, and it is the
+            # one family that has to be.
+            #
+            # A randomized quantile residual is only a probability-integral
+            # transform if the masses it splits sum to one. The prior
+            # construction `w Y ~ Binomial(w, mu)` lives on {0, 1/w, ..., 1},
+            # but `validate_response` pins y to {0, 1} -- so the reported
+            # likelihood's two reachable masses are (1-mu)**w and mu**w, which
+            # sum to one ONLY at w == 1 (0.378 at mu=0.71, w=3, measured).
+            # There is therefore no {0,1}-supported distribution whose masses
+            # are the reported likelihood's, and no PIT of it exists to build.
+            #
+            # Splitting [0, 1] at 1 - mu instead keeps the transform exactly
+            # uniform, which is the property the Q-Q envelope is a reference
+            # band for. What it costs is that the residual inverts the
+            # unit-weight marginal rather than the reported likelihood -- said
+            # here rather than left for a reader to discover, and already
+            # warned about at fit time by PriorWeightLatticeWarning.
             a = np.where(y == 0, 0.0, 1.0 - mu)
             b = np.where(y == 0, 1.0 - mu, 1.0)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Poisson):
-            count = np.round(y)
-            lam = mu
+            count = np.round(w * y) if prior else np.round(y)
+            lam = w * mu if prior else mu
             a = poisson.cdf(count - 1, lam)
             b = poisson.cdf(count, lam)
             u = rng.uniform(a, b)
         elif isinstance(self._family, NegativeBinomial):
             theta = self._family.theta
             p_nb = theta / (mu + theta)
-            count = np.round(y)
-            n_param = theta
+            count = np.round(w * y) if prior else np.round(y)
+            n_param = w * theta if prior else theta
             a = nbinom.cdf(count - 1, n=n_param, p=p_nb)
             b = nbinom.cdf(count, n=n_param, p=p_nb)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Gamma):
-            shape = 1.0 / self.phi
-            scale = mu * self.phi
+            shape = (w if prior else 1.0) / self.phi
+            scale = mu * self.phi / (w if prior else 1.0)
             u = gamma_dist.cdf(y, a=shape, scale=scale)
         elif isinstance(self._family, Gaussian):
-            u = norm.cdf(y, loc=mu, scale=np.sqrt(self.phi))
+            variance = self.phi / w if prior else np.full_like(y, self.phi)
+            u = norm.cdf(y, loc=mu, scale=np.sqrt(variance))
         elif isinstance(self._family, Tweedie):
             # Tweedie p in (1,2): compound Poisson-Gamma.
             # With weights: lambda and scale both depend on w.
             p_tw = self._family.p
             phi = self.phi
 
-            # Weight-adjusted Poisson rate and compound Gamma parameters
-            lam = w * np.power(mu, 2 - p_tw) / ((2 - p_tw) * phi)
+            # Weight-adjusted Poisson rate and compound Gamma parameters.  A
+            # replicated row's marginal is the unit-weight one, so the
+            # frequency contract evaluates the compound distribution at w = 1.
+            w_eff = w if prior else np.ones_like(w)
+            lam = w_eff * np.power(mu, 2 - p_tw) / ((2 - p_tw) * phi)
             p_zero = np.exp(-lam)
             alpha_tw = (2 - p_tw) / (p_tw - 1)  # Gamma shape per claim
-            scale_tw = phi * (p_tw - 1) * np.power(mu, p_tw - 1) / w
+            scale_tw = phi * (p_tw - 1) * np.power(mu, p_tw - 1) / w_eff
 
             u = np.empty_like(y)
 
@@ -1009,9 +1075,9 @@ class ModelMetrics:
         from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
 
         residual_df = pearson_residual_degrees_of_freedom(
-            self._family,
             self._weights,
             self.effective_df,
+            weight_semantics=self._weight_semantics,
         )
         return max(float(self.pearson_chi2) / residual_df, 0.0)
 
@@ -1361,7 +1427,7 @@ class ModelMetrics:
                 self._dm.group_matrices if self._uses_fit_design and self._dm is not None else None
             ),
             sample_weights=self._weights,
-            distribution=self._family,
+            weight_semantics=self._weight_semantics,
             selection_shrunk_group_names=selection_shrunk_group_names(
                 fitted_penalty(self._model), self._groups
             ),

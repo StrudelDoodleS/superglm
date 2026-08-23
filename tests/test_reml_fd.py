@@ -88,6 +88,7 @@ class TestREMLFiniteDifference:
             lambda2=lambdas,
             offset=offset_arr,
             return_xtwx=True,
+            weight_semantics="prior",
         )
 
         p_dim = XtWX.shape[0]
@@ -135,14 +136,16 @@ class TestREMLFiniteDifference:
 
         if isinstance(m._distribution, Gamma):
             scale_profile = profile_gamma_reml_scale(
-                prepare_gamma_reml_scale_data(y, sample_weight),
+                prepare_gamma_reml_scale_data(y, sample_weight, weight_semantics="frequency"),
                 pirls_result.deviance + pq,
                 M_p,
             )
             return scale_profile.phi, scale_profile.d_inverse_phi_d_penalized_deviance
         if isinstance(m._distribution, Tweedie):
             scale_profile = profile_tweedie_reml_scale(
-                prepare_tweedie_reml_scale_data(y, sample_weight, m._distribution.p),
+                prepare_tweedie_reml_scale_data(
+                    y, sample_weight, m._distribution.p, weight_semantics="prior"
+                ),
                 pirls_result.deviance + pq,
                 M_p,
             )
@@ -288,6 +291,7 @@ class TestREMLFiniteDifference:
                     beta_init=pirls_result.beta,
                     intercept_init=pirls_result.intercept,
                     return_xtwx=True,
+                    weight_semantics="prior",
                 )
 
                 phi_pert = 1.0
@@ -416,6 +420,7 @@ class TestREMLFiniteDifference:
                     beta_init=pirls_result.beta,
                     intercept_init=pirls_result.intercept,
                     return_xtwx=True,
+                    weight_semantics="prior",
                 )
                 objs[sign] = m._reml_laml_objective(
                     y,
@@ -719,6 +724,7 @@ class TestREMLFiniteDifference:
                     beta_init=pirls_result.beta,
                     intercept_init=pirls_result.intercept,
                     return_xtwx=True,
+                    weight_semantics="frequency",
                 )
 
                 phi_pert = 1.0
@@ -1144,6 +1150,7 @@ class TestREMLFiniteDifference:
                     beta_init=pirls_result.beta,
                     intercept_init=pirls_result.intercept,
                     return_xtwx=True,
+                    weight_semantics="frequency",
                 )
                 correction = m._reml_w_correction(
                     result,
@@ -1324,6 +1331,7 @@ class TestREMLFiniteDifference:
             penalty_caches=penalty_caches,
             w_correction_order=2,
             reml_penalties=penalties,
+            weight_semantics="frequency",
         )
         assert checked
 
@@ -1400,6 +1408,7 @@ class TestREMLFiniteDifference:
                     beta_init=pirls_result.beta,
                     intercept_init=pirls_result.intercept,
                     return_xtwx=True,
+                    weight_semantics="frequency",
                 )
                 gradient = m._reml_direct_gradient(
                     result,
@@ -1481,6 +1490,7 @@ class TestREMLFiniteDifference:
                 offset=offset,
                 return_xtwx=True,
                 reml_penalties=[penalty],
+                weight_semantics="frequency",
             )
             correction = w_derivatives.reml_w_correction(
                 dm=dm,

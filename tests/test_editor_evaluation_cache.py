@@ -38,7 +38,7 @@ def test_evaluation_key_is_frozen():
 
 def test_polars_evaluation_dataset_keeps_native_frame_and_uses_its_row_count():
     X = pl.DataFrame({"x": [1.0, 2.0, 3.0]})
-    dataset = coerce_dataset("validation", (X, np.array([1.0, 2.0, 3.0])))
+    dataset = coerce_dataset("validation", (X, np.array([1.0, 2.0, 3.0])), weight_semantics="prior")
 
     assert dataset is not None
     assert dataset.X is X
@@ -89,6 +89,7 @@ def test_coerce_dataset_normalizes_valid_zero_containing_frequency_weights():
     dataset = coerce_dataset(
         "validation",
         (X, np.ones(3), [0.0, 1.5, 2.0]),
+        weight_semantics="frequency",
     )
 
     assert dataset is not None
@@ -104,6 +105,7 @@ def test_coerce_dataset_rejects_zero_tweedie_prior_weight_when_family_is_known()
             "validation",
             (X, np.ones(3), [1.0, 0.0, 2.0]),
             family=Tweedie(p=1.5),
+            weight_semantics="prior",
         )
 
 
@@ -192,6 +194,11 @@ def weighted_offset_fit():
         family="gaussian",
         selection_penalty=0.0,
         features={"x": Numeric()},
+        # The hand-computed references below are written in the replication
+        # contract throughout -- sum(w) as the likelihood size, and the
+        # family's own sum(w * log f) -- so the fit declares that contract
+        # rather than the references silently assuming it.
+        weight_semantics="frequency",
     )
     model.fit(X, y, sample_weight=sample_weight, offset=offset)
     return model, X, y, sample_weight, offset
@@ -335,6 +342,7 @@ def test_validation_and_test_datasets_use_exact_prediction_fallback(
         offset_eval,
         model._distribution,
         model._link,
+        weight_semantics="frequency",
     )
     null_deviance = float(np.sum(weight_eval * model._distribution.deviance_unit(y_eval, null_mu)))
     pearson = float(np.sum(weight_eval * (y_eval - mu) ** 2 / model._distribution.variance(mu)))
@@ -361,6 +369,7 @@ def test_editor_frequency_weighted_criteria_match_literal_row_replication():
         family="gaussian",
         selection_penalty=0.0,
         features={"x": Numeric()},
+        weight_semantics="frequency",
     ).fit(X, y, sample_weight=weights)
     weighted_dataset = EvaluationDataset(
         "train",
@@ -377,6 +386,7 @@ def test_editor_frequency_weighted_criteria_match_literal_row_replication():
         family="gaussian",
         selection_penalty=0.0,
         features={"x": Numeric()},
+        weight_semantics="frequency",
     ).fit(repeated_X, repeated_y)
     repeated_dataset = EvaluationDataset("train", "Train", repeated_X, repeated_y)
 
@@ -397,6 +407,7 @@ def test_editor_bic_preserves_fractional_frequency_likelihood_size():
         family="gaussian",
         selection_penalty=0.0,
         features={"x": Numeric()},
+        weight_semantics="frequency",
     ).fit(X, y)
     weights = np.full(n, 0.5 / n)
     dataset = EvaluationDataset(

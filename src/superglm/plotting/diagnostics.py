@@ -15,6 +15,8 @@ import numba
 import numpy as np
 from scipy import stats
 
+from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
+
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from numpy.typing import NDArray
@@ -118,8 +120,21 @@ def _lowess(x: NDArray, y: NDArray, *, frac: float = 0.6, n_steps: int = 2) -> N
 # ── Simulation helpers ────────────────────────────────────────────
 
 
-def _validate_diagnostic_weights(family, sample_weight, n_rows: int) -> NDArray:
-    """Normalize diagnostic weights under the family's public contract."""
+def _validate_diagnostic_weights(
+    family,
+    sample_weight,
+    n_rows: int,
+    *,
+    weight_semantics: str,
+) -> NDArray:
+    """Normalize diagnostic weights under the declared weight contract.
+
+    Strict positivity is a Tweedie *density* requirement rather than a
+    statement about weights: only the prior contract puts ``log w`` inside the
+    compound-Poisson normalizer.  Read as a replication count, a Tweedie zero
+    weight means what it means everywhere else -- a row that appears no times --
+    and fitting accepts it, so plotting must too.
+    """
     from superglm.distributions import Tweedie
 
     if n_rows == 0:
@@ -145,7 +160,7 @@ def _validate_diagnostic_weights(family, sample_weight, n_rows: int) -> NDArray:
         raise ValueError(message) from exc
     if not np.all(np.isfinite(weights)):
         raise ValueError("sample_weight must contain only finite values")
-    if isinstance(family, Tweedie):
+    if isinstance(family, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
         if np.any(weights <= 0.0):
             raise ValueError("Tweedie sample_weight must be strictly positive")
     else:
@@ -156,12 +171,30 @@ def _validate_diagnostic_weights(family, sample_weight, n_rows: int) -> NDArray:
     return weights
 
 
-def _simulate_response(family, mu, phi, sample_weight, rng) -> NDArray | None:
+def _simulate_response(
+    family,
+    mu,
+    phi,
+    sample_weight,
+    rng,
+    *,
+    weight_semantics: str,
+) -> NDArray | None:
     """Simulate one response vector from the fitted model.
 
-    Non-Tweedie weights are case/frequency weights, so they do not alter
-    a single row's response distribution. Tweedie weights are EDM prior
-    weights and act through the row dispersion ``phi / sample_weight``.
+    A replication weight does not alter a single row's response distribution --
+    copies of a draw are draws -- so the frequency contract simulates every
+    family at ``w = 1``.  A prior weight is part of the row's own distribution
+    and stays in the draw.
+
+    The envelope this feeds is compared against quantile residuals that
+    ``ModelMetrics`` computes under the model's declared contract, so these
+    draws must come from exactly the marginals ``_quantile_residuals`` inverts:
+    the Gaussian's ``phi / w`` variance, the Gamma's ``w / phi`` shape, the
+    Poisson's and negative binomial's ``w``-scaled lattice, and the binomial's
+    ``w``-trial success probability.  Simulating from a different distribution
+    than the residual transform assumes puts a correct fit outside its own
+    envelope.
 
     Returns None if the family is not supported (caller should degrade
     gracefully).
@@ -175,31 +208,47 @@ def _simulate_response(family, mu, phi, sample_weight, rng) -> NDArray | None:
         Tweedie,
     )
 
+    prior = weight_semantics == PRIOR_WEIGHTS
+    weights = np.asarray(sample_weight, dtype=np.float64)
+
     if isinstance(family, Poisson):
+        # w Y ~ Poisson(w mu): draw on the scaled lattice and return the rate.
+        if prior:
+            return np.asarray(rng.poisson(lam=weights * mu), dtype=np.float64) / weights
         return np.asarray(rng.poisson(lam=mu), dtype=np.float64)
 
     if isinstance(family, Gaussian):
-        return rng.normal(loc=mu, scale=np.sqrt(phi))
+        variance = phi / weights if prior else phi
+        return rng.normal(loc=mu, scale=np.sqrt(variance))
 
     if isinstance(family, Gamma):
-        shape = 1.0 / phi
-        scale = mu * phi
+        shape = (weights if prior else 1.0) / phi
+        scale = mu * phi / (weights if prior else 1.0)
         return rng.gamma(shape=shape, scale=scale)
 
     if isinstance(family, NegativeBinomial):
         from scipy.stats import nbinom as nbinom_dist
 
         theta = family.theta
+        # w Y ~ NB2(w mu, w theta) scales the size parameter and leaves the
+        # success probability theta/(mu + theta) untouched.
         p_nb = theta / (mu + theta)
-        return nbinom_dist.rvs(n=theta, p=p_nb, random_state=rng).astype(float)
+        n_param = weights * theta if prior else theta
+        draws = nbinom_dist.rvs(n=n_param, p=p_nb, random_state=rng).astype(float)
+        return draws / weights if prior else draws
 
     if isinstance(family, Tweedie):
         from superglm.profiling.tweedie import generate_tweedie_cpg
 
-        weights = np.asarray(sample_weight, dtype=np.float64)
-        return generate_tweedie_cpg(len(mu), mu, phi / weights, family.p, rng=rng)
+        row_phi = phi / weights if prior else np.full_like(weights, phi)
+        return generate_tweedie_cpg(len(mu), mu, row_phi, family.p, rng=rng)
 
     if isinstance(family, Binomial):
+        # Contract-invariant, matching `_quantile_residuals`: the prior
+        # likelihood's two reachable masses at y in {0, 1} do not sum to one
+        # for w != 1, so no {0,1}-supported marginal reproduces it and no
+        # uniform PIT of it exists. Drawing Bernoulli(mu) keeps the envelope a
+        # valid reference band; see the note in `_quantile_residuals`.
         return rng.binomial(n=1, p=mu).astype(float)
 
     return None
@@ -226,19 +275,39 @@ def _diagnostic_rows(
     qresid,
     seed,
     rng,
+    *,
+    weight_semantics: str,
 ):
-    """Return row-level plot arrays honoring frequency-weight replication."""
-    from superglm.distributions import Tweedie
+    """Return row-level plot arrays honoring frequency-weight replication.
 
-    if isinstance(model._distribution, Tweedie):
-        return y, mu, eta, weights, qresid
+    Replication is what the *frequency* contract means, so it is the contract
+    and not the family that decides whether these rows expand.  Under the prior
+    contract there is no literal row array to expand into -- the weight lives
+    in each row's own marginal, which the quantile residual already carries --
+    and rebuilding metrics at unit weight would discard exactly the term that
+    distinguishes the two readings.
+    """
     if np.all(weights == 1.0):
         return y, mu, eta, weights, qresid
 
     positive = weights > 0.0
+    if weight_semantics == PRIOR_WEIGHTS:
+        # A zero prior weight is a row that was not observed; it leaves the
+        # plot the same way it leaves the likelihood. Everything else stays as
+        # it was fitted.
+        if np.all(positive):
+            return y, mu, eta, weights, qresid
+        return (
+            y[positive],
+            mu[positive],
+            eta[positive],
+            weights[positive],
+            qresid[positive],
+        )
+
     rounded = np.rint(weights)
     if not np.array_equal(weights, rounded):
-        # Fractional frequency weights have no literal row array. Keep their
+        # Fractional replication weights have no literal row array. Keep their
         # weighted calibration representation while dropping zero-mass rows.
         return (
             y[positive],
@@ -420,8 +489,8 @@ def plot_diagnostics(
     1. **Q-Q with simulation envelope** — observed quantile residuals vs
        simulated reference, with 95% pointwise envelope.
     2. **Calibration** — observed vs predicted values in equal-weight bins.
-       Integer non-Tweedie frequency weights are represented as replicated
-       rows; Tweedie bins use their EDM prior weights.
+       Integer replication weights are represented as replicated rows; prior
+       weights are used as mass.
     3. **Residuals vs Linear Predictor** — quantile residuals vs eta.
     4. **Residual distribution** — histogram with N(0,1) overlay.
 
@@ -434,12 +503,13 @@ def plot_diagnostics(
     y : NDArray
         Response vector.
     sample_weight : NDArray or None
-        Optional observation weights. Non-Tweedie families use nonnegative
-        case/frequency weights, with integer values represented as literal row
-        replication in the randomized diagnostics up to 100,000 diagnostic
-        rows; larger frequency populations use a reproducible
-        weight-proportional sample. Tweedie uses finite, strictly positive EDM
-        prior weights and row dispersion ``phi / w``.
+        Optional observation weights, read under the model's declared
+        ``weight_semantics``.  Under ``"frequency"`` integer values are
+        represented as literal row replication in the randomized diagnostics
+        up to 100,000 diagnostic rows; larger populations use a reproducible
+        weight-proportional sample.  Under ``"prior"`` the weight is part of
+        the row's distribution through ``phi / w``, and a Tweedie fit
+        additionally requires it finite and strictly positive.
     offset : NDArray or None
         Optional offset.
     n_sim : int
@@ -478,7 +548,15 @@ def plot_diagnostics(
     y_input = np.asarray(y)
     if y_input.ndim != 1:
         raise ValueError("y must be one-dimensional")
-    diagnostic_weights = _validate_diagnostic_weights(family, sample_weight, len(y_input))
+    # Resolved once, and handed to every helper that has to agree with the
+    # likelihood the residuals were built under.
+    weight_semantics = model_weight_semantics(model)
+    diagnostic_weights = _validate_diagnostic_weights(
+        family,
+        sample_weight,
+        len(y_input),
+        weight_semantics=weight_semantics,
+    )
 
     # Build metrics object
     metrics_weights = None if sample_weight is None else diagnostic_weights
@@ -499,6 +577,7 @@ def plot_diagnostics(
         qresid,
         seed,
         rng,
+        weight_semantics=weight_semantics,
     )
     n = len(y_arr)
 
@@ -522,6 +601,7 @@ def plot_diagnostics(
         n_sim,
         seed,
         rng,
+        weight_semantics=weight_semantics,
     )
 
     # ── Panel 2: Calibration plot (family-weight aware) ─────────
@@ -554,9 +634,9 @@ def plot_diagnostics(
 
     phi = m.phi
     resid_df = pearson_residual_degrees_of_freedom(
-        family,
         original_weights,
         m.effective_df,
+        weight_semantics=m._weight_semantics,
     )
     chi2_ratio = m.pearson_chi2 / resid_df
     ax4.set_title(f"Residual Distribution (φ={phi:.3g}, χ²/df={chi2_ratio:.2f})")
@@ -565,7 +645,7 @@ def plot_diagnostics(
     return fig
 
 
-def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng):
+def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng, *, weight_semantics):
     """Panel 1: Q-Q plot with simulation envelope."""
     family = model._distribution
     phi = m.phi
@@ -607,7 +687,14 @@ def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng):
         sim_sorted = np.empty((sim_n, n_grid))
         for i in range(sim_n):
             sim_rng = np.random.default_rng(seed + i + 1)
-            y_sim = _simulate_response(family, sim_mu, phi, sim_w, sim_rng)
+            y_sim = _simulate_response(
+                family,
+                sim_mu,
+                phi,
+                sim_w,
+                sim_rng,
+                weight_semantics=weight_semantics,
+            )
             if y_sim is None:
                 break
             # Compute quantile residuals for simulated data

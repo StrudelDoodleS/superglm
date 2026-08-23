@@ -1,9 +1,10 @@
 # Inspecting Results
 
-The examples on this page assume the Poisson rate workflow, where `exposure`
-is a case/frequency weight. Weight semantics differ by family; see
+The examples on this page assume the Poisson rate workflow with
+`weight_semantics="frequency"`, where `exposure` is a replication weight. The
+contract is declared per model and the default is `"prior"`; see
 [Families & Dispersion](families.md#weight-semantics) before carrying this
-spelling into Gaussian, Gamma, or Tweedie diagnostics.
+spelling into another fit.
 
 ## Summary table
 
@@ -28,23 +29,23 @@ print(m.summary(level_display="grouped"))
 
 ## Diagnostic weight semantics
 
-Quantile residuals and diagnostic simulations follow the same family-specific
+Quantile residuals and diagnostic simulations follow the same declared
 contract as fitting:
 
-- for non-Tweedie case/frequency weights, the row's response distribution is
+- under `weight_semantics="frequency"`, the row's response distribution is
   unchanged by its weight; the weight represents repeated likelihood
   contribution rather than smaller row variance
-- for Tweedie EDM prior weights, row \(i\) has observation-specific dispersion
+- under `"prior"`, row \(i\) has observation-specific dispersion
   \(\phi / w_i\), which is used by both its CDF residual and simulation
 
 For exact discrete Poisson quantile residuals, diagnose raw claim counts with
 `log(exposure)` as an offset. A fractional rate response with exposure as a
-frequency weight is useful for fitting, but the case/frequency API cannot
+frequency weight is useful for fitting, but the replication API cannot
 reconstruct that row's count distribution from `sample_weight`.
 
-The diagnostic Pearson denominator follows the same split:
-`sum(sample_weight) - edf` for non-Tweedie families and `n - edf` for
-Tweedie.
+The diagnostic Pearson denominator follows the same declaration:
+`sum(sample_weight) - edf` under `"frequency"` and the positive-weight row
+count minus `edf` under `"prior"`.
 
 ```python
 fig = model.plot_diagnostics(df, y, sample_weight=exposure)

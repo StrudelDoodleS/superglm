@@ -348,6 +348,7 @@ def test_authoritative_sz_override_uses_global_tiny_weight_rank() -> None:
         direct_solve="auto",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
     gram, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -361,6 +362,7 @@ def test_authoritative_sz_override_uses_global_tiny_weight_rank() -> None:
         direct_solve="gram",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
 
     assert automatic.direct_backend == "gram"
@@ -379,6 +381,7 @@ def test_authoritative_sz_override_uses_global_tiny_weight_rank() -> None:
             direct_solve="structured",
             S_override=override,
             tol=1.0e-10,
+            weight_semantics="frequency",
         )
 
 
@@ -462,6 +465,7 @@ def test_authoritative_factor_smooth_override_supersedes_stale_zero_lambdas(
         direct_solve="auto",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
     gram, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -475,6 +479,7 @@ def test_authoritative_factor_smooth_override_supersedes_stale_zero_lambdas(
         direct_solve="gram",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
 
     assert automatic.direct_backend == "structured"
@@ -511,6 +516,7 @@ def test_authoritative_singular_factor_smooth_override_falls_back_to_gram() -> N
         direct_solve="auto",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
     gram, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -524,6 +530,7 @@ def test_authoritative_singular_factor_smooth_override_falls_back_to_gram() -> N
         direct_solve="gram",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
 
     assert automatic.direct_backend == "gram"
@@ -545,6 +552,7 @@ def test_authoritative_singular_factor_smooth_override_falls_back_to_gram() -> N
             direct_solve="structured",
             S_override=override,
             tol=1.0e-10,
+            weight_semantics="frequency",
         )
 
 
@@ -593,6 +601,7 @@ def test_sz_locally_singular_but_globally_identifiable_remains_structured() -> N
         direct_solve="auto",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
     gram, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -606,6 +615,7 @@ def test_sz_locally_singular_but_globally_identifiable_remains_structured() -> N
         direct_solve="gram",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
 
     assert automatic.direct_backend == "structured"
@@ -647,6 +657,7 @@ def test_authoritative_factor_smooth_override_roundoff_asymmetry_matches_gram(
         direct_solve="auto",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
     gram, _ = irls_direct.fit_irls_direct(
         X=dm,
@@ -660,6 +671,7 @@ def test_authoritative_factor_smooth_override_roundoff_asymmetry_matches_gram(
         direct_solve="gram",
         S_override=override,
         tol=1.0e-10,
+        weight_semantics="frequency",
     )
 
     assert automatic.direct_backend == "structured"
@@ -695,6 +707,7 @@ def test_forced_factor_smooth_structured_irls_matches_dense(
         return_xtwx=True,
         direct_solve="gram",
         reml_penalties=penalties,
+        weight_semantics="frequency",
     )
     structured = irls_direct.fit_irls_direct(
         X=dm,
@@ -710,6 +723,7 @@ def test_forced_factor_smooth_structured_irls_matches_dense(
         return_xtwx=True,
         direct_solve="structured",
         reml_penalties=penalties,
+        weight_semantics="frequency",
     )
     dense_result, dense_inverse, dense_data = dense
     result, factor, data_operator = structured
@@ -761,6 +775,7 @@ def test_factor_smooth_fixed_weight_reml_derivatives_match_dense() -> None:
         direct_solve="gram",
         reml_penalties=penalties,
         tol=1e-10,
+        weight_semantics="frequency",
     )
     result, factor = irls_direct.fit_irls_direct(
         X=dm,
@@ -774,6 +789,7 @@ def test_factor_smooth_fixed_weight_reml_derivatives_match_dense() -> None:
         direct_solve="structured",
         reml_penalties=penalties,
         tol=1e-10,
+        weight_semantics="frequency",
     )
 
     dense_gradient = reml_direct_gradient(
@@ -825,6 +841,7 @@ def test_factor_smooth_w_derivatives_match_dense() -> None:
         direct_solve="gram",
         reml_penalties=penalties,
         tol=1e-10,
+        weight_semantics="frequency",
     )
     result, factor = irls_direct.fit_irls_direct(
         X=dm,
@@ -838,6 +855,7 @@ def test_factor_smooth_w_derivatives_match_dense() -> None:
         direct_solve="structured",
         reml_penalties=penalties,
         tol=1e-10,
+        weight_semantics="frequency",
     )
     dense_correction = reml_w_correction(
         dm,
@@ -911,6 +929,7 @@ def test_all_factor_smooth_lambda_derivatives_match_finite_differences() -> None
             reml_penalties=penalties,
             return_xtwx=True,
             tol=1e-11,
+            weight_semantics="frequency",
         )
         objective = reml_laml_objective(
             dm,
@@ -927,6 +946,7 @@ def test_all_factor_smooth_lambda_derivatives_match_finite_differences() -> None
             hessian_rank=result.reml_hessian_rank,
             reml_penalties=penalties,
             return_evaluation=True,
+            weight_semantics="frequency",
         )
         assert isinstance(objective, REMLObjectiveEvaluation)
         if not derivatives:
@@ -1302,6 +1322,7 @@ def test_reml_latches_runtime_sz_fallback_after_bootstrap(
         direct_solve="auto",
         reml_penalties=penalties,
         pirls_tol=1.0e-9,
+        weight_semantics="frequency",
     )
 
     assert direct_modes[:2] == ["auto", "auto"]

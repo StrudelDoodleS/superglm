@@ -12,6 +12,7 @@ import numpy as np
 from superglm.distributions import NegativeBinomial, Tweedie
 from superglm.profiling._reporting import cached_tweedie_profile_ci
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
+from superglm.solvers.dispersion import model_weight_semantics
 
 logger = logging.getLogger(__name__)
 
@@ -530,7 +531,14 @@ def _synchronize_tweedie_profile_refit(
         _reprofile_published_dispersion(
             model, y_arr, weights, published_mu, profile_result, phi_method
         )
-    null_mu = _compute_null_mu(y_arr, weights, offset_arr, distribution, model._link)
+    null_mu = _compute_null_mu(
+        y_arr,
+        weights,
+        offset_arr,
+        distribution,
+        model._link,
+        weight_semantics=model_weight_semantics(model),
+    )
     # One published fit, one mean: the summary statistics describe the same
     # mean the published dispersion was profiled at. Splitting them would
     # publish a hybrid -- public-mean phi inside binned-mean likelihood,
@@ -544,6 +552,7 @@ def _synchronize_tweedie_profile_refit(
         model._link,
         profile_result.phi_hat,
         null_mu=null_mu,
+        weight_semantics=model_weight_semantics(model),
     )
 
     replacement_public = _replace_pirls_phi(public_result, profile_result.phi_hat)

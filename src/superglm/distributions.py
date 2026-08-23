@@ -416,3 +416,176 @@ def clip_mu(mu: NDArray, family: Distribution) -> NDArray:
     if isinstance(family, Gaussian):
         return mu
     return np.clip(mu, _POSITIVE_MU_MIN, _POSITIVE_MU_MAX)
+
+
+def prior_weight_log_density(
+    family: Distribution,
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    phi: float,
+) -> NDArray | None:
+    """Return the per-row EDM prior-weight log density, or None for a custom family.
+
+    Each shipped family is closed under the EDM prior-weight construction --
+    ``w Y`` is a member of the same family at parameters scaled by ``w`` -- so
+    every form below is exact rather than a quasi-likelihood, and each reduces
+    to the family's own ``log_likelihood`` at ``w == 1``.  A zero-weight row
+    contributes exactly zero: it carries no information, and several of the
+    forms below are not finite at ``w = 0`` because their normalizer sits at a
+    gamma-function pole.
+
+    "Exact" is unqualified for Gaussian, Gamma and Tweedie, whose supports are
+    continuous, and for Binomial, where ``validate_response`` pins
+    ``y in {0, 1}`` and the scaled coefficient is then exactly 1.  For Poisson
+    and the negative binomial it holds **on the family's lattice**, where
+    ``w * y`` is a non-negative integer -- which is the canonical case here,
+    ``y = count / exposure`` with ``w = exposure``.  Off the lattice
+    ``validate_response`` requires only ``y >= 0``, and the ``gammaln`` factor
+    is then a Gamma-function interpolation of the counting density rather than
+    a density.  For Poisson the interpolated part depends only on ``(y, w)``,
+    so it moves the reported log-likelihood, AIC and BIC and nothing else; for
+    the negative binomial the ``Gamma(w y + w theta) / Gamma(w theta)`` factor
+    is theta-dependent, so it reaches ``theta_hat`` too.
+
+    The mean-dependent part is *identical* to the frequency form in every case:
+    prior weighting scales the same sufficient statistic, which is why the two
+    contracts share a score equation and a ``beta_hat``.  What differs is the
+    normalizer, and -- for the estimated-scale families -- how ``phi`` enters
+    it.  That is the whole of the reported log-likelihood's dependence on the
+    contract, and hence of AIC's and BIC's.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    if isinstance(family, Gaussian):
+        # N(mu, phi / w): the residual arm w r^2 / (2 phi) is already the
+        # frequency arm, and only the per-row normalizer moves.
+        phi_safe = max(phi, 1e-300)
+        with np.errstate(divide="ignore"):
+            log_w = np.where(w > 0.0, np.log(np.maximum(w, 1e-300)), 0.0)
+        contribution = (
+            0.5 * log_w - 0.5 * np.log(2 * np.pi * phi_safe) - w * (y - mu) ** 2 / (2 * phi_safe)
+        )
+        return np.where(w > 0.0, contribution, 0.0)
+    if isinstance(family, Gamma):
+        # Shape w/phi, scale mu phi/w. The shape enters lgamma per row, so
+        # this is genuinely a row scan rather than sum(w) times a scalar.
+        shape = w / max(phi, 1e-300)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            contribution = (
+                shape * np.log(shape * y / mu) - shape * y / mu - np.log(y) - gammaln(shape)
+            )
+        return np.where(w > 0.0, contribution, 0.0)
+    if isinstance(family, Poisson):
+        # w Y ~ Poisson(w mu) on the lattice w^-1 Z.
+        wy = w * y
+        with np.errstate(divide="ignore", invalid="ignore"):
+            contribution = (
+                wy * np.log(np.maximum(mu, 1e-300))
+                + wy * np.log(np.maximum(w, 1e-300))
+                - w * mu
+                - gammaln(wy + 1.0)
+            )
+        return np.where(w > 0.0, contribution, 0.0)
+    if isinstance(family, NegativeBinomial):
+        # w Y ~ NB2(w mu, w theta): the negative binomial is infinitely
+        # divisible, so this extends to fractional w.
+        # ``theta`` is declared ``float | str`` because the family accepts
+        # "auto"; by the time a likelihood is evaluated the profile has
+        # resolved it to a number.
+        theta = float(family.theta)
+        wy = w * y
+        w_theta = w * theta
+        with np.errstate(invalid="ignore"):
+            # A zero-weight row sends both gamma arguments to their pole, so
+            # the difference is nan before the mask discards it.
+            contribution = (
+                gammaln(wy + w_theta)
+                - gammaln(w_theta)
+                - gammaln(wy + 1.0)
+                + w_theta * np.log(theta / (mu + theta))
+                + wy * np.log(mu / (mu + theta))
+            )
+        return np.where(w > 0.0, contribution, 0.0)
+    if isinstance(family, Binomial):
+        # w is the trial count and y the success proportion, which is R's
+        # documented binomial convention.  On this family's own domain
+        # y in {0, 1} the binomial coefficient is exactly 1, so the prior and
+        # frequency forms coincide; the general expression is kept because it
+        # is what makes that agreement a derivation rather than a coincidence.
+        mu_safe = np.clip(mu, 1e-15, 1 - 1e-15)
+        wy = w * y
+        contribution = (
+            gammaln(w + 1.0)
+            - gammaln(wy + 1.0)
+            - gammaln(w - wy + 1.0)
+            + wy * np.log(mu_safe)
+            + (w - wy) * np.log(1 - mu_safe)
+        )
+        return np.where(w > 0.0, contribution, 0.0)
+    if isinstance(family, Tweedie):
+        # Already the prior form: the compound-Poisson density evaluator takes
+        # the weight into its own normalizer.
+        from superglm.profiling.tweedie import tweedie_logpdf
+
+        return np.asarray(tweedie_logpdf(y, mu, phi, family.p, weights=w), dtype=np.float64)
+    return None
+
+
+def _frequency_weight_log_likelihood(
+    family: Distribution,
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    phi: float,
+) -> float:
+    """Return ``sum(w_i * log f(y_i; mu_i, phi))``."""
+    if isinstance(family, Tweedie):
+        # The family's own method applies w as a prior weight, so the
+        # replication form has to be assembled from unit-weight rows.
+        from superglm.profiling.tweedie import tweedie_logpdf
+
+        w = np.asarray(weights, dtype=np.float64)
+        unit = np.ones_like(w)
+        logpdf = tweedie_logpdf(y, mu, phi, family.p, weights=unit)
+        return float(np.sum(w * logpdf))
+    return float(family.log_likelihood(y, mu, weights, phi))
+
+
+def weighted_log_likelihood(
+    family: Distribution,
+    y: NDArray,
+    mu: NDArray,
+    weights: NDArray,
+    phi: float = 1.0,
+    *,
+    weight_semantics: str,
+) -> float:
+    """Return the log-likelihood the declared weight contract defines.
+
+    A custom distribution that SuperGLM does not ship owns its own weight
+    contract, because only it knows its normalizer; its ``log_likelihood`` is
+    used as written and a mismatch with a declared ``"prior"`` contract is
+    reported rather than silently substituted.
+    """
+    if weight_semantics == "frequency":
+        return _frequency_weight_log_likelihood(family, y, mu, weights, phi)
+    if weight_semantics != "prior":
+        raise ValueError(
+            f"weight_semantics must be 'prior' or 'frequency', got {weight_semantics!r}",
+        )
+    density = prior_weight_log_density(family, y, mu, weights, phi)
+    if density is not None:
+        return float(np.sum(density, dtype=np.float64))
+    import warnings
+
+    warnings.warn(
+        f"{type(family).__name__} is not a SuperGLM-shipped family, so its EDM "
+        "prior-weight normalizer cannot be derived here. Its own log_likelihood "
+        "is being used unchanged, which reports sum(w * log f(y; mu, phi)) -- "
+        "the frequency form -- while the rest of the fit follows "
+        "weight_semantics='prior'. Implement the prior-weight normalizer on the "
+        "family, or fit with weight_semantics='frequency'.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return float(family.log_likelihood(y, mu, weights, phi))

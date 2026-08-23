@@ -70,7 +70,7 @@ class TestNBThetaProfileCI:
         y = rng.negative_binomial(theta, p_nb).astype(float)
         weights = np.ones(n)
 
-        ci_lo, ci_hi = profile_ci_theta(y, mu, weights, theta)
+        ci_lo, ci_hi = profile_ci_theta(y, mu, weights, theta, weight_semantics="frequency")
         assert ci_lo < theta < ci_hi
 
     def test_narrower_alpha_gives_wider_ci(self):

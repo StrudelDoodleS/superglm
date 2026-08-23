@@ -71,6 +71,7 @@ def test_selection_only_fit_skips_dense_smooth_penalty_assembly(
         groups,
         GroupLasso(lambda1=0.1),
         lambda2=lambda2,
+        weight_semantics="frequency",
     )
 
     assert result.converged
@@ -90,6 +91,7 @@ def test_correlated_ridge_matches_exact_gaussian_oracle() -> None:
         groups,
         Ridge(lambda1=lam),
         tol=1e-8,
+        weight_semantics="frequency",
     )
 
     expected = np.linalg.solve(X.T @ X + lam * np.eye(X.shape[1]), X.T @ y)
@@ -134,6 +136,7 @@ def test_penalty_subclass_uses_its_authoritative_custom_prox() -> None:
         groups,
         penalty,
         tol=1e-8,
+        weight_semantics="frequency",
     )
 
     expected = np.linalg.solve(X.T @ X, X.T @ y)
@@ -163,6 +166,7 @@ def test_correlated_group_lasso_default_convergence_satisfies_kkt() -> None:
         groups,
         penalty,
         tol=1e-8,
+        weight_semantics="frequency",
     )
 
     residual = y - result.intercept - X @ result.beta
@@ -202,6 +206,7 @@ def test_correlated_group_elastic_net_satisfies_composite_kkt() -> None:
         groups,
         penalty,
         tol=1e-8,
+        weight_semantics="frequency",
     )
 
     residual = y - result.intercept - X @ result.beta
@@ -243,6 +248,7 @@ def test_ridge_with_dense_s_override_matches_exact_oracle() -> None:
         Ridge(lambda1=lam),
         S_override=S,
         tol=1e-8,
+        weight_semantics="frequency",
     )
 
     expected = np.linalg.solve(X.T @ X + S + lam * np.eye(X.shape[1]), X.T @ y)
@@ -273,6 +279,7 @@ def test_group_lasso_with_dense_s_override_satisfies_composite_kkt() -> None:
         GroupLasso(lambda1=lam),
         S_override=S,
         tol=1e-8,
+        weight_semantics="frequency",
     )
 
     residual = y - result.intercept - X @ result.beta

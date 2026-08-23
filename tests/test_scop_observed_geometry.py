@@ -429,6 +429,7 @@ def test_noncanonical_log_scop_fit_installs_observed_geometry(family_name):
         return_xtwx=True,
         return_scop_state=True,
         cache_out=cache,
+        weight_semantics="prior",
     )
 
     assert result.converged
@@ -675,6 +676,7 @@ def test_gamma_log_model_geometry_matches_dense_latent_oracle():
         offset=offset_arr,
         return_xtwx=True,
         return_scop_state=True,
+        weight_semantics="frequency",
     )
     penalties = build_scop_penalty_components(states)
     penalty = build_penalty_matrix(

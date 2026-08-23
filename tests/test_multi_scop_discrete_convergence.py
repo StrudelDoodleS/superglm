@@ -179,6 +179,7 @@ def test_empty_cleanup_path_uses_legacy_plateau_convergence(monkeypatch):
         estimated_names={"term"},
         max_reml_iter=5,
         reml_penalties=penalties,
+        weight_semantics="frequency",
     )
 
     assert result.converged

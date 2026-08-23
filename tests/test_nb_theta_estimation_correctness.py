@@ -96,7 +96,7 @@ class TestThetaWrongRootAndClamp:
         y = data["y"].to_numpy(dtype=np.float64)
         weights = np.ones(len(y))
         mu = np.full(len(y), y.mean())
-        solve = _theta_ml(y, mu, weights, 1.0)
+        solve = _theta_ml(y, mu, weights, 1.0, weight_semantics="frequency")
         theta = float(getattr(solve, "theta", solve))
         assert theta < 0.2
         assert bool(getattr(solve, "converged", False))
@@ -154,7 +154,9 @@ class TestLargeThetaScoreStability:
 
         y, mu, weights = self._poisson_rows()
         scaled = {
-            theta: theta * theta * _theta_profile_score(y, mu, weights, theta)
+            theta: theta
+            * theta
+            * _theta_profile_score(y, mu, weights, theta, weight_semantics="frequency")
             for theta in (1e6, 1e7, 1e8)
         }
         for theta, value in scaled.items():
@@ -192,7 +194,9 @@ class TestLargeThetaScoreStability:
         original = nb_module._THETA_SCORE_ASYMPTOTIC_MIN
         try:
             nb_module._THETA_SCORE_ASYMPTOTIC_MIN = 1.0
-            expansion = nb_module._theta_profile_score(y, mu, weights, theta)
+            expansion = nb_module._theta_profile_score(
+                y, mu, weights, theta, weight_semantics="frequency"
+            )
         finally:
             nb_module._THETA_SCORE_ASYMPTOTIC_MIN = original
         assert expansion == pytest.approx(naive(theta), rel=1e-6)
@@ -202,7 +206,7 @@ class TestLargeThetaScoreStability:
         from superglm.profiling.nb import _theta_ml
 
         y, mu, weights = self._poisson_rows()
-        solve = _theta_ml(y, mu, weights, 1.0)
+        solve = _theta_ml(y, mu, weights, 1.0, weight_semantics="frequency")
         assert solve.at_upper
         assert not solve.converged
 
@@ -322,16 +326,20 @@ class TestSmallThetaSurvivability:
         from superglm.profiling.nb import _nb2_nll, _theta_ml, profile_ci_theta
 
         y, mu, weights = self._tiny_theta_rows()
-        solve = _theta_ml(y, mu, weights, 1.0)
+        solve = _theta_ml(y, mu, weights, 1.0, weight_semantics="frequency")
         assert solve.converged and solve.theta < 1e-4
         theta_hat = solve.theta
-        ci_lo, ci_hi = profile_ci_theta(y, mu, weights, theta_hat)
+        ci_lo, ci_hi = profile_ci_theta(y, mu, weights, theta_hat, weight_semantics="frequency")
         assert 0.0 < ci_lo < theta_hat < ci_hi
         w_sum = float(np.sum(weights))
-        nll_hat = _nb2_nll(y, mu, weights, theta_hat)
+        nll_hat = _nb2_nll(y, mu, weights, theta_hat, weight_semantics="frequency")
         cutoff = float(chi2.ppf(0.95, 1))
         for endpoint in (ci_lo, ci_hi):
-            lrt = 2.0 * w_sum * (_nb2_nll(y, mu, weights, endpoint) - nll_hat)
+            lrt = (
+                2.0
+                * w_sum
+                * (_nb2_nll(y, mu, weights, endpoint, weight_semantics="frequency") - nll_hat)
+            )
             assert lrt == pytest.approx(cutoff, rel=0.02), (
                 f"endpoint {endpoint:g} is not on the LRT crossing: {lrt:.4f}"
             )

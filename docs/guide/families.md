@@ -65,39 +65,80 @@ Scale is known (phi = 1) for binomial, so no dispersion estimation is needed.
 
 ## Weight semantics
 
-`sample_weight` has an explicit family-specific contract:
+What `sample_weight` says about a row is a **declared modelling choice**, not a
+consequence of the family. Set it with `weight_semantics`:
 
-- Poisson, negative binomial, binomial, Gaussian, and Gamma use
-  **case/frequency weights**. Once feature geometry is fixed, integer weights
-  are likelihood-equivalent to repeating the corresponding rows. For Gaussian
-  and Gamma, Pearson dispersion therefore uses
-  `sum(sample_weight) - edf`.
-- Tweedie uses strictly positive **EDM prior weights**:
-  `Var(Y_i | x_i) = phi * mu_i**p / w_i`. Its weights are not replication
-  counts, and dispersion uses the observation count rather than the weight
-  sum.
+```python
+features = {"vehicle_age": Spline(n_knots=8), "region": Categorical()}
 
-These contracts are not interchangeable. In particular, a Gamma response
-containing an average severity with claim count as `sample_weight` is often
-intended as a prior-weight model with
-`Var(Y_i | x_i) = phi * V(mu_i) / w_i` and residual degrees of freedom
-`n - edf`. SuperGLM's Gamma fit does not implement that contract: it interprets
-the count as a frequency weight and uses `sum(w) - edf`. For calibrated Gamma
-dispersion and Wald inference, retain the individual claim-severity rows (and
-their ordinary case weights), or use a model with an explicit prior-weight
-likelihood. Do not pass claim counts beside aggregated average severities and
-interpret the resulting inference as prior-weight inference.
+# The default: sample_weight is a precision, e.g. exposure beside an average.
+model = SuperGLM(family="gamma", features=features, weight_semantics="prior")
+
+# The alternative: sample_weight counts identical rows.
+model = SuperGLM(family="gamma", features=features, weight_semantics="frequency")
+```
+
+- **`"prior"` (default)** — an EDM prior weight, a statement of *precision*:
+  `Var(Y_i | x_i) = phi * V(mu_i) / w_i`, contributing
+  `log f(y_i; mu_i, phi / w_i)`. This is what you have when the response is an
+  average: `incurred / exposure` weighted by exposure, or an average severity
+  weighted by claim count. It is what R's `glm` and glum give their single
+  weight argument, and what statsmodels calls `var_weights` and Stata calls
+  `aweight`.
+- **`"frequency"`** — a replication count, contributing
+  `w_i * log f(y_i; mu_i, phi)`. Row `i` stands in for `w_i` identical rows, so
+  an integer weight is exactly equivalent to repeating it. This is
+  statsmodels' `freq_weights`, Stata's `fweight`, and SAS `GENMOD`'s `FREQ`.
+
+The two agree only at `w == 1`. Integer weights do **not** make them coincide:
+at `w == 2` the likelihood size is `n` under `"prior"` and `2n` under
+`"frequency"`, so the residual degrees of freedom, `phi`, every Wald standard
+error and BIC all differ. At fractional weights only the prior reading is a
+likelihood at all: a row cannot be replicated 0.4 times, and the
+frequency reading's `sum(w) - edf` residual degrees of freedom stop counting
+anything. Exposure is continuous, which is why `"prior"` is the default.
+
+### What the choice moves
+
+Both contracts give the same score equations, so **`beta` and the deviance are
+unchanged**. What moves is everything downstream of the likelihood's size:
+
+| quantity | `"prior"` | `"frequency"` |
+|---|---|---|
+| likelihood size | rows carrying positive weight | `sum(sample_weight)` |
+| residual d.f. | `n_positive - edf` | `sum(w) - edf` |
+| `phi`, Wald SEs and intervals | from that d.f. | from that d.f. |
+| effective `n` in AIC/BIC | same size | same size |
+| REML criterion → `lambda` → `edf` | prior-weight saturated likelihood | replicated saturated likelihood |
+| learned spline knots and bins | physical rows | weight mass |
+
+Unweighted fits and fits with `w == 1` are identical under both.
+
+A zero weight is admissible under either contract and means the row leaves the
+likelihood: under `"frequency"` it drops out of `sum(w)` on its own, and under
+`"prior"` it is excluded from the row count, matching R's rule that
+"observations with zero weight [are] not used for calculating dispersion". The
+one exception is a Tweedie fit under `"prior"`, which requires strictly positive
+weights — its compound-Poisson normalizer carries `log w`, so `w = 0` is an
+unevaluable density rather than an uninformative row.
+
+### Replication parity
 
 The frequency-weight replication statement is conditional on an identical
-constructed design. Main-effect non-Tweedie spline boundaries and the
-`quantile_rows` and `quantile_tempered` knot strategies use frequency mass and
-ignore zero-weight rows, matching integer row expansion and omission without
-materializing copies. Tweedie prior weights intentionally leave spline
-geometry determined by physical rows. Some tensor-interaction marginal
-centering, interaction-local spline geometry, and categorical/ordered/factor
-feature geometry can still depend on the physical row layout. Use fixed or
-preconstructed feature geometry when exact end-to-end replication parity
-matters.
+constructed design. Main-effect spline boundaries and the `quantile_rows` and
+`quantile_tempered` knot strategies use frequency mass and ignore zero-weight
+rows, matching integer row expansion and omission without materializing copies.
+Prior weights intentionally leave spline geometry determined by physical rows.
+Some tensor-interaction marginal centering, interaction-local spline geometry,
+and categorical/ordered/factor feature geometry can still depend on the physical
+row layout. Use fixed or preconstructed feature geometry when exact end-to-end
+replication parity matters.
+
+One limitation is declared rather than silent: `estimate_p` profiles the
+Tweedie power against the prior-weight likelihood, so it refuses
+`weight_semantics="frequency"` with non-unit weights rather than answer under
+the wrong one. Expand the rows the counts stand for, or profile under
+`"prior"`.
 
 `sample_weight` never enters the linear predictor; use an offset when exposure
 should scale the conditional mean.

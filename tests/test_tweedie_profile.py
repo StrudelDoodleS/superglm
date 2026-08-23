@@ -4430,6 +4430,7 @@ class TestImmutableProfileEvaluations:
             ll_scale=float(len(y)),
             trace_callback=self._mutating_callback(callback_rows),
             trace_iterations=True,
+            weight_semantics="prior",
         )
         for p in (1.2, 1.5, 1.8):
             ctx.evaluate(p, source="grid")
@@ -4577,6 +4578,7 @@ class TestImmutableProfileEvaluations:
             verbose=False,
             ll_scale=float(len(y)),
             trace_callback=callbacks.append,
+            weight_semantics="prior",
         )
 
         assert ctx.evaluate(first, source="near_first") == pytest.approx(1.01)
@@ -5175,6 +5177,7 @@ def _fake_search_context(objective):
         phi_method="mle",
         verbose=False,
         ll_scale=1.0,
+        weight_semantics="prior",
     )
 
     def evaluate(p, source=""):

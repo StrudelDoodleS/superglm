@@ -57,6 +57,7 @@ from superglm.reml.observed_geometry import (
     _NO_MODE_REASON,
     ObservedModeNotCertifiedError,
 )
+from superglm.solvers.dispersion import FREQUENCY_WEIGHTS, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
 
@@ -3913,6 +3914,7 @@ class _ProfileContext:
     lambda2: Any
     direct_solve: str
     phi_method: str
+    weight_semantics: str
     verbose: bool
     ll_scale: float
     max_iter: int = 100
@@ -3969,6 +3971,7 @@ class _ProfileContext:
                 tol=self.tol,
                 record_diagnostics=self.trace_iterations,
                 convergence=self.convergence,
+                weight_semantics=self.weight_semantics,
             )
         else:
             result = fit_pirls(
@@ -3988,6 +3991,7 @@ class _ProfileContext:
                 lambda2=self.lambda2,
                 record_diagnostics=self.trace_iterations,
                 convergence=self.convergence,
+                weight_semantics=self.weight_semantics,
             )
 
         eta = stabilize_eta(
@@ -4298,6 +4302,7 @@ def _build_profile_context(
         active_set=profile_model._active_set,
         convergence=profile_model._convergence,
         phi_method=phi_method,
+        weight_semantics=model_weight_semantics(model),
         verbose=verbose,
         ll_scale=float(len(y_arr)),
         trace_callback=trace_callback,
@@ -5581,6 +5586,34 @@ def estimate_tweedie_p(
     X = as_eager_frame(X)
     y_arr = np.asarray(y)
     if sample_weight is not None:
+        from superglm.model.input_validation import _finite_vector
+
+        # Shape and finiteness are required under both readings, so they are
+        # checked first and identically.  The contract refusal then comes
+        # BEFORE strict positivity, because a frequency Tweedie may legally
+        # carry a zero weight -- the normalizer only sees ``log w`` under the
+        # prior contract -- and it deserves the message that names the real
+        # obstacle rather than a positivity error about a rule that does not
+        # apply to it.
+        checked_weights = _finite_vector("sample_weight", sample_weight, len(y_arr))
+        # The power profile evaluates the compound-Poisson density with the
+        # weight inside its normalizer, which is the prior contract and only
+        # that one.  The replication contract would need the unit-weight
+        # density counted w times, through the phi cache, its analytic score
+        # and the exact-Newton polish -- a different objective, not a rescaled
+        # one.  It is refused rather than silently answered under the wrong
+        # likelihood.  Unit weights are admitted because the two contracts
+        # coincide there.
+        if model_weight_semantics(model) == FREQUENCY_WEIGHTS and not np.all(
+            checked_weights == 1.0
+        ):
+            raise ValueError(
+                "estimate_p profiles the Tweedie power against the EDM "
+                "prior-weight likelihood, so it cannot honour "
+                'weight_semantics="frequency" with non-unit weights. Fit with '
+                'weight_semantics="prior", or expand the rows the replication '
+                "counts stand for and profile with unit weights."
+            )
         sample_weight = _validate_strict_prior_weights(sample_weight, len(y_arr))
 
     # Validate family

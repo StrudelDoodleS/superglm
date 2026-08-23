@@ -12,8 +12,7 @@ Used when lambda1 > 0 (group lasso + REML smoothing).
    module's own phi estimate (here and in the iteration body) deviates from
    the criterion the rest of the codebase optimizes in three ways measured
    by the 2026-08-20 distribution-estimation audit (finding C1): it uses
-   the total penalty **rank** where Wood's M_p is the **nullity**,
-   ``len(y)`` where the frequency-weight contract is ``sum(w)``, and a
+   the total penalty **rank** where Wood's M_p is the **nullity**, and a
    deviance-form estimate where Gamma's Eq.-(4) profile is a digamma root
    (and Tweedie's is the exact saturated-likelihood profile in
    ``reml.scale``). Measured on a frequency-weighted Gamma: phi off 3.2x,
@@ -69,6 +68,7 @@ def optimize_efs_reml(
     penalty_ranks: dict[str, float],
     lambdas: dict[str, float],
     *,
+    weight_semantics: str,
     max_reml_iter: int,
     reml_tol: float,
     verbose: bool,
@@ -105,7 +105,14 @@ def optimize_efs_reml(
     reml_update_names = [
         pc.name for pc in penalties if estimated_names is None or pc.name in estimated_names
     ]
-    n = len(y)
+    # The declared contract's likelihood size, not the physical row count. This
+    # is the denominator of every dispersion update below, and `inv_phi` scales
+    # the quadratic arm of each Fellner-Schall step -- so reading it as `len(y)`
+    # lets an ignored prior-weight row, or a compressed replication count, move
+    # the selected smoothing parameters and the fitted surface.
+    from superglm.solvers.dispersion import dispersion_likelihood_size
+
+    n = dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
 
     # -- Bootstrap: one PIRLS with minimal penalty -> one EFS step --
     # Analogous to direct REML bootstrap (optimize_direct_reml lines 417-467).
@@ -124,6 +131,7 @@ def optimize_efs_reml(
         lambda2=boot_lambdas,
         tol=pirls_tol,
         max_iter_outer=max_pirls_iter,
+        weight_semantics=weight_semantics,
     )
 
     # Compute W and X'WX from bootstrap fit
@@ -222,6 +230,7 @@ def optimize_efs_reml(
                 lambda2=lambdas,
                 tol=pirls_tol,
                 max_iter_outer=max_pirls_iter,
+                weight_semantics=weight_semantics,
             )
             beta = pirls_result.beta
             intercept = pirls_result.intercept
@@ -329,6 +338,7 @@ def optimize_efs_reml(
                 XtWX=cached_xtwx,
                 penalty_caches=penalty_caches,
                 reml_penalties=penalties,
+                weight_semantics=weight_semantics,
             )
             obj_trial = reml_laml_objective(
                 dm,
@@ -343,6 +353,7 @@ def optimize_efs_reml(
                 XtWX=cached_xtwx,
                 penalty_caches=penalty_caches,
                 reml_penalties=penalties,
+                weight_semantics=weight_semantics,
             )
             if obj_trial > obj_curr + 1e-8 * max(abs(obj_curr), 1.0):
                 for pc in penalties:
@@ -419,6 +430,7 @@ def optimize_efs_reml(
         lambda2=lambdas,
         tol=pirls_tol,
         max_iter_outer=max_pirls_iter,
+        weight_semantics=weight_semantics,
     )
 
     reml_result = REMLResult(
@@ -439,6 +451,7 @@ def optimize_efs_reml(
             offset_arr,
             penalty_caches=penalty_caches,
             reml_penalties=penalties,
+            weight_semantics=weight_semantics,
         ),
     )
     return reml_result, dm

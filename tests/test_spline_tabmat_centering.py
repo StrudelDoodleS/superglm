@@ -502,8 +502,10 @@ def test_poisson_fit_matches_stable_spline_kernel_and_reuses_plan() -> None:
         max_iter=50,
     )
 
-    accelerated, _ = fit_irls_direct(X=accelerated_dm, profile=profile, **common)
-    stable, _ = fit_irls_direct(X=stable_dm, **common)
+    accelerated, _ = fit_irls_direct(
+        X=accelerated_dm, profile=profile, **common, weight_semantics="frequency"
+    )
+    stable, _ = fit_irls_direct(X=stable_dm, **common, weight_semantics="frequency")
     accelerated_second, _ = fit_irls_direct(
         X=accelerated_dm,
         profile=profile,
@@ -513,6 +515,7 @@ def test_poisson_fit_matches_stable_spline_kernel_and_reuses_plan() -> None:
             "beta_init": accelerated.beta,
             "intercept_init": accelerated.intercept,
         },
+        weight_semantics="frequency",
     )
     stable_second, _ = fit_irls_direct(
         X=stable_dm,
@@ -522,6 +525,7 @@ def test_poisson_fit_matches_stable_spline_kernel_and_reuses_plan() -> None:
             "beta_init": stable.beta,
             "intercept_init": stable.intercept,
         },
+        weight_semantics="frequency",
     )
 
     assert accelerated.converged is True
@@ -564,6 +568,7 @@ def test_zero_width_non_spline_group_does_not_break_admitted_raw_plan() -> None:
         lambda2=1.0,
         S_override=0.2 * np.eye(30),
         compute_rank_info=False,
+        weight_semantics="frequency",
     )
 
     assert result.converged is True
@@ -594,7 +599,9 @@ def test_large_constant_weight_fit_defers_plan_unless_reml_will_reuse_it() -> No
     )
     profile: dict[str, float | int] = {}
 
-    ordinary, _ = fit_irls_direct(profile=profile, trace_purpose="fit", **common)
+    ordinary, _ = fit_irls_direct(
+        profile=profile, trace_purpose="fit", **common, weight_semantics="frequency"
+    )
 
     assert ordinary.converged is True
     assert dm.raw_spline_tabmat_plan_built is False
@@ -606,6 +613,7 @@ def test_large_constant_weight_fit_defers_plan_unless_reml_will_reuse_it() -> No
         beta_init=ordinary.beta,
         intercept_init=ordinary.intercept,
         **common,
+        weight_semantics="frequency",
     )
     assert reml.converged is True
     assert dm.raw_spline_tabmat_plan_built is True
@@ -618,6 +626,7 @@ def test_large_constant_weight_fit_defers_plan_unless_reml_will_reuse_it() -> No
         beta_init=reml.beta,
         intercept_init=reml.intercept,
         **common,
+        weight_semantics="frequency",
     )
     assert profile["centered_spline_tabmat_attempts"] > attempts
     assert profile["centered_spline_tabmat_builds"] == 1
@@ -636,7 +645,8 @@ def test_large_constant_weight_fit_defers_plan_unless_reml_will_reuse_it() -> No
             "trace_purpose": "reml_final",
             "beta_init": reml.beta,
             "intercept_init": reml.intercept,
-        }
+        },
+        weight_semantics="frequency",
     )
     assert final.converged is True
     assert final_dm.raw_spline_tabmat_plan_built is False
@@ -665,7 +675,9 @@ def test_narrow_constant_weight_fit_defers_cold_plan_but_reml_can_reuse_it() -> 
     )
     profile: dict[str, float | int] = {}
 
-    ordinary, _ = fit_irls_direct(profile=profile, trace_purpose="fit", **common)
+    ordinary, _ = fit_irls_direct(
+        profile=profile, trace_purpose="fit", **common, weight_semantics="frequency"
+    )
     assert ordinary.converged is True
     assert dm.raw_spline_tabmat_plan_built is False
     assert profile["centered_spline_tabmat_cold_policy_rejections"] == 1
@@ -676,6 +688,7 @@ def test_narrow_constant_weight_fit_defers_cold_plan_but_reml_can_reuse_it() -> 
         beta_init=ordinary.beta,
         intercept_init=ordinary.intercept,
         **common,
+        weight_semantics="frequency",
     )
     assert reml.converged is True
     assert dm.raw_spline_tabmat_plan_built is True
@@ -688,6 +701,7 @@ def test_narrow_constant_weight_fit_defers_cold_plan_but_reml_can_reuse_it() -> 
         beta_init=reml.beta,
         intercept_init=reml.intercept,
         **common,
+        weight_semantics="frequency",
     )
     assert profile["centered_spline_tabmat_attempts"] > attempts
     assert profile["centered_spline_tabmat_builds"] == 1
@@ -710,6 +724,7 @@ def test_cold_spline_policy_does_not_report_unrelated_dense_fit() -> None:
         lambda2=0.0,
         profile=profile,
         compute_rank_info=False,
+        weight_semantics="frequency",
     )
 
     assert "centered_spline_tabmat_cold_policy_rejections" not in profile

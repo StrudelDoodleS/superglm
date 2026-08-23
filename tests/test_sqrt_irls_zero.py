@@ -39,6 +39,7 @@ def test_poisson_sqrt_exact_zero_start_is_response_scale_equivariant(
         max_iter=20,
         tol=1.0e-30,
         record_diagnostics=True,
+        weight_semantics="frequency",
     )
 
     fitted_eta = result.intercept + offset
@@ -73,6 +74,7 @@ def test_poisson_sqrt_negative_branch_is_retained_across_response_scales(
         intercept_init=-0.5 * natural_eta,
         max_iter=20,
         tol=1.0e-30,
+        weight_semantics="frequency",
     )
 
     assert result.converged
@@ -114,6 +116,7 @@ def test_poisson_sqrt_extreme_nonzero_start_uses_finite_branch_trust_response(
                 intercept_init=initial_eta,
                 max_iter=20,
                 tol=1.0e-12,
+                weight_semantics="frequency",
             )
         else:
             result = fit_pirls(
@@ -129,6 +132,7 @@ def test_poisson_sqrt_extreme_nonzero_start_uses_finite_branch_trust_response(
                 max_iter_outer=20,
                 max_iter_inner=20,
                 tol=1.0e-12,
+                weight_semantics="frequency",
             )
 
     runtime_warnings = [

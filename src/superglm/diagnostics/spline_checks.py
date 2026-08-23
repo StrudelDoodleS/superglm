@@ -16,25 +16,34 @@ from superglm._frame import FrameLike, as_eager_frame
 def _redundancy_geometry_weights(model, sample_weight, n_rows: int) -> NDArray:
     """Validate weights and return the row mass used by spline geometry."""
     from superglm.distributions import Tweedie
+    from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
     if n_rows == 0:
         raise ValueError("X must be non-empty")
+    weight_semantics = model_weight_semantics(model)
     if sample_weight is None:
         weights = np.ones(n_rows, dtype=np.float64)
-    elif isinstance(model._distribution, Tweedie):
+    elif isinstance(model._distribution, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
         from superglm._utils import _validate_strict_prior_weights
 
-        # Tweedie weights are prior precision, not replicated design rows.
-        _validate_strict_prior_weights(sample_weight, n_rows)
-        weights = np.ones(n_rows, dtype=np.float64)
+        weights = _validate_strict_prior_weights(sample_weight, n_rows)
     else:
         from superglm.model.input_validation import _finite_vector
 
+        # The weights are validated under either contract; only what counts as
+        # admissible differs, and only for Tweedie above.  What the contract
+        # decides here is the row mass the geometry follows, below.
         weights = _finite_vector("sample_weight", sample_weight, n_rows)
         if np.any(weights < 0.0):
             raise ValueError("sample_weight must be nonnegative")
         if not np.any(weights > 0.0):
             raise ValueError("sample_weight must not be all zero")
+
+    if weight_semantics == PRIOR_WEIGHTS:
+        # Prior weights are precision, not replicated design rows, so learned
+        # geometry stays a function of the rows themselves -- excluding a row
+        # carrying no weight, which under this contract was not observed.
+        weights = (weights > 0.0).astype(np.float64)
 
     total = float(np.sum(weights, dtype=np.float64))
     if not np.isfinite(total):
@@ -64,10 +73,11 @@ class SplineRedundancyReport:
     """Redundancy diagnostics for one spline feature.
 
     ``support_mass``, ``adjacent_basis_corr``, and ``effective_rank`` use
-    case/frequency mass for non-Tweedie families. Integer weights therefore
-    match literal row replication. Tweedie weights are validated as finite,
-    strictly positive EDM prior weights, but these geometric summaries use
-    the physical rows rather than treating prior precision as row frequency.
+    replication mass under the frequency contract. Integer weights therefore
+    match literal row replication. Under the prior contract the weights are
+    validated but these geometric summaries use the physical rows rather than
+    treating a precision as a row frequency; a Tweedie fit additionally
+    requires them finite and strictly positive.
     """
 
     feature_name: str
@@ -90,11 +100,11 @@ def spline_redundancy(
 
     Diagnostic-only. No auto-pruning. Interpretation: "try lower k and refit".
 
-    Non-Tweedie ``sample_weight`` is case/frequency mass, so the support
+    Under the frequency contract ``sample_weight`` is replication mass, so the support
     fractions, correlations, and weighted-basis singular values match literal
-    integer row replication. Tweedie ``sample_weight`` is finite, strictly
-    positive EDM prior precision; it is validated but does not alter the
-    physical-row spline geometry summarized here.
+    integer row replication. Under the prior contract ``sample_weight`` is a
+    precision; it is validated but does not alter the physical-row spline
+    geometry summarized here.
     """
     from superglm.features.spline import _SplineBase
 

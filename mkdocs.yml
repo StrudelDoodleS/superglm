@@ -104,6 +104,7 @@ nav:
   - Development:
     - Releases: development/releases.md
     - "Migration: group pricing follows rank": development/migrations/group-pricing-rank.md
+    - "Migration: sample_weight is a prior weight": development/migrations/weight-semantics-prior.md
     - Cost Claims and the Clock: development/cost-and-timing.md
     - Python Support Policy: development/python-support.md
     - Data and Solver Boundaries: development/data-and-solver-boundaries.md

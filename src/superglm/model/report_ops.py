@@ -106,15 +106,25 @@ def summary(
     edf = res.effective_df
     n = fs.n_obs
     ll = fs.log_likelihood
-    from superglm.solvers.dispersion import dispersion_likelihood_size
+    from superglm.solvers.dispersion import (
+        dispersion_likelihood_size,
+        model_weight_semantics,
+    )
 
     likelihood_weights = getattr(model, "_fit_weights", None)
-    if likelihood_weights is None:
-        likelihood_weights = np.ones(n, dtype=np.float64)
-    likelihood_size = dispersion_likelihood_size(
-        model._distribution,
-        likelihood_weights,
-    )
+    # The fit records its own likelihood size, which is the only source that
+    # survives ``retain_fit_state=False``: a released fit has no weights, and
+    # standing in all-ones would report ``n`` for a prior-contract fit that
+    # carried zero weights. The recomputation is the fallback for fits pickled
+    # before the field existed.
+    recorded_size = getattr(fs, "likelihood_size", None)
+    if recorded_size is not None:
+        likelihood_size = float(recorded_size)
+    else:
+        likelihood_size = dispersion_likelihood_size(
+            np.ones(n, dtype=np.float64) if likelihood_weights is None else likelihood_weights,
+            weight_semantics=model_weight_semantics(model),
+        )
 
     aic = -2 * ll + 2 * edf
     bic = -2 * ll + np.log(likelihood_size) * edf
@@ -191,6 +201,18 @@ def summary(
         "method": method_str,
         "n_obs": n,
         "effective_df": edf,
+        # Named only where it can matter.  At unit weight the two contracts
+        # publish the same numbers, so a row saying which one produced them
+        # would be noise on the majority of summaries.
+        "weight_semantics": (
+            model_weight_semantics(model)
+            if (
+                fs.weighted
+                if getattr(fs, "weighted", None) is not None
+                else (likelihood_weights is not None and not np.all(likelihood_weights == 1.0))
+            )
+            else None
+        ),
         "lambda1": lam1,
         "phi": res.phi,
         "pearson_chi2": fs.pearson_chi2,
@@ -297,7 +319,8 @@ def summary(
         selected_group_names=selected_names,
         group_matrices=model._dm.group_matrices if model._dm is not None else None,
         sample_weights=model._fit_weights,
-        distribution=model._distribution,
+        weight_semantics=model_weight_semantics(model),
+        recorded_likelihood_size=likelihood_size,
         selection_shrunk_group_names=selection_shrunk_group_names(
             fitted_penalty(model), model._groups
         ),

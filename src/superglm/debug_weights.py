@@ -51,8 +51,8 @@ def compare_irls_weights(
     y : array-like
         Response variable.
     sample_weight : array-like, optional
-        Family-specific fitting weights: case/frequency weights for
-        non-Tweedie families and EDM prior weights for Tweedie.
+        Fitting weights, read under the model's declared
+        ``weight_semantics``.
     offset : array-like, optional
         Offset term.
     max_iter : int
@@ -124,9 +124,19 @@ def compare_irls_weights(
     # statsmodels exposes the two supported contracts as separate arguments.
     # They enter its IRLS working weights identically, but choosing the matching
     # argument also preserves the family's likelihood and dispersion semantics.
+    #
+    # Which one matches is the MODEL'S DECLARED CONTRACT, not its family: the
+    # prior reading is exactly statsmodels' `var_weights` (verified -- the two
+    # agree on coefficients to 4e-16, on dispersion to the printed digit, and
+    # on standard errors to 2e-16), and the frequency reading is its
+    # `freq_weights`. Keying this on Tweedie-ness was the pre-`weight_semantics`
+    # rule, and it would compare a prior-contract Gamma fit against the wrong
+    # statsmodels model -- the exact mismatch this comparison exists to detect.
+    from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
+
     sm_weight_kwargs = (
         {"var_weights": comparison_weights}
-        if isinstance(family, Tweedie)
+        if model_weight_semantics(model) == PRIOR_WEIGHTS
         else {"freq_weights": comparison_weights}
     )
     sm_offset = offset if offset is not None else None
@@ -246,8 +256,8 @@ def inspect_worst_observations(
     y : array-like
         Response variable.
     sample_weight : array-like, optional
-        Family-specific fitting weights: case/frequency weights for
-        non-Tweedie families and EDM prior weights for Tweedie.
+        Fitting weights, read under the model's declared
+        ``weight_semantics``.
     iteration : int
         Which IRLS iteration to inspect (1-based).
 

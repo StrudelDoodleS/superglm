@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from superglm.solvers.dispersion import model_weight_semantics
+
 if TYPE_CHECKING:
     from superglm.types import LevelBinding
 
@@ -114,6 +116,12 @@ class ModelConfig:
     # models default to "rank"; configurations pickled before the field
     # existed restore to "spanned", the behaviour they were fitted under.
     group_pricing: str = "rank"
+    # What ``sample_weight`` states about a row.  New models default to the EDM
+    # prior-weight reading; configurations pickled before the field existed are
+    # restored to whichever contract their family carried at the time, because
+    # reproducing a recorded fit means reproducing the likelihood it was fitted
+    # under, not adopting the new default.
+    weight_semantics: str = "prior"
 
     def __getattr__(self, name: str) -> object:
         """Supply fields absent from models pickled before config migrations."""
@@ -133,6 +141,20 @@ class ModelConfig:
                 self,
                 "features_explicit",
                 bool(state.get("feature_templates", ())),
+            )
+        if "weight_semantics" not in state:
+            from superglm.distributions import resolve_distribution
+            from superglm.solvers.dispersion import family_default_weight_semantics
+
+            family = state.get("family", "poisson")
+            try:
+                distribution = resolve_distribution(family)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                distribution = None
+            object.__setattr__(
+                self,
+                "weight_semantics",
+                family_default_weight_semantics(distribution),
             )
         if "group_pricing" not in state:
             # Pre-field pickles were fitted under spanned pricing; restoring
@@ -179,6 +201,7 @@ class ModelConfig:
             separation=str(getattr(model, "_separation", "warn")),
             level_bindings=copy.deepcopy(getattr(model, "_level_bindings", None)),
             group_pricing=str(getattr(model, "_group_pricing", "spanned")),
+            weight_semantics=model_weight_semantics(model),
         )
 
     def with_value(self, **changes: object) -> ModelConfig:
@@ -222,6 +245,7 @@ class ModelConfig:
             "retain_fit_state": self.retain_fit_state,
             "separation": self.separation,
             "group_pricing": self.group_pricing,
+            "weight_semantics": self.weight_semantics,
         }
 
     def materialize(self, model_type):
@@ -242,6 +266,7 @@ class ModelConfig:
             "_discrete": self.discrete,
             "_n_bins": copy.deepcopy(self.n_bins),
             "_group_pricing": self.group_pricing,
+            "_weight_semantics": self.weight_semantics,
             "_tol": self.tol,
             "_max_iter": self.max_iter,
             "_retain_fit_state": self.retain_fit_state,

@@ -56,11 +56,10 @@ The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
 without this scaling the ``edf0`` noise floor is only honest for
 unit-dispersion families and a dispersed Gaussian null would swamp the scan.
-The Pearson denominator follows the same family-specific weight contract as
-the fitted model.  Non-Tweedie families use case/frequency weights and
-therefore ``sum(w) - edf``; Tweedie uses EDM prior weights and therefore the
-positive-observation count minus ``edf``.  Keeping the screen and published
-fit on one scale is essential because ``T / phi`` drives the ranking.
+The Pearson denominator follows the fitted model's declared weight contract:
+``sum(w) - edf`` under ``"frequency"``, the positive-weight row count minus
+``edf`` under ``"prior"``.  Keeping the screen and published fit on one scale
+is essential because ``T / phi`` drives the ranking.
 
 Per-feature work (unique support, codes, marginal basis menus, marginal
 penalties — level codes and the contrast menu for a categorical margin, the
@@ -106,7 +105,10 @@ from superglm.screening import (
 )
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._structured import spline_cat_moments, structured_ladder
-from superglm.solvers.dispersion import pearson_residual_degrees_of_freedom
+from superglm.solvers.dispersion import (
+    model_weight_semantics,
+    pearson_residual_degrees_of_freedom,
+)
 
 _RESULT_COLUMNS = [
     "feature_a",
@@ -655,8 +657,10 @@ def screen_interactions(
         )
     if not np.all(np.isfinite(y)):
         raise ValueError("screen_interactions requires finite y")
-    if isinstance(model._distribution, Tweedie) and (
-        not np.all(np.isfinite(weights)) or np.any(weights <= 0.0)
+    if (
+        isinstance(model._distribution, Tweedie)
+        and model_weight_semantics(model) == "prior"
+        and (not np.all(np.isfinite(weights)) or np.any(weights <= 0.0))
     ):
         raise ValueError("Tweedie sample_weight must be finite and strictly positive")
     if not np.all(np.isfinite(weights)) or np.any(weights < 0.0) or not np.any(weights > 0.0):
@@ -837,9 +841,9 @@ def screen_interactions(
         edf_mains = float(getattr(model._result, "effective_df", float("nan")))
         resolved_edf = edf_mains if np.isfinite(edf_mains) else 0.0
         denom = pearson_residual_degrees_of_freedom(
-            distribution,
             weights,
             resolved_edf,
+            weight_semantics=model_weight_semantics(model),
         )
         phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
         phi_hat = max(phi_hat, float(np.finfo(np.float64).tiny))

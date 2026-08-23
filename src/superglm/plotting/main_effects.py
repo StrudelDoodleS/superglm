@@ -72,7 +72,7 @@ def plot_relativities(
     X : pandas or eager Polars DataFrame, optional
         Training data for sample_weight density overlays.
     sample_weight : array-like, optional
-        Weights for the display-density overlay: non-Tweedie case/frequency
+        Weights for the display-density overlay: replication
         weights or Tweedie EDM prior weights.
     ncols : int
         Number of subplot columns (default 2).
@@ -331,7 +331,7 @@ def plot_term(
     X : pandas or eager Polars DataFrame, optional
         Training data for sample_weight overlays.
     sample_weight : array-like, optional
-        Weights for the display-density overlay: non-Tweedie case/frequency
+        Weights for the display-density overlay: replication
         weights or Tweedie EDM prior weights.
     interval : {"pointwise", "simultaneous", "both", None}
         Band style.  For categoricals, simultaneous/both fall back to pointwise.

@@ -8,6 +8,7 @@ from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import reml_laml_objective
 from superglm.reml.runner import run_reml_once
 from superglm.reml.w_derivatives import compute_dW_deta, reml_w_correction
+from superglm.solvers.dispersion import model_weight_semantics
 
 
 def model_compute_dW_deta(model, mu, eta, sample_weight):
@@ -66,6 +67,7 @@ def model_reml_laml_objective(
         penalty_caches=penalty_caches,
         reml_penalties=getattr(model, "_reml_penalties", None),
         scop_states=scop_states,
+        weight_semantics=model_weight_semantics(model),
     )
 
 
@@ -172,6 +174,7 @@ def model_optimize_direct_reml(
         reml_groups,
         penalty_ranks,
         lambdas,
+        weight_semantics=model_weight_semantics(model),
         max_reml_iter=max_reml_iter,
         reml_tol=reml_tol,
         verbose=verbose,
@@ -231,6 +234,7 @@ def model_optimize_discrete_reml_cached_w(
         reml_groups,
         penalty_ranks,
         lambdas,
+        weight_semantics=model_weight_semantics(model),
         max_reml_iter=max_reml_iter,
         reml_tol=reml_tol,
         verbose=verbose,
@@ -280,6 +284,7 @@ def model_optimize_efs_reml(
         reml_groups,
         penalty_ranks,
         lambdas,
+        weight_semantics=model_weight_semantics(model),
         max_reml_iter=max_reml_iter,
         reml_tol=reml_tol,
         verbose=verbose,
@@ -338,6 +343,7 @@ def model_run_reml_once(
         reml_groups,
         penalty_ranks,
         lambdas,
+        weight_semantics=model_weight_semantics(model),
         max_reml_iter=max_reml_iter,
         reml_tol=reml_tol,
         verbose=verbose,

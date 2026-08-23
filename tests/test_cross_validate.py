@@ -22,7 +22,12 @@ from superglm import (
     cross_validate,
 )
 from superglm._frame import as_eager_frame
-from superglm.distributions import Gaussian, Poisson, Tweedie
+from superglm.distributions import (
+    Gaussian,
+    Poisson,
+    Tweedie,
+    weighted_log_likelihood,
+)
 from superglm.model_selection import (
     _clone_model,
     _pooled_deviance_parts,
@@ -31,6 +36,10 @@ from superglm.model_selection import (
     _score_deviance,
     _score_gini,
     _score_nll,
+)
+from superglm.solvers.dispersion import (
+    dispersion_likelihood_size,
+    model_weight_semantics,
 )
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -415,11 +424,23 @@ class TestDataForwarding:
             off_test = offset[test_idx]
             mu = est.predict(X_test, offset=off_test)
             dev = est._distribution.deviance_unit(y_test, mu)
-            ll = est._distribution.log_likelihood(y_test, mu, sw_test, phi=est.result.phi)
+            # The pooling rule is what this test pins, so the likelihood and
+            # the denominator are both taken from the estimator's declared
+            # weight contract rather than assumed to be the replication one.
+            semantics = model_weight_semantics(est)
+            ll = weighted_log_likelihood(
+                est._distribution,
+                y_test,
+                mu,
+                sw_test,
+                est.result.phi,
+                weight_semantics=semantics,
+            )
+            size = dispersion_likelihood_size(sw_test, weight_semantics=semantics)
             dev_num += float(np.sum(sw_test * dev))
-            dev_den += float(np.sum(sw_test))
+            dev_den += size
             nll_num += float(-ll)
-            nll_den += float(np.sum(sw_test))
+            nll_den += size
 
         assert result.pooled_scores["deviance"] == pytest.approx(dev_num / dev_den)
         assert result.pooled_scores["nll"] == pytest.approx(nll_num / nll_den)
@@ -582,11 +603,19 @@ class TestScoring:
             y_test = y[test_idx]
             sw_test = sw[test_idx]
             mu = est.predict(X_test)
+            semantics = model_weight_semantics(est)
             total_dev += float(np.sum(sw_test * est._distribution.deviance_unit(y_test, mu)))
             total_nll += float(
-                -est._distribution.log_likelihood(y_test, mu, sw_test, phi=est.result.phi)
+                -weighted_log_likelihood(
+                    est._distribution,
+                    y_test,
+                    mu,
+                    sw_test,
+                    est.result.phi,
+                    weight_semantics=semantics,
+                )
             )
-            total_weight += float(np.sum(sw_test))
+            total_weight += dispersion_likelihood_size(sw_test, weight_semantics=semantics)
 
         assert result.pooled_scores["deviance"] == pytest.approx(total_dev / total_weight)
         assert result.pooled_scores["nll"] == pytest.approx(total_nll / total_weight)
@@ -1054,6 +1083,8 @@ class TestValidation:
         assert doc is not None
         assert "splitters operate on the physical compact rows" in doc
         assert "within a fixed train/validation partition and fixed feature geometry" in doc
+        assert "declared ``weight_semantics``" in doc
+        assert "``Var(Y_i) = phi * V(mu_i) / w_i``" in doc
 
     def test_no_split_method(self, poisson_data, base_model):
         """Raise if cv has no .split() method."""

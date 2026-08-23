@@ -22,7 +22,9 @@ fitted mains model, no refits, so screening ten pairs costs a few seconds
 where fitting ten interaction terms would cost minutes.
 
 ```python
-model = SuperGLM(family="poisson", features=feats).fit_reml(X, y, sample_weight=exposure)
+model = SuperGLM(
+    family="poisson", features=feats, weight_semantics="frequency"
+).fit_reml(X, y, sample_weight=exposure)
 table = model.screen_interactions(X, y, sample_weight=exposure)
 print(table.head())
 #  feature_a feature_b kind  statistic      z  edf0  lambda0  n_cells  approx
@@ -107,11 +109,11 @@ included — are excluded too: the screen profiles only the parent mains, so it
 cannot re-screen a term already in the model.
 
 A mixed sweep comes back as one sorted table. The example below screens an
-80,000-row sample of the freMTPL2 frequency book under SuperGLM's Poisson
-case/frequency-weight contract (`y` the claim *rate* `ClaimNb / Exposure`,
-`sample_weight` the exposure, `phi` estimated at 4.82). This is the
-non-Tweedie frequency interpretation; it is not the Tweedie EDM prior-weight
-contract.
+80,000-row sample of the freMTPL2 frequency book under
+`weight_semantics="frequency"` (`y` the claim *rate* `ClaimNb / Exposure`,
+`sample_weight` the exposure, `phi` estimated at 4.82). Every number here is
+therefore on the replication contract's `sum(sample_weight) - edf` scale, not
+the default prior one.
 
 The specification is spelled out rather than assumed, because the screen is
 defined *against the fitted mains*. A margin mis-specified there does not
@@ -343,10 +345,12 @@ explicitly. A badly specified mains model screens against the
 wrong baseline — screening quality is downstream of fit quality. The
 Pearson dispersion that scales the statistic is attached to the result as
 `table.attrs["phi"]` and can be overridden with `phi=`. By default its
-residual degrees of freedom follow the fitted family's contract: non-Tweedie
-case/frequency weights use `sum(sample_weight) - edf`, while Tweedie EDM prior
-weights use the observation count minus `edf`. The screen and fitted model
-therefore stay on the same dispersion scale.
+residual degrees of freedom follow the fitted model's declared
+`weight_semantics`: `sum(sample_weight) - edf` under `"frequency"`, the count
+of positive-weight rows minus `edf` under `"prior"` (the default). The screen
+and fitted model therefore stay on the same dispersion scale. The worked
+example below declares `weight_semantics="frequency"`, so every number it
+prints is on the `sum(sample_weight) - edf` scale.
 
 Factor margins are read through the fitted spec: levels are indexed in the
 fit's own order, any `LevelGrouping` collapse is applied exactly as the fit

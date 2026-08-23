@@ -65,6 +65,7 @@ def _setup(family, seed=42):
         lambda2=lambdas,
         offset=offset_arr,
         return_xtwx=True,
+        weight_semantics="frequency",
     )
 
     p_dim = XtWX.shape[0]
@@ -129,6 +130,7 @@ def _full_outer_fd_hessian(
                 beta_init=pirls_result.beta,
                 intercept_init=pirls_result.intercept,
                 return_xtwx=True,
+                weight_semantics="frequency",
             )
             phi_pert = 1.0
             if not getattr(m._distribution, "scale_known", True):

@@ -331,6 +331,7 @@ def test_fit_stats_pearson_is_zero_for_equal_subnormal_tweedie_values() -> None:
         LogLink(),
         1.0,
         null_mu=value,
+        weight_semantics="prior",
     )
 
     assert stats.pearson_chi2 == 0.0
@@ -498,6 +499,7 @@ def test_tweedie_fit_stats_reuses_one_density_normalizer(monkeypatch) -> None:
         LogLink(),
         0.8,
         null_mu=null_mu,
+        weight_semantics="prior",
     )
 
     assert calls == 1

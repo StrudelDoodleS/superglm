@@ -424,6 +424,8 @@ class ModelSummary:
             ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
             ("Deviance", _fmt(info["deviance"]), "", ""),
         ]
+        if info.get("weight_semantics"):
+            rows.append(("Weights", f"{info['weight_semantics']} weights", "", ""))
 
         # NB theta profile row
         if "nb_theta" in info:
@@ -961,6 +963,8 @@ class ModelSummary:
             ("EBIC", _fmt(info["ebic"]), "Converged", conv_str),
             ("Deviance", _fmt(info["deviance"]), "", ""),
         ]
+        if info.get("weight_semantics"):
+            header_rows.append(("Weights", f"{info['weight_semantics']} weights", "", ""))
 
         # NB theta profile row
         if "nb_theta" in info:

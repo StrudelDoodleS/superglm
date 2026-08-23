@@ -304,6 +304,7 @@ class TestDrop1DispersionScaling:
             family="poisson",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
 
         row = model.drop1(X, y, sample_weight=weights, test="F").iloc[0]
@@ -359,6 +360,7 @@ class TestDrop1DispersionScaling:
             family="gaussian",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(X, y, sample_weight=weights)
         weighted = weighted_model.drop1(
             X,
@@ -374,6 +376,7 @@ class TestDrop1DispersionScaling:
             family="gaussian",
             selection_penalty=0.0,
             features={"x": Numeric()},
+            weight_semantics="frequency",
         ).fit(repeated_X, repeated_y)
         repeated = repeated_model.drop1(repeated_X, repeated_y, test=test).iloc[0]
 

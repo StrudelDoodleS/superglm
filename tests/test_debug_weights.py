@@ -37,6 +37,7 @@ def test_compare_irls_weights_ignores_zero_frequency_rows():
         family="gaussian",
         selection_penalty=0.0,
         features={"x": Numeric()},
+        weight_semantics="frequency",
     )
     model.fit(X, y, sample_weight=weights, record_diagnostics=True)
 

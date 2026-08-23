@@ -57,10 +57,7 @@ from superglm.reml.penalty_algebra import (
 )
 from superglm.reml.result import REMLResult
 from superglm.reml.scale import (
-    GammaScaleProfileData,
-    TweedieScaleProfileData,
-    prepare_gamma_reml_scale_data,
-    prepare_tweedie_reml_scale_data,
+    prepare_reml_scale_data,
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
     profile_tweedie_reml_scale,
@@ -92,6 +89,7 @@ def optimize_direct_reml(
     penalty_ranks: dict[str, float],
     lambdas: dict[str, float],
     *,
+    weight_semantics: str,
     max_reml_iter: int,
     reml_tol: float,
     verbose: bool,
@@ -121,6 +119,24 @@ def optimize_direct_reml(
         BAM-style cached working/Fisher curvature approximation and bypasses
         ordinary observed-Hessian LAML for noncanonical links.
     """
+
+    # The declared contract's likelihood size, computed once. Every dispersion
+    # denominator and the REML scale term's `0.5 * (n - M_p) * log(D)` must use
+    # THIS, not the physical row count: `sum(w)` under `"frequency"`, the
+    # positive-row count under `"prior"`. The objective, its gradient and its
+    # Hessian all read it, so a row count in any one of them makes the Newton
+    # step inconsistent with the surface it is stepping on.
+    _contract_size_cache: list[float] = []
+
+    def _contract_size() -> float:
+        if not _contract_size_cache:
+            from superglm.solvers.dispersion import dispersion_likelihood_size
+
+            _contract_size_cache.append(
+                dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
+            )
+        return _contract_size_cache[0]
+
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
@@ -142,6 +158,7 @@ def optimize_direct_reml(
             reml_groups,
             penalty_ranks,
             lambdas,
+            weight_semantics=weight_semantics,
             max_reml_iter=max_reml_iter,
             reml_tol=reml_tol,
             verbose=verbose,
@@ -159,15 +176,17 @@ def optimize_direct_reml(
         )
 
     scale_known = getattr(distribution, "scale_known", True)
-    likelihood_size: float | None = None
-    gamma_scale_data: GammaScaleProfileData | None = None
-    tweedie_scale_data: TweedieScaleProfileData | None = None
-    if isinstance(distribution, Gaussian):
-        likelihood_size = float(np.sum(sample_weight, dtype=np.float64))
-    elif isinstance(distribution, Gamma):
-        gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
-    elif isinstance(distribution, Tweedie):
-        tweedie_scale_data = prepare_tweedie_reml_scale_data(y, sample_weight, distribution.p)
+    (
+        likelihood_size,
+        saturated_log_weight,
+        gamma_scale_data,
+        tweedie_scale_data,
+    ) = prepare_reml_scale_data(
+        distribution,
+        y,
+        sample_weight,
+        weight_semantics=weight_semantics,
+    )
     use_observed_geometry = (
         isinstance(dm, DesignMatrix)
         and classify_reml_curvature(
@@ -307,6 +326,7 @@ def optimize_direct_reml(
         debug_context={"phase": "bootstrap", "reml_iteration": 0},
         trace_run=trace_run,
         trace_purpose="reml_bootstrap",
+        weight_semantics=weight_semantics,
     )
     _t_pirls += _time.perf_counter() - _t0
     S_boot = latch_runtime_backend(boot_result, boot_lambdas, S_boot)
@@ -339,6 +359,7 @@ def optimize_direct_reml(
                 penalized_deviance,
                 likelihood_size,
                 boot_penalty_nullity,
+                saturated_log_weight=saturated_log_weight or 0.0,
             )
             boot_phi = boot_scale.phi
             boot_inv_phi = boot_scale.inverse_phi
@@ -362,7 +383,7 @@ def optimize_direct_reml(
             boot_inv_phi = boot_scale.inverse_phi
         else:
             boot_phi = max(
-                penalized_deviance / max(len(y) - boot_penalty_nullity, 1.0),
+                penalized_deviance / max(_contract_size() - boot_penalty_nullity, 1.0),
                 1e-10,
             )
             boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
@@ -475,6 +496,7 @@ def optimize_direct_reml(
                 debug_context={"phase": "candidate", "reml_iteration": n_iter},
                 trace_run=trace_run,
                 trace_purpose="reml_candidate",
+                weight_semantics=weight_semantics,
             )
             _t_pirls += _time.perf_counter() - _t0
         S_cand = latch_runtime_backend(pirls_result, cand_lambdas, S_cand)
@@ -619,6 +641,8 @@ def optimize_direct_reml(
             S_override=S_cand,
             reml_penalties=penalties,
             likelihood_size=likelihood_size,
+            saturated_log_weight=saturated_log_weight,
+            weight_semantics=weight_semantics,
             gamma_scale_data=gamma_scale_data,
             tweedie_scale_data=tweedie_scale_data,
             return_evaluation=True,
@@ -665,7 +689,7 @@ def optimize_direct_reml(
                     )
                     penalized_deviance = float(pirls_result.deviance + pq)
                 phi_hat = max(
-                    penalized_deviance / max(len(y) - penalty_nullity, 1.0),
+                    penalized_deviance / max(_contract_size() - penalty_nullity, 1.0),
                     1e-10,
                 )
                 inverse_phi = 1.0 / max(phi_hat, 1e-10)
@@ -874,7 +898,7 @@ def optimize_direct_reml(
                 gradient=grad_partial,
                 penalty_caches=penalty_caches,
                 pirls_result=pirls_result,
-                n_obs=len(y),
+                n_obs=_contract_size(),
                 phi_hat=phi_hat,
                 inverse_phi=inverse_phi,
                 d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
@@ -942,7 +966,7 @@ def optimize_direct_reml(
                 gradient=grad_partial,
                 penalty_caches=penalty_caches,
                 pirls_result=pirls_result,
-                n_obs=len(y),
+                n_obs=_contract_size(),
                 phi_hat=phi_hat,
                 inverse_phi=inverse_phi,
                 d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
@@ -1107,6 +1131,7 @@ def optimize_direct_reml(
                 },
                 trace_run=trace_run,
                 trace_purpose="reml_line_search",
+                weight_semantics=weight_semantics,
             )
             S_trial = latch_runtime_backend(trial_result, trial_lambdas, S_trial)
 
@@ -1213,6 +1238,8 @@ def optimize_direct_reml(
                 S_override=S_trial,
                 reml_penalties=penalties,
                 likelihood_size=likelihood_size,
+                saturated_log_weight=saturated_log_weight,
+                weight_semantics=weight_semantics,
                 gamma_scale_data=gamma_scale_data,
                 tweedie_scale_data=tweedie_scale_data,
                 return_evaluation=True,

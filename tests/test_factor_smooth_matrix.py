@@ -238,6 +238,7 @@ def test_factor_smooth_builder_keeps_all_levels_and_compact_penalties(discrete: 
         model_discrete=discrete,
         n_bins_config=8,
         lambda2=0.1,
+        weight_semantics="frequency",
     )
 
     [gm] = result.dm.group_matrices

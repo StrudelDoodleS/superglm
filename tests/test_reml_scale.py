@@ -10,6 +10,7 @@ from scipy.special import digamma
 from superglm.distributions import Gamma
 from superglm.reml.scale import (
     GammaScaleProfileData,
+    _gamma_inverse_shape_derivative,
     _gamma_saturated_normalizer,
     _shape_times_log_minus_digamma,
     _trigamma_minus_inverse,
@@ -77,7 +78,7 @@ def test_gamma_scale_profile_matches_direct_wood_criterion() -> None:
     weights = np.ones_like(y)
     expected_phi, expected_criterion = _brute_gamma_profile(y, weights, 3.7, 2.0)
 
-    profile_data = prepare_gamma_reml_scale_data(y, weights)
+    profile_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency")
     actual = profile_gamma_reml_scale(profile_data, 3.7, 2.0)
 
     assert actual.phi == pytest.approx(expected_phi, rel=2.0e-8)
@@ -99,9 +100,13 @@ def test_gamma_frequency_weights_match_expanded_rows() -> None:
     weights = np.array([1.0, 3.0, 2.0, 4.0])
     repeated_y = np.repeat(y, weights.astype(int))
 
-    weighted = profile_gamma_reml_scale(prepare_gamma_reml_scale_data(y, weights), 5.2, 1.0)
+    weighted = profile_gamma_reml_scale(
+        prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency"), 5.2, 1.0
+    )
     expanded = profile_gamma_reml_scale(
-        prepare_gamma_reml_scale_data(repeated_y, np.ones_like(repeated_y)),
+        prepare_gamma_reml_scale_data(
+            repeated_y, np.ones_like(repeated_y), weight_semantics="frequency"
+        ),
         5.2,
         1.0,
     )
@@ -116,6 +121,7 @@ def test_gamma_scale_profile_rejects_nonpositive_effective_likelihood_size() -> 
             prepare_gamma_reml_scale_data(
                 np.array([1.0, 2.0]),
                 np.array([0.1, 0.1]),
+                weight_semantics="frequency",
             ),
             1.0,
             penalty_nullity=1.0,
@@ -149,7 +155,7 @@ def test_gamma_scale_profile_rejects_invalid_reduced_statistics(
 )
 def test_gamma_scale_preparation_rejects_overflowed_reductions(y, weights) -> None:
     with pytest.raises(ValueError, match="finite"):
-        prepare_gamma_reml_scale_data(y, weights)
+        prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency")
 
 
 def test_gaussian_profile_uses_frequency_weight_likelihood_size() -> None:
@@ -226,7 +232,9 @@ def test_gamma_scale_profile_adaptively_brackets_extreme_valid_optima(
     inverse_phi_bound: float,
     comparison: str,
 ) -> None:
-    profile_data = prepare_gamma_reml_scale_data(np.array([1.0]), np.array([1.0]))
+    profile_data = prepare_gamma_reml_scale_data(
+        np.array([1.0]), np.array([1.0]), weight_semantics="frequency"
+    )
 
     profile = profile_gamma_reml_scale(
         profile_data,
@@ -249,7 +257,9 @@ def test_gamma_scale_profile_adaptively_brackets_extreme_valid_optima(
 
 def test_gamma_scale_profile_handles_curvature_below_square_underflow() -> None:
     """A valid tiny shape must not fail after the root has been found."""
-    profile_data = prepare_gamma_reml_scale_data(np.array([1.0]), np.array([1.0]))
+    profile_data = prepare_gamma_reml_scale_data(
+        np.array([1.0]), np.array([1.0]), weight_semantics="frequency"
+    )
 
     profile = profile_gamma_reml_scale(
         profile_data,
@@ -309,7 +319,7 @@ def test_gamma_scale_profile_is_stationary_across_wide_deviance_sweep(
 ) -> None:
     y = np.array([0.4, 0.8, 1.7, 3.1])
     weights = np.array([0.5, 1.25, 2.0, 1.75])
-    profile_data = prepare_gamma_reml_scale_data(y, weights)
+    profile_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency")
 
     profile = profile_gamma_reml_scale(
         profile_data,
@@ -328,3 +338,179 @@ def test_gamma_scale_profile_is_stationary_across_wide_deviance_sweep(
         2.0,
     )
     assert score == pytest.approx(0.0, abs=1.0e-11)
+
+
+def _distinct_weight_fixture(n: int = 4000, seed: int = 5):
+    rng = np.random.default_rng(seed)
+    y = rng.gamma(5.0, 1.0, n)
+    weights = rng.uniform(0.5, 2.0, n)
+    return y, weights
+
+
+def _term_fields(term) -> np.ndarray:
+    return np.array(
+        [term.phi, term.inverse_phi, term.criterion, term.d_inverse_phi_d_penalized_deviance]
+    )
+
+
+def test_gamma_prior_profile_memoizes_exact_repeats() -> None:
+    """The outer loop re-evaluates accepted points bitwise-identically."""
+    y, weights = _distinct_weight_fixture()
+    profile_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="prior")
+
+    first = profile_gamma_reml_scale(profile_data, 4321.0, 3.0)
+    repeat = profile_gamma_reml_scale(profile_data, 4321.0, 3.0)
+    moved = profile_gamma_reml_scale(profile_data, 4322.0, 3.0)
+
+    assert repeat is first
+    assert moved is not first
+
+
+def test_gamma_prior_warm_start_matches_cold_solves_at_solver_tolerance() -> None:
+    """Roots found from the previous solve's bracket equal the cold roots.
+
+    The warm path runs the same ``brentq`` tolerances inside a smaller
+    bracket, so its root may differ from the fixed-window root only within
+    the solver's own placement freedom (xtol 1e-12 in log shape).
+    """
+    y, weights = _distinct_weight_fixture()
+    warm_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="prior")
+
+    deviances = [4321.0, 4325.7, 4329.9, 4329.9012, 4329.9012345]
+    warm_terms = [profile_gamma_reml_scale(warm_data, dp, 3.0) for dp in deviances]
+    for dp, warm in zip(deviances, warm_terms, strict=True):
+        cold_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="prior")
+        cold = profile_gamma_reml_scale(cold_data, dp, 3.0)
+        assert np.log(warm.inverse_phi) == pytest.approx(np.log(cold.inverse_phi), abs=5.0e-12)
+        assert _term_fields(warm) == pytest.approx(_term_fields(cold), rel=1.0e-11)
+
+
+def test_gamma_prior_warm_start_falls_back_cold_after_a_deviance_jump() -> None:
+    """A root far outside the warm ladder still resolves via the cold window."""
+    y, weights = _distinct_weight_fixture()
+    warm_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="prior")
+
+    profile_gamma_reml_scale(warm_data, 4321.0, 3.0)
+    profile_gamma_reml_scale(warm_data, 4325.0, 3.0)
+    jumped = profile_gamma_reml_scale(warm_data, 4321.0e12, 3.0)
+
+    cold_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="prior")
+    cold = profile_gamma_reml_scale(cold_data, 4321.0e12, 3.0)
+    assert np.log(jumped.inverse_phi) == pytest.approx(np.log(cold.inverse_phi), abs=5.0e-12)
+
+
+def test_gamma_prior_derivative_is_deferred_until_read_then_cached(monkeypatch) -> None:
+    """The trigamma pass runs only when the derivative is consumed."""
+    y, weights = _distinct_weight_fixture()
+    profile_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="prior")
+
+    calls = {"n": 0}
+    real = GammaScaleProfileData.scaled_curvature
+
+    def counting(self, shape, penalty_nullity):
+        calls["n"] += 1
+        return real(self, shape, penalty_nullity)
+
+    monkeypatch.setattr(GammaScaleProfileData, "scaled_curvature", counting)
+    term = profile_gamma_reml_scale(profile_data, 4321.0, 3.0)
+    assert calls["n"] == 0
+
+    first_read = term.d_inverse_phi_d_penalized_deviance
+    assert calls["n"] == 1
+    assert term.d_inverse_phi_d_penalized_deviance == first_read
+    assert calls["n"] == 1
+
+    monkeypatch.undo()
+    expected = _gamma_inverse_shape_derivative(
+        term.inverse_phi,
+        profile_data.scaled_curvature(term.inverse_phi, 3.0),
+    )
+    assert first_read == expected
+
+
+def test_gamma_prior_term_pickles_to_a_plain_eager_term() -> None:
+    """Serialization must not drag the retained weight arrays along."""
+    import pickle
+
+    from superglm.reml.scale import ProfiledScaleTerm
+
+    y, weights = _distinct_weight_fixture()
+    profile_data = prepare_gamma_reml_scale_data(y, weights, weight_semantics="prior")
+    term = profile_gamma_reml_scale(profile_data, 4321.0, 3.0)
+
+    restored = pickle.loads(pickle.dumps(term))
+    assert type(restored) is ProfiledScaleTerm
+    assert np.array_equal(_term_fields(restored), _term_fields(term))
+
+
+def test_gamma_prior_sorted_dispatch_matches_masked_dispatch_bitwise() -> None:
+    """Slice selectors on sorted arguments reproduce the mask path exactly."""
+    from superglm.reml.scale import (
+        _gamma_saturated_normalizer_array,
+        _scaled_trigamma_minus_inverse_array,
+        _shape_times_log_minus_digamma_array,
+    )
+
+    rng = np.random.default_rng(11)
+    argument = np.sort(10.0 ** rng.uniform(-6.0, 4.0, 20_000))
+    for helper in (
+        _shape_times_log_minus_digamma_array,
+        _gamma_saturated_normalizer_array,
+        _scaled_trigamma_minus_inverse_array,
+    ):
+        masked = helper(argument)
+        sliced = helper(argument, assume_sorted=True)
+        assert np.array_equal(masked.view(np.uint64), sliced.view(np.uint64))
+
+
+def test_gamma_frequency_arm_never_enters_the_prior_accelerations(monkeypatch) -> None:
+    """The load-bearing constraint: `"frequency"` runs the shipped code path.
+
+    The prior arm's memo, warm-start solver and per-solve score stash exist
+    because its saturated term is a per-distinct-weight reduction. The
+    frequency arm's is a single scalar, has nothing to accelerate, and
+    reproduces a shipped release bit for bit -- so it must not merely *agree*
+    with the shipped body, it must BE it. Anything else and the next change to
+    the accelerations can move a released number.
+    """
+    from superglm.reml import scale as scale_module
+
+    rng = np.random.default_rng(11)
+    n = 400
+    weights = rng.uniform(0.5, 4.0, n)
+    y = rng.gamma(5.0, np.exp(0.3 + rng.normal(0.0, 0.3, n)) / 5.0)
+    data = scale_module.prepare_gamma_reml_scale_data(y, weights, weight_semantics="frequency")
+
+    def _forbidden(*args, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("the frequency arm must not use the prior-arm warm solver")
+
+    monkeypatch.setattr(scale_module, "_solve_gamma_profile_root_warm", _forbidden)
+
+    # Several solves at moving deviances: enough that a warm path would engage.
+    terms = [
+        scale_module.profile_gamma_reml_scale(
+            data,
+            penalized_deviance=float(np.sum(weights)) * factor,
+            penalty_nullity=4.0,
+        )
+        for factor in (0.30, 0.31, 0.32, 0.33)
+    ]
+
+    assert not data._profile_cache, "the frequency arm must not populate the memo"
+    assert not data._warm_history, "the frequency arm must not record warm-start history"
+    # Eager terms: the deferred derivative is a prior-arm object.
+    for term in terms:
+        assert type(term) is scale_module.ProfiledScaleTerm
+
+    # And re-solving the same input reproduces every field exactly, with the
+    # caches still empty -- i.e. the repeat came from the solver, not a memo.
+    repeat = scale_module.profile_gamma_reml_scale(
+        data,
+        penalized_deviance=float(np.sum(weights)) * 0.30,
+        penalty_nullity=4.0,
+    )
+    assert repeat.phi == terms[0].phi
+    assert repeat.inverse_phi == terms[0].inverse_phi
+    assert repeat.criterion == terms[0].criterion
+    assert repeat.d_inverse_phi_d_penalized_deviance == terms[0].d_inverse_phi_d_penalized_deviance
+    assert not data._profile_cache

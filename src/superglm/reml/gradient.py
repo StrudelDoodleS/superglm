@@ -106,7 +106,13 @@ def reml_direct_hessian(
     penalty_ranks: dict[str, float] | None = None,
     penalty_caches: dict | None = None,
     pirls_result: PIRLSResult | None = None,
-    n_obs: int = 0,
+    # The declared weight contract's likelihood size, not the physical row
+    # count -- `sum(w)` under `"frequency"`, the positive-row count under
+    # `"prior"`. It is the `n` in this Hessian's `0.5 * (n - M_p) * log(D)`
+    # scale term, and it must match the `n` the OBJECTIVE uses for that same
+    # term or the Newton step is inconsistent with the surface it steps on.
+    # Float, because `sum(w)` is not an integer.
+    n_obs: float = 0.0,
     phi_hat: float = 1.0,
     penalty_nullity: float | None = None,
     dH_extra: Mapping[int, NDArray | CompactSymmetricOperator] | None = None,

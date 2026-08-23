@@ -88,6 +88,7 @@ class TestReturnSCOPState:
             offset=offset,
             return_xtwx=True,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         assert isinstance(out, tuple)
         assert len(out) == 4, f"Expected 4-tuple, got {len(out)}-tuple"
@@ -111,6 +112,7 @@ class TestReturnSCOPState:
             offset=offset,
             return_xtwx=False,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         assert isinstance(out, tuple)
         assert len(out) == 3, f"Expected 3-tuple, got {len(out)}-tuple"
@@ -133,6 +135,7 @@ class TestReturnSCOPState:
             lambda2={"x": 1.0},
             offset=offset,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         _, _, scop_states = out
 
@@ -157,6 +160,7 @@ class TestReturnSCOPState:
             lambda2={"x": 1.0},
             offset=offset,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         _, _, scop_states = out
 
@@ -189,6 +193,7 @@ class TestReturnSCOPState:
             lambda2={"x": 1.0},
             offset=offset,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         _, _, scop_states = out
 
@@ -213,6 +218,7 @@ class TestReturnSCOPState:
             groups=model._groups,
             lambda2={"x": 1.0},
             offset=offset,
+            weight_semantics="frequency",
         )
         assert isinstance(out, tuple)
         assert len(out) == 2, f"Expected 2-tuple, got {len(out)}-tuple"
@@ -231,6 +237,7 @@ class TestReturnSCOPState:
             lambda2={"x": 1.0},
             offset=offset,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
         assert isinstance(out, tuple)
         assert len(out) == 3, f"Expected 3-tuple, got {len(out)}-tuple"
@@ -249,6 +256,7 @@ class TestReturnSCOPState:
             lambda2={"x": 1.0},
             offset=offset,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         _, _, scop_states = out
 
@@ -274,6 +282,7 @@ class TestReturnSCOPState:
             lambda2={"x": 1.0},
             offset=offset,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         _, _, scop_states = out
 
@@ -590,6 +599,7 @@ class TestSCOPStateCaching:
             lambda2={"x": 1.0},
             offset=offset,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         _, _, scop_states = out
         build_scop_penalty_components(scop_states)
@@ -605,6 +615,7 @@ class TestSCOPStateCaching:
             offset=offset,
             return_scop_state=True,
             scop_state_init=scop_states,
+            weight_semantics="frequency",
         )
         _, _, scop_states2 = out2
 
@@ -1433,6 +1444,7 @@ class TestSCOPAwareObjective:
             offset=offset,
             return_xtwx=True,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         penalties = build_scop_penalty_components(scop_states)
         penalty = build_penalty_matrix(
@@ -1467,11 +1479,12 @@ class TestSCOPAwareObjective:
             "reml_penalties": penalties,
             "scop_states": scop_states,
         }
-        actual = reml_laml_objective(**common)
+        actual = reml_laml_objective(**common, weight_semantics="frequency")
         expected = reml_laml_objective(
             **common,
             log_det_H=expected_logdet,
             hessian_rank=1 + decomposition.rank,
+            weight_semantics="frequency",
         )
 
         assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12)
@@ -1497,6 +1510,7 @@ class TestSCOPAwareObjective:
             offset=offset,
             return_xtwx=True,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         result, _, XtWX, scop_states = out
 
@@ -1512,6 +1526,7 @@ class TestSCOPAwareObjective:
             offset_arr=offset_arr,
             XtWX=XtWX,
             scop_states=scop_states,
+            weight_semantics="frequency",
         )
         assert isinstance(val, float)
         assert np.isfinite(val), f"Objective returned non-finite value: {val}"
@@ -1538,6 +1553,7 @@ class TestSCOPAwareObjective:
             offset=offset,
             return_xtwx=True,
             return_scop_state=True,
+            weight_semantics="frequency",
         )
         penalties = build_scop_penalty_components(scop_states)
         expected_penalty = np.zeros((model._dm.p, model._dm.p))
@@ -1560,10 +1576,11 @@ class TestSCOPAwareObjective:
             "reml_penalties": penalties,
             "scop_states": scop_states,
         }
-        assembled_objective = reml_laml_objective(**common)
+        assembled_objective = reml_laml_objective(**common, weight_semantics="frequency")
         explicit_objective = reml_laml_objective(
             **common,
             S_override=expected_penalty,
+            weight_semantics="frequency",
         )
 
         assert assembled_objective == pytest.approx(explicit_objective, rel=1e-12, abs=1e-12)
@@ -1588,6 +1605,7 @@ class TestSCOPAwareObjective:
             lambda2=lambdas,
             offset=offset,
             return_xtwx=True,
+            weight_semantics="frequency",
         )
         result, _, XtWX = out
 
@@ -1603,6 +1621,7 @@ class TestSCOPAwareObjective:
             sample_weight=sample_weight,
             offset_arr=offset_arr,
             XtWX=XtWX,
+            weight_semantics="frequency",
         )
 
         # Call with explicit scop_states=None
@@ -1618,6 +1637,7 @@ class TestSCOPAwareObjective:
             offset_arr=offset_arr,
             XtWX=XtWX,
             scop_states=None,
+            weight_semantics="frequency",
         )
 
         assert isinstance(val_none, float)
@@ -1668,6 +1688,7 @@ class TestSCOPEFSOuterLoop:
             debug_recorder=None,
             likelihood_size=1.0,
             gamma_scale_data=None,
+            weight_semantics="frequency",
         )
 
         mode = scop_efs_module._fit_scop_reml_mode(
@@ -1710,6 +1731,7 @@ class TestSCOPEFSOuterLoop:
             debug_recorder=None,
             likelihood_size=float(np.sum(sample_weight)),
             gamma_scale_data=None,
+            weight_semantics="frequency",
         )
         candidate = scop_efs_module._fit_scop_reml_mode(
             context,
@@ -1768,6 +1790,7 @@ class TestSCOPEFSOuterLoop:
             debug_recorder=None,
             likelihood_size=float(len(y)),
             gamma_scale_data=None,
+            weight_semantics="frequency",
         )
 
         mode = scop_efs_module._fit_scop_reml_mode(
@@ -2143,6 +2166,7 @@ class TestSCOPEFSOuterLoop:
             debug_recorder=None,
             likelihood_size=1.0,
             gamma_scale_data=None,
+            weight_semantics="frequency",
         )
         mode = scop_efs_module._fit_scop_reml_mode(
             context,
@@ -2207,6 +2231,7 @@ class TestSCOPEFSOuterLoop:
             debug_recorder=None,
             likelihood_size=1.0,
             gamma_scale_data=None,
+            weight_semantics="frequency",
         )
         mode = scop_efs_module._fit_scop_reml_mode(
             context,
@@ -2276,6 +2301,7 @@ class TestSCOPEFSOuterLoop:
             estimated_names={"x"},
             max_reml_iter=1,
             reml_tol=1e-12,
+            weight_semantics="frequency",
         )
 
         assert any(call["phase"] == "line_search" for call in fit_calls)
@@ -2306,6 +2332,7 @@ class TestSCOPEFSOuterLoop:
             estimated_names={"x"},
             max_reml_iter=8,
             reml_tol=1e-6,
+            weight_semantics="frequency",
         )
         evaluation = reml_laml_objective(
             dm=model._dm,
@@ -2320,6 +2347,7 @@ class TestSCOPEFSOuterLoop:
             reml_penalties=fitted.reml_penalties,
             scop_states=fitted.scop_states,
             return_evaluation=True,
+            weight_semantics="frequency",
         )
 
         assert isinstance(evaluation, REMLObjectiveEvaluation)
@@ -2351,6 +2379,7 @@ class TestSCOPEFSOuterLoop:
             max_reml_iter=20,
             reml_tol=1e-6,
             verbose=False,
+            weight_semantics="frequency",
         )
 
         assert isinstance(result, REMLResult)
@@ -2389,6 +2418,7 @@ class TestSCOPEFSOuterLoop:
                 estimated_names={"x"},
                 max_reml_iter=20,
                 reml_tol=1e-6,
+                weight_semantics="frequency",
             )
             results[noise_label] = res
 
@@ -2416,6 +2446,7 @@ class TestSCOPEFSOuterLoop:
             estimated_names={"x"},
             max_reml_iter=20,
             reml_tol=1e-6,
+            weight_semantics="frequency",
         )
 
         # Compute fitted values using final coefficients
@@ -2452,6 +2483,7 @@ class TestSCOPEFSOuterLoop:
             estimated_names={"x"},
             max_reml_iter=20,
             reml_tol=1e-6,
+            weight_semantics="frequency",
         )
 
         assert isinstance(result, REMLResult)
@@ -2507,6 +2539,7 @@ class TestSCOPNonConvergenceIsNotSpeciallyAccepted:
             debug_recorder=None,
             likelihood_size=1.0,
             gamma_scale_data=None,
+            weight_semantics="frequency",
         )
 
     def _run_gate(self, monkeypatch, solver_result, captured=None):
@@ -3292,6 +3325,7 @@ class TestSCOPFitRemlIntegration:
             reml_penalties=fitted.reml_penalties,
             scop_states=fitted.scop_states,
             return_evaluation=True,
+            weight_semantics="frequency",
         )
         assert evaluation.value == pytest.approx(fitted.objective, rel=2e-11, abs=2e-11)
         if isinstance(family, Gaussian):
@@ -3743,6 +3777,7 @@ class TestSCOPEFSRegression:
             XtWX=XtWX,
             reml_penalties=model._reml_penalties,
             scop_states=model._reml_result.scop_states,
+            weight_semantics="frequency",
         )
 
         # Must match the objective stored during optimization
@@ -4405,6 +4440,7 @@ class TestMultiSCOPIntegration:
             XtWX=XtWX,
             reml_penalties=model._reml_penalties,
             scop_states=model._reml_result.scop_states,
+            weight_semantics="frequency",
         )
         assert obj_recomputed == pytest.approx(model._reml_result.objective, rel=1e-8)
 

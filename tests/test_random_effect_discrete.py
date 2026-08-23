@@ -46,6 +46,7 @@ def _build_random_effect_design(
         model_discrete=discrete,
         n_bins_config=32,
         lambda2=0.1,
+        weight_semantics="frequency",
     )
     return result.dm.group_matrices[0]
 
@@ -171,6 +172,7 @@ def test_discrete_spline_is_exact_on_observed_support_with_random_effect():
             model_discrete=discrete,
             n_bins_config=32,
             lambda2={"x": 2.0, "broker": 3.0},
+            weight_semantics="frequency",
         )
 
     exact = build(False)
@@ -205,12 +207,14 @@ def test_discrete_spline_is_exact_on_observed_support_with_random_effect():
         groups=exact.groups,
         reml_penalties=exact_penalties,
         **common,
+        weight_semantics="frequency",
     )
     discrete_result, _ = fit_irls_direct(
         X=discrete.dm,
         groups=discrete.groups,
         reml_penalties=discrete_penalties,
         **common,
+        weight_semantics="frequency",
     )
 
     np.testing.assert_allclose(

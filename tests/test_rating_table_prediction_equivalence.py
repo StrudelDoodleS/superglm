@@ -141,7 +141,11 @@ def _every_term_type_features() -> dict:
     return features
 
 
-def _fit_binned_family(family) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
+def _fit_binned_family(
+    family,
+    *,
+    semantics: str = "prior",
+) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.ndarray]:
     """A binned fit under a chosen family, for the geometry-measure comparison.
 
     Its own frame rather than ``_frame``'s: the point of the comparison is the
@@ -168,6 +172,7 @@ def _fit_binned_family(family) -> tuple[SuperGLM, pd.DataFrame, np.ndarray, np.n
         family=family,
         selection_penalty=0.0,
         features={"age": Spline(n_knots=8), "density": Numeric()},
+        weight_semantics=semantics,
     )
     model.fit(X, y, sample_weight=weight)
     return model, X, y, weight
@@ -1220,24 +1225,26 @@ def test_the_printed_bin_edges_are_the_edges_the_model_binned_on():
     np.testing.assert_array_equal(_predict_from_payload(payload, X), with_exact_edges(X))
 
 
-def test_the_binning_measure_is_physical_rows_for_tweedie_and_the_weights_otherwise():
-    """The zero-bias identity above is in the GEOMETRY measure, which is family-scoped.
+def test_the_binning_measure_follows_the_declared_weight_contract():
+    """The zero-bias identity above is in the GEOMETRY measure, which the contract scopes.
 
     ``build_rating_table_payload``'s docstring states the binned blocks are
     bias-free in the mean.  In which mean is not a detail: ``discretize`` bins
-    and averages in ``geometry_weight``, which is ``sample_weight`` for the
-    frequency families and unit mass per physical row for ``Tweedie``, whose
-    weights are prior precision rather than case counts.  Stated
+    and averages in ``geometry_weight``, which is ``sample_weight`` under the
+    replication contract and unit mass per physical row under the prior one,
+    where the weights are precisions rather than case counts.  Stated
     unconditionally the claim is false -- measured on a Tweedie(p=1.5) fit with
     weights on [0.5, 20], the residual mean is 1.2e-18 per physical row and
     -8.7e-04 under the prior weights, and per bin 1.9e-17 against 6.4e-03.
 
     Asserted through the observable consequence rather than by re-deriving the
-    average: if a family bins on physical rows then its binned relativities
-    cannot depend on the weights at all, so handing the same fit two very
-    different weight vectors has to leave the table bit-identical.  For a
-    frequency family the same comparison has to MOVE it, or the test would pass
-    on an export that ignored weights everywhere.
+    average: if a fit bins on physical rows then its binned relativities cannot
+    depend on the weights at all, so handing it two very different weight
+    vectors has to leave the table bit-identical.  Under the replication
+    contract the same comparison has to MOVE it, or the test would pass on an
+    export that ignored weights everywhere.  Both arms use the same family, so
+    what is being pinned is the contract and not the family -- which is the
+    whole of what changed.
     """
 
     def binned(model, X, y, weight):
@@ -1245,8 +1252,8 @@ def test_the_binning_measure_is_physical_rows_for_tweedie_and_the_weights_otherw
             X, y, sample_weight=weight, n_bins=20, features=["age"]
         ).tables["age"]
 
-    for family, expect_invariant in (("poisson", False), (families.tweedie(p=1.5), True)):
-        model, X, y, fitted_weight = _fit_binned_family(family)
+    for semantics, expect_invariant in (("frequency", False), ("prior", True)):
+        model, X, y, fitted_weight = _fit_binned_family("poisson", semantics=semantics)
         flat = np.ones(len(X), dtype=np.float64)
         spread = np.linspace(0.5, 20.0, len(X))
 
@@ -1275,11 +1282,11 @@ def test_the_binning_measure_is_physical_rows_for_tweedie_and_the_weights_otherw
             np.testing.assert_array_equal(
                 under_flat["bin_from"].to_numpy(), under_spread["bin_from"].to_numpy()
             )
-            assert moved == 0.0, f"tweedie binned on the weights: max |dlog rel| {moved}"
+            assert moved == 0.0, f"prior arm binned on the weights: max |dlog rel| {moved}"
         else:
             # Measured 2.1e-02; the floor is an order of magnitude below, so a
             # refit that happens to shrink the effect does not flake it.
-            assert moved > 2e-03, f"poisson ignored the weights: max |dlog rel| {moved}"
+            assert moved > 2e-03, f"frequency arm ignored the weights: max |dlog rel| {moved}"
 
 
 # ── The other mean centering ───────────────────────────────────────────────

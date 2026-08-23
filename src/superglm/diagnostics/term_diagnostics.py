@@ -39,7 +39,7 @@ def term_importance(
     X : pandas or eager Polars DataFrame
         Data to evaluate on (typically training data).
     sample_weight : array-like, optional
-        Nonnegative case/frequency weights for non-Tweedie models. For
+        Nonnegative observation weights, read under the declared contract. For
         Tweedie models, finite, strictly positive EDM prior weights.
 
     Returns
@@ -58,8 +58,11 @@ def term_importance(
         weights = np.ones(n, dtype=np.float64)
     else:
         from superglm.distributions import Tweedie
+        from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
-        if isinstance(model._distribution, Tweedie):
+        if isinstance(model._distribution, Tweedie) and (
+            model_weight_semantics(model) == PRIOR_WEIGHTS
+        ):
             from superglm._utils import _validate_strict_prior_weights
 
             weights = _validate_strict_prior_weights(sample_weight, n)
@@ -164,10 +167,11 @@ def term_drop_diagnostics(
         Rows used by ``mode="refit"``. They also identify the training-row
         objects eligible for same-object holdout fallback.
     sample_weight, offset : array-like, optional
-        Training/refit weights and offset. Non-Tweedie weights are
-        case/frequency weights; Tweedie weights are finite, strictly positive
-        EDM prior weights. In holdout mode these are reused only when
-        ``X_val is X`` and ``y_val is y``.
+        Training/refit weights and offset, read under the model's declared
+        ``weight_semantics``. A Tweedie fit under ``"prior"`` needs finite,
+        strictly positive EDM prior weights, because its normalizer carries
+        ``log w``; every other combination admits a zero weight. In holdout
+        mode these are reused only when ``X_val is X`` and ``y_val is y``.
     mode : {"refit", "holdout"}
         ``"refit"``: calls ``drop1()`` and adds delta_aic, delta_bic columns.
         ``"holdout"``: zeros each term's contribution on validation set,
@@ -239,9 +243,15 @@ def _drop_term_refit(model, X, y, sample_weight, offset) -> pd.DataFrame:
         else np.asarray(sample_weight, dtype=np.float64)
     )
 
-    from superglm.solvers.dispersion import dispersion_likelihood_size
+    from superglm.solvers.dispersion import (
+        dispersion_likelihood_size,
+        model_weight_semantics,
+    )
 
-    likelihood_size = dispersion_likelihood_size(model._distribution, weights)
+    likelihood_size = dispersion_likelihood_size(
+        weights,
+        weight_semantics=model_weight_semantics(model),
+    )
 
     full_aic = -2.0 * full_ll + 2.0 * full_edf
     full_bic = -2.0 * full_ll + np.log(likelihood_size) * full_edf
@@ -288,8 +298,14 @@ def _drop_term_holdout(
         w = np.ones(n_val, dtype=np.float64)
     else:
         from superglm.distributions import Tweedie
+        from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
-        if isinstance(dist, Tweedie):
+        # Strict positivity is a Tweedie density requirement under the prior
+        # contract only -- read as replication the weight never enters the
+        # compound-Poisson normalizer. Scoping this on the family alone made
+        # holdout reject zero weights that the fit itself accepts, and
+        # ``term_importance`` above already gets it right.
+        if isinstance(dist, Tweedie) and model_weight_semantics(model) == PRIOR_WEIGHTS:
             from superglm._utils import _validate_strict_prior_weights
 
             w = _validate_strict_prior_weights(sample_weight_val, n_val)

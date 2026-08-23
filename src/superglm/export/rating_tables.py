@@ -2087,14 +2087,15 @@ def build_rating_table_payload(
       geometry-weighted mean of the smooth log-relativity over the rows in it,
       so the weighted mean residual is zero by construction in that measure and
       the binning error is spread rather than scale.  Which measure that is
-      depends on the family, and the difference is not cosmetic.  For
-      non-Tweedie families ``sample_weight`` is frequency mass, so the geometry
-      measure IS the exposure weighting and the residual is zero in the same
-      weights the exported ``Weight`` column reports.  Tweedie weights are
-      prior precision, not case counts, so ``discretize`` deliberately gives
-      every physical row unit geometry mass and each bin's value is the
-      UNWEIGHTED mean; the identity then holds per physical row, and the
-      prior-weighted residual is not zero.  Measured on a 900-row Tweedie(p=1.5)
+      depends on the declared weight contract, and the difference is not
+      cosmetic.  Under ``"frequency"`` ``sample_weight`` is replication mass,
+      so the geometry measure IS the exposure weighting and the residual is
+      zero in the same weights the exported ``Weight`` column reports.  Under
+      ``"prior"`` the weights are precisions, not case counts, so
+      ``discretize`` deliberately gives every physical row unit geometry mass
+      and each bin's value is the UNWEIGHTED mean; the identity then holds per
+      physical row, and the prior-weighted residual is not zero.  Measured on
+      a 900-row Tweedie(p=1.5)
       fit with 20 bins and prior weights drawn on [0.5, 20]: the residual mean
       is 1.2e-18 per physical row and -8.7e-04 under the prior weights, and per
       bin 1.9e-17 against 6.4e-03.  Those figures come from a probe, not from a

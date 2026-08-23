@@ -151,6 +151,7 @@ def test_well_scaled_scop_fit_avoids_anchor_prediction_fallback(monkeypatch) -> 
         lambda2={"x": 1.0},
         offset=offset,
         max_iter=2,
+        weight_semantics="frequency",
     )
 
     assert result.converged or result.n_iter == 2
@@ -182,6 +183,7 @@ def test_first_scop_rejection_retains_initialized_latent_bundle(monkeypatch) -> 
         record_diagnostics=True,
         return_scop_state=True,
         trace_run=TraceRun("scop-reject", sink=sink),
+        weight_semantics="frequency",
     )
 
     assert not result.converged
@@ -226,6 +228,7 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
         offset=offset,
         max_iter=5,
         return_scop_state=True,
+        weight_semantics="frequency",
     )
     baseline_state = next(iter(baseline_states.values()))
     monkeypatch.setattr(
@@ -249,6 +252,7 @@ def test_scop_rejection_restores_warm_hessian_step_and_fisher_cache(monkeypatch)
         record_diagnostics=True,
         return_scop_state=True,
         scop_state_init=baseline_states,
+        weight_semantics="frequency",
     )
 
     rejected_state = next(iter(rejected_states.values()))
@@ -289,6 +293,7 @@ def test_scop_half_step_refreshes_gamma_deviance_and_retained_hessian(monkeypatc
         record_diagnostics=True,
         return_scop_state=True,
         trace_run=TraceRun("scop-half", sink=sink),
+        weight_semantics="frequency",
     )
 
     gi, state = next(iter(states.items()))
@@ -366,6 +371,7 @@ def test_recorder_captures_step_quality_fields(monkeypatch, alpha, halvings, rej
         offset=offset,
         max_iter=1,
         record_diagnostics=True,
+        weight_semantics="frequency",
     )
 
     assert result.iteration_log is not None
@@ -402,6 +408,7 @@ def test_scop_terminal_refresh_replaces_stale_fisher_fallback_flag(monkeypatch) 
         offset=offset,
         max_iter=1,
         return_scop_state=True,
+        weight_semantics="frequency",
     )
 
     assert all(state["last_fisher_fallback"] for state in states.values())
@@ -434,6 +441,7 @@ def test_scop_trace_merit_uses_authoritative_latent_penalty(monkeypatch) -> None
         max_iter=1,
         return_scop_state=True,
         trace_run=TraceRun("scop-latent-merit", sink=sink),
+        weight_semantics="frequency",
     )
 
     state = next(iter(states.values()))
@@ -479,6 +487,7 @@ def test_poisson_scop_terminal_inference_keeps_known_dispersion() -> None:
         model._groups,
         lambda2={"x": 1.0},
         offset=offset,
+        weight_semantics="frequency",
     )
 
     assert result.phi == 1.0

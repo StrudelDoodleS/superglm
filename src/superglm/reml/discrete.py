@@ -48,10 +48,7 @@ from superglm.reml.penalty_algebra import (
 )
 from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.reml.scale import (
-    GammaScaleProfileData,
-    TweedieScaleProfileData,
-    prepare_gamma_reml_scale_data,
-    prepare_tweedie_reml_scale_data,
+    prepare_reml_scale_data,
     profile_gamma_reml_scale,
     profile_gaussian_reml_scale,
     profile_tweedie_reml_scale,
@@ -186,6 +183,7 @@ def optimize_discrete_reml_cached_w(
     penalty_ranks: dict[str, float],
     lambdas: dict[str, float],
     *,
+    weight_semantics: str,
     max_reml_iter: int,
     reml_tol: float,
     verbose: bool,
@@ -221,6 +219,24 @@ def optimize_discrete_reml_cached_w(
     lambdas are large but not maximally penalized.  Deviance drift is
     typically <0.1% relative (guarded by test_wide_poisson_poi_quality).
     """
+
+    # The declared contract's likelihood size, computed once. Every dispersion
+    # denominator and the REML scale term's `0.5 * (n - M_p) * log(D)` must use
+    # THIS, not the physical row count: `sum(w)` under `"frequency"`, the
+    # positive-row count under `"prior"`. The objective, its gradient and its
+    # Hessian all read it, so a row count in any one of them makes the Newton
+    # step inconsistent with the surface it is stepping on.
+    _contract_size_cache: list[float] = []
+
+    def _contract_size() -> float:
+        if not _contract_size_cache:
+            from superglm.solvers.dispersion import dispersion_likelihood_size
+
+            _contract_size_cache.append(
+                dispersion_likelihood_size(sample_weight, weight_semantics=weight_semantics)
+            )
+        return _contract_size_cache[0]
+
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
@@ -228,15 +244,17 @@ def optimize_discrete_reml_cached_w(
         penalty_caches=penalty_caches,
     )
     scale_known = getattr(distribution, "scale_known", True)
-    likelihood_size: float | None = None
-    gamma_scale_data: GammaScaleProfileData | None = None
-    tweedie_scale_data: TweedieScaleProfileData | None = None
-    if isinstance(distribution, Gaussian):
-        likelihood_size = float(np.sum(sample_weight, dtype=np.float64))
-    elif isinstance(distribution, Gamma):
-        gamma_scale_data = prepare_gamma_reml_scale_data(y, sample_weight)
-    elif isinstance(distribution, Tweedie):
-        tweedie_scale_data = prepare_tweedie_reml_scale_data(y, sample_weight, distribution.p)
+    (
+        likelihood_size,
+        saturated_log_weight,
+        gamma_scale_data,
+        tweedie_scale_data,
+    ) = prepare_reml_scale_data(
+        distribution,
+        y,
+        sample_weight,
+        weight_semantics=weight_semantics,
+    )
     group_names = [pc.name for pc in penalties]
     m = len(group_names)
     shared_tensor_pairs = _shared_tensor_penalty_pairs(penalties, dm.group_matrices)
@@ -394,6 +412,7 @@ def optimize_discrete_reml_cached_w(
         debug_context={"phase": "bootstrap", "reml_iteration": 0},
         trace_run=trace_run,
         trace_purpose="reml_bootstrap",
+        weight_semantics=weight_semantics,
     )
     _t_pirls += _time.perf_counter() - _pirls_start
     S_boot = latch_runtime_backend(
@@ -448,6 +467,7 @@ def optimize_discrete_reml_cached_w(
                 penalized_deviance,
                 likelihood_size,
                 M_p,
+                saturated_log_weight=saturated_log_weight or 0.0,
             )
             boot_phi = boot_scale.phi
             boot_inv_phi = boot_scale.inverse_phi
@@ -471,7 +491,7 @@ def optimize_discrete_reml_cached_w(
             boot_inv_phi = boot_scale.inverse_phi
         else:
             boot_phi = max(
-                penalized_deviance / max(len(y) - M_p, 1.0),
+                penalized_deviance / max(_contract_size() - M_p, 1.0),
                 1e-10,
             )
             boot_inv_phi = 1.0 / max(boot_phi, 1e-10)
@@ -607,6 +627,7 @@ def optimize_discrete_reml_cached_w(
             debug_context={"phase": "candidate", "reml_iteration": poi_iter + 1},
             trace_run=trace_run,
             trace_purpose="reml_candidate",
+            weight_semantics=weight_semantics,
         )
         _t_pirls += _time.perf_counter() - _t0
         S_cand = latch_runtime_backend(
@@ -655,6 +676,8 @@ def optimize_discrete_reml_cached_w(
             reml_penalties=penalties,
             tensor_pair_evaluations=cand_tensor_pair_evals,
             likelihood_size=likelihood_size,
+            saturated_log_weight=saturated_log_weight,
+            weight_semantics=weight_semantics,
             gamma_scale_data=gamma_scale_data,
             tweedie_scale_data=tweedie_scale_data,
             return_evaluation=True,
@@ -700,7 +723,7 @@ def optimize_discrete_reml_cached_w(
                     )
                     penalized_deviance = float(pirls_result.deviance + pq)
                 phi_hat = max(
-                    penalized_deviance / max(len(y) - penalty_nullity, 1.0),
+                    penalized_deviance / max(_contract_size() - penalty_nullity, 1.0),
                     1e-10,
                 )
                 inverse_phi = 1.0 / max(phi_hat, 1e-10)
@@ -827,7 +850,7 @@ def optimize_discrete_reml_cached_w(
                 gradient=grad,
                 penalty_caches=penalty_caches,
                 pirls_result=pirls_result,
-                n_obs=len(y),
+                n_obs=_contract_size(),
                 phi_hat=phi_hat,
                 inverse_phi=inverse_phi,
                 d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
@@ -887,7 +910,7 @@ def optimize_discrete_reml_cached_w(
                 gradient=grad,
                 penalty_caches=penalty_caches,
                 pirls_result=pirls_result,
-                n_obs=len(y),
+                n_obs=_contract_size(),
                 phi_hat=phi_hat,
                 inverse_phi=inverse_phi,
                 d_inverse_phi_d_penalized_deviance=inverse_phi_derivative,
@@ -1159,6 +1182,8 @@ def optimize_discrete_reml_cached_w(
                 reml_penalties=penalties,
                 tensor_pair_evaluations=trial_tensor_pair_evals,
                 likelihood_size=likelihood_size,
+                saturated_log_weight=saturated_log_weight,
+                weight_semantics=weight_semantics,
                 gamma_scale_data=gamma_scale_data,
                 tweedie_scale_data=tweedie_scale_data,
             )
@@ -1253,6 +1278,8 @@ def optimize_discrete_reml_cached_w(
                 reml_penalties=penalties,
                 tensor_pair_evaluations=trial_tensor_pair_evals,
                 likelihood_size=likelihood_size,
+                saturated_log_weight=saturated_log_weight,
+                weight_semantics=weight_semantics,
                 gamma_scale_data=gamma_scale_data,
                 tweedie_scale_data=tweedie_scale_data,
             )
@@ -1425,6 +1452,7 @@ def optimize_discrete_reml_cached_w(
         debug_context={"phase": "optimizer_final", "reml_iteration": poi_iter + 1},
         trace_run=trace_run,
         trace_purpose="reml_optimizer_final",
+        weight_semantics=weight_semantics,
     )
     _t_pirls += _time.perf_counter() - _t0
     S_final = latch_runtime_backend(
@@ -1455,6 +1483,8 @@ def optimize_discrete_reml_cached_w(
         reml_penalties=penalties,
         tensor_pair_evaluations=final_tensor_pair_evals,
         likelihood_size=likelihood_size,
+        saturated_log_weight=saturated_log_weight,
+        weight_semantics=weight_semantics,
         gamma_scale_data=gamma_scale_data,
         tweedie_scale_data=tweedie_scale_data,
     )

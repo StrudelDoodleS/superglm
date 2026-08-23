@@ -75,7 +75,7 @@ train_df = pd.DataFrame(
 )
 
 y = np.array([0.3, 0.5, 1.1, 1.5] * 40)
-w = np.array([1.0, 2.0, 1.0, 2.0] * 40)  # Gamma case/frequency weights
+w = np.array([1.0, 2.0, 1.0, 2.0] * 40)  # prior weights, the default reading
 offset = np.log(train_df["term_months"].to_numpy() / 12.0)
 
 model = SuperGLM(

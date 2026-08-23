@@ -43,6 +43,7 @@ from superglm.group_matrix import (
     _discretize_column,
 )
 from superglm.links import Link, resolve_link
+from superglm.solvers.dispersion import PRIOR_WEIGHTS, validate_weight_semantics
 from superglm.types import DiscreteTensorBuildResult, FeatureSpec, GroupInfo, GroupSlice
 
 logger = logging.getLogger(__name__)
@@ -901,6 +902,7 @@ def build_design_matrix(
     separation: str = "warn",
     selection_penalty: object | None = None,
     group_pricing: str = "rank",
+    weight_semantics: str,
 ) -> BuildResult:
     """Build features, groups, and design matrix from specs.
 
@@ -931,14 +933,24 @@ def build_design_matrix(
     than the term spans: ``"rank"`` (default) prices the emitted,
     identifiable width; ``"spanned"`` reproduces the historical behaviour of
     pricing the width the term spans.  See ``_priced_group_dimension``.
+
+    ``weight_semantics`` decides what ``sample_weight`` says about a row, and
+    reaches the build in two places: which weights a strict-positivity check
+    applies to, and whether learned geometry follows weight mass or physical
+    rows.
     """
     _validate_group_pricing(group_pricing)
+    weight_semantics = validate_weight_semantics(weight_semantics)
     y = np.asarray(y, dtype=np.float64)
     n = len(y)
     distribution = resolve_distribution(family)
     if sample_weight is None:
         sample_weight = np.ones(n, dtype=np.float64)
-    elif isinstance(distribution, Tweedie):
+    elif isinstance(distribution, Tweedie) and weight_semantics == PRIOR_WEIGHTS:
+        # The compound-Poisson normalizer carries ``log w``, so a Tweedie prior
+        # weight of zero is not an uninformative row but an unevaluable
+        # density.  Read as a replication count the weight never enters that
+        # normalizer, and zero means what it means everywhere else.
         sample_weight = _validate_strict_prior_weights(sample_weight, n)
     else:
         sample_weight = np.asarray(sample_weight, dtype=np.float64)
@@ -961,18 +973,32 @@ def build_design_matrix(
     )
     separation_records: list[tuple] = []
 
-    # Non-Tweedie weights are frequency mass for learned spline geometry.
-    # Tweedie weights are EDM prior weights, so spline knot placement and
-    # discretized-bin geometry stay functions of physical rows only.  That
-    # physical-rows rule covers every MODEL-geometry learner: _SplineBase
-    # knot placement, and Piecewise int-mode quantile placement and
-    # base='most_exposed' selection (explicit-breaks mode is unaffected --
-    # stated knots do not move).  Polynomial standardization deliberately
-    # follows sample_weight under every family, because orthonormalization is
-    # inference/selection geometry (the spanned column space is
-    # weight-invariant; unpenalized fits are identical), not model geometry
-    # like knot placement.
-    geometry_weight = None if isinstance(distribution, Tweedie) else sample_weight
+    # Frequency weights are replication mass, so they shape the same support as
+    # literally repeated rows and learned geometry follows them.  Prior weights
+    # say how precisely a row was measured, not how many rows there are, so
+    # spline knot placement and discretized-bin geometry stay functions of
+    # physical rows only.  That physical-rows rule covers every MODEL-geometry
+    # learner: _SplineBase knot placement, and Piecewise int-mode quantile
+    # placement and base='most_exposed' selection (explicit-breaks mode is
+    # unaffected -- stated knots do not move).  Polynomial standardization
+    # deliberately follows sample_weight under either contract, because
+    # orthonormalization is inference/selection geometry (the spanned column
+    # space is weight-invariant; unpenalized fits are identical), not model
+    # geometry like knot placement.
+    #
+    # "Physical rows" still excludes a row carrying no weight.  Under the prior
+    # contract ``w = 0`` says the row was observed with infinite variance --
+    # not observed at all -- so it must no more shape a boundary or a quantile
+    # than a zero replication count does.  Passing the indicator rather than
+    # ``None`` says exactly that, and it is all-ones (hence identical to
+    # ``None``) wherever the weights are strictly positive, which is every
+    # Tweedie prior fit.
+    physical_rows = weight_semantics == PRIOR_WEIGHTS
+    geometry_weight = (
+        (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
+        if physical_rows
+        else sample_weight
+    )
 
     group_matrices: list[GroupMatrix] = []
     col_offset = 0
@@ -988,7 +1014,7 @@ def build_design_matrix(
         # base, its specials identifiability guards, and Polynomial
         # standardization deliberately keep following sample_weight.
         if isinstance(spec, OrderedCategorical):
-            spec._inner_geometry_physical_rows = geometry_weight is None
+            spec._inner_geometry_physical_rows = physical_rows
         x_col = X.column_array(name)
         if separation_boundaries and isinstance(spec, Categorical):
             # Scanned after the loops, once the spec has learned its levels

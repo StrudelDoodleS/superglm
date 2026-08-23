@@ -679,6 +679,7 @@ def test_pirls_rank_metadata_uses_factor_certified_subspaces() -> None:
         groups,
         GroupLasso(lambda1=0.0),
         tol=1e-12,
+        weight_semantics="frequency",
     )
 
     assert result.converged

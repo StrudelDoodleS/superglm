@@ -108,10 +108,9 @@ For the Poisson rate encoding, exposure \(a_i=e_i\) multiplies the IRLS
 curvature, so a three-year rate row contributes three times the information of
 a one-year row. It does not multiply the conditional mean automatically. For
 a raw count response, put `log(exposure)` in the offset so that
-\(\text{E}[\text{count}_i]=e_i\lambda_i\). SuperGLM does not interpret
-Gaussian/Gamma `sample_weight` as the generic inverse-variance row above, and
-Tweedie uses EDM prior weights; see [Families & Dispersion](families.md#weight-semantics)
-for the family-specific contract.
+\(\text{E}[\text{count}_i]=e_i\lambda_i\). Whether `sample_weight` is the inverse-variance row above or a replication
+count is declared per model by `weight_semantics`, and defaults to the former;
+see [Families & Dispersion](families.md#weight-semantics).
 
 ### 1.3 IRLS
 

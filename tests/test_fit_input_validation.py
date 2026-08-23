@@ -987,6 +987,7 @@ def test_validate_fit_input_returns_float64_vectors_without_mutating_callers() -
         offset,
         family=Gaussian(),
         required_columns=("x",),
+        weight_semantics="prior",
     )
 
     assert validated.X.native is X
@@ -1075,6 +1076,7 @@ def test_validate_fit_input_retains_the_native_frame_behind_the_adapter() -> Non
         None,
         family=Gaussian(),
         required_columns=("x",),
+        weight_semantics="frequency",
     )
 
     assert validated.X.native is X
