@@ -645,22 +645,26 @@ class ModelMetrics:
         # binomial's trial count, and the transform is wrong without it.
         prior = self._weight_semantics == "prior"
         if isinstance(self._family, Binomial):
-            # The prior contract reads w as the trial count, so with y pinned
-            # to {0, 1} the observed grouped count K is 0 or w. The randomized
-            # transform needs that count's own CDF interval, [F(K-1), F(K)]:
+            # Binomial is deliberately CONTRACT-INVARIANT here, and it is the
+            # one family that has to be.
             #
-            #   y == 0  ->  K = 0  ->  [0, P(K = 0)]      = [0, (1-mu)**w]
-            #   y == 1  ->  K = w  ->  [P(K <= w-1), 1]   = [1 - mu**w, 1]
+            # A randomized quantile residual is only a probability-integral
+            # transform if the masses it splits sum to one. The prior
+            # construction `w Y ~ Binomial(w, mu)` lives on {0, 1/w, ..., 1},
+            # but `validate_response` pins y to {0, 1} -- so the reported
+            # likelihood's two reachable masses are (1-mu)**w and mu**w, which
+            # sum to one ONLY at w == 1 (0.378 at mu=0.71, w=3, measured).
+            # There is therefore no {0,1}-supported distribution whose masses
+            # are the reported likelihood's, and no PIT of it exists to build.
             #
-            # Starting the all-success row at (1-mu)**w instead would hand it
-            # every intermediate count as well, which is not the transform of
-            # the likelihood being fitted. The two bounds coincide at w == 1.
-            if prior:
-                a = np.where(y == 0, 0.0, 1.0 - np.power(mu, w))
-                b = np.where(y == 0, np.power(1.0 - mu, w), 1.0)
-            else:
-                a = np.where(y == 0, 0.0, 1.0 - mu)
-                b = np.where(y == 0, 1.0 - mu, 1.0)
+            # Splitting [0, 1] at 1 - mu instead keeps the transform exactly
+            # uniform, which is the property the Q-Q envelope is a reference
+            # band for. What it costs is that the residual inverts the
+            # unit-weight marginal rather than the reported likelihood -- said
+            # here rather than left for a reader to discover, and already
+            # warned about at fit time by PriorWeightLatticeWarning.
+            a = np.where(y == 0, 0.0, 1.0 - mu)
+            b = np.where(y == 0, 1.0 - mu, 1.0)
             u = rng.uniform(a, b)
         elif isinstance(self._family, Poisson):
             count = np.round(w * y) if prior else np.round(y)

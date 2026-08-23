@@ -357,15 +357,16 @@ class TestWeightContractDiagnostics:
         np.testing.assert_allclose(rng.gamma_shape, weights / phi)
         np.testing.assert_allclose(rng.gamma_scale, mu * phi / weights)
 
-        # y == 1 is the ALL-success outcome of w trials under the prior
-        # contract, so the draw is mu**w -- the event the quantile residual
-        # inverts. "At least one success" would be a different event and would
-        # mask the residual's endpoint.
+        # Binomial is the exception, and deliberately so: with y pinned to
+        # {0, 1} the prior likelihood's two reachable masses do not sum to one
+        # for w != 1, so no {0,1}-supported marginal reproduces it. Both this
+        # helper and the residual stay contract-invariant, which is what keeps
+        # the envelope a valid reference band.
         probability = np.array([0.2, 0.5, 0.7])
         diagnostics_module._simulate_response(
             Binomial(), probability, phi, weights, rng, weight_semantics="prior"
         )
-        np.testing.assert_allclose(rng.binomial_p, probability**weights)
+        np.testing.assert_allclose(rng.binomial_p, probability)
 
     @pytest.mark.parametrize(
         ("semantics", "expected"),
@@ -432,7 +433,11 @@ class TestWeightContractDiagnostics:
         assert len(frequency_rows[0]) == 2 * (n - 3)
         np.testing.assert_array_equal(frequency_rows[3], np.ones(2 * (n - 3)))
 
-    @pytest.mark.parametrize("family", [Gaussian(), Gamma()], ids=["gaussian", "gamma"])
+    @pytest.mark.parametrize(
+        "family",
+        [Gaussian(), Gamma(), Poisson(), NegativeBinomial(theta=2.0), Binomial()],
+        ids=["gaussian", "gamma", "poisson", "negative_binomial", "binomial"],
+    )
     def test_simulated_rows_are_standard_normal_under_their_own_contract(self, family):
         """The envelope's defining property, stated without reference to the code.
 
@@ -449,16 +454,26 @@ class TestWeightContractDiagnostics:
         rng = np.random.default_rng(404)
         n = 4000
         frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
-        mu_true = np.exp(0.5 + 0.8 * frame["x"].to_numpy())
+        linear = 0.5 + 0.8 * frame["x"].to_numpy()
+        mu_true = np.exp(linear)
         weights = rng.uniform(0.4, 6.0, n)
-        y = rng.gamma(6.0, mu_true / 6.0)
+        if isinstance(family, Binomial):
+            y = rng.binomial(1, 1.0 / (1.0 + np.exp(-linear))).astype(float)
+        elif isinstance(family, Poisson | NegativeBinomial):
+            y = rng.poisson(mu_true).astype(float)
+        elif isinstance(family, Gaussian):
+            y = linear + rng.normal(0.0, 0.4, n)
+        else:
+            y = rng.gamma(6.0, mu_true / 6.0)
 
         model = SuperGLM(
             family=family,
             features={"x": Numeric()},
             weight_semantics="prior",
         )
-        model.fit(frame, y, sample_weight=weights)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(frame, y, sample_weight=weights)
         metrics = model.metrics(frame, y, weights)
         mu, phi = metrics._mu, metrics.phi
 
@@ -478,7 +493,15 @@ class TestWeightContractDiagnostics:
         wrong = ModelMetrics(model, y=mismatched, sample_weight=weights, _mu=mu).residuals(
             "quantile", seed=11
         )
-        assert scipy_stats.kstest(wrong, "norm").pvalue < 1e-6
+        if isinstance(family, Binomial):
+            # Binomial has no mismatch to detect, and that is the point: its
+            # prior likelihood's two reachable masses at y in {0, 1} do not sum
+            # to one for w != 1, so no {0,1}-supported marginal reproduces it.
+            # Both the simulator and the residual therefore stay
+            # contract-invariant, and the two arms are the same draw.
+            np.testing.assert_array_equal(mismatched, matched)
+        else:
+            assert scipy_stats.kstest(wrong, "norm").pvalue < 1e-6
 
     @pytest.mark.parametrize(
         ("family", "weights", "match"),

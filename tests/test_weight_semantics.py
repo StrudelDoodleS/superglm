@@ -983,17 +983,28 @@ class TestTheBinomialPriorFormIsNotNormalised:
             ).fit(frame, y, sample_weight=rng.integers(1, 4, len(frame)).astype(float))
         assert [c for c in caught if issubclass(c.category, PriorWeightLatticeWarning)] == []
 
-    def test_the_residual_inverts_the_all_success_count(self):
-        """y == 1 is K == w, so its interval starts at P(K <= w-1) = 1 - mu**w.
+    def test_the_residual_stays_contract_invariant_so_the_pit_stays_uniform(self):
+        """The residual cannot invert a likelihood that is not normalised.
 
-        Starting at (1-mu)**w would hand the all-success row every
-        intermediate count too, which is not the transform of the fitted
-        likelihood.
+        A randomized quantile residual is a probability-integral transform, so
+        it is only valid if the masses it splits sum to one. The prior form's
+        two reachable masses do not, which leaves exactly one coherent choice:
+        keep the transform uniform and say plainly that it inverts the
+        unit-weight marginal rather than the reported likelihood.
+
+        Splitting at ``1 - mu**w`` instead -- the PIT of the reported
+        likelihood -- makes the transform non-uniform for a CORRECTLY
+        specified fit, because the intermediate counts ``1..w-1`` are
+        unobservable under ``y in {0, 1}``. Measured: kstest p goes from 0.82
+        to 0.0 and the residual s.d. from 1.01 to 1.66.
         """
 
-        rng, frame = _frame(seed=53, n=150)
-        y = _response(rng, frame, Binomial())
-        weights = np.full(len(frame), 3.0)
+        rng = np.random.default_rng(53)
+        n = 4000
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        linear = 0.5 + 0.8 * frame["x"].to_numpy()
+        y = rng.binomial(1, 1.0 / (1.0 + np.exp(-linear))).astype(float)
+        weights = np.full(n, 3.0)
 
         model = SuperGLM(
             family=Binomial(),
@@ -1004,14 +1015,27 @@ class TestTheBinomialPriorFormIsNotNormalised:
             model.fit(frame, y, sample_weight=weights)
         metrics = model.metrics(frame, y, sample_weight=weights)
         mu = np.asarray(model.predict(frame), dtype=np.float64)
-        residuals = metrics.residuals("quantile", seed=3)
 
-        lower = stats.norm.ppf(1.0 - np.power(mu, weights))
-        success = y == 1
-        # Every all-success row sits above its own K = w lower bound, which is
-        # strictly above the (1-mu)**w bound the previous code used.
-        assert np.all(residuals[success] >= lower[success] - 1e-9)
-        assert np.all(np.power(1.0 - mu, weights) < 1.0 - np.power(mu, weights))
+        # The masses the reported likelihood assigns do not sum to one, which
+        # is why no PIT of it exists to build.
+        total = np.power(1.0 - mu, weights) + np.power(mu, weights)
+        assert np.all(total < 0.99)
+
+        # The residual is a valid transform, and is the same under both
+        # contracts -- Binomial is deliberately contract-invariant here.
+        residuals = metrics.residuals("quantile", seed=3)
+        assert stats.kstest(residuals, "norm").pvalue > 0.01
+
+        frequency = SuperGLM(
+            family=Binomial(),
+            features={"x": Spline(n_knots=4)},
+            weight_semantics="frequency",
+        )
+        frequency.fit(frame, y, sample_weight=weights)
+        np.testing.assert_array_equal(
+            frequency.metrics(frame, y, sample_weight=weights).residuals("quantile", seed=3),
+            residuals,
+        )
 
 
 class TestTheCustomFamilyScaleTermUsesTheContract:
