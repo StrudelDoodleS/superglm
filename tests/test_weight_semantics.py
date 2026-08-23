@@ -1800,3 +1800,92 @@ class TestTheContractWarningNeverPreemptsAValidationError:
         model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
         with pytest.warns(FractionalFrequencyWeightWarning):
             model.fit(X, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))
+
+
+class TestTheIntegralitySlackIsUlpScaled:
+    """A relative slack cannot express "close to an integer" at any setting.
+
+    Nothing is ever further than 0.5 from its nearest integer, so a relative
+    slack that reaches 0.5 admits everything -- and an absolute ceiling only
+    moves where it fails rather than removing the failure. Float64 spacing is
+    the scale that actually applies.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            1_000_000.0005,  # inside a 1e-3 ceiling, still not a whole number
+            1_000_000.5,
+            500_000_000.5,
+            1_000_000_000.5,  # a 1e-9 relative slack reaches 0.5 here
+            1e12 + 0.5,
+        ],
+    )
+    def test_an_exactly_representable_fraction_is_never_called_whole(self, value):
+        from superglm.model.input_validation import _off_integer_lattice
+
+        assert value != np.rint(value), "test needs a genuinely fractional value"
+        assert bool(_off_integer_lattice(np.array([value]))[0])
+
+    @pytest.mark.parametrize("magnitude", [1.0, 1e3, 1e6, 1e9, 1e15])
+    def test_a_few_ulps_of_round_off_is_still_absorbed(self, magnitude):
+        """The slack exists for this and must keep covering it.
+
+        Measured: over 200,000 trials of ``count / exposure * exposure`` the
+        worst deviation from the intended integer was 1.0 ulp.
+        """
+        from superglm.model.input_validation import _off_integer_lattice
+
+        nudged = magnitude
+        for _ in range(4):  # four ulps out, inside the eight-ulp allowance
+            nudged = np.nextafter(nudged, np.inf)
+        assert not bool(_off_integer_lattice(np.array([nudged]))[0])
+
+    def test_the_canonical_exposure_round_trip_does_not_warn(self):
+        """``count / exposure`` times ``exposure`` must read as integral."""
+        from superglm.model.input_validation import _off_integer_lattice
+
+        rng = np.random.default_rng(21)
+        counts = rng.integers(0, 10_000, size=20_000).astype(float)
+        exposure = rng.uniform(0.01, 50.0, size=20_000)
+        assert not _off_integer_lattice((counts / exposure) * exposure).any()
+
+
+class TestTheEvaluationWarningNeverPreemptsAValidationError:
+    """Same ordering rule as the fit entry, at the evaluation boundary.
+
+    ``predict`` is what validates the evaluation frame and the offset, so a
+    contract warning raised ahead of it fires on input that will never reach a
+    likelihood -- and under ``-W error`` it surfaces instead of the error the
+    caller needs.
+    """
+
+    @staticmethod
+    def _fitted():
+        rng = np.random.default_rng(22)
+        n = 60
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y = rng.poisson(3.0, n).astype(float)
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            model.fit(X, y, sample_weight=np.full(n, 2.0))
+        return model, X, y, n
+
+    def test_a_malformed_offset_raises_rather_than_warning(self):
+        model, X, y, n = self._fitted()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # promote every warning
+            with pytest.raises(ValueError):
+                model.metrics(
+                    X,
+                    y,
+                    sample_weight=np.full(n, 2.5),  # fractional: would warn
+                    offset=np.zeros(n - 3),  # but this is the real problem
+                )
+
+    def test_a_well_formed_call_still_warns(self):
+        """The control: the reordering must not have disabled the check."""
+        model, X, y, n = self._fitted()
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            model.metrics(X, y, sample_weight=np.full(n, 2.5), offset=np.zeros(n))

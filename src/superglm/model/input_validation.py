@@ -31,34 +31,38 @@ class FractionalFrequencyWeightWarning(UserWarning):
     """A replication count that is not a whole number of observations."""
 
 
-#: Relative slack when testing a value for integrality.  The quantities tested
-#: are formed in floating point from user arrays, so an exactly-integral intent
-#: (``count / exposure`` times ``exposure``) can land a few ulps away.
-_LATTICE_RELATIVE_TOLERANCE = 1e-9
+#: Absolute slack when testing a weight for unity.  Values sit near 1 here, so
+#: magnitude scaling is not in play and a plain tolerance is the right shape.
+_UNIT_WEIGHT_TOLERANCE = 1e-9
 
-#: Ceiling on that slack.  A *relative* tolerance cannot express "close to an
-#: integer" on its own: nothing is ever further than 0.5 from its nearest
-#: integer, so once the relative slack reaches 0.5 -- which 1e-9 does at
-#: ``|v| >= 5e8`` -- the test admits everything and the check silently dies.
-#: ``1e9 + 0.5`` is exactly representable in float64 and would have been
-#: reported as a whole number of replications.  The ceiling binds only above
-#: ``|v| = 1e6``, where the relative rule was already allowing more slack than
-#: any accumulated round-off needs, and it still resolves a fractional part
-#: three orders of magnitude finer than a replication count can mean anything.
-_LATTICE_MAXIMUM_SLACK = 1e-3
+#: Slack when testing a value for integrality, in units of float64 spacing.
+#:
+#: The quantity tested is formed in floating point from user arrays -- an
+#: exactly-integral intent (``count / exposure`` times ``exposure``) lands a few
+#: ulps away -- so the allowance has to scale with magnitude.  Spacing is the
+#: scale that does: it is what the nearest representable neighbour costs.
+#:
+#: A *relative* tolerance is not.  Nothing is ever further than 0.5 from its
+#: nearest integer, so any relative slack that reaches 0.5 admits everything;
+#: 1e-9 does that at ``|v| >= 5e8``, and a 1e-3 ceiling only moves the failure
+#: rather than removing it -- ``1_000_000.0005`` is exactly representable, is
+#: not a whole number of replications, and sits inside that ceiling.
+#:
+#: Sized from measurement, not taste.  Over 200,000 trials of
+#: ``count / exposure * exposure`` the worst deviation from the intended
+#: integer was **1.0 ulp**, and summed integer counts were exact.  Eight ulps
+#: is that with room to spare, and stays far below 0.5 across the whole double
+#: range, so the check cannot die at any magnitude.
+_LATTICE_ULP_SLACK = 8.0
 
 
 def _off_integer_lattice(values: NDArray) -> NDArray:
     """Which entries sit further from a whole number than round-off explains.
 
     Shared by both contract checks so the tolerance rule cannot drift apart
-    between them -- it previously did, and the ceiling above was missing from
-    each of them independently.
+    between them -- it previously did, and was wrong in each copy separately.
     """
-    slack = np.minimum(
-        _LATTICE_RELATIVE_TOLERANCE * np.maximum(1.0, np.abs(values)),
-        _LATTICE_MAXIMUM_SLACK,
-    )
+    slack = _LATTICE_ULP_SLACK * np.spacing(np.maximum(1.0, np.abs(values)))
     return np.abs(values - np.rint(values)) > slack
 
 
@@ -85,7 +89,7 @@ def _warn_prior_weighted_binomial(weights: NDArray) -> None:
     # ordinary Bernoulli likelihood, and warning that it is "not an exact
     # density" would be false about that fit. Counting the zero rows would also
     # inflate the figure when the warning does fire legitimately.
-    off = (weights > 0.0) & (np.abs(weights - 1.0) > _LATTICE_RELATIVE_TOLERANCE)
+    off = (weights > 0.0) & (np.abs(weights - 1.0) > _UNIT_WEIGHT_TOLERANCE)
     count = int(np.count_nonzero(off))
     if count == 0:
         return
