@@ -2435,3 +2435,67 @@ class TestEveryPublicLikelihoodEntryChecksTheContract:
             warnings.simplefilter("error", PriorWeightLatticeWarning)
             warnings.simplefilter("error", FractionalFrequencyWeightWarning)
             estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+
+
+class TestAFoldIsCheckedOncePerCondition:
+    """The per-fold score and the pooled aggregate are one evaluation.
+
+    They divide the same numerator by the same denominator, so computing them
+    separately predicted twice per fold -- and once the contract check landed
+    in each, one off-contract fold warned twice from two call sites, scaling
+    the noise with the fold count.
+    """
+
+    @staticmethod
+    def _validation_only_off_lattice(n=160, seed=93):
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        y[-8:] += 0.5  # off-lattice, held out, so the fit never warns
+
+        class _Folds:
+            n_splits = 1
+
+            def split(self, X, y=None, groups=None):
+                idx = np.arange(len(X))
+                held_out = idx[-8:]
+                yield np.setdiff1d(idx, held_out), held_out
+
+        return frame, y, _Folds()
+
+    def test_one_warning_per_affected_fold(self):
+        from superglm.model_selection import cross_validate
+
+        frame, y, folds = self._validation_only_off_lattice()
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            cross_validate(model, frame, y, cv=folds, scoring="nll")
+        lattice = [w for w in caught if issubclass(w.category, PriorWeightLatticeWarning)]
+        assert len(lattice) == 1
+
+    def test_the_warning_count_does_not_scale_with_folds(self):
+        """Three affected folds should say so three times, not six."""
+        from superglm.model_selection import cross_validate
+
+        rng = np.random.default_rng(94)
+        n = 180
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        y += 0.5  # every row off-lattice, so every validation slice warns
+
+        class _Folds:
+            n_splits = 3
+
+            def split(self, X, y=None, groups=None):
+                idx = np.arange(len(X))
+                for fold in np.array_split(idx, 3):
+                    yield np.setdiff1d(idx, fold), fold
+
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cross_validate(model, frame, y, cv=_Folds(), scoring="nll")
+        lattice = [w for w in caught if issubclass(w.category, PriorWeightLatticeWarning)]
+        # Three fits (each trains on off-lattice rows too) plus three scored
+        # slices -- what must not happen is the scoring half counting twice.
+        assert len([w for w in lattice if "model_selection" in w.filename]) == 3

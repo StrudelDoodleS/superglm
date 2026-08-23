@@ -441,6 +441,30 @@ def cross_validate(
             # Score
             t1 = time.perf_counter()
             for sname, sfn in scorers.items():
+                pooled_fn = _POOLED_PARTS.get(sname)
+                if pooled_fn is not None and sfn is _BUILTIN_SCORERS.get(sname):
+                    # One evaluation per fold. The per-fold score is exactly
+                    # the pooled parts' quotient -- both scorers divide the
+                    # same numerator by the same denominator -- so calling the
+                    # two separately predicted twice, and once the contract
+                    # check landed in each, warned twice about one condition.
+                    #
+                    # Guarded on the scorer actually being the built-in.
+                    # `_resolve_scorers` already normalises a name to its
+                    # built-in today, so this cannot currently differ -- it is
+                    # here so that a future resolver change cannot silently
+                    # route a custom callable through the built-in's parts.
+                    numerator, denominator = pooled_fn(
+                        est,
+                        X_test,
+                        y_test,
+                        sample_weight=sw_test,
+                        offset=off_test,
+                    )
+                    record[sname] = float(numerator / denominator)
+                    pooled_numerators[sname] += numerator
+                    pooled_denominators[sname] += denominator
+                    continue
                 result = sfn(
                     est,
                     X_test,
