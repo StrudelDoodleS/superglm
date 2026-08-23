@@ -75,7 +75,10 @@ from superglm.links import (
     SqrtLink,
 )
 from superglm.model import PathResult, SuperGLM
-from superglm.model.input_validation import PriorWeightLatticeWarning
+from superglm.model.input_validation import (
+    FractionalFrequencyWeightWarning,
+    PriorWeightLatticeWarning,
+)
 from superglm.model.profile_ops import PublicationModeError
 from superglm.model_selection import CrossValidationResult, cross_validate
 from superglm.penalties.flavors import Adaptive
@@ -184,6 +187,7 @@ __all__ = [
     "Adaptive",
     "NBProfileResult",
     "NBThetaBoundWarning",
+    "FractionalFrequencyWeightWarning",
     "PriorWeightLatticeWarning",
     "REMLResult",
     "LambdaPolicy",

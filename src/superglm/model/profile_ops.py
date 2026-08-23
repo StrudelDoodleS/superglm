@@ -625,6 +625,9 @@ def estimate_theta(model, X, y, sample_weight=None, offset=None, *, fit_mode="fi
         y,
         sample_weight=sample_weight,
         offset=offset,
+        # `_validate_entrypoint_input` above already ran the contract check on
+        # exactly these arrays.
+        contract_already_checked=True,
         **kwargs,
     )
     # The profile result retains only the vectors needed for reporting/CI.

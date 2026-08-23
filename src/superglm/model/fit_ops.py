@@ -1012,7 +1012,17 @@ def _maybe_estimate_nb_theta(model, X, y, sample_weight=None, offset=None) -> No
     if isinstance(family, NegativeBinomial) and family.theta == "auto":
         from superglm.profiling.nb import estimate_nb_theta
 
-        nb_result = estimate_nb_theta(model, X, y, sample_weight=sample_weight, offset=offset)
+        # `fit` has already routed these arrays through validate_fit_input,
+        # and so through check_weight_contract. Checking again would report one
+        # condition twice from two source locations inside a single fit.
+        nb_result = estimate_nb_theta(
+            model,
+            X,
+            y,
+            sample_weight=sample_weight,
+            offset=offset,
+            contract_already_checked=True,
+        )
         model.family = NegativeBinomial(theta=nb_result.theta_hat)
         model._nb_profile_result = nb_result
         logger.info(f"NB theta estimated: {nb_result.theta_hat:.4f}")

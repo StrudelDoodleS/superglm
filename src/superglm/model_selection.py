@@ -148,6 +148,17 @@ def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Mean negative log-likelihood under the family's weight contract."""
     mu = model.predict(X_val, offset=offset)
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
+    # A predefined or custom split can put an off-lattice row only in
+    # validation, so no fold's fit ever warns while both the per-fold and the
+    # pooled NLL quietly use an interpolated pseudo-density.
+    from superglm.model.input_validation import check_weight_contract
+
+    check_weight_contract(
+        np.asarray(y_val, dtype=np.float64),
+        weights,
+        model._distribution,
+        model_weight_semantics(model),
+    )
     ll = weighted_log_likelihood(
         model._distribution,
         y_val,
@@ -177,6 +188,17 @@ def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     """Return numerator and denominator for pooled negative log-likelihood."""
     mu = model.predict(X_val, offset=offset)
     weights, denominator = _scoring_weights(model, sample_weight, len(y_val))
+    # A predefined or custom split can put an off-lattice row only in
+    # validation, so no fold's fit ever warns while both the per-fold and the
+    # pooled NLL quietly use an interpolated pseudo-density.
+    from superglm.model.input_validation import check_weight_contract
+
+    check_weight_contract(
+        np.asarray(y_val, dtype=np.float64),
+        weights,
+        model._distribution,
+        model_weight_semantics(model),
+    )
     ll = weighted_log_likelihood(
         model._distribution,
         y_val,
@@ -419,6 +441,30 @@ def cross_validate(
             # Score
             t1 = time.perf_counter()
             for sname, sfn in scorers.items():
+                pooled_fn = _POOLED_PARTS.get(sname)
+                if pooled_fn is not None and sfn is _BUILTIN_SCORERS.get(sname):
+                    # One evaluation per fold. The per-fold score is exactly
+                    # the pooled parts' quotient -- both scorers divide the
+                    # same numerator by the same denominator -- so calling the
+                    # two separately predicted twice, and once the contract
+                    # check landed in each, warned twice about one condition.
+                    #
+                    # Guarded on the scorer actually being the built-in.
+                    # `_resolve_scorers` already normalises a name to its
+                    # built-in today, so this cannot currently differ -- it is
+                    # here so that a future resolver change cannot silently
+                    # route a custom callable through the built-in's parts.
+                    numerator, denominator = pooled_fn(
+                        est,
+                        X_test,
+                        y_test,
+                        sample_weight=sw_test,
+                        offset=off_test,
+                    )
+                    record[sname] = float(numerator / denominator)
+                    pooled_numerators[sname] += numerator
+                    pooled_denominators[sname] += denominator
+                    continue
                 result = sfn(
                     est,
                     X_test,

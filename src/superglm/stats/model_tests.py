@@ -531,6 +531,7 @@ def vuong_test(
                 raise ValueError("sample_weight must be nonnegative")
             if not np.any(prior_weights > 0.0):
                 raise ValueError("sample_weight must not be all zero")
+        contract_weights = np.ones(n, dtype=np.float64) if prior_weights is None else prior_weights
         ll_a = _per_obs_log_likelihood(
             model_a,
             X,
@@ -570,6 +571,11 @@ def vuong_test(
         mean_m = float(np.mean(d))
         omega = float(np.std(d, ddof=1))
     elif mixed_weight_contracts:
+        # Reachable only with sample_weight None -- that is what makes a
+        # mixed-contract comparison legal at all -- so the evaluation carries
+        # unit weights. Those still define a lattice for whichever model is
+        # the counting one, which is why this arm is checked like the others.
+        contract_weights = np.ones(n, dtype=np.float64)
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
         ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
         d = ll_a - ll_b
@@ -578,6 +584,7 @@ def vuong_test(
         likelihood_size = float(n)
     else:
         frequency_weights, likelihood_size = _frequency_weights(sample_weight, n)
+        contract_weights = frequency_weights
         ll_a = _per_obs_log_likelihood(model_a, X, y_arr, offset)
         ll_b = _per_obs_log_likelihood(model_b, X, y_arr, offset)
         d = ll_a - ll_b
@@ -590,6 +597,26 @@ def vuong_test(
 
     if likelihood_size <= 1.0:
         raise ValueError("Vuong test requires an effective likelihood size greater than one")
+
+    # Vuong takes its own evaluation rows, so a response that cannot be honoured
+    # under the declared contract -- off the counting lattice, a non-unit prior
+    # binomial weight, a fractional replication count -- would otherwise become
+    # a finite pseudo-log-likelihood and produce an apparently valid statistic,
+    # p-value and preferred model with nothing to mark it.
+    #
+    # One site, after every arm has resolved the weights it actually evaluated
+    # at, rather than one per arm: the previous version sat inside the
+    # both-prior branch and so never ran for the mixed or frequency arms.
+    # Checked against BOTH families, since either may be the counting one.
+    from superglm.model.input_validation import check_weight_contract
+
+    for compared in (model_a, model_b):
+        check_weight_contract(
+            y_arr,
+            contract_weights,
+            compared._distribution,
+            model_weight_semantics(compared),
+        )
 
     # Model complexities
     p_a = model_a.result.effective_df

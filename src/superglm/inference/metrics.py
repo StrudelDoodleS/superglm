@@ -337,14 +337,6 @@ class ModelMetrics:
             # residuals would then be silently fabricated -- the residual
             # rounds the impossible count onto a neighbouring lattice point
             # and inverts the CDF there. Re-check at this boundary.
-            from superglm.model.input_validation import _check_counting_lattice
-
-            _check_counting_lattice(
-                self._y,
-                self._weights,
-                self._family,
-                self._weight_semantics,
-            )
         self._offset = np.zeros(n) if offset is None else np.asarray(offset, dtype=np.float64)
         fit_offset = getattr(model, "_fit_offset", None)
         fit_offset_array = np.zeros(n) if fit_offset is None else np.asarray(fit_offset)
@@ -384,6 +376,50 @@ class ModelMetrics:
             self._mu = _mu
         else:
             self._mu = model.predict(self._X, offset=offset)
+
+        # Evaluation takes its OWN rows and weights, so the fit-time check does
+        # not cover it: a clean fitted model can be scored on holdout rows whose
+        # `w * y` is not integral, and both the reported log-likelihood and the
+        # randomized quantile residuals would then be silently fabricated -- the
+        # residual rounds the impossible count onto a neighbouring lattice point
+        # and inverts the CDF there.
+        #
+        # Not inside a `sample_weight is not None` branch: synthesized all-ones
+        # weights still define a counting lattice, so a fractional response on
+        # an unweighted holdout is just as off it.
+        #
+        # After predict(), not before: predict is what validates the evaluation
+        # frame and the offset, and this warning describes a likelihood about to
+        # be computed. Ahead of that validation it fires on input that will never
+        # reach one, and under `-W error` it surfaces instead of the frame or
+        # offset error the caller needs to see.
+        # `predict` validates the frame and the offset but never looks at `y`,
+        # so a length mismatch is still outstanding at this point and would
+        # otherwise be pre-empted by the contract warning under `-W error` --
+        # the same ordering defect as the offset, one argument over.
+        if len(self._y) != len(self._mu):
+            raise ValueError(
+                f"y has {len(self._y)} rows but X predicts {len(self._mu)}; "
+                "they must describe the same observations"
+            )
+
+        # Only when a likelihood is genuinely about to be evaluated here.
+        # `explain_ops.metrics` hands back `_fit_stats` when the caller passed
+        # the training arrays themselves, in which case this reuses the
+        # likelihood the fit already computed -- and already checked -- so
+        # checking again reports one condition twice for one fit.
+        #
+        # Holdout evaluation is unaffected: it has no `_fit_stats` to reuse,
+        # which is exactly the case the check exists for.
+        if _fit_stats is None:
+            from superglm.model.input_validation import check_weight_contract
+
+            check_weight_contract(
+                self._y,
+                self._weights,
+                self._family,
+                self._weight_semantics,
+            )
         if _null_mu is not None:
             self.__dict__["_null_mu"] = _null_mu
         if _fit_stats is not None:

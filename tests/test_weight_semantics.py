@@ -9,12 +9,25 @@ reading shows up as a disagreement with row replication or with scipy.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 from scipy import stats
 
-from superglm import Categorical, Gamma, Gaussian, NegativeBinomial, Poisson, Spline, SuperGLM
+from superglm import (
+    Categorical,
+    FractionalFrequencyWeightWarning,
+    Gamma,
+    Gaussian,
+    NegativeBinomial,
+    Numeric,
+    Poisson,
+    PriorWeightLatticeWarning,
+    Spline,
+    SuperGLM,
+)
 from superglm.distributions import Binomial, Tweedie, weighted_log_likelihood
 from superglm.reml.scale import (
     _gamma_saturated_normalizer,
@@ -820,7 +833,10 @@ class TestTheCountingLatticeIsDeclared:
         assert "quasi-likelihood" in message
         # The NB interpolated factor is theta-dependent, so it reaches the
         # estimate itself and not only the reported likelihood.
-        assert ("theta_hat" in message) is mentions_theta
+        # "theta" rather than "theta_hat": at a fixed theta this call estimates
+        # nothing, so naming an estimate would be false. The theta-DEPENDENCE
+        # of the interpolated factor is what this asserts, and it still holds.
+        assert ("theta" in message) is mentions_theta
 
     def test_a_released_fit_reports_exactly_what_a_retained_one_does(self):
         """Releasing the rows must not change a single published number.
@@ -1401,3 +1417,1292 @@ class TestTheContractsAgreeAtUnitWeightNotAtIntegerWeight:
             str(c.message) for c in caught if issubclass(c.category, PriorWeightLatticeWarning)
         )
         assert message.startswith(f"{n - 5} of {n} rows")
+
+
+class TestTheLatticeCheckReachesEveryEvaluationBoundary:
+    """One fit-time check does not cover code that brings its own rows.
+
+    `ModelMetrics`, the editor's dataset metrics, cross-validation's NLL and
+    the Vuong test each take their own response and weights, so an off-lattice
+    row can reach an interpolated pseudo-density without any fit ever warning.
+    """
+
+    def _counts(self, seed=90, n=150):
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        counts = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        exposure = rng.uniform(0.5, 4.0, n)
+        return frame, counts, exposure
+
+    def _on_lattice_fit(self, frame, counts, exposure):
+        from superglm import Numeric
+
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        model.fit(frame, counts / exposure, sample_weight=exposure)
+        return model
+
+    def test_evaluation_without_explicit_weights_still_checks(self):
+        """Synthesized all-ones weights define a lattice too.
+
+        The earlier boundary check was nested under ``sample_weight is not
+        None``, so an unweighted holdout with a fractional response reached the
+        interpolated density with no warning at all.
+        """
+        from superglm import PriorWeightLatticeWarning
+
+        frame, counts, exposure = self._counts()
+        model = self._on_lattice_fit(frame, counts, exposure)
+
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.metrics(frame, counts / exposure).log_likelihood
+
+    def test_cross_validation_nll_checks_each_validation_slice(self):
+        """A custom split can put the off-lattice row only in validation."""
+        from superglm import Numeric, PriorWeightLatticeWarning
+        from superglm.model_selection import cross_validate
+
+        rng = np.random.default_rng(91)
+        n = 160
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        y[-8:] += 0.5  # off-lattice at unit weight, in the last fold only
+
+        class _Folds:
+            """The off-lattice rows are VALIDATION-ONLY, never trained on.
+
+            If any fold trains on them the fit itself warns and the test
+            passes without the scorer's check ever running -- which is exactly
+            how the first version of this test failed to pin anything.
+            """
+
+            n_splits = 1
+
+            def split(self, X, y=None, groups=None):
+                idx = np.arange(len(X))
+                held_out = idx[-8:]
+                yield np.setdiff1d(idx, held_out), held_out
+
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with pytest.warns(PriorWeightLatticeWarning):
+            cross_validate(model, frame, y, cv=_Folds(), scoring="nll")
+
+    def test_the_vuong_test_checks_both_families(self):
+        from superglm import Categorical, PriorWeightLatticeWarning
+        from superglm.stats.model_tests import vuong_test
+
+        rng, frame = _frame(seed=92, n=200)
+        y = _response(rng, frame, Poisson())
+
+        def fitted(features):
+            model = SuperGLM(family=Poisson(), features=features, weight_semantics="prior")
+            model.fit(frame, y)
+            return model
+
+        a = fitted({"x": Spline(n_knots=5)})
+        b = fitted({"g": Categorical()})
+
+        off_lattice = y.copy()
+        off_lattice[:6] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            vuong_test(a, b, frame, off_lattice)
+
+    def test_editor_dataset_metrics_check_their_own_split(self):
+        from superglm import PriorWeightLatticeWarning
+        from superglm.editor.metrics import compute_dataset_metrics
+
+        frame, counts, exposure = self._counts(seed=93)
+        model = self._on_lattice_fit(frame, counts, exposure)
+
+        from superglm.editor.evaluation import EvaluationDataset
+
+        dataset = EvaluationDataset(
+            name="validation",
+            label="Validation",
+            X=frame,
+            y=counts,  # off-lattice: the fit used counts / exposure
+            sample_weight=exposure,
+        )
+        with pytest.warns(PriorWeightLatticeWarning):
+            compute_dataset_metrics(model, dataset)
+
+
+class TestFractionalReplicationCountsAreDeclared:
+    """A row cannot appear 0.4 times, so `sum(w) - edf` stops being a count."""
+
+    def _fit(self, semantics, weights):
+        from superglm import Numeric
+
+        rng = np.random.default_rng(94)
+        n = 150
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics=semantics)
+        model.fit(frame, y, sample_weight=weights(n, rng))
+        return model
+
+    def test_a_fractional_frequency_weight_says_so(self):
+        from superglm import FractionalFrequencyWeightWarning
+
+        with pytest.warns(FractionalFrequencyWeightWarning, match="quasi-likelihood"):
+            self._fit("frequency", lambda n, rng: rng.uniform(0.5, 4.0, n))
+
+    def test_integer_replication_counts_are_silent(self):
+        import warnings as warnings_module
+
+        from superglm import FractionalFrequencyWeightWarning
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            self._fit("frequency", lambda n, rng: rng.integers(1, 4, n).astype(float))
+        assert [c for c in caught if issubclass(c.category, FractionalFrequencyWeightWarning)] == []
+
+    def test_the_prior_contract_is_silent_at_fractional_weights(self):
+        """Fractional weights are exactly what the prior reading is for."""
+        import warnings as warnings_module
+
+        from superglm import FractionalFrequencyWeightWarning
+
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            self._fit("prior", lambda n, rng: rng.uniform(0.5, 4.0, n))
+        assert [c for c in caught if issubclass(c.category, FractionalFrequencyWeightWarning)] == []
+
+
+class TestACustomFamilyDoesNotWarnAtUnitWeight:
+    """The two contracts are the same likelihood at ``w == 1``.
+
+    `prior_weight_log_density` returns None for any family it does not ship,
+    so an ordinary unweighted custom-family fit reached the mismatch warning --
+    twice, since the null likelihood is computed too -- and failed outright
+    under ``-W error``.
+    """
+
+    def _custom_family(self):
+        class _CustomFamily:
+            """Genuinely unshipped: a subclass of a shipped family is matched
+            by `isinstance` and never reaches the fallback at all."""
+
+            scale_known = False
+
+            def log_likelihood(self, y, mu, weights, phi):
+                resid = np.asarray(y) - np.asarray(mu)
+                return float(np.sum(np.asarray(weights) * -0.5 * resid**2 / phi))
+
+            def deviance_unit(self, y, mu):
+                return (np.asarray(y) - np.asarray(mu)) ** 2
+
+        return _CustomFamily()
+
+    def test_unit_weights_do_not_warn(self):
+        import warnings as warnings_module
+
+        from superglm.distributions import weighted_log_likelihood
+
+        rng = np.random.default_rng(95)
+        n = 80
+        y = rng.normal(0.0, 1.0, n)
+        mu = np.zeros(n)
+
+        for weights in (np.ones(n), np.where(np.arange(n) < 5, 0.0, 1.0)):
+            with warnings_module.catch_warnings(record=True) as caught:
+                warnings_module.simplefilter("always")
+                value = weighted_log_likelihood(
+                    self._custom_family(), y, mu, weights, 1.0, weight_semantics="prior"
+                )
+            assert [c for c in caught if issubclass(c.category, UserWarning)] == []
+            assert np.isfinite(value)
+
+    def test_non_unit_weights_still_warn(self):
+        from superglm.distributions import weighted_log_likelihood
+
+        rng = np.random.default_rng(96)
+        n = 80
+        y = rng.normal(0.0, 1.0, n)
+        with pytest.warns(UserWarning, match="not a SuperGLM-shipped family"):
+            weighted_log_likelihood(
+                self._custom_family(),
+                y,
+                np.zeros(n),
+                np.full(n, 2.0),
+                1.0,
+                weight_semantics="prior",
+            )
+
+
+class TestTheFrequencyCheckReachesTheEvaluationBoundariesToo:
+    """The lattice half of the contract check reached every boundary; the
+    replication half did not.
+
+    ``_check_counting_lattice`` returns immediately under ``"frequency"`` and
+    ``_check_frequency_counts`` returns immediately under ``"prior"``, so a
+    boundary wired to one of them looks right and silently covers half the
+    models it sees. Every boundary now goes through ``check_weight_contract``,
+    which is both.
+    """
+
+    @staticmethod
+    def _fitted_on_whole_counts():
+        """Fitted with integral weights, so the FIT never warns.
+
+        The evaluation call is then the only thing that can produce a warning,
+        which is what makes these tests pin the boundary rather than the fit.
+        """
+        rng = np.random.default_rng(11)
+        n = 60
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y = rng.poisson(3.0, n).astype(float)
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            model.fit(X, y, sample_weight=np.full(n, 2.0))
+        return model, X, y, n
+
+    def test_metrics_warns_on_fractional_replication_counts(self):
+        model, X, y, n = self._fitted_on_whole_counts()
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            model.metrics(X, y, sample_weight=np.full(n, 2.5))
+
+    def test_cross_validation_warns_on_fractional_replication_counts(self):
+        """The fractional counts are VALIDATION-ONLY, never trained on.
+
+        ``cross_validate`` takes one weight array for both roles, so putting
+        the fractional values everywhere would make the training fit warn and
+        the test would pass with the scorer's check mutated out.
+        """
+        from superglm.model_selection import cross_validate
+
+        model, X, y, n = self._fitted_on_whole_counts()
+        weights = np.full(n, 2.0)
+        weights[-8:] = 2.5  # fractional only in the held-out rows
+
+        class _Folds:
+            n_splits = 1
+
+            def split(self, X, y=None, groups=None):
+                idx = np.arange(len(X))
+                held_out = idx[-8:]
+                yield np.setdiff1d(idx, held_out), held_out
+
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            cross_validate(model, X, y, sample_weight=weights, cv=_Folds(), scoring="nll")
+
+    def test_vuong_warns_on_fractional_replication_counts(self):
+        from superglm.stats.model_tests import vuong_test
+
+        model, X, y, n = self._fitted_on_whole_counts()
+        other = SuperGLM(family=Gaussian(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            other.fit(X, y, sample_weight=np.full(n, 2.0))
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            vuong_test(model, other, X, y, sample_weight=np.full(n, 2.5))
+
+
+class TestVuongChecksTheContractOnEveryArm:
+    """The check sat inside the both-prior branch, so two of the three arms
+    never ran it.
+
+    A mixed-contract comparison is legal precisely when no weights are
+    supplied -- unit weights make the two readings the same likelihood -- but
+    unit weights still define a counting lattice, so a fractional response
+    reaches the interpolated ``gammaln`` and returns a statistic and p-value
+    with nothing marking them as a pseudo-density.
+    """
+
+    @staticmethod
+    def _pair_fitted_on_lattice(contract_a, contract_b):
+        rng = np.random.default_rng(12)
+        n = 80
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y_fit = rng.poisson(3.0, n).astype(float)  # on-lattice: the fits stay silent
+        a = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics=contract_a)
+        b = SuperGLM(family=Gaussian(), features={"x": Numeric()}, weight_semantics=contract_b)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            a.fit(X, y_fit)
+            b.fit(X, y_fit)
+        y_eval = y_fit.copy()
+        y_eval[:12] += 0.5  # off-lattice only in the EVALUATION rows
+        return a, b, X, y_eval
+
+    def test_the_mixed_contract_arm_is_checked(self):
+        from superglm.stats.model_tests import vuong_test
+
+        a, b, X, y_eval = self._pair_fitted_on_lattice("prior", "frequency")
+        with pytest.warns(PriorWeightLatticeWarning):
+            vuong_test(a, b, X, y_eval)
+
+    def test_the_frequency_arm_is_checked(self):
+        from superglm.stats.model_tests import vuong_test
+
+        a, b, X, y_eval = self._pair_fitted_on_lattice("frequency", "frequency")
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            vuong_test(a, b, X, y_eval, sample_weight=np.full(len(y_eval), 2.5))
+
+
+class TestIntegralityToleranceSurvivesLargeMagnitudes:
+    """A relative tolerance cannot express "close to an integer".
+
+    Nothing is ever further than 0.5 from its nearest integer, so once the
+    relative slack reaches 0.5 the test admits everything. At 1e-9 that
+    happens at ``|v| = 5e8``, and ``1e9 + 0.5`` -- exactly representable in
+    float64 -- was reported as a whole number of replications.
+    """
+
+    @pytest.mark.parametrize("magnitude", [1e6, 1e8, 5e8, 1e9, 1e12])
+    def test_a_half_integer_is_never_called_whole(self, magnitude):
+        from superglm.model.input_validation import _off_integer_lattice
+
+        value = magnitude + 0.5
+        assert value - magnitude == 0.5, "test needs an exactly representable half"
+        assert bool(_off_integer_lattice(np.array([value]))[0])
+
+    @pytest.mark.parametrize("magnitude", [1.0, 1e3, 1e6, 1e9])
+    def test_round_off_is_still_absorbed(self, magnitude):
+        from superglm.model.input_validation import _off_integer_lattice
+
+        nudged = np.nextafter(magnitude, np.inf)
+        assert not bool(_off_integer_lattice(np.array([nudged]))[0])
+
+    def test_a_large_fractional_replication_count_warns_end_to_end(self):
+        n = 40
+        rng = np.random.default_rng(13)
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        # Noise deliberately: an exact linear fit drives phi to zero and the
+        # weighted log-likelihood overflows, which would mask what is tested.
+        y = np.linspace(1.0, 5.0, n) + rng.normal(0.0, 0.4, n)
+        weights = np.full(n, 1e9)
+        weights[0] = 1e9 + 0.5
+        model = SuperGLM(family=Gaussian(), features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            model.fit(X, y, sample_weight=weights)
+
+
+class TestTheContractWarningNeverPreemptsAValidationError:
+    """The warning describes a likelihood that is about to be computed.
+
+    On input that will never reach one it is noise, and under ``-W error`` it
+    surfaces *instead of* the error the caller needs -- reporting a
+    quasi-likelihood for a negative Poisson response rather than the negative
+    response. Same defect as the custom-family warning this branch fixes.
+    """
+
+    def test_an_invalid_response_raises_rather_than_warning(self):
+        n = 40
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # promote every warning
+            with pytest.raises(ValueError, match="nonnegative"):
+                model.fit(X, np.full(n, -1.0), sample_weight=np.full(n, 2.5))
+
+    def test_a_valid_response_still_warns(self):
+        """The control: the ordering fix must not have disabled the warning."""
+        n = 40
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            model.fit(X, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))
+
+
+class TestTheIntegralitySlackIsCorrectAtEveryMagnitude:
+    """Swept over the exponent range, not sampled at chosen magnitudes.
+
+    This check has been wrong three times, each time at a magnitude nobody
+    had tried: a 1e-9 relative tolerance died at ``|v| >= 5e8``, a 1e-3
+    absolute ceiling admitted ``1_000_000.0005``, and eight raw ulps died at
+    ``|v| >= 2**48`` where one ulp is 1/16 and eight are exactly a half-count.
+
+    Each was found by a reviewer naming the next magnitude, so testing more
+    named magnitudes would only postpone the fourth. The sweep below asserts
+    the property that actually has to hold -- a representable half-integer is
+    always flagged, an exact integer never is, and a ulp of round-off is
+    absorbed -- at every binade of the double range.
+    """
+
+    def test_every_binade_of_the_double_range(self):
+        from superglm.model.input_validation import _off_integer_lattice
+
+        violations = []
+        for exponent in range(64):
+            magnitude = float(2**exponent)
+            spacing = np.spacing(magnitude)
+
+            if _off_integer_lattice(np.array([magnitude]))[0]:
+                violations.append(f"2^{exponent}: an exact integer was flagged")
+
+            # Where a half-integer is representable it must always be caught:
+            # this is the failure the three previous rules all shared.
+            if spacing <= 0.5:
+                half = magnitude + 0.5
+                assert half - magnitude == 0.5
+                if not _off_integer_lattice(np.array([half]))[0]:
+                    violations.append(f"2^{exponent}: half-integer admitted (spacing={spacing})")
+
+            # Below a half-count a ulp is round-off, and absorbing it is what
+            # the slack is for. At or above it a ulp IS half a count, so the
+            # two cannot be told apart and the property does not apply.
+            if spacing < 0.5:
+                nudged = np.nextafter(magnitude, np.inf)
+                if _off_integer_lattice(np.array([nudged]))[0]:
+                    violations.append(
+                        f"2^{exponent}: one ulp of round-off was flagged (spacing={spacing})"
+                    )
+
+        assert not violations, "\n".join(violations)
+
+    def test_the_slack_never_reaches_a_half_count(self):
+        """The invariant underneath the sweep, stated directly.
+
+        Any slack that reaches 0.5 admits every value, because nothing is
+        further than 0.5 from its nearest integer. Every rule that scales with
+        magnitude eventually crosses it, which is why the ceiling is the fix
+        rather than a larger multiplier.
+        """
+        from superglm.model.input_validation import (
+            _LATTICE_MAXIMUM_SLACK,
+            _LATTICE_ULP_SLACK,
+        )
+
+        assert _LATTICE_MAXIMUM_SLACK < 0.5
+        magnitudes = 2.0 ** np.arange(64, dtype=np.float64)
+        slack = np.minimum(_LATTICE_ULP_SLACK * np.spacing(magnitudes), _LATTICE_MAXIMUM_SLACK)
+        assert np.all(slack < 0.5)
+
+
+class TestTheIntegralitySlackIsUlpScaled:
+    """A relative slack cannot express "close to an integer" at any setting.
+
+    Nothing is ever further than 0.5 from its nearest integer, so a relative
+    slack that reaches 0.5 admits everything -- and an absolute ceiling only
+    moves where it fails rather than removing the failure. Float64 spacing is
+    the scale that actually applies.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            1_000_000.0005,  # inside a 1e-3 ceiling, still not a whole number
+            1_000_000.5,
+            500_000_000.5,
+            1_000_000_000.5,  # a 1e-9 relative slack reaches 0.5 here
+            1e12 + 0.5,
+            281474976710656.5,  # 2**48: eight raw ulps are exactly 0.5 here
+        ],
+    )
+    def test_an_exactly_representable_fraction_is_never_called_whole(self, value):
+        from superglm.model.input_validation import _off_integer_lattice
+
+        assert value != np.rint(value), "test needs a genuinely fractional value"
+        assert bool(_off_integer_lattice(np.array([value]))[0])
+
+    @pytest.mark.parametrize("magnitude", [1.0, 1e3, 1e6, 1e9, 1e15])
+    def test_a_ulp_of_round_off_is_still_absorbed(self, magnitude):
+        """The slack exists for this and must keep covering it.
+
+        Measured: over 200,000 trials of ``count / exposure * exposure`` the
+        worst deviation from the intended integer was 1.0 ulp.
+
+        One ulp, not several: at 1e15 a ulp is already 0.125, so four of them
+        are a half-count -- the thing the check must never absorb. An earlier
+        version of this test asserted that four ulps are absorbed at every
+        magnitude, which asserted the defect rather than the fix.
+        """
+        from superglm.model.input_validation import _off_integer_lattice
+
+        nudged = np.nextafter(magnitude, np.inf)
+        assert not bool(_off_integer_lattice(np.array([nudged]))[0])
+
+    def test_the_canonical_exposure_round_trip_does_not_warn(self):
+        """``count / exposure`` times ``exposure`` must read as integral."""
+        from superglm.model.input_validation import _off_integer_lattice
+
+        rng = np.random.default_rng(21)
+        counts = rng.integers(0, 10_000, size=20_000).astype(float)
+        exposure = rng.uniform(0.01, 50.0, size=20_000)
+        assert not _off_integer_lattice((counts / exposure) * exposure).any()
+
+
+class TestTheEvaluationWarningNeverPreemptsAValidationError:
+    """Same ordering rule as the fit entry, at the evaluation boundary.
+
+    ``predict`` is what validates the evaluation frame and the offset, so a
+    contract warning raised ahead of it fires on input that will never reach a
+    likelihood -- and under ``-W error`` it surfaces instead of the error the
+    caller needs.
+    """
+
+    @staticmethod
+    def _fitted():
+        rng = np.random.default_rng(22)
+        n = 60
+        X = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y = rng.poisson(3.0, n).astype(float)
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            model.fit(X, y, sample_weight=np.full(n, 2.0))
+        return model, X, y, n
+
+    def test_a_malformed_offset_raises_rather_than_warning(self):
+        model, X, y, n = self._fitted()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # promote every warning
+            with pytest.raises(ValueError):
+                model.metrics(
+                    X,
+                    y,
+                    sample_weight=np.full(n, 2.5),  # fractional: would warn
+                    offset=np.zeros(n - 3),  # but this is the real problem
+                )
+
+    def test_a_well_formed_call_still_warns(self):
+        """The control: the reordering must not have disabled the check."""
+        model, X, y, n = self._fitted()
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            model.metrics(X, y, sample_weight=np.full(n, 2.5), offset=np.zeros(n))
+
+
+class TestASuppliedCountIsTestedExactly:
+    """A replication count is handed over, not computed, so nothing forms it.
+
+    The product tolerance exists because ``w * y`` is built here from two user
+    arrays and lands a ulp or so from an integral intent. A weight the caller
+    supplies has no product in it, and lending it that allowance admitted
+    representable fractional counts at large magnitudes -- at ``2**49`` a ulp
+    is already an eighth of a count.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            2.0**49 + 0.125,  # exactly one ulp, and a real eighth of a count
+            2.0**48 + 0.0625,
+            281474976710656.5,
+            1_000_000.0005,
+            1_000_000_000.5,
+        ],
+    )
+    def test_a_representable_fraction_is_flagged_however_small(self, value):
+        from superglm.model.input_validation import _not_a_whole_number
+
+        assert value != np.rint(value), "test needs a genuinely fractional value"
+        assert bool(_not_a_whole_number(np.array([value]))[0])
+
+    @pytest.mark.parametrize("value", [0.0, 1.0, 3.0, 1e6, 2.0**49, 1e15])
+    def test_a_whole_count_is_never_flagged(self, value):
+        from superglm.model.input_validation import _not_a_whole_number
+
+        assert not bool(_not_a_whole_number(np.array([value]))[0])
+
+    def test_counts_read_as_floats_are_exact(self):
+        """The reason exactness costs nothing: real counts are exact."""
+        from superglm.model.input_validation import _not_a_whole_number
+
+        rng = np.random.default_rng(31)
+        counts = rng.integers(0, 10**6, 100_000).astype(float)
+        assert not _not_a_whole_number(counts).any()
+
+    def test_the_product_rule_keeps_its_round_off_allowance(self):
+        """The two rules must stay apart: this one still forgives a ulp."""
+        from superglm.model.input_validation import _off_integer_lattice
+
+        rng = np.random.default_rng(32)
+        counts = rng.integers(0, 10_000, 50_000).astype(float)
+        exposure = rng.uniform(0.01, 50.0, 50_000)
+        assert not _off_integer_lattice((counts / exposure) * exposure).any()
+
+
+class TestAReplicatedCountingResponseStaysOnItsLattice:
+    """Replication does not move the support.
+
+    Under ``"frequency"`` the likelihood is ``w log f(y; mu)`` -- the weight
+    multiplies an ordinary per-row density rather than entering it, so it
+    cannot rescue a response the family does not support. The lattice check
+    returned early for every frequency model, so a fractional ``y`` reached the
+    same interpolated ``gammaln`` the prior arm warns about, with nothing
+    marking it.
+    """
+
+    @staticmethod
+    def _frame(n=40):
+        return pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+
+    @pytest.mark.parametrize("family", [Poisson(), NegativeBinomial(theta=2.0)])
+    def test_a_fractional_response_warns_with_an_integral_weight(self, family):
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[:6] += 0.5
+        model = SuperGLM(family=family, features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(self._frame(n), y, sample_weight=np.full(n, 2.0))
+
+    def test_a_fractional_response_warns_with_no_weight_at_all(self):
+        """The weight never enters the question, so omitting it changes nothing."""
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[:6] += 0.5
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(self._frame(n), y)
+
+    def test_a_whole_response_stays_silent(self):
+        n = 40
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            model.fit(self._frame(n), np.arange(n, dtype=float), sample_weight=np.full(n, 2.0))
+
+    def test_a_continuous_family_is_untouched(self):
+        """Only the counting families have an integer support to leave."""
+        n = 40
+        model = SuperGLM(family=Gaussian(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.fit(self._frame(n), np.linspace(0.5, 4.5, n), sample_weight=np.full(n, 2.0))
+
+    def test_the_evaluation_boundaries_check_it_too(self):
+        """Fit on whole counts, evaluate on fractional ones."""
+        n = 40
+        frame = self._frame(n)
+        y_fit = np.arange(n, dtype=float)
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.fit(frame, y_fit, sample_weight=np.full(n, 2.0))
+        y_eval = y_fit.copy()
+        y_eval[:6] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.metrics(frame, y_eval, sample_weight=np.full(n, 2.0))
+
+
+class TestTheReplicatedResponseCheckObeysItsSiblings:
+    """The invariants three sibling checks in the module already held.
+
+    A fourth warning was added in the previous round without adopting them:
+    it did not restrict to carried rows, and it copied an "unaffected" claim
+    that is false when theta is being profiled. Both are now structural --
+    carried-row filtering at the check, and the reach sentence derived once
+    from the family by ``_interpolated_density_reach``.
+    """
+
+    @staticmethod
+    def _frame(n=40):
+        return pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+
+    def test_a_zero_replication_row_is_ignored(self):
+        """A row that appears no times contributes exactly zero."""
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[3] += 0.5
+        weights = np.full(n, 2.0)
+        weights[3] = 0.0
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.fit(self._frame(n), y, sample_weight=weights)
+
+    def test_the_same_row_warns_once_it_is_carried(self):
+        """The control: it is the zero weight that silences it, not the value."""
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[3] += 0.5
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(self._frame(n), y, sample_weight=np.full(n, 2.0))
+
+    def test_the_count_reported_is_of_carried_rows(self):
+        n = 40
+        y = np.arange(n, dtype=float)
+        y[:5] += 0.5  # five fractional rows ...
+        weights = np.full(n, 2.0)
+        weights[:2] = 0.0  # ... two of which are not carried
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with pytest.warns(PriorWeightLatticeWarning, match=r"3 of 38 carried rows"):
+            model.fit(self._frame(n), y, sample_weight=weights)
+
+    @pytest.mark.parametrize(
+        ("theta", "estimates_move"),
+        [("auto", True), (2.0, False)],
+    )
+    def test_auto_theta_is_described_as_estimate_affecting(self, theta, estimates_move):
+        """theta profiled from an interpolated density reaches the estimates.
+
+        It enters V(mu) and the IRLS working weights, so saying "coefficients
+        are unaffected" is false there -- and that claim was copied into the
+        frequency warning from a context where it held.
+        """
+        n = 40
+        y = np.arange(n, dtype=float) + 1.0
+        y[:6] += 0.5
+        model = SuperGLM(
+            family=NegativeBinomial(theta=theta),
+            features={"x": Numeric()},
+            weight_semantics="frequency",
+        )
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            model.fit(self._frame(n), y, sample_weight=np.full(n, 2.0))
+        message = str(caught[0].message)
+        assert ("move as well" in message) is estimates_move
+        # At a fixed theta "unaffected" is the true claim about the estimates,
+        # so forbidding the phrase outright was over-broad. What must never
+        # appear is a theta_hat this call did not produce.
+        assert ("theta_hat" in message) is estimates_move
+
+    def test_the_reach_sentence_is_derived_once(self):
+        """Both arms answer the same question, so they answer it in one place."""
+        from superglm.model.input_validation import (
+            THETA_ESTIMATED,
+            THETA_FIXED,
+            _interpolated_density_reach,
+        )
+
+        assert "move as well" in _interpolated_density_reach(
+            NegativeBinomial(theta="auto"), theta_role=THETA_ESTIMATED
+        )
+        assert "move as well" not in _interpolated_density_reach(
+            NegativeBinomial(theta=2.0), theta_role=THETA_FIXED
+        )
+        assert "unaffected" in _interpolated_density_reach(Poisson(), theta_role=THETA_FIXED)
+
+
+class TestTheEvaluationResponseLengthIsCheckedFirst:
+    """``predict`` validates the frame and the offset, but never ``y``.
+
+    So a length mismatch was still outstanding when the contract warning ran,
+    and under ``-W error`` pre-empted it -- the same ordering defect as the
+    offset, one argument over.
+    """
+
+    def test_a_mismatched_response_length_raises_rather_than_warning(self):
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        model.fit(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.0))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match="same observations"):
+                model.metrics(
+                    frame,
+                    np.arange(n - 3, dtype=float) + 0.5,
+                    sample_weight=np.full(n - 3, 2.5),
+                )
+
+    def test_a_matched_length_still_warns(self):
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        model.fit(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.0))
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            model.metrics(frame, np.arange(n, dtype=float), sample_weight=np.full(n, 2.5))
+
+
+class TestTheStandaloneThetaProfileChecksTheContract:
+    """``profile_ci_theta`` is a public likelihood boundary of its own.
+
+    It takes arrays directly, so no fit-time or evaluation-time check has seen
+    those rows, and every NLL it evaluates reads the same response and weights.
+    An off-contract input returned an apparently exact interval with nothing
+    marking it -- the sixth boundary, and the one this branch missed.
+    """
+
+    @staticmethod
+    def _arrays(n=200, seed=41):
+        rng = np.random.default_rng(seed)
+        y = rng.poisson(4.0, n).astype(float)
+        return y, np.full(n, 4.0), n
+
+    def test_fractional_replication_counts_warn(self):
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            profile_ci_theta(y, mu, np.full(n, 2.5), 3.0, weight_semantics="frequency")
+
+    def test_an_off_lattice_prior_response_warns(self):
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        y = y.copy()
+        y[:20] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            profile_ci_theta(y, mu, np.full(n, 1.5), 3.0, weight_semantics="prior")
+
+    def test_a_fractional_response_warns_under_frequency(self):
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        y = y.copy()
+        y[:20] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics="frequency")
+
+    @pytest.mark.parametrize("semantics", ["prior", "frequency"])
+    def test_an_honoured_contract_stays_silent(self, semantics):
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            profile_ci_theta(y, mu, np.full(n, 2.0), 3.0, weight_semantics=semantics)
+
+    def test_it_reports_the_interval_moving_not_the_coefficients(self):
+        """mu is held fixed here, so nothing can be refitted."""
+        from superglm.profiling.nb import profile_ci_theta
+
+        y, mu, n = self._arrays()
+        y = y.copy()
+        y[:20] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            profile_ci_theta(y, mu, np.full(n, 1.5), 3.0, weight_semantics="prior")
+        message = str(caught[0].message)
+        assert "profiled theta and its interval" in message
+        assert "move as well" not in message  # the coefficients do not
+
+
+class TestTheImpactClaimMatchesWhatTheCallIsDoing:
+    """The reach depends on what the caller does with theta, not only on the family.
+
+    An auto-theta fit stamps a numeric theta into the family when it finishes,
+    so at evaluation the fitted model is indistinguishable from a fixed-theta
+    one -- and at evaluation nothing is refitted. Deriving the claim from the
+    family alone therefore asserted that ``theta_hat`` and its interval were
+    affected in two places where no theta is estimated at all.
+    """
+
+    @staticmethod
+    def _fractional_response(n=40):
+        y = np.arange(n, dtype=float) + 1.0
+        y[:6] += 0.5
+        return pd.DataFrame({"x": np.linspace(0.0, 1.0, n)}), y, n
+
+    def test_a_fixed_theta_fit_claims_nothing_about_theta_hat(self):
+        frame, y, n = self._fractional_response()
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.0),
+            features={"x": Numeric()},
+            weight_semantics="frequency",
+        )
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            model.fit(frame, y, sample_weight=np.full(n, 2.0))
+        message = str(caught[0].message)
+        assert "theta_hat" not in message
+        assert "unaffected" in message
+
+    def test_an_auto_theta_fit_still_says_the_estimates_move(self):
+        """The control: the fix must not have silenced the case that is real."""
+        frame, y, n = self._fractional_response()
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            features={"x": Numeric()},
+            weight_semantics="frequency",
+        )
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            model.fit(frame, y, sample_weight=np.full(n, 2.0))
+        assert "move as well" in str(caught[0].message)
+
+    @pytest.mark.parametrize(
+        ("role", "expected"),
+        [
+            ("fixed", "unaffected"),
+            ("profiled", "profiled theta and its interval"),
+            ("estimated", "move as well"),
+        ],
+    )
+    def test_each_role_states_only_what_that_call_can_move(self, role, expected):
+        from superglm.model.input_validation import _interpolated_density_reach
+
+        reach = _interpolated_density_reach(NegativeBinomial(theta=2.0), theta_role=role)
+        assert expected in reach
+
+    def test_a_finished_auto_fit_is_a_constant_from_then_on(self):
+        """Evaluation refits nothing, so the claim must not survive the fit."""
+        from superglm.model.input_validation import THETA_FIXED, _theta_role_for
+
+        assert _theta_role_for(NegativeBinomial(theta=2.0)) == THETA_FIXED
+        assert _theta_role_for(Poisson()) == THETA_FIXED
+        assert _theta_role_for(NegativeBinomial(theta="auto")) == "estimated"
+
+
+class TestTheProductToleranceIsOnlyEarnedByAProduct:
+    """``w * y`` at a unit weight is the response, bit for bit.
+
+    IEEE-754 multiplication by a power of two only shifts the exponent, so
+    nothing is rounded and there is no round-off to forgive. Applying the
+    product allowance there lent it to a directly supplied response -- in the
+    default fit, since unit weights are what an unweighted call passes.
+    """
+
+    def test_multiplication_by_a_power_of_two_is_exact(self):
+        """The property the branch rests on, asserted rather than assumed."""
+        from superglm.model.input_validation import _is_exact_power_of_two
+
+        rng = np.random.default_rng(51)
+        y = rng.uniform(1.0, 1e6, 20_000)
+        for w in (1.0, 2.0, 0.5, 4.0, 1024.0):
+            assert bool(_is_exact_power_of_two(np.array([w]))[0])
+            assert np.all((w * y) / w == y)
+        for w in (3.0, 2.5, 0.1):
+            assert not bool(_is_exact_power_of_two(np.array([w]))[0])
+
+    def test_a_zero_weight_is_not_treated_as_exact(self):
+        """0 * y is always integral, so the branch it takes cannot matter."""
+        from superglm.model.input_validation import _is_exact_power_of_two
+
+        assert not bool(_is_exact_power_of_two(np.array([0.0]))[0])
+
+    @pytest.mark.parametrize("value", [2.0**49 + 0.125, 2.0**48 + 0.0625, 1_000_000.0005])
+    def test_a_unit_weighted_response_is_tested_exactly(self, value):
+        """These sit inside the product allowance but are genuinely fractional."""
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y = np.full(n, 4.0)
+        y[0] = value
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(frame, y, sample_weight=np.ones(n))
+
+    def test_a_genuine_product_keeps_its_allowance(self):
+        """The canonical rate weighting must not start warning."""
+        from superglm.model.input_validation import _check_counting_lattice
+
+        rng = np.random.default_rng(52)
+        counts = rng.integers(0, 10_000, 20_000).astype(float)
+        exposure = rng.uniform(0.01, 50.0, 20_000)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            _check_counting_lattice(counts / exposure, exposure, Poisson(), "prior")
+
+
+class TestEveryPublicLikelihoodEntryChecksTheContract:
+    """Enumerated rather than listed from memory.
+
+    "Every evaluation boundary" was five, then six. The entry points that take
+    arrays or a model plus arrays -- rather than reading a fit's stored rows --
+    are the ones no other check can cover, so they are the ones to enumerate.
+    """
+
+    @staticmethod
+    def _fitted_on_whole_counts(n=200):
+        rng = np.random.default_rng(53)
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(4.0, n).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.0),
+            features={"x": Numeric()},
+            weight_semantics="frequency",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            model.fit(frame, y, sample_weight=np.full(n, 2.0))
+        return model, frame, y, n
+
+    def test_estimate_nb_theta_warns_on_fractional_counts(self):
+        from superglm import estimate_nb_theta
+
+        model, frame, y, n = self._fitted_on_whole_counts()
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.5))
+
+    def test_estimate_nb_theta_warns_on_a_fractional_response(self):
+        from superglm import estimate_nb_theta
+
+        model, frame, y, n = self._fitted_on_whole_counts()
+        y = y.copy()
+        y[:30] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+
+    def test_estimate_nb_theta_says_the_estimates_move(self):
+        """It refits beta at each candidate theta, so the reach is the estimates."""
+        from superglm import estimate_nb_theta
+
+        model, frame, y, n = self._fitted_on_whole_counts()
+        y = y.copy()
+        y[:30] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+        assert "move as well" in str(caught[0].message)
+
+    def test_an_honoured_contract_stays_silent(self):
+        from superglm import estimate_nb_theta
+
+        model, frame, y, n = self._fitted_on_whole_counts()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+
+
+class TestAFoldIsCheckedOncePerCondition:
+    """The per-fold score and the pooled aggregate are one evaluation.
+
+    They divide the same numerator by the same denominator, so computing them
+    separately predicted twice per fold -- and once the contract check landed
+    in each, one off-contract fold warned twice from two call sites, scaling
+    the noise with the fold count.
+    """
+
+    @staticmethod
+    def _validation_only_off_lattice(n=160, seed=93):
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        y[-8:] += 0.5  # off-lattice, held out, so the fit never warns
+
+        class _Folds:
+            n_splits = 1
+
+            def split(self, X, y=None, groups=None):
+                idx = np.arange(len(X))
+                held_out = idx[-8:]
+                yield np.setdiff1d(idx, held_out), held_out
+
+        return frame, y, _Folds()
+
+    def test_one_warning_per_affected_fold(self):
+        from superglm.model_selection import cross_validate
+
+        frame, y, folds = self._validation_only_off_lattice()
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            cross_validate(model, frame, y, cv=folds, scoring="nll")
+        lattice = [w for w in caught if issubclass(w.category, PriorWeightLatticeWarning)]
+        assert len(lattice) == 1
+
+    def test_the_warning_count_does_not_scale_with_folds(self):
+        """Three affected folds should say so three times, not six."""
+        from superglm.model_selection import cross_validate
+
+        rng = np.random.default_rng(94)
+        n = 180
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(np.exp(0.5 + frame["x"].to_numpy())).astype(float)
+        y += 0.5  # every row off-lattice, so every validation slice warns
+
+        class _Folds:
+            n_splits = 3
+
+            def split(self, X, y=None, groups=None):
+                idx = np.arange(len(X))
+                for fold in np.array_split(idx, 3):
+                    yield np.setdiff1d(idx, fold), fold
+
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cross_validate(model, frame, y, cv=_Folds(), scoring="nll")
+        lattice = [w for w in caught if issubclass(w.category, PriorWeightLatticeWarning)]
+        # Three fits (each trains on off-lattice rows too) plus three scored
+        # slices -- what must not happen is the scoring half counting twice.
+        assert len([w for w in lattice if "model_selection" in w.filename]) == 3
+
+
+class TestEveryBoundaryValidatesBeforeItWarns:
+    """One invariant, swept over the boundaries, instead of found one at a time.
+
+    A contract warning describes a likelihood that is about to be computed, so
+    on a request that cannot produce one it is noise -- and under ``-W error``
+    it surfaces *instead of* the error the caller needs. That has now been
+    found four times on this branch, at the fit entry, at the evaluation
+    offset, at the evaluation response, and at the theta profile, each time by
+    someone naming the next site.
+
+    Sweeping it is what stops a fifth. A new boundary that warns before it
+    validates fails here rather than in review.
+    """
+
+    @staticmethod
+    def _fitted(n=80, seed=61):
+        rng = np.random.default_rng(seed)
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(4.0, n).astype(float)
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            model.fit(frame, y, sample_weight=np.full(n, 2.0))
+        return model, frame, y, n
+
+    def test_the_fit_entry_raises_on_a_bad_response(self):
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="frequency")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError):
+                model.fit(frame, np.full(n, -1.0), sample_weight=np.full(n, 2.5))
+
+    def test_metrics_raises_on_a_bad_offset(self):
+        model, frame, y, n = self._fitted()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError):
+                model.metrics(frame, y, sample_weight=np.full(n, 2.5), offset=np.zeros(n - 3))
+
+    def test_metrics_raises_on_a_bad_response_length(self):
+        model, frame, y, n = self._fitted()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError):
+                model.metrics(
+                    frame,
+                    np.arange(n - 3, dtype=float) + 0.5,
+                    sample_weight=np.full(n - 3, 2.5),
+                )
+
+    def test_the_theta_profile_raises_on_mismatched_arrays(self):
+        from superglm.profiling.nb import profile_ci_theta
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(ValueError, match="same rows"):
+                profile_ci_theta(
+                    np.array([1.5, 2.5, 3.5]),
+                    np.ones(2),
+                    np.full(3, 2.5),
+                    3.0,
+                    weight_semantics="frequency",
+                )
+
+
+class TestOneConditionWarnsOnce:
+    """The other invariant nothing was enforcing.
+
+    A single off-contract condition must be reported once per operation, not
+    once per internal path that happens to touch it. Found three times -- the
+    cross-validation double score, the auto-theta fit, and metrics reusing the
+    fit's own statistics -- so it is swept here too.
+    """
+
+    def test_an_auto_theta_fit_warns_once(self):
+        rng = np.random.default_rng(62)
+        n = 120
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(4.0, n).astype(float)
+        y[:10] += 0.5
+        model = SuperGLM(
+            family=NegativeBinomial(theta="auto"),
+            features={"x": Numeric()},
+            weight_semantics="prior",
+        )
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            model.fit(frame, y, sample_weight=np.full(n, 1.5))
+        lattice = [w for w in caught if issubclass(w.category, PriorWeightLatticeWarning)]
+        assert len(lattice) == 1
+
+    def test_metrics_on_the_training_arrays_does_not_warn_again(self):
+        """It reuses the fit's likelihood, which the fit already checked."""
+        rng = np.random.default_rng(63)
+        n = 100
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = np.arange(n, dtype=float)
+        y[:5] += 0.5
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(frame, y)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.metrics(frame, y)
+
+    def test_a_genuine_holdout_still_warns(self):
+        """The control: suppression must key on reuse, not on having fitted."""
+        rng = np.random.default_rng(64)
+        n = 100
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.fit(frame, np.arange(n, dtype=float))
+        holdout = pd.DataFrame({"x": rng.uniform(0.0, 1.0, 40)})
+        y_holdout = np.arange(40, dtype=float)
+        y_holdout[:5] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.metrics(holdout, y_holdout)
+
+
+class TestTheProductShortcutRequiresARepresentableProduct:
+    """Being a power of two is necessary but not sufficient.
+
+    The exponent shift is lossless only while the result stays representable:
+    ``w = 5e-324`` with ``y = 0.5`` underflows to exactly ``0.0``, which then
+    reads as a whole number, so a rounded-away row was reported as on-lattice.
+    """
+
+    def test_an_underflowing_product_is_not_treated_as_exact(self):
+        from superglm.model.input_validation import _product_was_exact
+
+        w = np.array([np.nextafter(0.0, 1.0)])
+        y = np.array([0.5])
+        assert not bool(_product_was_exact(w, y, w * y)[0])
+
+    @pytest.mark.parametrize("weight", [1.0, 2.0, 0.5, 1024.0, 2.0**-40])
+    def test_a_representable_power_of_two_product_stays_exact(self, weight):
+        from superglm.model.input_validation import _product_was_exact
+
+        y = np.array([3.5, 100.25, 7.0])
+        w = np.full(3, weight)
+        scaled = w * y
+        assert np.all(_product_was_exact(w, y, scaled))
+
+    def test_scaling_back_agrees_with_exact_arithmetic(self):
+        """The property the shortcut rests on, checked against Fraction."""
+        from fractions import Fraction
+
+        from superglm.model.input_validation import _product_was_exact
+
+        rng = np.random.default_rng(65)
+        exponents = rng.integers(-1060, 1000, 4000)
+        weights = np.ldexp(1.0, exponents.astype(np.int32)).astype(np.float64)
+        y = rng.uniform(-1e6, 1e6, 4000)
+        # A zero weight is excluded by the helper's documented contract: 0 * y
+        # is exactly 0, so the product IS exact, but the row is uncarried and
+        # `scaled == 0` is integral under either rule, so which branch it takes
+        # cannot change an outcome. Asserting past that would pin an
+        # immaterial answer rather than the property.
+        carried = weights > 0.0
+        assert carried.sum() > 3000, "test needs mostly carried rows"
+        scaled = weights * y
+        claimed = _product_was_exact(weights, y, scaled)
+        for i in range(0, 4000, 37):  # sampled: Fraction is slow but exact
+            if not carried[i]:
+                continue
+            truth = Fraction(scaled[i]) == Fraction(weights[i]) * Fraction(y[i])
+            assert bool(claimed[i]) == truth, (weights[i], y[i], scaled[i])
+
+    def test_an_underflowed_product_is_not_judged_exactly(self):
+        """End-to-end, because the helper's own tests cannot see the call site.
+
+        The exact rule is justified by "nothing rounded this value". That
+        justification fails when the product underflows, so such a row must
+        fall back to the tolerance -- whichever way the verdict then falls.
+
+        Here it falls towards silence, and that is right: the row carries a
+        weight of 5e-324 and contributes nothing to the reported likelihood,
+        so calling the fit a quasi-likelihood on its account would be noise.
+        Judging a rounded value exactly is the defect; the direction of the
+        resulting verdict is a consequence, not the goal.
+        """
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y = np.arange(n, dtype=float)
+        y[0] = 1.5
+        weights = np.ones(n)
+        weights[0] = np.nextafter(0.0, 1.0)  # w * y underflows to a subnormal
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            model.fit(frame, y, sample_weight=weights)
+
+    def test_a_normally_weighted_fractional_row_still_warns(self):
+        """The control: it is the underflow that silences it, not the value."""
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y = np.arange(n, dtype=float)
+        y[0] = 1.5
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(frame, y, sample_weight=np.ones(n))
