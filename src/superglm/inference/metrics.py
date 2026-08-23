@@ -403,14 +403,23 @@ class ModelMetrics:
                 "they must describe the same observations"
             )
 
-        from superglm.model.input_validation import check_weight_contract
+        # Only when a likelihood is genuinely about to be evaluated here.
+        # `explain_ops.metrics` hands back `_fit_stats` when the caller passed
+        # the training arrays themselves, in which case this reuses the
+        # likelihood the fit already computed -- and already checked -- so
+        # checking again reports one condition twice for one fit.
+        #
+        # Holdout evaluation is unaffected: it has no `_fit_stats` to reuse,
+        # which is exactly the case the check exists for.
+        if _fit_stats is None:
+            from superglm.model.input_validation import check_weight_contract
 
-        check_weight_contract(
-            self._y,
-            self._weights,
-            self._family,
-            self._weight_semantics,
-        )
+            check_weight_contract(
+                self._y,
+                self._weights,
+                self._family,
+                self._weight_semantics,
+            )
         if _null_mu is not None:
             self.__dict__["_null_mu"] = _null_mu
         if _fit_stats is not None:

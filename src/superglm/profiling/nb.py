@@ -679,6 +679,7 @@ def estimate_nb_theta(
     maxiter: int = 30,
     verbose: bool = False,
     trace_callback=None,
+    contract_already_checked: bool = False,
 ) -> NBProfileResult:
     """Estimate NB2 theta via alternating GLM fit + safeguarded profile solve.
 
@@ -770,13 +771,18 @@ def estimate_nb_theta(
     # interpolated density reaches the coefficients, not only the interval.
     from superglm.model.input_validation import THETA_ESTIMATED, check_weight_contract
 
-    check_weight_contract(
-        y_arr,
-        w_arr,
-        configured_family(model),
-        model_weight_semantics(model),
-        theta_role=THETA_ESTIMATED,
-    )
+    # Only when this is the caller's entry point. `fit()` routes the same
+    # arrays through `validate_fit_input` -> `check_weight_contract` before it
+    # reaches auto-theta, so checking again would report one condition twice
+    # from two source locations within a single fit.
+    if not contract_already_checked:
+        check_weight_contract(
+            y_arr,
+            w_arr,
+            configured_family(model),
+            model_weight_semantics(model),
+            theta_role=THETA_ESTIMATED,
+        )
 
     penalty = configured_penalty(model)
     from superglm.model.base import resolve_selection_penalty_for_fit
@@ -999,9 +1005,23 @@ def profile_ci_theta(
     # being profiled here, but against a FIXED mu, so the interval moves and
     # the coefficients cannot. This is the one boundary where saying the
     # interval is affected is the accurate claim.
+    # Shapes first. The warning describes an interval that is about to be
+    # computed, so on a request that cannot produce one it is noise -- and
+    # under `-W error` it surfaces instead of the mismatch the caller needs.
+    # Fourth time this ordering has bitten on this branch, hence the sweep in
+    # TestEveryBoundaryValidatesBeforeItWarns.
+    y_arr = np.asarray(y, dtype=np.float64).ravel()
+    mu_arr = np.asarray(mu, dtype=np.float64).ravel()
+    w_arr = np.asarray(weights, dtype=np.float64).ravel()
+    if not (y_arr.size == mu_arr.size == w_arr.size):
+        raise ValueError(
+            f"y, mu and weights must describe the same rows; got {y_arr.size}, "
+            f"{mu_arr.size} and {w_arr.size}"
+        )
+
     check_weight_contract(
-        np.asarray(y, dtype=np.float64),
-        np.asarray(weights, dtype=np.float64),
+        y_arr,
+        w_arr,
         NegativeBinomial(theta=theta_hat),
         weight_semantics,
         theta_role=THETA_PROFILED,

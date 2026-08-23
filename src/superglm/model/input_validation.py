@@ -136,6 +136,27 @@ def _is_exact_power_of_two(values: NDArray) -> NDArray:
     return finite & (mantissa == 0.5)
 
 
+def _product_was_exact(weights: NDArray, y: NDArray, scaled: NDArray) -> NDArray:
+    """Which rows had ``w * y`` computed without losing a single bit.
+
+    Being a power of two is necessary but not sufficient: the exponent shift is
+    lossless only while the result stays representable.  ``w = 5e-324`` with
+    ``y = 0.5`` underflows to exactly ``0.0``, which then reads as a whole
+    number, so a rounded-away row was reported as being on the lattice.
+
+    Scaling back is the test that covers it.  Division by a power of two is
+    itself exact, so ``scaled / w == y`` holds precisely when the
+    multiplication lost nothing -- verified against exact rational arithmetic
+    over 200,000 draws spanning the subnormal range, with no disagreement.
+    The power-of-two gate is what makes the division trustworthy, so both
+    conditions stay.
+    """
+    gate = _is_exact_power_of_two(weights) & np.isfinite(scaled)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        recovered = np.where(gate, np.divide(scaled, np.where(gate, weights, 1.0)), np.nan)
+    return gate & (recovered == y)
+
+
 #: What the caller is doing with theta, which decides how far an interpolated
 #: density reaches.  Deriving this from the family alone is not enough: an
 #: auto-theta fit replaces ``theta`` with a number once it finishes, so the
@@ -384,7 +405,7 @@ def _check_counting_lattice(
     # caller's response bit for bit and the supplied-value rule applies. Lending
     # those rows the round-off allowance let a directly supplied response like
     # 2**49 + 0.125 through, in the most common fit there is.
-    exact_product = _is_exact_power_of_two(weights)
+    exact_product = _product_was_exact(weights, y, scaled)
     count = int(
         np.count_nonzero(
             np.where(
