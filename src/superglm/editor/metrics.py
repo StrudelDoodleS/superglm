@@ -185,9 +185,9 @@ def _compute_metrics(model, X, y, weights, offset) -> dict[str, float]:
     # `compute_dataset_metrics` bypasses `ModelMetrics` entirely, so the
     # evaluation-boundary check is repeated here for editor validation and
     # test splits.
-    from superglm.model.input_validation import _check_counting_lattice
+    from superglm.model.input_validation import check_weight_contract
 
-    _check_counting_lattice(y_arr, w, family, model_weight_semantics(model))
+    check_weight_contract(y_arr, w, family, model_weight_semantics(model))
     log_likelihood = float(
         weighted_log_likelihood(
             family, y_arr, mu, w, phi, weight_semantics=model_weight_semantics(model)

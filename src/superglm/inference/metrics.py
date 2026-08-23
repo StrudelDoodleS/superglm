@@ -342,9 +342,9 @@ class ModelMetrics:
         # fractional response such as `y = 0.5` on an unweighted holdout is
         # just as off it, and would otherwise reach the interpolated density
         # and the rounded residual with no warning at all.
-        from superglm.model.input_validation import _check_counting_lattice
+        from superglm.model.input_validation import check_weight_contract
 
-        _check_counting_lattice(
+        check_weight_contract(
             self._y,
             self._weights,
             self._family,

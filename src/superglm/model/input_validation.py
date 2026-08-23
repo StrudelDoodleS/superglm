@@ -31,10 +31,35 @@ class FractionalFrequencyWeightWarning(UserWarning):
     """A replication count that is not a whole number of observations."""
 
 
-#: Relative slack when testing ``w * y`` for integrality.  The product is
-#: formed in floating point from two user arrays, so an exactly-integral
-#: intent (``count / exposure`` times ``exposure``) can land a few ulps away.
+#: Relative slack when testing a value for integrality.  The quantities tested
+#: are formed in floating point from user arrays, so an exactly-integral intent
+#: (``count / exposure`` times ``exposure``) can land a few ulps away.
 _LATTICE_RELATIVE_TOLERANCE = 1e-9
+
+#: Ceiling on that slack.  A *relative* tolerance cannot express "close to an
+#: integer" on its own: nothing is ever further than 0.5 from its nearest
+#: integer, so once the relative slack reaches 0.5 -- which 1e-9 does at
+#: ``|v| >= 5e8`` -- the test admits everything and the check silently dies.
+#: ``1e9 + 0.5`` is exactly representable in float64 and would have been
+#: reported as a whole number of replications.  The ceiling binds only above
+#: ``|v| = 1e6``, where the relative rule was already allowing more slack than
+#: any accumulated round-off needs, and it still resolves a fractional part
+#: three orders of magnitude finer than a replication count can mean anything.
+_LATTICE_MAXIMUM_SLACK = 1e-3
+
+
+def _off_integer_lattice(values: NDArray) -> NDArray:
+    """Which entries sit further from a whole number than round-off explains.
+
+    Shared by both contract checks so the tolerance rule cannot drift apart
+    between them -- it previously did, and the ceiling above was missing from
+    each of them independently.
+    """
+    slack = np.minimum(
+        _LATTICE_RELATIVE_TOLERANCE * np.maximum(1.0, np.abs(values)),
+        _LATTICE_MAXIMUM_SLACK,
+    )
+    return np.abs(values - np.rint(values)) > slack
 
 
 def _warn_prior_weighted_binomial(weights: NDArray) -> None:
@@ -101,9 +126,7 @@ def _check_frequency_counts(weights: NDArray, weight_semantics: str) -> None:
         return
     carried = weights > 0.0
     values = weights[carried]
-    slack = _LATTICE_RELATIVE_TOLERANCE * np.maximum(1.0, np.abs(values))
-    fractional = np.abs(values - np.rint(values)) > slack
-    count = int(np.count_nonzero(fractional))
+    count = int(np.count_nonzero(_off_integer_lattice(values)))
     if count == 0:
         return
     import warnings
@@ -149,9 +172,7 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
     if not isinstance(family, Poisson | NegativeBinomial):
         return
     scaled = weights * y
-    slack = _LATTICE_RELATIVE_TOLERANCE * np.maximum(1.0, np.abs(scaled))
-    off_lattice = np.abs(scaled - np.rint(scaled)) > slack
-    count = int(np.count_nonzero(off_lattice))
+    count = int(np.count_nonzero(_off_integer_lattice(scaled)))
     if count == 0:
         return
     import warnings
@@ -194,6 +215,25 @@ def _check_counting_lattice(y: NDArray, weights: NDArray, family, weight_semanti
         PriorWeightLatticeWarning,
         stacklevel=4,
     )
+
+
+def check_weight_contract(y: NDArray, weights: NDArray, family, weight_semantics: str) -> None:
+    """Both halves of the declared-contract check, behind one call.
+
+    Each contract has its own way of being unhonourable, and each is silent
+    about the other's: ``_check_counting_lattice`` returns immediately under
+    ``"frequency"``, and ``_check_frequency_counts`` returns immediately under
+    ``"prior"``. A caller that wires in only one therefore looks correct and
+    covers half the models it sees -- which is exactly what happened when the
+    evaluation boundaries were first given the lattice check alone, leaving
+    every frequency-weighted evaluation unwarned.
+
+    Call this at any point where a likelihood, an information criterion or a
+    residual degrees-of-freedom is about to be computed from caller-supplied
+    weights. It is the single seam; do not call the halves directly.
+    """
+    _check_frequency_counts(weights, weight_semantics)
+    _check_counting_lattice(y, weights, family, weight_semantics)
 
 
 @dataclass(frozen=True)
@@ -355,8 +395,13 @@ def validate_fit_input(
         raise ValueError("sample_weight must be nonnegative")
     if not np.any(weight_arr > 0.0):
         raise ValueError("sample_weight must not be all zero")
-    _check_frequency_counts(weight_arr, weight_semantics)
     offset_arr = None if offset is None else _finite_vector("offset", offset, n_rows)
     validate_response(y_arr, family)
-    _check_counting_lattice(y_arr, weight_arr, family, weight_semantics)
+    # Both contract checks run only once every ordinary validation has passed.
+    # They describe a likelihood that is about to be computed, so on input that
+    # will never reach one they are noise -- and under ``-W error`` a warning
+    # raised here would surface *instead of* the ValueError the caller needs to
+    # see, reporting a quasi-likelihood for a negative Poisson response rather
+    # than the negative response.
+    check_weight_contract(y_arr, weight_arr, family, weight_semantics)
     return ValidatedFitInput(frame, y_arr, weight_arr, offset_arr)

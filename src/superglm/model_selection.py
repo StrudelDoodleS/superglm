@@ -151,9 +151,9 @@ def _score_nll(model, X_val, y_val, *, sample_weight=None, offset=None):
     # A predefined or custom split can put an off-lattice row only in
     # validation, so no fold's fit ever warns while both the per-fold and the
     # pooled NLL quietly use an interpolated pseudo-density.
-    from superglm.model.input_validation import _check_counting_lattice
+    from superglm.model.input_validation import check_weight_contract
 
-    _check_counting_lattice(
+    check_weight_contract(
         np.asarray(y_val, dtype=np.float64),
         weights,
         model._distribution,
@@ -191,9 +191,9 @@ def _pooled_nll_parts(model, X_val, y_val, *, sample_weight=None, offset=None):
     # A predefined or custom split can put an off-lattice row only in
     # validation, so no fold's fit ever warns while both the per-fold and the
     # pooled NLL quietly use an interpolated pseudo-density.
-    from superglm.model.input_validation import _check_counting_lattice
+    from superglm.model.input_validation import check_weight_contract
 
-    _check_counting_lattice(
+    check_weight_contract(
         np.asarray(y_val, dtype=np.float64),
         weights,
         model._distribution,
