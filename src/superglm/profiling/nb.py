@@ -760,6 +760,24 @@ def estimate_nb_theta(
     finally:
         model.family = saved_family
 
+    # The other public likelihood boundary in this module. It takes the arrays
+    # the caller passes, not a fit's stored ones, so nothing has checked them:
+    # `_validate_entrypoint_input` never runs here. Every NLL in the theta
+    # search below reads this response and these weights.
+    #
+    # THETA_ESTIMATED, not THETA_PROFILED: the search refits beta at each
+    # candidate theta (`beta_init=warm_beta` into the IRLS calls), so an
+    # interpolated density reaches the coefficients, not only the interval.
+    from superglm.model.input_validation import THETA_ESTIMATED, check_weight_contract
+
+    check_weight_contract(
+        y_arr,
+        w_arr,
+        configured_family(model),
+        model_weight_semantics(model),
+        theta_role=THETA_ESTIMATED,
+    )
+
     penalty = configured_penalty(model)
     from superglm.model.base import resolve_selection_penalty_for_fit
 

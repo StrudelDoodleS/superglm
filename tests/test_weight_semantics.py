@@ -2324,3 +2324,114 @@ class TestTheImpactClaimMatchesWhatTheCallIsDoing:
         assert _theta_role_for(NegativeBinomial(theta=2.0)) == THETA_FIXED
         assert _theta_role_for(Poisson()) == THETA_FIXED
         assert _theta_role_for(NegativeBinomial(theta="auto")) == "estimated"
+
+
+class TestTheProductToleranceIsOnlyEarnedByAProduct:
+    """``w * y`` at a unit weight is the response, bit for bit.
+
+    IEEE-754 multiplication by a power of two only shifts the exponent, so
+    nothing is rounded and there is no round-off to forgive. Applying the
+    product allowance there lent it to a directly supplied response -- in the
+    default fit, since unit weights are what an unweighted call passes.
+    """
+
+    def test_multiplication_by_a_power_of_two_is_exact(self):
+        """The property the branch rests on, asserted rather than assumed."""
+        from superglm.model.input_validation import _is_exact_power_of_two
+
+        rng = np.random.default_rng(51)
+        y = rng.uniform(1.0, 1e6, 20_000)
+        for w in (1.0, 2.0, 0.5, 4.0, 1024.0):
+            assert bool(_is_exact_power_of_two(np.array([w]))[0])
+            assert np.all((w * y) / w == y)
+        for w in (3.0, 2.5, 0.1):
+            assert not bool(_is_exact_power_of_two(np.array([w]))[0])
+
+    def test_a_zero_weight_is_not_treated_as_exact(self):
+        """0 * y is always integral, so the branch it takes cannot matter."""
+        from superglm.model.input_validation import _is_exact_power_of_two
+
+        assert not bool(_is_exact_power_of_two(np.array([0.0]))[0])
+
+    @pytest.mark.parametrize("value", [2.0**49 + 0.125, 2.0**48 + 0.0625, 1_000_000.0005])
+    def test_a_unit_weighted_response_is_tested_exactly(self, value):
+        """These sit inside the product allowance but are genuinely fractional."""
+        n = 40
+        frame = pd.DataFrame({"x": np.linspace(0.0, 1.0, n)})
+        y = np.full(n, 4.0)
+        y[0] = value
+        model = SuperGLM(family=Poisson(), features={"x": Numeric()}, weight_semantics="prior")
+        with pytest.warns(PriorWeightLatticeWarning):
+            model.fit(frame, y, sample_weight=np.ones(n))
+
+    def test_a_genuine_product_keeps_its_allowance(self):
+        """The canonical rate weighting must not start warning."""
+        from superglm.model.input_validation import _check_counting_lattice
+
+        rng = np.random.default_rng(52)
+        counts = rng.integers(0, 10_000, 20_000).astype(float)
+        exposure = rng.uniform(0.01, 50.0, 20_000)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            _check_counting_lattice(counts / exposure, exposure, Poisson(), "prior")
+
+
+class TestEveryPublicLikelihoodEntryChecksTheContract:
+    """Enumerated rather than listed from memory.
+
+    "Every evaluation boundary" was five, then six. The entry points that take
+    arrays or a model plus arrays -- rather than reading a fit's stored rows --
+    are the ones no other check can cover, so they are the ones to enumerate.
+    """
+
+    @staticmethod
+    def _fitted_on_whole_counts(n=200):
+        rng = np.random.default_rng(53)
+        frame = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+        y = rng.poisson(4.0, n).astype(float)
+        model = SuperGLM(
+            family=NegativeBinomial(theta=2.0),
+            features={"x": Numeric()},
+            weight_semantics="frequency",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            model.fit(frame, y, sample_weight=np.full(n, 2.0))
+        return model, frame, y, n
+
+    def test_estimate_nb_theta_warns_on_fractional_counts(self):
+        from superglm import estimate_nb_theta
+
+        model, frame, y, n = self._fitted_on_whole_counts()
+        with pytest.warns(FractionalFrequencyWeightWarning):
+            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.5))
+
+    def test_estimate_nb_theta_warns_on_a_fractional_response(self):
+        from superglm import estimate_nb_theta
+
+        model, frame, y, n = self._fitted_on_whole_counts()
+        y = y.copy()
+        y[:30] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning):
+            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+
+    def test_estimate_nb_theta_says_the_estimates_move(self):
+        """It refits beta at each candidate theta, so the reach is the estimates."""
+        from superglm import estimate_nb_theta
+
+        model, frame, y, n = self._fitted_on_whole_counts()
+        y = y.copy()
+        y[:30] += 0.5
+        with pytest.warns(PriorWeightLatticeWarning) as caught:
+            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))
+        assert "move as well" in str(caught[0].message)
+
+    def test_an_honoured_contract_stays_silent(self):
+        from superglm import estimate_nb_theta
+
+        model, frame, y, n = self._fitted_on_whole_counts()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PriorWeightLatticeWarning)
+            warnings.simplefilter("error", FractionalFrequencyWeightWarning)
+            estimate_nb_theta(model, frame, y, sample_weight=np.full(n, 2.0))

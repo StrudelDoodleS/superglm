@@ -118,6 +118,24 @@ def _not_a_whole_number(values: NDArray) -> NDArray:
     return values != np.rint(values)
 
 
+def _is_exact_power_of_two(values: NDArray) -> NDArray:
+    """Which weights scale a response without introducing any rounding.
+
+    IEEE-754 multiplication by a power of two only shifts the exponent, so
+    ``w * y`` is exact there and carries no round-off to forgive.  ``w == 1``
+    is the case that matters -- it is what an unweighted fit passes -- but the
+    property is the same for 2, 0.5 and the rest, so the test is the property
+    rather than the one value.
+
+    Zero is excluded deliberately: ``0 * y`` is exactly zero and therefore
+    always integral, so those rows never flag under either rule and the branch
+    they take is immaterial.
+    """
+    finite = np.isfinite(values) & (values > 0.0)
+    mantissa, _ = np.frexp(np.where(finite, values, 1.0))
+    return finite & (mantissa == 0.5)
+
+
 #: What the caller is doing with theta, which decides how far an interpolated
 #: density reaches.  Deriving this from the family alone is not enough: an
 #: auto-theta fit replaces ``theta`` with a number once it finishes, so the
@@ -360,7 +378,22 @@ def _check_counting_lattice(
     if not isinstance(family, Poisson | NegativeBinomial):
         return
     scaled = weights * y
-    count = int(np.count_nonzero(_off_integer_lattice(scaled)))
+    # The product tolerance is only earned where a product was actually formed.
+    # IEEE-754 multiplication by an exact power of two -- and w == 1 above all,
+    # which is what an unweighted fit passes -- is exact, so `scaled` is the
+    # caller's response bit for bit and the supplied-value rule applies. Lending
+    # those rows the round-off allowance let a directly supplied response like
+    # 2**49 + 0.125 through, in the most common fit there is.
+    exact_product = _is_exact_power_of_two(weights)
+    count = int(
+        np.count_nonzero(
+            np.where(
+                exact_product,
+                _not_a_whole_number(scaled),
+                _off_integer_lattice(scaled),
+            )
+        )
+    )
     if count == 0:
         return
     import warnings
