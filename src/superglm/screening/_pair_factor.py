@@ -81,7 +81,10 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.screening._factor_kernels import _combine_row_factors
+from superglm.screening._factor_kernels import (
+    _combine_row_factors,
+    _factor_rank_floor,
+)
 
 # Peak doubles allowed in one reduction temporary, matching
 # ``_structured._TRACE_CHUNK_DOUBLES``.  It bounds the inner batched QR's
@@ -292,11 +295,23 @@ def numeric_cat_factor(
     level whose ``z`` is constant makes it exactly rank 1 -- so its root's
     second row comes back at ``sqrt(eps)`` of the design rather than at ``eps``,
     which is the square-root loss this whole change exists to remove, reappearing
-    two dimensions wide inside a cell.  It is not academic: on the wholly
-    absorbed ``numeric_cat`` geometry (a numeric constant within each level, so
-    the true profiled rank is 0) the raw root leaves ``R_eff`` at 1.5e-08 of the
-    design against a round-off cut of 4.7e-08 -- a margin of 3x, where the
-    centered form leaves it at 1e-16 and the margin is eight orders.
+    two dimensions wide inside a cell.  It is not academic.  Measured over the
+    20 seeds of the wholly absorbed ``numeric_cat`` geometry the unpenalized
+    rung is graded on -- a numeric constant within each level, so the true
+    profiled rank is 0 -- with everything relative to
+    :func:`_profiled_rank_scale`'s joint-design reference and a round-off cut
+    of 4.7122e-08 there:
+
+        raw per-level root       ``||R_eff||_2`` 1.03e-16 .. 2.50e-08,
+                                 worst seed 1.89x below the cut
+        centered per-level root  ``||R_eff||_2`` 4.23e-17 .. 1.84e-16,
+                                 worst seed 2.57e+08x below the cut
+
+    Both forms come back rank 0 on all 20, so this is not the difference
+    between right and wrong on that geometry -- it is the difference between a
+    margin of 1.89x and one of eight orders, and a 1.89x margin on a rank
+    decision is what this repo has twice recorded going the wrong way on
+    another machine.
 
     So the level's mean is subtracted BEFORE the second moment is formed, in a
     second bincount pass over the rows, exactly as
@@ -535,13 +550,11 @@ def _profiled_factor(factor: PairFactor) -> tuple[NDArray, NDArray]:
     ``[(I - P) z_o ; z_t]`` its response.  A full-rank overlap makes ``I - P``
     exactly zero and the returned factor is the bare slice, bit for bit.  The
     rank is decided on ``R_o`` -- a factor formed by reduction, where nothing
-    has cancelled -- at :func:`._score_stat._factor_rank_floor`, the same cut
+    has cancelled -- at :func:`._factor_kernels._factor_rank_floor`, the same cut
     every other rank decision here takes.  The moment route took the same
     decision and did not state it: ``cho_factor`` or, on refusal,
     ``numpy.linalg.pinv``'s shape-derived default ``rcond``.
     """
-    from superglm.screening._score_stat import _factor_rank_floor
-
     q, k = int(factor.overlap_width), int(factor.tensor_width)
     R_eff = factor.joint[q : q + k, q : q + k]
     z_t = factor.joint[q : q + k, -1]

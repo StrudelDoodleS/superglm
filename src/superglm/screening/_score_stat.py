@@ -430,6 +430,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm.screening._factor_kernels import _factor_rank_floor
 from superglm.screening._pair_factor import (
     PairFactor,
     _pair_scale,
@@ -439,64 +440,6 @@ from superglm.screening._pair_factor import (
 
 _EDF_TOL = 1e-6
 _MAX_BISECT = 200
-
-
-def _rank_floor(n: int) -> float:
-    """Share of the largest eigenvalue below which a direction is ROUND-OFF.
-
-    ``max(n, 1) * eps`` -- LAPACK's convention and exactly what
-    ``numpy.linalg.matrix_rank`` uses by default.  It scales with the
-    dimension because round-off accumulates with it, and that dependence is
-    the whole point: no fixed constant works at both ends.
-
-    Two failures bound it from either side, and they are three orders apart,
-    so this is not a free parameter.
-
-    ABOVE round-off it deletes real curvature.  At 1e-12, ``V = S =
-    diag(1, 1e-13, 0)`` with ``U = (0, sqrt(1e-13), 0)`` had its 1e-13
-    direction discarded by the whitening below -- a direction carrying a
-    genuine ``a = 0.5`` and ALL of ``U``'s mass -- and the ladder returned
-    ``statistic 0, lambda0 1e-10`` where the direct pseudo-inverse ladder
-    resolves ``lambda0 1, statistic 0.5``.  Here that direction sits 150x
-    above the floor and survives.
-
-    AT round-off it keeps subtraction dust and reports a degree of freedom
-    that does not exist.  A fixed 1e-15 is only 4.5x ``eps``, which is inside
-    the dust's own distribution rather than above it: measured over 400
-    replicates of a 39-wide profiled block whose true rank is 38, the
-    round-off eigenvalue has median 2.2e-16 and a tail to 1.2e-15, so 2 of
-    400 read rank 39.  ``39 * eps`` is 8.7e-15, above the whole measured tail
-    by 7x.
-
-    **THIS MODULE NO LONGER APPLIES IT DIRECTLY, AND THAT IS THE POINT OF
-    ISSUE #257.**  Every cut here is now taken on a FACTOR, at
-    :func:`_factor_rank_floor` -- this expression's square root, which is the
-    same cut on the Gram the factor would square to.  The Gram form survives
-    because it is what the sibling cut is derived FROM, and because
-    ``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic``
-    counts against it to establish the regime the change was made for.
-    """
-    return max(int(n), 1) * float(np.finfo(np.float64).eps)
-
-
-def _factor_rank_floor(n: int) -> float:
-    """:func:`_rank_floor`'s cut, expressed for a FACTOR rather than a Gram.
-
-    A factor's singular values are the Gram's eigenvalues' square roots, so
-    ``sigma > sqrt(n eps) * sigma_max`` and ``w > n eps * w_max`` are the same
-    statement about the same direction.  Taking it here rather than after
-    squaring is the whole of #257: the deciding direction on a starved pair
-    sits at ``2.78e+20`` of conditioning in the Gram against ``1.67e+10`` in
-    the factor, and only the second is inside what float64 carries.
-
-    It is the same cutoff
-    :func:`superglm.screening._structured._representative_projection` takes,
-    whose docstring calls it "the square root of the Hermitian pseudo-inverse
-    policy used by the dense path".  That sentence used to be a borrowing;
-    since this module reads factors it is one policy at two sites, and the
-    derivation lives here.
-    """
-    return float(np.sqrt(_rank_floor(n)))
 
 
 @dataclass(frozen=True)

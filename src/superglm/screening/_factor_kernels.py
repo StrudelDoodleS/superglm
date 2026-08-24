@@ -4,22 +4,85 @@ Nothing here is specific to a pair's shape.  What lives in this module is the
 arithmetic that both the structured kernel of
 :mod:`superglm.screening._structured` and the dense one of
 :mod:`superglm.screening._pair_factor` do to a factor rather than to a Gram:
-merging two weighted-row factors without squaring either, and rooting an
-assembled penalty on a bar the caller can see.
+merging two weighted-row factors without squaring either, rooting an assembled
+penalty on a bar the caller can see, and the round-off floor every rank
+decision in the package is taken at.
 
 It exists because the dense path needs both and cannot reach
 :mod:`superglm.screening._structured`, which already imports ``ScreenedPair``
 from :mod:`superglm.screening._score_stat`.  Adding the reverse edge would be
-a cycle; a leaf module both can import is not.  The two routines below moved
-here unchanged from :mod:`superglm.screening._structured` -- same body, same
-docstring, same measurements -- so every number in them was taken on the
-structured path and every test that pinned them there still pins them here.
+a cycle; a leaf module both can import is not.  ``_combine_row_factors`` and
+``_penalty_root`` moved here unchanged from
+:mod:`superglm.screening._structured` -- same body, same docstring, same
+measurements -- so every number in them was taken on the structured path and
+every test that pinned them there still pins them here.  The two rank floors
+moved here from :mod:`superglm.screening._score_stat` for the same reason, and
+having them in one place is the point: the two paths take the same cut, on a
+Gram or on a factor, rather than one borrowing the other's.
 """
 
 from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+def _rank_floor(n: int) -> float:
+    """Share of the largest eigenvalue below which a direction is ROUND-OFF.
+
+    ``max(n, 1) * eps`` -- LAPACK's convention and exactly what
+    ``numpy.linalg.matrix_rank`` uses by default.  It scales with the
+    dimension because round-off accumulates with it, and that dependence is
+    the whole point: no fixed constant works at both ends.
+
+    Two failures bound it from either side, and they are three orders apart,
+    so this is not a free parameter.
+
+    ABOVE round-off it deletes real curvature.  At 1e-12, ``V = S =
+    diag(1, 1e-13, 0)`` with ``U = (0, sqrt(1e-13), 0)`` had its 1e-13
+    direction discarded by the whitening below -- a direction carrying a
+    genuine ``a = 0.5`` and ALL of ``U``'s mass -- and the ladder returned
+    ``statistic 0, lambda0 1e-10`` where the direct pseudo-inverse ladder
+    resolves ``lambda0 1, statistic 0.5``.  Here that direction sits 150x
+    above the floor and survives.
+
+    AT round-off it keeps subtraction dust and reports a degree of freedom
+    that does not exist.  A fixed 1e-15 is only 4.5x ``eps``, which is inside
+    the dust's own distribution rather than above it: measured over 400
+    replicates of a 39-wide profiled block whose true rank is 38, the
+    round-off eigenvalue has median 2.2e-16 and a tail to 1.2e-15, so 2 of
+    400 read rank 39.  ``39 * eps`` is 8.7e-15, above the whole measured tail
+    by 7x.
+
+    **NOTHING IN THE PACKAGE APPLIES IT TO A GRAM ANY MORE, AND THAT IS THE
+    POINT OF ISSUE #257.**  Every cut is taken on a FACTOR, at
+    :func:`_factor_rank_floor` -- this expression's square root, which is the
+    same cut on the Gram the factor would square to.  This form survives
+    because it is what the sibling cut is derived FROM, and because
+    ``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic``
+    counts against it to establish the regime the change was made for.
+    """
+    return max(int(n), 1) * float(np.finfo(np.float64).eps)
+
+
+def _factor_rank_floor(n: int) -> float:
+    """:func:`_rank_floor`'s cut, expressed for a FACTOR rather than a Gram.
+
+    A factor's singular values are the Gram's eigenvalues' square roots, so
+    ``sigma > sqrt(n eps) * sigma_max`` and ``w > n eps * w_max`` are the same
+    statement about the same direction.  Taking it here rather than after
+    squaring is the whole of #257: the deciding direction on a starved pair
+    sits at ``2.78e+20`` of conditioning in the Gram against ``1.67e+10`` in
+    the factor, and only the second is inside what float64 carries.
+
+    It is the same cutoff
+    :func:`superglm.screening._structured._representative_projection` takes,
+    whose docstring calls it "the square root of the Hermitian pseudo-inverse
+    policy used by the dense path".  That sentence used to be a borrowing;
+    since the dense ladder reads factors it is one policy at two sites, and the
+    derivation lives here.
+    """
+    return float(np.sqrt(_rank_floor(n)))
 
 
 def _combine_row_factors(left: NDArray, right: NDArray) -> NDArray:

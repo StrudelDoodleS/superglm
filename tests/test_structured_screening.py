@@ -23,12 +23,10 @@ from superglm import SuperGLM
 from superglm.features import Categorical, Spline
 from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._arrow import factor_arrow
+from superglm.screening._factor_kernels import _rank_floor
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._pair_moments import pair_score_curvature
-from superglm.screening._score_stat import (
-    _rank_floor,
-    penalized_score_statistic_ladder,
-)
+from superglm.screening._score_stat import penalized_score_statistic_ladder
 from superglm.screening._structured import (
     _evaluate,
     _penalty_root,
