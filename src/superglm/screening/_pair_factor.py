@@ -486,9 +486,12 @@ def numeric_cat_factor(
     # WHY IT MATTERS HERE.  Emitting every level at once costs
     # ``n_g * 3 * width`` doubles, and ``width`` is ``2k + 3``, so at the
     # widest factor the default ``max_cells`` admits -- 1709 contrasts, where
-    # ``_within_cubic_budget`` refuses -- that one temporary is 140 MB on top
-    # of the 385 MB the whole pair measures there, and 240 MB on top of 616 MB
-    # at the ``(k_g + 2)**2 <= max_cells`` gate's own frontier of 2234.  A
+    # ``_within_cubic_budget`` refuses -- that one temporary is 134 MB on top
+    # of the 385 MB the whole pair measures there, and 229 MB on top of 616 MB
+    # at the ``(k_g + 2)**2 <= max_cells`` gate's own frontier of 2234.  (The
+    # second figure read 240 MB before, which is the same byte count taken as
+    # a decimal megabyte; every other size in this package is the binary one
+    # the kernel reports, so both are stated that way.)  A
     # chunk sized so each merge sees about ``width`` new rows caps it at the
     # accumulator's own shape instead, which is the ``(width, width)`` this
     # pair has to hold in any case.
