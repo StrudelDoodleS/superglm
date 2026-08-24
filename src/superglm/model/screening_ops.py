@@ -44,14 +44,19 @@ the block's achieved rank and ``lambda0`` is 0.
 for the cell tables, the curvature intermediates and a numeric-margin pair's
 blocks; through ``_within_cubic_budget`` it is also a TIME ceiling, because
 the probe's block dimension ``k`` enters every rung as a ``(k, k)``
-factorization or pseudo-inverse.  Per-pair time therefore grows as ``k^3``
-where every allocation here grows as ``k^2``, and for the gridded kinds the
-pseudo-inverse branch is the routine path rather than the exception — one
-empty ``cat_cat`` cell or one singleton factor level makes a probe column
-collinear with the overlap span and the Cholesky falls back.  A block too
-wide to SOLVE inside the budget is refused with a NaN row exactly as an
-unaffordable allocation is, and refused immediately: binning cannot shrink a
-basis dimension, so no fallback is attempted first.
+decomposition — a pivoted QR of the pair's design factor with one SVD beside
+it.  Per-pair time therefore grows as ``k^3`` where every allocation here
+grows as ``k^2``.  For the gridded kinds a probe column collinear with the
+overlap span is routine rather than exceptional — one empty ``cat_cat`` cell
+or one singleton factor level does it — and it is now settled by a rank cut
+taken on the factor.  **THE CHOLESKY-WITH-A-PSEUDO-INVERSE-FALLBACK THIS
+PARAGRAPH USED TO DESCRIBE IS GONE AND THE SENTENCE IS PAST TENSE**: issue
+#257 removed it with the rest of the moment route, and nothing under
+``superglm/screening`` calls ``pinv``, ``cho_factor`` or ``cho_solve`` on the
+dense path any more.  The cost class is what it was, so the gate below is
+unchanged.  A block too wide to SOLVE inside the budget is refused with a NaN
+row exactly as an unaffordable allocation is, and refused immediately:
+binning cannot shrink a basis dimension, so no fallback is attempted first.
 
 The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
@@ -123,11 +128,28 @@ _RESULT_COLUMNS = [
     "approx",
 ]
 
-# The V-assembly einsum carries (n_a, k_b, k_b) and (n_b, k_a, k_a)
-# intermediates that max_cells alone does not bound (a lopsided 1e6 x 5 pair
-# passes the cell budget while the intermediate is 40x larger).  Budget them
-# against a small multiple of max_cells; the marginal dimension is estimated
-# from the parent spec's k, which is a guard-grade bound, not an exact count.
+# A class of allocation max_cells alone does not bound: one scaling with a
+# margin's SUPPORT times the other margin's basis dimension SQUARED, or with a
+# tensor width squared.  A lopsided 1e6 x 5 pair passes the cell budget while
+# such an intermediate is 40x larger.  Three gates charge against this factor
+# and two of them still bound something the code allocates -- the arrow
+# kernel's (n_a, k_s, k_s) stack of the spline menu's outer products, in
+# _within_structured_cells, and the dense (k_l*k_r, k_l*k_r) block a gridded
+# pair reduces to.
+#
+# THE THIRD NO LONGER DOES, AND THE CONSTANT IS HELD ANYWAY.  _within_budget's
+# term was fitted to pair_score_curvature's V-assembly einsum, which carried
+# (n_a, k_b, k_b) and (n_b, k_a, k_a) intermediates.  Issue #257 retired that
+# route: pair_design_factor reduces the same cell tables through temporaries
+# whose size this package chooses -- one bounded by _FACTOR_CHUNK_DOUBLES, the
+# rest at the accumulator's own (width, width) -- so nothing on the dense path
+# allocates the shape that term measures.  It is kept at 4 because it decides
+# ADMISSIONS: a pair it refuses gets a NaN row, and holding every admission
+# identical is what keeps #257 an accuracy change rather than a scope change,
+# the same reason no constant in the cubic block below moves.  Re-deriving it
+# from what the factor route actually allocates belongs to that block's
+# recorded follow-up.  Either way the marginal dimension is estimated from the
+# parent spec's k, which is a guard-grade bound, not an exact count.
 _INTERMEDIATE_BUDGET_FACTOR = 4
 
 # Every budget above bounds an ALLOCATION.  Per-pair TIME is cubic in the
@@ -153,11 +175,26 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 # 1.037 s -> 1.095 s, and the reported edf0 1709 -> 1708, which is the point)
 # and 1.209x on the pseudo-inverse path at two 67-level factors (k = 4356, one
 # empty cell: 14.0 s -> 16.9 s, 1.48 GB either way).  Carry the figures above
-# forward by those multipliers; the budget ceiling then lands near 1.1 s per
-# unpenalized pair, still inside the ~1.5 s target, so no constant here moves.
+# forward by those multipliers and the budget ceiling landed near 1.1 s per
+# unpenalized pair, inside the ~1.5 s target the constants were fitted to.
 # Holding the worst path of each class to ~1.5 s per pair gives k^3 <=
 # _CUBIC_BUDGET_FACTOR * max_cells for an unpenalized block, and the same
 # budget against _PENALIZED_LADDER_COST times the work for a penalized one.
+#
+# THAT TARGET IS NO LONGER MET AT THE CEILING, AND EVERY SECOND QUOTED ABOVE
+# IS A MOMENT-ROUTE SECOND.  Issue #257 moved the dense route off assembled
+# Grams onto a design factor, for accuracy, and the A/B recorded in
+# screening/_pair_factor's module docstring measures what that costs: 4.09x
+# on the ladder and 4.17x end to end at 1349 tensor columns, which is the
+# widest geometry measured and the nearest one to these ceilings.  Carried
+# forward at 4.09x the unpenalized ceiling lands near 4.5 s per pair and the
+# 0.81 s / 0.67 s below near 3.3 s / 2.7 s -- two to three times the target,
+# not inside it.  Nothing here moves on that account and that is deliberate:
+# admissions are DIMENSIONAL, so holding these constants is what keeps the
+# accuracy change from also being a scope change, and every published ceiling
+# is unchanged.  Re-fitting _CUBIC_BUDGET_FACTOR and _PENALIZED_LADDER_COST
+# to the factor route's own cost is the follow-up, and it needs the same
+# exclusive machine the multipliers above were taken on.
 #
 # That multiplier used to be 16.  A penalized ladder re-solved the (k, k)
 # system ~27 times PER RUNG to bisect for its edf target -- 109 solves per
@@ -174,11 +211,14 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 # keep headroom for the pseudo-inverse branch, which either path can take.
 #
 # At the default max_cells this admits k <= 1709 unpenalized and k <= 1357
-# penalized, measured there at 0.81 s and 0.67 s -- both inside the 1.5 s
-# target the old constants were chosen against.  Raising max_cells lifts
-# both, as it lifts every other budget here.  The remaining ceiling is an
-# artifact of densifying a block that is structurally block-diagonal; see
-# issue #188.
+# penalized, measured there at 0.81 s and 0.67 s ON THE MOMENT ROUTE -- both
+# inside the 1.5 s target the old constants were chosen against, and neither
+# inside it since #257: at the factor route's 4.09x those ceilings read about
+# 3.3 s and 2.7 s.  The ceilings themselves do not move, because they are
+# dimensional; what moved is the second per pair behind them.  Raising
+# max_cells lifts both, as it lifts every other budget here.  The remaining
+# ceiling is an artifact of densifying a block that is structurally
+# block-diagonal; see issue #188.
 _CUBIC_BUDGET_FACTOR = 1000
 _PENALIZED_LADDER_COST = 2
 
@@ -570,11 +610,14 @@ def screen_interactions(
     rows may report the raw grid with no binning attempted.
 
     ``max_cells`` bounds allocation AND time.  The probe block's dimension
-    ``k`` enters every rung as a ``(k, k)`` factorization or pseudo-inverse,
-    so per-pair time grows as ``k^3`` where the allocations grow as ``k^2``
-    — and for the gridded kinds the pseudo-inverse is the routine branch, not
-    the exception (one empty ``cat_cat`` cell or one singleton level makes a
-    probe column collinear with the overlap span).  ``_within_cubic_budget``
+    ``k`` enters every rung as a ``(k, k)`` decomposition — a pivoted QR of
+    the pair's design factor with one SVD beside it — so per-pair time grows
+    as ``k^3`` where the allocations grow as ``k^2``.  For the gridded kinds
+    a probe column collinear with the overlap span is the routine case rather
+    than the exception (one empty ``cat_cat`` cell or one singleton level does
+    it), and it is settled by a rank cut on that factor: the Cholesky and its
+    pseudo-inverse fallback went with the assembled Grams in issue #257, and
+    the cost class did not move with them.  ``_within_cubic_budget``
     therefore refuses a pair whose block is too wide to solve inside the
     budget: ``k^3 <= 1000 * max_cells`` for an unpenalized block, and the
     same budget against twice the work for a penalized one whose ladder can
@@ -958,16 +1001,40 @@ def screen_interactions(
     def _numeric_margin_within_budget(k_g):
         """Budget a numeric x gridded pair BEFORE its menu is built.
 
-        A z-moment pair allocates no cell grid, but it does allocate four
-        blocks that all scale with the GRIDDED margin's width: the (L, L-1)
-        menu, the (L-1)^2 curvature, the (L+1)^2 overlap curvature, and the
-        cross block between them.  Holding the largest of those — the
-        ``(k_g + 2)^2`` overlap block — to ``max_cells`` leaves the pair's
-        total at roughly four ceiling-sized blocks, the same small multiple
-        the two cell tables of a gridded pair sit at, and refuses the factors
-        whose blocks would dwarf it (measured: ~160 MB at the threshold,
-        ~640 MB at twice it).  Runs on the level count alone, so an
-        over-budget pair never allocates the dense menu it was refused for.
+        A z-moment pair allocates no cell grid, but everything it does
+        allocate scales with the GRIDDED margin's width, so holding the
+        ``(k_g + 2)^2`` overlap block to ``max_cells`` bounds the pair.  Runs
+        on the level count alone, so an over-budget pair never allocates the
+        dense ``(L, L-1)`` menu it was refused for.
+
+        **WHAT IT BOUNDS IS NO LONGER FOUR MOMENT BLOCKS, AND THE FIGURE IT
+        WAS CALIBRATED TO IS THE ONE THAT MOVED.**  It used to hold four
+        blocks that each fit inside the ceiling -- the menu, the ``(L-1)^2``
+        curvature, the ``(L+1)^2`` overlap curvature and the cross block --
+        and measured ~160 MB at the threshold.  Issue #257 moved the pair onto
+        ``numeric_cat_factor``, which allocates instead ONE joint factor of
+        width ``2L + 1`` (``2 k_g + 3``), the per-chunk emission block beside
+        it, and the merge temporaries of
+        :func:`superglm.screening._factor_kernels._combine_row_factors` -- a
+        Fortran-ordered stack of the accumulator and the new rows, and the
+        leading square of the ``R`` it returns.  Squaring the width squares
+        the block, so the same ceiling now buys four times the area.
+
+        Re-measured on this branch, one BLAS thread, as ``VmHWM`` minus the
+        resident set with the imports already paid, so the figure is the
+        pair's own allocation.  At this gate's own threshold (``k_g = 2234``,
+        2235 levels) the moment route reads 161.9 MB, which is the ~160 MB
+        above; the factor route reads 616.2 MB there.  At ``k_g = 1709`` --
+        1710 levels, which is where the pair is ACTUALLY refused, because
+        ``_within_cubic_budget`` binds first for every ``max_cells`` above 1e6
+        -- the moment route reads 118.4 MB and the factor route 384.5 MB.
+
+        So the widest ``numeric_cat`` pair admitted at the default allocates
+        about 385 MB where it used to allocate about 120 MB.  ``max_cells``
+        is documented as an allocation ceiling and that multiplier is
+        published rather than absorbed; re-fitting these constants to it is
+        the follow-up recorded at the top of this module, and no constant
+        here moves on this branch, so which pairs are admitted is unchanged.
         """
         return (k_g + 2) ** 2 <= max_cells
 
