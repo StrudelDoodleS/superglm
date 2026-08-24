@@ -12,13 +12,22 @@ It exists because the dense path needs both and cannot reach
 :mod:`superglm.screening._structured`, which already imports ``ScreenedPair``
 from :mod:`superglm.screening._score_stat`.  Adding the reverse edge would be
 a cycle; a leaf module both can import is not.  ``_combine_row_factors`` and
-``_penalty_root`` moved here unchanged from
-:mod:`superglm.screening._structured` -- same body, same docstring, same
-measurements -- so every number in them was taken on the structured path and
-every test that pinned them there still pins them here.  The two rank floors
-moved here from :mod:`superglm.screening._score_stat` for the same reason, and
-having them in one place is the point: the two paths take the same cut, on a
-Gram or on a factor, rather than one borrowing the other's.
+``_penalty_root`` moved here from :mod:`superglm.screening._structured` with
+the same body and the same measurements, so every number in them was taken on
+the structured path and every test that pinned them there still pins them
+here.  The two rank floors moved here from
+:mod:`superglm.screening._score_stat` for the same reason, and having them in
+one place is the point: the two paths take the same cut, on a Gram or on a
+factor, rather than one borrowing the other's.
+
+**ONE SENTENCE OF ``_penalty_root``'s DOCSTRING DID NOT SURVIVE THE MOVE, AND
+IT IS WORTH SAYING WHY.**  It gave the guard's reason as cross-route
+comparability, "because the DENSE path still assembles ``S_ti`` raw" -- true
+where it was written and false the moment ``_pair_penalty`` started calling
+:func:`superglm.screening._overlap.tensor_penalty_root`, which routes both
+margins through this very function.  Moving a docstring UNCHANGED is exactly
+how a true sentence becomes a false one; a claim about what some other module
+does has to be re-checked at the new site, not carried.
 """
 
 from __future__ import annotations
@@ -180,8 +189,17 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
       scores the PROJECTED penalty by construction, and there is no separate
       moment-space arrow left for it to score ``S_a`` raw in.  (An earlier
       draft here named that arrow; it no longer exists.)  The guard's real
-      reason is the one :func:`_profile` states at its own site: cross-route
-      comparability, because the DENSE path still assembles ``S_ti`` raw.
+      reason is the one :func:`superglm.screening._structured._profile` states
+      at its own site, and it is INTRINSIC rather than cross-route: a
+      certified-negative eigenvalue means the penalty being scored is not the
+      penalty specified.  It used to be cross-route comparability -- the dense
+      route assembled ``S_ti`` raw, so a direction dropped here would still be
+      penalized there -- and issue #257 spent that reason: ``_pair_penalty``
+      calls :func:`superglm.screening._overlap.tensor_penalty_root`, which
+      routes both margins through THIS function, so both paths now root the
+      same matrices by the same rule.  The asymmetry that survives is the
+      REFUSAL, not the rooting: the dense route drops the same direction and
+      publishes, because it has no numerical-certificate refusal contract.
     * **The refusal was not guaranteed, and the window it left has a closed
       form.**  Dropping happened at ``|c| > n eps ||S||_2``; :func:`_profile`
       raised only at ``clip = |c| / |tr S| > 2 n^2 eps``.  Two thresholds on

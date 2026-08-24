@@ -1480,11 +1480,11 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     # FIRST.  Both are now read off ONE block-angular QR whose penalty rows are
     # ``sqrt(lambda) root_penalty``, so they are built from ``rootS' rootS``
     # together by construction; what is left to check is that the PROJECTION
-    # ITSELF is roundoff, because the
-    # DENSE path still assembles ``S_ti`` raw and the two routes have to stay
-    # comparable.  A projection that removed something material would mean the
-    # structured route was scoring a different model from the one the caller
-    # specified, and silently.
+    # ITSELF is roundoff.  A projection that removed something material would
+    # mean the structured route was scoring a different model from the one the
+    # caller specified, and silently.  (This used to argue from cross-route
+    # comparability instead -- see the retraction below, which is what that
+    # argument was worth after issue #257.)
     #
     # The certification is the eigensolver's own documented error bound rather
     # than a chosen tolerance.  A symmetric eigendecomposition returns
