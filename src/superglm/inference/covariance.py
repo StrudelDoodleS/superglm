@@ -725,7 +725,11 @@ def _penalised_xtwx_inv_gram(
     Same result as ``_penalised_xtwx_inv`` but avoids forming the dense
     (n, p) matrix. Computes X'WX block-by-block using the group gram
     kernels, then inverts the (p_active, p_active) system directly.
-    Cost is O(n · sum(p_g²)) + O(p³) instead of O(n · p²).
+    Cost is O(n · sum(p_g²)) + O(p³) instead of O(n · p²) -- on the
+    certified fast path only. When a consult falls back to the certified
+    factor (``needs_factor_certification``), the design is streamed in
+    bounded dense chunks and the cost is at least O(n · p²): inside the
+    band, neither half of the fast-path claim holds.
 
     Does NOT return X_a (not needed for REML). For leverage/hat matrix
     diagnostics, use ``_penalised_xtwx_inv`` instead.

@@ -975,7 +975,7 @@ def test_penalised_gram_covariance_keeps_its_gram_route_outside_the_band(monkeyp
     # Well away from the band: the ridge is eight orders above its upper edge,
     # so the Hessian is certifiable and the fast path is the whole answer.
     penalty = 1e-3 * np.eye(fit.p)
-    _inverse, _augmented, _active, data_gram, active_penalty = _penalised_xtwx_inv_gram(
+    _inverse, _augmented, active_groups, data_gram, active_penalty = _penalised_xtwx_inv_gram(
         fit.beta,
         fit.weights,
         fit.group_matrices,
@@ -985,6 +985,17 @@ def test_penalised_gram_covariance_keeps_its_gram_route_outside_the_band(monkeyp
     )
     hessian = data_gram + active_penalty
     assert not needs_factor_certification(decompose_gram(hessian))
+    # The augmented system carries its own verdict at the site, so the premise
+    # must hold for it too -- otherwise a kernel that put M_aug in the band
+    # would fail below as "certifiable Gram must not stream the design", which
+    # points at the wrong system and reads as a regression rather than drift.
+    active_gms = [
+        matrix
+        for matrix, group in zip(fit.group_matrices, fit.groups, strict=True)
+        if group.name in {active.name for active in active_groups}
+    ]
+    bordered = _bordered_with_intercept(hessian, fit.weights, active_gms)
+    assert not needs_factor_certification(decompose_gram(bordered))
 
     monkeypatch.setattr(
         covariance_module,
