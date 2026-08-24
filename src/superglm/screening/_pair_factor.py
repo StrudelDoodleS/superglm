@@ -58,15 +58,21 @@ here, not a level count arriving from the data: the chunk is sized so each
 merge sees about ``w`` new rows, which caps the temporary at the shape of the
 accumulator itself.
 
-**COST CLASS, STATED AND NOT MEASURED HERE.**  The dominant term is
+**COST CLASS, AND THE MULTIPLIER MEASURED FOR IT.**  The dominant term is
 ``O(n_outer * k_inner * w**2)`` against the moment route's ``O(n_outer *
 k**2)``, so the reduction costs a factor of the INNER margin's width.  The
 builder therefore reduces the NARROWER margin inside and loops over the other,
-which makes that factor ``min(k_a, k_b)``.  No timing is taken on this branch
-and none is claimed; the budget gates in :mod:`superglm.model.screening_ops`
-are DIMENSIONAL (``k**3 <= _CUBIC_BUDGET_FACTOR * max_cells``), so which pairs
-are admitted is unchanged, and re-fitting their calibration is a separate
-decision taken with a machine to itself.
+which makes that factor ``min(k_a, k_b)``.  Against the moment route at
+``16e7f810``, as 18-rep interleaved A/B/B/A medians taken in a dedicated
+exclusive phase with all seven thread pools pinned to one, the ladder phase
+costs 0.95x, 3.10x, 3.94x and 4.09x at tensor widths 35, 133, 1043 and 1349
+(``ps(8)`` on 6, 20 and 150 levels, then ``ps(20)`` on 72), and 1.10x, 1.67x,
+2.31x and 4.17x end to end through ``screen_interactions``.  The budget gates
+in :mod:`superglm.model.screening_ops` are DIMENSIONAL (``k**3 <=
+_CUBIC_BUDGET_FACTOR * max_cells``), so which pairs are admitted is unchanged;
+what those multipliers move is the ~1.5 s per-pair target the constants were
+fitted to, and re-fitting them is a separate decision taken with a machine to
+itself.
 
 Column order out is ``[ 1 | inner menu | outer menu | tensor | yhat ]``.  The
 overlap's internal order is the FACTOR's and differs from
@@ -343,6 +349,59 @@ def numeric_cat_factor(
     zero row rather than a division.  Graded against a row-space QR of the same
     levels in ``test_the_numeric_cat_cell_gram_is_not_what_limits_the_pair``,
     including on a level starved to a single row.
+
+    **THE REFERENCE IS THE LEVEL'S LAST ROW IN ROW ORDER, AND A ZERO-WEIGHT
+    ROW IS A ROW.**  ``reference[codes_g] = z`` is a scatter with duplicate
+    indices, so the value that survives is whichever row of the level comes
+    last.  A zero-weight row reaches the arithmetic NOWHERE else -- its weight
+    drops out of every accumulation and ``screening_ops`` forces its score to
+    exactly zero -- so this is the one channel through which it can move an
+    answer.  When the level's positively-weighted rows share one ``z`` and
+    that last row does not, ``shifted`` is a nonzero constant rather than an
+    exact zero, and ``offset = sum(w shifted) / sum(w)`` returns it only to
+    two roundings; ``centered`` then comes back at ``eps`` of the gap instead
+    of at zero and ``m2 > 0`` reads a spread that is not in the data.
+
+    Measured over twelve random seven-row levels with unequal weights, one
+    zero-weight row placed either first or last:
+
+        reference a positively-weighted row   ``m2`` exactly 0.0, 12 of 12
+        reference the zero-weight row         ``m2`` in 2.34e-33 .. 2.14e-30
+                                              on 6 of 12
+
+    On those six the level's factor puts up to 1.9099 of response -- 29.0% of
+    that level's own ``sum(s**2 / w)`` -- on a design direction of norm
+    1.461e-15.  Equal weights keep the property outright, because
+    ``sum(w c) / sum(w)`` then rounds back to ``c``, which is why the suite's
+    fixtures do not see it.
+
+    **IT DOES NOT REACH A PUBLISHED NUMBER, AND THE REASON IS A MARGIN RATHER
+    THAN EXACTNESS.**  1.461e-15 is more than seven orders under
+    :func:`._factor_kernels._factor_rank_floor`'s ``sqrt(k eps)``, which is
+    1.490e-08 at its smallest and rises with the block's width -- and that cut
+    is taken RELATIVE to the joint's top singular value, which is larger than
+    this level's -- so the pencil drops the direction and the response energy
+    lands in the reduction's residual exactly as it does when the reference is
+    a weighted row.  The two references agree on what is PUBLISHED; they
+    differ in whether that agreement is arithmetic or a seven-order gap.
+    Referencing the level's last POSITIVELY-WEIGHTED row would restore the
+    exactness and is a scatter over ``codes_g[w > 0]`` rather than over
+    ``codes_g``; it is not taken here because it changes an emitted factor,
+    and this branch changes none.
+
+    **THE ROW-LENGTH TEMPORARIES HERE ARE NOT CHUNKED, UNLIKE THE ONES BESIDE
+    THEM.**  ``reference[codes_g]``, ``shifted``, ``offset[codes_g]``,
+    ``centered``, ``root_w``, ``residual`` and the two products inside it are
+    each ``n`` long and about eight are live at once, where
+    :func:`numeric_numeric_factor` below reduces its raw rows in chunks of
+    ``_FACTOR_CHUNK_DOUBLES`` and the level-emission loop further down chunks
+    too.  The moment route this replaced held one or two at a time.  Nothing
+    gates it: ``_numeric_margin_within_budget`` bounds ``(k_g + 2)**2`` and
+    says nothing about ``n``, so on a ten-million-row frame this is a few
+    hundred megabytes of transients on a path documented as one O(n) pass.
+    Chunking it is a recorded follow-up and not a defect: every quantity here
+    is a bincount accumulation or a row-local map, so the pass splits without
+    changing an emitted bit.
     """
     codes_g = np.asarray(codes_g, dtype=np.intp)
     menu_g = np.asarray(menu_g, dtype=np.float64)
@@ -425,12 +484,13 @@ def numeric_cat_factor(
     # CHUNKED FOR THE SAME REASON THE GRIDDED BUILDER IS, AND THE CEILING IS
     # WHY IT MATTERS HERE.  Emitting every level at once costs
     # ``n_g * 3 * width`` doubles, and ``width`` is ``2k + 3``, so at the
-    # ``(k_g + 2)**2 <= max_cells`` gate's own frontier -- 2234 contrasts at
-    # the default ``max_cells`` -- that one temporary is 240 MB against the
-    # ~160 MB the gate's docstring budgets for the WHOLE pair.  A chunk sized
-    # so each merge sees about ``width`` new rows caps it at the accumulator's
-    # own shape instead, which is the ``(width, width)`` this pair has to hold
-    # in any case.
+    # widest factor the default ``max_cells`` admits -- 1709 contrasts, where
+    # ``_within_cubic_budget`` refuses -- that one temporary is 140 MB on top
+    # of the 385 MB the whole pair measures there, and 240 MB on top of 616 MB
+    # at the ``(k_g + 2)**2 <= max_cells`` gate's own frontier of 2234.  A
+    # chunk sized so each merge sees about ``width`` new rows caps it at the
+    # accumulator's own shape instead, which is the ``(width, width)`` this
+    # pair has to hold in any case.
     merge = _merge_chunk(n_g, 3, width)
     joint = np.zeros((0, width), dtype=np.float64)
     for start in range(0, n_g, merge):

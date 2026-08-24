@@ -470,16 +470,20 @@ factors are themselves accurate (Demmel and Veselic, *SIMAX* 13 (1992)
 1204-1245; Demmel et al., *LAA* 299 (1999) 21-80), and a Gram formed in
 floating point is not one.
 
-**WHAT IS NOT CLAIMED HERE: COST.**  The reduction that produces the factor is
-``O(n_outer * k_inner * w^2)`` where the moment assembly was
-``O(n_outer * k^2)``, so it costs a factor of the narrower margin's width, and
-the pencil is one pivoted QR plus one SVD where the moment route ran a
-generalized eigendecomposition.  No timing was taken on this branch and none is
-stated: the budget gates in :mod:`superglm.model.screening_ops` are DIMENSIONAL
+**WHAT IT COSTS, AND WHAT THAT COST DOES NOT MOVE.**  The reduction that
+produces the factor is ``O(n_outer * k_inner * w^2)`` where the moment
+assembly was ``O(n_outer * k^2)``, so it costs a factor of the narrower
+margin's width, and the pencil is one pivoted QR plus one SVD where the moment
+route ran a generalized eigendecomposition.  Measured against that route at
+``16e7f810`` -- 18-rep interleaved A/B/B/A medians, dedicated exclusive phase,
+all seven thread pools pinned to one -- this ladder costs 0.95x, 3.10x, 3.94x
+and 4.09x at tensor widths 35, 133, 1043 and 1349, and 1.10x to 4.17x end to
+end.  The budget gates in :mod:`superglm.model.screening_ops` are DIMENSIONAL
 (``k**3 <= _CUBIC_BUDGET_FACTOR * max_cells``), so which pairs are admitted is
-unchanged and no published ceiling moves, but their ~1.5 s per-pair calibration
-was fitted against the moment route and re-fitting it is a separate decision
-taken with a machine to itself.
+unchanged and no published ceiling moves; what those multipliers spend is the
+~1.5 s per-pair calibration behind the ceilings, which was fitted against the
+moment route and is no longer met at them.  Re-fitting it is a separate
+decision taken with a machine to itself.
 """
 
 from __future__ import annotations
