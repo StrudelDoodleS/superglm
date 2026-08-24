@@ -418,15 +418,33 @@ def numeric_cat_factor(
     k = menu_g.shape[1]
     overlap_width, tensor_width = 2 + k, k
     width = overlap_width + tensor_width + 1
-    block = np.empty((n_g, 3, width), dtype=np.float64)
-    block[:, :, :2] = factors[:, :, :2]
-    block[:, :, 2:overlap_width] = menu_g[:, None, :] * factors[:, :, 0:1]
-    block[:, :, overlap_width : overlap_width + tensor_width] = (
-        menu_g[:, None, :] * factors[:, :, 1:2]
+    # CHUNKED FOR THE SAME REASON THE GRIDDED BUILDER IS, AND THE CEILING IS
+    # WHY IT MATTERS HERE.  Emitting every level at once costs
+    # ``n_g * 3 * width`` doubles, and ``width`` is ``2k + 3``, so at the
+    # ``(k_g + 2)**2 <= max_cells`` gate's own frontier -- 2234 contrasts at
+    # the default ``max_cells`` -- that one temporary is 240 MB against the
+    # ~160 MB the gate's docstring budgets for the WHOLE pair.  A chunk sized
+    # so each merge sees about ``width`` new rows caps it at the accumulator's
+    # own shape instead, which is the ``(width, width)`` this pair has to hold
+    # in any case.
+    merge = _merge_chunk(n_g, 3, width)
+    joint = np.zeros((0, width), dtype=np.float64)
+    for start in range(0, n_g, merge):
+        stop = min(start + merge, n_g)
+        rows = stop - start
+        local = factors[start:stop]
+        menu = menu_g[start:stop, None, :]
+        block = np.empty((rows, 3, width), dtype=np.float64)
+        block[:, :, :2] = local[:, :, :2]
+        block[:, :, 2:overlap_width] = menu * local[:, :, 0:1]
+        block[:, :, overlap_width : overlap_width + tensor_width] = menu * local[:, :, 1:2]
+        block[:, :, -1] = local[:, :, -1]
+        joint = _combine_row_factors(joint, block.reshape(rows * 3, width))
+    return PairFactor(
+        joint=_square(joint, width),
+        overlap_width=overlap_width,
+        tensor_width=tensor_width,
     )
-    block[:, :, -1] = factors[:, :, -1]
-    joint = _square(np.linalg.qr(block.reshape(n_g * 3, width), mode="r"), width)
-    return PairFactor(joint=joint, overlap_width=overlap_width, tensor_width=tensor_width)
 
 
 def numeric_numeric_factor(
