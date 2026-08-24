@@ -253,27 +253,48 @@ COUNTS the directions ``V_eff``'s Gram cannot resolve, four on the starved pair
 against one elsewhere, and that count is what says the Gram route was reading
 absent information.
 
-**REPRODUCIBILITY, WHICH IS WHAT ACTUALLY REACHED A USER.**  On the published
-twelve-row ``freMTPL2freq`` screen (100,000 rows, the guide's own
-specification), one thread against eight with all six pools pinned together::
+**REPRODUCIBILITY, WHICH IS WHAT ACTUALLY REACHED A USER.**  On the guide's
+published twelve-row ``freMTPL2freq`` screen -- an 80,000-row sample under
+``weight_semantics="frequency"``, the specification ``docs/guide/screening.md``
+prints and ``tests/fixtures/screening_guide_fremtpl.json`` pins, ``phi``
+4.821136 -- one thread against eight with all six pools pinned together::
 
                           worst |dz|      worst |d edf0|
-    moment route          1.4808e-05      2.6226e-04
-    factor route          2.9632e-13      2.2027e-13
+    moment route          4.5597e-05      7.7570e-04
+    factor route          1.1252e-13      7.0699e-13
 
-Eight orders, and the table order is identical and the ``z > sqrt(edf0 / 2)``
-gate admits the same four pairs on every one of the four runs.  On this suite's
-own fixtures the same comparison gives a worst ``edf`` move of 5.58e-13 across
-1 and 8 threads, against the 4.05e-04 :mod:`superglm.screening._structured`
-recorded for the dense arm on ``_thin_level_pair``.
+Eight orders, and the table order is identical on both routes and the
+``z > sqrt(edf0 / 2)`` gate admits the same SINGLE pair -- ``VehAge x
+BonusMalus`` -- on every one of the four runs.  On this suite's own fixtures
+the same comparison gives a worst ``edf`` move of 5.58e-13 across 1 and 8
+threads, against the 4.05e-04 :mod:`superglm.screening._structured` recorded
+for the dense arm on ``_thin_level_pair``.
 
 **WHAT THE CHANGE MOVES IN THE PUBLISHED TABLE**, one thread, the same screen,
 one route against the other: the order is identical, the gate admits the same
-four pairs, and the worst ``|dz|`` is 9.8127e-05 on ``VehAge x Region``,
-followed by 3.97e-06, 2.24e-06, 1.43e-06 and 1.02e-08.  Every ``ti``,
-``cat_cat`` and ``numeric_cat`` row moves at round-off (2.2e-12 or below).  So
+single pair, and the worst ``|dz|`` is 3.6886e-05 on ``VehAge x VehBrand``,
+followed by 8.97e-06, 4.05e-06, 6.54e-07, 3.23e-07 and 1.74e-07.  Every ``ti``,
+``cat_cat`` and ``numeric_cat`` row moves at round-off (2.46e-12 or below).  So
 the change is visible only on ``spline_cat`` pairs and only in the fifth
 decimal of ``z``, which is the size #257 said it would be.
+
+**AND THE PUBLISHED TABLE'S OWN PINS WERE RE-TAKEN RATHER THAN ASSUMED**, since
+a fifth-decimal move against a ``rel=1e-4, abs=1e-4`` pin is only 2.7x of the
+bound and that is not a headroom anyone should infer.  Against the committed
+fixture, at one thread, the shipped factor route uses 0.180 of the ``z`` bound
+(5.6x inside, worst on ``VehAge x Region``), 0.191 of the ``statistic`` bound,
+0.070 of the ``edf0`` bound and 0.00037 of the ``lambda0`` bound.  The moment
+route the fixture was generated with uses 0.215, 0.296, 0.063 and 0.00037 of
+the same four.  So the change does not consume the fixture's headroom; on ``z``
+it widens it, because the moment route's own thread-to-thread spread on this
+screen is larger than the distance between the two routes.
+
+**AN EARLIER REVISION OF THIS SECTION QUOTED A DIFFERENT SCREEN, AND SAID SO
+IN THE PUBLISHED TABLE'S NAME.**  It reported these tables on "100,000 rows,
+the guide's own specification" and said the gate admitted FOUR pairs.  The
+guide's screen is 80,000 rows AND carries ``weight_semantics="frequency"``,
+which sets ``phi`` and therefore every ``z``; on it the gate admits one.  The
+numbers above are the published screen's.
 
 **THE LOW EDGE HAS ITS OWN LIMIT AND IT IS A FIRST-ORDER SENSITIVITY,
 ``eps ||V_eff||_F ||G||_F``.**  (Not a ceiling: finite realizations exceed it,
