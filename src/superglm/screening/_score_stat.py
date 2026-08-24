@@ -520,9 +520,8 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     decomposition serves an entire ladder, which is what makes a rung O(k).
 
     **BALANCE BEFORE STACKING, FOR ACCURACY RATHER THAN FOR REPRESENTABILITY.**
-    :func:`_build_pencil`, which this replaces, had to balance because it FORMED
-    ``V + S`` and lost the smaller term outright when the two lived on far-apart
-    scales -- ``V = 1e20 I`` against ``S = I`` rounds to ``V``, every share comes
+    The form this replaces had to balance because it FORMED ``V + S`` and lost
+    the smaller term outright when the two lived on far-apart scales -- ``V = 1e20 I`` against ``S = I`` rounds to ``V``, every share comes
     back 1, and the ladder reports the full dimension at every lambda.  Stacking
     adds nothing, so that failure is gone by construction and the balance is no
     longer load-bearing for it.  It is kept for a different and smaller reason:
@@ -533,12 +532,12 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     rounding on a quantity nothing cancelled.
 
     ``penalty_root = None`` is the unpenalized block: the stack is ``R_eff``
-    alone,
-    every ``s_j`` is exactly zero and every surviving ``c_j`` gives a filter
-    factor of exactly 1, so ``edf`` comes back as the retained RANK and ``T``
-    as ``|| Uc' z_t ||^2`` -- the projection of the profiled score onto the
-    directions the design actually resolves.  It is the same estimator as
-    every other rung rather than a second one beside it.
+    alone, every ``s_j`` is exactly zero and every surviving ``c_j`` gives a
+    filter factor of exactly 1, so ``edf`` comes back as the retained RANK and
+    ``T`` as the squared norm of ``z_t``'s projection onto the directions the
+    design actually resolves.  It is the same estimator as every other rung
+    rather than a second one beside it, which is why there is no separate
+    counting routine here any more.
     """
     R_eff, z_t = _profiled_factor(pair)
     k = int(pair.tensor_width)

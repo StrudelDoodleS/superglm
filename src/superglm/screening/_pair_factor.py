@@ -245,14 +245,15 @@ def pair_design_factor(
         block[:, :, : 1 + k_inner] = factors[:, :, : 1 + k_inner]
         # the outer margin's own main effect: ``a_i[1:]`` against the intercept
         block[:, :, 1 + k_inner : overlap_width] = outer[start:stop, None, :] * factors[:, :, 0:1]
-        # and the tensor, ``a_i[1:]`` against ``t_j[1:]``
-        np.multiply(
-            outer[start:stop, None, :, None],
-            factors[:, :, None, 1 : 1 + k_inner],
-            out=block[:, :, overlap_width : overlap_width + tensor_width].reshape(
-                rows, block_rows, k_outer, k_inner
-            ),
-        )
+        # and the tensor, ``a_i[1:]`` against ``t_j[1:]``, in the C-order the
+        # penalty is assembled on.  Written through a temporary rather than
+        # with ``out=`` on a reshaped slice: that reshape does return a view
+        # here (the axis being split is contiguous), but a reader should not
+        # have to know numpy's rule for when it does, and the temporary is
+        # smaller than ``block`` itself.
+        block[:, :, overlap_width : overlap_width + tensor_width] = (
+            outer[start:stop, None, :, None] * factors[:, :, None, 1 : 1 + k_inner]
+        ).reshape(rows, block_rows, tensor_width)
         block[:, :, -1] = factors[:, :, -1]
         joint = _combine_row_factors(joint, block.reshape(rows * block_rows, width))
 
