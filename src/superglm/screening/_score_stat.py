@@ -231,6 +231,16 @@ QR on the same factor agrees with the pencil to 2.0e-13 on the statistic and
 1.1e-15 on ``edf``, so ONE lambda-free
 decomposition costs nothing against a fresh factorization per rung.
 
+**THOSE ORDERS ARE THE PENCIL'S AND NOT THE FACTOR'S, WHICH IS WORTH
+SEPARATING BECAUSE THE ISSUE IS NAMED AFTER THE OTHER HALF.**  Master's route
+changes two things at once.  Holding the pencil fixed and rebuilding the
+pair through the moment route -- ``V - C' M^-1 C`` with the moment route's own
+cho-or-pinv solve, the factor's column order preserved -- the same statistic
+reads 3.998e-13 against the shipped 3.451e-13.  ``moderate_pair``'s high edge
+therefore cannot see the Gram-to-factor move at all; what sees it is the LOW
+edge, where the table above reads 0.0 against 1.3662e-10 and 2.4045e-09, and
+where three of this suite's tests go red under that same mutation.
+
 **THE RANK CUT IS NO LONGER A CONVENTION, AND THAT IS THE MEASUREMENT THIS
 SECTION EXISTS FOR.**  The moment route's disagreement with the arrow kernel
 was defensible as a CONVENTION: an independent evaluation's rank cut, swept,

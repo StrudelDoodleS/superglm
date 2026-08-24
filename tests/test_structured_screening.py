@@ -603,11 +603,10 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     for d, s in zip(dense, struct, strict=True):
         # RE-DERIVED FOR ISSUE #257, ON THE SWEEP THAT SET THE NUMBER IT
         # REPLACES.  ``rel=1e-5`` was two moment-space errors agreeing; the
-        # dense arm reads a design factor now and the two arms' ``edf`` at
-        # this rung differ by 5.49e-13 to 3.01e-12 relative over 7
-        # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings.  ``1e-9`` is
-        # 332x the worst of the fourteen and four orders inside what the
-        # separate accuracy bounds below imply.
+        # two arms' ``edf`` at this rung differ by 5.49e-13 to 3.01e-12
+        # relative over 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread
+        # settings.  ``1e-9`` is 332x the worst of the fourteen and four
+        # orders inside what the separate accuracy bounds below imply.
         assert s.edf0 == pytest.approx(d.edf0, rel=1e-9)
         assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12)
 
@@ -638,10 +637,20 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
         # EVIDENCE RATHER THAN A TIDY-UP.  ``2.2e-5`` was ``eps * kappa`` for a
         # moment-space read of a pencil whose condition number is ~1e11 here,
         # and it was pinning the dense path's own error.  Since issue #257 the
-        # dense arm reads the pair's design factor and its distance from the
-        # arbiter is 1.91e-12 to 2.09e-11 over the same 14 configurations --
-        # so it is held to ``1e-9``, the number the structured arm already
-        # carries three lines up, with 48x on the worst of the fourteen.
+        # dense arm's distance from the arbiter is 1.91e-12 to 2.09e-11 over
+        # the same 14 configurations -- so it is held to ``1e-9``, the number
+        # the structured arm already carries three lines up, with 48x on the
+        # worst of the fourteen.
+        #
+        # WHAT MOVED IT IS THE PENCIL, NOT THE READ OFF A FACTOR, and saying
+        # so is the point of the sentence.  Rebuilding ``pair_design_factor``
+        # through the moment route while keeping ``_pair_pencil`` leaves this
+        # fixture's dense statistic at 3.998e-13 against the shipped 3.451e-13
+        # -- both far inside ``1e-9`` -- where master's whole route reads
+        # 1.116e-05.  The Gram-to-factor half is pinned at the LOW edge
+        # instead, by the two ``_thin_level_pair`` bounds below at ``abs=1e-9``
+        # and by ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_
+        # freedom``; those three go red under exactly that mutation.
         assert abs(d.statistic - arbiter) / abs(arbiter) < 1e-9, (d.statistic, arbiter)
 
 
@@ -4537,13 +4546,34 @@ def test_the_dense_high_edge_statistic_matches_the_stacked_qr_arbiter(moderate_p
     structured arm against ``_wood_stacked_statistic`` at ``rel=1e-9`` and the
     dense arm at ``2.2e-5``, and says why: the dense half read the pair's
     moments, so its own accuracy at this rung was ``eps * kappa`` with a
-    condition number of ~1e11.  Reading the design factor instead removes the
-    squaring, and this asserts the dense arm at the bound the structured arm
-    already meets.
+    condition number of ~1e11.  This asserts the dense arm at the bound the
+    structured arm already meets.
 
-    RED on the Gram route, measured here: the dense statistic sits 1.1159e-05
-    relative from the arbiter where the structured one sits 1.7369e-11, and
-    ``edf0`` reads 23.000031 against 22.999931.
+    RED on master's route, measured here: the dense statistic sits 1.116e-05
+    relative from the arbiter and ``edf0`` reads 23.000031 against 22.999931.
+
+    **WHICH HALF OF THE CHANGE THOSE FIVE ORDERS COME FROM, BECAUSE IT IS NOT
+    THE HALF THE ISSUE IS NAMED AFTER.**  Master's route is two changes at
+    once -- moments instead of a factor, and ``_edge``/``_build_pencil``
+    instead of ``_pair_pencil``.  Separating them by mutation, this fixture's
+    dense statistic against the same arbiter::
+
+        master's whole route                       1.116e-05
+        Gram construction, the NEW pencil          3.998e-13
+        shipped (design factor + the new pencil)   3.451e-13
+
+    So on ``moderate_pair`` the five orders are the PENCIL's, and this test
+    stays green under a reversion of the Gram-to-factor move: the two
+    constructions differ here by 1.6x on a quantity already at 1e-13.  That is
+    not a hole in the branch -- rebuilding ``pair_design_factor`` through the
+    moment route reds three tests over the six screening files (262 pass), and
+    they are the ones written for the LOW edge, where the information the Gram
+    lost is the whole answer:
+    ``test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom`` at 0.01
+    and 0.001, and
+    ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom`` at
+    1e-12.  It is a statement about what THIS test is evidence for, which is
+    the pencil.
     """
     factor, penalty = moderate_pair["factor"]
     dense = _dense_ladder(factor, penalty, budgets=BUDGETS)
