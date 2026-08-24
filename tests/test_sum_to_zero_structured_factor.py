@@ -16,6 +16,7 @@ from superglm.solvers.structured import (
     CenteredBlockOperator,
     SumToZeroBlockOperator,
     SumToZeroBlockStructuredSystem,
+    _centered_operator_column_scale,
     _certified_ritz_discarded,
     _multiply_symmetric_bdlr_coalesced,
     _operator_bdlr,
@@ -23,6 +24,8 @@ from superglm.solvers.structured import (
     _sum_to_zero_inherent_null_row_norms,
     _sum_to_zero_public_null_geometry,
     _sum_to_zero_public_spectral_bound,
+    _sum_to_zero_public_spectral_estimability,
+    _sum_to_zero_public_weak_bases,
     _sum_to_zero_scaled_basis_null_row_norms,
     build_penalized_sum_to_zero_operator,
     centered_operator_coefficient_estimable,
@@ -2049,3 +2052,133 @@ def test_constrained_null_leverage_floor_still_governs_above_the_two_bars_crossi
             "a resolved negative diagonal must be flagged, not clipped -- "
             "otherwise the one remaining sign clip decides an outcome again"
         )
+
+
+def _sum_to_zero_shared_constant_operator(
+    tilt: float,
+    *,
+    n_levels: int = 17,
+    rows_per_level: int = 4,
+    weak: float = 1e-7,
+    small_columns: int = 2,
+    seed: int = 13,
+) -> tuple[CenteredBlockOperator, np.ndarray]:
+    """SZ levels sharing a constant column the final level cancels exactly.
+
+    Every free level's first local column is ``1_m`` and the final level's is
+    ``-1_m / (K - 1)``, so the public direction taking 1 on each free level's
+    first coordinate maps to a design column that is CONSTANT on every row --
+    exactly null once the intercept is profiled out, which is what puts a
+    computed zero into the public spectrum.  ``tilt`` rotates level 0's
+    constant towards a unit vector orthogonal to it, lifting that null
+    eigenvalue as ``tilt**2`` and so placing it anywhere wanted relative to the
+    two cuts.  ``weak`` shrinks level 0's second local direction so it is
+    retained locally but weak publicly: that is what asks for the public
+    spectral certificate at all, and without it this geometry never reaches
+    the branch under test.
+    """
+    rng = np.random.default_rng(seed)
+    ones = np.ones(rows_per_level)
+    drift = np.resize(np.array([1.0, -1.0]), rows_per_level)
+    drift = drift / np.linalg.norm(drift)
+    local_factors = []
+    for level in range(n_levels - 1):
+        second = rng.normal(size=rows_per_level)
+        second -= (second @ ones) / (ones @ ones) * ones
+        if level == 0:
+            second = weak * second
+        first = ones + tilt * drift if level == 0 else ones
+        local_factors.append(np.column_stack((first, second)))
+    final_second = rng.normal(size=rows_per_level)
+    final_second -= (final_second @ ones) / (ones @ ones) * ones
+    local_factors.append(np.column_stack((-ones / (n_levels - 1), final_second)))
+    small = rng.normal(size=(n_levels * rows_per_level, small_columns))
+    return _sum_to_zero_centered_operator(np.stack(local_factors), small)
+
+
+def _public_sz_spectral_certificate(operator: CenteredBlockOperator) -> np.ndarray:
+    """Call the public SZ spectral certificate with the arguments its caller builds."""
+    raw = operator.raw
+    local_decompositions = tuple(decompose_gram(block) for block in raw.D)
+    structured_column_scale = _centered_operator_column_scale(operator)[raw.structured_indices]
+    spectral_bound = _sum_to_zero_public_spectral_bound(operator, structured_column_scale)
+    return _sum_to_zero_public_spectral_estimability(
+        operator,
+        structured_column_scale,
+        local_decompositions,
+        _sum_to_zero_public_weak_bases(
+            operator,
+            structured_column_scale,
+            local_decompositions,
+            spectral_bound,
+        ),
+        spectral_bound,
+    )
+
+
+# ``tilt**2`` sets the lifted null eigenvalue and these two points bracket
+# ``eigh``'s bar at this width (32, so the bar is ``32 eps`` against a bare
+# ``gram_rcond`` of ``eps``).  Measured on this fixture over 7
+# ``OPENBLAS_CORETYPE`` microkernels at one thread, as a multiple of the
+# largest eigenvalue: the exact-null design reads -3.032e-16 to +1.494e-16 --
+# BOTH SIGNS, magnitude 0.32x to 1.37x of the bare cut, which is issue #356's
+# coin flip in this module; ``1.3e-6`` reads 2.017e-15 to 2.199e-15, i.e. 9.1x
+# to 9.9x the bare cut and 0.28x to 0.31x of the floored one; ``1e-5`` reads
+# 1.232e-13 to 1.235e-13, 17.3x ABOVE the floored cut.
+_SZ_SUB_BAR_TILT = 1.3e-6
+_SZ_RESOLVED_TILT = 1e-5
+
+
+def test_public_sz_spectral_certificate_reads_a_sub_bar_residue_as_it_reads_zero() -> None:
+    """A residue ``eigh`` cannot resolve must not move a published verdict.
+
+    Swept monotonically in ``tilt`` under the bare cut, this certificate reads
+    16, 32, 16, 32 estimable coordinates at 1e-7, 3e-7, 4e-7 and 6e-7, because
+    the computed eigenvalue is not monotone there -- 2.035e-16, 3.078e-16,
+    1.108e-16, 2.687e-16 -- while the exact quantity is.  That is the whole of
+    the defect: the verdict tracks round-off rather than the design.
+    """
+    exact_null, _design = _sum_to_zero_shared_constant_operator(0.0)
+    exact_mask = _public_sz_spectral_certificate(exact_null)
+    # The shared constant is the alias, so each free level's first coordinate
+    # is unidentified and its second one is not.
+    assert exact_mask.shape == (16, 2)
+    np.testing.assert_array_equal(exact_mask, np.tile([False, True], (16, 1)))
+
+    tilted, _tilted_design = _sum_to_zero_shared_constant_operator(_SZ_SUB_BAR_TILT)
+    np.testing.assert_array_equal(_public_sz_spectral_certificate(tilted), exact_mask)
+
+
+def test_public_sz_spectral_certificate_still_keeps_a_residue_above_its_bar() -> None:
+    """The floor must not swallow a direction the same ``eigh`` does resolve."""
+    resolved, _design = _sum_to_zero_shared_constant_operator(_SZ_RESOLVED_TILT)
+    mask = _public_sz_spectral_certificate(resolved)
+    assert mask.shape == (16, 2)
+    assert mask.all()
+
+
+def test_public_sz_certificate_is_conservative_below_its_bar_against_the_factor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The price of the floor, pinned rather than left to be discovered.
+
+    ``factor_rcond`` on singular values IS ``gram_rcond`` on eigenvalues, so
+    the bare cut sat exactly on ``decompose_factor``'s boundary and the floored
+    one sits ``width`` times above it.  Inside that band the compact route is
+    deliberately the more conservative of the two: it withholds estimability
+    where the factor route grants it, because this branch has already formed
+    the Gram and cannot see the difference.  That is the same trade
+    ``decompose_gram`` has made since ``0d7d51b0``; what is bought is that the
+    answer stops depending on which machine ran it.
+    """
+    operator, public_design = _sum_to_zero_shared_constant_operator(_SZ_SUB_BAR_TILT)
+    centered_design = public_design - public_design.mean(axis=0)
+
+    factor_mask = decompose_factor(centered_design).coefficient_estimable()
+    assert int(np.count_nonzero(factor_mask)) == 34
+
+    compact_mask = centered_operator_coefficient_estimable(operator)
+    assert int(np.count_nonzero(compact_mask)) == 18
+    # Conservative, not merely different: the compact route never claims a
+    # coordinate the factor route withholds.
+    assert not np.any(compact_mask & ~factor_mask)
