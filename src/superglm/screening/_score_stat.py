@@ -552,8 +552,9 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     the CSD; Bai & Demmel, *SIAM J. Sci. Comput.* 14(6):1464-1486 (1993) for
     the modern arrangement.  It is what the *LAPACK Users' Guide* (3rd ed.,
     SIAM 1999, sec. 4.7) recommends over the generalized symmetric-definite
-    driver when the second matrix is ill conditioned, and what this module's
-    refused-remedy 4 used to record as unreachable.  **That record was half
+    driver when the second matrix is ill conditioned, and what an earlier
+    revision of this module listed among its refused remedies as unreachable.
+    **That record was half
     wrong**: ``dggsvd3``, ``dggsvp3`` and ``dtgsja`` really are absent from
     ``scipy.linalg.lapack`` (re-verified at 1.18.0), but the construction needs
     only a pivoted QR and one SVD per block, both of which are present.  The

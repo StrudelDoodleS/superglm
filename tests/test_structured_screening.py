@@ -5202,21 +5202,38 @@ def _separation(magnitudes, cut):
 def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight, unresolved_dirs):
     """COUNT the directions the arithmetic cannot resolve; never divide to get there.
 
-    This asserts the REGIME, not a value.  Four separate remedies for the dense
-    path's high-edge disagreement have been measured and refused -- porting the
-    arrow path's cut, answering every rung from the pencil, forcing the
-    whitening branch, and the GSVD the LAPACK Users' Guide recommends (absent
-    from SciPy).  They failed for one reason, and it is the reason pinned here:
-    on the starved pair a direction the answer depends on lies below the noise
-    floor of the operator it is read from, so each remedy reads a different
-    rounding of information that is not there.  Asserting an ``edf`` for such a
-    pair would assert this module's threshold and not the data -- an
-    independent stacked-QR evaluation gives 19.000 at a rank cut of 1e-14 and
-    18.275 at 1e-12 -- and each of those is a PLATEAU, three decades wide and
-    six decades wide respectively.  That is the argument, not its absence: a
-    single wide plateau would certify a cut, whereas plateaus separated by
-    0.725 df say the answer is a property of which one the cut lands on, and
-    nothing in the data chooses.
+    This asserts the REGIME, not a value: on the starved pair a direction the
+    answer depends on lies below the noise floor of the GRAM it is read from,
+    so no arrangement of the arithmetic downstream can put it back.  That is
+    what issue #257 acted on, and it is measured here directly rather than
+    through any consequence of it.
+
+    **THE ARGUMENT THIS DOCSTRING USED TO MAKE IS RETIRED, AND WHAT REPLACED IT
+    IS A STRONGER RESULT RATHER THAN A WEAKER ONE.**  It reasoned from a
+    rank-cut sweep of an independent stacked-QR evaluation -- 19.000 at 1e-14
+    and 18.275 at 1e-12, "plateaus separated by 0.725 df" -- to the conclusion
+    that nothing in the data chooses a cut, so no ``edf`` may be asserted for
+    such a pair.  That sweep measured the MOMENT construction, which this
+    branch does not reproduce, and
+    :mod:`superglm.screening._score_stat` deletes it rather than carrying it:
+    re-taken over ``1e-18 .. 1e-6`` it gives ONE value, 17.99991, thirteen
+    decades wide, on the Gram column and the factor column alike.  So the
+    reason this test asserts a COUNT is no longer "nothing chooses the cut".
+    It is that the count is the property the change was made for, and that a
+    count against ``eps`` times a norm is bit-stable where the ratio the first
+    version of this test used is not.
+
+    **AND THE FOUR "MEASURED AND REFUSED" REMEDIES ARE NOT ALL REFUSALS NOW.**
+    The list was: porting the arrow path's cut, answering every rung from the
+    pencil, forcing the whitening branch, and the GSVD the *LAPACK Users'
+    Guide* recommends.  Two of them SHIPPED --
+    ``penalized_score_statistic_ladder`` answers every rung from one pencil,
+    and that pencil IS the GSVD, built from a pivoted QR and one SVD because
+    only the ``dggsvd3`` DRIVER was missing from SciPy and not the method.  A
+    third names a construction that no longer exists: ``G = V + S`` is never
+    formed, so there is no whitening branch to force.  What survives is the
+    regime below, which is why the remedies failed and not a property of any
+    of them.
 
     **The count is the assertion because a CONDITION NUMBER here is not
     measurable.**  The first version of this test divided ``V_eff``'s largest
@@ -5262,8 +5279,9 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     whole point: it is the geometry both paths score, so it is where the two
     can be compared at all.  Moving the test would mean exporting the fixture.
 
-    See the module docstring of :mod:`superglm.screening._score_stat` for the
-    measurements and the four refusals.
+    :mod:`superglm.screening._score_stat`'s module docstring carries what the
+    move off Grams bought, against oracles that predate it, and the rank-cut
+    sweep that replaced the plateau table above.
     """
     U, V, C, M, S_ti, u_m = _thin_level_pair(low_weight)["args"]
     V = np.asarray(V, dtype=float)
