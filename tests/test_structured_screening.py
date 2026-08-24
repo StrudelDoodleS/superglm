@@ -4516,13 +4516,15 @@ def test_the_pencil_carries_its_own_orthonormality_invariant(build):
     that it is derived rather than sampled: a machine on which it failed would
     be a machine whose QR was not backward stable.
     """
-    from superglm.screening._pair_factor import _pair_scale
     from superglm.screening._score_stat import _pair_pencil
 
     factor, root = build()["factor"]
     pencil = _pair_pencil(factor, root)
     assert pencil.v.size, "the pencil must resolve something or this proves nothing"
-    balance = _pair_scale(factor) / float(np.sum(np.asarray(root) ** 2))
+    # ``tr(V_eff)`` off the pencil rather than re-derived here.  Re-deriving it
+    # was how the module's own two readings came to differ on a rank-deficient
+    # overlap, and a test that repeats the derivation cannot see that.
+    balance = pencil.tr_v / float(np.sum(np.asarray(root) ** 2))
     residual = float(np.max(np.abs(pencil.v + pencil.s * balance - 1.0)))
     bar = 4.0 * pencil.v.size * np.finfo(np.float64).eps
     assert residual < bar, (residual, bar, pencil.v.size)

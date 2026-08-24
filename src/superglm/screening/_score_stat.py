@@ -9,7 +9,11 @@ reads the profiled block off the first as a slice, so
 
 with ``V_eff = R_eff' R_eff`` and ``U_eff = R_eff' z_t`` -- never as
 ``V - C' M^-1 C``, never by inverting an overlap Gram, and never as a
-difference of two quantities of the same size.  ``lambda0`` is chosen so the
+difference of two quantities of the same size.  (The slice is the whole of
+``R_eff`` only while the overlap has full rank; where it does not,
+:func:`superglm.screening._pair_factor._profiled_factor` stacks back the
+directions the overlap never spanned, and everything below reads ITS block --
+``tr(V_eff)`` included.)  ``lambda0`` is chosen so the
 smooth is compared at a fixed screening complexity:
 ``tr((V_eff + lambda0 S)^{-1} V_eff) = edf0``.  Fixing the effective degrees of
 freedom across pairs makes raw ``T`` values comparable regardless of each
@@ -486,15 +490,23 @@ class _Pencil:
     scaling that put the two blocks of the stack on one scale before they were
     reduced together.  Undoing it is one division on a quantity that never
     cancelled.
+
+    ``tr_v`` is ``tr(V_eff)`` of the block this pencil was built from, carried
+    out rather than recomputed by the caller.  It is the bracket's numerator
+    AND this pencil's own balance, and computing it twice is exactly how the
+    two came to disagree: the balance read :func:`_profiled_factor`'s block and
+    the bracket re-sliced ``joint``, which is a different matrix whenever the
+    overlap is rank deficient.  One field, one value, one place it is formed.
     """
 
     v: NDArray
     s: NDArray
     u: NDArray
+    tr_v: float
 
 
-def _empty_pencil() -> _Pencil:
-    return _Pencil(v=np.zeros(0), s=np.zeros(0), u=np.zeros(0))
+def _empty_pencil(tr_v: float = 0.0) -> _Pencil:
+    return _Pencil(v=np.zeros(0), s=np.zeros(0), u=np.zeros(0), tr_v=float(tr_v))
 
 
 def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
@@ -553,19 +565,23 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     counting routine here any more.
     """
     R_eff, z_t = _profiled_factor(pair)
+    # ``tr(V_eff)`` ONCE, off the block this pencil is about to score.  It
+    # leaves on ``_Pencil.tr_v`` because the ladder's bracket needs the same
+    # number, and taking it there from the factor's own slice is what put the
+    # bracket 18.06% below the block on a rank-deficient overlap.
+    tr_v = _pair_scale(R_eff)
     k = int(pair.tensor_width)
     balance = 1.0
     if penalty_root is None or penalty_root.size == 0:
         root = np.zeros((0, k), dtype=np.float64)
     else:
         root = np.asarray(penalty_root, dtype=np.float64)
-        tr_v = _pair_scale(pair)
         tr_s = float(np.sum(root**2))
         if tr_v > 0.0 and tr_s > 0.0:
             balance = tr_v / tr_s
         root = np.sqrt(balance) * root
     if k == 0:
-        return _empty_pencil()
+        return _empty_pencil(tr_v)
 
     stack = np.concatenate((R_eff, root), axis=0)
     orthonormal, triangular, _pivot = scipy.linalg.qr(
@@ -573,7 +589,7 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     )
     diagonal = np.abs(np.diag(triangular))
     if diagonal.size == 0 or float(diagonal[0]) <= np.finfo(np.float64).tiny:
-        return _empty_pencil()
+        return _empty_pencil(tr_v)
     # TWO DIFFERENT QUESTIONS, AND THEY GET TWO DIFFERENT REFERENCES.
     #
     # With a penalty, the cut asks what neither operand resolves: a direction
@@ -598,7 +614,7 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     )
     rank = int(np.count_nonzero(diagonal > cut))
     if rank == 0:
-        return _empty_pencil()
+        return _empty_pencil(tr_v)
 
     top = orthonormal[: R_eff.shape[0], :rank]
     bottom = orthonormal[R_eff.shape[0] :, :rank]
@@ -646,6 +662,7 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
         v=np.clip(cosines**2, 0.0, 1.0),
         s=np.clip(sines**2, 0.0, 1.0) / balance,
         u=carried.T @ z_t,
+        tr_v=tr_v,
     )
 
 
@@ -750,10 +767,16 @@ def penalized_score_statistic_ladder(
     # penalty it roots and never assembles it.  The structured ladder's bracket
     # is ``tr(V_eff) / (tr(S_a) * L)`` over the same 1e+-10 edges, and the two
     # are pinned equal so a pair both paths can score gets one ``lambda0``.
-    scale = max(_pair_scale(pair), 1e-300) / max(float(np.sum(root**2)), 1e-300)
-    lo, hi = 1e-10 * scale, 1e10 * scale
-
+    #
+    # THE NUMERATOR COMES OFF THE PENCIL, WHICH IS WHY THE PENCIL IS BUILT
+    # FIRST.  ``tr(V_eff)`` is the mass of the block the pencil scored, and
+    # this line used to re-slice the factor for it instead -- the same number
+    # only while the overlap has full rank, and 18.06% low on the
+    # ``OrderedCategorical`` geometry where it is not.  See
+    # :func:`superglm.screening._pair_factor._pair_scale`.
     p = _pair_pencil(pair, root)
+    scale = max(p.tr_v, 1e-300) / max(float(np.sum(root**2)), 1e-300)
+    lo, hi = 1e-10 * scale, 1e10 * scale
     edf_lo, edf_hi = _pencil_edf(p, lo), _pencil_edf(p, hi)
 
     out: list[ScreenedPair] = []

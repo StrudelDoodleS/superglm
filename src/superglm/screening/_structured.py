@@ -2511,6 +2511,18 @@ def structured_ladder(
     # 3.99e-16, and the resulting lambdas agree to 3.0e-16 .. 4.5e-16 at both
     # edges -- about two ulp, and 2000x inside the ``rel=1e-12`` the suite
     # pins them at.
+    #
+    # WHAT THAT FIXTURE CANNOT SEE, STATED BECAUSE IT WAS ONCE MISSED.  Its
+    # overlap has FULL rank -- 31 of 31 at all three weights -- so the dense
+    # ``R_eff`` is the bare Frisch-Waugh slice and the two numerators are the
+    # same arithmetic.  Where the overlap is rank deficient the dense side
+    # residualizes only onto ``range(X_o)`` and its numerator picks up the
+    # directions outside it (:func:`superglm.screening._pair_factor.
+    # _profiled_factor`), which is what makes it ``tr(V_eff)`` rather than the
+    # slice's mass -- 18.06% apart on the mixed suite's ``band x power`` pair.
+    # That pair is dense-only, so no parity is at stake there; a future
+    # structured route over a rank-deficient overlap would have to re-take
+    # this measurement rather than inherit it.
     tr_S = float(np.trace(p.S_a)) * p.dims[0]
     scale = max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300)
     lo, hi = 1e-10 * scale, 1e10 * scale

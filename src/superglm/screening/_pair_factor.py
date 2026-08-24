@@ -20,6 +20,10 @@ needs off ``R``'s trailing blocks, with no difference of two Grams anywhere:
 where ``R_eff`` is ``R``'s tensor-by-tensor block and ``z_t`` the response
 column beside it.  ``R_eff``'s spectrum is ``V_eff``'s square root, which is
 the whole content of #257's ``sqrt(cond) = 1.67e+10 against 2.78e+20``.
+(That slice is the whole story only while the overlap has full rank;
+:func:`_profiled_factor` states what a rank-deficient one adds back, and
+:func:`_pair_scale` takes its block rather than re-slicing so the two cannot
+part company.)
 
 **THE DESIGN HERE IS THE CELL DESIGN, NOT THE ROW DESIGN, AND THAT IS EXACT
 RATHER THAN AN APPROXIMATION.**  Both margins are constant within a joint
@@ -485,10 +489,41 @@ def numeric_numeric_factor(
     return PairFactor(joint=_square(joint, width), overlap_width=3, tensor_width=1)
 
 
-def _pair_scale(factor: PairFactor) -> float:
-    """``tr(V_eff)`` from the factor: ``||R_eff||_F**2``, never a difference."""
-    q, k = factor.overlap_width, factor.tensor_width
-    return float(np.sum(factor.joint[q : q + k, q : q + k] ** 2))
+def _pair_scale(profiled: NDArray) -> float:
+    """``tr(V_eff)`` from the factor: ``||R_eff||_F**2``, never a difference.
+
+    **IT TAKES :func:`_profiled_factor`'S BLOCK RATHER THAN THE
+    :class:`PairFactor`, AND THAT SIGNATURE IS THE POINT.**  It used to slice
+    ``joint[q:q+k, q:q+k]`` itself, which is the same block only while the
+    overlap has full rank; where it does not, :func:`_profiled_factor` returns
+    the slice STACKED with ``outside' R_ot`` and the two functions in this
+    module then disagreed about what ``V_eff`` is, with the ladder scoring one
+    and bracketing on the other.  Passing the block in makes the disagreement
+    unrepresentable.
+
+    Measured on the mixed suite's ``band x power`` pair -- an
+    ``OrderedCategorical`` margin whose 7-column inner menu sits on 5 levels,
+    so the overlap is 17 wide with singular values 9.8658e-15 .. 6.8369e+01 and
+    three of its directions fall outside :func:`._factor_kernels.
+    _factor_rank_floor`'s cut of 4.2005e-06, giving ``R_eff`` 66 rows where the
+    slice has 63::
+
+        tr(V - C' pinv(M) C)   538.7617246636    the moment route's own V_eff
+        ||R_aug||_F**2         538.7617246636    what the ladder scores
+        ||slice||_F**2         441.4506031909    18.06% low
+
+    That number reaches two published fields.  It is
+    :func:`~superglm.screening._score_stat.penalized_score_statistic_ladder`'s
+    bracket, ``tr(V_eff) / tr(S)``, so a rung CLAMPED to an edge publishes
+    ``lambda0`` 18% off what the moment route published; and it is
+    :func:`~superglm.screening._score_stat._pair_pencil`'s balance, which is
+    accuracy only.  On this fixture every rung searches, so the published move
+    is at 1e-7 of a degree of freedom -- the slice-only bracket reads
+    ``edf(lo)`` 35.999999895 and ``edf(hi)`` 0.999999344 where the block's
+    reads 35.999999872 and 0.999999169 -- and it is the clamped rung on such a
+    pair that the slice-only form got wrong outright.
+    """
+    return float(np.sum(np.asarray(profiled, dtype=np.float64) ** 2))
 
 
 def _profiled_rank_scale(factor: PairFactor) -> float:
@@ -573,6 +608,11 @@ def _profiled_factor(factor: PairFactor) -> tuple[NDArray, NDArray]:
     every other rank decision here takes.  The moment route took the same
     decision and did not state it: ``cho_factor`` or, on refusal,
     ``numpy.linalg.pinv``'s shape-derived default ``rcond``.
+
+    **THE RETURNED BLOCK IS THE ONLY ``V_eff`` IN THIS MODULE.**  Its Frobenius
+    mass IS ``tr(V_eff)``, and :func:`_pair_scale` is handed it rather than
+    re-slicing ``joint`` for itself: on the fixture above the two differ by
+    18.06%, and the smaller one used to set the ladder's bracket.
     """
     q, k = int(factor.overlap_width), int(factor.tensor_width)
     R_eff = factor.joint[q : q + k, q : q + k]
