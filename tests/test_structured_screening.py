@@ -2932,9 +2932,12 @@ _EDGE_BUDGETS = (1.0, 2.0, 4.0, 8.0, 400.0)
 # Measured on this fixture at 1, 4 and 8 threads with all six pools set
 # together: every lambda here is BIT-IDENTICAL at all three (relative move
 # 0.00e+00), as is every edf both arms return.  The two arms' lambdas -- a
-# dense factorization against an arrow one, computed by different routes --
-# agree to 1.41e-16 at the low edge and 2.21e-16 at the high edge, so the
-# ``rel=1e-12`` below carries ~4500x.  Both are also bit-identical over 40
+# design factor against an arrow one, computed by different routes -- agreed to
+# 1.41e-16 at the low edge and 2.21e-16 at the high edge before issue #257 and
+# to 3.0e-16 .. 4.5e-16 after, so the ``rel=1e-12`` below carries ~2000x.  What
+# moved is that the dense numerator is now ``||R_eff||_F^2`` off its own design
+# factor, which is BIT-IDENTICAL to the structured arm's ``profiled_trace`` on
+# all three weights.  Both are also bit-identical over 40
 # exact relabelings of the level coordinates, so pinning them is not pinning
 # an arrangement.  And ``edf`` moves at most ``|d edf / d ln lambda| ~ 4.1``
 # per unit of ``ln lambda`` over this bracket, so even a full 1e-12 of lambda
@@ -4377,6 +4380,64 @@ def test_the_dense_ladder_reports_one_edf_per_lambda(build):
     assert disagreeing == {}, disagreeing
 
 
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: _thin_level_pair(1.0),
+        lambda: _thin_level_pair(0.01),
+        lambda: _thin_level_pair(0.001),
+        lambda: _thin_level_pair(1e-12),
+        lambda: _vanishing_mass_pair(1e-10),
+        lambda: _vanishing_mass_pair(1e-12),
+        _starved_bs_pair,
+    ],
+    ids=[
+        "thin-1.0",
+        "thin-0.01",
+        "thin-0.001",
+        "thin-1e-12",
+        "vanishing-1e-10",
+        "vanishing-1e-12",
+        "starved-bs",
+    ],
+)
+def test_the_pencil_carries_its_own_orthonormality_invariant(build):
+    """``c**2 + s**2 == 1``, which is DERIVABLE rather than fitted.
+
+    The dense pencil's two terms are the squared cosines and sines of the CS
+    decomposition of one orthonormal factor, so their sum is 1 by orthonormality
+    -- and this is the site SCALE DISCIPLINE rule 2 used to tolerate.  The form
+    it replaces returned ``s = (1 - share) / balance`` and had to argue from
+    measurement that the subtraction happened to be harmless; there is nothing
+    left to argue, and this asserts it instead.
+
+    THE BAR IS THE MODULE'S OWN ROUND-OFF FLOOR, NOT AN OBSERVED HEADROOM.
+    Departure from orthonormality of a Householder-accumulated factor is
+    bounded by a modest polynomial in the dimensions times ``eps`` (Higham,
+    *Accuracy and Stability of Numerical Algorithms*, 2nd ed., Thm 19.4; the
+    *LAPACK Users' Guide*'s own bound), and ``k * eps`` is this module's
+    stand-in for that polynomial -- it is exactly what :func:`_rank_floor`
+    uses.  The factor of 4 is a stated allowance on that stand-in and not a
+    number read off a run: over this bank at one thread and at eight, the worst
+    reading is 2.109e-14 against a ``k * eps`` of 4.641e-14, i.e. 0.45 of the
+    bar itself and 4.4x inside what is asserted.
+
+    Two threads settings are not a population.  What makes the bound usable is
+    that it is derived rather than sampled: a machine on which it failed would
+    be a machine whose QR was not backward stable.
+    """
+    from superglm.screening._pair_factor import _pair_scale
+    from superglm.screening._score_stat import _pair_pencil
+
+    factor, root = build()["factor"]
+    pencil = _pair_pencil(factor, root)
+    assert pencil.v.size, "the pencil must resolve something or this proves nothing"
+    balance = _pair_scale(factor) / float(np.sum(np.asarray(root) ** 2))
+    residual = float(np.max(np.abs(pencil.v + pencil.s * balance - 1.0)))
+    bar = 4.0 * pencil.v.size * np.finfo(np.float64).eps
+    assert residual < bar, (residual, bar, pencil.v.size)
+
+
 def test_the_dense_high_edge_statistic_matches_the_stacked_qr_arbiter(moderate_pair):
     """The dense arm at the rung where the two routes used to part.
 
@@ -4442,10 +4503,21 @@ def test_the_zero_penalty_rung_on_a_near_rank_pair(build, observed):
     integer here would restore a LARGER disagreement, not a smaller one.
 
     Rank is not well defined on these geometries in float64 and the three
-    available counters say so: on ``band-1e-3-L6`` the dense path counts 9,
+    available counters said so: on ``band-1e-3-L6`` the dense path counted 9,
     ``numpy.linalg.matrix_rank`` on the residualized design counts 10, and the
     old arrow form counted 6.  That spread is the reason this module stopped
     counting.
+
+    **THE DENSE COUNTER MOVED UNDER THIS COMPARISON AND THE FIGURES ABOVE WERE
+    TAKEN AGAINST ITS PREVIOUS FORM.**  Issue #257 put that count on the
+    profiled FACTOR, referenced to the joint design's own scale, where it was
+    Guttman additivity on two Grams; re-measured on ``band-1e-3-L6`` it now
+    reads **10**, which is what ``matrix_rank`` on the residualized design
+    reads.  So the three-counter spread narrows to 10 / 10 / 6 and the dense
+    counter is no longer one of the two that disagree.  The df gaps in the
+    paragraph above are NOT re-derived, because the form they compare against
+    -- the old arrow integer -- no longer exists to be re-run; they are left
+    as the record of why this module stopped counting, which is unchanged.
 
     **NOTHING HERE PINS A VALUE, AND THE REASON IS A MEASUREMENT.**  A first
     revision of this test pinned the structured rung to the numbers above at

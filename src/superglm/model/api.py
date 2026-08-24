@@ -887,9 +887,11 @@ class SuperGLM:
         Only ``spline_cat`` has that retry: ``ti`` and ``cat_cat`` are
         gridded and dense-only, so for them the cap IS the refusal.  The two
         numeric kinds are neither — they enter through the z-moment kernels
-        rather than the dense curvature one, and ``numeric_numeric``
-        contracts to 3x3 blocks whatever the supports, so it never meets the
-        cap at all.
+        rather than the gridded one, and ``numeric_numeric`` contracts to a
+        five-column design whatever the supports, so it never meets the cap at
+        all.  Every kind is reduced to a triangular FACTOR of its own weighted
+        design rather than to a curvature matrix (issue #257); the caps above
+        are dimensional and are unchanged by that.
 
         A NaN row is not by itself a routing signal.  A ``spline_cat`` pair
         reaches one either because the arrow gates or its ladder refused

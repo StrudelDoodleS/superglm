@@ -417,6 +417,9 @@ discretize at all, so OC pairs stay exact on both sides.
   0.81 s and 0.67 s per pair — the unpenalized figure a few percent low since
   that rung's rank became a count rather than a trace (measured 1.056x at that
   corner, and it is what makes the reported `edf0` the rank rather than `k`).
+  **Those per-pair times were measured before the dense path moved onto design
+  factors (issue #257) and are not re-measured here; the ceilings themselves
+  are dimensional and are unchanged.**
   Wider blocks are refused with a NaN row,
   immediately — binning cannot shrink a basis dimension — and raising
   `max_cells` lifts the refusal. For scale, the block the old
@@ -511,7 +514,8 @@ discretize at all, so OC pairs stay exact on both sides.
   margin never bins — its support *is* the fitted level set — and a numeric
   margin never grids at all: it enters its probe linearly, so moments of the
   numeric accumulated over the other margin's cells are its exact sufficient
-  statistics, at any cardinality. Neither margin can raise `approx`. The one
+  statistics, at any cardinality — reduced, level by level, to a factor of the
+  same design rather than to its curvature. Neither margin can raise `approx`. The one
   degradation available to a numeric-margin pair is refusal (`numeric_cat`
   with a factor wider than its blocks), and a refused row is a NaN row, never
   an approximated one.
