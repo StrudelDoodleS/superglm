@@ -845,11 +845,15 @@ class SuperGLM:
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
         ``max_cells`` bounds allocation AND time: the probe block's dimension
-        ``k`` enters every rung as a ``(k, k)`` factorization or
-        pseudo-inverse — routinely the pseudo-inverse, since one empty
-        ``cat_cat`` cell or one singleton level makes a probe column
-        collinear with the overlap span — so per-pair time grows as ``k^3``
-        where the allocations grow as ``k^2``.  A cubic-work gate caps ``k``
+        ``k`` enters every rung as a ``(k, k)`` decomposition — a pivoted QR
+        of the pair's design factor with one SVD beside it — so per-pair time
+        grows as ``k^3`` where the allocations grow as ``k^2``.  A probe
+        column collinear with the overlap span is routine rather than
+        exceptional (one empty ``cat_cat`` cell or one singleton level does
+        it) and is settled by a rank cut on that factor; the Cholesky that
+        used to run here, and the pseudo-inverse it used to fall back to,
+        went with the assembled Grams in issue #257, which changed neither
+        the cost class nor any ceiling below.  A cubic-work gate caps ``k``
         at the FLOOR of ``(1000 * max_cells)^(1/3)`` for an unpenalized block
         and of ``(500 * max_cells)^(1/3)`` for a penalized one, whose ladder
         can bisect: 1709 and 1357 at the default.  Take the floor — at
