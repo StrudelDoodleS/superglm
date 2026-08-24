@@ -603,7 +603,14 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     )
     assert struct is not None and len(struct) == len(BUDGETS)
     for d, s in zip(dense, struct, strict=True):
-        assert s.edf0 == pytest.approx(d.edf0, rel=1e-5)
+        # RE-DERIVED FOR ISSUE #257, ON THE SWEEP THAT SET THE NUMBER IT
+        # REPLACES.  ``rel=1e-5`` was two moment-space errors agreeing; the
+        # dense arm reads a design factor now and the two arms' ``edf`` at
+        # this rung differ by 5.49e-13 to 3.01e-12 relative over 7
+        # ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings.  ``1e-9`` is
+        # 332x the worst of the fourteen and four orders inside what the
+        # separate accuracy bounds below imply.
+        assert s.edf0 == pytest.approx(d.edf0, rel=1e-9)
         assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12)
 
     # THE STATISTIC IS HELD AGAINST THE ARBITER, NOT AGAINST THE OTHER PATH,
@@ -629,7 +636,15 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     for d, s in zip(dense, struct, strict=True):
         arbiter = _wood_stacked_statistic(pair, geometry, s.lambda0)
         assert s.statistic == pytest.approx(arbiter, rel=1e-9), (s.statistic, arbiter)
-        assert abs(d.statistic - arbiter) / abs(arbiter) < 2.2e-5, (d.statistic, arbiter)
+        # THE DENSE ARM AT THE STRUCTURED ARM'S OWN BOUND, WHICH IS THE
+        # EVIDENCE RATHER THAN A TIDY-UP.  ``2.2e-5`` was ``eps * kappa`` for a
+        # moment-space read of a pencil whose condition number is ~1e11 here,
+        # and it was pinning the dense path's own error.  Since issue #257 the
+        # dense arm reads the pair's design factor and its distance from the
+        # arbiter is 1.91e-12 to 2.09e-11 over the same 14 configurations --
+        # so it is held to ``1e-9``, the number the structured arm already
+        # carries three lines up, with 48x on the worst of the fourteen.
+        assert abs(d.statistic - arbiter) / abs(arbiter) < 1e-9, (d.statistic, arbiter)
 
 
 def test_issue_204_reachable_half_df_uses_the_profiled_trace():
@@ -3026,6 +3041,17 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
       3.965e-11 / 3.336e-08 / 1.288e-07 and dense 1.366e-10 / 2.404e-09 /
       3.226e-09 across the three weights.
 
+    **AND THE ARM BOUND IS NOW THE ORACLE'S OWN RULER RATHER THAN ``1e-5``.**
+    ``1e-5`` was placed when the dense arm read moments and was 1.37e-10 from
+    the certified value; since issue #257 it reads the pair's design factor and
+    both arms sit 0.0 to 1.14e-13 from this oracle over the same 14
+    configurations, against a ``ruler`` of 2.22e-06.  A fixture-blind constant
+    beside a derived bound that is four orders tighter would only be looser, so
+    the ruler is what the arms are held to.  It is DERIVED -- dimensions, unit
+    roundoff, the augmented system's conditioning -- which is the property
+    ``1e-5`` never had, and it is gated two lines above so an uncertified
+    oracle cannot self-grant it.
+
     THE LAMBDA PINS CARRY ``abs=0.0`` AND THAT IS WHAT MAKES THEM PINS.  Moving
     the ladder's low bracket edge by a RELATIVE 1e-11 -- far too small for any
     edf assertion in this file to see, since ``|d edf / d ln lambda| ~ 4.1``
@@ -3096,11 +3122,16 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
       1.693e-05 / 2.911e-05 / 4.089e-05.  The structured arm at
       ``low_weight = 0.001`` exceeds its own ``p eps rho`` by 1.7x, which is
       the factorization depth the first-order estimate does not carry.
-    * OBSERVED, over the 14-configuration sweep: structured
+    * OBSERVED, over the 14-configuration sweep, BEFORE issue #257: structured
       1.230e-06..1.166e-04 / 4.176e-06..3.959e-04 / **3.187e-05..3.013e-03**,
       dense 4.482e-07..5.838e-05 / 4.782e-06..1.282e-04 /
-      4.089e-05..1.365e-03.  Both arms are worst on NEHALEM at every weight,
-      and the dense arm's 1.365e-03 is still 7.3x inside its ``1e-2``.
+      4.089e-05..1.365e-03.  Both arms were worst on NEHALEM at every weight.
+    * RE-MEASURED AFTER IT, over the same fourteen: the two arms are now the
+      SAME reading to 1.3e-12..5.1e-10, at 1.230e-06..1.166e-04 /
+      4.176e-06..3.959e-04 / **3.187e-05..3.013e-03**.  The dense arm moved
+      onto the structured arm's figure rather than the other way round,
+      because both now root the same margin penalties; 3.013e-03 is 3.3x
+      inside the ``1e-2`` both carry.
 
     PARITY, RE-SET HERE AND SPLIT BY EDGE.  Its previous ``3e-3`` was red at
     master alongside the accuracy bound above, at 4.379e-03 over the same
@@ -3115,19 +3146,36 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     implied 150x over, and a shared bound wide enough for the high edge would
     have taken that to 400x.  So:
 
-    * LOW EDGE, ``abs=1e-6``: 20x inside what the two oracle bounds imply, so it
-      still refuses pairs they admit, and 75x above the worst of the fourteen
-      readings (1.365e-10..1.148e-08 / 2.405e-09..7.391e-09 /
-      6.688e-11..1.341e-08).
-    * HIGH EDGE, ``abs=1e-2``: 2.3x the worst reading, the same number both
-      accuracy bounds there now carry, so the triangle permits 2e-2 and this
-      refuses at half of it.
+    * LOW EDGE, ``abs=1e-9``, RE-SET FOR ISSUE #257.  ``1e-6`` was 75x above a
+      worst of 1.341e-08 when the dense arm read moments.  Over the same 14
+      configurations the two arms now differ by 2.842e-14..2.987e-12 across all
+      three weights, so ``1e-9`` is 335x the worst of the fourteen and still
+      2e+04x inside what the two oracle pins imply.  Shown to bite against the
+      route it replaces: the moment route's own distance from the structured
+      arm at this edge is 1.37e-10, 2.40e-09 and 3.22e-09, which ``1e-9``
+      refuses at two of the three weights.
+    * HIGH EDGE, ``abs=1e-6``, ALSO RE-SET, AND PARITY IS NOW THE SHARPER
+      STATEMENT RATHER THAN THE SLACKER ONE.  ``1e-2`` was 2.3x a worst reading
+      of 4.379e-03.  Since issue #257 both arms root the same margin penalties
+      through the same ``_penalty_root`` and evaluate the same filter-factor
+      sum, and ``|s - d|`` runs 1.265e-12..5.088e-10 over the fourteen --
+      seven orders in.  ``1e-6`` is 1965x the worst of them and refuses the
+      9.84e-05, 2.48e-04 and 2.15e-03 the moment route stood at.
+    * The ACCURACY bounds at the high edge stay at ``abs=1e-2`` and their
+      justification changes: what they now carry is not either arm's own
+      arithmetic but the PENALTY ROOT both take, whose distance from the exact
+      residue is 3.013e-03 at ``0.001`` on NEHALEM.  ``S_a``'s smallest
+      eigenvalue reads 1.4476e-15 against an ``eigh`` bar of 3.7592e-14, so it
+      is 26x inside what the eigensolver resolves and no float64 factorization
+      of ``S_a`` recovers it.
 
     The claim it replaces was that parity "is now carried by the dense arm
-    alone", the structured value being bit-stable.  That holds on the thread
-    axis and does not hold on the kernel axis: over the sweep the structured
-    arm moves 3.37e-03 at ``0.001`` against the dense arm's 1.32e-03, so at
-    this rung parity is carried mostly by the STRUCTURED arm.
+    alone", the structured value being bit-stable.  That held on the thread
+    axis and not on the kernel axis: over the sweep the structured arm moved
+    3.37e-03 at ``0.001`` against the dense arm's 1.32e-03.  **BOTH HALVES ARE
+    NOW MOOT AT THE HIGH EDGE**: the two arms move TOGETHER there, by the same
+    3.013e-03 on the same kernel, because what moves is the penalty root they
+    share.  Parity no longer sees the kernel axis at all.
 
     **WHAT THIS FIXTURE SAYS ABOUT THE FILTER-FACTOR FORM, INCLUDING AGAINST
     IT.**  Against the same certified constants, the rank-differencing form
@@ -3238,7 +3286,17 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
                 reference, ruler = _reference_edf_and_bound(factors, arm.lambda0)
                 assert ruler < 1e-5, (name, budget, low_weight, arm.lambda0, ruler)
                 assert reference == pytest.approx(edf_lo, abs=ruler), ("oracle", name, reference)
-                assert arm.edf0 == pytest.approx(reference, abs=1e-5), (name, budget, arm.edf0)
+                # THE ARM IS HELD TO THE ORACLE'S OWN BOUND, NOT TO A
+                # CONSTANT.  ``abs=1e-5`` was placed when the dense arm read
+                # moments; since issue #257 both arms sit 0.0 to 1.14e-13 from
+                # this oracle over 7 ``OPENBLAS_CORETYPE`` microkernels x 2
+                # thread settings, against a ``ruler`` of 2.22e-06 -- so the
+                # ruler is now the binding statement and a fixture-blind
+                # constant beside it would only be looser.  It is DERIVED
+                # (dimensions, unit roundoff, the augmented system's
+                # conditioning) rather than observed, which is the property
+                # ``1e-5`` never had, and it is already gated above.
+                assert arm.edf0 == pytest.approx(reference, abs=ruler), (name, budget, arm.edf0)
             # PARITY GETS THE LOW EDGE'S OWN BOUND.  This assertion used to sit
             # below the branch and fire at both edges on ONE number, which gave
             # it no content here: both arms are pinned to the oracle at ``1e-5``
@@ -3268,7 +3326,14 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             # ``_CERTIFIED_EDGES`` pins this pair to seed 3, so the bound is
             # right for the fixture the suite runs and is not a claim about the
             # generator.
-            assert s.edf0 == pytest.approx(d.edf0, abs=1e-6), ("parity lo", budget)
+            # RE-DERIVED ON THE SAME 14 CONFIGURATIONS.  ``|s - d|`` at this
+            # edge now runs 2.84e-14 to 2.99e-12 across 7 microkernels x 2
+            # thread settings and all three weights, where ``1e-6`` was 75x
+            # above a worst of 1.34e-08.  ``1e-9`` is 335x the new worst and
+            # still 2e+04x inside the ``2e-5`` the two oracle pins imply, so it
+            # keeps the property the old number had -- refusing pairs the
+            # oracle bounds would admit -- three orders tighter.
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-9), ("parity lo", budget)
             saw_low_edge = True
         else:
             # HIGH edge.  No float64 oracle survives here (``_reference_edf``
@@ -3339,7 +3404,20 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             # accuracy bounds either side now carry -- so the triangle
             # inequality permits 2e-2 and this still refuses at half of it,
             # rather than being implied by them.
-            assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity hi", budget)
+            # PARITY SEPARATES FROM ACCURACY HERE, AND THE MEASUREMENT IS WHY.
+            # Both arms are held to the certified constant at ``abs=1e-2``
+            # above, and that number stays: what it carries is the PENALTY
+            # ROOT's distance from the exact residue, 3.01e-03 at ``0.001`` on
+            # NEHALEM, which is a shared limit neither arm can narrow.  What
+            # the two arms no longer differ by is anything of that size: since
+            # issue #257 they root the same margin penalties and evaluate the
+            # same filter-factor sum, and ``|s - d|`` runs 1.26e-12 to 5.09e-10
+            # over the same 7 microkernels x 2 thread settings, where it ran
+            # 8.845e-05 to 4.379e-03 before.  ``1e-6`` is 1965x the worst of
+            # the fourteen and four orders tighter than the accuracy bound
+            # beside it, so parity is now the sharper of the two statements
+            # rather than the slacker.
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-6), ("parity hi", budget)
             saw_high_edge = True
         assert s.statistic == pytest.approx(d.statistic, rel=1e-3)
     assert saw_low_edge, "a rung must clamp at the LOW edge or this proves nothing"
@@ -3691,13 +3769,27 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
                 f"{left_free!r} directions the maximum penalty leaves free, with "
                 f"three levels holding {low_weight:g} of the weight"
             )
+            # THE DENSE ARM KEEPS ``1e-2`` AND IS NOW IMPLIED BY THE LINE
+            # ABOVE PLUS PARITY.  Since issue #257 it reads the pair's design
+            # factor and roots the same margin penalty the structured arm
+            # does, so what its distance from ``left_free`` carries is the
+            # penalty root both share rather than its own arithmetic.
             assert d.edf0 == pytest.approx(left_free, abs=1e-2), (
                 "dense",
                 budget,
                 d.edf0,
                 left_free,
             )
-            assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity", budget, s.edf0, d.edf0)
+            # PARITY, RE-SET FOR ISSUE #257 ON A 14-CONFIGURATION SWEEP.  The
+            # docstring above records a worst reading of 2.908e-03 for this
+            # check when the dense arm read moments, which is what ``1e-2`` was
+            # 3.4x above.  Over 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread
+            # settings the two arms now differ by 1.885e-12..4.631e-11 at
+            # ``low_weight = 1e-10`` and 2.114e-12..3.337e-11 at 1e-12 -- eight
+            # orders in, because both arms evaluate the same filter-factor sum
+            # over the same rooted penalty.  ``1e-6`` is 2.2e+04x the worst of
+            # the fourteen and refuses the 2.908e-03 the moment route stood at.
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-6), ("parity", budget, s.edf0, d.edf0)
         else:  # the LOW edge
             # **NO ORACLE ARBITRATES THIS RUNG, AND THAT IS A MEASUREMENT
             # RATHER THAN AN OMISSION.**  This edge used to assert each arm
