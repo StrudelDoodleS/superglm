@@ -678,10 +678,11 @@ def _certified_penalised_inverse(
         W,
     )
     smooth_factor = penalty_factor(S)
-    if smooth_factor.shape[0] == 0:
-        return decompose_factor(factor).pseudo_inverse()
     if intercept:
         # The intercept carries no penalty, exactly as ``S_aug_rows`` above.
+        # Unconditional, including on the zero-penalty row count that
+        # ``penalty_factor`` returns: the padding is what makes that empty
+        # block the augmented width, so the stack below has one shape.
         smooth_factor = np.hstack(
             (np.zeros((smooth_factor.shape[0], 1)), smooth_factor),
         )

@@ -886,3 +886,52 @@ def test_penalised_gram_covariance_keeps_its_gram_route_outside_the_band(monkeyp
     )
     np.testing.assert_array_equal(gram_inverse, decompose_gram(hessian).pseudo_inverse())
     assert gram_augmented.shape == (fit.p + 1, fit.p + 1)
+
+
+def test_penalised_gram_covariance_certifies_an_unpenalised_system(monkeypatch) -> None:
+    """The certified route must also handle a penalty with no rows at all.
+
+    ``penalty_factor`` returns a ``(0, p)`` block for an identically zero
+    penalty, and the augmented system needs it padded to ``(0, p + 1)`` or the
+    stack has two widths.  This is a shape pin rather than a numerical one --
+    at zero penalty the two routes agree to 0.0 on this geometry -- and it
+    exists because an unpenalised uncertifiable Gram is a reachable state that
+    no other test here drives.
+    """
+    import superglm.inference.covariance as covariance_module
+    from superglm.inference.covariance import _penalised_xtwx_inv, _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    monkeypatch.setattr(
+        covariance_module,
+        "decompose_gram_if_authoritative",
+        lambda *args, **kwargs: None,
+    )
+    gram_inverse, gram_augmented, _active, _data_gram, penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+    )
+    assert not np.any(penalty)
+    assert gram_inverse.shape == (18, 18)
+    assert gram_augmented.shape == (19, 19)
+    assert np.all(np.isfinite(gram_inverse)) and np.all(np.isfinite(gram_augmented))
+
+    _design, factor_inverse, factor_augmented, _groups, _gms = _penalised_xtwx_inv(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+    )
+    assert (
+        np.linalg.norm(gram_inverse - factor_inverse, ord=2) / np.linalg.norm(factor_inverse, ord=2)
+        <= SHARED_RANK_POLICY.factor_rcond
+    )
+    assert (
+        np.linalg.norm(gram_augmented - factor_augmented, ord=2)
+        / np.linalg.norm(factor_augmented, ord=2)
+        <= SHARED_RANK_POLICY.factor_rcond
+    )
