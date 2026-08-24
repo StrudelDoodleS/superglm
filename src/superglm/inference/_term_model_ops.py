@@ -282,7 +282,7 @@ def drop1(
 
     dev_full = model._result.deviance
     edf_full = model._result.effective_df
-    n = len(y) if not hasattr(y, "__len__") else len(y)
+    n = len(y)
     phi = model._result.phi
     # The chi-square LRT reference for a known-scale family is the family's
     # unit dispersion. Reading it off the result would make the test depend on
