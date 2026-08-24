@@ -7,18 +7,27 @@ types — they have no dependency on inference results or metrics classes.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.group_matrix import (
+    DesignMatrix,
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
+    GroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
+from superglm.solvers.centered_system import iter_grouped_design_chunks, penalty_factor
 from superglm.solvers.hessian_factor import HessianFactor, _expanded_component_omega
-from superglm.solvers.rank import decompose_factor, decompose_gram
+from superglm.solvers.rank import (
+    decompose_factor,
+    decompose_gram_if_authoritative,
+    streamed_weighted_factor,
+)
 from superglm.solvers.structured import (
     ProfiledBlockSchurFactor,
     ProfiledScalarSchurFactor,
@@ -628,6 +637,78 @@ def _penalised_xtwx_inv(
     return X_a, XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, active_gms
 
 
+def _intercept_prefixed_chunks(
+    chunks: Iterator[tuple[int, int, NDArray]],
+) -> Iterator[tuple[int, int, NDArray]]:
+    """Prepend the intercept column to each bounded design chunk."""
+    for start, stop, block in chunks:
+        yield start, stop, np.column_stack((np.ones(len(block)), block))
+
+
+def _certified_penalised_inverse(
+    active_gms: list[GroupMatrix],
+    W: NDArray,
+    S: NDArray,
+    *,
+    intercept: bool,
+) -> NDArray:
+    """``(X'WX + S)^{-1}`` from the observation factor, for an uncertifiable Gram.
+
+    ``needs_factor_certification`` says the normal equations cannot certify
+    their own retained subspace, and a certificate governs that subspace as
+    well as the integer rank -- so this rebuilds the same operator as
+    ``A'A`` with ``A = [sqrt(W) X ; sqrt(S)]`` and decomposes ``A``.  It is
+    the destination ``_penalised_xtwx_inv`` already uses at every one of its
+    own inversions; the difference is that ``A`` is accumulated here in
+    bounded row chunks, so the ``(n, p)`` dense block that
+    ``_penalised_xtwx_inv_gram`` exists to avoid is never materialised.  That
+    is the same shape ``inference/metrics.py``'s ``_certified_*_rank`` helpers
+    use for the same verdict.
+
+    ``intercept`` prepends the intercept column, giving the augmented system
+    ``[[sum W, X'W1], [X'W1, X'WX + S]]`` whose factor is ``A`` with a leading
+    ``sqrt(W)`` column and an unpenalised leading column in ``sqrt(S)``.
+
+    **The verdict has two arms and this route serves both.**  Neither is "the"
+    trigger, and the second is the likelier one in production:
+
+    ``rank < width and resolution_limited`` -- the Gram has ERASED a direction
+    the factor resolves.  Measured on issue #356's aliased-pair fit with the
+    ridge that places the alias's residual eigenvalue between the two rank
+    cuts: the Gram reports rank 17 of 18 and ``||pinv||_2 = 1.5422``, this
+    route reports rank 18 and ``2.0000e+11``, and the largest published
+    standard error moves from 1.18 to 2.58e+05.
+
+    ``rank == width and pre_truncation_condition >= certification_condition``
+    -- NOTHING is discarded; the whole retained subspace is simply recomputed
+    from a factor that never squared the condition.  That is the ordinary
+    ill-conditioned rating design, and the correction it buys is the larger of
+    the two: on the full-rank collinear fixture in
+    ``test_factor_certification_authority.py`` the published standard errors
+    move 5.74e-03 to 4.15e-02 relative against the Gram's answer over 7
+    ``OPENBLAS_CORETYPE`` microkernels, against 1.78e-10 on the aliased one.
+
+    Outside both arms the two agree and this route is not taken.
+    """
+    width = S.shape[0]
+    design = DesignMatrix(active_gms, n=len(W), p=width)
+    chunks = iter_grouped_design_chunks(design)
+    factor = streamed_weighted_factor(
+        _intercept_prefixed_chunks(chunks) if intercept else chunks,
+        W,
+    )
+    smooth_factor = penalty_factor(S)
+    if intercept:
+        # The intercept carries no penalty, exactly as ``S_aug_rows`` above.
+        # Unconditional, including on the zero-penalty row count that
+        # ``penalty_factor`` returns: the padding is what makes that empty
+        # block the augmented width, so the stack below has one shape.
+        smooth_factor = np.hstack(
+            (np.zeros((smooth_factor.shape[0], 1)), smooth_factor),
+        )
+    return decompose_factor(np.vstack((factor, smooth_factor))).pseudo_inverse()
+
+
 def _penalised_xtwx_inv_gram(
     beta: NDArray,
     W: NDArray,
@@ -644,10 +725,24 @@ def _penalised_xtwx_inv_gram(
     Same result as ``_penalised_xtwx_inv`` but avoids forming the dense
     (n, p) matrix. Computes X'WX block-by-block using the group gram
     kernels, then inverts the (p_active, p_active) system directly.
-    Cost is O(n · sum(p_g²)) + O(p³) instead of O(n · p²).
+    Cost is O(n · sum(p_g²)) + O(p³) instead of O(n · p²) -- on the
+    certified fast path only. When a consult falls back to the certified
+    factor (``needs_factor_certification``), the design is streamed in
+    bounded dense chunks and the cost is at least O(n · p²): inside the
+    band, neither half of the fast-path claim holds.
 
     Does NOT return X_a (not needed for REML). For leverage/hat matrix
     diagnostics, use ``_penalised_xtwx_inv`` instead.
+
+    **Not covariance-only.**  Inside the certification band the two inversions
+    below leave the Gram for the observation factor, and this helper has three
+    consumers, not one: the published covariance here, ``reml/runner.py``'s
+    Fellner-Schall trace term, and ``inference/_term_covariance.py``'s Bayesian
+    term covariance.  The route change reaches all three by construction.  No
+    REML fit in the suite reaches the band -- an instrumented run of the whole
+    suite records the fallback only from this module's own tests -- and a
+    ``fit_reml`` on the aliased-pair design records none either, so the REML
+    consumer is unpinned rather than known-safe.  Tracked on #356.
 
     Returns
     -------
@@ -712,7 +807,19 @@ def _penalised_xtwx_inv_gram(
     )
 
     M = XtWX + S
-    XtWX_S_inv = decompose_gram(M).pseudo_inverse()
+    # The pseudo-inverse here IS the published covariance, so it may only be
+    # taken from a Gram that can certify its own retained subspace.
+    # ``decompose_gram_if_authoritative`` returns ``None`` for exactly the
+    # ``needs_factor_certification`` band, on EITHER of its two arms -- the
+    # Gram having erased a direction the factor resolves, or the Gram being
+    # full rank but reached through a squared condition.  The factor is the
+    # authority in both.
+    authoritative_gram = decompose_gram_if_authoritative(M)
+    XtWX_S_inv = (
+        authoritative_gram.pseudo_inverse()
+        if authoritative_gram is not None
+        else _certified_penalised_inverse(active_gms, W, S, intercept=False)
+    )
 
     if not compute_augmented:
         return XtWX_S_inv, np.empty((0, 0)), active_groups_out, XtWX, S
@@ -728,6 +835,13 @@ def _penalised_xtwx_inv_gram(
     M_aug[0, 1:] = XtW1
     M_aug[1:, 0] = XtW1
     M_aug[1:, 1:] = M  # XtWX + S
-    XtWX_S_inv_aug = decompose_gram(M_aug).pseudo_inverse()
+    # Its own verdict, not the unaugmented one's: bordering with the intercept
+    # changes the width, the spectrum and hence the certification band.
+    authoritative_augmented_gram = decompose_gram_if_authoritative(M_aug)
+    XtWX_S_inv_aug = (
+        authoritative_augmented_gram.pseudo_inverse()
+        if authoritative_augmented_gram is not None
+        else _certified_penalised_inverse(active_gms, W, S, intercept=True)
+    )
 
     return XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, XtWX, S

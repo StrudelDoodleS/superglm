@@ -21,6 +21,7 @@ from superglm.solvers._structured.operators import (
 from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
+    _eigensolver_relative_bar,
     decompose_gram,
     needs_factor_certification,
 )
@@ -603,12 +604,23 @@ def _sum_to_zero_scaled_basis_null_row_norms(
         # the three consumers re-read this same floored quantity, so they are
         # circular; the third, the dense branch, does independent arithmetic --
         # a sum of squares over discarded modes, with no cancelling subtraction
-        # -- and only fails because ITS selection cut is a bare `gram_rcond`
-        # times the largest eigenvalue, with no residual interval.  That is the
-        # defect this issue is about, one level up.  So when that cut is
-        # floored, the dense branch becomes a genuinely resolving authority and
-        # this precedence deserves revisiting.  Do not inherit the stronger
-        # claim that nothing downstream could ever decide these.
+        # -- and only failed because ITS selection cut was a bare `gram_rcond`
+        # times the largest eigenvalue, with no residual interval.
+        #
+        # THAT CUT IS NOW FLOORED, and this note is the disposition rather than
+        # the anticipation.  The precedence STAYS as it is, on two measured
+        # grounds.  First, "genuinely resolving" turns out to be half true: the
+        # floor makes the dense branch's mode SELECTION a function of the data,
+        # but inside `(gram_rcond, bar]` that branch DROPS a direction rather
+        # than resolving it, so asking it about a sub-`projector_noise`
+        # diagonal returns "not estimable" by policy, not by resolution -- the
+        # same floor one level up, in other coordinates.  Second, `ambiguous`
+        # is not a per-entry route: its consumer replaces the WHOLE block's
+        # verdict with the certificate's, so marking `stable_zero` ambiguous
+        # would send every SZ fit carrying any local null through the public
+        # spectral certificate and leave this function unable to decide
+        # anything.  That is a branch deletion, not an adjustment, and it is
+        # recorded as a follow-up on #356 rather than taken here.
         #
         # The old order asked ambiguity first and gated `stable_zero` on it.
         # `rank_uncertainty` carries `projector_scale` and the `gram_rcond` it
@@ -1184,10 +1196,61 @@ def _sum_to_zero_public_spectral_estimability(
         eigenvectors = eigenvectors[:, order]
 
     if use_dense_spectrum:
-        dense_cutoff = SHARED_RANK_POLICY.gram_rcond * max(
-            float(eigenvalues[-1]),
-            0.0,
-        )
+        # Floored at the eigensolver's own bar, exactly as ``decompose_gram``'s
+        # cut is and for the same reason.  ``factor`` above is an assembled
+        # DENSE Gram and these eigenvalues come from ``np.linalg.eigh`` on it,
+        # so by the *LAPACK Users' Guide* bound cited in
+        # :func:`_eigensolver_relative_bar` nothing under ``width eps max|w|``
+        # is a property of the matrix.  Against a bare ``gram_rcond`` a
+        # computed zero is therefore discarded or retained on the SIGN of its
+        # round-off -- measured on the shared-constant SZ fixture over 7
+        # ``OPENBLAS_CORETYPE`` microkernels, an exactly null direction reads
+        # -3.032e-16 to +1.494e-16 relative, both signs, at 0.32x to 1.37x of
+        # that cut.  Issue #356; the sibling clip one function up was the same
+        # defect and ``rank.py``'s Gram cut was the original.
+        #
+        # THIS IS NOT A RANK-POLICY VERSION BUMP.  ``RankPolicy.version``
+        # documents itself as a claim about the selection rule inside
+        # ``rank.py`` -- "bump when the deficient path can return a different
+        # ``active_columns`` for the same input" -- and explicitly excludes "a
+        # change outside this module".  This cut is this module's own, applied
+        # to this module's own ``eigh`` output; no ``decompose_gram`` result
+        # moves, and version 3 already carries the identical argument.
+        #
+        # WHAT IT COSTS, stated because the direction is not free.  The
+        # boundary left behind is the FACTOR's: ``factor_rcond`` on singular
+        # values IS ``gram_rcond`` on eigenvalues, so the bare cut sat exactly
+        # on ``decompose_factor``'s answer and this one sits ``width`` times
+        # above it.  Inside that band the certificate now withholds
+        # estimability where the factor route grants it --
+        # ``test_public_sz_certificate_is_conservative_below_its_bar_against_
+        # the_factor`` pins 18 coordinates against 34 at a residue of 2.1e-15
+        # relative.  That is the price of having formed the Gram, the same one
+        # ``decompose_gram`` has paid since ``0d7d51b0``, and withholding a
+        # standard error is the conservative direction.  What it buys: swept
+        # monotonically in the perturbation, the bare cut answers 16, 32, 16,
+        # 32 because the computed eigenvalue is not monotone there
+        # (2.035e-16, 3.078e-16, 1.108e-16, 2.687e-16) while the exact one is.
+        #
+        # NOTHING THAT ALREADY EXISTED CHANGES BRANCH.  Instrumented over the
+        # whole suite, this branch runs nine times.  FIVE are pre-existing and
+        # every one of them discards a byte-identical set under the bare cut
+        # and under the floored one, the nearest retained eigenvalue clearing
+        # the floored cut by 60.06x or more (widths 4, 4, 10, 25, 30; margins
+        # 6.0060e+01, 2.8147e+05, 4.7250e+07, 6.5884e+12, 1.1259e+15).  No
+        # geometry in the suite sat in the band, which is why the tests below
+        # construct one.  The other FOUR runs are those tests, at width 32, and
+        # two of them do move the verdict -- nothing discarded under the bare
+        # cut, one direction discarded under the floored one.  That is what
+        # they are for.
+        #
+        # THE PRECEDENCE IN ``_sum_to_zero_scaled_basis_null_row_norms`` IS
+        # UNCHANGED, and its note there is now measured rather than
+        # anticipated.  See that function.
+        dense_cutoff = max(
+            SHARED_RANK_POLICY.gram_rcond,
+            _eigensolver_relative_bar(width),
+        ) * max(float(eigenvalues[-1]), 0.0)
         discarded = eigenvalues <= dense_cutoff
     else:
         discarded, _retained, ambiguous = _ritz_rank_masks(

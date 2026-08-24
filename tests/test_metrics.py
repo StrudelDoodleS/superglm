@@ -709,38 +709,47 @@ class TestMetricsCaching:
 
         covariance_calls = 0
         metrics_calls = 0
-        original = covariance_module.decompose_gram
-
-        def counted_covariance_decomposition(matrix, *args, **kwargs):
-            nonlocal covariance_calls
-            covariance_calls += 1
-            return original(matrix, *args, **kwargs)
 
         # Both entry points count: a decomposition this path consumes is one it
         # performed, whether or not the shared policy had to certify it against
         # the observation factor.
-        def counted_metrics_decomposition(name):
-            metrics_original = getattr(metrics_module, name)
+        def counted_decomposition(module, name, bump):
+            module_original = getattr(module, name)
 
             def counted(matrix, *args, **kwargs):
-                nonlocal metrics_calls
-                metrics_calls += 1
-                return metrics_original(matrix, *args, **kwargs)
+                bump()
+                return module_original(matrix, *args, **kwargs)
 
             return counted
 
-        monkeypatch.setattr(
-            covariance_module,
-            "decompose_gram",
-            counted_covariance_decomposition,
-        )
+        def bump_covariance():
+            nonlocal covariance_calls
+            covariance_calls += 1
+
+        def bump_metrics():
+            nonlocal metrics_calls
+            metrics_calls += 1
+
         monkeypatch.setattr(
             MatrixExecutionPlan,
             "moments",
             lambda *_args, **_kwargs: pytest.fail("rebuilt the grouped raw Gram"),
         )
+        # Every way out of ``inference/covariance.py``: the Gram entry point
+        # and the factor route the certification band sends it to.  This path
+        # takes neither, which is the claim.
+        for name in ("decompose_gram_if_authoritative", "decompose_factor"):
+            monkeypatch.setattr(
+                covariance_module,
+                name,
+                counted_decomposition(covariance_module, name, bump_covariance),
+            )
         for name in ("decompose_gram", "decompose_gram_if_authoritative"):
-            monkeypatch.setattr(metrics_module, name, counted_metrics_decomposition(name))
+            monkeypatch.setattr(
+                metrics_module,
+                name,
+                counted_decomposition(metrics_module, name, bump_metrics),
+            )
 
         _ = metrics._active_info
 
