@@ -369,9 +369,10 @@ def numeric_cat_factor(
         reference the zero-weight row         ``m2`` in 2.34e-33 .. 2.14e-30
                                               on 6 of 12
 
-    On those six the level's factor puts up to 1.9099 of response -- 29.0% of
-    that level's own ``sum(s**2 / w)`` -- on a design direction of norm
-    1.461e-15.  Equal weights keep the property outright, because
+    On those six the level's factor carries a response entry of up to 1.9099
+    -- 29.0% of that level's own ``sum(s**2 / w)``, on the worst of them --
+    against a design direction whose norm never exceeds 1.461e-15 over the
+    six.  Equal weights keep the property outright, because
     ``sum(w c) / sum(w)`` then rounds back to ``c``, which is why the suite's
     fixtures do not see it.
 
