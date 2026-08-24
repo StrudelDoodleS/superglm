@@ -690,3 +690,164 @@ def test_the_penalized_rank_cut_references_the_pivot_and_that_is_the_accurate_on
     oracle = _rank_free_edf(R_eff, balanced, float(rung.lambda0))
     assert abs(rung.edf0 - oracle) < 1e-2
     assert abs((rung.edf0 - 1.0) - oracle) > 0.5
+
+
+def _steep_zero_weight_case(outlier_z, *, position):
+    """A level whose per-level SLOPE exceeds 1, plus one zero-weight row.
+
+    The slope is what the remaining overflow route runs through, so it has to
+    be steep enough to matter: ``residual`` evaluates the level's fit in the
+    shifted coordinate as ``slope * centered``, and a zero-weight row's
+    ``centered`` is bounded only by the double range.  ``|slope| > 1`` is
+    therefore the condition under which an admissible ``z`` can push that
+    product past the largest double.  Level 0 here rises 2.5 in score per unit
+    of ``z``; the fixture beside it, whose slope is 0.65, cannot reach the
+    overflow and stays green either way.
+    """
+    codes = [0, 0, 0, 0, 1, 1, 1, 1]
+    z = [1.0, 2.0, 3.0, 4.0, 0.5, 1.5, 2.5, 3.5]
+    w = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    s = [0.5, 3.0, 5.5, 8.0, -0.2, 0.4, 0.1, 0.8]
+    if position is not None:
+        at = len(codes) if position == "last" else 0
+        codes.insert(at, 0)
+        z.insert(at, outlier_z)
+        w.insert(at, 0.0)
+        s.insert(at, 0.0)
+    return (
+        np.asarray(codes, dtype=np.intp),
+        2,
+        np.array([[0.0], [1.0]]),
+        np.asarray(z, dtype=np.float64),
+        np.asarray(s, dtype=np.float64),
+        np.asarray(w, dtype=np.float64),
+    )
+
+
+def _tripled_slope_case(outlier_z, *, position):
+    """``_zero_weight_boundary_case`` with its scores TRIPLED: slope 0.65 -> 1.95.
+
+    Same geometry, same outlier, one factor of three on the response -- which
+    is the whole difference between the arm that always passed and an arm that
+    raised.  It isolates the threshold as a property of the SLOPE rather than
+    of the outlier's magnitude.
+    """
+    codes, n_g, menu, z, score, w = _zero_weight_boundary_case(outlier_z, position=position)
+    return codes, n_g, menu, z, 3.0 * score, w
+
+
+@pytest.mark.parametrize("outlier_z", [1e308])
+@pytest.mark.parametrize("position", ["first", "last"])
+def test_a_steeper_slope_reaches_the_overflow_the_shipped_fixture_misses(outlier_z, position):
+    """Why ``test_a_zero_weight_row_cannot_move_a_numeric_cat_pair[1e308]`` passed.
+
+    That arm's level has slope 0.65, and ``0.65 * 1.797e308`` is 1.17e308 --
+    finite, by a factor of 2.76.  It was never evidence that the residual path
+    was safe; it was evidence that this fixture sits under the threshold.
+    Tripling the scores puts the slope at 1.95 and the same product at ``inf``,
+    and the pair then raised where it publishes ``statistic 1.0830000000,
+    edf0 1.0``.  Recording the dependence so the passing arm is not read as
+    coverage it never had.
+    """
+    baseline = _published(_tripled_slope_case(outlier_z, position=None))
+    assert baseline == pytest.approx((1.083, 1.0), rel=1e-12, abs=0.0)
+
+    with_row = _published(_tripled_slope_case(outlier_z, position=position))
+    assert with_row == pytest.approx(baseline, rel=1e-12, abs=0.0)
+
+
+@pytest.mark.parametrize("top", [1e292, 1e300, 1e308])
+def test_a_zero_weight_row_cannot_overflow_the_shift_itself(top):
+    """The OTHER channel: ``shifted = z - reference`` overflowing.
+
+    Choosing the reference from a weighted row bounds it to a value the data
+    actually carries -- but a weighted row may legitimately carry one near the
+    top of the double range, and an ignored row may hold the opposite extreme.
+    ``z - reference`` then overflows to ``-inf`` before any weight is applied,
+    and ``0 * -inf`` is NaN.  The level here has NO spread among its weighted
+    rows, so nothing else about it overflows and the shift is the only thing
+    on trial.
+
+    Measured at 1e292, 1e300 and 1e308: the builder produced a factor for this
+    data, and adding one zero-weight row at ``-max_double`` made it raise
+    ``ValueError`` from the reduction's finiteness guard.  Below 1e292 the
+    subtraction stays finite and the row was already inert.
+
+    **THIS IS PINNED AT THE BUILDER RATHER THAN ON A PUBLISHED STATISTIC, AND
+    THE REASON IS NOT THIS DEFECT.**  A design whose values reach 1e200 cannot
+    be factored by the downstream pencil at all -- ``LinAlgError``, with no
+    zero-weight row anywhere -- so there is no published number at these
+    magnitudes to be invariant.  What the contract can still say, and what is
+    asserted, is that the row changes nothing the builder does.
+    """
+    outlier = -np.finfo(np.float64).max
+    assert not np.isfinite(outlier - top), "this magnitude no longer overflows the shift"
+
+    def case(with_row):
+        codes = [0, 0, 1, 1, 1]
+        z = [top, top, 0.5, 1.5, 2.5]
+        w = [0.5, 0.5, 1.0, 1.0, 1.0]
+        s = [0.3, 0.9, -0.2, 0.4, 0.1]
+        if with_row:
+            codes.append(0)
+            z.append(outlier)
+            w.append(0.0)
+            s.append(0.0)
+        return (
+            np.asarray(codes, dtype=np.intp),
+            2,
+            np.array([[0.0], [1.0]]),
+            np.asarray(z, dtype=np.float64),
+            np.asarray(s, dtype=np.float64),
+            np.asarray(w, dtype=np.float64),
+        )
+
+    base = numeric_cat_factor(*case(False)).joint
+    assert np.all(np.isfinite(base))
+    with_row = numeric_cat_factor(*case(True)).joint
+    assert np.array_equal(with_row, base), "the zero-weight row moved the factor"
+
+
+@pytest.mark.parametrize("outlier_z", [-1e300, -np.finfo(np.float64).max])
+@pytest.mark.parametrize("position", ["first", "last"])
+def test_a_zero_weight_row_cannot_overflow_the_level_fit(outlier_z, position):
+    """The centering fix chose the reference; this one excludes the ARITHMETIC.
+
+    Selecting the reference from a positively-weighted row bounded what the
+    reference can be, but ``shifted``, ``centered`` and the residual were still
+    EVALUATED on every row, so a zero-weight row's own value still entered the
+    arithmetic.  It reaches a published number through the residual: the level
+    fit is ``level_mean + slope * centered``, and for a zero-weight row
+    ``centered`` is as large as the double range allows, so ``slope *
+    centered`` overflows to ``-inf`` whenever ``|slope| > 1``.  ``root_w`` is
+    exactly zero on that row, so the product that should have erased it is
+    ``0 * -inf``, which is NaN rather than zero, and the reduction's finiteness
+    guard raised.
+
+    Measured on this fixture, whose slope is 2.5: with the row at
+    ``-max_double`` the pair raised ``ValueError`` in BOTH positions where the
+    baseline publishes ``statistic 12.4322500000, edf0 1.0`` -- and it raised
+    from FIRST as well as last, which is what distinguishes this from the
+    reference-selection defect and is why fixing that one did not close it.
+    At ``-1e300`` the same fixture already published correctly, so the boundary
+    is the product overflowing and not the magnitude as such.
+
+    The excluded rows are now zeroed BEFORE any multiplication rather than
+    multiplied by zero afterwards, which makes a zero-weight row's
+    contribution structurally zero instead of arithmetically zero -- the only
+    form that survives an operand of ``inf``.
+    """
+    baseline = _published(_steep_zero_weight_case(outlier_z, position=None))
+    assert baseline == pytest.approx((12.43225, 1.0), rel=1e-12, abs=0.0)
+
+    with_row = _published(_steep_zero_weight_case(outlier_z, position=position))
+    assert with_row == pytest.approx(baseline, rel=1e-12, abs=0.0)
+
+
+@pytest.mark.parametrize("outlier_z", [-1e300, -np.finfo(np.float64).max])
+def test_a_zero_weight_row_leaves_the_steep_factor_bit_identical(outlier_z):
+    """Same fixture, the stronger statement: the emitted factor is the same bits."""
+    base = numeric_cat_factor(*_steep_zero_weight_case(outlier_z, position=None)).joint
+    for position in ("first", "last"):
+        got = numeric_cat_factor(*_steep_zero_weight_case(outlier_z, position=position)).joint
+        assert np.array_equal(got, base), f"zero-weight row placed {position} moved the factor"

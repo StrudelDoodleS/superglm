@@ -388,16 +388,41 @@ def numeric_cat_factor(
     first published correctly -- which is the shape of a defect rather than of
     a tolerance.
 
-    The fix costs nothing anyone had: with no zero-weight row present the mask
-    is all-true and the scatter is the one it replaces, so the emitted factor
-    is bit-identical.  Checked on 300 random all-positive-weight geometries
-    and on all eight of the suite's own ``_numeric_cat_case`` arms, 0 of 308
-    differing in any bit.
+    **CHOOSING THE REFERENCE WAS HALF OF IT, AND THE HALF THAT SHOWS.**  Two
+    channels carry an excluded row's magnitude into the arithmetic and the
+    reference is only the first.  The second is the SHIFT and the residual,
+    which were evaluated on every row: ``z - reference`` overflows when a
+    weighted row legitimately supplies a value near the top of the double
+    range, and ``slope * centered`` overflows whenever ``|slope| > 1``, which
+    is ordinary.  ``root_w`` is exactly zero on such a row, so the product
+    that should have erased it is ``0 * inf`` -- NaN, not zero -- and the
+    reduction's finiteness guard raised.  Both are closed by zeroing the
+    excluded rows BEFORE any multiplication rather than multiplying by their
+    zero afterwards.
+
+    That the earlier ``1e308`` arm passed was not evidence the residual was
+    safe: its level's slope is 0.65, so ``0.65 * 1.797e308`` is finite by a
+    factor of 2.76.  Tripling that fixture's scores puts the slope at 1.95 and
+    the same arm raised.  The threshold is the SLOPE, not the outlier.
+
+    The fix costs nothing anyone had, and the argument is structural rather
+    than empirical: everywhere an excluded row currently produces a number it
+    already produces exactly zero -- ``offset`` because its ``w`` is zero,
+    ``m2`` because ``(w * c) * c`` associates left so ``c**2`` never forms,
+    ``c1`` because a zero-weight row's score is exactly zero, and ``residual``
+    because ``root_w`` is zero.  Zeroing those rows removes the ``0 * inf``
+    without moving a bit anywhere the function was already finite.  Measured
+    to be so on 300 random all-positive-weight geometries and all eight of the
+    suite's own ``_numeric_cat_case`` arms: 0 of 308 differing in any bit,
+    against the body before either half of this fix.
 
     **THE ROW-LENGTH TEMPORARIES HERE ARE NOT CHUNKED, UNLIKE THE ONES BESIDE
     THEM.**  ``reference[codes_g]``, ``shifted``, ``offset[codes_g]``,
     ``centered``, ``root_w``, ``residual`` and the two products inside it are
-    each ``n`` long and about eight are live at once, where
+    each ``n`` long, and the zero-weight mask adds three more on the same
+    pass -- ``weighted`` (``n`` bools, an eighth of a double each), and the
+    ``codes_g[weighted]`` and ``z[weighted]`` gathers the reference scatter
+    takes.  About eleven are live at once, where
     :func:`numeric_numeric_factor` below reduces its raw rows in chunks of
     ``_FACTOR_CHUNK_DOUBLES`` and the level-emission loop further down chunks
     too.  The moment route this replaced held one or two at a time.  Nothing
@@ -462,12 +487,31 @@ def numeric_cat_factor(
     # both exactly zero, so ``positive`` and ``spread`` are both False, every
     # divide below is guarded to zero, and the level emits an exact zero
     # block whatever its ``z`` holds.
+    # AND THE ARITHMETIC IS EVALUATED ON THE WEIGHTED ROWS, NOT MERELY WEIGHTED
+    # BY THEM.  Choosing the reference bounds what the SHIFT is measured
+    # against; it does not bound what an excluded row's own value does on the
+    # way through.  ``shifted`` and ``centered`` are written through ``where=``
+    # so an excluded row holds an exact zero rather than its own magnitude, and
+    # every later product involving it is then zero BY CONSTRUCTION rather than
+    # by a multiplication that has to survive its operand.  That distinction is
+    # the whole defect: ``residual`` evaluates the level fit as ``slope *
+    # centered``, ``|slope| > 1`` is ordinary, and an excluded row's
+    # ``centered`` is bounded only by the double range -- so the product
+    # reached ``-inf``, ``root_w`` was exactly 0.0 there, and ``0 * -inf`` is
+    # NaN rather than the zero the row's weight promised.  Measured on a level
+    # of slope 2.5: one zero-weight row at ``-max_double`` raised out of the
+    # reduction's finiteness guard, from EITHER position, where the pair
+    # publishes ``statistic 12.4322500000, edf0 1.0``.  A row with no weight
+    # may cost nothing, and multiplying by its zero afterwards is not the same
+    # promise as never admitting its value.
     reference = np.zeros(n_g, dtype=np.float64)
     weighted = w > 0.0
     reference[codes_g[weighted]] = z[weighted]
-    shifted = z - reference[codes_g]
+    shifted = np.zeros_like(z)
+    np.subtract(z, reference[codes_g], out=shifted, where=weighted)
     offset = np.divide(cell(w * shifted), w0, out=np.zeros_like(w0), where=positive)
-    centered = shifted - offset[codes_g]
+    centered = np.zeros_like(z)
+    np.subtract(shifted, offset[codes_g], out=centered, where=weighted)
     m2 = cell(w * centered * centered)
     c1 = cell(score * centered)
     zbar = reference + offset
