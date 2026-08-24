@@ -10,6 +10,24 @@ an ``(n_g, k)`` menu makes every block here scale with ``k``, so the caller
 budgets ``n_g`` and refuses a pair whose blocks it cannot afford rather than
 compressing anything.  Exactness is pinned against the dense assembly in
 tests/test_interaction_screening.py.
+
+**NO LONGER THE PRODUCTION ROUTE, AND KEPT DELIBERATELY.**  Issue #257 moved
+the dense screening path onto design factors -- ``_pair_factor`` reduces the
+same cell tables to one triangular factor and the ladder reads ``V_eff`` off a
+block of it, so no Gram is formed and the spectrum the statistic works in is
+the design's rather than its square.  What is below is the DEFINITION that
+factor is graded against: every exactness pin in
+``tests/test_pair_design_factor.py`` compares the two, and
+``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` counts the
+directions the Gram cannot resolve, which needs the Gram.  Precedent for
+keeping a live-tested non-caller is ``_reference_edf`` in the structured suite.
+An import guard keeps it from becoming production again by accident:
+``test_no_production_module_imports_a_retired_gram_producer``.
+
+The channels themselves are unchanged on the live route:
+``numeric_cat_factor`` accumulates the same ``s``, ``s*z``, ``w``, ``w*z``
+sweep and one centered pass beside it, and emits a per-level FACTOR instead of
+a per-level moment block.
 """
 
 from __future__ import annotations

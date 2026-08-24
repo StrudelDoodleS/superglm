@@ -18,7 +18,8 @@ indicator columns and ``kron`` of a spline menu with one reproduces the
 per-level curve blocks, column for column.  A NUMERIC margin never grids: it
 enters its probe linearly (a per-level slope, or a product of two numerics),
 so z-weighted moments accumulated over the other margin's cells are the exact
-sufficient statistics — see ``screening/_numeric_margin``.  Such a pair is
+sufficient statistics, and one centered pass beside them turns each level's
+into a FACTOR — see ``screening/_pair_factor``.  Such a pair is
 therefore exact whenever it is computed at all: it has no binning fallback,
 so a factor margin too wide for the pair's blocks is REFUSED with a NaN row
 rather than approximated.
@@ -43,14 +44,19 @@ the block's achieved rank and ``lambda0`` is 0.
 for the cell tables, the curvature intermediates and a numeric-margin pair's
 blocks; through ``_within_cubic_budget`` it is also a TIME ceiling, because
 the probe's block dimension ``k`` enters every rung as a ``(k, k)``
-factorization or pseudo-inverse.  Per-pair time therefore grows as ``k^3``
-where every allocation here grows as ``k^2``, and for the gridded kinds the
-pseudo-inverse branch is the routine path rather than the exception — one
-empty ``cat_cat`` cell or one singleton factor level makes a probe column
-collinear with the overlap span and the Cholesky falls back.  A block too
-wide to SOLVE inside the budget is refused with a NaN row exactly as an
-unaffordable allocation is, and refused immediately: binning cannot shrink a
-basis dimension, so no fallback is attempted first.
+decomposition — a pivoted QR of the pair's design factor with one SVD beside
+it.  Per-pair time therefore grows as ``k^3`` where every allocation here
+grows as ``k^2``.  For the gridded kinds a probe column collinear with the
+overlap span is routine rather than exceptional — one empty ``cat_cat`` cell
+or one singleton factor level does it — and it is now settled by a rank cut
+taken on the factor.  **THE CHOLESKY-WITH-A-PSEUDO-INVERSE-FALLBACK THIS
+PARAGRAPH USED TO DESCRIBE IS GONE AND THE SENTENCE IS PAST TENSE**: issue
+#257 removed it with the rest of the moment route, and nothing under
+``superglm/screening`` calls ``pinv``, ``cho_factor`` or ``cho_solve`` on the
+dense path any more.  The cost class is what it was, so the gate below is
+unchanged.  A block too wide to SOLVE inside the budget is refused with a NaN
+row exactly as an unaffordable allocation is, and refused immediately:
+binning cannot shrink a basis dimension, so no fallback is attempted first.
 
 The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
 fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
@@ -96,14 +102,14 @@ from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.screening import (
-    numeric_numeric_moments,
-    numeric_pair_moments,
+    numeric_cat_factor,
+    numeric_numeric_factor,
     pair_cell_moments,
-    pair_score_curvature,
+    pair_design_factor,
     penalized_score_statistic_ladder,
     working_score,
 )
-from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
+from superglm.screening._overlap import tensor_penalty_root
 from superglm.screening._structured import spline_cat_moments, structured_ladder
 from superglm.solvers.dispersion import (
     model_weight_semantics,
@@ -122,19 +128,39 @@ _RESULT_COLUMNS = [
     "approx",
 ]
 
-# The V-assembly einsum carries (n_a, k_b, k_b) and (n_b, k_a, k_a)
-# intermediates that max_cells alone does not bound (a lopsided 1e6 x 5 pair
-# passes the cell budget while the intermediate is 40x larger).  Budget them
-# against a small multiple of max_cells; the marginal dimension is estimated
-# from the parent spec's k, which is a guard-grade bound, not an exact count.
+# A class of allocation max_cells alone does not bound: one scaling with a
+# margin's SUPPORT times the other margin's basis dimension SQUARED, or with a
+# tensor width squared.  A lopsided 1e6 x 5 pair passes the cell budget while
+# such an intermediate is 40x larger.  Three gates charge against this factor
+# and two of them still bound something the code allocates -- the arrow
+# kernel's (n_a, k_s, k_s) stack of the spline menu's outer products, in
+# _within_structured_cells, and the dense (k_l*k_r, k_l*k_r) block a gridded
+# pair reduces to.
+#
+# THE THIRD NO LONGER DOES, AND THE CONSTANT IS HELD ANYWAY.  _within_budget's
+# term was fitted to pair_score_curvature's V-assembly einsum, which carried
+# (n_a, k_b, k_b) and (n_b, k_a, k_a) intermediates.  Issue #257 retired that
+# route: pair_design_factor reduces the same cell tables through temporaries
+# whose size this package chooses -- one bounded by _FACTOR_CHUNK_DOUBLES, the
+# rest at the accumulator's own (width, width) -- so nothing on the dense path
+# allocates the shape that term measures.  It is kept at 4 because it decides
+# ADMISSIONS: a pair it refuses gets a NaN row, and holding every admission
+# identical is what keeps #257 an accuracy change rather than a scope change,
+# the same reason no constant in the cubic block below moves.  Re-deriving it
+# from what the factor route actually allocates belongs to that block's
+# recorded follow-up.  Either way the marginal dimension is estimated from the
+# parent spec's k, which is a guard-grade bound, not an exact count.
 _INTERMEDIATE_BUDGET_FACTOR = 4
 
 # Every budget above bounds an ALLOCATION.  Per-pair TIME is cubic in the
-# probe block's dimension k, because each rung factorizes or pseudo-inverts a
-# (k, k) system, and the allocation budgets alone admit blocks whose solve
-# costs minutes: at the default they let a cat_cat pair reach k = 4472.
-# Measured end to end through screen_interactions on the reference box with a
-# single BLAS thread, per k^3 of block dimension:
+# probe block's dimension k, because each rung takes a (k, k) decomposition,
+# and the allocation budgets alone admit blocks whose solve costs minutes: at
+# the default they let a cat_cat pair reach k = 4472.  Measured end to end
+# through screen_interactions on the reference box with a single BLAS thread,
+# per k^3 of block dimension.  The two paths NAMED in these rates are the
+# moment route's -- a Cholesky that fell back to a pseudo-inverse -- which is
+# what the pair took when they were measured; the paragraph below says what
+# replaced it and what the replacement costs:
 #   2.9e-10 s  unpenalized block, pseudo-inverse path (cat_cat with an empty
 #              cell or a singleton level -- the routine case: 24 s and 1.3 GB
 #              at two 67-level factors, k = 4290)
@@ -152,11 +178,26 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 # 1.037 s -> 1.095 s, and the reported edf0 1709 -> 1708, which is the point)
 # and 1.209x on the pseudo-inverse path at two 67-level factors (k = 4356, one
 # empty cell: 14.0 s -> 16.9 s, 1.48 GB either way).  Carry the figures above
-# forward by those multipliers; the budget ceiling then lands near 1.1 s per
-# unpenalized pair, still inside the ~1.5 s target, so no constant here moves.
+# forward by those multipliers and the budget ceiling landed near 1.1 s per
+# unpenalized pair, inside the ~1.5 s target the constants were fitted to.
 # Holding the worst path of each class to ~1.5 s per pair gives k^3 <=
 # _CUBIC_BUDGET_FACTOR * max_cells for an unpenalized block, and the same
 # budget against _PENALIZED_LADDER_COST times the work for a penalized one.
+#
+# THAT TARGET IS NO LONGER MET AT THE CEILING, AND EVERY SECOND QUOTED ABOVE
+# IS A MOMENT-ROUTE SECOND.  Issue #257 moved the dense route off assembled
+# Grams onto a design factor, for accuracy, and the A/B recorded in
+# screening/_pair_factor's module docstring measures what that costs: 4.09x
+# on the ladder and 4.17x end to end at 1349 tensor columns, which is the
+# widest geometry measured and the nearest one to these ceilings.  Carried
+# forward at 4.09x the unpenalized ceiling lands near 4.5 s per pair and the
+# 0.81 s / 0.67 s below near 3.3 s / 2.7 s -- two to three times the target,
+# not inside it.  Nothing here moves on that account and that is deliberate:
+# admissions are DIMENSIONAL, so holding these constants is what keeps the
+# accuracy change from also being a scope change, and every published ceiling
+# is unchanged.  Re-fitting _CUBIC_BUDGET_FACTOR and _PENALIZED_LADDER_COST
+# to the factor route's own cost is the follow-up, and it needs the same
+# exclusive machine the multipliers above were taken on.
 #
 # That multiplier used to be 16.  A penalized ladder re-solved the (k, k)
 # system ~27 times PER RUNG to bisect for its edf target -- 109 solves per
@@ -169,15 +210,24 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 # Measured after that change, at k = 1709, one BLAS thread: 1.6e-10 s/k^3
 # unpenalized against 2.7e-10 for the entire four-rung penalized ladder --
 # a ratio of 1.65, not 25.  End to end on a bisecting 28x28-knot ti the same
-# change is 4.20 s -> 0.54 s.  The multiplier is set to 2 rather than 1.65 to
-# keep headroom for the pseudo-inverse branch, which either path can take.
+# change is 4.20 s -> 0.54 s.  The multiplier was set to 2 rather than 1.65 to
+# keep headroom for the pseudo-inverse branch, which either path could take.
+# That branch is gone with the rest of the moment route: a rank-deficient
+# overlap now costs the pencil a TALLER stacked-back block inside the same
+# pivoted QR rather than a different decomposition, so what the headroom
+# covers is no longer what it was sized against.  The 2 is left where it is,
+# because moving it would move admissions; re-sizing it against the factor
+# route's own spread is part of the refit above.
 #
 # At the default max_cells this admits k <= 1709 unpenalized and k <= 1357
-# penalized, measured there at 0.81 s and 0.67 s -- both inside the 1.5 s
-# target the old constants were chosen against.  Raising max_cells lifts
-# both, as it lifts every other budget here.  The remaining ceiling is an
-# artifact of densifying a block that is structurally block-diagonal; see
-# issue #188.
+# penalized, measured there at 0.81 s and 0.67 s ON THE MOMENT ROUTE -- both
+# inside the 1.5 s target the old constants were chosen against, and neither
+# inside it since #257: at the factor route's 4.09x those ceilings read about
+# 3.3 s and 2.7 s.  The ceilings themselves do not move, because they are
+# dimensional; what moved is the second per pair behind them.  Raising
+# max_cells lifts both, as it lifts every other budget here.  The remaining
+# ceiling is an artifact of densifying a block that is structurally
+# block-diagonal; see issue #188.
 _CUBIC_BUDGET_FACTOR = 1000
 _PENALIZED_LADDER_COST = 2
 
@@ -569,11 +619,14 @@ def screen_interactions(
     rows may report the raw grid with no binning attempted.
 
     ``max_cells`` bounds allocation AND time.  The probe block's dimension
-    ``k`` enters every rung as a ``(k, k)`` factorization or pseudo-inverse,
-    so per-pair time grows as ``k^3`` where the allocations grow as ``k^2``
-    — and for the gridded kinds the pseudo-inverse is the routine branch, not
-    the exception (one empty ``cat_cat`` cell or one singleton level makes a
-    probe column collinear with the overlap span).  ``_within_cubic_budget``
+    ``k`` enters every rung as a ``(k, k)`` decomposition — a pivoted QR of
+    the pair's design factor with one SVD beside it — so per-pair time grows
+    as ``k^3`` where the allocations grow as ``k^2``.  For the gridded kinds
+    a probe column collinear with the overlap span is the routine case rather
+    than the exception (one empty ``cat_cat`` cell or one singleton level does
+    it), and it is settled by a rank cut on that factor: the Cholesky and its
+    pseudo-inverse fallback went with the assembled Grams in issue #257, and
+    the cost class did not move with them.  ``_within_cubic_budget``
     therefore refuses a pair whose block is too wide to solve inside the
     budget: ``k^3 <= 1000 * max_cells`` for an unpenalized block, and the
     same budget against twice the work for a penalized one whose ladder can
@@ -931,15 +984,20 @@ def screen_interactions(
         return codes, n, menu, S
 
     def _pair_penalty(S_a, S_b, k_a, k_b):
-        """The pair's block penalty, or None when no margin carries one.
+        """A FACTOR of the pair's block penalty, or None when it has none.
 
-        ``tensor_penalty(S, 0)`` is ``kron(S, I)``, which is exactly the
-        block-diagonal per-level penalty a varying-coefficient refit applies
-        (up to the column permutation the statistic is invariant to).
+        ``tensor_penalty_root(S, 0)`` factors ``kron(S, I)``, which is exactly
+        the block-diagonal per-level penalty a varying-coefficient refit
+        applies (up to the column permutation the statistic is invariant to).
+        The root rather than the assembly, because the ladder's high edge
+        multiplies the penalty's smallest resolved direction by ``1e10`` and an
+        eigendecomposition of the ASSEMBLY resolves an exactly-null direction
+        only to the assembled dimension's round-off -- six orders, measured at
+        the builder.
         """
         if S_a is None and S_b is None:
             return None
-        return tensor_penalty(
+        return tensor_penalty_root(
             np.zeros((k_a, k_a)) if S_a is None else S_a,
             np.zeros((k_b, k_b)) if S_b is None else S_b,
         )
@@ -952,16 +1010,40 @@ def screen_interactions(
     def _numeric_margin_within_budget(k_g):
         """Budget a numeric x gridded pair BEFORE its menu is built.
 
-        A z-moment pair allocates no cell grid, but it does allocate four
-        blocks that all scale with the GRIDDED margin's width: the (L, L-1)
-        menu, the (L-1)^2 curvature, the (L+1)^2 overlap curvature, and the
-        cross block between them.  Holding the largest of those — the
-        ``(k_g + 2)^2`` overlap block — to ``max_cells`` leaves the pair's
-        total at roughly four ceiling-sized blocks, the same small multiple
-        the two cell tables of a gridded pair sit at, and refuses the factors
-        whose blocks would dwarf it (measured: ~160 MB at the threshold,
-        ~640 MB at twice it).  Runs on the level count alone, so an
-        over-budget pair never allocates the dense menu it was refused for.
+        A z-moment pair allocates no cell grid, but everything it does
+        allocate scales with the GRIDDED margin's width, so holding the
+        ``(k_g + 2)^2`` overlap block to ``max_cells`` bounds the pair.  Runs
+        on the level count alone, so an over-budget pair never allocates the
+        dense ``(L, L-1)`` menu it was refused for.
+
+        **WHAT IT BOUNDS IS NO LONGER FOUR MOMENT BLOCKS, AND THE FIGURE IT
+        WAS CALIBRATED TO IS THE ONE THAT MOVED.**  It used to hold four
+        blocks that each fit inside the ceiling -- the menu, the ``(L-1)^2``
+        curvature, the ``(L+1)^2`` overlap curvature and the cross block --
+        and measured ~160 MB at the threshold.  Issue #257 moved the pair onto
+        ``numeric_cat_factor``, which allocates instead ONE joint factor of
+        width ``2L + 1`` (``2 k_g + 3``), the per-chunk emission block beside
+        it, and the merge temporaries of
+        :func:`superglm.screening._factor_kernels._combine_row_factors` -- a
+        Fortran-ordered stack of the accumulator and the new rows, and the
+        leading square of the ``R`` it returns.  Squaring the width squares
+        the block, so the same ceiling now buys four times the area.
+
+        Re-measured on this branch, one BLAS thread, as ``VmHWM`` minus the
+        resident set with the imports already paid, so the figure is the
+        pair's own allocation.  At this gate's own threshold (``k_g = 2234``,
+        2235 levels) the moment route reads 161.9 MB, which is the ~160 MB
+        above; the factor route reads 616.2 MB there.  At ``k_g = 1709`` --
+        1710 levels, which is where the pair is ACTUALLY refused, because
+        ``_within_cubic_budget`` binds first for every ``max_cells`` above 1e6
+        -- the moment route reads 118.4 MB and the factor route 384.5 MB.
+
+        So the widest ``numeric_cat`` pair admitted at the default allocates
+        about 385 MB where it used to allocate about 120 MB.  ``max_cells``
+        is documented as an allocation ceiling and that multiplier is
+        published rather than absorbed; re-fitting these constants to it is
+        the follow-up recorded at the top of this module, and no constant
+        here moves on this branch, so which pairs are admitted is unchanged.
         """
         return (k_g + 2) ** 2 <= max_cells
 
@@ -1131,7 +1213,7 @@ def screen_interactions(
         # surfaces as its own error rather than a dtype failure downstream.
         kind = _pair_kind(margin_kinds[feat_a], margin_kinds[feat_b])
         # Set only by the spline_cat arrow path below; every other pair leaves
-        # it None and is scored from the dense moments as before.
+        # it None and is scored from its own design factor.
         structured_results = None
         if kind in ("numeric_cat", "numeric_numeric"):
             # A numeric margin enters the probe LINEARLY, so the pair has no
@@ -1142,12 +1224,13 @@ def screen_interactions(
             # OTHER margin's own blocks, which is why a factor too wide for
             # them is refused below — refusal is the only degradation a
             # z-moment pair has, since it cannot approximate.
-            S_ti, approx = None, False
+            S_root, approx = None, False
             if kind == "numeric_numeric":
-                U, V, C, M, u_m = numeric_numeric_moments(
+                factor = numeric_numeric_factor(
                     _raw_numeric(feat_a), _raw_numeric(feat_b), score, working_weights
                 )
-                # Two numerics contract to 3x3 blocks whatever the supports.
+                # Two numerics contract to a five-column design whatever the
+                # supports, so no cell table stands behind them.
                 n_cells = 1
             else:
                 num_name, cat_name = (
@@ -1172,7 +1255,7 @@ def screen_interactions(
                     )
                     continue
                 _, _, menu_g, _ = _margin(cat_name, False)
-                U, V, C, M, u_m = numeric_pair_moments(
+                factor = numeric_cat_factor(
                     codes_g, n_g, menu_g, _raw_numeric(num_name), score, working_weights
                 )
         else:
@@ -1382,17 +1465,19 @@ def screen_interactions(
                 S_cell, W_cell = pair_cell_moments(
                     codes_l, codes_r, n_l, n_r, score, working_weights, max_cells=max_cells
                 )
-                U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
-                M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
-                S_ti = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
+                factor = pair_design_factor(menu_l, menu_r, S_cell, W_cell)
+                S_root = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
         # An unpenalized block has no bandwidth to scan: every rung returns the
         # same achieved rank, statistic and lambda0=0, so one rung is the ladder.
-        penalized = structured_results is None and S_ti is not None and bool(np.any(S_ti))
-        # The whole ladder shares ONE decomposition.  The pencil that turns
-        # edf(lambda) and T(lambda) into closed forms depends on neither
-        # lambda nor edf0, so every rung after the first costs O(k) instead of
-        # a fresh O(k^3) solve — and the bisection that used to re-solve ~27
-        # times per rung now runs on the closed form.
+        # A penalty whose every direction is round-off reaches here as an EMPTY
+        # root, which is the same predicate the assembled ``np.any(S_ti)`` made.
+        penalized = structured_results is None and S_root is not None and S_root.size > 0
+        # The whole ladder shares ONE decomposition, and since issue #257 that
+        # is true of the CLAMPED rungs too.  The pencil that turns edf(lambda)
+        # and T(lambda) into closed forms depends on neither lambda nor edf0,
+        # so every rung after the first costs O(k) instead of a fresh O(k^3)
+        # solve — and the bisection that used to re-solve ~27 times per rung
+        # now runs on the closed form.
         #
         # This also retires the clamped-rung skip that used to guard the same
         # cost.  Its own justification was that a rung clamping UPWARD returns
@@ -1400,16 +1485,18 @@ def screen_interactions(
         # lower budget; an identical triple gives an identical z, and the
         # comparison below is STRICT, so recomputing those rungs cannot
         # displace the incumbent.  Same output, one less special case.
+        #
+        # AND IT RETIRES THE SECOND ESTIMATOR THE BRACKET USED TO CARRY.  A
+        # clamped rung used to be answered from the bracket's own
+        # factorization of V_eff + lambda S while a searching rung read the
+        # pencil, so two rungs landing on one lambda could publish two
+        # different degrees of freedom for it.  Both read the pencil now.
         results = structured_results
         if results is None:
             results = penalized_score_statistic_ladder(
-                U,
-                V,
-                C,
-                M,
-                S_ti,
+                factor,
+                S_root,
                 budgets=tuple(float(b) for b in (budgets if penalized else budgets[:1])),
-                U_nuisance=u_m,
             )
         best_z, best = -np.inf, None
         for result in results:

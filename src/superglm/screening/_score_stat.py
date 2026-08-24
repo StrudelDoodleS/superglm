@@ -1,42 +1,62 @@
 """Penalized efficient-score statistic for one candidate pair.
 
-Given the pair's cell-assembled score ``U`` and curvature ``V`` (Task 1), the
-overlap cross-moments ``C``/``M`` against the span the mains already fit, and
-the pair's tensor penalty ``S``, the statistic is
+The pair arrives as ONE triangular factor of its own weighted joint design
+(:mod:`superglm.screening._pair_factor`) and one factor of its tensor penalty
+(:func:`superglm.screening._overlap.tensor_penalty_root`).  Frisch-Waugh-Lovell
+reads the profiled block off the first as a slice, so
 
     T = U_eff' (V_eff + lambda0 * S)^{-1} U_eff
 
-with the efficient-score adjustments ``U_eff = U - C' M^{-1} u_m`` and
-``V_eff = V - C' M^{-1} C``, and ``lambda0`` chosen so the smooth is compared
-at a fixed screening complexity: ``tr((V_eff + lambda0 S)^{-1} V_eff) = edf0``.
-Fixing the effective degrees of freedom across pairs makes raw ``T`` values
-comparable regardless of each pair's basis size or penalty scaling — at a
-COMMON budget; across different budgets compare the normalized ``z`` the
-ladder scan reports, never raw ``T``.
+with ``V_eff = R_eff' R_eff`` and ``U_eff = R_eff' z_t`` -- never as
+``V - C' M^-1 C``, never by inverting an overlap Gram, and never as a
+difference of two quantities of the same size.  (The slice is the whole of
+``R_eff`` only while the overlap has full rank; where it does not,
+:func:`superglm.screening._pair_factor._profiled_factor` stacks back the
+directions the overlap never spanned, and everything below reads ITS block --
+``tr(V_eff)`` included.)  ``lambda0`` is chosen so the
+smooth is compared at a fixed screening complexity:
+``tr((V_eff + lambda0 S)^{-1} V_eff) = edf0``.  Fixing the effective degrees of
+freedom across pairs makes raw ``T`` values comparable regardless of each
+pair's basis size or penalty scaling — at a COMMON budget; across different
+budgets compare the normalized ``z`` the ladder scan reports, never raw ``T``.
 
 Ranking-only: calibration is by confirmatory refit, never by this number.
 
-**How lambda0 is found.** Both quantities the search needs are closed forms in
-one simultaneous diagonalization of the pencil ``(V_eff, S)``.  Whitening by
-``G = V_eff + S`` and diagonalizing ``V_eff`` in that basis gives ``B`` with
-``B' V_eff B = diag(a)`` and ``B' S B = diag(1 - a)``, and then
+**How lambda0 is found.**  Both quantities the search needs are closed forms in
+one generalized singular value decomposition of the PAIR OF FACTORS
+``(R_eff, rootS)`` -- the QR-plus-CS construction of :func:`_pair_pencil`.
+With ``c`` and ``s`` its cosines and sines and ``u`` the rotated score,
 
-    edf(lambda) = sum_j a_j / (a_j + lambda * (1 - a_j))
-    T(lambda)   = sum_j u_j^2 / (a_j + lambda * (1 - a_j)),  u = B' U_eff
+    edf(lambda) = sum_j c_j^2 / (c_j^2 + lambda s_j^2)
+    T(lambda)   = sum_j u_j^2 / (c_j^2 + lambda s_j^2)
 
 so every subsequent lambda costs O(k) rather than a fresh O(k^3) solve.  The
 decomposition depends on neither ``lambda`` nor ``edf0``, so ONE of them serves
 an entire ladder of budgets — which is why ``penalized_score_statistic_ladder``
 exists and why callers sweeping a ladder should prefer it.
 
-``G`` is the right thing to whiten by, rather than ``V_eff``: where ``V_eff``
-is singular but ``V_eff + lambda S`` is not, those directions still contribute
-to ``edf``, and whitening by ``V_eff`` alone silently drops them.  The common
-null space of both contributes nothing to either sum and is discarded.
+**ONE ESTIMATOR ANSWERS EVERY RUNG, AND THAT IS ISSUE #257's CLOSURE.**  A
+clamped rung used to be answered from a factorization of ``V_eff + lambda S``
+and a searching rung from a diagonalization of the same pencil, so two rungs
+landing on ONE lambda could publish two different degrees of freedom for it.
+Measured on this suite's own fixtures, with budgets placed just inside each
+bracket edge::
+
+    _vanishing_mass_pair(1e-12)   16.000004 against 16.999987   1.000 df
+    _vanishing_mass_pair(1e-10)   16.000555 against 17.000221   1.000 df
+    _starved_bs_pair()             0.999999 against  3.999986   3.000 df
+    _starved_bs_pair()            14.605916 against 22.799934   8.194 df
+
+``_thin_level_pair`` at 1.0 and 0.001 did NOT reproduce it, which is why the
+pin carries five geometries: the size of the disagreement is a property of how
+far apart the two estimators land on a pair.  There is one estimator now and a
+rung's lambda decides its answer completely, so the invariant is asserted as
+EXACT equality and carries no constant --
+``test_the_dense_ladder_reports_one_edf_per_lambda``.
 
 **SCALE DISCIPLINE.  Read this before combining two matrices.**
 
-Four defects on this branch were one mistake: *two quantities combined as
+Four defects on an earlier branch were one mistake: *two quantities combined as
 though they were on one scale when they are not*.  By adding, by subtracting,
 or by thresholding separately and differencing.
 
@@ -44,8 +64,7 @@ or by thresholding separately and differencing.
   statistic depend on the units the curvature was carried in;
 * ``G = V + S`` formed in floating point, which loses ``S`` entirely when the
   curvature dwarfs it.  Deriving ``s`` as ``1 - a`` then loses it a second
-  time -- **and that half was never removed, only made harmless**; see rule 2
-  below and :class:`_Pencil`, which measure it;
+  time -- and that half was never removed, only made harmless;
 * the same ``1 - a`` parameterisation in the test oracle, where it disagreed
   with two algebraically equivalent forms by 2.3e-03 at the ladder's high edge;
 * two ranks thresholded independently and then DIFFERENCED, where a probe
@@ -58,47 +77,45 @@ The rule, and it is enforceable rather than advisory:
      Scale symmetrically by the diagonal first -- a congruence, so rank is
      preserved -- and only then ask whether a direction is small.
   2. **Two quantities may only be added, subtracted or differenced once they
-     share a scale.**  Balance before summing (:func:`_build_pencil`);
-     equilibrate before counting (:func:`_psd_rank`).
+     share a scale.**  Balance before combining.
 
-     This rule once also read "carry both transformed terms rather than
-     deriving one from the other (:class:`_Pencil`)".  **That clause was
-     false about the code and has been removed rather than reworded.**
-     :func:`_build_pencil` returns ``s = (1 - share) / balance`` and always
-     has.  What makes the subtraction safe is the BALANCE, which puts the two
-     terms on one scale before ``G`` is formed, so ``1 - share`` cancels only
-     where the penalty share is genuinely zero -- measured in
-     :class:`_Pencil` on three geometries, all such directions in
-     ``null(S)``, none fabricated.  Deriving one term from the other is still
-     the wrong default; it is tolerated at exactly one site, for a stated and
-     measured reason.
+**BOTH OF THE SITES THIS NOTE USED TO NAME ARE GONE, AND THE RULE IS STRONGER
+FOR IT.**  It used to say "there are exactly two such sites": ``_psd_rank``,
+the module's only relative-rank threshold, and the ``G`` of ``_build_pencil``,
+its only sum of two independently scaled matrices.  Neither exists.
 
-**There are exactly two such sites**, which is what makes this a chokepoint
-rather than a habit: :func:`_psd_rank` is the module's only relative-rank
-threshold, and the ``G`` of :func:`_build_pencil` is its only sum of two
-independently scaled matrices.  Equilibration and balancing live at those two
-places rather than at their call sites, so a new caller cannot omit them.
-
-Each has its own enforcing test, and each was verified to fail when its
-site is reverted -- stated separately because they do NOT cover each other:
-
-* :func:`_psd_rank` --
-  ``test_screening_is_invariant_to_the_units_of_a_numeric_margin``.  Rescaling
-  a numeric covariate is a change of units and nothing else, so the whole
-  table must come back identical.  Reverting the equilibration turns a
-  ``numeric_numeric`` pair from ``edf0 = 1`` into a NaN row at a scale of 1e4.
-* ``G``'s BALANCING, and that alone --
-  ``test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty``.  Reverting
-  the balancing fails it while the units test still PASSES, which is measured
-  rather than assumed: rescaling a spline's covariate rescales its penalty
-  with it, so that route never reaches the ``V >> S`` regime.
-
-  **It does NOT enforce the ``(v, s)`` parameterisation, and this entry used
-  to claim it did.**  The shipped pencil derives ``s`` as ``1 - share`` and
-  that test is green, so it cannot be holding the two apart; it is green
-  because the balancing keeps the smaller term representable in ``G``.  A
-  test for the parameterisation would have to defeat the balancing first and
-  none exists.  That is the honest state: one site, one enforced property.
+* ``G = V + S`` is not formed at all.  The pencil STACKS ``R_eff`` under
+  ``rootS`` and reduces, so there is no floating-point sum for the smaller term
+  to be lost in: with ``V = 1e20 I`` against ``S = I`` the stack keeps the
+  penalty by construction rather than by balancing.  A balance is still
+  applied, and it is now an ACCURACY measure rather than a representability
+  one -- each block's singular values are resolved to ``eps`` ABSOLUTELY, so a
+  block whose norm is 1e-10 of the other would be resolved to six figures
+  instead of sixteen.  See :func:`_pair_pencil`.
+* the ``1 - a`` subtraction is gone with it.  ``c^2 + s^2 = 1`` now holds by
+  ORTHONORMALITY of one factor rather than by construction, so it is a
+  derivable invariant instead of a tolerated site: measured over this suite's
+  eight-fixture bank, ``max |c^2 + s^2 - 1|`` is 2.109e-14 at one thread and
+  1.310e-14 at eight, against ``k eps`` of 4.641e-14 -- inside its own derived
+  bar by 2.2x at worst.  Pinned in
+  ``test_the_pencil_carries_its_own_orthonormality_invariant``.
+* the surviving relative cuts are :func:`_factor_rank_floor`'s, and they are
+  taken on FACTORS.  The rank of a profiled block is still balanced before it
+  is counted, for exactly rule 1's reason, in
+  :func:`superglm.screening._pair_factor._profiled_rank_scale`.  **What
+  enforces that balance is NOT the end-to-end units test, and believing it was
+  cost this note a correction.**  A change of units multiplies the tensor block
+  by the square of what it multiplies the overlap by, so
+  ``test_screening_is_invariant_to_the_units_of_a_numeric_margin`` only ever
+  moves a pair in the direction where an unbalanced reference agrees: measured,
+  removing the equilibration outright left all 265 tests in the six screening
+  files passing.  The balance is pinned instead as the two exact homogeneity
+  identities it is equivalent to -- degree one in the probe block's units,
+  degree zero in the overlap's --
+  ``test_the_rank_reference_is_blind_to_the_overlap_s_units_and_tracks_the_probe_s``.
+  The end-to-end test keeps its own standing: it covers a relative threshold
+  that reaches a reported field through a change of units, which is a different
+  and still-useful statement.
 
 **THRESHOLD TYPES.  Read this before adding a constant to this module.**
 
@@ -109,7 +126,9 @@ point, DERIVABLE from backward stability as a function of machine epsilon and
 dimension.  It holds for every input because the bound covers all of them, so
 there is no unmeasured regime waiting to break it.  :func:`_rank_floor` is of
 this kind: ``max(n, 1) * eps``, LAPACK's convention and ``matrix_rank``'s own
-tolerance.  So is ``_solve_floor`` in :mod:`superglm.screening._arrow`.
+tolerance, and :func:`_factor_rank_floor` is its square root, which is the same
+statement about a factor.  So is ``_solve_floor`` in
+:mod:`superglm.screening._arrow`.
 
 *Type 2 -- "is this answer small?"*  A statement about DATA.  Not derivable;
 any constant is a claim about the datasets its author had seen, and there is
@@ -128,139 +147,181 @@ behind.  There is no Type 1 threshold for it.  Measured on EXACTLY absorbed
 blocks at FIXED ``k = 24``, varying only how unevenly the levels carry weight:
 ``max(mu)`` ranges over 9.6e-16, 1.1e-15, 1.7e-12, 5.9e-12, 9.1e-15 and
 2.4e-05 -- eleven orders at one dimension, so no power of ``k`` governs it.
-``eps * cond(M)`` does not bound it usefully either, since the overlap block
-is near-singular by construction here (measured ``cond(M)`` ~ 1e20 throughout,
-which makes that bound vacuous).  A dimension-scaled cut therefore cannot
-separate absorption from weak identification, and the fitted one that was
-tried both deleted a legitimately weak block (``V = (1 + 1e-4) I``, whose
-``V_eff`` is ``1e-4 I`` and full rank) and failed to fire on a genuinely
-absorbed one at the same ``k``.
+A dimension-scaled cut therefore cannot separate absorption from weak
+identification, and the fitted one that was tried both deleted a legitimately
+weak block (``V = (1 + 1e-4) I``, whose ``V_eff`` is ``1e-4 I`` and full rank)
+and failed to fire on a genuinely absorbed one at the same ``k``.
 
 So absorption is NOT detected and such a pair is NOT discarded.  It is scored:
-the rank comes from :func:`_rank_floor` like any other block, the statistic
-comes out at round-off, and ``z`` puts the pair near the bottom where it
-belongs.  Its ``edf0`` is not reproducible across seeds, which is the honest
-signature of a numerically indeterminate block rather than something to hide.
+the unpenalized rung counts the rank of the profiled FACTOR against the joint
+design's own scale, which on an absorbed block is 0, the statistic comes out at
+round-off, and ``z`` puts the pair near the bottom where it belongs.
 
-There IS a Type 1 route to the same answer -- Guttman rank additivity,
-``rank([[V, C'], [C, M]]) - rank(M)``, where both ranks are of PSD matrices
-formed by ADDITION, so neither cancels and both are countable at
-:func:`_rank_floor`.  It is not taken here on cost: the overlap of a
-``numeric_cat`` pair is as wide as the probe, so the bordered system is ``2k``
-and its eigendecomposition is 8x the ``k`` one -- about 1.1 s to 2.3 s at the
-budget's own ceiling, against the ~1.5 s per-pair target the cubic constants
-were fitted to.  It is affordable for ``cat_cat``, where the overlap is small
-beside the probe.  Worth its own issue rather than this module's guesswork.
+**WHERE THAT RANK IS DECIDED, AND WHY NOT ON THE PROFILED BLOCK ITSELF.**  The
+unpenalized rung's ``edf`` IS ``rank(V_eff)``, and the reference it is counted
+against cannot be ``R_eff``'s own largest direction: on a block the overlap has
+absorbed, ``R_eff`` is round-off in its entirety, so a relative cut there is
+taken against the noise it must reject.  Measured on the reachable path --
+5-level wholly absorbed ``numeric_cat`` pairs screened end to end, 20 seeds --
+that reference reports a nonzero ``edf0`` on 20 of 20.  ``edf`` too HIGH is not
+a neutral failure: ``z = (T - e) / sqrt(2 e)`` DECREASES in ``e``, so a
+partly-rejected block scores higher than an unrejected one.
 
-**THE ACCURACY CEILING IS ARCHITECTURAL, NOT ALGORITHMIC.  Read this before
-rearranging the arithmetic below to chase a degree of freedom.**
+The reference is therefore the JOINT design's, where nothing has been
+residualized away -- :func:`superglm.screening._pair_factor.
+_profiled_rank_scale`.  That is the factor-space form of the Guttman argument
+the moment route used, ``rank([[V, C'], [C, M]]) - rank(M)``, which counted
+both operands against the joint's scale rather than against the difference's;
+here it is one count rather than two, because the factor carries the difference
+as a block instead of leaving it to be formed.  Measured 0 of 20 on the same
+reachable path.  **The precondition that argument rested on -- non-negative
+working weights, so the joint moment matrix is PSD -- is no longer needed:
+nothing is differenced, so nothing has to be PSD for the count to mean what it
+says.**
 
-This module is handed MOMENTS.  ``V_eff`` arrives as a Gram, so its spectrum is
-the design's SQUARED, and squaring is what decides the whole question: on a
-pair with a starved level the smallest directions fall under the noise floor of
-the operator they are read from, and no correct digits are left in them.
+**THE ACCURACY CEILING WAS ARCHITECTURAL AND THIS MODULE NO LONGER SITS UNDER
+IT.**
 
-**Count those directions; do not divide to find them.**  A condition number is
-not measurable here -- its denominator IS the noise, so it is not a property of
-the pair.  ``_thin_level_pair(1.0)``'s largest-over-smallest-positive ratio
-reads 7.24e+06 at one thread and 6.11e+19 at sixteen on one box, changing
-nothing else.  What IS stable, bit-for-bit across 1, 4 and 16 threads and
-across Python 3.12 and 3.13, is a magnitude compared against ``eps`` times a
-norm:
+The ceiling was this: the module was handed MOMENTS, ``V_eff`` arrived as a
+Gram, so its spectrum was the design's SQUARED, and on a pair with a starved
+level the smallest directions fell under the noise floor of the operator they
+were read from with no correct digits left in them.  ``cond(V_eff)`` on the
+starved pair is 2.78e+20 against a representable ``1 / eps`` of 4.5e+15, where
+``sqrt(cond)`` is 1.67e+10 -- comfortably inside float64.  Reading the factor
+is what puts the deciding direction back in range, and it is the same move
+:mod:`superglm.screening._structured` made in #285 and #322.
 
-===================  =====================  ==========================
-low weight           directions of          directions of ``A`` within
-                     ``V_eff`` below        10x ``eps ||A||`` at the
-                     ``k eps ||V_eff||``    ladder's high edge
-===================  =====================  ==========================
-1.0                  1                      0
-1e-4                 1                      0
-1e-12                **4**                  **1**
-===================  =====================  ==========================
+**WHAT IT BOUGHT, MEASURED ON THIS BRANCH AGAINST ORACLES THAT PREDATE IT.**
+The moment route is reconstructed for the comparison -- ``V - C' M^-1 C`` with
+the cho-or-pinv solve, the two bracket edges from a factorization's trace, and
+a searching rung from the balanced congruence -- and handed the same inputs, so
+what separates the columns is the estimator and not the data.
 
-The starved pair carries four directions its own Gram cannot resolve and one
-that survives into the high-edge operator -- exactly the one degree of freedom
-the routes disagree about.  They are not disagreeing about an answer; they are
-each reading a different rounding of the same absent information.
+At the ladder's LOW edge, against ``_CERTIFIED_EDGES``, which is 640-bit arb
+ball arithmetic on the pair's exact design::
 
-That is why the disagreement is a CONVENTION and not an error, and it is
-measurable as one.  Sweeping the rank cut of an independent stacked-QR
-evaluation over ``1e-18 .. 1e-6``:
+    _thin_level_pair    moment route      factor route
+    1.0                 1.3662e-10        0.0000e+00
+    0.01                2.4045e-09        0.0000e+00
+    0.001               3.2264e-09        2.8422e-14
 
-======================  =============  ==========
-rank cut                ``edf(hi)``    decades
-======================  =============  ==========
-``1e-18 .. 1e-16``      18.99995       three
-``1e-15 .. 1e-13``      19.00000       three
-``1e-12 .. 1e-7``       **18.27481**   **six**
-``1e-6``                18.05829       --
-======================  =============  ==========
+Two of the three are BIT-IDENTICAL to the certified value and the third is one
+ulp from it.  That edge is where the whole-degree-of-freedom defect this
+module's oldest tests were written for lived.
 
-**THERE ARE THREE PLATEAUS AND THEY DISAGREE BY 0.725 df.**  Two earlier
-drafts of this paragraph said "there is no plateau", then "the widest window
-giving one answer is under three decades".  Both were false against the table
-directly above them -- 18.27481 holds to eight significant figures across six
-decades, twice the width claimed.
+At the HIGH edge the two routes trade, and the trade is stated rather than
+averaged.  On ``_vanishing_mass_pair`` the factor route reproduces the
+independent stacked-QR oracle to the printed digits where the moment route is
+5.004e-04 (at 1e-10) and 7.600e-05 (at 1e-12) away from it.  On
+``_thin_level_pair``, against the same arb-certified constants::
 
-The correct statement is stronger than either.  A single wide plateau is what
-would CERTIFY a cut: it says the answer is insensitive to where the cut is put
-within it.  Three of them, separated by most of a degree of freedom, say the
-answer is a property of WHICH plateau the cut lands on -- and nothing in the
-data chooses between them.  Any routine reporting a number for such a pair is
-reporting its own threshold.
+    _thin_level_pair    moment route      factor route / structured route
+    1.0                 1.6929e-05        8.1497e-05
+    0.01                2.9110e-05        2.7668e-04
+    0.001               4.0894e-05        2.1075e-03
 
-An earlier draft also contrasted this with "the arrow kernel's own nine-decade
-plateau".  **That comparison was stale and is withdrawn** — it described a
-rank cut the structured path no longer has.  Since it moved onto design
-factors it evaluates ``edf`` as a sum of filter factors and takes no rank
-decision at all, which :func:`_edge` says in its own docstring.  The contrast
-that survives is sharper anyway: the other path does not need a plateau
-because it does not need a cut.
+**That column is not a pencil error and no rearrangement here narrows it: it is
+the PENALTY ROOT, and it is shared with the structured path deliberately.**
+``S_a``'s smallest eigenvalue on this fixture reads 1.4476e-15 against an
+``eigh`` bar of 3.7592e-14, so it is 26x INSIDE what the eigensolver resolves;
+the certified value carries the exact residue and any float64 route carries
+the eigensolver's reading of it instead.  At ``lambda = 1e10 * scale`` that
+difference is what the table shows.  The moment route escaped it only by never
+rooting the penalty at all -- it carried ``S_ti`` raw inside ``V + balance S``
+-- and the price of that was a second policy: issue #323 is what happens when
+two parts of this package decide the same question on different bars.  What the
+shared root buys is exact: the dense and structured arms' high-edge ``edf``
+now agree to 3.7e-11, 2.0e-10 and 1.4e-12 on the three weights, where they
+differed by 9.8e-05, 2.5e-04 and 2.1e-03.  The suite asserts both against the
+certified constant at ``abs=1e-2``, which the worst reading clears by 4.7x.
 
-**Four remedies have been measured and refused.  Do not re-derive them.**
+**AND THE PENCIL ITSELF IS EXACT WHERE AN ORACLE CAN SEE IT.**  On
+``moderate_pair``'s high edge, whose condition number is ~1e11, against the
+textbook stacked-QR arbiter: the statistic moves 1.1159e-05 -> 3.451e-13 and
+``edf`` 4.3374e-06 -> 1.959e-12, four to six orders, and the per-lambda stacked
+QR on the same factor agrees with the pencil to 2.0e-13 on the statistic and
+1.1e-15 on ``edf``, so ONE lambda-free
+decomposition costs nothing against a fresh factorization per rung.
 
-1. *Give the pseudo-inverse fallback a stated cut.*  ``_edge`` already counts
-   its unpenalized rank at :func:`_rank_floor`; what has no stated cut is the
-   ``np.linalg.pinv`` branch it falls to when ``cho_factor`` refuses, which
-   takes NumPy's shape-derived default ``rcond``.  Passing the arrow path's
-   ``_solve_floor`` there -- the same ``max(n, 1) * eps`` expression -- gives
-   **-8.17 df** against the shipped -1.21 df.  No scalar cut can work,
-   because the deciding curvature (8.896e-05) sits BELOW the eigensolver's
-   noise floor on the matrix it is read from (``eps ||A|| = 1.653e-04``).
-2. *Answer every rung from the pencil* instead of from ``_edge``, the
-   "balanced congruence" remedy: measured WORSE.  Across 1/2/4/8 threads the
-   pencil's high-edge ``edf`` moves 1.0000 df on the starved pair (18.99998 at
-   one thread, 17.99997 at two or more) where ``_edge`` moves 5.3e-07, and it
-   is worse on three of four geometries.  The claim that this comes back
-   bit-identical across thread counts does not reproduce.
-3. *Force the whitening branch* (the Fix & Heiberger construction already
-   below) rather than reaching it only on a hard ``LinAlgError``: still flips
-   at eight threads, and 29x worse than the generalized driver on the 1e-4
-   pair.
-4. *The GSVD*, which is what the LAPACK Users' Guide (3rd ed., SIAM 1999,
-   sec. 4.7 and its "Further Details" for the generalized symmetric definite
-   eigenproblem) actually recommends here — it gives the driver's error as
-   ``sqrt(n) (||B^-1||_2 ||A||_2 + cond(B) |lambda_i|) eps`` and names
-   Cholesky-plus-GSVD as the tighter alternative when ``B`` is ill
-   conditioned.  **SciPy exposes no GSVD**: ``dggsvd3``, ``dggsvp3`` and
-   ``dtgsja`` are all absent from ``scipy.linalg.lapack`` at 1.18.0.  So the
-   recommended method is unavailable, not rejected.
+**THOSE ORDERS ARE THE PENCIL'S AND NOT THE FACTOR'S, WHICH IS WORTH
+SEPARATING BECAUSE THE ISSUE IS NAMED AFTER THE OTHER HALF.**  Master's route
+changes two things at once.  Holding the pencil fixed and rebuilding the
+pair through the moment route -- ``V - C' M^-1 C`` with the moment route's own
+cho-or-pinv solve, the factor's column order preserved -- the same statistic
+reads 3.998e-13 against the shipped 3.451e-13.  ``moderate_pair``'s high edge
+therefore cannot see the Gram-to-factor move at all; what sees it is the LOW
+edge, where the table above reads 0.0 against 1.3662e-10 and 2.4045e-09, and
+where three of this suite's tests go red under that same mutation.
 
-The remedy that WOULD work is the one :mod:`superglm.screening._structured`
-took: read the design factors and never form the Gram.  A factor's spectrum is
-the Gram's square root, so a direction the Gram has pushed under ``eps`` sits
-at its square root in the factor — representable, with about half the digits
-still there.  Measured on the structured side, that took the high-edge error
-from 5.1e-06 to 7.4e-12 against a 60-digit oracle.  It is a change to what the
-CALLER hands this module, not to anything in it.
+**THE RANK CUT IS NO LONGER A CONVENTION, AND THAT IS THE MEASUREMENT THIS
+SECTION EXISTS FOR.**  The moment route's disagreement with the arrow kernel
+was defensible as a CONVENTION: an independent evaluation's rank cut, swept,
+gave several plateaus, and nothing in the data chose between them.  Re-measured
+on this branch -- ``_thin_level_pair(1e-12)`` at the ladder's high edge,
+whitening ``V_eff`` at a relative cut for the Gram column and truncating
+``R_eff`` at that cut's square root for the factor column, then evaluating by
+stacked QR::
+
+    rank cut          Gram column     factor column
+    1e-18 .. 1e-6     17.99991        17.99991
+
+Thirteen decades, ONE value, on both columns.  The earlier three-plateau table
+is DELETED rather than carried: it was a measurement of a construction this
+branch does not reproduce, and re-stating a number nobody can re-take is the
+defect #324 was about.  What is asserted instead is the regime the change was
+made for --
+``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` still
+COUNTS the directions ``V_eff``'s Gram cannot resolve, four on the starved pair
+against one elsewhere, and that count is what says the Gram route was reading
+absent information.
+
+**REPRODUCIBILITY, WHICH IS WHAT ACTUALLY REACHED A USER.**  On the guide's
+published twelve-row ``freMTPL2freq`` screen -- an 80,000-row sample under
+``weight_semantics="frequency"``, the specification ``docs/guide/screening.md``
+prints and ``tests/fixtures/screening_guide_fremtpl.json`` pins, ``phi``
+4.821136 -- one thread against eight with all six pools pinned together::
+
+                          worst |dz|      worst |d edf0|
+    moment route          4.5597e-05      7.7570e-04
+    factor route          1.1252e-13      7.0699e-13
+
+Eight orders, and the table order is identical on both routes and the
+``z > sqrt(edf0 / 2)`` gate admits the same SINGLE pair -- ``VehAge x
+BonusMalus`` -- on every one of the four runs.  On this suite's own fixtures
+the same comparison gives a worst ``edf`` move of 5.58e-13 across 1 and 8
+threads, against the 4.05e-04 :mod:`superglm.screening._structured` recorded
+for the dense arm on ``_thin_level_pair``.
+
+**WHAT THE CHANGE MOVES IN THE PUBLISHED TABLE**, one thread, the same screen,
+one route against the other: the order is identical, the gate admits the same
+single pair, and the worst ``|dz|`` is 3.6886e-05 on ``VehAge x VehBrand``,
+followed by 8.97e-06, 4.05e-06, 6.54e-07, 3.23e-07 and 1.74e-07.  Every ``ti``,
+``cat_cat`` and ``numeric_cat`` row moves at round-off (2.46e-12 or below).  So
+the change is visible only on ``spline_cat`` pairs and only in the fifth
+decimal of ``z``, which is the size #257 said it would be.
+
+**AND THE PUBLISHED TABLE'S OWN PINS WERE RE-TAKEN RATHER THAN ASSUMED**, since
+a fifth-decimal move against a ``rel=1e-4, abs=1e-4`` pin is only 2.7x of the
+bound and that is not a headroom anyone should infer.  Against the committed
+fixture, at one thread, the shipped factor route uses 0.180 of the ``z`` bound
+(5.6x inside, worst on ``VehAge x Region``), 0.191 of the ``statistic`` bound,
+0.070 of the ``edf0`` bound and 0.00037 of the ``lambda0`` bound.  The moment
+route the fixture was generated with uses 0.215, 0.296, 0.063 and 0.00037 of
+the same four.  So the change does not consume the fixture's headroom; on ``z``
+it widens it, because the moment route's own thread-to-thread spread on this
+screen is larger than the distance between the two routes.
+
+**AN EARLIER REVISION OF THIS SECTION QUOTED A DIFFERENT SCREEN, AND SAID SO
+IN THE PUBLISHED TABLE'S NAME.**  It reported these tables on "100,000 rows,
+the guide's own specification" and said the gate admitted FOUR pairs.  The
+guide's screen is 80,000 rows AND carries ``weight_semantics="frequency"``,
+which sets ``phi`` and therefore every ``z``; on it the gate admits one.  The
+numbers above are the published screen's.
 
 **THE LOW EDGE HAS ITS OWN LIMIT AND IT IS A FIRST-ORDER SENSITIVITY,
 ``eps ||V_eff||_F ||G||_F``.**  (Not a ceiling: finite realizations exceed it,
-measured at up to 1.0617x below.)
-The section above is about the ladder's HIGH edge, and it left the impression
--- recorded in issue #279 and in the sweep that opened it -- that the low edge
-was the good end.  It is not; it fails differently, and the two must not be
-conflated.
+measured at up to 1.0617x.)  The section above is about the ladder's HIGH edge;
+the low edge fails differently and the two must not be conflated.
 
 At the low edge nothing is unresolved in the sense counted above.  Over 21
 draws of the 20-level spline-by-categorical geometry, the operator
@@ -274,119 +335,72 @@ perturbation ``E`` of the operand::
 
 **FOR NONSINGULAR ``A`` ONLY.**  The identity above inverts ``A``, so it does
 not cover a pair whose ``V_eff`` and ``S`` share a null space -- a supported
-case, which :func:`_edge` answers through ``pinv``, and on which
-``k - lambda tr(A^-1 S)`` is not evaluable (at ``V = S = diag(1, 0)`` the
-shipped ``edf`` is 1, and substituting a pseudo-inverse while keeping ``k = 2``
-gives the wrong value).  Everything in this section is about the low edge of a
-positive definite pencil; the common-null-space case is discarded before the
-pencil is formed and is not what #279 is about.
+case, which the pencil answers by discarding that common null space, and on
+which ``k - lambda tr(A^-1 S)`` is not evaluable.  Everything in this section is
+about the low edge of a positive definite pencil.
 
 The second term is the BRACKET's own response: ``lambda = alpha tr(V_eff)``
 with ``alpha = 1e-10 / tr(S)``, so a probe with nonzero trace moves ``lambda``
-too.  It is part of the gradient, not an afterthought -- an earlier revision
-displayed only the first term here while the test used both, which is a formula
-readers would have carried away different from the quantity asserted.
+too.  It is part of the gradient, not an afterthought.
 
-and over ``||E||_F = c`` that is maximised at ``E = c G / ||G||_F``, giving
-exactly ``c ||G||_F``.  Take ``c = eps ||V_eff||_F`` -- ONE ROUNDING of the
-operand's norm -- and the low edge's first-order sensitivity is
-``eps ||V_eff||_F ||G||_F``.  **That maximisation is exact for the
-DIFFERENTIAL and is not a bound on the finite response**, since ``edf(V + E)``
-is nonlinear in ``E``; measured realizations reach 1.0617 of it.  ``G`` is the
-TOTAL gradient, including the bracket's own response ``alpha (d edf / d lambda)
-I`` from ``lambda = alpha tr(V_eff)`` -- which changes its norm by at most 1.6%
-here, but only the whole gradient gives the ladder's maximising direction.
+Over ``||E||_F = c`` the differential is maximised at ``E = c G / ||G||_F``,
+giving exactly ``c ||G||_F``.  Take ``c = eps ||V_eff||_F`` -- ONE ROUNDING of
+the operand's norm -- and the low edge's first-order sensitivity is
+``eps ||V_eff||_F ||G||_F``.  That maximisation is exact for the DIFFERENTIAL
+and is not a bound on the finite response, since ``edf(V + E)`` is nonlinear in
+``E``; measured realizations reach 1.0617 of it.
 
-**THE RADIUS IS A STATED PROBE AND NOTHING MORE, AND TWO OVER-CLAIMS ARE
-WITHDRAWN.**  It is not "smaller than the error already committed in forming
-the Gram" -- that asserted a backward-error bound nobody had derived -- and it
-is not established to be smaller either.  Higham, *Accuracy and Stability of
-Numerical Algorithms*, 2nd ed., Ch. 3 gives ``fl(X'X) = X'X + D`` with
-``|D| <= gamma_n |X|'|X|`` COMPONENTWISE, measured here at 98.6x to 204.7x the
-probe radius -- but that is an UPPER bound, and an upper bound puts no floor
-under the actual error, which may be anywhere below it and is zero for exactly
-representable products.  So what follows is the answer's SENSITIVITY to a
-one-rounding probe.  Nothing here certifies an information floor, and the word
-is not used for it.
+**THE RADIUS IS A STATED PROBE AND NOTHING MORE.**  It is not "smaller than the
+error already committed in forming the Gram" -- that asserted a backward-error
+bound nobody had derived -- and it is not established to be smaller either.
+Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed., Ch. 3 gives
+``fl(X'X) = X'X + D`` with ``|D| <= gamma_n |X|'|X|`` COMPONENTWISE, measured
+here at 98.6x to 204.7x the probe radius -- but that is an UPPER bound, and an
+upper bound puts no floor under the actual error.  So what follows is the
+answer's SENSITIVITY to a one-rounding probe.
 
-**THAT FORM IS LOAD-BEARING AND TWO WEAKER ONES WERE REFUSED IN REVIEW.**
-
-* ``eps / lambda``, which drops both norms, is dimensionally wrong rather than
-  merely loose: rescaling the design leaves ``edf`` and its uncertainty alike,
-  since ``V``, the perturbation and the bracket's ``lambda`` all move together,
-  while ``eps / lambda`` moves inversely.  Measured on one geometry at design
-  scales 1, 1e3 and 1e-3 and with the PENALTY scaled by 1e4, it reads
-  6.47e-01, 6.38e+05, 8.47e-07 and 6.47e-05 -- twelve orders from a change of
-  units alone.
-* ``eps ||V_eff||_F / (lambda ||S||_2)`` fixes the units but substitutes the
-  LARGEST penalty eigenvalue for the one in the deciding direction.  On a
-  rotated ``S`` with eight orders of spectrum that understates the response by
-  up to four orders: where the theory says 1 it reads 55.6 to 126.9 and 5924 to
-  11124.  ``G`` carries ``S`` in the right place and needs no such proxy.
-
-``G`` costs only solves against ``A``.  An earlier revision claimed ``lambda``
-bounds ``cond(A)`` at about 1e10 "by construction"; **that is false for an
-anisotropic penalty and is withdrawn.**  The only available bound is
-``||A||_2 / (lambda lambda_min(S))``, which a rotated penalty makes vacuous
-(1.6e+18) and a singular ``S`` makes unavailable outright.  Measured instead,
-``cond(A)`` runs 1.0e+02 and 1.0e+06 on resolved geometries, 1.9e+11 and
-2.2e+11 on isotropic unresolved ones, and 5.8e+12 and **5.4e+14** on rotated
-ones -- so at the hardest the solve for ``G`` keeps about one digit in its
-smallest direction.  That is disclosure rather than derivation; what makes the
-quantity usable is measured stability, which is what the sweep checks.
+**THE DERIVATION IS BASIS-FREE AND SURVIVES THE MOVE; THE PROBE'S RADIUS WAS
+ONE ROUNDING OF A GRAM AND IS NOW ONE ROUNDING OF A FACTOR'S GRAM.**  The
+sensitivity is a property of the QUANTITY ``tr((V_eff + lambda S)^-1 V_eff)``
+and of the pair the caller supplies, not of how this module reads it, so it is
+unchanged -- and
+``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``
+drives the shipped ladder through the factor route and still separates its
+resolved geometries from its unresolved ones.  What DID change is where the
+perturbation enters: the caller now hands a factor, so a rounding of the
+operand is a rounding of ``R_eff``, and the same displacement reaches ``edf``
+through a spectrum that has not been squared.
 
 **WHAT THE SENSITIVITY IS ON THIS FAMILY, PER DRAW RATHER THAN AS A
-CONSTANT.**  Over the 21 draws it spans **1.6298e-15 to 4.9265e-04** -- twelve orders,
-tracking the residualized design's smallest singular value, and NOT the tidy
-2% band the ``||S||_2`` form reported before it was corrected.  All ten draws
-whose design is rank deficient sit at ~2.6e-04; the well-conditioned ones sit
-at 1e-15 to 3e-09.
-
-**So on exactly the draws that can fail it, the answer's sensitivity is ~26x
-the ``abs=1e-5`` the suite asserts**, and that is the whole of issue #279: the
-bound is far below how far those answers move under a one-rounding probe, so
-which draw is used decides whether it passes.  Seed 1's 1.2574e-05 is 0.049x
-its own 2.5688e-04, and 1.26x the bound.  Nothing was mis-tuned; the number
-was placed against observed errors rather than against a floor, because the
-floor had not been derived.  Do not carry the number to another fixture --
-carry the derivation.
-
-The seed the fixture happens to run has a sensitivity of 2.6282e-04 like its
-nine siblings, and reports an error of 1.37e-10, so it clears the suite's bound by
-193x on a draw whose answer MOVES in the fourth decimal under a one-rounding
-probe.  That is mobility, not uncertainty: the probe establishes no lower bound
-on the Gram's actual error, so nothing here says seed 3's 1.37e-10 is anything
-but accurate.  What it says is that the same geometry admits answers 2.6e-04
-apart under perturbations of the size the arithmetic works in, so a tolerance
-placed at 1e-5 is being decided by the draw.  A draw is not evidence about the
-family here, and neither is a passing bound.
+CONSTANT.**  Over the 21 draws it spans **1.6298e-15 to 4.9265e-04** -- twelve
+orders, tracking the residualized design's smallest singular value.  All ten
+draws whose design is rank deficient sit at ~2.6e-04; the well-conditioned ones
+sit at 1e-15 to 3e-09.  So on exactly the draws that can fail it, the answer's
+sensitivity is ~26x the ``abs=1e-5`` the suite asserts, which is the whole of
+issue #279: which draw is used decides whether it passes.  Do not carry the
+number to another fixture -- carry the derivation.
 
 Which draws are bad is decided in the DESIGN, before this module is called: the
 bad ones are those where a level's rows put the constant vector in the span of
-that level's own spline columns.  Squaring sends such a direction under
-``eps``; ``1 / lambda`` then multiplies whatever round-off is left there.
-Pinned in
-``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``,
-which asserts the sensitivity against ONE ULP of the answer -- ``np.spacing``,
-the real adjacent-float distance, not ``eps |edf|``, which is a relative scale
-running 1.045x to 1.679x it.  Worst asserted-resolved 4.0956e-08 ulp against
-best asserted-unresolved 3.0293e+10 ulp, so the boundary clears by 2.44e+07x
-and 3.03e+10x.  Separately the maximising perturbation attains 0.9425 to 1.0617
-of the predicted displacement against a first-order value of 1 -- and that it
-EXCEEDS 1 is the direct evidence that this quantity is a first-order measure
-rather than an upper bound on the finite response.  That ratio is REPORTED and
-not asserted.  Two intervals were tried and both refused: bounding it fits a
-window around observations, on a difference of two evaluations at ``cond(A)``
-up to 5.4e+14, which is the sampled-width objection in another form.  So this
-test carries ONE asserted boundary and no fitted constant.
+that level's own spline columns.  ``1 / lambda`` then multiplies whatever is
+left there.  The test asserts the sensitivity against ONE ULP of the answer --
+``np.spacing``, the real adjacent-float distance -- with worst asserted-resolved
+4.0956e-08 ulp against best asserted-unresolved 3.0293e+10 ulp, so the boundary
+clears by 2.44e+07x and 3.03e+10x.  Separately the maximising perturbation
+attains 0.9425 to 1.0617 of the predicted displacement against a first-order
+value of 1; that ratio is REPORTED and not asserted.
 
-**TWO EARLIER REVISIONS GOT THE BOUNDARY WRONG IN OPPOSITE DIRECTIONS.**  One
-asserted 1e5 ulp while the prose said one -- a midpoint of the two observed
-populations, which would have passed a resolved geometry amplified by five
-orders.  The next asserted one ulp but measured it as ``eps |edf|``, which put
-the ``sigma_min = 1e-3`` geometries at a 1.59x margin that the correct spacing
-turns into 1.06x.  Those geometries are transitional and are now measured and
-disclosed rather than asserted on either side.
+**WHICH OF THOSE FIGURES ISSUE #257 COULD HAVE MOVED, AND WHICH IT COULD NOT.**
+The SENSITIVITY itself -- the 1.6298e-15..4.9265e-04 span -- is
+``eps ||V_eff||_F ||G||_F``, computed from the pair's own ``V_eff`` and the
+operator at the low edge, so it is a property of the QUANTITY and the same
+number whichever route reads it.  The two figures that involve a realized
+displacement -- the ulp separation and the 0.9425..1.0617 attainment ratio --
+were taken before the move and are NOT re-taken here, because what they
+support is a boundary the test recomputes on every run rather than a constant
+it carries.  That test drives the shipped ladder, so the boundary it asserts is
+the factor route's; the numbers beside it are the moment route's record of how
+wide the gap was, and are labelled as such rather than restated as current.
 
 **A SAMPLED WIDTH WAS TRIED FIRST AND IS NOT SOUND**, which is worth recording
 because it looks convincing.  Taking ``max - min`` of ``edf`` over 32 random
@@ -396,33 +410,11 @@ with both of its own arbitrary constants: 0.2548 at 4 draws against 0.8653 at
 128, and 0.5063 to 0.8085 over 24 perturbation seeds at one configuration.  A
 deterministic norm has neither axis.
 
-**THE PROBE ALSO DRIVES THE LADDER RATHER THAN ``_edge`` AT A PINNED LAMBDA**,
-because the bracket is ``1e-10 tr(V_eff) / tr(S)``, so a probe with nonzero
-trace moves ``lambda`` too.  (An earlier revision justified that trace by
-calling ``G`` PSD.  **It is not**, once the bracket term is in it: scale
-invariance of the ladder gives ``<G, V_eff>_F = 0``, which no nonzero PSD
-matrix can satisfy against a positive definite ``V_eff``.  The claim is
-withdrawn; the term is carried because it belongs in the gradient, not because
-of any sign property.)  Review is right that the omitted term can
-cancel the response outright -- in ONE dimension ``edf = V / (V + 1e-10 V)`` is
-constant in ``V`` while a fixed-lambda calculation reports a move.  It does not
-cancel here, because the response is carried by the near-null direction at
-``1 / (lambda s)`` while the bracket shifts with the TOTAL trace, which the
-saturated directions dominate: measured, the ladder's displacement equals the
-fixed-lambda one to **1.000 on all eight geometries**, with ``lambda`` moving 0
-to 7.9e-16 relative.  The ladder is driven anyway, because one extra call
-removes an argument.
-
-**No arrangement of the arithmetic below narrows this.**  It is the same
-architectural limit as the high edge, reached by a different route, and it
-has the same remedy and the same tracking issue -- design factors, #257.  What
-is genuinely different is that at the low edge there is nothing to COUNT, so
-the high edge's probe reports a clean bill on exactly the draws that miss.
-
-**WHERE THIS SITS IN THE LITERATURE, because half of it is textbook and half
-of it is not.**  ``edf`` is the trace of the influence matrix of a general-form
-Tikhonov problem -- equivalently the sum of filter factors over the generalized
-singular values of the pair ``(X_w, L)`` with ``L' L = S``.  Every standard
+**WHERE THIS SITS IN THE LITERATURE, AND IT IS NOW THE JUSTIFICATION RATHER
+THAN A DISCLOSURE.**  ``edf`` is the trace of the influence matrix of a
+general-form Tikhonov problem -- equivalently the sum of filter factors over
+the generalized singular values of the pair ``(X_w, L)`` with ``L' L = S``,
+which is literally what :func:`_pair_pencil` computes.  Every standard
 algorithm for it takes the DESIGN or a backward-stable factor of it, never the
 Gram: Elden, *BIT* 17 (1977) 134-145 and *BIT* 24 (1984) 467-472; Golub, Heath
 and Wahba, *Technometrics* 21 (1979) 215-223; Hutchinson and de Hoog, *Numer.
@@ -430,8 +422,21 @@ Math.* 47 (1985) 99-106; Wood, *JRSS-B* 70 (2008) 495-518 sec. 3.2, which gives
 exactly the stacked-QR form ``[W X; E] = Q R`` with ``A = K K'`` and calls the
 Cholesky-of-``X'W^2X`` alternative the less stable of the two for "the
 exacerbation of any numerical ill-conditioning that accompanies explicit
-formation of ``X'W^2X``".  So the moment route is published, and published as
-the route the standard method exists to avoid.
+formation of ``X'W^2X``".  The moment route was published, and published as the
+route the standard method exists to avoid.
+
+The GSVD itself is Van Loan, *SIAM J. Numer. Anal.* 13(1):76-83 (1976);
+computing it through the CS decomposition is Stewart, *Numer. Math.*
+40:297-306 (1983) and Van Loan, *SIAM J. Numer. Anal.* 22(3):579-592 (1985),
+with the modern arrangement in Bai and Demmel, *SIAM J. Sci. Comput.*
+14(6):1464-1486 (1993).  The *LAPACK Users' Guide* (3rd ed., SIAM 1999,
+sec. 4.7) recommends Cholesky-plus-GSVD over the generalized symmetric definite
+driver when the second matrix is ill conditioned, and an earlier revision of
+this module recorded that recommendation as UNREACHABLE because ``dggsvd3``,
+``dggsvp3`` and ``dtgsja`` are absent from ``scipy.linalg.lapack``.  **That was
+half wrong and the half matters**: those three really are absent at 1.18.0, but
+the construction needs only a pivoted QR and one SVD, both of which are there.
+The DRIVER was missing, not the method.
 
 Two halves of the mechanism are settled and one is not.
 
@@ -443,7 +448,7 @@ Two halves of the mechanism are settled and one is not.
   cross-product pencil ``(A'A, B'B)`` for the GSVD on precisely this ground --
   small generalized singular values from it "may be recovered much less
   accurately and even may have no accuracy" -- which is one algebraic step from
-  the quantity summed here.
+  the quantity summed here, and is the pencil this module used to form.
 * AMPLIFICATION.  ``1 / (lambda s_j)`` is elementary calculus, above.
 * THE COMPOSITION IS OURS.  A sweep of the GCV/edf and inverse-problems
   literature found NO published forward-error bound for
@@ -453,246 +458,52 @@ Two halves of the mechanism are settled and one is not.
   improving Stewart and Sun, *Matrix Perturbation Theory*, 1990) or the
   Tikhonov SOLUTION, not this trace.  Stated as ours rather than cited.
 
-AND DO NOT REACH FOR THE STANDARD RESCUES; they were checked and each needs
-what this module does not have.  Seminormal equations and its corrected form,
-and iterative refinement on the normal equations, all require ``A`` itself or
-an ``R`` that is the factor of a backward-stable decomposition of it (Bjorck,
-*BIT* 7 (1967) 257-278 and *LAA* 88 (1987) 31-48).  The high-relative-accuracy
-theory needs a rank-revealing decomposition whose factors are themselves
-accurate (Demmel and Veselic, *SIMAX* 13 (1992) 1204-1245; Demmel et al.,
-*LAA* 299 (1999) 21-80), and a Gram formed in floating point is not one: its
-entries carry ABSOLUTE errors, which is an unbounded RELATIVE error exactly in
-the direction that matters.  This is an information barrier, not an algorithmic
-one.
+AND DO NOT REACH BACK FOR THE STANDARD RESCUES ON THE MOMENTS; they were
+checked and each needed what the moment route did not have.  Seminormal
+equations and its corrected form, and iterative refinement on the normal
+equations, all require ``A`` itself or an ``R`` that is the factor of a
+backward-stable decomposition of it (Bjorck, *BIT* 7 (1967) 257-278 and *LAA*
+88 (1987) 31-48) -- which is exactly what this module is now handed, so the
+barrier they ran into is the one that has been removed.  The
+high-relative-accuracy theory needs a rank-revealing decomposition whose
+factors are themselves accurate (Demmel and Veselic, *SIMAX* 13 (1992)
+1204-1245; Demmel et al., *LAA* 299 (1999) 21-80), and a Gram formed in
+floating point is not one.
 
-One caution about the published tripwire, since it is the obvious thing to
-reach for.  ``cond <= eps^-1/2`` recurs across that literature as the boundary
-for the cross-product route, and here it is NOT conservative enough: the draw
-that misses worst has ``sigma_min / sigma_max = 2.72e-07``, i.e. a design
-condition number of 3.7e+06 against an ``eps^-1/2`` of 6.7e+07, and it is still
-1.2574e-05 out.  ``1 / lambda`` moves the boundary, which is why the regime
-test above is keyed to the width of the answer set and not to a conditioning
-threshold.
-
-What this costs in practice is small, and that is measured too rather than
-assumed: on the published twelve-row freMTPL2 screen, one thread against
-eight, the table order is identical, the ``z > sqrt(edf0 / 2)`` gate admits
-the same single pair, and the worst ``|dz|`` is 2.93e-05.  The instability is
-real, and it lives on geometries the screen ranks at the bottom anyway.
+**WHAT IT COSTS, AND WHAT THAT COST DOES NOT MOVE.**  The reduction that
+produces the factor is ``O(n_outer * k_inner * w^2)`` where the moment
+assembly was ``O(n_outer * k^2)``, so it costs a factor of the narrower
+margin's width, and the pencil is one pivoted QR plus one SVD where the moment
+route ran a generalized eigendecomposition.  Measured against that route at
+``16e7f810`` -- 18-rep interleaved A/B/B/A medians, dedicated exclusive phase,
+all seven thread pools pinned to one -- this ladder costs 0.95x, 3.10x, 3.94x
+and 4.09x at tensor widths 35, 133, 1043 and 1349, and 1.10x to 4.17x end to
+end.  The budget gates in :mod:`superglm.model.screening_ops` are DIMENSIONAL
+(``k**3 <= _CUBIC_BUDGET_FACTOR * max_cells``), so which pairs are admitted is
+unchanged and no published ceiling moves; what those multipliers spend is the
+~1.5 s per-pair calibration behind the ceilings, which was fitted against the
+moment route and is no longer met at them.  Re-fitting it is a separate
+decision taken with a machine to itself.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 
 import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm.screening._factor_kernels import _factor_rank_floor
+from superglm.screening._pair_factor import (
+    PairFactor,
+    _pair_scale,
+    _profiled_factor,
+    _profiled_rank_scale,
+)
+
 _EDF_TOL = 1e-6
 _MAX_BISECT = 200
-
-
-def _rank_floor(n: int) -> float:
-    """Share of the largest eigenvalue below which a direction is ROUND-OFF.
-
-    ``max(n, 1) * eps`` -- LAPACK's convention and exactly what
-    ``numpy.linalg.matrix_rank`` uses by default.  It scales with the
-    dimension because round-off accumulates with it, and that dependence is
-    the whole point: no fixed constant works at both ends.
-
-    Two failures bound it from either side, and they are three orders apart,
-    so this is not a free parameter.
-
-    ABOVE round-off it deletes real curvature.  At 1e-12, ``V = S =
-    diag(1, 1e-13, 0)`` with ``U = (0, sqrt(1e-13), 0)`` had its 1e-13
-    direction discarded by the whitening below -- a direction carrying a
-    genuine ``a = 0.5`` and ALL of ``U``'s mass -- and the ladder returned
-    ``statistic 0, lambda0 1e-10`` where the direct pseudo-inverse ladder
-    resolves ``lambda0 1, statistic 0.5``.  Here that direction sits 150x
-    above the floor and survives.
-
-    AT round-off it keeps subtraction dust and reports a degree of freedom
-    that does not exist.  A fixed 1e-15 is only 4.5x ``eps``, which is inside
-    the dust's own distribution rather than above it: measured over 400
-    replicates of a 39-wide profiled block whose true rank is 38, the
-    round-off eigenvalue has median 2.2e-16 and a tail to 1.2e-15, so 2 of
-    400 read rank 39.  ``39 * eps`` is 8.7e-15, above the whole measured tail
-    by 7x.
-
-    Because this IS ``matrix_rank``'s tolerance, the count it produces cannot
-    exceed ``matrix_rank`` -- the contract the unpenalized rung rests on holds
-    by construction rather than by luck, and only tightens where a negative
-    eigenvalue makes :func:`_psd_rank` stricter than a singular-value count.
-
-    It is only meaningful where the matrix's own largest eigenvalue is a real
-    scale.  On a wholly PROFILED-AWAY block that is not guaranteed -- see the
-    THRESHOLD TYPES note at the top of this module for what is and is not
-    decidable there.
-    """
-    return max(int(n), 1) * float(np.finfo(np.float64).eps)
-
-
-def _psd_rank(A: NDArray, inv_scale: NDArray | None = None) -> float:
-    """Numerical rank of a symmetric PSD matrix at the round-off floor.
-
-    ``inv_scale`` applies a symmetric congruence ``diag(s) A diag(s)`` first,
-    which preserves rank.  It exists to BALANCE two blocks against each other,
-    not to equilibrate every direction: scaling by a matrix's own full diagonal
-    makes every direction O(1) by construction, which is exactly what a rank
-    count must not do -- on ``diag(3, 2, 1e-18)`` it turns a rank of 2 into 3.
-    """
-    w = _psd_spectrum(A, inv_scale)
-    if w.size == 0:
-        return 0.0
-    top = float(w[-1])
-    if top <= 0.0:
-        return 0.0
-    return float(np.sum(w > _rank_floor(w.size) * top))
-
-
-def _psd_spectrum(A: NDArray, inv_scale: NDArray | None = None) -> NDArray:
-    """Ascending eigenvalues of the symmetrized, optionally balanced block.
-
-    Split out of :func:`_psd_rank` so that two operands about to be DIFFERENCED
-    can be counted against one absolute cut rather than against two relative
-    ones.  See :func:`_profiled_rank`.
-    """
-    A = 0.5 * (A + A.T)
-    if inv_scale is not None:
-        A = A * inv_scale[:, None] * inv_scale[None, :]
-    return np.linalg.eigvalsh(A)
-
-
-def _profiled_rank(V_eff: NDArray, joint: tuple | None) -> float:
-    """Rank of the profiled block, decided where NOTHING cancels.
-
-    ``rank(V_eff)`` is the unpenalized rung's edf, and no cut taken on
-    ``V_eff`` itself is safe.  ``V_eff = V - C' M^-1 C`` is a difference, so an
-    absorbed direction survives only as round-off -- and on a block the overlap
-    has largely absorbed, that round-off IS the largest eigenvalue, so a
-    relative cut is taken against the very noise it must reject.  Three rules
-    were tried against the block itself and all three fail on the REACHABLE
-    path, 5-level wholly absorbed pairs screened end to end, 20 seeds:
-
-    * relative to ``V_eff``'s own top: nonzero rank on 37 of 40 replicates;
-    * plus ``max(-lambda_min, 0)``, a certificate that ``V_eff >= 0`` is
-      violated: 12 of 40.  It is silent whenever the perturbation lands
-      positive-definite, which for a symmetric perturbation on an exactly null
-      subspace is a coin flip at EVERY width;
-    * plus an a-priori ``k * eps * tr(V)`` bound on the difference: 9 of 20.
-      It is short because the dominant error is not the subtraction at all --
-      ``cond(M)`` measured 5.8e+14 to 5.8e+15 on every failing seed, so the
-      overlap is numerically singular and the error comes from inverting it.
-      No bound written in terms of ``||V||`` can see that.
-
-    Getting an edf too HIGH is not a neutral failure here.  ``z = (T - e) /
-    sqrt(2 e)`` DECREASES in ``e``, so a partly-rejected block scores higher
-    than an unrejected one: on a measured ``statistic = 145.508`` an edf of 10
-    gives ``z = 30.3`` where an edf of 1 gives ``z = 102.2``.  Only rank 0 is
-    safe, which is why a rule that reaches it most of the time is not a rule.
-
-    So the rank is taken where nothing has cancelled.  Guttman rank additivity
-    on the JOINT moment matrix,
-
-        rank([[V, C'], [C, M]]) = rank(M) + rank(V - C' M^-1 C),
-
-    holds for a PSD joint, and both ranks on the left are of matrices assembled
-    by ADDITION.  Neither hides a cancellation, so each is countable at
-    :func:`_rank_floor` -- the round-off floor that is derivable from eps and
-    dimension -- and the difference is exact integer arithmetic.  No inverse is
-    formed, no conditioning enters, and there is no threshold on a cancelled
-    quantity anywhere.  Measured 0 of 20 on the same reachable path that
-    defeats all three rules above, and it is right on the other corners too: a
-    three-direction block whose probe is exactly nested (true rank 2, where a
-    positive-only cancellation makes the certificate silent), and a weak but
-    real ``V_eff = 1e-4 I`` at k = 2, 4 and 12 (true rank k).
-
-    **Precondition: the working weights are non-negative.**  Guttman rank
-    additivity as used here needs the joint ``[[V, C'], [C, M]]`` to be PSD,
-    which needs ``working_weights >= 0``.  Satisfied on the reachable path --
-    ``screening_ops`` builds them as ``weights * dmu_deta**2 / var_mu`` with
-    ``var_mu`` floored, from weights already validated finite and
-    non-negative, so it rests on Fisher scoring plus that validation.  Worth
-    stating because a negative weight would not merely degrade the count: the
-    joint would stop being PSD, the additivity would no longer hold, and the
-    rank could come out either side of the truth.
-
-    **The cost is real, and measured rather than filed.**  The bordered system
-    is ``k + q``, and for ``numeric_cat`` the overlap is as wide as the probe,
-    so the eigendecomposition is of ``2k`` where a direct count is of ``k``.
-    Interleaved A/B in one process at one BLAS thread, whole pair end to end:
-
-        k =  209   0.046 s -> 0.052 s   (1.12x)
-        k = 1709   1.134 s -> 3.408 s   (3.01x)
-
-    So it is nearly free at ordinary widths and 3x at the cubic budget's own
-    ceiling.  It is paid on ONE rung of the one ladder with no bandwidth to
-    scan, and only where an overlap was profiled out.
-
-    **No pair changes whether it is screened at all.**  ``_within_cubic_budget``
-    is ``k**3 <= _CUBIC_BUDGET_FACTOR * max_cells``, a DIMENSIONAL gate
-    evaluated on ``k`` alone, so admission is identical before and after and
-    nothing silently becomes a NaN row.  What does move is that constant's
-    calibration: it was fitted against a ~1.5 s per-pair target, and the widest
-    unpenalized pair it admits now takes 3.4 s.  Re-fitting it is a separate
-    decision and is not taken here.
-    """
-    if joint is None:
-        return _psd_rank(V_eff)
-    V, C, M = joint
-    k, q = V.shape[0], M.shape[0]
-    K = np.empty((k + q, k + q), dtype=np.float64)
-    K[:k, :k] = V
-    K[:k, k:] = C.T
-    K[k:, :k] = C
-    K[k:, k:] = M
-    # BALANCE the two blocks before counting either.  The counts are about to
-    # be DIFFERENCED, so their thresholds have to be commensurable -- and each
-    # threshold is relative to its own block's largest eigenvalue.  The probe
-    # block carries the numeric margin's scale SQUARED, so at 1e4 units its
-    # moments are 1e8 and it sets the threshold for the whole joint: a nuisance
-    # direction then falls below the cut in K while surviving in M, and the
-    # difference collapses to zero on a pair whose true rank is 1.
-    #
-    # Scaling the probe block to the overlap's trace is a congruence, so rank
-    # is preserved exactly, and it leaves the two blocks' INTERNAL structure
-    # untouched -- which a full diagonal equilibration would not, and which the
-    # absorbed-block detection depends on.  Same rule as _build_pencil's G:
-    # balance, then combine.
-    tr_v = abs(float(np.trace(V)))
-    tr_m = abs(float(np.trace(M)))
-    inv = np.ones(k + q, dtype=np.float64)
-    if tr_v > 0.0 and tr_m > 0.0:
-        inv[:k] = np.sqrt(tr_m / tr_v)
-    # ONE RULER for both operands.  Counting each at its own relative floor
-    # makes the thresholds differ by DIMENSION -- ``(k + q) * eps`` against
-    # ``q * eps`` -- so a nuisance direction can fall below the cut in the
-    # joint while surviving in ``M``, and the difference undercounts by a whole
-    # degree of freedom.  Balancing does not reach this: it equalises the two
-    # blocks' SCALES, and here the disagreement is between their dimensions.
-    #
-    # ``inv[k:]`` is 1, so ``M`` is bitwise the joint's trailing block and the
-    # single cut applies to it unchanged -- no congruence question arises.
-    #
-    # One-sided by construction: ``M`` is a principal submatrix of the balanced
-    # joint, so Cauchy interlacing gives ``top_M <= top_K``, and ``k + q > q``
-    # gives ``_rank_floor(k + q) > _rank_floor(q)``.  The shared cut therefore
-    # always exceeds the old nuisance cut, the nuisance count can only fall,
-    # and the profiled rank can only rise.  The clamp below is retained as a
-    # cheap invariant rather than a live branch.
-    w_joint = _psd_spectrum(K, inv)
-    if w_joint.size == 0:
-        return 0.0
-    top = float(w_joint[-1])
-    if top <= 0.0:
-        return 0.0
-    cut = _rank_floor(w_joint.size) * top
-    w_nuisance = _psd_spectrum(M)
-    retained = np.count_nonzero(w_joint > cut) - np.count_nonzero(w_nuisance > cut)
-    return max(float(retained), 0.0)
 
 
 @dataclass(frozen=True)
@@ -706,194 +517,251 @@ class ScreenedPair:
 
 @dataclass(frozen=True)
 class _Pencil:
-    """Simultaneous diagonalization of ``(V_eff, S)`` with ``U_eff`` rotated in.
+    """The pair ``(V_eff, S)`` diagonalized once, with ``U_eff`` rotated in.
 
-    ``v`` and ``s`` are the two transformed diagonal terms, carried as two
-    fields so a rung costs no arithmetic beyond ``edf(lam) = sum v / (v + lam
-    s)`` and ``T(lam) = sum u^2 / (v + lam s)``.
+    ``v`` and ``s`` are the two transformed diagonal terms and ``u`` the
+    rotated score, so a rung costs no arithmetic beyond
+    ``edf(lam) = sum v / (v + lam s)`` and ``T(lam) = sum u^2 / (v + lam s)``.
 
-    ``s`` IS formed as ``(1 - v) / balance`` in :func:`_build_pencil`, and an
-    earlier revision of this docstring claimed the opposite -- that the two
-    were held independently so the subtraction could not lose ``s`` where
-    ``v`` rounds to 1.  The subtraction is real; what was measured is that it
-    does not cost anything here.  Reading ``s`` instead off the congruence
-    ``basis' S basis``, which takes no difference at all, agrees on every
-    direction where ``v`` rounds to 1 on ``moderate_pair`` and on
-    ``_thin_level_pair`` at 1.0 and 1e-4: 13, 5 and 10 such directions, whose
-    direct quotient is 1.8e-17 to 4.2e-17 relative to ``||S||_2`` against an
-    ``eigh`` error bar of ``k eps`` ~ 4.6e-14.  **All of them are genuinely in
-    ``null(S)``, none is fabricated by the cancellation**, so ``s = 0`` there
-    is the right answer arrived at by a suspect route.  Kept because it is
-    measured, not because it is safe by construction; the congruence form is
-    the drop-in replacement if a geometry ever contradicts this.
+    **NEITHER TERM IS DERIVED FROM THE OTHER, AND THAT IS NEW.**  They are the
+    squared cosines and sines of the CS decomposition of one orthonormal
+    factor, taken from two independent singular value decompositions -- so
+    ``v + s == 1`` holds by orthonormality of that factor rather than being
+    imposed, and there is no ``1 - v`` anywhere for a direction with ``v``
+    rounding to 1 to fall through.  The form this replaces returned
+    ``s = (1 - share) / balance`` and had to argue, from measurement, that the
+    subtraction happened to be harmless; SCALE DISCIPLINE rule 2's one
+    tolerated site is closed rather than re-argued.
+
+    ``v`` is ``c**2`` and ``s`` is ``s**2 / balance``, the balance being the
+    scaling that put the two blocks of the stack on one scale before they were
+    reduced together.  Undoing it is one division on a quantity that never
+    cancelled.
+
+    ``tr_v`` is ``tr(V_eff)`` of the block this pencil was built from, carried
+    out rather than recomputed by the caller.  It is the bracket's numerator
+    AND this pencil's own balance, and computing it twice is exactly how the
+    two came to disagree: the balance read :func:`_profiled_factor`'s block and
+    the bracket re-sliced ``joint``, which is a different matrix whenever the
+    overlap is rank deficient.  One field, one value, one place it is formed.
     """
 
     v: NDArray
     s: NDArray
     u: NDArray
+    tr_v: float
 
 
-def _solve_psd(A: NDArray, B: NDArray) -> NDArray:
-    """Solve A X = B for symmetric PSD A, falling back to a pseudo-inverse."""
-    try:
-        factor = scipy.linalg.cho_factor(A, check_finite=False)
-        return scipy.linalg.cho_solve(factor, B, check_finite=False)
-    except scipy.linalg.LinAlgError:
-        return np.linalg.pinv(A, hermitian=True) @ B
+def _empty_pencil(tr_v: float = 0.0) -> _Pencil:
+    return _Pencil(v=np.zeros(0), s=np.zeros(0), u=np.zeros(0), tr_v=float(tr_v))
 
 
-def _edge(
-    V: NDArray, S: NDArray | None, lam: float, joint: tuple | None = None
-) -> tuple[float, Callable[[NDArray], NDArray]]:
-    """Factor ``V + lam * S`` ONCE; return its edf and a solver against it.
+def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
+    """Diagonalize ``(V_eff, S)`` from the pair's FACTOR, never from its Gram.
 
-    The bracket and the clamped rungs ask the same two matrices for both an
-    edf and a statistic.  Answering each from its own factorization repeated
-    the expensive half three times over: the edf needs ``A^-1 V``, a solve
-    with k right-hand sides, which costs about 3x the factorization it rides
-    on -- measured at 58% of a wide pair's total time against 17% for the
-    factorizations themselves.  One factorization per edge, reused, removes
-    both duplicates.
+    This is the generalized singular value decomposition of the pair
+    ``(R_eff, rootS)``, computed the way the standard references construct it
+    -- a QR of the stack followed by the CS decomposition of the resulting
+    orthonormal factor.  Van Loan, *SIAM J. Numer. Anal.* 13(1):76-83 (1976)
+    for the GSVD itself; Stewart, *Numer. Math.* 40:297-306 (1983) and Van
+    Loan, *SIAM J. Numer. Anal.* 22(3):579-592 (1985) for computing it through
+    the CSD; Bai & Demmel, *SIAM J. Sci. Comput.* 14(6):1464-1486 (1993) for
+    the modern arrangement.  It is what the *LAPACK Users' Guide* (3rd ed.,
+    SIAM 1999, sec. 4.7) recommends over the generalized symmetric-definite
+    driver when the second matrix is ill conditioned, and what an earlier
+    revision of this module listed among its refused remedies as unreachable.
+    **That record was half
+    wrong**: ``dggsvd3``, ``dggsvp3`` and ``dtgsja`` really are absent from
+    ``scipy.linalg.lapack`` (re-verified at 1.18.0), but the construction needs
+    only a pivoted QR and one SVD per block, both of which are present.  The
+    DRIVER was missing, not the method.
 
-    ``S = None`` is the unpenalized block, where ``A`` IS ``V`` and the edf is
-    its RANK — so it is counted, not traced.  ``tr(A^-1 V)`` reports the rank
-    only when ``A^-1`` is a pseudo-inverse; where ``cho_factor`` succeeds it
-    reports ``k``, and a barely positive-definite block is exactly the one
-    ``cho_factor`` is entitled to accept, since such a block is mathematically
-    PD.  Whether it accepts is then decided by rounding alone: on 200
-    replicates of one 210-level ``numeric_cat`` layout with a single singleton
-    level — a level whose numeric margin is constant is exactly collinear with
-    the profiled-out span, so every replicate's block has rank 208 of 209 —
-    ``cho_factor`` succeeded on 76 and the reported edf came back 209 on those
-    and 208 on the other 124.  ``numpy.linalg.matrix_rank`` read 208 on all
-    200.  Through the public screen the same layout reported 209 on 3 of 12
-    seeds, moving ``z`` by +0.050; at 4 df of 5 the same flip moved it by
-    +0.29, since ``z`` divides by ``sqrt(2 * edf0)``.
-    :func:`_psd_rank` is the counter, at :func:`_rank_floor`: count
-    eigenvalues, respect their sign, at a cut this path can justify — a raw
-    profiled block on which only round-off is a scale.  This rank is THIS
-    path's alone.  The arrow kernel used to carry one too and no longer does:
-    :mod:`superglm.screening._structured` evaluates the same ``edf`` as a sum
-    of Tikhonov filter factors, which takes no rank decision at all.  Doing
-    the same here would mean simultaneously diagonalizing the dense pencil,
-    which is the cost this rung exists to avoid.
+    With ``[R_eff ; rootS] = Q Rg``, ``Q = [Q1 ; Q2]``, and ``Q1 = Uc C W'``,
+    ``Q2 = Us S W'`` sharing their right singular vectors,
 
-    The cut here was a fixed 1e-12 when this counting first landed, then a
-    fixed 1e-15; both were wrong and in opposite directions, which is why it
-    is now dimension-scaled.  ``_rank_floor`` carries the two measurements
-    that bound it.  What matters for THIS rung is the lower one: at a fixed
-    1e-15 the count could exceed ``matrix_rank`` on a profiled block whose
-    round-off dust ran into the tail, reporting a degree of freedom that does
-    not exist — the exact defect this counting exists to remove, reintroduced
-    from the other side.  At ``k * eps`` the count is ``matrix_rank``'s own
-    tolerance, so it cannot.
+        V_eff = Y C^2 Y' ,   S = Y S^2 Y' ,   Y = Rg' W ,
 
-    One difference from ``pinv`` is kept on purpose: it scores directions by
-    ``|lambda|``, so it counted a curvature of -1e-11 as a degree of freedom
-    and inverted it, where :func:`_psd_rank` reads the sign and drops it.  On a
-    block formed by subtraction small negative eigenvalues are ordinary —
-    -4.042e-15 measured on the worked freMTPL2 ``cat_cat`` block — and a
-    negative curvature is not a degree of freedom.
+    so with ``u = C Uc' z_t`` every rung is a sum of Tikhonov filter factors:
 
-    The count is NOT free: eigenvalues cost more than the k-right-hand-side
-    trace they replace, by 2.13x, 1.60x, 1.28x, 1.19x and 1.42x at k = 100,
-    209, 400, 800 and 1600 (single-threaded).  Against the whole pair it is
-    much less -- 1.056x end to end on the widest unpenalized pair the cubic
-    budget admits, see the calibration comment in
-    :mod:`superglm.model.screening_ops`.  This is a correctness price, paid on
-    ONE rung of the one ladder that has no bandwidth to scan.
+        edf(lam) = sum_j c_j^2 / (c_j^2 + lam s_j^2)
+        T(lam)   = sum_j u_j^2 / (c_j^2 + lam s_j^2) .
 
-    Only the edf moves.  The statistic is ``U_eff' A^-1 U_eff``, and ``U_eff``
-    is orthogonal to ``V_eff``'s null space by construction — a direction the
-    overlap absorbs carries no profiled score — so the Cholesky and
-    pseudo-inverse solves answer it the same: over the 76 affected replicates
-    above, ``|T_chol - T_pinv| / |T_pinv|`` had median 3.9e-16 and max 2.9e-15.
-    ``apply`` is deliberately NOT rank-limited to match.  The count sits a
-    little above ``pinv``'s own cut, so on the fallback branch a direction
-    between them is inverted by the solve without being counted here — which
-    is the conservative side of that gap: the edf never claims a degree of
-    freedom the data does not carry, and ``U_eff`` has no mass there to
-    contribute anyway (measured above at 2.9e-15 relative, worst case).  On
-    the Cholesky branch the solve makes no rank decision at all, which is
-    exactly why the edf is counted separately here.
+    Every term of the first is in ``[0, 1]`` by construction, no term of
+    either is a difference, and both are exact where ``Y`` is rank deficient:
+    ``Y`` has full column rank after the truncation below, so ``Y^+ Y = I``
+    and the pseudo-inverse of the operator collapses out of both traces.  ONE
+    decomposition serves an entire ladder, which is what makes a rung O(k).
+
+    **BALANCE BEFORE STACKING, FOR ACCURACY RATHER THAN FOR REPRESENTABILITY.**
+    The form this replaces had to balance because it FORMED ``V + S`` and lost
+    the smaller term outright when the two lived on far-apart scales -- ``V = 1e20 I`` against ``S = I`` rounds to ``V``, every share comes
+    back 1, and the ladder reports the full dimension at every lambda.  Stacking
+    adds nothing, so that failure is gone by construction and the balance is no
+    longer load-bearing for it.  It is kept for a different and smaller reason:
+    the SVD of each block is accurate to ``eps`` ABSOLUTELY, so a block whose
+    norm is ``1e-10`` of the other has its singular values resolved to six
+    figures rather than sixteen.  Scaling ``rootS`` by ``sqrt(tr(V_eff) /
+    tr(S))`` puts both blocks at O(1) and the division that undoes it is one
+    rounding on a quantity nothing cancelled.
+
+    ``penalty_root = None`` is the unpenalized block: the stack is ``R_eff``
+    alone, every ``s_j`` is exactly zero and every surviving ``c_j`` gives a
+    filter factor of exactly 1, so ``edf`` comes back as the retained RANK and
+    ``T`` as the squared norm of ``z_t``'s projection onto the directions the
+    design actually resolves.  It is the same estimator as every other rung
+    rather than a second one beside it, which is why there is no separate
+    counting routine here any more.
     """
-    A = V if S is None else V + lam * S
-    try:
-        factor = scipy.linalg.cho_factor(A, check_finite=False)
-        apply = partial(scipy.linalg.cho_solve, factor, check_finite=False)
-    except scipy.linalg.LinAlgError:
-        apply = np.linalg.pinv(A, hermitian=True).__matmul__
-    if S is None:
-        return _profiled_rank(V, joint), apply
-    return float(np.trace(apply(V))), apply
+    R_eff, z_t = _profiled_factor(pair)
+    # ``tr(V_eff)`` ONCE, off the block this pencil is about to score.  It
+    # leaves on ``_Pencil.tr_v`` because the ladder's bracket needs the same
+    # number, and taking it there from the factor's own slice is what put the
+    # bracket 18.06% below the block on a rank-deficient overlap.
+    tr_v = _pair_scale(R_eff)
+    k = int(pair.tensor_width)
+    balance = 1.0
+    if penalty_root is None or penalty_root.size == 0:
+        root = np.zeros((0, k), dtype=np.float64)
+    else:
+        root = np.asarray(penalty_root, dtype=np.float64)
+        tr_s = float(np.sum(root**2))
+        if tr_v > 0.0 and tr_s > 0.0:
+            balance = tr_v / tr_s
+        root = np.sqrt(balance) * root
+    if k == 0:
+        return _empty_pencil(tr_v)
 
+    stack = np.concatenate((R_eff, root), axis=0)
+    orthonormal, triangular, _pivot = scipy.linalg.qr(
+        stack, mode="economic", pivoting=True, check_finite=False
+    )
+    diagonal = np.abs(np.diag(triangular))
+    if diagonal.size == 0 or float(diagonal[0]) <= np.finfo(np.float64).tiny:
+        return _empty_pencil(tr_v)
+    # TWO DIFFERENT QUESTIONS, AND THEY GET TWO DIFFERENT REFERENCES.
+    #
+    # With a penalty, the cut asks what neither operand resolves: a direction
+    # the STACK does not resolve carries neither curvature nor penalty, so it
+    # contributes zero to both sums and discarding it is exact.  No rank
+    # decision beyond that is taken on a penalized rung: a direction with
+    # little curvature and real penalty gets a filter factor near zero and
+    # contributes what it should, so there is nothing here for a threshold to
+    # arbitrate.
+    #
+    # **ITS REFERENCE IS THE FIRST PIVOT, WHICH IS THE STACK'S LARGEST COLUMN
+    # NORM AND NOT ITS LARGEST SINGULAR VALUE.**  This comment used to say
+    # "the stack's own largest direction", which reads as ``sigma_1`` and is
+    # the scale ``_factor_rank_floor`` states its policy in; the code has
+    # always referenced ``diagonal[0]``, and the two are different numbers.
+    # Column-pivoted QR puts the column of greatest norm first (Businger and
+    # Golub, *Numer. Math.* 7:269-276, 1965), so ``|R_00| = max_j ||a_j||_2``
+    # exactly -- measured to 3.9e-16 over 200 random stacks -- and since
+    # ``||A||_2 <= ||A||_F <= sqrt(k) max_j ||a_j||_2``,
+    #
+    #     sigma_1 / sqrt(k)  <=  |R_00|  <=  sigma_1 ,
+    #
+    # both edges tight: no violation in 400 draws, and the LEFT edge attained
+    # to four figures on k near-parallel unit-norm columns (ratio 2.000, 4.000,
+    # 8.000, 16.000 at k = 4, 16, 64, 256).  So this reference UNDER-scales the
+    # floor by up to sqrt(k) against the policy as written, and retains
+    # directions a ``sigma_1`` reference would drop.
+    #
+    # **IT IS KEPT BECAUSE THE DIRECTIONS IT RETAINS ARE REAL, AND THAT IS
+    # MEASURED AGAINST AN ORACLE THAT TAKES NO CUT AT ALL.**  Referencing the
+    # leading pivot is what LAPACK's own rank determination does -- ``xGELSY``
+    # takes the effective rank as the order of the largest leading block of the
+    # pivoted ``R`` whose condition estimate beats ``1/RCOND``, relative to
+    # that block rather than to a spectral norm -- and the RRQR bounds relating
+    # ``|R_jj|`` to ``sigma_j`` carry dimension-dependent constants of the same
+    # shape (Chan, *Linear Algebra Appl.* 88/89:67-82, 1987; Hong and Pan,
+    # *Math. Comp.* 58:213-232, 1992), so a sqrt(k) factor sits inside the
+    # criterion's own error bar rather than outside it.
+    #
+    # Swept over the thirteen adversarial pairs the screening suites build, the
+    # realized slack ``sigma_1 / |R_00|`` runs 1.151 to 1.824 against sqrt(k)
+    # of 2.83 to 14.46, and the two references choose the SAME rank on twelve
+    # of the thirteen.  On the thirteenth -- ``_multi_null_pair(0)``, k = 20 --
+    # they differ by one direction, and against an augmented-QR evaluation of
+    # ``edf`` that applies no threshold anywhere this reference is 6.25e-07 out
+    # at the low edge where a ``sigma_1`` one is 9.95e-01 out, having discarded
+    # a direction carrying 0.995 of a degree of freedom.  Same verdict on the
+    # geometry the sqrt(k) bound is TIGHT on, which is the adversarial case for
+    # this choice rather than an easy one: at 32 and 64 near-parallel unit
+    # columns this reference is 8.2e-04 and 4.4e-04 from that oracle and a
+    # ``sigma_1`` one is 9.9e-01 both times.
+    #
+    # The under-scaling is not a leak, it is the point of issue #257: on
+    # ``_multi_null_pair`` the contested direction sits at 2.78e-08 of the
+    # stack's spectrum, which is 7.7e-16 of the GRAM's and therefore gone.  A
+    # floor conservative enough for a squared spectrum is too blunt for a
+    # factor.  Pinned both ways -- synthetically on the near-parallel geometry
+    # in ``tests/test_pair_design_factor.py``, and on the pipeline-built pair
+    # in ``tests/test_structured_screening.py``; both tests grep as
+    # ``rank_cut`` and both assert the pivot rank against the ``sigma_1`` rank
+    # explicitly, so moving this reference goes red rather than quiet.
+    #
+    # Without one, the cut IS the answer -- ``edf`` is ``rank(V_eff)`` -- and
+    # the stack is ``R_eff`` alone, whose own top is round-off on exactly the
+    # blocks that matter.  :func:`_profiled_rank_scale` supplies the joint
+    # design's scale instead, which is where nothing has been residualized
+    # away.
+    cut = (
+        _factor_rank_floor(k) * float(diagonal[0])
+        if root.size
+        else _factor_rank_floor(k + int(pair.overlap_width)) * _profiled_rank_scale(pair)
+    )
+    rank = int(np.count_nonzero(diagonal > cut))
+    if rank == 0:
+        return _empty_pencil(tr_v)
 
-def _build_pencil(V: NDArray, S: NDArray, U: NDArray) -> _Pencil:
-    """Diagonalize ``(V, S)`` simultaneously and rotate ``U`` into that basis.
-
-    Prefers the generalized symmetric-definite driver, which does the whole
-    reduction in one pass; falls back to explicit whitening when ``G`` is
-    singular, i.e. when the two share a null space.  That common null space
-    contributes to neither sum, so discarding it is exact.
-
-    The whitening cut is relative to ``G``'s own largest eigenvalue, with
-    only a floor against a matrix that is genuinely zero.  An absolute floor
-    would make the statistic depend on the units the curvature is carried in:
-    with an absolute 1.0, ``V = 1e-13 diag(1, 2, 0)`` against
-    ``S = 1e-13 diag(2, 1, 0)`` classified every identifiable direction as
-    null and returned ``statistic 0, edf0 0`` where the identically scaled
-    problem at a relative cut returned ``2/3`` and ``1``.
-
-    Relative is necessary but not sufficient: the cut must also sit at
-    ROUND-OFF, because what it is entitled to discard is the common null
-    space and nothing else.  At 1e-12 it discarded identifiable modes whose
-    only fault was being small beside another direction -- see
-    :func:`_rank_floor`, which records the case that forced it.  ``G`` is a
-    SUM of two PSD terms, so nothing cancels in forming it and its round-off
-    floor really is ``eps`` times its own largest eigenvalue; that is why the
-    same floor serves here and on the profiled block in :func:`_edge`, where
-    the arithmetic is a difference but was measured not to cancel.
-
-    A mode surviving the cut is whitened by ``1 / sqrt(w)``, so a floor this
-    low does amplify a direction it keeps.  That is the right trade: keeping
-    a noise direction costs at most one spurious degree of freedom in ``edf``,
-    where dropping a real one zeroes the statistic outright.
-    """
-    # BALANCE before summing.  ``G = V + S`` is formed in floating point, so
-    # if the two terms live on far-apart scales the smaller is simply lost:
-    # with ``V = 1e20 I`` and ``S = I``, ``V + S`` rounds to ``V`` exactly,
-    # every share comes back 1, and the ladder reports the full dimension as
-    # its edf at every lambda -- the answer then depends on the units the
-    # curvature is carried in, or on a frequency-weight scale, which is the
-    # same defect a relative whitening cut was introduced to remove.
-    # Scaling S to V's trace makes the sum lossless; the scaling is undone
-    # exactly below, so nothing depends on the balance point itself.
-    tr_v = abs(float(np.trace(V)))
-    tr_s = abs(float(np.trace(S)))
-    balance = tr_v / tr_s if tr_v > 0.0 and tr_s > 0.0 else 1.0
-    Sb = balance * S
-    G = 0.5 * (V + Sb + (V + Sb).T)
-    try:
-        share, basis = scipy.linalg.eigh(V, G, check_finite=False)
-    except (scipy.linalg.LinAlgError, np.linalg.LinAlgError):
-        w, Q = np.linalg.eigh(G)
-        top = float(w.max()) if w.size else 0.0
-        keep = w > _rank_floor(w.size) * max(top, np.finfo(np.float64).tiny)
-        if not np.any(keep):
-            return _Pencil(v=np.zeros(0), s=np.zeros(0), u=np.zeros(0))
-        whiten = Q[:, keep] / np.sqrt(w[keep])
-        Vt = whiten.T @ V @ whiten
-        share, R = np.linalg.eigh(0.5 * (Vt + Vt.T))
-        basis = whiten @ R
-    # In the balanced G-metric the two shares sum to one by construction, and
-    # ``s`` IS the subtraction -- the comment here used to claim the opposite,
-    # three lines above the line that does it.  What keeps the smaller term
-    # representable is the BALANCE above, not this parameterisation: on one
-    # scale, ``1 - share`` cancels only where the penalty share is genuinely
-    # zero.  Measured in :class:`_Pencil`; the congruence ``basis' S basis``
-    # is the drop-in replacement if a geometry ever contradicts it.
-    share = np.clip(share, 0.0, 1.0)
-    return _Pencil(v=share, s=(1.0 - share) / balance, u=basis.T @ U)
+    top = orthonormal[: R_eff.shape[0], :rank]
+    bottom = orthonormal[R_eff.shape[0] :, :rank]
+    # THE COMMON BASIS COMES FROM THE PENALTY BLOCK, AND WHICH BLOCK IT COMES
+    # FROM IS THE WHOLE OF THE CONSTRUCTION'S ACCURACY.
+    #
+    # ``Q'Q = I`` gives ``c_j**2 + s_j**2 = 1`` for any orthonormal basis ``W``
+    # of the ``rank``-dimensional row space, so ONE decomposition settles both
+    # terms: take ``W`` from one block and read the other off ``|| . W ||``.
+    # There is no cancellation either way -- what differs is WHICH clusters are
+    # ambiguous, and only one of the two choices is safe.
+    #
+    # A singular value decomposition determines its singular vectors only up to
+    # a rotation inside a cluster of equal singular values.  Here ``s`` decides
+    # the filter factor outright -- ``f = (1 - s**2) / (1 - s**2 + lam s**2)``
+    # is a function of ``s`` alone -- so directions with near-equal ``s`` have
+    # near-equal ``f``, and a rotation among them leaves both ``sum f`` and
+    # ``sum proj * f`` invariant.  A cluster in ``c`` carries no such promise:
+    # near ``c = 1``, ``s = sqrt(1 - c**2)`` is exactly the quantity float64
+    # cannot recover, so directions whose ``c`` are bit-identical can have
+    # ``s`` an order apart and ``f`` with them.
+    #
+    # Measured on ``moderate_pair``'s high edge against the stacked-QR arbiter,
+    # where 23 directions come back with ``c**2`` rounding to exactly 1.0 while
+    # their ``s**2`` spread from 1.4e-16 to 2.1e-15: taking ``W`` from ``Q1``
+    # puts the statistic 3.89e-06 out and this puts it 5.4e-13 out, with
+    # ``edf`` 1.96e-12 either way.  An independent ``svd`` of each block was
+    # tried first and is worse still (5.47e-06), because it does not even pair
+    # the two consistently.  Stewart, *Numer. Math.* 40:297-306 (1983) and Van
+    # Loan, *SIAM J. Numer. Anal.* 22(3):579-592 (1985) construct the CS
+    # decomposition from one block and transform the other for the same reason.
+    if bottom.size:
+        # ``full_matrices`` only where the penalty root is SHORTER than the
+        # pencil: there ``Q2`` has a genuine null space and its basis has to be
+        # completed, and the singular values it cannot carry are the exact
+        # zeros that belong at the end of a descending list.
+        _, values, basis = np.linalg.svd(bottom, full_matrices=bottom.shape[0] < rank)
+        sines = np.concatenate((values, np.zeros(rank - values.size)))[:rank]
+        carried = top @ basis.T
+    else:
+        sines = np.zeros(rank, dtype=np.float64)
+        carried = top
+    cosines = np.linalg.norm(carried, axis=0)
+    return _Pencil(
+        v=np.clip(cosines**2, 0.0, 1.0),
+        s=np.clip(sines**2, 0.0, 1.0) / balance,
+        u=carried.T @ z_t,
+        tr_v=tr_v,
+    )
 
 
 def _pencil_edf(p: _Pencil, lam: float) -> float:
@@ -938,14 +806,10 @@ def _lambda_for_edf(p: _Pencil, edf0: float, scale: float) -> float:
 
 
 def penalized_score_statistic_ladder(
-    U: NDArray,
-    V: NDArray,
-    C: NDArray | None = None,
-    M: NDArray | None = None,
-    S_ti: NDArray | None = None,
+    pair: PairFactor,
+    penalty_root: NDArray | None,
     *,
     budgets: tuple[float, ...] = (4.0,),
-    U_nuisance: NDArray | None = None,
 ) -> list[ScreenedPair]:
     """Score one pair at every budget in ``budgets``, sharing one decomposition.
 
@@ -954,110 +818,99 @@ def penalized_score_statistic_ladder(
     ``lambda`` nor ``edf0`` — so an entire ladder costs one decomposition
     instead of one per rung, each of which previously also paid for its own
     bisection.
+
+    **BOTH ARGUMENTS ARE FACTORS, AND BOTH ARE REQUIRED.**  ``pair`` is the
+    pair's whole weighted joint design reduced to one triangular factor by
+    :mod:`superglm.screening._pair_factor`; ``penalty_root`` is a factor of the
+    tensor penalty, ``rootS' rootS = S_ti``, from
+    :func:`superglm.screening._overlap.tensor_penalty_root`, or ``None`` for an
+    unpenalized block.  Neither is the ``(k, k)`` Gram the moment route passed,
+    and that is the whole of issue #257: a Gram's spectrum is its factor's
+    SQUARED, so a direction the answer depends on can sit five orders past what
+    float64 resolves in one and comfortably inside it in the other.  The
+    penalty is a factor for the same reason and it is not a cosmetic
+    symmetry -- rooting the ASSEMBLED ``kron(S_a, I)`` rather than the margin
+    it is built from costs six orders at the ladder's high edge, measured in
+    :func:`superglm.screening._overlap.tensor_penalty_root`.  A caller still
+    holding the five moment matrices gets a ``TypeError`` here rather than a
+    plausible answer.  ROOTING IS STILL ONE POLICY,
+    :func:`superglm.screening._factor_kernels._penalty_root`'s, applied to the
+    same margin penalties the structured path applies it to; issue #323 is what
+    happened when there were two.
+
+    **ONE ESTIMATOR ANSWERS EVERY RUNG.**  A budget outside the bracket clamps
+    to the nearest edge and a budget inside it bisects, but both then read the
+    same pencil, so two rungs landing on one ``lambda`` report one ``edf`` and
+    one ``statistic`` -- bit-for-bit, since the closed forms are deterministic
+    in ``lambda``.  The form this replaces answered a clamped rung from a
+    factorization of ``V_eff + lambda S`` and a searching rung from a
+    diagonalization of the same pencil, and the two could differ by whole
+    degrees of freedom at one lambda.  Pinned in
+    ``test_the_dense_ladder_reports_one_edf_per_lambda``.
     """
-    U = np.asarray(U, dtype=np.float64)
-    V = np.asarray(V, dtype=np.float64)
-    V = 0.5 * (V + V.T)
+    root = None if penalty_root is None else np.asarray(penalty_root, dtype=np.float64)
+    if root is None or root.size == 0:
+        # No penalty to scan: every rung is the block's own achieved RANK, at
+        # ``lambda0 = 0``.  The pencil answers it like any other rung -- with
+        # an empty penalty root every filter factor is exactly 1, so the sum
+        # IS the retained rank of the factor.  An all-zero penalty reaches here
+        # as an EMPTY root rather than as a zero matrix, which is the same
+        # predicate ``not np.any(S_ti)`` used to make and one fewer scan of a
+        # ``(k, k)`` block.
+        p = _pair_pencil(pair, None)
+        stat, rank = _pencil_stat(p, 0.0), _pencil_edf(p, 0.0)
+        return [ScreenedPair(statistic=stat, edf0=rank, lambda0=0.0) for _ in budgets]
 
-    if (C is None) != (M is None):
-        raise ValueError("C and M profile the overlap together; supply both or neither")
-    # The JOINT moment matrix, kept so the unpenalized rank can be counted
-    # where nothing has cancelled; see _profiled_rank.  None when nothing was
-    # profiled out, where V is not a difference and its own scale is already
-    # the right reference.
-    joint = None
-    if C is not None:
-        C = np.asarray(C, dtype=np.float64)
-        M = np.asarray(M, dtype=np.float64)
-        joint = (V, C, M)
-        MinvC = _solve_psd(M, C)
-        V = V - C.T @ MinvC
-        V = 0.5 * (V + V.T)
-        if U_nuisance is not None:
-            U = U - MinvC.T @ np.asarray(U_nuisance, dtype=np.float64)
-
-    if S_ti is None or not np.any(S_ti):
-        # No penalty to scan: ONE factorization of the block answers the
-        # statistic, and the achieved rank is COUNTED beside it rather than
-        # read off that factorization -- see _edge on why the trace cannot
-        # answer it.
-        rank, apply = _edge(V, None, 0.0, joint)
-        T = float(U @ apply(U))
-        return [ScreenedPair(statistic=T, edf0=rank, lambda0=0.0) for _ in budgets]
-
-    S = np.asarray(S_ti, dtype=np.float64)
-    S = 0.5 * (S + S.T)
-    scale = max(float(np.trace(V)), 1e-300) / max(float(np.trace(S)), 1e-300)
+    # ``tr(S)`` off the factor: ``||rootS||_F**2``, which is the trace of the
+    # penalty it roots and never assembles it.  The structured ladder's bracket
+    # is ``tr(V_eff) / (tr(S_a) * L)`` over the same 1e+-10 edges, and the two
+    # are pinned equal so a pair both paths can score gets one ``lambda0``.
+    #
+    # THE NUMERATOR COMES OFF THE PENCIL, WHICH IS WHY THE PENCIL IS BUILT
+    # FIRST.  ``tr(V_eff)`` is the mass of the block the pencil scored, and
+    # this line used to re-slice the factor for it instead -- the same number
+    # only while the overlap has full rank, and 18.06% low on the
+    # ``OrderedCategorical`` geometry where it is not.  See
+    # :func:`superglm.screening._pair_factor._pair_scale`.
+    p = _pair_pencil(pair, root)
+    scale = max(p.tr_v, 1e-300) / max(float(np.sum(root**2)), 1e-300)
     lo, hi = 1e-10 * scale, 1e10 * scale
-
-    # Bracket first, with two ordinary solves shared by every rung.  A budget
-    # outside the bracket clamps to an edge and needs no search at all, and for
-    # the wide-factor spline_cat that clamps at EVERY rung this is the whole
-    # computation -- decomposing there would be strictly more expensive than
-    # the solves it replaces.  The pencil is built only if some rung genuinely
-    # has to search, and then it serves all of them.
-    (edf_lo, apply_lo), (edf_hi, apply_hi) = _edge(V, S, lo), _edge(V, S, hi)
-    needs_search = any(edf_hi < float(b) < edf_lo for b in budgets)
-    pencil = _build_pencil(V, S, U) if needs_search else None
+    edf_lo, edf_hi = _pencil_edf(p, lo), _pencil_edf(p, hi)
 
     out: list[ScreenedPair] = []
-    edges = {lo: (edf_lo, apply_lo), hi: (edf_hi, apply_hi)}
-    edge_cache: dict[float, tuple[float, float]] = {}
     for budget in budgets:
         edf0 = float(budget)
         if edf_hi < edf0 < edf_lo:
-            # Genuine search: the closed forms answer it in O(k).
-            lam = _lambda_for_edf(pencil, edf0, scale)
-            out.append(
-                ScreenedPair(
-                    statistic=_pencil_stat(pencil, lam),
-                    edf0=_pencil_edf(pencil, lam),
-                    lambda0=float(lam),
-                )
+            lam = _lambda_for_edf(p, edf0, scale)
+        else:
+            lam = lo if edf0 >= edf_lo else hi
+        out.append(
+            ScreenedPair(
+                statistic=_pencil_stat(p, lam),
+                edf0=_pencil_edf(p, lam),
+                lambda0=float(lam),
             )
-            continue
-        # Clamped: answer it the direct way even when a pencil exists for some
-        # other rung, so a clamped rung stays bit-identical to what it always
-        # reported.  Both edges were already factored to bracket the ladder,
-        # so a clamped rung adds one k-vector solve and nothing else.
-        lam = lo if edf0 >= edf_lo else hi
-        if lam not in edge_cache:
-            achieved, apply = edges[lam]
-            edge_cache[lam] = (float(U @ apply(U)), achieved)
-        stat, achieved = edge_cache[lam]
-        out.append(ScreenedPair(statistic=stat, edf0=achieved, lambda0=float(lam)))
+        )
     return out
 
 
 def penalized_score_statistic(
-    U: NDArray,
-    V: NDArray,
-    C: NDArray | None = None,
-    M: NDArray | None = None,
-    S_ti: NDArray | None = None,
+    pair: PairFactor,
+    penalty_root: NDArray | None,
     *,
     edf0: float = 4.0,
-    U_nuisance: NDArray | None = None,
 ) -> ScreenedPair:
     """Rank one candidate pair by its penalized efficient-score statistic.
 
-    ``C`` (overlap x tensor cross-moments) and ``M`` (overlap curvature)
-    profile out the span the mains model already explains; ``U_nuisance`` is
-    the overlap block's own score (zero at an exactly stationary fit, the
-    penalty gradient ``S_M beta`` otherwise).  With ``S_ti`` absent or zero
-    the statistic reduces to the unpenalized ``U' V^{-1} U`` and ``lambda0``
-    is reported as 0.
+    ``pair`` carries the overlap span the mains model already explains as the
+    leading block of its own factor, so the profiling that used to need ``C``,
+    ``M`` and the overlap's own score is a slice of a triangular matrix here
+    rather than a difference of two Grams.  With ``penalty_root`` absent or
+    empty the statistic reduces to the unpenalized ``U_eff' V_eff^+ U_eff`` and
+    ``lambda0`` is reported as 0.
 
     Scoring a ladder of budgets? Use
     :func:`penalized_score_statistic_ladder`, which shares one decomposition
     across every rung instead of rebuilding it per call.
     """
-    return penalized_score_statistic_ladder(
-        U,
-        V,
-        C,
-        M,
-        S_ti,
-        budgets=(float(edf0),),
-        U_nuisance=U_nuisance,
-    )[0]
+    return penalized_score_statistic_ladder(pair, penalty_root, budgets=(float(edf0),))[0]

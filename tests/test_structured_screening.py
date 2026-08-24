@@ -23,13 +23,11 @@ from superglm import SuperGLM
 from superglm.features import Categorical, Spline
 from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._arrow import factor_arrow
-from superglm.screening._overlap import pair_overlap_moments
+from superglm.screening._factor_kernels import _factor_rank_floor, _rank_floor
+from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
+from superglm.screening._pair_factor import _pair_scale, _profiled_factor
 from superglm.screening._pair_moments import pair_score_curvature
-from superglm.screening._score_stat import (
-    _rank_floor,
-    _solve_psd,
-    penalized_score_statistic_ladder,
-)
+from superglm.screening._score_stat import _pair_pencil, penalized_score_statistic_ladder
 from superglm.screening._structured import (
     _evaluate,
     _penalty_root,
@@ -38,6 +36,24 @@ from superglm.screening._structured import (
 )
 
 BUDGETS = (2.0, 4.0, 8.0, 16.0)
+
+
+def _solve_psd(A, B):
+    """Solve ``A X = B`` for symmetric PSD ``A``, falling back to a pseudo-inverse.
+
+    THE MOMENT ROUTE'S OWN SOLVE, KEPT HERE AS AN ARBITER.  It used to live in
+    :mod:`superglm.screening._score_stat`, which formed ``V_eff`` as
+    ``V - C' M^-1 C``.  Since issue #257 that module reads a design factor and
+    inverts nothing, so nothing in production needs this -- but the tests that
+    grade the factor route against the moments do, and they need the SAME
+    fallback the moment route had, or the geometries where ``M`` is
+    numerically singular would be compared against a different quantity.
+    """
+    try:
+        factorization = scipy.linalg.cho_factor(A, check_finite=False)
+        return scipy.linalg.cho_solve(factorization, B, check_finite=False)
+    except scipy.linalg.LinAlgError:
+        return np.linalg.pinv(A, hermitian=True) @ B
 
 
 def _single_rung(p, budget=2.0):
@@ -163,15 +179,36 @@ def test_arrow_inverts_a_singular_system_as_a_pseudo_inverse():
     assert np.array_equal(f.Ginv[2], np.zeros((g, g)))
 
 
+def _dense_ladder(factor, penalty, **kw):
+    """The dense ladder, called the way production calls it since issue #257.
+
+    One name for the new contract, so a signature change is one edit here and
+    not forty in the bodies below.
+    """
+    return penalized_score_statistic_ladder(factor, penalty, **kw)
+
+
 def _capture(df, y, features, cand, sample_weight=None, **kw):
+    """Run the public screen on one pair and keep what the dense route saw.
+
+    ``grab["factor"]`` is the ``(PairFactor, penalty)`` the ladder is now
+    handed.  ``grab["args"]`` is the five-moment tuple it USED to be handed,
+    rebuilt here from the same menus and cell tables by the producers
+    themselves -- :func:`pair_score_curvature` and
+    :func:`pair_overlap_moments`, which are no longer on the production path
+    and are kept as this file's arbiter.  Consumers below grade the factor
+    route against those moments, so the rebuild has to go through the
+    producers rather than through anything the factor route computes.
+    """
     model = SuperGLM(family="gaussian", features=features)
     model.fit_reml(df, y, sample_weight=sample_weight)
     if sample_weight is not None:
         kw["sample_weight"] = sample_weight
     grab = {}
-    real_curv, real_cells, real_ladder = (
-        ops.pair_score_curvature,
+    real_factor, real_cells, real_root, real_ladder = (
+        ops.pair_design_factor,
         ops.pair_cell_moments,
+        ops.tensor_penalty_root,
         ops.penalized_score_statistic_ladder,
     )
 
@@ -179,23 +216,37 @@ def _capture(df, y, features, cand, sample_weight=None, **kw):
         grab["cells"] = real_cells(*a, **k)
         return grab["cells"]
 
-    def spy_curv(B_a, B_b, S_cell, W_cell):
+    def spy_factor(B_a, B_b, S_cell, W_cell):
         grab["menus"] = (B_a, B_b)
-        return real_curv(B_a, B_b, S_cell, W_cell)
+        return real_factor(B_a, B_b, S_cell, W_cell)
 
-    def spy_ladder(U, V, C, M, S_ti, **k):
-        grab["args"] = (U, V, C, M, S_ti, k.get("U_nuisance"))
-        return real_ladder(U, V, C, M, S_ti, **k)
+    def spy_root(S1, S2):
+        grab["margin_penalties"] = (S1, S2)
+        return real_root(S1, S2)
+
+    def spy_ladder(factor, penalty_root, **k):
+        grab["factor"] = (factor, penalty_root)
+        return real_ladder(factor, penalty_root, **k)
 
     ops.pair_cell_moments = spy_cells
-    ops.pair_score_curvature = spy_curv
+    ops.pair_design_factor = spy_factor
+    ops.tensor_penalty_root = spy_root
     ops.penalized_score_statistic_ladder = spy_ladder
     try:
         model.screen_interactions(df, y, candidates=[cand], edf0=BUDGETS, **kw)
     finally:
         ops.pair_cell_moments = real_cells
-        ops.pair_score_curvature = real_curv
+        ops.pair_design_factor = real_factor
+        ops.tensor_penalty_root = real_root
         ops.penalized_score_statistic_ladder = real_ladder
+    if "menus" in grab and "cells" in grab and "factor" in grab:
+        B_a, B_b = grab["menus"]
+        S_cell, W_cell = grab["cells"]
+        U, V = pair_score_curvature(B_a, B_b, S_cell, W_cell)
+        M, C, u_m = pair_overlap_moments(B_a, B_b, S_cell, W_cell)
+        margins = grab.get("margin_penalties")
+        S_ti = None if margins is None else tensor_penalty(*margins)
+        grab["args"] = (U, V, C, M, S_ti, u_m)
     return grab
 
 
@@ -544,14 +595,20 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     """
     from superglm.screening._structured import structured_ladder
 
-    U, V, C, M, S_ti, u_m = moderate_pair["args"]
-    dense = penalized_score_statistic_ladder(U, V, C, M, S_ti, budgets=BUDGETS, U_nuisance=u_m)
+    factor, penalty_root = moderate_pair["factor"]
+    dense = _dense_ladder(factor, penalty_root, budgets=BUDGETS)
     struct = structured_ladder(
         spline_cat_moments(*_structured_inputs(moderate_pair)), budgets=BUDGETS
     )
     assert struct is not None and len(struct) == len(BUDGETS)
     for d, s in zip(dense, struct, strict=True):
-        assert s.edf0 == pytest.approx(d.edf0, rel=1e-5)
+        # RE-DERIVED FOR ISSUE #257, ON THE SWEEP THAT SET THE NUMBER IT
+        # REPLACES.  ``rel=1e-5`` was two moment-space errors agreeing; the
+        # two arms' ``edf`` at this rung differ by 5.49e-13 to 3.01e-12
+        # relative over 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread
+        # settings.  ``1e-9`` is 332x the worst of the fourteen and four
+        # orders inside what the separate accuracy bounds below imply.
+        assert s.edf0 == pytest.approx(d.edf0, rel=1e-9)
         assert s.lambda0 == pytest.approx(d.lambda0, rel=1e-12)
 
     # THE STATISTIC IS HELD AGAINST THE ARBITER, NOT AGAINST THE OTHER PATH,
@@ -577,7 +634,25 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     for d, s in zip(dense, struct, strict=True):
         arbiter = _wood_stacked_statistic(pair, geometry, s.lambda0)
         assert s.statistic == pytest.approx(arbiter, rel=1e-9), (s.statistic, arbiter)
-        assert abs(d.statistic - arbiter) / abs(arbiter) < 2.2e-5, (d.statistic, arbiter)
+        # THE DENSE ARM AT THE STRUCTURED ARM'S OWN BOUND, WHICH IS THE
+        # EVIDENCE RATHER THAN A TIDY-UP.  ``2.2e-5`` was ``eps * kappa`` for a
+        # moment-space read of a pencil whose condition number is ~1e11 here,
+        # and it was pinning the dense path's own error.  Since issue #257 the
+        # dense arm's distance from the arbiter is 1.91e-12 to 2.09e-11 over
+        # the same 14 configurations -- so it is held to ``1e-9``, the number
+        # the structured arm already carries three lines up, with 48x on the
+        # worst of the fourteen.
+        #
+        # WHAT MOVED IT IS THE PENCIL, NOT THE READ OFF A FACTOR, and saying
+        # so is the point of the sentence.  Rebuilding ``pair_design_factor``
+        # through the moment route while keeping ``_pair_pencil`` leaves this
+        # fixture's dense statistic at 3.998e-13 against the shipped 3.451e-13
+        # -- both far inside ``1e-9`` -- where master's whole route reads
+        # 1.116e-05.  The Gram-to-factor half is pinned at the LOW edge
+        # instead, by the two ``_thin_level_pair`` bounds below at ``abs=1e-9``
+        # and by ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_
+        # freedom``; those three go red under exactly that mutation.
+        assert abs(d.statistic - arbiter) / abs(arbiter) < 1e-9, (d.statistic, arbiter)
 
 
 def test_issue_204_reachable_half_df_uses_the_profiled_trace():
@@ -1647,7 +1722,7 @@ def test_profiled_trace_uses_chunked_linear_geometry_without_svd(monkeypatch):
         return real_centered(B, W)
 
     def watched_scipy_qr(*args, **kwargs):
-        pivoted_qr_calls.append(bool(kwargs.get("pivoting", False)))
+        pivoted_qr_calls.append((bool(kwargs.get("pivoting", False)), kwargs.get("mode", "full")))
         return real_scipy_qr(*args, **kwargs)
 
     def watched_numpy_qr(a, *args, **kwargs):
@@ -1684,7 +1759,16 @@ def test_profiled_trace_uses_chunked_linear_geometry_without_svd(monkeypatch):
     assert (n_levels + 1, k_a, k_a) in allocations
     assert max(chunk_widths) <= st._trace_chunk_width(n_rows, k_a, n_levels)
     assert sum(chunk_widths) == 2 * n_levels
-    assert pivoted_qr_calls == [True]
+    # ONE column-pivoted QR, and nothing else this watcher sees may pivot.
+    # The watcher intercepts ``scipy.linalg.qr`` wholesale, and since
+    # ``_combine_row_factors`` began handing LAPACK a Fortran-ordered stack to
+    # destroy it reaches ``dgeqrf`` through scipy too -- so the per-level merge
+    # reductions land here at ``mode="r"`` where they used to land in
+    # ``numpy_qr_calls``.  Counting every scipy QR as a CPQR dispatch would be
+    # counting the reduction; both halves are asserted separately so the pin is
+    # on the dispatch rather than on which library the merge happens to use.
+    assert [call for call in pivoted_qr_calls if call[0]] == [(True, "economic")]
+    assert {call for call in pivoted_qr_calls if not call[0]} == {(False, "r")}
     aligned_qr = [shape for shape, mode in numpy_qr_calls if mode == "reduced"]
     assert aligned_qr == [(2 * k_a, k_a)] * level_rows.size
     # One combined aligned RHS solve per emitted level.  The old
@@ -1822,16 +1906,37 @@ def test_a_factor_above_the_dense_cap_is_scored_rather_than_refused():
 
 def test_the_wide_path_never_allocates_the_dense_blocks(monkeypatch):
     """A pair routed structurally must not touch either thing the dense gates
-    refused it for: the ``(L, L-1)`` contrast menu, or the ``(k, k)``
-    curvature the ladder would factorize."""
+    refused it for: the ``(L, L-1)`` contrast menu, or the ``(k, k)``-wide
+    reduction the ladder would factorize.
+
+    **RE-KEYED FOR ISSUE #257, AND THE RE-KEYING IS THE POINT.**  The spy used
+    to watch ``pair_score_curvature``, which was the dense path's allocator
+    until this branch and is now nothing's -- so leaving it there would have
+    left a green test watching a function the production route no longer
+    calls, which is the vacuous-pass failure this repo has recorded three
+    times.
+
+    Two measurements, because an earlier revision of this paragraph claimed a
+    third that is not performable.  It said the retired key "passes under a
+    mutation that sends this pair down the dense track"; it does not pass, it
+    ERRORS -- this branch removed the import, so ``screening_ops`` has no
+    ``pair_score_curvature`` attribute and ``monkeypatch.setattr`` raises
+    ``AttributeError`` without ``raising=False``.  The re-key is forced rather
+    than preferred.  What IS shown, and is the load-bearing half: the spies as
+    keyed here fire when this pair really does go dense.  At the default
+    ``max_cells`` the calls list is empty and ``z`` is finite; raising
+    ``max_cells`` to 5e8 sends the same 400-level pair down the dense track and
+    all three fire -- ``['menu', 'factor', 'dense_ladder']`` -- with ``z``
+    coming back NaN because the spies return stubs.
+    """
     calls = []
     monkeypatch.setattr(
         ops, "_contrast_menu", lambda spec: calls.append("menu") or np.zeros((1, 1))
     )
     monkeypatch.setattr(
         ops,
-        "pair_score_curvature",
-        lambda *a, **k: calls.append("curvature") or (np.zeros(1), np.zeros((1, 1))),
+        "pair_design_factor",
+        lambda *a, **k: calls.append("factor") or None,
     )
     monkeypatch.setattr(
         ops,
@@ -2870,9 +2975,12 @@ _EDGE_BUDGETS = (1.0, 2.0, 4.0, 8.0, 400.0)
 # Measured on this fixture at 1, 4 and 8 threads with all six pools set
 # together: every lambda here is BIT-IDENTICAL at all three (relative move
 # 0.00e+00), as is every edf both arms return.  The two arms' lambdas -- a
-# dense factorization against an arrow one, computed by different routes --
-# agree to 1.41e-16 at the low edge and 2.21e-16 at the high edge, so the
-# ``rel=1e-12`` below carries ~4500x.  Both are also bit-identical over 40
+# design factor against an arrow one, computed by different routes -- agreed to
+# 1.41e-16 at the low edge and 2.21e-16 at the high edge before issue #257 and
+# to 3.0e-16 .. 4.5e-16 after, so the ``rel=1e-12`` below carries ~2000x.  What
+# moved is that the dense numerator is now ``||R_eff||_F^2`` off its own design
+# factor, which is BIT-IDENTICAL to the structured arm's ``profiled_trace`` on
+# all three weights.  Both are also bit-identical over 40
 # exact relabelings of the level coordinates, so pinning them is not pinning
 # an arrangement.  And ``edf`` moves at most ``|d edf / d ln lambda| ~ 4.1``
 # per unit of ``ln lambda`` over this bracket, so even a full 1e-12 of lambda
@@ -2961,6 +3069,17 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
       3.965e-11 / 3.336e-08 / 1.288e-07 and dense 1.366e-10 / 2.404e-09 /
       3.226e-09 across the three weights.
 
+    **AND THE ARM BOUND IS NOW THE ORACLE'S OWN RULER RATHER THAN ``1e-5``.**
+    ``1e-5`` was placed when the dense arm read moments and was 1.37e-10 from
+    the certified value; since issue #257 it reads the pair's design factor and
+    both arms sit 0.0 to 1.14e-13 from this oracle over the same 14
+    configurations, against a ``ruler`` of 2.22e-06.  A fixture-blind constant
+    beside a derived bound that is four orders tighter would only be looser, so
+    the ruler is what the arms are held to.  It is DERIVED -- dimensions, unit
+    roundoff, the augmented system's conditioning -- which is the property
+    ``1e-5`` never had, and it is gated two lines above so an uncertified
+    oracle cannot self-grant it.
+
     THE LAMBDA PINS CARRY ``abs=0.0`` AND THAT IS WHAT MAKES THEM PINS.  Moving
     the ladder's low bracket edge by a RELATIVE 1e-11 -- far too small for any
     edf assertion in this file to see, since ``|d edf / d ln lambda| ~ 4.1``
@@ -3031,11 +3150,16 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
       1.693e-05 / 2.911e-05 / 4.089e-05.  The structured arm at
       ``low_weight = 0.001`` exceeds its own ``p eps rho`` by 1.7x, which is
       the factorization depth the first-order estimate does not carry.
-    * OBSERVED, over the 14-configuration sweep: structured
+    * OBSERVED, over the 14-configuration sweep, BEFORE issue #257: structured
       1.230e-06..1.166e-04 / 4.176e-06..3.959e-04 / **3.187e-05..3.013e-03**,
       dense 4.482e-07..5.838e-05 / 4.782e-06..1.282e-04 /
-      4.089e-05..1.365e-03.  Both arms are worst on NEHALEM at every weight,
-      and the dense arm's 1.365e-03 is still 7.3x inside its ``1e-2``.
+      4.089e-05..1.365e-03.  Both arms were worst on NEHALEM at every weight.
+    * RE-MEASURED AFTER IT, over the same fourteen: the two arms are now the
+      SAME reading to 1.3e-12..5.1e-10, at 1.230e-06..1.166e-04 /
+      4.176e-06..3.959e-04 / **3.187e-05..3.013e-03**.  The dense arm moved
+      onto the structured arm's figure rather than the other way round,
+      because both now root the same margin penalties; 3.013e-03 is 3.3x
+      inside the ``1e-2`` both carry.
 
     PARITY, RE-SET HERE AND SPLIT BY EDGE.  Its previous ``3e-3`` was red at
     master alongside the accuracy bound above, at 4.379e-03 over the same
@@ -3050,19 +3174,36 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
     implied 150x over, and a shared bound wide enough for the high edge would
     have taken that to 400x.  So:
 
-    * LOW EDGE, ``abs=1e-6``: 20x inside what the two oracle bounds imply, so it
-      still refuses pairs they admit, and 75x above the worst of the fourteen
-      readings (1.365e-10..1.148e-08 / 2.405e-09..7.391e-09 /
-      6.688e-11..1.341e-08).
-    * HIGH EDGE, ``abs=1e-2``: 2.3x the worst reading, the same number both
-      accuracy bounds there now carry, so the triangle permits 2e-2 and this
-      refuses at half of it.
+    * LOW EDGE, ``abs=1e-9``, RE-SET FOR ISSUE #257.  ``1e-6`` was 75x above a
+      worst of 1.341e-08 when the dense arm read moments.  Over the same 14
+      configurations the two arms now differ by 2.842e-14..2.987e-12 across all
+      three weights, so ``1e-9`` is 335x the worst of the fourteen and still
+      2e+04x inside what the two oracle pins imply.  Shown to bite against the
+      route it replaces: the moment route's own distance from the structured
+      arm at this edge is 1.37e-10, 2.40e-09 and 3.22e-09, which ``1e-9``
+      refuses at two of the three weights.
+    * HIGH EDGE, ``abs=1e-6``, ALSO RE-SET, AND PARITY IS NOW THE SHARPER
+      STATEMENT RATHER THAN THE SLACKER ONE.  ``1e-2`` was 2.3x a worst reading
+      of 4.379e-03.  Since issue #257 both arms root the same margin penalties
+      through the same ``_penalty_root`` and evaluate the same filter-factor
+      sum, and ``|s - d|`` runs 1.265e-12..5.088e-10 over the fourteen --
+      seven orders in.  ``1e-6`` is 1965x the worst of them and refuses the
+      9.84e-05, 2.48e-04 and 2.15e-03 the moment route stood at.
+    * The ACCURACY bounds at the high edge stay at ``abs=1e-2`` and their
+      justification changes: what they now carry is not either arm's own
+      arithmetic but the PENALTY ROOT both take, whose distance from the exact
+      residue is 3.013e-03 at ``0.001`` on NEHALEM.  ``S_a``'s smallest
+      eigenvalue reads 1.4476e-15 against an ``eigh`` bar of 3.7592e-14, so it
+      is 26x inside what the eigensolver resolves and no float64 factorization
+      of ``S_a`` recovers it.
 
     The claim it replaces was that parity "is now carried by the dense arm
-    alone", the structured value being bit-stable.  That holds on the thread
-    axis and does not hold on the kernel axis: over the sweep the structured
-    arm moves 3.37e-03 at ``0.001`` against the dense arm's 1.32e-03, so at
-    this rung parity is carried mostly by the STRUCTURED arm.
+    alone", the structured value being bit-stable.  That held on the thread
+    axis and not on the kernel axis: over the sweep the structured arm moved
+    3.37e-03 at ``0.001`` against the dense arm's 1.32e-03.  **BOTH HALVES ARE
+    NOW MOOT AT THE HIGH EDGE**: the two arms move TOGETHER there, by the same
+    3.013e-03 on the same kernel, because what moves is the penalty root they
+    share.  Parity no longer sees the kernel axis at all.
 
     **WHAT THIS FIXTURE SAYS ABOUT THE FILTER-FACTOR FORM, INCLUDING AGAINST
     IT.**  Against the same certified constants, the rank-differencing form
@@ -3095,10 +3236,7 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
 
     grab = _thin_level_pair(low_weight)
     factors = _reference_factors(grab)
-    U, V, C, M, S_ti, u_m = grab["args"]
-    dense = penalized_score_statistic_ladder(
-        U, V, C, M, S_ti, budgets=_EDGE_BUDGETS, U_nuisance=u_m
-    )
+    dense = _dense_ladder(*grab["factor"], budgets=_EDGE_BUDGETS)
     struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=_EDGE_BUDGETS)
     assert struct is not None and len(struct) == len(_EDGE_BUDGETS)
     lam_lo, edf_lo, lam_hi, edf_hi = _CERTIFIED_EDGES[low_weight]
@@ -3176,7 +3314,17 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
                 reference, ruler = _reference_edf_and_bound(factors, arm.lambda0)
                 assert ruler < 1e-5, (name, budget, low_weight, arm.lambda0, ruler)
                 assert reference == pytest.approx(edf_lo, abs=ruler), ("oracle", name, reference)
-                assert arm.edf0 == pytest.approx(reference, abs=1e-5), (name, budget, arm.edf0)
+                # THE ARM IS HELD TO THE ORACLE'S OWN BOUND, NOT TO A
+                # CONSTANT.  ``abs=1e-5`` was placed when the dense arm read
+                # moments; since issue #257 both arms sit 0.0 to 1.14e-13 from
+                # this oracle over 7 ``OPENBLAS_CORETYPE`` microkernels x 2
+                # thread settings, against a ``ruler`` of 2.22e-06 -- so the
+                # ruler is now the binding statement and a fixture-blind
+                # constant beside it would only be looser.  It is DERIVED
+                # (dimensions, unit roundoff, the augmented system's
+                # conditioning) rather than observed, which is the property
+                # ``1e-5`` never had, and it is already gated above.
+                assert arm.edf0 == pytest.approx(reference, abs=ruler), (name, budget, arm.edf0)
             # PARITY GETS THE LOW EDGE'S OWN BOUND.  This assertion used to sit
             # below the branch and fire at both edges on ONE number, which gave
             # it no content here: both arms are pinned to the oracle at ``1e-5``
@@ -3206,7 +3354,14 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             # ``_CERTIFIED_EDGES`` pins this pair to seed 3, so the bound is
             # right for the fixture the suite runs and is not a claim about the
             # generator.
-            assert s.edf0 == pytest.approx(d.edf0, abs=1e-6), ("parity lo", budget)
+            # RE-DERIVED ON THE SAME 14 CONFIGURATIONS.  ``|s - d|`` at this
+            # edge now runs 2.84e-14 to 2.99e-12 across 7 microkernels x 2
+            # thread settings and all three weights, where ``1e-6`` was 75x
+            # above a worst of 1.34e-08.  ``1e-9`` is 335x the new worst and
+            # still 2e+04x inside the ``2e-5`` the two oracle pins imply, so it
+            # keeps the property the old number had -- refusing pairs the
+            # oracle bounds would admit -- three orders tighter.
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-9), ("parity lo", budget)
             saw_low_edge = True
         else:
             # HIGH edge.  No float64 oracle survives here (``_reference_edf``
@@ -3277,7 +3432,20 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
             # accuracy bounds either side now carry -- so the triangle
             # inequality permits 2e-2 and this still refuses at half of it,
             # rather than being implied by them.
-            assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity hi", budget)
+            # PARITY SEPARATES FROM ACCURACY HERE, AND THE MEASUREMENT IS WHY.
+            # Both arms are held to the certified constant at ``abs=1e-2``
+            # above, and that number stays: what it carries is the PENALTY
+            # ROOT's distance from the exact residue, 3.01e-03 at ``0.001`` on
+            # NEHALEM, which is a shared limit neither arm can narrow.  What
+            # the two arms no longer differ by is anything of that size: since
+            # issue #257 they root the same margin penalties and evaluate the
+            # same filter-factor sum, and ``|s - d|`` runs 1.26e-12 to 5.09e-10
+            # over the same 7 microkernels x 2 thread settings, where it ran
+            # 8.845e-05 to 4.379e-03 before.  ``1e-6`` is 1965x the worst of
+            # the fourteen and four orders tighter than the accuracy bound
+            # beside it, so parity is now the sharper of the two statements
+            # rather than the slacker.
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-6), ("parity hi", budget)
             saw_high_edge = True
         assert s.statistic == pytest.approx(d.statistic, rel=1e-3)
     assert saw_low_edge, "a rung must clamp at the LOW edge or this proves nothing"
@@ -3591,10 +3759,7 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
     from superglm.screening._structured import structured_ladder
 
     grab = _vanishing_mass_pair(low_weight)
-    U, V, C, M, S_ti, u_m = grab["args"]
-    dense = penalized_score_statistic_ladder(
-        U, V, C, M, S_ti, budgets=_VANISHING_BUDGETS, U_nuisance=u_m
-    )
+    dense = _dense_ladder(*grab["factor"], budgets=_VANISHING_BUDGETS)
     struct = structured_ladder(
         spline_cat_moments(*_structured_inputs(grab)), budgets=_VANISHING_BUDGETS
     )
@@ -3632,13 +3797,27 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
                 f"{left_free!r} directions the maximum penalty leaves free, with "
                 f"three levels holding {low_weight:g} of the weight"
             )
+            # THE DENSE ARM KEEPS ``1e-2`` AND IS NOW IMPLIED BY THE LINE
+            # ABOVE PLUS PARITY.  Since issue #257 it reads the pair's design
+            # factor and roots the same margin penalty the structured arm
+            # does, so what its distance from ``left_free`` carries is the
+            # penalty root both share rather than its own arithmetic.
             assert d.edf0 == pytest.approx(left_free, abs=1e-2), (
                 "dense",
                 budget,
                 d.edf0,
                 left_free,
             )
-            assert s.edf0 == pytest.approx(d.edf0, abs=1e-2), ("parity", budget, s.edf0, d.edf0)
+            # PARITY, RE-SET FOR ISSUE #257 ON A 14-CONFIGURATION SWEEP.  The
+            # docstring above records a worst reading of 2.908e-03 for this
+            # check when the dense arm read moments, which is what ``1e-2`` was
+            # 3.4x above.  Over 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread
+            # settings the two arms now differ by 1.885e-12..4.631e-11 at
+            # ``low_weight = 1e-10`` and 2.114e-12..3.337e-11 at 1e-12 -- eight
+            # orders in, because both arms evaluate the same filter-factor sum
+            # over the same rooted penalty.  ``1e-6`` is 2.2e+04x the worst of
+            # the fourteen and refuses the 2.908e-03 the moment route stood at.
+            assert s.edf0 == pytest.approx(d.edf0, abs=1e-6), ("parity", budget, s.edf0, d.edf0)
         else:  # the LOW edge
             # **NO ORACLE ARBITRATES THIS RUNG, AND THAT IS A MEASUREMENT
             # RATHER THAN AN OMISSION.**  This edge used to assert each arm
@@ -4096,8 +4275,7 @@ def test_an_unpenalized_spline_margin_is_scored_at_one_rung_not_refused():
 
     grab = _thin_level_pair(1.0)
     B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
-    U, V, C, M, _, u_m = grab["args"]
-    dense = penalized_score_statistic_ladder(U, V, C, M, None, budgets=BUDGETS, U_nuisance=u_m)
+    dense = _dense_ladder(grab["factor"][0], None, budgets=BUDGETS)
     for penalty in (None, np.zeros_like(S_a)):
         struct = structured_ladder(
             spline_cat_moments(B_a, penalty, S_cell, W_cell, level_rows), budgets=BUDGETS
@@ -4252,6 +4430,184 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
     assert all(0.0 <= r.edf0 <= L * k_a and np.isfinite(r.statistic) for r in rungs), rungs
 
 
+def _bracket_probing_budgets(factor, penalty):
+    """Budgets that make the dense ladder answer at each edge from both sides.
+
+    The edges are learned from the ladder itself -- a budget above every
+    reachable ``edf`` clamps low, one below every reachable ``edf`` clamps high
+    -- and then approached from inside on a log grid.  A budget just inside an
+    edge is the one a searching rung resolves TO that edge, so it is where a
+    ladder carrying two estimators reports two answers for one ``lambda``.
+    Nothing here reaches into the kernel: the grid is a property of the
+    published bracket, so it survives the estimator being replaced.
+    """
+    ends = _dense_ladder(factor, penalty, budgets=(1e12, 0.0))
+    edf_lo, edf_hi = float(ends[0].edf0), float(ends[1].edf0)
+    offsets = 10.0 ** np.arange(-9.0, 0.0)
+    return tuple(
+        sorted(
+            {edf_lo, edf_hi}
+            | {float(edf_hi * (1.0 + t)) for t in offsets}
+            | {float(edf_lo * (1.0 - t)) for t in offsets}
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: _thin_level_pair(1.0),
+        lambda: _thin_level_pair(0.001),
+        lambda: _vanishing_mass_pair(1e-12),
+        lambda: _vanishing_mass_pair(1e-10),
+        _starved_bs_pair,
+    ],
+    ids=["thin-1.0", "thin-0.001", "vanishing-1e-12", "vanishing-1e-10", "starved-bs"],
+)
+def test_the_dense_ladder_reports_one_edf_per_lambda(build):
+    """One ``lambda``, one answer.  Structural, so it carries no tolerance.
+
+    The ladder used to answer a clamped rung from a factorization of
+    ``V_eff + lambda S`` and a searching rung from a simultaneous
+    diagonalization of the same pencil, so two rungs landing on one
+    ``lambda`` could publish two different degrees of freedom for it.  On the
+    Gram route, measured at this file's own fixtures with the grid above:
+
+        _vanishing_mass_pair(1e-12)   16.000004 against 16.999987  (1.000 df)
+        _vanishing_mass_pair(1e-10)   16.000555 against 17.000221  (1.000 df)
+        _starved_bs_pair()             0.999999 against  3.999986  (3.000 df)
+        _starved_bs_pair()            14.605916 against 22.799934  (8.194 df)
+
+    ``_thin_level_pair`` at 1.0 and 0.001 does NOT reproduce it, which is why
+    the parametrization carries five geometries rather than one: the defect is
+    a property of how far apart the two estimators land on a pair, and on an
+    easy pair they agree to well past what any published field shows.
+
+    There is one estimator now, and a rung's ``lambda`` decides its answer
+    completely -- so the comparison is EXACT equality rather than a rounding,
+    and this test has no constant in it to be wrong on another machine.
+    Issue #257; the same invariant #281 files as a strict xfail on one pair.
+    """
+    grab = build()
+    factor, penalty = grab["factor"]
+    budgets = _bracket_probing_budgets(factor, penalty)
+    rungs = _dense_ladder(factor, penalty, budgets=budgets)
+
+    answers: dict[float, set[tuple[float, float]]] = {}
+    for rung in rungs:
+        answers.setdefault(rung.lambda0, set()).add((rung.statistic, rung.edf0))
+    disagreeing = {lam: sorted(values) for lam, values in answers.items() if len(values) > 1}
+    assert disagreeing == {}, disagreeing
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: _thin_level_pair(1.0),
+        lambda: _thin_level_pair(0.01),
+        lambda: _thin_level_pair(0.001),
+        lambda: _thin_level_pair(1e-12),
+        lambda: _vanishing_mass_pair(1e-10),
+        lambda: _vanishing_mass_pair(1e-12),
+        _starved_bs_pair,
+    ],
+    ids=[
+        "thin-1.0",
+        "thin-0.01",
+        "thin-0.001",
+        "thin-1e-12",
+        "vanishing-1e-10",
+        "vanishing-1e-12",
+        "starved-bs",
+    ],
+)
+def test_the_pencil_carries_its_own_orthonormality_invariant(build):
+    """``c**2 + s**2 == 1``, which is DERIVABLE rather than fitted.
+
+    The dense pencil's two terms are the squared cosines and sines of the CS
+    decomposition of one orthonormal factor, so their sum is 1 by orthonormality
+    -- and this is the site SCALE DISCIPLINE rule 2 used to tolerate.  The form
+    it replaces returned ``s = (1 - share) / balance`` and had to argue from
+    measurement that the subtraction happened to be harmless; there is nothing
+    left to argue, and this asserts it instead.
+
+    THE BAR IS THE MODULE'S OWN ROUND-OFF FLOOR, NOT AN OBSERVED HEADROOM.
+    Departure from orthonormality of a Householder-accumulated factor is
+    bounded by a modest polynomial in the dimensions times ``eps`` (Higham,
+    *Accuracy and Stability of Numerical Algorithms*, 2nd ed., Thm 19.4; the
+    *LAPACK Users' Guide*'s own bound), and ``k * eps`` is this module's
+    stand-in for that polynomial -- it is exactly what :func:`_rank_floor`
+    uses.  The factor of 4 is a stated allowance on that stand-in and not a
+    number read off a run: over this bank at one thread and at eight, the worst
+    reading is 2.109e-14 against a ``k * eps`` of 4.641e-14, i.e. 0.45 of the
+    bar itself and 4.4x inside what is asserted.
+
+    Two threads settings are not a population.  What makes the bound usable is
+    that it is derived rather than sampled: a machine on which it failed would
+    be a machine whose QR was not backward stable.
+    """
+    from superglm.screening._score_stat import _pair_pencil
+
+    factor, root = build()["factor"]
+    pencil = _pair_pencil(factor, root)
+    assert pencil.v.size, "the pencil must resolve something or this proves nothing"
+    # ``tr(V_eff)`` off the pencil rather than re-derived here.  Re-deriving it
+    # was how the module's own two readings came to differ on a rank-deficient
+    # overlap, and a test that repeats the derivation cannot see that.
+    balance = pencil.tr_v / float(np.sum(np.asarray(root) ** 2))
+    residual = float(np.max(np.abs(pencil.v + pencil.s * balance - 1.0)))
+    bar = 4.0 * pencil.v.size * np.finfo(np.float64).eps
+    assert residual < bar, (residual, bar, pencil.v.size)
+
+
+def test_the_dense_high_edge_statistic_matches_the_stacked_qr_arbiter(moderate_pair):
+    """The dense arm at the rung where the two routes used to part.
+
+    ``test_structured_ladder_agrees_with_the_dense_ladder`` grades the
+    structured arm against ``_wood_stacked_statistic`` at ``rel=1e-9`` and the
+    dense arm at ``2.2e-5``, and says why: the dense half read the pair's
+    moments, so its own accuracy at this rung was ``eps * kappa`` with a
+    condition number of ~1e11.  This asserts the dense arm at the bound the
+    structured arm already meets.
+
+    RED on master's route, measured here: the dense statistic sits 1.116e-05
+    relative from the arbiter and ``edf0`` reads 23.000031 against 22.999931.
+
+    **WHICH HALF OF THE CHANGE THOSE FIVE ORDERS COME FROM, BECAUSE IT IS NOT
+    THE HALF THE ISSUE IS NAMED AFTER.**  Master's route is two changes at
+    once -- moments instead of a factor, and ``_edge``/``_build_pencil``
+    instead of ``_pair_pencil``.  Separating them by mutation, this fixture's
+    dense statistic against the same arbiter::
+
+        master's whole route                       1.116e-05
+        Gram construction, the NEW pencil          3.998e-13
+        shipped (design factor + the new pencil)   3.451e-13
+
+    So on ``moderate_pair`` the five orders are the PENCIL's, and this test
+    stays green under a reversion of the Gram-to-factor move: the two
+    constructions differ here by 1.6x on a quantity already at 1e-13.  That is
+    not a hole in the branch -- rebuilding ``pair_design_factor`` through the
+    moment route reds three tests over the six screening files (262 pass), and
+    they are the ones written for the LOW edge, where the information the Gram
+    lost is the whole answer:
+    ``test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom`` at 0.01
+    and 0.001, and
+    ``test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom`` at
+    1e-12.  It is a statement about what THIS test is evidence for, which is
+    the pencil.
+    """
+    factor, penalty = moderate_pair["factor"]
+    dense = _dense_ladder(factor, penalty, budgets=BUDGETS)
+    pair = spline_cat_moments(*_structured_inputs(moderate_pair))
+    geometry = _profile(pair)
+    for rung in dense:
+        arbiter = _wood_stacked_statistic(pair, geometry, rung.lambda0)
+        assert rung.statistic == pytest.approx(arbiter, rel=1e-9), (rung.statistic, arbiter)
+        assert rung.edf0 == pytest.approx(
+            _wood_stacked_edf(pair, geometry, rung.lambda0), rel=1e-9
+        ), (rung.edf0, rung.lambda0)
+
+
 # The measured cross-machine spread of the ``lambda = 0`` rung on a near-rank
 # pair, 0.379 df (see the test below), rounded up to the next half degree of
 # freedom.  It is a slack on a bound that holds EXACTLY in exact arithmetic,
@@ -4290,10 +4646,21 @@ def test_the_zero_penalty_rung_on_a_near_rank_pair(build, observed):
     integer here would restore a LARGER disagreement, not a smaller one.
 
     Rank is not well defined on these geometries in float64 and the three
-    available counters say so: on ``band-1e-3-L6`` the dense path counts 9,
+    available counters said so: on ``band-1e-3-L6`` the dense path counted 9,
     ``numpy.linalg.matrix_rank`` on the residualized design counts 10, and the
     old arrow form counted 6.  That spread is the reason this module stopped
     counting.
+
+    **THE DENSE COUNTER MOVED UNDER THIS COMPARISON AND THE FIGURES ABOVE WERE
+    TAKEN AGAINST ITS PREVIOUS FORM.**  Issue #257 put that count on the
+    profiled FACTOR, referenced to the joint design's own scale, where it was
+    Guttman additivity on two Grams; re-measured on ``band-1e-3-L6`` it now
+    reads **10**, which is what ``matrix_rank`` on the residualized design
+    reads.  So the three-counter spread narrows to 10 / 10 / 6 and the dense
+    counter is no longer one of the two that disagree.  The df gaps in the
+    paragraph above are NOT re-derived, because the form they compare against
+    -- the old arrow integer -- no longer exists to be re-run; they are left
+    as the record of why this module stopped counting, which is unchanged.
 
     **NOTHING HERE PINS A VALUE, AND THE REASON IS A MEASUREMENT.**  A first
     revision of this test pinned the structured rung to the numbers above at
@@ -4856,21 +5223,38 @@ def _separation(magnitudes, cut):
 def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight, unresolved_dirs):
     """COUNT the directions the arithmetic cannot resolve; never divide to get there.
 
-    This asserts the REGIME, not a value.  Four separate remedies for the dense
-    path's high-edge disagreement have been measured and refused -- porting the
-    arrow path's cut, answering every rung from the pencil, forcing the
-    whitening branch, and the GSVD the LAPACK Users' Guide recommends (absent
-    from SciPy).  They failed for one reason, and it is the reason pinned here:
-    on the starved pair a direction the answer depends on lies below the noise
-    floor of the operator it is read from, so each remedy reads a different
-    rounding of information that is not there.  Asserting an ``edf`` for such a
-    pair would assert this module's threshold and not the data -- an
-    independent stacked-QR evaluation gives 19.000 at a rank cut of 1e-14 and
-    18.275 at 1e-12 -- and each of those is a PLATEAU, three decades wide and
-    six decades wide respectively.  That is the argument, not its absence: a
-    single wide plateau would certify a cut, whereas plateaus separated by
-    0.725 df say the answer is a property of which one the cut lands on, and
-    nothing in the data chooses.
+    This asserts the REGIME, not a value: on the starved pair a direction the
+    answer depends on lies below the noise floor of the GRAM it is read from,
+    so no arrangement of the arithmetic downstream can put it back.  That is
+    what issue #257 acted on, and it is measured here directly rather than
+    through any consequence of it.
+
+    **THE ARGUMENT THIS DOCSTRING USED TO MAKE IS RETIRED, AND WHAT REPLACED IT
+    IS A STRONGER RESULT RATHER THAN A WEAKER ONE.**  It reasoned from a
+    rank-cut sweep of an independent stacked-QR evaluation -- 19.000 at 1e-14
+    and 18.275 at 1e-12, "plateaus separated by 0.725 df" -- to the conclusion
+    that nothing in the data chooses a cut, so no ``edf`` may be asserted for
+    such a pair.  That sweep measured the MOMENT construction, which this
+    branch does not reproduce, and
+    :mod:`superglm.screening._score_stat` deletes it rather than carrying it:
+    re-taken over ``1e-18 .. 1e-6`` it gives ONE value, 17.99991, thirteen
+    decades wide, on the Gram column and the factor column alike.  So the
+    reason this test asserts a COUNT is no longer "nothing chooses the cut".
+    It is that the count is the property the change was made for, and that a
+    count against ``eps`` times a norm is bit-stable where the ratio the first
+    version of this test used is not.
+
+    **AND THE FOUR "MEASURED AND REFUSED" REMEDIES ARE NOT ALL REFUSALS NOW.**
+    The list was: porting the arrow path's cut, answering every rung from the
+    pencil, forcing the whitening branch, and the GSVD the *LAPACK Users'
+    Guide* recommends.  Two of them SHIPPED --
+    ``penalized_score_statistic_ladder`` answers every rung from one pencil,
+    and that pencil IS the GSVD, built from a pivoted QR and one SVD because
+    only the ``dggsvd3`` DRIVER was missing from SciPy and not the method.  A
+    third names a construction that no longer exists: ``G = V + S`` is never
+    formed, so there is no whitening branch to force.  What survives is the
+    regime below, which is why the remedies failed and not a property of any
+    of them.
 
     **The count is the assertion because a CONDITION NUMBER here is not
     measurable.**  The first version of this test divided ``V_eff``'s largest
@@ -4916,8 +5300,9 @@ def test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic(low_weight,
     whole point: it is the geometry both paths score, so it is where the two
     can be compared at all.  Moving the test would mean exporting the fixture.
 
-    See the module docstring of :mod:`superglm.screening._score_stat` for the
-    measurements and the four refusals.
+    :mod:`superglm.screening._score_stat`'s module docstring carries what the
+    move off Grams bought, against oracles that predate it, and the rank-cut
+    sweep that replaced the plateau table above.
     """
     U, V, C, M, S_ti, u_m = _thin_level_pair(low_weight)["args"]
     V = np.asarray(V, dtype=float)
@@ -5267,3 +5652,56 @@ def test_the_cut_margin_survives_an_exactly_absorbed_border_under_raising_errsta
 
     assert rungs is not None and len(rungs) == 1
     assert np.isfinite([rungs[0].statistic, rungs[0].edf0, rungs[0].lambda0]).all()
+
+
+def _rank_free_edf(R_eff, root, lam):
+    """``edf(lambda)`` with NO rank cut anywhere, as the arbiter.
+
+    ``edf = tr(R (R'R + lam S)^-1 R')`` evaluated as ``||Q_R||_F**2`` for the
+    orthonormal factor of ``[R ; sqrt(lam) rootS]`` -- the augmented-system
+    form :func:`_reference_edf` derives, with no threshold applied, so it
+    cannot inherit whatever rank decision the routine under test took.
+    """
+    stacked = np.concatenate((R_eff, np.sqrt(lam) * root), axis=0)
+    Q, _ = np.linalg.qr(stacked, mode="reduced")
+    return float(np.sum(Q[: R_eff.shape[0]] ** 2))
+
+
+def test_the_dense_rank_cut_keeps_the_direction_a_spectral_reference_would_drop():
+    """``_multi_null_pair`` is where the pivot and ``sigma_1`` references part.
+
+    :func:`superglm.screening._score_stat._pair_pencil` cuts the penalized
+    stack's pivoted-QR diagonal relative to ``diagonal[0]``, which is the
+    largest COLUMN NORM rather than the largest singular value; the two differ
+    by up to ``sqrt(k)``.  Across this file's adversarial bank they choose the
+    same rank everywhere but here, where the pivot reference keeps a 20th
+    direction that a ``sigma_1`` reference drops -- and the direction is real.
+
+    Graded against an augmented-QR oracle that takes no rank cut at all, at the
+    low edge where the disagreement is largest: what the ladder publishes is
+    within 1e-5 of the oracle, and the value a ``sigma_1`` reference would
+    publish instead is a whole degree of freedom away from it.  Two decisive
+    orders separate those, so nothing here rests on a tolerance.  This is the
+    real-pipeline instance of the synthetic pin in
+    ``tests/test_pair_design_factor.py``.
+    """
+    grab = _multi_null_pair(0)
+    pair, root = grab["factor"]
+    R_eff, _z = _profiled_factor(pair)
+    balanced = np.sqrt(_pair_scale(R_eff) / float(np.sum(np.asarray(root) ** 2))) * root
+    stack = np.concatenate((R_eff, balanced), axis=0)
+    _q, triangular, _p = scipy.linalg.qr(stack, mode="economic", pivoting=True, check_finite=False)
+    diagonal = np.abs(np.diag(triangular))
+    sigma = scipy.linalg.svdvals(triangular)
+    k = int(pair.tensor_width)
+    floor = _factor_rank_floor(k)
+
+    kept = int(np.count_nonzero(diagonal > floor * diagonal[0]))
+    dropped = int(np.count_nonzero(diagonal > floor * sigma[0]))
+    assert (kept, dropped) == (k, k - 1), "this fixture no longer separates the references"
+    assert len(_pair_pencil(pair, root).v) == kept
+
+    rung = penalized_score_statistic_ladder(pair, root, budgets=(16.0,))[0]
+    oracle = _rank_free_edf(R_eff, balanced, float(rung.lambda0))
+    assert abs(rung.edf0 - oracle) < 1e-5
+    assert abs((rung.edf0 - 1.0) - oracle) > 0.5

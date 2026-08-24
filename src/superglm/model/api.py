@@ -845,11 +845,15 @@ class SuperGLM:
         ``screen_bins`` support points per margin and flagged
         ``approx=True``; pairs within budget are always computed exactly.
         ``max_cells`` bounds allocation AND time: the probe block's dimension
-        ``k`` enters every rung as a ``(k, k)`` factorization or
-        pseudo-inverse — routinely the pseudo-inverse, since one empty
-        ``cat_cat`` cell or one singleton level makes a probe column
-        collinear with the overlap span — so per-pair time grows as ``k^3``
-        where the allocations grow as ``k^2``.  A cubic-work gate caps ``k``
+        ``k`` enters every rung as a ``(k, k)`` decomposition — a pivoted QR
+        of the pair's design factor with one SVD beside it — so per-pair time
+        grows as ``k^3`` where the allocations grow as ``k^2``.  A probe
+        column collinear with the overlap span is routine rather than
+        exceptional (one empty ``cat_cat`` cell or one singleton level does
+        it) and is settled by a rank cut on that factor; the Cholesky that
+        used to run here, and the pseudo-inverse it used to fall back to,
+        went with the assembled Grams in issue #257, which changed neither
+        the cost class nor any ceiling below.  A cubic-work gate caps ``k``
         at the FLOOR of ``(1000 * max_cells)^(1/3)`` for an unpenalized block
         and of ``(500 * max_cells)^(1/3)`` for a penalized one, whose ladder
         can bisect: 1709 and 1357 at the default.  Take the floor — at
@@ -887,9 +891,11 @@ class SuperGLM:
         Only ``spline_cat`` has that retry: ``ti`` and ``cat_cat`` are
         gridded and dense-only, so for them the cap IS the refusal.  The two
         numeric kinds are neither — they enter through the z-moment kernels
-        rather than the dense curvature one, and ``numeric_numeric``
-        contracts to 3x3 blocks whatever the supports, so it never meets the
-        cap at all.
+        rather than the gridded one, and ``numeric_numeric`` contracts to a
+        five-column design whatever the supports, so it never meets the cap at
+        all.  Every kind is reduced to a triangular FACTOR of its own weighted
+        design rather than to a curvature matrix (issue #257); the caps above
+        are dimensional and are unchanged by that.
 
         A NaN row is not by itself a routing signal.  A ``spline_cat`` pair
         reaches one either because the arrow gates or its ladder refused

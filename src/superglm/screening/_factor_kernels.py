@@ -1,0 +1,411 @@
+"""Row-space factor kernels shared by BOTH screening paths.
+
+Nothing here is specific to a pair's shape.  What lives in this module is the
+arithmetic that both the structured kernel of
+:mod:`superglm.screening._structured` and the dense one of
+:mod:`superglm.screening._pair_factor` do to a factor rather than to a Gram:
+merging two weighted-row factors without squaring either, rooting an assembled
+penalty on a bar the caller can see, and the round-off floor every rank
+decision in the package is taken at.
+
+It exists because the dense path needs both and cannot reach
+:mod:`superglm.screening._structured`, which already imports ``ScreenedPair``
+from :mod:`superglm.screening._score_stat`.  Adding the reverse edge would be
+a cycle; a leaf module both can import is not.  ``_combine_row_factors`` and
+``_penalty_root`` moved here from :mod:`superglm.screening._structured` with
+the same body and the same measurements, so every number in them was taken on
+the structured path and every test that pinned them there still pins them
+here.  The two rank floors moved here from
+:mod:`superglm.screening._score_stat` for the same reason, and having them in
+one place is the point: the two paths take the same cut, on a Gram or on a
+factor, rather than one borrowing the other's.
+
+**ONE SENTENCE OF ``_penalty_root``'s DOCSTRING DID NOT SURVIVE THE MOVE, AND
+IT IS WORTH SAYING WHY.**  It gave the guard's reason as cross-route
+comparability, "because the DENSE path still assembles ``S_ti`` raw" -- true
+where it was written and false the moment ``_pair_penalty`` started calling
+:func:`superglm.screening._overlap.tensor_penalty_root`, which routes both
+margins through this very function.  Moving a docstring UNCHANGED is exactly
+how a true sentence becomes a false one; a claim about what some other module
+does has to be re-checked at the new site, not carried.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import scipy.linalg
+from numpy.typing import NDArray
+
+
+def _rank_floor(n: int) -> float:
+    """Share of the largest eigenvalue below which a direction is ROUND-OFF.
+
+    ``max(n, 1) * eps`` -- LAPACK's convention and exactly what
+    ``numpy.linalg.matrix_rank`` uses by default.  It scales with the
+    dimension because round-off accumulates with it, and that dependence is
+    the whole point: no fixed constant works at both ends.
+
+    Two failures bound it from either side, and they are three orders apart,
+    so this is not a free parameter.
+
+    ABOVE round-off it deletes real curvature.  At 1e-12, ``V = S =
+    diag(1, 1e-13, 0)`` with ``U = (0, sqrt(1e-13), 0)`` had its 1e-13
+    direction discarded by the whitening below -- a direction carrying a
+    genuine ``a = 0.5`` and ALL of ``U``'s mass -- and the ladder returned
+    ``statistic 0, lambda0 1e-10`` where the direct pseudo-inverse ladder
+    resolves ``lambda0 1, statistic 0.5``.  Here that direction sits 150x
+    above the floor and survives.
+
+    AT round-off it keeps subtraction dust and reports a degree of freedom
+    that does not exist.  A fixed 1e-15 is only 4.5x ``eps``, which is inside
+    the dust's own distribution rather than above it: measured over 400
+    replicates of a 39-wide profiled block whose true rank is 38, the
+    round-off eigenvalue has median 2.2e-16 and a tail to 1.2e-15, so 2 of
+    400 read rank 39.  ``39 * eps`` is 8.7e-15, above the whole measured tail
+    by 7x.
+
+    **NOTHING IN THE PACKAGE APPLIES IT TO A GRAM ANY MORE, AND THAT IS THE
+    POINT OF ISSUE #257.**  Every cut is taken on a FACTOR, at
+    :func:`_factor_rank_floor` -- this expression's square root, which is the
+    same cut on the Gram the factor would square to.  This form survives
+    because it is what the sibling cut is derived FROM, and because
+    ``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic``
+    counts against it to establish the regime the change was made for.
+    """
+    return max(int(n), 1) * float(np.finfo(np.float64).eps)
+
+
+def _factor_rank_floor(n: int) -> float:
+    """:func:`_rank_floor`'s cut, expressed for a FACTOR rather than a Gram.
+
+    A factor's singular values are the Gram's eigenvalues' square roots, so
+    ``sigma > sqrt(n eps) * sigma_max`` and ``w > n eps * w_max`` are the same
+    statement about the same direction.  Taking it here rather than after
+    squaring is the whole of #257: the deciding direction on a starved pair
+    sits at ``2.78e+20`` of conditioning in the Gram against ``1.67e+10`` in
+    the factor, and only the second is inside what float64 carries.
+
+    It is the same cutoff
+    :func:`superglm.screening._structured._representative_projection` takes,
+    whose docstring calls it "the square root of the Hermitian pseudo-inverse
+    policy used by the dense path".  That sentence used to be a borrowing;
+    since the dense ladder reads factors it is one policy at two sites, and the
+    derivation lives here.
+    """
+    return float(np.sqrt(_rank_floor(n)))
+
+
+def _combine_row_factors(left: NDArray, right: NDArray) -> NDArray:
+    """Compact two weighted-row factors without squaring either one.
+
+    **THE STACK IS BUILT FORTRAN-ORDERED AND HANDED TO LAPACK TO DESTROY, AND
+    BOTH HALVES OF THAT ARE LOAD-BEARING.**  ``dgeqrf`` factors in place in
+    column-major storage, so an ``overwrite_a`` a wrapper can honour needs an
+    array that is already ``order="F"``; a C-ordered one is copied first and
+    the flag buys nothing.  The buffer is this function's own -- it is
+    allocated here and neither ``left`` nor ``right`` is a view of it -- so
+    destroying it destroys nothing a caller can see.
+
+    Measured on a single ``numeric_cat`` pair at the widest factor the default
+    ``max_cells`` admits (1710 levels, ``joint`` 3421 wide), one BLAS thread,
+    as ``VmHWM`` minus the resident set with every import already paid, so the
+    figure is the PAIR's own allocation and not the interpreter's:
+
+        563.2 MB   np.linalg.qr(np.concatenate(...))      2.95 s
+        519.8 MB   scipy.linalg.qr(C-ordered, overwrite)  2.82 s
+        384.5 MB   this, F-ordered                        2.75 s
+
+    The middle row is why the buffer is not simply the old ``concatenate``:
+    ``overwrite_a`` on a C-ordered stack removes one of the three ``(m, n)``
+    copies and leaves the transposing one, which is the largest.  ``mode="r"``
+    returns the FULL ``(m, n)`` here where :func:`numpy.linalg.qr` returns
+    ``(min(m, n), n)``, so the leading rows are taken and COPIED -- a view
+    would keep the whole buffer alive in ``joint`` for the rest of the
+    reduction, which is the allocation this change exists to release.
+
+    ``check_finite`` is left at its default, and that costs nothing MEASURED
+    rather than nothing argued.  ``asarray_chkfinite`` returns the same object
+    for an array already of this dtype and order, so it is a scan and not a
+    copy; switching it off moves the peak above by less than 0.2 MB of 384.5
+    and the wall clock by less than the run-to-run spread.  Trading the guard
+    would buy neither.
+
+    **THIS IS NOT THE SAME BITS AS THE ROUTINE IT REPLACES, AND THE SUITE IS
+    WHAT SAYS THE DIFFERENCE IS ROUND-OFF.**  NumPy and SciPy reach ``dgeqrf``
+    through different wrappers with different blocking, so ``R`` moves in its
+    last bits: over the shapes both screening paths use, the two agree to
+    2.2e-16 at width 5 and to 8.3e-14 at width 3421, which is round-off at
+    each width and not a change of answer.  Every exactness pin in
+    ``tests/test_pair_design_factor.py`` and the structured suite grades the
+    factor against an independently assembled Gram rather than against a
+    stored bit pattern, and they hold across the change.
+    """
+    rows_left, width = left.shape
+    stacked = np.empty((rows_left + right.shape[0], width), dtype=np.float64, order="F")
+    stacked[:rows_left] = left
+    stacked[rows_left:] = right
+    (factor,) = scipy.linalg.qr(stacked, mode="r", overwrite_a=True)
+    return factor[: min(factor.shape)].copy()
+
+
+def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
+    """``rootS`` with ``rootS' rootS`` a PSD matrix WITHIN ``eigh``'s bar of ``S_a``.
+
+    Returns the factor, the spectral-norm distance the DROP branch below moved
+    ``S_a``, and the CUT that branch cut on -- so the caller decides on the
+    same bar this function decided on rather than on a second one of its own.
+    Issue #323 is what happens when it does not.
+
+    **THE SUMMARY LINE USED TO SAY "NEAREST" AND THAT IS THE ONE WORD IT MAY
+    NOT SAY.**  The nearest PSD matrix in ANY unitarily invariant norm is
+    ``max(w, 0)`` -- Higham, *Linear Algebra Appl.* 103:103-118 (1988) for the
+    Frobenius case, and Goulart, Nakatsukasa & Rontsis, "Accuracy of
+    approximate projection to the semidefinite cone", arXiv:1908.01606, Lemma
+    2.1, for every unitarily invariant norm.  Taking ``|w|`` instead moves
+    ``2|w|`` in that direction where clipping moves ``|w|``, so this is a
+    PERTURBATION BOUNDED BY ``2 n eps ||S||_2`` and deliberately not a
+    projection.  The reason is below and it is a good one, but the two are not
+    the same object and the docstring may not claim the cheaper word.
+
+    ``edf`` is a sum of filter factors ``a_j / (a_j + lambda s_j)``, and a
+    NEGATIVE ``s_j`` puts that term outside ``[0, 1]``: there is no bound to
+    keep and no nonnegative decomposition to have.  Assembled penalties here
+    are not all inside the cone.  A difference penalty IS exactly PSD as
+    stored -- exact rational LDL certifies exactly ``m`` zero pivots, and the
+    ``-1e-15`` an eigensolver reports on it is the eigensolver's own backward
+    error -- but the integrated-derivative penalty ``bs`` and ``cr`` margins
+    carry is not PSD BY CONSTRUCTION, and ``fl(lambda * S_a)`` leaves the cone
+    even for the exactly-PSD one.
+
+    **"NOT PSD BY CONSTRUCTION" IS NOT "NOT PSD AT THE SCALE THIS FUNCTION
+    CUTS", AND THE DIFFERENCE MATTERS NOW THAT THE DROP REFUSES.**  An earlier
+    draft said those penalties are "genuinely not" in the cone, which read
+    literally is the condition the refusal below fires on -- so either every
+    ``bs`` pair refuses or the sentence was overstated.  It was the sentence.
+    Measured over fifteen margin shapes, ``bs``, ``cr`` and ``ps`` at 5, 8, 12,
+    16 and 20 knots, taken through the same route the kernel takes ``S_a``:
+    NONE is dropped, SIX carry no negative eigenvalue at all, and the worst
+    margin is ``ps(12)`` at 22x INSIDE the bar.  The ``bs`` family -- the one
+    the sentence was about -- runs 37x to 1339x inside, because its
+    ``||S||_2`` is eight to ten orders larger, so its bar is too.  Their
+    departure from the cone is real in exact arithmetic and is not resolvable
+    in float64, which is the only sense in which this function may speak of it.
+
+    **A CUT AT THE MODULE'S USUAL ``k eps`` RELATIVE FLOOR IS WRONG HERE, AND
+    THE REASON IS MEASURED.**  On the suite's vanishing-mass pair the
+    penalty's smallest eigenvalue is ``1.374e-16`` of its largest, which
+    ``lambda_hi = 1e10 * scale`` amplifies into a real penalty of
+    ``1.86e-08 * tr(V_eff)`` that reaches three levels' free directions.
+    Dropping it reports 19 free directions where an independent closed form
+    counts 16.  The residue is data.
+
+    **AND ITS SIGN IS NOT, SO NEITHER ``max(w, 0)`` NOR A DROP MAY DECIDE
+    THREE DEGREES OF FREEDOM.**  Assembly round-off puts that eigenvalue on
+    either side of zero depending on the data -- the same fixture measures
+    ``+2.11e-15`` at one seed and ``-5.03e-16`` at another, and the same
+    fixture at the same seed measures either sign on different machines.
+    ``max(w, 0)`` is the Euclidean projection onto the PSD cone (Higham,
+    *Linear Algebra Appl.* 103:103-118, 1988) and is the right thing to do to
+    an eigenvalue that is RESOLVED; applied to one that is not, it turns a
+    coin flip into a 3 df move in a published ``edf0``, and CI caught exactly
+    that -- 19.000000 where this machine reads 16.000374.
+
+    So an eigenvalue inside ``eigh``'s own error bar, ``n eps ||S||_2``
+    (*LAPACK Users' Guide*, 3rd ed., SIAM 1999, sec. 4.7), is taken at its
+    MAGNITUDE, which is the only sign-independent choice that keeps it.
+    Checked against 40-digit mpmath on both signs of the residue: the
+    magnitude gives 15.999993 and 16.000012, and clamping the negative case
+    up to zero gives back the full ``k_b`` -- wrong by three degrees of
+    freedom.  Inside the bar every PSD matrix within ``n eps ||S||_2`` of
+    ``S_a`` is equally admissible, so what is chosen there cannot be settled
+    by nearness to ``S_a``; it is settled by requiring the answer to be a
+    function of the data rather than of the rounding.
+
+    Outside the bar a negative eigenvalue is real, no magnitude is taken and
+    the direction is dropped -- and the largest such magnitude is RETURNED, so
+    :func:`_profile` refuses on the cut this function made rather than on a
+    second one.  That is the whole of issue #323's fix and the rest of this
+    docstring is why it is one cut and not two.
+
+    **THE OLD PROMISE WAS WRONG IN BOTH HALVES.**  It said :func:`_profile`
+    "then refuses the pair, because the statistic is still scoring ``S_a``
+    raw".
+
+    * **The reason is stale, and issue #298 made it more so.**  The statistic
+      and the ``edf`` now come off ONE factorization -- :func:`_evaluate`
+      delegates to :func:`_filter_factor_sum`, which stacks
+      ``sqrt(lam) * root_penalty`` under each level's rows -- so the statistic
+      scores the PROJECTED penalty by construction, and there is no separate
+      moment-space arrow left for it to score ``S_a`` raw in.  (An earlier
+      draft here named that arrow; it no longer exists.)  The guard's real
+      reason is the one :func:`superglm.screening._structured._profile` states
+      at its own site, and it is INTRINSIC rather than cross-route: a
+      certified-negative eigenvalue means the penalty being scored is not the
+      penalty specified.  It used to be cross-route comparability -- the dense
+      route assembled ``S_ti`` raw, so a direction dropped here would still be
+      penalized there -- and issue #257 spent that reason: ``_pair_penalty``
+      calls :func:`superglm.screening._overlap.tensor_penalty_root`, which
+      routes both margins through THIS function, so both paths now root the
+      same matrices by the same rule.  The asymmetry that survives is the
+      REFUSAL, not the rooting: the dense route drops the same direction and
+      publishes, because it has no numerical-certificate refusal contract.
+    * **The refusal was not guaranteed, and the window it left has a closed
+      form.**  Dropping happened at ``|c| > n eps ||S||_2``; :func:`_profile`
+      raised only at ``clip = |c| / |tr S| > 2 n^2 eps``.  Two thresholds on
+      two scales, so ``n eps ||S||_2 < |c| <= 2 n^2 eps |tr S|`` was dropped
+      WITHOUT a refusal, and the ratio between them is
+
+          (2 n^2 eps |tr S|) / (n eps ||S||_2)  =  2 n tr(S) / ||S||_2,
+
+      which is ``2 n`` times the INTRINSIC DIMENSION ``tr(S) / ||S||_2`` of the
+      penalty -- between ``2n`` and ``2n^2``, and never empty, because
+      ``tr S >= ||S||_2`` holds for everything in the cone.  Measured, not
+      reasoned: ``n = 10``, spectrum ``[1]*9 + [-1e-14]``, ``||S||_2 = 1``.
+      The bar is 2.220e-15 so the eigenvalue is 4.43x to 4.48x outside it,
+      depending on the kernel, and dropped -- ``rootS`` came back with 9 rows
+      of 10 -- while ``clip`` was 7.89e-16 to 1.18e-15 against a threshold of
+      4.441e-14, a factor of 37.5x to 56.25x short.  (Swept over seven
+      ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads; a single run would not
+      have been evidence for either number.  ``clip`` here is
+      ``sum(rootS**2)`` against ``tr S``, which is what :func:`_profile`
+      computes -- an earlier draft of this paragraph summed the EIGENVALUES
+      instead and reported a range the code never sees.)  On the public ``freMTPL2freq``
+      screen the same ratio measures 85.6x, 157.8x and 160.0x over ten
+      structured-route factorizations, matching ``2 n tr(S)/||S||_2`` to four
+      figures at ``n = 11`` and ``n = 15``.  A window two orders wide is not a
+      seam, so it is closed rather than documented.
+
+    **THE FIX ADDS NO TOLERANCE, WHICH IS WHY IT IS ALLOWED TO BE THIS CHEAP.**
+    The drop branch fires exactly when this function has CERTIFIED the
+    negativity is not the eigensolver's backward error.  "Was the projection
+    roundoff?" is the question :func:`_profile`'s guard asks, and the drop
+    branch is definitionally its NO.  So the refusal keys to the drop itself,
+    at ``|c| > n eps ||S||_2`` and no other constant.  LAPACK's ``?PSTRF`` --
+    Cholesky with complete pivoting for a semidefinite matrix -- is the same
+    shape: ONE tolerance, defaulting to ``n u max_k A(k,k)``, decides both the
+    ``RANK`` it returns and the ``INFO > 0`` it raises, and its documentation
+    declines to distinguish "rank deficient" from "not positive semidefinite"
+    at that tolerance because there they are one event.  What this module must
+    do differently is split them by SIGN, since clause 2 forbids refusing on
+    singularity: ``w = 0`` leaves ``rootS`` through ``keep`` and publishes,
+    ``w < -bar`` refuses.
+
+    **AND THE PRICE IS PAID IN THE ONE PROPERTY THIS MODULE OTHERWISE CLAIMS
+    OUTRIGHT, SO IT IS STATED RATHER THAN LEFT TO BE FOUND.**  "WHAT IS NOT A
+    TRADE: REPRODUCIBILITY" promises the same ``edf`` whatever the BLAS kernel
+    or thread count.  A cut AT the eigensolver's own resolution cannot promise
+    that about which SIDE it falls on: a penalty within a factor of about one
+    of the bar can refuse on one kernel and publish on another.  What moves
+    there is a ROUTE -- and, at the non-speculative entry, whether the row
+    exists at all -- and not the value of a published number, which is the
+    trade clause 2 makes deliberately: a coin flip over a value that no one can
+    tell is a coin flip is worse than a coin flip over a route.  It is not free,
+    and calling it free would be the same overstatement this docstring has had
+    to withdraw twice.  **AND THE NUMBER THAT BELONGS HERE IS THE ONE WITH A
+    SPREAD, NOT THE SMALLEST ONE.**  No PIPELINE-BUILT margin penalty comes
+    near the cut -- fifteen ``bs`` / ``cr`` / ``ps`` shapes, the closest 22x
+    inside -- but that is a spread-free property of the constructors and so
+    says nothing about kernel-dependence, which is what this paragraph is
+    about.  The measured quantity that HAS that property is the vanishing-mass
+    fixture's reconstruction, whose distance to the cut moves 7x across
+    kernels: 69.6x inside on SKYLAKEX down to **10.0x on NEHALEM**.  Still an
+    order clear, and it is a reconstructed test fixture rather than anything a
+    caller builds, but 10.0x-with-a-7x-spread is the honest headroom for a
+    claim about which side of the cut something lands on.
+
+    **THE TRACE WAS ALSO THE WRONG NORM, AND THAT IS A PUBLISHED RESULT
+    RATHER THAN A PREFERENCE.**  ``|tr S - ||rootS||_F^2|`` is the TRACE-NORM
+    distance to the PSD cone, and the projection onto that cone is
+    nonexpansive in the Frobenius norm and in no other standard one -- Goulart,
+    Nakatsukasa & Rontsis, arXiv:1908.01606, sec. 2.2, which gives
+    counterexamples for the spectral and trace norms by name.  The per-direction
+    question is a SPECTRAL one (Halmos's distance to the cone is
+    ``max{|w| : w < 0}``), so it gets a spectral answer.
+
+    **WHICH WAY THAT WINDOW MOVED ``edf`` IS CLAUSE 4's DIRECTION, NOT CLAUSE
+    3's.**  Dropping a direction from ``rootS`` removes it from the PENALTY,
+    not from the sum: ``T_q' T_q = D_q + lambda rootS' rootS``, so in that
+    direction the filter factor becomes ``d / (d + 0) = 1``.  The direction is
+    reported FREE and ``edf`` goes UP by as much as one per level -- the same
+    end as "WHAT CLAUSE 4 COSTS", and the OPPOSITE of clause 3's harm, which is
+    losing a degree of freedom.  (If ``D_q`` carries no mass there either,
+    :func:`_block_inverse_factors` zeroes it and it contributes zero, which is
+    clause 1.)  Stating the sign because getting it backwards once already cost
+    this docstring a correction.
+
+    The sharper reading is that enlarging ``null(S)`` can MANUFACTURE a common
+    null space where none existed -- a penalty projection creating clause-1
+    directions is the exact condition this policy is organized around, and is
+    more interesting than a deflation rather than less.
+
+    **WHAT THE REFUSAL COSTS, MEASURED BEFORE IT WAS CHOSEN.**  Across the
+    twelve pair geometries this suite builds, ZERO factor a penalty with a
+    negative eigenvalue outside the bar, so none of them changes.  Across the
+    public ``freMTPL2freq`` screen at five ``max_cells`` settings, ten
+    structured-route factorizations, again ZERO.  What DID sit in the window
+    was one arm of the suite's own guard test, which injected a negative
+    direction at a tenth of the TRACE bound -- 8.5x to 8.6x outside the
+    eigensolver's bar on every kernel swept -- and asserted it published.  The
+    suite pinned the defect; it is re-pinned the other way and a third arm now
+    holds the magnitude branch open.
+
+    **AND ON A TWO-COLUMN MARGIN THERE IS NOTHING LEFT TO TAKE THE MAGNITUDE
+    OF, WHICH IS CLAUSE 4 OF THE SINGULAR-PENCIL POLICY AT ITS WORST.**
+    ``_rank_one_penalty_pair``'s ``S_a`` has ``|sigma_min|`` bracketed EXACTLY,
+    by rational arithmetic over the float entries, in ``[3.269e-17,
+    6.538e-17]`` -- a fifth of an ulp of ``sigma_max``, so ``eigh`` hands back
+    a bit-exact ``0.0`` and the residue is not merely unresolved but absent.
+    The direction is then free, and the ladder's high edge publishes
+    ``edf = 9.000000`` where a 40-digit oracle on the same exact design reads
+    ``5.720073``.  That 3.28 df is the policy, not this routine: the suite's
+    textbook stacked-QR reference reads 9.000000 on the same point.  No float64
+    penalty factorization recovers it, so nothing here is waiting on a better
+    cut.
+    """
+    lifted, Q, dropped, unresolved = _penalty_spectrum(S_a)
+    keep = lifted > 0.0
+    return (Q[:, keep] * np.sqrt(lifted[keep])).T, dropped, unresolved
+
+
+def _penalty_spectrum(S_a: NDArray) -> tuple[NDArray, NDArray, float, float]:
+    """:func:`_penalty_root`'s POLICY, before it is collapsed into a factor.
+
+    Returns ``(lifted, Q, dropped, unresolved)``: the non-negative eigenvalues
+    the policy above admits, their eigenvectors, the spectral-norm distance the
+    drop branch moved ``S_a``, and the cut it decided on.  Every word of that
+    policy is documented in :func:`_penalty_root`, which is this function
+    followed by one line.
+
+    It is split out because a KRONECKER SUM must be rooted from its margins'
+    spectra rather than from its own.  ``eigh`` is accurate ABSOLUTELY, to
+    ``n eps ||S||_2``, so rooting an assembled ``kron(S1, I) + kron(I, S2)``
+    resolves a direction that is exactly null in exact arithmetic only to the
+    ASSEMBLED dimension's round-off -- and the ladder's high edge multiplies
+    that residue by ``1e10``.  Measured on ``moderate_pair``, whose penalty is
+    ``kron(S_a, I_23)`` with ``S_a`` nine wide: rooting the 207-wide assembly
+    puts ``edf`` 8.26e-07 from the stacked-QR arbiter, and rooting the 9-wide
+    margin and combining the spectra puts it 4.99e-13 from the same point.
+    Six orders, from where the eigendecomposition is taken.
+    See :func:`superglm.screening._overlap.tensor_penalty_root`.
+    """
+    n = S_a.shape[0]
+    if n == 0:
+        return (
+            np.zeros(0, dtype=np.float64),
+            np.zeros((0, 0), dtype=np.float64),
+            0.0,
+            0.0,
+        )
+    w, Q = np.linalg.eigh(0.5 * (S_a + S_a.T))
+    unresolved = float(float(n) * np.finfo(np.float64).eps * float(np.max(np.abs(w), initial=0.0)))
+    lifted = np.where(w >= -unresolved, np.abs(w), 0.0)
+    # The spectral-norm distance to the cone contributed by the CERTIFIED
+    # negatives only.  A zero eigenvalue -- exact, or positive and inside the
+    # bar -- leaves ``rootS`` through ``keep`` and is not counted here: that is
+    # clause 1's deflation of a null direction, and clause 2 forbids refusing
+    # on it.  Only ``w < -unresolved`` is the eigensolver saying the sign is
+    # real.  ``unresolved`` travels out with it so the caller reports the cut
+    # this function cut on rather than recomputing ``||S||_2`` by a second
+    # routine that would agree only to roundoff.
+    dropped = float(np.max(-w, initial=0.0, where=w < -unresolved))
+    return lifted, Q, dropped, unresolved

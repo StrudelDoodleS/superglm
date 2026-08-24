@@ -43,6 +43,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.screening._factor_kernels import _rank_floor
+
 
 def _solve_floor(n: int) -> float:
     """Relative cut for what an inverse may RESOLVE.
@@ -52,6 +54,19 @@ def _solve_floor(n: int) -> float:
     does not round the answer, it deletes the direction's whole contribution,
     so the cut is set at the point below which the arithmetic is meaningless
     rather than at the point below which an answer is "small".
+
+    **THE ARITHMETIC IS NOT WRITTEN OUT HERE, AND THAT IS DELIBERATE.**  It
+    was a third transcription of the expression
+    :func:`superglm.screening._factor_kernels._rank_floor` derives and
+    :func:`superglm.screening._factor_kernels._factor_rank_floor` takes the
+    square root of, and "having them in one place is the point" is the reason
+    that module exists.  It is a leaf -- it imports nothing from this package
+    -- so reaching it from here adds no cycle.  The NAME stays, because what
+    it means at this site is not what ``_rank_floor`` means at that one: there
+    the question is whether a direction is round-off, here it is whether an
+    inverse may resolve one, and :mod:`superglm.screening._score_stat`'s
+    threshold taxonomy names this function as a Type 1 cut in its own right.
+    Same number, two questions, one derivation.
 
     ``rcond`` is RELATIVE to each matrix's own largest eigenvalue, which is
     the only scale a batched routine has, and a sum of two PSD terms on wildly
@@ -69,15 +84,28 @@ def _solve_floor(n: int) -> float:
     nothing else — the error is bounded by the direction's own share rather
     than by a whole count.
     """
-    return max(int(n), 1) * float(np.finfo(np.float64).eps)
+    return _rank_floor(n)
 
 
 def _psd_pinv(A: NDArray) -> NDArray:
     """Batched PSD (pseudo-)inverse.
 
     ``A`` is ``(..., n, n)`` and symmetric.  Directions below the cut are
-    dropped rather than inverted, which is the pseudo-inverse and is what the
-    dense path's own ``pinv`` fallback does for the same matrices.  The cut is
+    dropped rather than inverted, which is the pseudo-inverse.  This used to
+    add "and is what the dense path's own ``pinv`` fallback does for the same
+    matrices".  **THAT MECHANISM IS GONE AND THE SENTENCE IS PAST TENSE**:
+    issue #257 removed the ``pinv`` fallback with the rest of the moment
+    route, and the dense ladder now takes its one rank decision on a design
+    FACTOR, through a pivoted QR at
+    :func:`superglm.screening._factor_kernels._factor_rank_floor`'s
+    ``sqrt(n eps)``.  That is the same cut as this one, since a factor's
+    singular values are the Gram's eigenvalues' square roots -- so what
+    survives the correction is the agreement, not the mechanism.  A
+    present-tense claim by one module about another module's behaviour is
+    exactly what :mod:`superglm.screening._factor_kernels`' own header warns
+    is how a true sentence becomes a false one; this one outlived its subject
+    by a branch because ``_arrow`` was outside that branch's changed set.
+    The cut is
     :func:`_solve_floor`, and it is NOT selectable: this took an ``rcond``
     override while the caller counted a rank, so that the count and the
     inverse could be given different cuts.  Nothing counts any more -- there

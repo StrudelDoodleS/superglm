@@ -403,12 +403,15 @@ discretize at all, so OC pairs stay exact on both sides.
   uses the full data.
 - **Block dimension, which costs time rather than memory.** `max_cells` is an
   allocation ceiling, and every allocation above grows as `k^2` in the probe
-  block's dimension — but the *solve* grows as `k^3`, because each rung
-  factorizes or pseudo-inverts a `(k, k)` system, and for the gridded kinds
-  the pseudo-inverse is the routine branch rather than the exception (one
-  empty `cat_cat` cell or one singleton level makes a probe column collinear
-  with the overlap span; the `VehBrand x Region` row above reports
-  `edf0 = 208` against a nominal 210 for exactly this reason). The same knob
+  block's dimension — but the *solve* grows as `k^3`, because each rung takes
+  a `(k, k)` decomposition: a pivoted QR of the pair's design factor with one
+  SVD beside it. For the gridded kinds a probe column collinear with the
+  overlap span is the routine case rather than the exception (one empty
+  `cat_cat` cell or one singleton level makes one; the `VehBrand x Region` row
+  above reports `edf0 = 208` against a nominal 210 for exactly this reason),
+  and it is settled by a rank cut on that factor — the Cholesky and its
+  pseudo-inverse fallback this bullet used to describe went with the assembled
+  Grams in issue #257, without moving the cost class. The same knob
   therefore bounds time: `k^3 <= 1000 * max_cells` for an unpenalized block,
   and the same budget against twice the work for a penalized one, whose
   ladder can bisect rather than clamp. At the default that admits `k <= 1709`
@@ -417,6 +420,13 @@ discretize at all, so OC pairs stay exact on both sides.
   0.81 s and 0.67 s per pair — the unpenalized figure a few percent low since
   that rung's rank became a count rather than a trace (measured 1.056x at that
   corner, and it is what makes the reported `edf0` the rank rather than `k`).
+  **Those two figures are moment-route figures and the dense path is measured
+  slower since it moved onto design factors (issue #257): 4.09x on the ladder
+  and 4.17x end to end at the widest geometry benchmarked, which carries them
+  to roughly 3.3 s and 2.7 s per pair. The ceilings themselves are dimensional
+  and are unchanged, so no pair is admitted or refused differently; what the
+  move spent is the ~1.5 s per-pair calibration behind them, which is no
+  longer met at the ceiling and is refitted separately.**
   Wider blocks are refused with a NaN row,
   immediately — binning cannot shrink a basis dimension — and raising
   `max_cells` lifts the refusal. For scale, the block the old
@@ -511,7 +521,8 @@ discretize at all, so OC pairs stay exact on both sides.
   margin never bins — its support *is* the fitted level set — and a numeric
   margin never grids at all: it enters its probe linearly, so moments of the
   numeric accumulated over the other margin's cells are its exact sufficient
-  statistics, at any cardinality. Neither margin can raise `approx`. The one
+  statistics, at any cardinality — reduced, level by level, to a factor of the
+  same design rather than to its curvature. Neither margin can raise `approx`. The one
   degradation available to a numeric-margin pair is refusal (`numeric_cat`
   with a factor wider than its blocks), and a refused row is a NaN row, never
   an approximated one.
