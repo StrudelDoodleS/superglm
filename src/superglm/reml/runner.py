@@ -222,7 +222,13 @@ def run_reml_once(
                 reml_penalties=penalties_rro,
             )
             XtWX_S_inv, _, active_groups, _, _ = _penalised_xtwx_inv_gram(
-                beta, W, dm.group_matrices, groups, lambdas, S_override=S_rro
+                beta,
+                W,
+                dm.group_matrices,
+                groups,
+                lambdas,
+                S_override=S_rro,
+                compute_augmented=False,
             )
 
         inv_phi = 1.0

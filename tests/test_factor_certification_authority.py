@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from superglm.distributions import Gamma, Gaussian
 from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
@@ -693,3 +694,520 @@ def test_pirls_rank_metadata_uses_factor_certified_subspaces() -> None:
     _assert_factor_certificate(result.rank_info.data, centered_factor)
     _assert_factor_certificate(result.rank_info.augmented, centered_factor)
     _assert_factor_certificate(result.rank_info.coefficient, raw_factor)
+
+
+def _irls_state(model, n: int) -> SimpleNamespace:
+    """The IRLS state ``inference/covariance.py``'s helpers take as arguments.
+
+    Rebuilds the converged working weights the way the inference layer does,
+    so a fixture below is exactly what the published covariance is computed
+    from rather than an approximation of it.
+    """
+    from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+    from superglm.links import stabilize_eta
+
+    solver = model._solver_pirls_result()
+    linear = stabilize_eta(model._dm.matvec(solver.beta) + solver.intercept, model._link)
+    mu = clip_mu(model._link.inverse(linear), model._distribution)
+    fit_weights = model._fit_weights if model._fit_weights is not None else np.ones(n)
+    working = (
+        fit_weights
+        * model._link.deriv_inverse(linear) ** 2
+        / np.maximum(model._distribution.variance(mu), _VARIANCE_FLOOR)
+    )
+    return SimpleNamespace(
+        beta=solver.beta,
+        weights=working,
+        group_matrices=list(model._dm.group_matrices),
+        groups=list(model._groups),
+        p=len(solver.beta),
+    )
+
+
+def _aliased_pair_fit(*, n: int = 1200, seed: int = 5):
+    """The #356 reachability fixture -- an exact alias inside a kept group.
+
+    ``_penalised_xtwx_inv_gram`` keeps a group only when ``||beta[g.sl]|| >
+    1e-12``, and PIRLS zeroes a wholly aliased block to exactly ``0.0``, so a
+    duplicated single-column group never reaches ``M`` at all.  Here
+    ``pair[p1]`` equals ``zone[B] + zone[C]`` row for row while ``pair[p2]``
+    stays estimable, so the ``pair`` group is kept and carries the alias into
+    ``M = X'WX + S``.  Measured on this fit: ``||beta[pair]|| = 2.8423e-01``,
+    active groups ``['zone', 'pair', 'age']``, ``M`` width 18 (zone 3 + pair 2
+    + age 13) at rank 17 with ``needs_factor_certification`` True.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, PSpline, SuperGLM
+
+    rng = np.random.default_rng(seed)
+    zone = rng.choice(list("ABCD"), size=n)
+    pair = np.empty(n, dtype=object)
+    in_bc = np.isin(zone, ["B", "C"])
+    pair[in_bc] = "p1"
+    rest = ~in_bc
+    coin = rng.random(n) < 0.5
+    pair[rest & coin] = "p2"
+    pair[rest & ~coin] = "p0"
+    frame = pd.DataFrame({"zone": zone, "pair": pair, "age": rng.uniform(18, 80, n)})
+    eta = 0.3 + 0.4 * (frame["zone"] == "B") - 0.2 * (frame["pair"] == "p2") + 0.01 * frame["age"]
+    y = np.asarray(rng.poisson(np.exp(eta)), dtype=float)
+
+    model = SuperGLM(
+        family="poisson",
+        penalty=None,
+        features={
+            "zone": Categorical(base="A"),
+            "pair": Categorical(base="p0"),
+            "age": PSpline(n_knots=10),
+        },
+    )
+    model.fit(frame, y)
+    return _irls_state(model, n)
+
+
+# A ridge of exactly this size places the alias's residual eigenvalue between
+# the two rank cuts, which is the only band in which the two routes disagree
+# about the RANK.  Measured on this fixture: the penalised Hessian's smallest
+# eigenvalue is 6.2116e-12 against a largest of 3.3967e+03, i.e. relative
+# 1.83e-15 -- under the Gram cut ``n eps = 4.00e-15`` by 2.2x, and its square
+# root 4.28e-08 over the factor cut ``sqrt(eps) = 1.49e-08`` by 2.9x.
+#
+# Where that band runs was re-measured by bisection over 7
+# ``OPENBLAS_CORETYPE`` microkernels at one thread rather than estimated: the
+# lower edge is 1.1009e-12 on every one of them and the upper edge is
+# 1.8105e-11 to 2.0371e-11, so this ridge sits 4.54x above the lower edge and
+# 3.62x to 4.07x below the upper one.
+#
+# That band is a strict SUBSET of the one ``needs_factor_certification`` names,
+# which is wider on both sides: on this fit the predicate is True from ridge 0
+# (rank 17 on both routes, ``resolution_limited``) up to about 3.4e-11 (rank 18
+# on both, ``pre_truncation_condition`` still over the certification
+# condition).  A disagreeing rank is one of its two arms, not the predicate.
+_CERTIFICATION_BAND_RIDGE = 5e-12
+
+
+def test_aliased_pair_reaches_the_penalised_gram_inside_the_certification_band() -> None:
+    """A premise guard for the four tests below, not coverage of the fix.
+
+    Everything here is a property of the FIXTURE -- that the alias survives the
+    active-group filter, that the width is 18, that the Gram truncates to 17
+    and asks for certification.  None of it reads the route
+    ``_penalised_xtwx_inv_gram`` takes, so no mutation of the fix reddens it:
+    it went green under all eight applied while the other four tests in this
+    group each have one that reddens them.  Read a failure here as "the fixture
+    drifted", which would silently defuse those four.
+    """
+    from superglm.inference.covariance import _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    penalty = _CERTIFICATION_BAND_RIDGE * np.eye(fit.p)
+    _inverse, _augmented, active_groups, data_gram, active_penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+
+    # The alias survives the site's own active-group filter, which every
+    # simpler aliased fixture fails.
+    assert [group.name for group in active_groups] == ["zone", "pair", "age"]
+
+    hessian = data_gram + active_penalty
+    gram = decompose_gram(hessian)
+    assert gram.width == 18
+    assert needs_factor_certification(gram)
+    # The Gram erases a direction the factor resolves: that gap is the defect.
+    assert gram.rank == 17
+
+
+# Standard errors above this read the RETAINED NEAR-NULL direction rather than
+# the estimable block.  Not a tuned threshold: on this fixture at the band
+# ridge the three coordinates the alias touches -- ``zone[B]``, ``zone[C]`` and
+# ``pair[p1]``, since ``pair[p1] == zone[B] + zone[C]`` row for row -- all read
+# 2.5820e+05, and every other coordinate reads at most 1.1825.  The gap is five
+# orders wide, so any cut inside it names the same set, and the tests assert
+# the size of the set they get so a drifting fixture fails rather than quietly
+# widening the claim.
+_NEAR_NULL_STANDARD_ERROR = 1e2
+
+# The estimable coordinates agree far tighter than ``factor_rcond``, so a bar
+# at ``factor_rcond`` there would be nearly as blind as the spectral one.
+# Measured over 7 ``OPENBLAS_CORETYPE`` microkernels at one thread, on both the
+# coefficient and the augmented system: 1.55e-15 to 2.89e-15 relative, i.e.
+# round-off on a quantity of order one.  The bar is placed 35x above the worst
+# of those readings.
+_ESTIMABLE_STANDARD_ERROR_AGREEMENT = 1e-13
+
+
+def _standard_error_agreement(
+    gram: NDArray,
+    factor: NDArray,
+) -> tuple[float, float, int]:
+    """Per-coordinate relative agreement of the two routes' published SEs.
+
+    Returns the worst relative gap over ALL coordinates, the worst over the
+    estimable ones, and how many of those there are.
+
+    A spectral-norm comparison of these two matrices cannot see the estimable
+    block at all, which is why this exists.  ``||factor_inverse||_2`` on this
+    fixture is 2.0000e+11 and that IS the retained near-null direction -- the
+    one quantity both routes get right by construction, since both land on
+    ``1 / ridge`` -- so a relative bar of ``factor_rcond`` there permits
+    2.9802e+03 of absolute error while the whole well-conditioned part of the
+    covariance has spectral norm 1.5422.  Corruption 1900x larger than the
+    estimable block passes: dropping the weights from
+    ``_certified_penalised_inverse`` entirely moves the spectral statistic to
+    1.42e-10, comfortably inside the bar, and this one to 7.77e-01.
+
+    A standard error is scale-free per coordinate, and it is what the summary
+    publishes, so it is the quantity the band was ever about.
+    """
+    gram_errors = np.sqrt(np.abs(np.diag(gram)))
+    factor_errors = np.sqrt(np.abs(np.diag(factor)))
+    relative = np.abs(gram_errors / factor_errors - 1.0)
+    estimable = factor_errors < _NEAR_NULL_STANDARD_ERROR
+    # ``nan`` where there is no estimable block to speak of, so a caller that
+    # asserts a bound on it fails rather than reads an empty maximum as agreement.
+    worst_estimable = float(relative[estimable].max()) if estimable.any() else float("nan")
+    return float(relative.max()), worst_estimable, int(estimable.sum())
+
+
+def test_penalised_gram_covariance_matches_the_factor_route_in_the_certification_band() -> None:
+    from superglm.inference.covariance import _penalised_xtwx_inv, _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    penalty = _CERTIFICATION_BAND_RIDGE * np.eye(fit.p)
+    gram_inverse, _augmented, _active, _data_gram, _penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+    _design, factor_inverse, _factor_augmented, _groups, _gms = _penalised_xtwx_inv(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+
+    # ``_penalised_xtwx_inv_gram``'s own docstring claims the same result as
+    # ``_penalised_xtwx_inv``.  Inside the certification band that claim is
+    # what breaks, and the two routes are independent arithmetic -- a chunked
+    # QR against a dense one -- so ``factor_rcond`` is the rung's own bar for
+    # agreement.  Measured margin on this fixture: 3.56e-10 against 1.49e-08.
+    #
+    # This first assertion pins ONLY the retained near-null direction; see
+    # ``_standard_error_agreement`` for why, and for the two below that pin
+    # the rest of the matrix.
+    reference_norm = np.linalg.norm(factor_inverse, ord=2)
+    relative = np.linalg.norm(gram_inverse - factor_inverse, ord=2) / reference_norm
+    assert relative <= SHARED_RANK_POLICY.factor_rcond
+
+    worst, worst_estimable, estimable_count = _standard_error_agreement(
+        gram_inverse,
+        factor_inverse,
+    )
+    # 15 of the 18 coordinates; the other three are the alias's own.
+    assert estimable_count == 15
+    # Every published standard error, on its own scale.  Measured 1.53e-10 to
+    # 5.21e-10 over 7 ``OPENBLAS_CORETYPE`` microkernels at one thread, i.e.
+    # 28.6x to 97.1x inside ``factor_rcond``.
+    assert worst <= SHARED_RANK_POLICY.factor_rcond
+    # And the estimable block itself, which agrees to round-off.
+    assert worst_estimable <= _ESTIMABLE_STANDARD_ERROR_AGREEMENT
+
+
+def test_penalised_gram_augmented_covariance_matches_the_factor_route_in_the_band() -> None:
+    from superglm.inference.covariance import _penalised_xtwx_inv, _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    penalty = _CERTIFICATION_BAND_RIDGE * np.eye(fit.p)
+    _inverse, gram_augmented, _active, _data_gram, _penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+    _design, _factor_inverse, factor_augmented, _groups, _gms = _penalised_xtwx_inv(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+
+    # Measured margin on this fixture: 3.00e-10 against 1.49e-08.  As above,
+    # the reference norm here is the retained near-null direction's 2.0000e+11,
+    # so this assertion sees that direction and nothing else.
+    reference_norm = np.linalg.norm(factor_augmented, ord=2)
+    relative = np.linalg.norm(gram_augmented - factor_augmented, ord=2) / reference_norm
+    assert relative <= SHARED_RANK_POLICY.factor_rcond
+
+    worst, worst_estimable, estimable_count = _standard_error_agreement(
+        gram_augmented,
+        factor_augmented,
+    )
+    # 16 of 19: the intercept the border adds is estimable.
+    assert estimable_count == 16
+    # Measured 2.98e-11 to 1.82e-09 over the same 7 microkernels, i.e. 8.2x to
+    # 500.8x inside ``factor_rcond``.  The augmented spread is the wider of the
+    # two and 8.2x is the tightest margin either assertion carries.
+    assert worst <= SHARED_RANK_POLICY.factor_rcond
+    assert worst_estimable <= _ESTIMABLE_STANDARD_ERROR_AGREEMENT
+
+
+def test_penalised_gram_covariance_keeps_its_gram_route_outside_the_band(monkeypatch) -> None:
+    """A certifiable Gram must still be inverted as a Gram, bit for bit."""
+    import superglm.inference.covariance as covariance_module
+    from superglm.inference.covariance import _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    # Well away from the band: the ridge is eight orders above its upper edge,
+    # so the Hessian is certifiable and the fast path is the whole answer.
+    penalty = 1e-3 * np.eye(fit.p)
+    _inverse, _augmented, active_groups, data_gram, active_penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+    hessian = data_gram + active_penalty
+    assert not needs_factor_certification(decompose_gram(hessian))
+    # The augmented system carries its own verdict at the site, so the premise
+    # must hold for it too -- otherwise a kernel that put M_aug in the band
+    # would fail below as "certifiable Gram must not stream the design", which
+    # points at the wrong system and reads as a regression rather than drift.
+    active_gms = [
+        matrix
+        for matrix, group in zip(fit.group_matrices, fit.groups, strict=True)
+        if group.name in {active.name for active in active_groups}
+    ]
+    bordered = _bordered_with_intercept(hessian, fit.weights, active_gms)
+    assert not needs_factor_certification(decompose_gram(bordered))
+
+    monkeypatch.setattr(
+        covariance_module,
+        "decompose_factor",
+        lambda *args, **kwargs: pytest.fail("certifiable Gram must not stream the design"),
+    )
+    gram_inverse, gram_augmented, _active, _data_gram, _penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+    np.testing.assert_array_equal(gram_inverse, decompose_gram(hessian).pseudo_inverse())
+    assert gram_augmented.shape == (fit.p + 1, fit.p + 1)
+
+
+def test_penalised_gram_covariance_certifies_an_unpenalised_system(monkeypatch) -> None:
+    """The certified route must also handle a penalty with no rows at all.
+
+    ``penalty_factor`` returns a ``(0, p)`` block for an identically zero
+    penalty, and the augmented system needs it padded to ``(0, p + 1)`` or the
+    stack has two widths.  This is primarily a shape pin, and it exists because
+    an unpenalised uncertifiable Gram is a reachable state that no other test
+    here drives.
+
+    The numerical assertions below are nonetheless the strictest in this group,
+    because at zero penalty the alias is DISCARDED rather than retained: the
+    reference norm is then the estimable block's own 1.5422 and not the
+    2.0000e+11 of a retained near-null direction, so ``factor_rcond`` here is a
+    bar on the part of the matrix that matters.  The two routes do not agree
+    bit for bit -- ``np.array_equal`` is False on both systems -- but they
+    agree to 2.30e-15 to 5.33e-15 relative, measured over 7
+    ``OPENBLAS_CORETYPE`` microkernels at one thread.  Standard errors are not
+    compared here because the discarded direction makes some of them exactly
+    zero.
+    """
+    import superglm.inference.covariance as covariance_module
+    from superglm.inference.covariance import _penalised_xtwx_inv, _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    monkeypatch.setattr(
+        covariance_module,
+        "decompose_gram_if_authoritative",
+        lambda *args, **kwargs: None,
+    )
+    gram_inverse, gram_augmented, _active, _data_gram, penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+    )
+    assert not np.any(penalty)
+    assert gram_inverse.shape == (18, 18)
+    assert gram_augmented.shape == (19, 19)
+    assert np.all(np.isfinite(gram_inverse)) and np.all(np.isfinite(gram_augmented))
+
+    _design, factor_inverse, factor_augmented, _groups, _gms = _penalised_xtwx_inv(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+    )
+    assert (
+        np.linalg.norm(gram_inverse - factor_inverse, ord=2) / np.linalg.norm(factor_inverse, ord=2)
+        <= SHARED_RANK_POLICY.factor_rcond
+    )
+    assert (
+        np.linalg.norm(gram_augmented - factor_augmented, ord=2)
+        / np.linalg.norm(factor_augmented, ord=2)
+        <= SHARED_RANK_POLICY.factor_rcond
+    )
+
+
+# The near-collinearity that puts the design's own condition inside the
+# certification band while leaving it FULL RANK.  Its size is set by the
+# arithmetic of the two cuts, not tuned: ``pre_truncation_condition`` is a
+# factor-scale condition, the certification condition is ``1 / sqrt(32 eps)``
+# and ``decompose_gram`` truncates at ``width eps``, so the full-rank arm is
+# exactly the window ``[1 / sqrt(32 eps), 1 / sqrt(width eps)]`` -- a ratio of
+# ``sqrt(32 / width)``, which is 4.00x at width 2 and 3.27x at the augmented
+# width 3.  This gap places the fixture at 1.86x to 1.99x of the certification
+# condition over 7 ``OPENBLAS_CORETYPE`` microkernels at one thread, i.e. at
+# the geometric centre of the narrower of the two windows, with both systems
+# on the full-rank arm on every kernel.  Below about 8e-8 the Gram truncates
+# instead (the deficient arm) and below about 4e-8 PIRLS drops ``z`` outright.
+_COLLINEAR_GAP = 1.5e-7
+
+
+def _collinear_pair_fit(*, gap: float = _COLLINEAR_GAP, n: int = 1200, seed: int = 11):
+    """A full-rank, ill-conditioned, UNPENALISED design -- the other arm.
+
+    ``needs_factor_certification`` has two arms and the aliased fixture above
+    drives only one of them: ``rank < width and resolution_limited``, where the
+    Gram has erased a direction the factor resolves.  The other arm is ``rank
+    == width and pre_truncation_condition >= certification_condition``, where
+    nothing is discarded at all and the whole retained subspace is simply
+    recomputed from the factor because the Gram reached it through ``kappa**2``.
+    That is the ordinary shape of an ill-conditioned rating design, and it is
+    the arm that a production fit is far likelier to hit.
+
+    ``z`` is ``3 x`` plus a perturbation of size ``gap``, so the design is
+    genuinely full rank and its condition is ``O(1 / gap)``.  ``penalty=None``
+    leaves ``S`` identically zero, which also exercises ``penalty_factor``'s
+    empty block on a route that reaches it for real rather than by
+    monkeypatch.  Measured over 7 ``OPENBLAS_CORETYPE`` microkernels at one
+    thread: active groups ``['x', 'z']``, ``M`` width 2 at rank 2 with
+    ``resolution_limited`` False, the augmented system width 3 at rank 3, and
+    ``_certified_penalised_inverse`` reached at BOTH sites on every kernel.
+    """
+    import pandas as pd
+
+    from superglm import Numeric, SuperGLM
+
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(-1.0, 1.0, n)
+    z = 3.0 * x + gap * rng.standard_normal(n)
+    frame = pd.DataFrame({"x": x, "z": z})
+    y = np.asarray(rng.poisson(np.exp(0.2 + 0.5 * x)), dtype=float)
+
+    model = SuperGLM(
+        family="poisson",
+        penalty=None,
+        features={"x": Numeric(), "z": Numeric()},
+    )
+    model.fit(frame, y)
+    return _irls_state(model, n)
+
+
+def _bordered_with_intercept(gram: NDArray, weights: NDArray, active_gms: list) -> NDArray:
+    """``[[sum W, X'W1], [X'W1, M]]`` -- the augmented system, as the site builds it."""
+    from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
+
+    moments = MatrixExecutionPlan(active_gms, n=len(weights)).moments(weights, include_xtw=True)
+    width = gram.shape[0]
+    bordered = np.empty((width + 1, width + 1))
+    bordered[0, 0] = weights.sum()
+    bordered[0, 1:] = moments.xtw
+    bordered[1:, 0] = moments.xtw
+    bordered[1:, 1:] = gram
+    return bordered
+
+
+def test_penalised_gram_covariance_certifies_a_full_rank_ill_conditioned_system() -> None:
+    """The full-rank arm reroutes the published covariance too, and by more.
+
+    Nothing is discarded here -- both systems are full rank -- so the verdict
+    is entirely about the Gram having squared the condition.  The two routes
+    then disagree by FAR more than in the rank-deficient band: measured over 7
+    ``OPENBLAS_CORETYPE`` microkernels at one thread, the published standard
+    errors move 5.74e-03 to 4.15e-02 relative against what
+    ``decompose_gram(M).pseudo_inverse()`` would have published, and 2.46e-03
+    to 2.72e-02 on the augmented system.  That is percent-scale movement in a
+    published number, against 1.78e-10 for the aliased fixture, and it is the
+    reason this arm is worth a test of its own.
+    """
+    from superglm.inference.covariance import _penalised_xtwx_inv, _penalised_xtwx_inv_gram
+
+    fit = _collinear_pair_fit()
+    gram_inverse, gram_augmented, active_groups, data_gram, penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+    )
+    assert [group.name for group in active_groups] == ["x", "z"]
+    assert not np.any(penalty)
+
+    active_gms = [
+        matrix
+        for matrix, group in zip(fit.group_matrices, fit.groups, strict=True)
+        if group.name in {active.name for active in active_groups}
+    ]
+    hessian = data_gram + penalty
+    augmented_hessian = _bordered_with_intercept(hessian, fit.weights, active_gms)
+
+    certification_condition = SHARED_RANK_POLICY.warning_condition / np.sqrt(
+        SHARED_RANK_POLICY.certification_band
+    )
+    for system in (decompose_gram(hessian), decompose_gram(augmented_hessian)):
+        # The full-rank arm, both clauses of it, and NOT the deficient one.
+        assert system.rank == system.width
+        assert not system.resolution_limited
+        assert system.pre_truncation_condition >= certification_condition
+        assert needs_factor_certification(system)
+
+    _design, factor_inverse, factor_augmented, _groups, _gms = _penalised_xtwx_inv(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+    )
+    # What the site publishes is the factor's answer, to the rung's own bar.
+    # Measured 4.92e-12 to 1.03e-10 relative over the same 7 microkernels,
+    # i.e. 145x to 3029x inside ``factor_rcond``.
+    for published, reference in (
+        (gram_inverse, factor_inverse),
+        (gram_augmented, factor_augmented),
+    ):
+        worst, _estimable, _count = _standard_error_agreement(published, reference)
+        assert worst <= SHARED_RANK_POLICY.factor_rcond
+
+    # And it is NOT the Gram's answer, by a margin no round-off explains -- so
+    # this reddens if either consult stops asking.
+    for published, uncertified in (
+        (gram_inverse, decompose_gram(hessian).pseudo_inverse()),
+        (gram_augmented, decompose_gram(augmented_hessian).pseudo_inverse()),
+    ):
+        moved, _estimable, _count = _standard_error_agreement(published, uncertified)
+        assert moved >= 1e-3
