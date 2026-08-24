@@ -1721,7 +1721,7 @@ def test_profiled_trace_uses_chunked_linear_geometry_without_svd(monkeypatch):
         return real_centered(B, W)
 
     def watched_scipy_qr(*args, **kwargs):
-        pivoted_qr_calls.append(bool(kwargs.get("pivoting", False)))
+        pivoted_qr_calls.append((bool(kwargs.get("pivoting", False)), kwargs.get("mode", "full")))
         return real_scipy_qr(*args, **kwargs)
 
     def watched_numpy_qr(a, *args, **kwargs):
@@ -1758,7 +1758,16 @@ def test_profiled_trace_uses_chunked_linear_geometry_without_svd(monkeypatch):
     assert (n_levels + 1, k_a, k_a) in allocations
     assert max(chunk_widths) <= st._trace_chunk_width(n_rows, k_a, n_levels)
     assert sum(chunk_widths) == 2 * n_levels
-    assert pivoted_qr_calls == [True]
+    # ONE column-pivoted QR, and nothing else this watcher sees may pivot.
+    # The watcher intercepts ``scipy.linalg.qr`` wholesale, and since
+    # ``_combine_row_factors`` began handing LAPACK a Fortran-ordered stack to
+    # destroy it reaches ``dgeqrf`` through scipy too -- so the per-level merge
+    # reductions land here at ``mode="r"`` where they used to land in
+    # ``numpy_qr_calls``.  Counting every scipy QR as a CPQR dispatch would be
+    # counting the reduction; both halves are asserted separately so the pin is
+    # on the dispatch rather than on which library the merge happens to use.
+    assert [call for call in pivoted_qr_calls if call[0]] == [(True, "economic")]
+    assert {call for call in pivoted_qr_calls if not call[0]} == {(False, "r")}
     aligned_qr = [shape for shape, mode in numpy_qr_calls if mode == "reduced"]
     assert aligned_qr == [(2 * k_a, k_a)] * level_rows.size
     # One combined aligned RHS solve per emitted level.  The old

@@ -33,6 +33,7 @@ does has to be re-checked at the new site, not carried.
 from __future__ import annotations
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 
 
@@ -95,8 +96,54 @@ def _factor_rank_floor(n: int) -> float:
 
 
 def _combine_row_factors(left: NDArray, right: NDArray) -> NDArray:
-    """Compact two weighted-row factors without squaring either one."""
-    return np.linalg.qr(np.concatenate((left, right), axis=0), mode="r")
+    """Compact two weighted-row factors without squaring either one.
+
+    **THE STACK IS BUILT FORTRAN-ORDERED AND HANDED TO LAPACK TO DESTROY, AND
+    BOTH HALVES OF THAT ARE LOAD-BEARING.**  ``dgeqrf`` factors in place in
+    column-major storage, so an ``overwrite_a`` a wrapper can honour needs an
+    array that is already ``order="F"``; a C-ordered one is copied first and
+    the flag buys nothing.  The buffer is this function's own -- it is
+    allocated here and neither ``left`` nor ``right`` is a view of it -- so
+    destroying it destroys nothing a caller can see.
+
+    Measured on a single ``numeric_cat`` pair at the widest factor the default
+    ``max_cells`` admits (1710 levels, ``joint`` 3421 wide), one BLAS thread,
+    as ``VmHWM`` minus the resident set with every import already paid, so the
+    figure is the PAIR's own allocation and not the interpreter's:
+
+        563.2 MB   np.linalg.qr(np.concatenate(...))      2.95 s
+        519.8 MB   scipy.linalg.qr(C-ordered, overwrite)  2.82 s
+        384.5 MB   this, F-ordered                        2.75 s
+
+    The middle row is why the buffer is not simply the old ``concatenate``:
+    ``overwrite_a`` on a C-ordered stack removes one of the three ``(m, n)``
+    copies and leaves the transposing one, which is the largest.  ``mode="r"``
+    returns the FULL ``(m, n)`` here where :func:`numpy.linalg.qr` returns
+    ``(min(m, n), n)``, so the leading rows are taken and COPIED -- a view
+    would keep the whole buffer alive in ``joint`` for the rest of the
+    reduction, which is the allocation this change exists to release.
+
+    ``check_finite`` is left at its default.  It is a scan rather than a copy
+    (``asarray_chkfinite`` returns the same object for an array already of
+    this dtype and order), so switching it off would trade a guard for no
+    memory at all.
+
+    **THIS IS NOT THE SAME BITS AS THE ROUTINE IT REPLACES, AND THE SUITE IS
+    WHAT SAYS THE DIFFERENCE IS ROUND-OFF.**  NumPy and SciPy reach ``dgeqrf``
+    through different wrappers with different blocking, so ``R`` moves in its
+    last bits: over the shapes both screening paths use, the two agree to
+    2.2e-16 at width 5 and to 8.3e-14 at width 3421, which is round-off at
+    each width and not a change of answer.  Every exactness pin in
+    ``tests/test_pair_design_factor.py`` and the structured suite grades the
+    factor against an independently assembled Gram rather than against a
+    stored bit pattern, and they hold across the change.
+    """
+    rows_left, width = left.shape
+    stacked = np.empty((rows_left + right.shape[0], width), dtype=np.float64, order="F")
+    stacked[:rows_left] = left
+    stacked[rows_left:] = right
+    (factor,) = scipy.linalg.qr(stacked, mode="r", overwrite_a=True)
+    return factor[: min(factor.shape)].copy()
 
 
 def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
