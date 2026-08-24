@@ -60,6 +60,7 @@ from superglm.screening._pair_factor import (
     pair_design_factor,
 )
 from superglm.screening._pair_moments import pair_cell_moments, pair_score_curvature
+from superglm.screening._score_stat import penalized_score_statistic_ladder
 
 
 def _gram_blocks(factor: PairFactor):
@@ -483,3 +484,113 @@ def test_no_production_module_imports_a_retired_gram_producer():
         "the dense screening path reads design factors since issue #257; these "
         f"reach for the moments it replaced: {offenders}"
     )
+
+
+def _zero_weight_boundary_case(outlier_z, *, position):
+    """One ``numeric_cat`` pair, optionally carrying one zero-weight row.
+
+    Level 0 holds a real per-level slope -- its ``z`` takes two distinct
+    values against differing scores -- so erasing that level's spread is
+    visible in the published statistic rather than only in the factor.
+    ``position`` places the zero-weight row first, last, or nowhere.
+    """
+    codes = [0, 0, 0, 0, 1, 1, 1, 1]
+    z = [1.0, 2.0, 1.0, 2.0, 0.5, 1.5, 2.5, 3.5]
+    w = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    s = [0.3, 0.9, 0.4, 1.1, -0.2, 0.4, 0.1, 0.8]
+    if position is not None:
+        # A zero-weight row's score is exactly zero by construction: both cell
+        # tables carry the same ``weights * dmu_deta`` factor, so a row with no
+        # weight contributes no score either.
+        at = len(codes) if position == "last" else 0
+        codes.insert(at, 0)
+        z.insert(at, outlier_z)
+        w.insert(at, 0.0)
+        s.insert(at, 0.0)
+    return (
+        np.asarray(codes, dtype=np.intp),
+        2,
+        np.array([[0.0], [1.0]]),
+        np.asarray(z, dtype=np.float64),
+        np.asarray(s, dtype=np.float64),
+        np.asarray(w, dtype=np.float64),
+    )
+
+
+def _published(args):
+    """``(statistic, edf0)`` for a ``numeric_cat`` pair, which is unpenalized."""
+    rung = penalized_score_statistic_ladder(numeric_cat_factor(*args), None, budgets=(4.0,))[0]
+    return float(rung.statistic), float(rung.edf0)
+
+
+@pytest.mark.parametrize("outlier_z", [1e20, 1e308])
+@pytest.mark.parametrize("position", ["first", "last"])
+def test_a_zero_weight_row_cannot_move_a_numeric_cat_pair(outlier_z, position):
+    """A row with no weight is not in the fit and may not reach the screen.
+
+    The level reference is a scatter with duplicate indices, so whichever row
+    of the level comes LAST supplies the value every other row is shifted
+    against.  A zero-weight row is a row, and its ``z`` is unconstrained by
+    anything -- it is not in the fit -- so before this was fixed the reference
+    could be arbitrarily far from the level's own values and the shift stopped
+    being exact.  Two regimes, both from one appended row at unit weights:
+
+    * ``z = 1e20`` erased the level outright.  ``1 - 1e20`` and ``2 - 1e20``
+      round to the SAME double, so ``m2`` came back exactly zero, the level's
+      real slope went with it, and the pair published ``statistic 0.0,
+      edf0 0.0`` where it reads 0.1203333333 and 1.0.
+    * ``z = 1e308`` overflowed.  The level's four shifted values summed past
+      the largest double, ``offset`` came back infinite, and the reduction
+      raised ``ValueError: array must not contain infs or NaNs`` from inside
+      ``_combine_row_factors`` -- a screen that crashes on a row that is not
+      in the fit.
+
+    Both are decided by the row's POSITION, which is why the control arm here
+    places the same row first: that arm passed throughout.
+    """
+    baseline = _published(_zero_weight_boundary_case(outlier_z, position=None))
+    assert baseline == pytest.approx((0.12033333333333333, 1.0), rel=1e-12, abs=0.0)
+
+    with_row = _published(_zero_weight_boundary_case(outlier_z, position=position))
+    assert with_row == pytest.approx(baseline, rel=1e-12, abs=0.0)
+
+
+@pytest.mark.parametrize("outlier_z", [1e20, 1e308])
+def test_a_zero_weight_row_leaves_the_emitted_factor_bit_identical(outlier_z):
+    """Stronger than the published invariance, and the reason it holds.
+
+    The reference is selected from the level's positively-weighted rows, so a
+    zero-weight row changes no input to any accumulation: its weight is zero
+    in every ``bincount`` channel and its score is exactly zero.  The factor
+    is therefore the same BITS, not merely the same answer to a tolerance.
+    """
+    base = numeric_cat_factor(*_zero_weight_boundary_case(outlier_z, position=None)).joint
+    for position in ("first", "last"):
+        got = numeric_cat_factor(*_zero_weight_boundary_case(outlier_z, position=position)).joint
+        assert np.array_equal(got, base), f"zero-weight row placed {position} moved the factor"
+
+
+def test_a_level_whose_every_row_has_zero_weight_emits_an_exact_zero_block():
+    """The case the reference selection above cannot fill, stated rather than left.
+
+    Choosing the reference from ``codes_g[w > 0]`` leaves a level with NO
+    positively-weighted row unwritten, so its reference stays 0.0.  That is
+    inert rather than arbitrary: the level's ``w0`` and ``s0`` are both exactly
+    zero, so ``positive`` and ``spread`` are both False, every divide is
+    guarded to zero, and the level emits an exact zero block whatever its
+    ``z`` holds -- including a value whose square would overflow.
+    """
+    codes = np.array([0, 0, 1, 1, 1], dtype=np.intp)
+    z = np.array([1e308, -1e308, 0.5, 1.5, 2.5])
+    w = np.array([0.0, 0.0, 1.0, 1.0, 1.0])
+    s = np.array([0.0, 0.0, -0.2, 0.4, 0.1])
+    factor = numeric_cat_factor(codes, 2, np.array([[0.0], [1.0]]), z, s, w)
+    assert np.all(np.isfinite(factor.joint))
+
+    # The dead level contributes nothing: dropping its rows entirely leaves
+    # the same factor, bit for bit.
+    alive = np.array([2, 3, 4])
+    same = numeric_cat_factor(
+        codes[alive], 2, np.array([[0.0], [1.0]]), z[alive], s[alive], w[alive]
+    )
+    assert np.array_equal(factor.joint, same.joint)

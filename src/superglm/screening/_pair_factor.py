@@ -350,45 +350,49 @@ def numeric_cat_factor(
     levels in ``test_the_numeric_cat_cell_gram_is_not_what_limits_the_pair``,
     including on a level starved to a single row.
 
-    **THE REFERENCE IS THE LEVEL'S LAST ROW IN ROW ORDER, AND A ZERO-WEIGHT
-    ROW IS A ROW.**  ``reference[codes_g] = z`` is a scatter with duplicate
-    indices, so the value that survives is whichever row of the level comes
-    last.  A zero-weight row reaches the arithmetic NOWHERE else -- its weight
-    drops out of every accumulation and ``screening_ops`` forces its score to
-    exactly zero -- so this is the one channel through which it can move an
-    answer.  When the level's positively-weighted rows share one ``z`` and
-    that last row does not, ``shifted`` is a nonzero constant rather than an
-    exact zero, and ``offset = sum(w shifted) / sum(w)`` returns it only to
-    two roundings; ``centered`` then comes back at ``eps`` of the gap instead
-    of at zero and ``m2 > 0`` reads a spread that is not in the data.
+    **THE REFERENCE IS TAKEN FROM A POSITIVELY-WEIGHTED ROW, AND A ROW WITH NO
+    WEIGHT MAY NOT SUPPLY IT.**  The scatter has duplicate indices, so what
+    survives for a level is whichever of its rows comes LAST.  A zero-weight
+    row reaches the arithmetic NOWHERE else -- its weight drops out of every
+    accumulation and ``screening_ops`` forces its score to exactly zero -- so
+    an unmasked scatter is the single channel through which a row that is not
+    in the fit can move a published number.  Masking to ``w > 0`` keeps
+    ``shifted`` inside the level's own spread, which is what every exactness
+    claim above rests on.
 
-    Measured over twelve random seven-row levels with unequal weights, one
-    zero-weight row placed either first or last:
+    **THE MEASUREMENT THAT SETTLED IT IS UNBOUNDED, NOT THE BOUNDED ONE, AND
+    THE DIFFERENCE IS WHY THIS CHANGED.**  Sweeping MODERATE outliers found
+    only a margin: over twelve random seven-row levels with unequal weights, a
+    zero-weight reference put ``m2`` in 2.34e-33 .. 2.14e-30 on 6 of 12 where
+    a weighted one puts it at exactly 0.0 on 12 of 12, carrying a response
+    entry of up to 1.9099 -- 29.0% of that level's own ``sum(s**2 / w)`` --
+    against a direction of norm at most 1.461e-15.  That is more than seven
+    orders under :func:`._factor_kernels._factor_rank_floor`'s ``sqrt(k eps)``,
+    so the pencil dropped it and nothing published moved.  That sweep stands
+    and it is not the case that matters, because the outlier's magnitude is
+    bounded by nothing: the row is not in the fit.
 
-        reference a positively-weighted row   ``m2`` exactly 0.0, 12 of 12
-        reference the zero-weight row         ``m2`` in 2.34e-33 .. 2.14e-30
-                                              on 6 of 12
+    Taken to the scale the input boundary actually admits, at UNIT weights and
+    one appended row, the same channel erases and then crashes:
 
-    On those six the level's factor carries a response entry of up to 1.9099
-    -- 29.0% of that level's own ``sum(s**2 / w)``, on the worst of them --
-    against a design direction whose norm never exceeds 1.461e-15 over the
-    six.  Equal weights keep the property outright, because
-    ``sum(w c) / sum(w)`` then rounds back to ``c``, which is why the suite's
-    fixtures do not see it.
+        appended zero-weight row   published (statistic, edf0)
+        none                       (0.1203333333, 1.0)
+        z = 1e+20                  (0.0, 0.0)          level erased
+        z = 1e+308                 ValueError          non-finite reduction
 
-    **IT DOES NOT REACH A PUBLISHED NUMBER, AND THE REASON IS A MARGIN RATHER
-    THAN EXACTNESS.**  1.461e-15 is more than seven orders under
-    :func:`._factor_kernels._factor_rank_floor`'s ``sqrt(k eps)``, which is
-    1.490e-08 at its smallest and rises with the block's width -- and that cut
-    is taken RELATIVE to the joint's top singular value, which is larger than
-    this level's -- so the pencil drops the direction and the response energy
-    lands in the reduction's residual exactly as it does when the reference is
-    a weighted row.  The two references agree on what is PUBLISHED; they
-    differ in whether that agreement is arithmetic or a seven-order gap.
-    Referencing the level's last POSITIVELY-WEIGHTED row would restore the
-    exactness and is a scatter over ``codes_g[w > 0]`` rather than over
-    ``codes_g``; it is not taken here because it changes an emitted factor,
-    and this branch changes none.
+    ``1 - 1e20`` and ``2 - 1e20`` round to the SAME double, so ``m2`` came
+    back exactly zero and a real per-level slope went with it; at 1e308 the
+    level's four shifted values summed past the largest double, ``offset``
+    came back infinite and ``_combine_row_factors``' finiteness guard raised.
+    Both were decided by the row's POSITION -- the same rows with that row
+    first published correctly -- which is the shape of a defect rather than of
+    a tolerance.
+
+    The fix costs nothing anyone had: with no zero-weight row present the mask
+    is all-true and the scatter is the one it replaces, so the emitted factor
+    is bit-identical.  Checked on 300 random all-positive-weight geometries
+    and on all eight of the suite's own ``_numeric_cat_case`` arms, 0 of 308
+    differing in any bit.
 
     **THE ROW-LENGTH TEMPORARIES HERE ARE NOT CHUNKED, UNLIKE THE ONES BESIDE
     THEM.**  ``reference[codes_g]``, ``shifted``, ``offset[codes_g]``,
@@ -446,8 +450,21 @@ def numeric_cat_factor(
     # exactly zero there and ``m2 > 0`` is a rank test with no constant in it.
     # Same device, and the same reason, as
     # :func:`superglm.screening._structured._centered_level_factors`.
+    #
+    # AND THE VALUE IS TAKEN FROM A POSITIVELY-WEIGHTED ROW, WHICH IS THE
+    # WHOLE OF THE GUARANTEE.  This scatter has duplicate indices, so what
+    # survives for a level is whichever of its rows comes LAST -- and a
+    # zero-weight row is a row.  Such a row is not in the fit, so its ``z`` is
+    # bounded by nothing; masking to ``w > 0`` is what keeps ``shifted``
+    # inside the level's OWN spread, which is the property every claim above
+    # rests on.  A level with no positively-weighted row is left at 0.0 and
+    # that reference is inert rather than arbitrary: its ``w0`` and ``s0`` are
+    # both exactly zero, so ``positive`` and ``spread`` are both False, every
+    # divide below is guarded to zero, and the level emits an exact zero
+    # block whatever its ``z`` holds.
     reference = np.zeros(n_g, dtype=np.float64)
-    reference[codes_g] = z
+    weighted = w > 0.0
+    reference[codes_g[weighted]] = z[weighted]
     shifted = z - reference[codes_g]
     offset = np.divide(cell(w * shifted), w0, out=np.zeros_like(w0), where=positive)
     centered = shifted - offset[codes_g]
