@@ -223,7 +223,8 @@ certified constant at ``abs=1e-2``, which the worst reading clears by 4.7x.
 ``moderate_pair``'s high edge, whose condition number is ~1e11, against the
 textbook stacked-QR arbiter: the statistic moves 1.1159e-05 -> 3.451e-13 and
 ``edf`` 4.3374e-06 -> 1.959e-12, four to six orders, and the per-lambda stacked
-QR on the same factor agrees with the pencil to 1.4e-13, so ONE lambda-free
+QR on the same factor agrees with the pencil to 2.0e-13 on the statistic and
+1.1e-15 on ``edf``, so ONE lambda-free
 decomposition costs nothing against a fresh factorization per rung.
 
 **THE RANK CUT IS NO LONGER A CONVENTION, AND THAT IS THE MEASUREMENT THIS
@@ -341,6 +342,18 @@ left there.  The test asserts the sensitivity against ONE ULP of the answer --
 clears by 2.44e+07x and 3.03e+10x.  Separately the maximising perturbation
 attains 0.9425 to 1.0617 of the predicted displacement against a first-order
 value of 1; that ratio is REPORTED and not asserted.
+
+**WHICH OF THOSE FIGURES ISSUE #257 COULD HAVE MOVED, AND WHICH IT COULD NOT.**
+The SENSITIVITY itself -- the 1.6298e-15..4.9265e-04 span -- is
+``eps ||V_eff||_F ||G||_F``, computed from the pair's own ``V_eff`` and the
+operator at the low edge, so it is a property of the QUANTITY and the same
+number whichever route reads it.  The two figures that involve a realized
+displacement -- the ulp separation and the 0.9425..1.0617 attainment ratio --
+were taken before the move and are NOT re-taken here, because what they
+support is a boundary the test recomputes on every run rather than a constant
+it carries.  That test drives the shipped ladder, so the boundary it asserts is
+the factor route's; the numbers beside it are the moment route's record of how
+wide the gap was, and are labelled as such rather than restated as current.
 
 **A SAMPLED WIDTH WAS TRIED FIRST AND IS NOT SOUND**, which is worth recording
 because it looks convincing.  Taking ``max - min`` of ``edf`` over 32 random
