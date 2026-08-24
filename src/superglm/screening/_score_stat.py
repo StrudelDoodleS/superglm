@@ -101,9 +101,21 @@ its only sum of two independently scaled matrices.  Neither exists.
   ``test_the_pencil_carries_its_own_orthonormality_invariant``.
 * the surviving relative cuts are :func:`_factor_rank_floor`'s, and they are
   taken on FACTORS.  The rank of a profiled block is still balanced before it
-  is counted, for exactly rule 1's reason, and
-  ``test_screening_is_invariant_to_the_units_of_a_numeric_margin`` still
-  enforces it end to end.
+  is counted, for exactly rule 1's reason, in
+  :func:`superglm.screening._pair_factor._profiled_rank_scale`.  **What
+  enforces that balance is NOT the end-to-end units test, and believing it was
+  cost this note a correction.**  A change of units multiplies the tensor block
+  by the square of what it multiplies the overlap by, so
+  ``test_screening_is_invariant_to_the_units_of_a_numeric_margin`` only ever
+  moves a pair in the direction where an unbalanced reference agrees: measured,
+  removing the equilibration outright left all 265 tests in the six screening
+  files passing.  The balance is pinned instead as the two exact homogeneity
+  identities it is equivalent to -- degree one in the probe block's units,
+  degree zero in the overlap's --
+  ``test_the_rank_reference_is_blind_to_the_overlap_s_units_and_tracks_the_probe_s``.
+  The end-to-end test keeps its own standing: it covers a relative threshold
+  that reaches a reported field through a change of units, which is a different
+  and still-useful statement.
 
 **THRESHOLD TYPES.  Read this before adding a constant to this module.**
 

@@ -417,17 +417,43 @@ def test_screening_is_invariant_to_the_units_of_a_numeric_margin():
     rescaled coefficient, so ``phi`` is unchanged too.  Every reported field
     must therefore come back identical.
 
-    **This enforces the equilibration in ``_psd_rank``, which is the module's
-    only relative-rank threshold** -- see the SCALE DISCIPLINE note in
-    :mod:`superglm.screening._score_stat`.  It is deliberately a property of
-    the whole public screen rather than a unit check on one block, so any
-    future relative threshold that reaches a reported field is covered by it.
+    It is deliberately a property of the whole public screen rather than a unit
+    check on one block, so a relative threshold that reaches a reported field
+    THROUGH A CHANGE OF UNITS is covered by it -- see the SCALE DISCIPLINE note
+    in :mod:`superglm.screening._score_stat`.
 
-    What it does NOT cover, measured rather than assumed: reverting the
-    balancing in ``_build_pencil`` leaves this test PASSING, because rescaling
-    a spline's covariate rescales its penalty with it and never reaches the
-    ``V >> S`` regime.  That site has its own regression,
-    ``test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty``.
+    **WHAT IT DOES NOT COVER, MEASURED RATHER THAN ASSUMED, AND THE LIST GREW
+    WHEN THE TWO SITES IT NAMED WERE REPLACED.**  It used to say it enforced
+    "the equilibration in ``_psd_rank``, the module's only relative-rank
+    threshold".  Both of the functions in that sentence are gone: the surviving
+    relative-rank cut is
+    :func:`superglm.screening._factor_kernels._factor_rank_floor` and the
+    balancing is
+    :func:`superglm.screening._pair_factor._profiled_rank_scale`'s.  Neither is
+    enforced here.
+
+    * Removing the equilibration from ``_profiled_rank_scale`` left every one
+      of the 265 tests these six files then held passing, this one included.  A
+      change of units multiplies the TENSOR block by the SQUARE of what it
+      multiplies the overlap by, so it only moves the pair in the direction
+      where an unbalanced reference happens to agree.  The regime that bites is
+      the other one, overlap mass far above probe mass, and it is now pinned
+      directly and exactly -- the mutation reds
+      ``test_the_rank_reference_is_blind_to_the_overlap_s_units_and_tracks_the
+      _probe_s`` in ``tests/test_profiled_rank_threshold.py``, which was added
+      because nothing else did.
+    * Removing the balance from ``_pair_pencil`` also leaves this test passing,
+      for the reason the old sentence gave -- rescaling a spline's covariate
+      rescales its penalty with it and never reaches the ``V >> S`` regime.  It
+      leaves ``test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty``
+      passing too, which the old sentence named as that site's regression and
+      which is no longer one: the pencil STACKS ``R_eff`` under ``rootS``
+      instead of forming ``V + S``, so the penalty survives ``V >> S`` by
+      construction and the balance is an accuracy measure rather than a
+      representability one.  What catches that mutation is
+      ``test_the_pencil_carries_its_own_orthonormality_invariant``, red on all
+      seven of its fixtures, because it reads the balance off the pencil and
+      asserts ``c**2 + balance * s**2 == 1``.
 
     The reviewer's case: on the balanced four-point design
     ``z1, z2 = +-10000`` with ``C = 0``, so the true profiled rank is
