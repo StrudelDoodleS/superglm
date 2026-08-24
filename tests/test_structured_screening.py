@@ -23,10 +23,11 @@ from superglm import SuperGLM
 from superglm.features import Categorical, Spline
 from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._arrow import factor_arrow
-from superglm.screening._factor_kernels import _rank_floor
+from superglm.screening._factor_kernels import _factor_rank_floor, _rank_floor
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
+from superglm.screening._pair_factor import _pair_scale, _profiled_factor
 from superglm.screening._pair_moments import pair_score_curvature
-from superglm.screening._score_stat import penalized_score_statistic_ladder
+from superglm.screening._score_stat import _pair_pencil, penalized_score_statistic_ladder
 from superglm.screening._structured import (
     _evaluate,
     _penalty_root,
@@ -5651,3 +5652,56 @@ def test_the_cut_margin_survives_an_exactly_absorbed_border_under_raising_errsta
 
     assert rungs is not None and len(rungs) == 1
     assert np.isfinite([rungs[0].statistic, rungs[0].edf0, rungs[0].lambda0]).all()
+
+
+def _rank_free_edf(R_eff, root, lam):
+    """``edf(lambda)`` with NO rank cut anywhere, as the arbiter.
+
+    ``edf = tr(R (R'R + lam S)^-1 R')`` evaluated as ``||Q_R||_F**2`` for the
+    orthonormal factor of ``[R ; sqrt(lam) rootS]`` -- the augmented-system
+    form :func:`_reference_edf` derives, with no threshold applied, so it
+    cannot inherit whatever rank decision the routine under test took.
+    """
+    stacked = np.concatenate((R_eff, np.sqrt(lam) * root), axis=0)
+    Q, _ = np.linalg.qr(stacked, mode="reduced")
+    return float(np.sum(Q[: R_eff.shape[0]] ** 2))
+
+
+def test_the_dense_rank_cut_keeps_the_direction_a_spectral_reference_would_drop():
+    """``_multi_null_pair`` is where the pivot and ``sigma_1`` references part.
+
+    :func:`superglm.screening._score_stat._pair_pencil` cuts the penalized
+    stack's pivoted-QR diagonal relative to ``diagonal[0]``, which is the
+    largest COLUMN NORM rather than the largest singular value; the two differ
+    by up to ``sqrt(k)``.  Across this file's adversarial bank they choose the
+    same rank everywhere but here, where the pivot reference keeps a 20th
+    direction that a ``sigma_1`` reference drops -- and the direction is real.
+
+    Graded against an augmented-QR oracle that takes no rank cut at all, at the
+    low edge where the disagreement is largest: what the ladder publishes is
+    within 1e-5 of the oracle, and the value a ``sigma_1`` reference would
+    publish instead is a whole degree of freedom away from it.  Two decisive
+    orders separate those, so nothing here rests on a tolerance.  This is the
+    real-pipeline instance of the synthetic pin in
+    ``tests/test_pair_design_factor.py``.
+    """
+    grab = _multi_null_pair(0)
+    pair, root = grab["factor"]
+    R_eff, _z = _profiled_factor(pair)
+    balanced = np.sqrt(_pair_scale(R_eff) / float(np.sum(np.asarray(root) ** 2))) * root
+    stack = np.concatenate((R_eff, balanced), axis=0)
+    _q, triangular, _p = scipy.linalg.qr(stack, mode="economic", pivoting=True, check_finite=False)
+    diagonal = np.abs(np.diag(triangular))
+    sigma = scipy.linalg.svdvals(triangular)
+    k = int(pair.tensor_width)
+    floor = _factor_rank_floor(k)
+
+    kept = int(np.count_nonzero(diagonal > floor * diagonal[0]))
+    dropped = int(np.count_nonzero(diagonal > floor * sigma[0]))
+    assert (kept, dropped) == (k, k - 1), "this fixture no longer separates the references"
+    assert len(_pair_pencil(pair, root).v) == kept
+
+    rung = penalized_score_statistic_ladder(pair, root, budgets=(16.0,))[0]
+    oracle = _rank_free_edf(R_eff, balanced, float(rung.lambda0))
+    assert abs(rung.edf0 - oracle) < 1e-5
+    assert abs((rung.edf0 - 1.0) - oracle) > 0.5

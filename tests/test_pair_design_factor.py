@@ -47,6 +47,7 @@ import numpy as np
 import pytest
 import scipy.linalg
 
+from superglm.screening._factor_kernels import _factor_rank_floor
 from superglm.screening._numeric_margin import (
     numeric_numeric_moments,
     numeric_pair_moments,
@@ -54,13 +55,17 @@ from superglm.screening._numeric_margin import (
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._pair_factor import (
     PairFactor,
+    _pair_scale,
     _profiled_factor,
     numeric_cat_factor,
     numeric_numeric_factor,
     pair_design_factor,
 )
 from superglm.screening._pair_moments import pair_cell_moments, pair_score_curvature
-from superglm.screening._score_stat import penalized_score_statistic_ladder
+from superglm.screening._score_stat import (
+    _pair_pencil,
+    penalized_score_statistic_ladder,
+)
 
 
 def _gram_blocks(factor: PairFactor):
@@ -594,3 +599,94 @@ def test_a_level_whose_every_row_has_zero_weight_emits_an_exact_zero_block():
         codes[alive], 2, np.array([[0.0], [1.0]]), z[alive], s[alive], w[alive]
     )
     assert np.array_equal(factor.joint, same.joint)
+
+
+def _near_parallel_pair(k, separation, n_null=2):
+    """``k`` near-parallel UNIT-norm probe columns: the ``sqrt(k)`` geometry.
+
+    ``sigma_1 / |R_00|`` is bounded by ``sqrt(k)`` and attains it exactly when
+    every column is a unit vector and they are all nearly parallel, which is
+    what this builds.  ``separation`` sets how far the block is from rank one,
+    and the penalty leaves ``n_null`` directions free so that the rank cut is
+    what decides whether the near-parallel residual directions are counted.
+    """
+    T = np.ones((k, k)) + separation * np.eye(k)
+    T = T / np.linalg.norm(T, axis=0)
+    R_eff = np.linalg.qr(T, mode="r")
+    root = np.eye(k)[n_null:]
+    q, width = 1, 1 + k + 1
+    joint = np.zeros((width, width))
+    joint[0, 0] = 1.0
+    joint[q : q + k, q : q + k] = R_eff
+    joint[q : q + k, -1] = np.linspace(0.3, 1.2, k)
+    joint[-1, -1] = 0.5
+    return PairFactor(joint=joint, overlap_width=q, tensor_width=k), root
+
+
+def _rank_free_edf(R_eff, root, lam):
+    """``edf(lambda)`` with NO rank cut anywhere, as the arbiter.
+
+    ``edf = tr(R (R'R + lam S)^-1 R')`` evaluated as ``||Q_R||_F**2`` for the
+    orthonormal factor of ``[R ; sqrt(lam) rootS]`` -- the augmented-system
+    form of Tikhonov regularization (Elden 1977; Golub, Heath and Wahba 1979;
+    Wood, *JASA* 99:673-686, 2004).  Every term summed is a square and no
+    threshold is applied, so it cannot inherit either reference's decision.
+    """
+    stacked = np.concatenate((R_eff, np.sqrt(lam) * root), axis=0)
+    Q, _ = np.linalg.qr(stacked, mode="reduced")
+    return float(np.sum(Q[: R_eff.shape[0]] ** 2))
+
+
+@pytest.mark.parametrize("k", [32, 64])
+def test_the_penalized_rank_cut_references_the_pivot_and_that_is_the_accurate_one(k):
+    """``diagonal[0]`` is the largest COLUMN NORM, not the largest singular value.
+
+    Pivoted QR puts the column of greatest norm first (Businger and Golub,
+    *Numer. Math.* 7:269-276, 1965), so ``|R_00| = max_j ||a_j||_2`` exactly,
+    and ``||A||_2 <= ||A||_F <= sqrt(k) max_j ||a_j||_2`` gives
+
+        sigma_1 / sqrt(k)  <=  |R_00|  <=  sigma_1 ,
+
+    with the left edge ATTAINED on near-parallel unit columns -- which is what
+    this fixture builds and what this test measures rather than assumes.  The
+    reference therefore UNDER-scales the floor relative to a ``sigma_1`` one,
+    by up to ``sqrt(k)``, and retains directions a ``sigma_1`` reference drops.
+
+    **THAT IS THE ACCURATE CHOICE HERE, AND THIS PINS IT SO.**  The retained
+    direction is graded against an augmented-QR oracle that takes no rank cut
+    at all: the shipped reference lands within a thousandth of a degree of
+    freedom of it, while the ``sigma_1`` reference -- computed here from the
+    same stack, so the comparison needs no second implementation -- discards a
+    direction carrying very nearly a whole one.  Moving this cut to
+    ``sigma_1`` reds this test, which is the point of it.
+    """
+    pair, root = _near_parallel_pair(k, separation=1e-6)
+    R_eff, _z = _profiled_factor(pair)
+    tr_v = _pair_scale(R_eff)
+    balanced = np.sqrt(tr_v / float(np.sum(root**2))) * root
+    stack = np.concatenate((R_eff, balanced), axis=0)
+    _q, triangular, _p = scipy.linalg.qr(stack, mode="economic", pivoting=True, check_finite=False)
+    diagonal = np.abs(np.diag(triangular))
+    sigma = scipy.linalg.svdvals(triangular)
+
+    # The reference IS the largest column norm, to round-off.
+    assert diagonal[0] == pytest.approx(np.max(np.linalg.norm(stack, axis=0)), rel=1e-12)
+    # ...and this geometry realizes most of the sqrt(k) gap the bound allows.
+    slack = sigma[0] / diagonal[0]
+    assert 1.0 <= slack <= np.sqrt(k) * (1 + 1e-12)
+    assert slack > 0.7 * np.sqrt(k), "fixture no longer exercises the sqrt(k) edge"
+
+    floor = _factor_rank_floor(k)
+    shipped_rank = int(np.count_nonzero(diagonal > floor * diagonal[0]))
+    sigma_rank = int(np.count_nonzero(diagonal > floor * sigma[0]))
+    assert shipped_rank == sigma_rank + 1, "the two references no longer disagree here"
+    assert len(_pair_pencil(pair, root).v) == shipped_rank
+
+    # The extra direction is REAL: graded against a cut-free oracle, keeping it
+    # is right to a thousandth of a degree of freedom and dropping it costs
+    # nearly one.  Two decisive orders separate the two, so no tolerance here
+    # is doing any work.
+    rung = penalized_score_statistic_ladder(pair, root, budgets=(4.0,))[0]
+    oracle = _rank_free_edf(R_eff, balanced, float(rung.lambda0))
+    assert abs(rung.edf0 - oracle) < 1e-2
+    assert abs((rung.edf0 - 1.0) - oracle) > 0.5

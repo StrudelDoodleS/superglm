@@ -642,13 +642,63 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     #
     # With a penalty, the cut asks what neither operand resolves: a direction
     # the STACK does not resolve carries neither curvature nor penalty, so it
-    # contributes zero to both sums and discarding it is exact.  Its reference
-    # is the stack's own largest direction -- the same policy the whitening
-    # branch this replaces applied to ``G``'s spectrum, at the same cut and one
-    # square root earlier.  No rank decision beyond that is taken on a
-    # penalized rung: a direction with little curvature and real penalty gets a
-    # filter factor near zero and contributes what it should, so there is
-    # nothing here for a threshold to arbitrate.
+    # contributes zero to both sums and discarding it is exact.  No rank
+    # decision beyond that is taken on a penalized rung: a direction with
+    # little curvature and real penalty gets a filter factor near zero and
+    # contributes what it should, so there is nothing here for a threshold to
+    # arbitrate.
+    #
+    # **ITS REFERENCE IS THE FIRST PIVOT, WHICH IS THE STACK'S LARGEST COLUMN
+    # NORM AND NOT ITS LARGEST SINGULAR VALUE.**  This comment used to say
+    # "the stack's own largest direction", which reads as ``sigma_1`` and is
+    # the scale ``_factor_rank_floor`` states its policy in; the code has
+    # always referenced ``diagonal[0]``, and the two are different numbers.
+    # Column-pivoted QR puts the column of greatest norm first (Businger and
+    # Golub, *Numer. Math.* 7:269-276, 1965), so ``|R_00| = max_j ||a_j||_2``
+    # exactly -- measured to 3.9e-16 over 200 random stacks -- and since
+    # ``||A||_2 <= ||A||_F <= sqrt(k) max_j ||a_j||_2``,
+    #
+    #     sigma_1 / sqrt(k)  <=  |R_00|  <=  sigma_1 ,
+    #
+    # both edges tight: no violation in 400 draws, and the LEFT edge attained
+    # to four figures on k near-parallel unit-norm columns (ratio 2.000, 4.000,
+    # 8.000, 16.000 at k = 4, 16, 64, 256).  So this reference UNDER-scales the
+    # floor by up to sqrt(k) against the policy as written, and retains
+    # directions a ``sigma_1`` reference would drop.
+    #
+    # **IT IS KEPT BECAUSE THE DIRECTIONS IT RETAINS ARE REAL, AND THAT IS
+    # MEASURED AGAINST AN ORACLE THAT TAKES NO CUT AT ALL.**  Referencing the
+    # leading pivot is what LAPACK's own rank determination does -- ``xGELSY``
+    # takes the effective rank as the order of the largest leading block of the
+    # pivoted ``R`` whose condition estimate beats ``1/RCOND``, relative to
+    # that block rather than to a spectral norm -- and the RRQR bounds relating
+    # ``|R_jj|`` to ``sigma_j`` carry dimension-dependent constants of the same
+    # shape (Chan, *Linear Algebra Appl.* 88/89:67-82, 1987; Hong and Pan,
+    # *Math. Comp.* 58:213-232, 1992), so a sqrt(k) factor sits inside the
+    # criterion's own error bar rather than outside it.
+    #
+    # Swept over the thirteen adversarial pairs the screening suites build, the
+    # realized slack ``sigma_1 / |R_00|`` runs 1.151 to 1.824 against sqrt(k)
+    # of 2.83 to 14.46, and the two references choose the SAME rank on twelve
+    # of the thirteen.  On the thirteenth -- ``_multi_null_pair(0)``, k = 20 --
+    # they differ by one direction, and against an augmented-QR evaluation of
+    # ``edf`` that applies no threshold anywhere this reference is 6.25e-07 out
+    # at the low edge where a ``sigma_1`` one is 9.95e-01 out, having discarded
+    # a direction carrying 0.995 of a degree of freedom.  Same verdict on the
+    # geometry the sqrt(k) bound is TIGHT on, which is the adversarial case for
+    # this choice rather than an easy one: at 32 and 64 near-parallel unit
+    # columns this reference is 8.2e-04 and 4.4e-04 from that oracle and a
+    # ``sigma_1`` one is 9.9e-01 both times.
+    #
+    # The under-scaling is not a leak, it is the point of issue #257: on
+    # ``_multi_null_pair`` the contested direction sits at 2.78e-08 of the
+    # stack's spectrum, which is 7.7e-16 of the GRAM's and therefore gone.  A
+    # floor conservative enough for a squared spectrum is too blunt for a
+    # factor.  Pinned both ways -- synthetically on the near-parallel geometry
+    # in ``tests/test_pair_design_factor.py``, and on the pipeline-built pair
+    # in ``tests/test_structured_screening.py``; both tests grep as
+    # ``rank_cut`` and both assert the pivot rank against the ``sigma_1`` rank
+    # explicitly, so moving this reference goes red rather than quiet.
     #
     # Without one, the cut IS the answer -- ``edf`` is ``rank(V_eff)`` -- and
     # the stack is ``R_eff`` alone, whose own top is round-off on exactly the
