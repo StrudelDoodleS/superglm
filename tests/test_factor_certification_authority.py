@@ -693,3 +693,196 @@ def test_pirls_rank_metadata_uses_factor_certified_subspaces() -> None:
     _assert_factor_certificate(result.rank_info.data, centered_factor)
     _assert_factor_certificate(result.rank_info.augmented, centered_factor)
     _assert_factor_certificate(result.rank_info.coefficient, raw_factor)
+
+
+def _aliased_pair_fit(*, n: int = 1200, seed: int = 5):
+    """The #356 reachability fixture -- an exact alias inside a kept group.
+
+    ``_penalised_xtwx_inv_gram`` keeps a group only when ``||beta[g.sl]|| >
+    1e-12``, and PIRLS zeroes a wholly aliased block to exactly ``0.0``, so a
+    duplicated single-column group never reaches ``M`` at all.  Here
+    ``pair[p1]`` equals ``zone[B] + zone[C]`` row for row while ``pair[p2]``
+    stays estimable, so the ``pair`` group is kept and carries the alias into
+    ``M = X'WX + S``.  Measured on this fit: ``||beta[pair]|| = 2.8423e-01``,
+    active groups ``['zone', 'pair', 'age']``, ``M`` width 18 (zone 3 + pair 2
+    + age 13) at rank 17 with ``needs_factor_certification`` True.
+    """
+    import pandas as pd
+
+    from superglm import Categorical, PSpline, SuperGLM
+    from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+    from superglm.links import stabilize_eta
+
+    rng = np.random.default_rng(seed)
+    zone = rng.choice(list("ABCD"), size=n)
+    pair = np.empty(n, dtype=object)
+    in_bc = np.isin(zone, ["B", "C"])
+    pair[in_bc] = "p1"
+    rest = ~in_bc
+    coin = rng.random(n) < 0.5
+    pair[rest & coin] = "p2"
+    pair[rest & ~coin] = "p0"
+    frame = pd.DataFrame({"zone": zone, "pair": pair, "age": rng.uniform(18, 80, n)})
+    eta = 0.3 + 0.4 * (frame["zone"] == "B") - 0.2 * (frame["pair"] == "p2") + 0.01 * frame["age"]
+    y = np.asarray(rng.poisson(np.exp(eta)), dtype=float)
+
+    model = SuperGLM(
+        family="poisson",
+        penalty=None,
+        features={
+            "zone": Categorical(base="A"),
+            "pair": Categorical(base="p0"),
+            "age": PSpline(n_knots=10),
+        },
+    )
+    model.fit(frame, y)
+    solver = model._solver_pirls_result()
+    linear = stabilize_eta(model._dm.matvec(solver.beta) + solver.intercept, model._link)
+    mu = clip_mu(model._link.inverse(linear), model._distribution)
+    fit_weights = model._fit_weights if model._fit_weights is not None else np.ones(n)
+    working = (
+        fit_weights
+        * model._link.deriv_inverse(linear) ** 2
+        / np.maximum(model._distribution.variance(mu), _VARIANCE_FLOOR)
+    )
+    return SimpleNamespace(
+        beta=solver.beta,
+        weights=working,
+        group_matrices=list(model._dm.group_matrices),
+        groups=list(model._groups),
+        p=len(solver.beta),
+    )
+
+
+# A ridge of exactly this size places the alias's residual eigenvalue between
+# the two rank cuts, which is the only band in which they disagree and is the
+# band ``needs_factor_certification`` names.  Measured on this fixture: the
+# penalised Hessian's smallest eigenvalue is 6.2116e-12 against a largest of
+# 3.3967e+03, i.e. relative 1.83e-15 -- under the Gram cut ``n eps = 4.00e-15``
+# by 2.2x, and its square root 4.28e-08 over the factor cut ``sqrt(eps) =
+# 1.49e-08`` by 2.9x.  The band runs from 1.5e-12 to 1.2e-11 on this fit, so
+# this sits 3.3x above its lower edge and 2.4x below its upper one.
+_CERTIFICATION_BAND_RIDGE = 5e-12
+
+
+def test_aliased_pair_reaches_the_penalised_gram_inside_the_certification_band() -> None:
+    from superglm.inference.covariance import _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    penalty = _CERTIFICATION_BAND_RIDGE * np.eye(fit.p)
+    _inverse, _augmented, active_groups, data_gram, active_penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+
+    # The alias survives the site's own active-group filter, which every
+    # simpler aliased fixture fails.
+    assert [group.name for group in active_groups] == ["zone", "pair", "age"]
+
+    hessian = data_gram + active_penalty
+    gram = decompose_gram(hessian)
+    assert gram.width == 18
+    assert needs_factor_certification(gram)
+    # The Gram erases a direction the factor resolves: that gap is the defect.
+    assert gram.rank == 17
+
+
+def test_penalised_gram_covariance_matches_the_factor_route_in_the_certification_band() -> None:
+    from superglm.inference.covariance import _penalised_xtwx_inv, _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    penalty = _CERTIFICATION_BAND_RIDGE * np.eye(fit.p)
+    gram_inverse, _augmented, _active, _data_gram, _penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+    _design, factor_inverse, _factor_augmented, _groups, _gms = _penalised_xtwx_inv(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+
+    # ``_penalised_xtwx_inv_gram``'s own docstring claims the same result as
+    # ``_penalised_xtwx_inv``.  Inside the certification band that claim is
+    # what breaks, and the two routes are independent arithmetic -- a chunked
+    # QR against a dense one -- so ``factor_rcond`` is the rung's own bar for
+    # agreement.  Measured margin on this fixture: 3.56e-10 against 1.49e-08.
+    reference_norm = np.linalg.norm(factor_inverse, ord=2)
+    relative = np.linalg.norm(gram_inverse - factor_inverse, ord=2) / reference_norm
+    assert relative <= SHARED_RANK_POLICY.factor_rcond
+
+
+def test_penalised_gram_augmented_covariance_matches_the_factor_route_in_the_band() -> None:
+    from superglm.inference.covariance import _penalised_xtwx_inv, _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    penalty = _CERTIFICATION_BAND_RIDGE * np.eye(fit.p)
+    _inverse, gram_augmented, _active, _data_gram, _penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+    _design, _factor_inverse, factor_augmented, _groups, _gms = _penalised_xtwx_inv(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+
+    # Measured margin on this fixture: 3.00e-10 against 1.49e-08.
+    reference_norm = np.linalg.norm(factor_augmented, ord=2)
+    relative = np.linalg.norm(gram_augmented - factor_augmented, ord=2) / reference_norm
+    assert relative <= SHARED_RANK_POLICY.factor_rcond
+
+
+def test_penalised_gram_covariance_keeps_its_gram_route_outside_the_band(monkeypatch) -> None:
+    """A certifiable Gram must still be inverted as a Gram, bit for bit."""
+    import superglm.inference.covariance as covariance_module
+    from superglm.inference.covariance import _penalised_xtwx_inv_gram
+
+    fit = _aliased_pair_fit()
+    # Well away from the band: the ridge is eight orders above its upper edge,
+    # so the Hessian is certifiable and the fast path is the whole answer.
+    penalty = 1e-3 * np.eye(fit.p)
+    _inverse, _augmented, _active, data_gram, active_penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+    hessian = data_gram + active_penalty
+    assert not needs_factor_certification(decompose_gram(hessian))
+
+    monkeypatch.setattr(
+        covariance_module,
+        "decompose_factor",
+        lambda *args, **kwargs: pytest.fail("certifiable Gram must not stream the design"),
+    )
+    gram_inverse, gram_augmented, _active, _data_gram, _penalty = _penalised_xtwx_inv_gram(
+        fit.beta,
+        fit.weights,
+        fit.group_matrices,
+        fit.groups,
+        0.0,
+        S_override=penalty,
+    )
+    np.testing.assert_array_equal(gram_inverse, decompose_gram(hessian).pseudo_inverse())
+    assert gram_augmented.shape == (fit.p + 1, fit.p + 1)
