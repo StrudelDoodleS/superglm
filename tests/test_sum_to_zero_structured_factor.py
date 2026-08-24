@@ -2157,9 +2157,7 @@ def test_public_sz_spectral_certificate_still_keeps_a_residue_above_its_bar() ->
     assert mask.all()
 
 
-def test_public_sz_certificate_is_conservative_below_its_bar_against_the_factor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_public_sz_certificate_is_conservative_below_its_bar_against_the_factor() -> None:
     """The price of the floor, pinned rather than left to be discovered.
 
     ``factor_rcond`` on singular values IS ``gram_rcond`` on eigenvalues, so

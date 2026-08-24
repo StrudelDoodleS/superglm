@@ -1232,12 +1232,17 @@ def _sum_to_zero_public_spectral_estimability(
         # 32 because the computed eigenvalue is not monotone there
         # (2.035e-16, 3.078e-16, 1.108e-16, 2.687e-16) while the exact one is.
         #
-        # NOTHING IN THE SUITE CHANGES BRANCH.  This branch runs five times in
-        # the whole test suite, and in every one the nearest retained
-        # eigenvalue clears the floored cut by at least 60.06x (widths 4, 4,
-        # 10, 25, 30; margins 6.0e+01 to 1.1e+15).  The two tests above
-        # construct the geometry that does sit in the band, because none
-        # existed.
+        # NOTHING THAT ALREADY EXISTED CHANGES BRANCH.  Instrumented over the
+        # whole suite, this branch runs nine times.  FIVE are pre-existing and
+        # every one of them discards a byte-identical set under the bare cut
+        # and under the floored one, the nearest retained eigenvalue clearing
+        # the floored cut by 60.06x or more (widths 4, 4, 10, 25, 30; margins
+        # 6.0060e+01, 2.8147e+05, 4.7250e+07, 6.5884e+12, 1.1259e+15).  No
+        # geometry in the suite sat in the band, which is why the tests below
+        # construct one.  The other FOUR runs are those tests, at width 32, and
+        # two of them do move the verdict -- nothing discarded under the bare
+        # cut, one direction discarded under the floored one.  That is what
+        # they are for.
         #
         # THE PRECEDENCE IN ``_sum_to_zero_scaled_basis_null_row_norms`` IS
         # UNCHANGED, and its note there is now measured rather than

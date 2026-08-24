@@ -7,6 +7,8 @@ types — they have no dependency on inference results or metrics classes.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -15,6 +17,7 @@ from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
+    GroupMatrix,
     SparseSSPGroupMatrix,
     SplineCategoricalGroupMatrix,
 )
@@ -634,14 +637,16 @@ def _penalised_xtwx_inv(
     return X_a, XtWX_S_inv, XtWX_S_inv_aug, active_groups_out, active_gms
 
 
-def _intercept_prefixed_chunks(chunks):
+def _intercept_prefixed_chunks(
+    chunks: Iterator[tuple[int, int, NDArray]],
+) -> Iterator[tuple[int, int, NDArray]]:
     """Prepend the intercept column to each bounded design chunk."""
     for start, stop, block in chunks:
         yield start, stop, np.column_stack((np.ones(len(block)), block))
 
 
 def _certified_penalised_inverse(
-    active_gms: list,
+    active_gms: list[GroupMatrix],
     W: NDArray,
     S: NDArray,
     *,
@@ -664,11 +669,26 @@ def _certified_penalised_inverse(
     ``[[sum W, X'W1], [X'W1, X'WX + S]]`` whose factor is ``A`` with a leading
     ``sqrt(W)`` column and an unpenalised leading column in ``sqrt(S)``.
 
-    Measured on issue #356's aliased-pair fit with the ridge that places the
-    alias's residual eigenvalue between the two rank cuts: the Gram reports
-    rank 17 of 18 and ``||pinv||_2 = 1.5422``, this route reports rank 18 and
-    ``2.0000e+11``, and the largest published standard error moves from 1.18
-    to 2.58e+05.  Outside that band the two agree and this route is not taken.
+    **The verdict has two arms and this route serves both.**  Neither is "the"
+    trigger, and the second is the likelier one in production:
+
+    ``rank < width and resolution_limited`` -- the Gram has ERASED a direction
+    the factor resolves.  Measured on issue #356's aliased-pair fit with the
+    ridge that places the alias's residual eigenvalue between the two rank
+    cuts: the Gram reports rank 17 of 18 and ``||pinv||_2 = 1.5422``, this
+    route reports rank 18 and ``2.0000e+11``, and the largest published
+    standard error moves from 1.18 to 2.58e+05.
+
+    ``rank == width and pre_truncation_condition >= certification_condition``
+    -- NOTHING is discarded; the whole retained subspace is simply recomputed
+    from a factor that never squared the condition.  That is the ordinary
+    ill-conditioned rating design, and the correction it buys is the larger of
+    the two: on the full-rank collinear fixture in
+    ``test_factor_certification_authority.py`` the published standard errors
+    move 5.74e-03 to 4.15e-02 relative against the Gram's answer over 7
+    ``OPENBLAS_CORETYPE`` microkernels, against 1.78e-10 on the aliased one.
+
+    Outside both arms the two agree and this route is not taken.
     """
     width = S.shape[0]
     design = DesignMatrix(active_gms, n=len(W), p=width)
@@ -709,6 +729,16 @@ def _penalised_xtwx_inv_gram(
 
     Does NOT return X_a (not needed for REML). For leverage/hat matrix
     diagnostics, use ``_penalised_xtwx_inv`` instead.
+
+    **Not covariance-only.**  Inside the certification band the two inversions
+    below leave the Gram for the observation factor, and this helper has three
+    consumers, not one: the published covariance here, ``reml/runner.py``'s
+    Fellner-Schall trace term, and ``inference/_term_covariance.py``'s Bayesian
+    term covariance.  The route change reaches all three by construction.  No
+    REML fit in the suite reaches the band -- an instrumented run of the whole
+    suite records the fallback only from this module's own tests -- and a
+    ``fit_reml`` on the aliased-pair design records none either, so the REML
+    consumer is unpinned rather than known-safe.  Tracked on #356.
 
     Returns
     -------
@@ -776,8 +806,10 @@ def _penalised_xtwx_inv_gram(
     # The pseudo-inverse here IS the published covariance, so it may only be
     # taken from a Gram that can certify its own retained subspace.
     # ``decompose_gram_if_authoritative`` returns ``None`` for exactly the
-    # ``needs_factor_certification`` band and spares the retained subspace this
-    # caller would then discard; the factor is the authority in that band.
+    # ``needs_factor_certification`` band, on EITHER of its two arms -- the
+    # Gram having erased a direction the factor resolves, or the Gram being
+    # full rank but reached through a squared condition.  The factor is the
+    # authority in both.
     authoritative_gram = decompose_gram_if_authoritative(M)
     XtWX_S_inv = (
         authoritative_gram.pseudo_inverse()

@@ -404,13 +404,24 @@ def needs_factor_certification(
     at :func:`_eigensolver_relative_bar` is what makes the verdict honest
     rather than what replaces it.
 
-    **And a verdict only helps where it is read.**  Issue #356 is that roughly
-    twenty call sites take :func:`decompose_gram` directly and never ask.  The
-    load-bearing pair is ``inference/covariance.py``, where the pseudo-inverse
+    **And a verdict only helps where it is read.**  Issue #356 is that call
+    sites take :func:`decompose_gram` directly and never ask.  The
+    load-bearing pair was ``inference/covariance.py``, where the pseudo-inverse
     IS the published covariance matrix: on the fixture in that issue this
     predicate is ``True`` on both arms of a round-off coin flip, correctly,
-    and nothing downstream consults it.  That half is *not* fixed by version 3
-    and is tracked separately.
+    and nothing downstream consulted it.  That pair now reads the verdict and
+    falls back to the observation factor, so the published covariance is no
+    longer taken from a Gram that cannot certify its own retained subspace.
+    Version 3 is what made the verdict honest; reading it is a separate
+    change and is not carried by this field.
+
+    Twenty-one direct call sites remain, across nine modules -- seven in
+    ``solvers/_structured/geometry.py``, five in ``reml/scop_geometry.py``, two
+    each in ``reml/observed_geometry.py`` and ``reml/objective.py``, and one
+    each in ``solvers/irls_direct.py``, ``solvers/constrained_qp.py``,
+    ``reml/discrete.py``, ``model/state_ops.py`` and ``inference/metrics.py``.
+    Each is its own question about whether the quantity it feeds is published
+    or internal, and they are tracked on #356 rather than converted wholesale.
     """
     return _certification_required(
         method=decomposition.method,
