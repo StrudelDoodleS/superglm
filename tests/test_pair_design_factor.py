@@ -11,6 +11,34 @@ penalty is assembled in.
 The four moment producers are still here as the arbiter — see the disposition
 note in :mod:`superglm.screening._pair_moments`.  They are the reference this
 file grades the factor against; they are no longer the production route.
+
+**WHERE EVERY MAGNITUDE CONSTANT IN THIS FILE COMES FROM.**  Each assertion
+here compares two backward-stable routes to the SAME quantity — a Gram entry
+read off the factor against the producer that assembles it — so the achieved
+difference is round-off and nothing else, and the honest thing is to record it
+rather than to leave the constants unexplained.  Measured at one thread on
+Python 3.14.6, as ``max|a - b| / max|b|`` over each test's own comparisons::
+
+    test_the_factor_reproduces_every_moment_...        9.60e-16   asserted 1e-11
+    test_the_tensor_block_stays_in_the_order_...       7.37e-16   asserted 1e-11
+    test_a_zero_weight_cell_contributes_nothing_...    1.25e-16   asserted 1e-13
+    test_the_factor_profiles_the_overlap_...           9.09e-16   asserted 1e-11
+    test_a_rank_deficient_overlap_profiles_...         1.83e-15   asserted 1e-11
+    test_the_numeric_cat_factor_reproduces_...         3.11e-15   asserted 1e-10
+    test_the_numeric_numeric_factor_reproduces_...     1.04e-14   asserted 1e-10
+    test_the_numeric_cat_cell_gram_... (whole Gram)    9.30e-16   asserted 1e-12
+    test_the_numeric_cat_cell_gram_... (profiled)      1.17e-14   asserted 1e-10
+
+So every constant sits between 3 and 5 orders above what it has to cover.  That
+band is deliberate and it is PLAN-257 section 9's rule applied rather than
+dodged: the issue thread records an 859x swing on ``ns(6)`` between Python 3.12
+and 3.14 with everything else held, and #324 records a bound set from one
+pinned run failing on SANDYBRIDGE at eight threads, so a constant this file
+sets from one machine needs three orders of allowance before it is a bound
+rather than a fingerprint.  A tighter constant here would be measuring this
+interpreter.  A looser one is only defensible if something about the geometry
+justifies it, and none of these geometries does — the rank-deficient case was
+two orders looser than its siblings for no stated reason and is now at theirs.
 """
 
 from __future__ import annotations
@@ -213,8 +241,16 @@ def test_a_rank_deficient_overlap_profiles_onto_its_own_range_and_no_further():
     U_gram = U - MinvC.T @ u_m
     V_fac, U_fac = _profiled_from_factor(pair_design_factor(B_a, B_b, S_cell, W_cell))
 
-    np.testing.assert_allclose(V_fac, V_gram, rtol=0, atol=1e-9 * np.abs(V_gram).max())
-    np.testing.assert_allclose(U_fac, U_gram, rtol=0, atol=1e-9 * np.abs(U_gram).max())
+    # THE SIBLING'S CONSTANT, NOT A LOOSER ONE FOR THE ILL-POSED GEOMETRY.
+    # This was ``1e-9``, two orders past every other bound in the file, with no
+    # sentence saying why -- and the deficiency here is EXACT rather than
+    # marginal, so it costs no accuracy: ``M``'s singular values run
+    # 2.93e-13 .. 4.71e+04 with rank 8 of 11, and both routes' cuts fall in the
+    # fifteen-order gap between the dropped directions and the kept ones.  What
+    # is left to bound is ordinary round-off, measured at 3.99e-16 on ``V_eff``
+    # and 1.83e-15 on ``U_eff``, which is 5.5e+03x inside ``1e-11``.
+    np.testing.assert_allclose(V_fac, V_gram, rtol=0, atol=1e-11 * np.abs(V_gram).max())
+    np.testing.assert_allclose(U_fac, U_gram, rtol=0, atol=1e-11 * np.abs(U_gram).max())
 
 
 def _numeric_cat_case(seed, L=7, n=3000, thin=None):
@@ -358,7 +394,7 @@ _RETIRED_GRAM_PRODUCERS = frozenset(
 )
 
 
-def test_no_model_module_imports_a_retired_gram_producer():
+def test_no_production_module_imports_a_retired_gram_producer():
     """The fingerprint of the rule issue #257 replaced, enforced by import.
 
     #322's precedent is to delete what nothing calls.  These five are kept
@@ -371,15 +407,35 @@ def test_no_model_module_imports_a_retired_gram_producer():
 
     An AST scan rather than a grep: a name reached through
     ``superglm.screening.pair_score_curvature`` is the same defect as an
-    ``import``, and both are import statements in the tree under
-    ``src/superglm/model/``, which is where every screening caller lives.
+    ``import``, and both are import statements.
+
+    **THE SCAN COVERS ALL OF ``src/superglm/``, NOT JUST ``model/``.**  It used
+    to stop at ``src/superglm/model/`` because that is where every screening
+    CALLER lives -- but a producer re-adopted from inside
+    ``src/superglm/screening/`` would inherit the same accuracy ceiling and
+    slip past, and that is the plausible route rather than an exotic one:
+    ``_structured.py`` is a production module that already imports from its
+    siblings.  Widening costs one exemption, ``screening/__init__.py``, which
+    re-exports all five in ``__all__`` deliberately -- that IS the arbiter's
+    public surface, and it is named here rather than pattern-matched so
+    re-exporting a SIXTH producer would still have to be a deliberate edit.
+
+    Shown to bite on the widening itself, not only on the original scope:
+    adding ``from superglm.screening._overlap import tensor_penalty`` to
+    ``_structured.py`` -- a screening module, so invisible to the old
+    ``model/``-only scan -- reds this test naming the file and line.  And
+    nothing else under ``src/superglm/`` reaches any of the five, so the
+    widening arrives green.
     """
     import ast
     import pathlib
 
-    root = pathlib.Path(__file__).resolve().parents[1] / "src" / "superglm" / "model"
+    root = pathlib.Path(__file__).resolve().parents[1] / "src" / "superglm"
+    re_export = root / "screening" / "__init__.py"
     offenders = []
     for path in sorted(root.rglob("*.py")):
+        if path == re_export:
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(

@@ -22,7 +22,7 @@ factor is graded against: every exactness pin in
 directions the Gram cannot resolve, which needs the Gram.  Precedent for
 keeping a live-tested non-caller is ``_reference_edf`` in the structured suite.
 An import guard keeps it from becoming production again by accident:
-``test_no_model_module_imports_a_retired_gram_producer``.
+``test_no_production_module_imports_a_retired_gram_producer``.
 
 The channels themselves are unchanged on the live route:
 ``numeric_cat_factor`` accumulates the same ``s``, ``s*z``, ``w``, ``w*z``
