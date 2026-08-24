@@ -1153,7 +1153,8 @@ def screen_interactions(
                 factor = numeric_numeric_factor(
                     _raw_numeric(feat_a), _raw_numeric(feat_b), score, working_weights
                 )
-                # Two numerics contract to 3x3 blocks whatever the supports.
+                # Two numerics contract to a five-column design whatever the
+                # supports, so no cell table stands behind them.
                 n_cells = 1
             else:
                 num_name, cat_name = (

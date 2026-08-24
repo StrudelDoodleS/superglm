@@ -1997,7 +1997,8 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     c = np.finfo(np.float64).eps * float(np.linalg.norm(V, "fro"))
 
     def edf(operand):
-        # THE REAL CALLER PATH, not ``_edge`` at a pinned lambda.  The bracket
+        # THE REAL CALLER PATH, not one bracket-edge evaluation at a pinned
+        # lambda.  The bracket
         # is ``1e-10 tr(V) / tr(S)``, so a perturbation with nonzero trace
         # moves lambda too, and holding it fixed would measure only the partial
         # derivative.  (An earlier revision argued the probe has nonzero trace
@@ -2092,7 +2093,7 @@ _LOW_EDGE_ULP = 1.0
 # THE CALLER PATH IS PINNED ELSEWHERE, BY A CLOSED FORM.
 #
 # ``ceiling`` is computed from this test's own ``A`` and ``G``, so the only
-# production quantity in the boundary is ``edf(V)`` inside ``ulp``: an ``_edge``
+# production quantity in the boundary is ``edf(V)`` inside ``ulp``: a ladder
 # returning an edf INDEPENDENT of ``V`` would keep every row green.  Three
 # attempts to close that here were refused in turn, and each refusal was right:
 # two magnitude windows around the realized response ((0.5, 2.0), then
@@ -2286,8 +2287,8 @@ def test_the_clamped_low_edge_reproduces_the_isotropic_closed_form(p, scale):
 
     **THIS EXISTS TO PIN THE CALLER PATH**, which
     ``test_the_low_edge_edf_is_only_as_determined_as_the_gram_it_is_read_from``
-    cannot: that test's boundary is computed from its own ``A`` and ``G``, so an
-    ``_edge`` returning an edf independent of ``V`` would leave every row of it
+    cannot: that test's boundary is computed from its own ``A`` and ``G``, so a
+    ladder returning an edf independent of ``V`` would leave every row of it
     green -- verified, it did.  Three attempts to close that inside it were
     refused in review and each refusal was right, because each asserted a
     magnitude or an ordering of FINITE responses that no remainder bound

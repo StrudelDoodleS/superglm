@@ -1904,9 +1904,20 @@ def test_the_wide_path_never_allocates_the_dense_blocks(monkeypatch):
     until this branch and is now nothing's -- so leaving it there would have
     left a green test watching a function the production route no longer
     calls, which is the vacuous-pass failure this repo has recorded three
-    times.  ``pair_design_factor`` is what the dense route allocates now, and
-    shown to bite: pointing the spy back at the retired name passes under a
-    mutation that sends this pair down the dense track.
+    times.
+
+    Two measurements, because an earlier revision of this paragraph claimed a
+    third that is not performable.  It said the retired key "passes under a
+    mutation that sends this pair down the dense track"; it does not pass, it
+    ERRORS -- this branch removed the import, so ``screening_ops`` has no
+    ``pair_score_curvature`` attribute and ``monkeypatch.setattr`` raises
+    ``AttributeError`` without ``raising=False``.  The re-key is forced rather
+    than preferred.  What IS shown, and is the load-bearing half: the spies as
+    keyed here fire when this pair really does go dense.  At the default
+    ``max_cells`` the calls list is empty and ``z`` is finite; raising
+    ``max_cells`` to 5e8 sends the same 400-level pair down the dense track and
+    all three fire -- ``['menu', 'factor', 'dense_ladder']`` -- with ``z``
+    coming back NaN because the spies return stubs.
     """
     calls = []
     monkeypatch.setattr(

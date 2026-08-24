@@ -976,8 +976,9 @@ def _representative_projection(
 
     The cutoff is the square root of the Hermitian pseudo-inverse policy the
     dense path used to apply to a Gram, and since issue #257 applies to a
-    factor at this same square root -- :func:`superglm.screening._score_stat.
-    _factor_rank_floor`.  One policy at two sites rather than one borrowed
+    factor at this same square root -- :func:`superglm.screening.
+    _factor_kernels._factor_rank_floor`, where the derivation lives now that
+    both paths take it.  One policy at two sites rather than one borrowed
     from the other.  Rank is refused, rather than guessed, when a pivot
     intersects its QR backward-error interval.  Each Householder reduction
     contributes an additive ``O(eps * leading_scale)`` perturbation; the
