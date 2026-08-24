@@ -393,6 +393,18 @@ _RETIRED_GRAM_PRODUCERS = frozenset(
     }
 )
 
+# The three of them ``screening/__init__.py`` names in ``__all__``, which IS the
+# arbiter's public surface.  It is neither all five nor a pattern: ``_overlap``
+# is never imported there, so ``pair_overlap_moments`` and ``tensor_penalty``
+# are re-exported by nothing and re-exporting either would be a new decision.
+_RE_EXPORTED_PRODUCERS = frozenset(
+    {
+        "numeric_numeric_moments",
+        "numeric_pair_moments",
+        "pair_score_curvature",
+    }
+)
+
 
 def test_no_production_module_imports_a_retired_gram_producer():
     """The fingerprint of the rule issue #257 replaced, enforced by import.
@@ -415,17 +427,37 @@ def test_no_production_module_imports_a_retired_gram_producer():
     ``src/superglm/screening/`` would inherit the same accuracy ceiling and
     slip past, and that is the plausible route rather than an exotic one:
     ``_structured.py`` is a production module that already imports from its
-    siblings.  Widening costs one exemption, ``screening/__init__.py``, which
-    re-exports all five in ``__all__`` deliberately -- that IS the arbiter's
-    public surface, and it is named here rather than pattern-matched so
-    re-exporting a SIXTH producer would still have to be a deliberate edit.
+    siblings.  Widening costs one exemption, ``screening/__init__.py``.
 
-    Shown to bite on the widening itself, not only on the original scope:
-    adding ``from superglm.screening._overlap import tensor_penalty`` to
+    **THE EXEMPTION IS THREE NAMES, NOT THE FILE, AND IT USED TO SAY FIVE.**
+    ``__init__.py`` imports ``_numeric_margin`` and ``_pair_moments`` and
+    re-exports ``numeric_numeric_moments``, ``numeric_pair_moments`` and
+    ``pair_score_curvature``; it never imports ``_overlap``, so
+    ``pair_overlap_moments`` and ``tensor_penalty`` are re-exported by nothing
+    -- consistent with ``_overlap``'s own header calling them not-live, and not
+    with the sentence that used to stand here.  Exempting the FILE would also
+    have hidden a re-adoption inside it, which is a production edit like any
+    other.  Exempting the three NAMES leaves the other two guarded there and
+    makes re-exporting a sixth producer a deliberate edit to
+    ``_RE_EXPORTED_PRODUCERS`` rather than a silent one.
+
+    **A RELATIVE IMPORT IS AN IMPORT.**  Matching only modules that start with
+    ``superglm.screening`` misses ``from ._overlap import tensor_penalty``,
+    where ``node.module`` is ``"_overlap"`` and ``node.level`` is 1 -- and a
+    sibling is exactly where the re-adoption this scan was widened for would
+    appear.  ``node.level > 0`` closes it with no module test needed: these
+    five names live nowhere but ``superglm.screening``, so a relative import
+    that binds one of them resolved into that package whatever its dots say.
+    The ``ast.Attribute`` fallback does not cover the case, because ``from X
+    import name`` binds a bare ``Name``.
+
+    Shown to bite on both widenings rather than only on the original scope.
+    Adding ``from superglm.screening._overlap import tensor_penalty`` to
     ``_structured.py`` -- a screening module, so invisible to the old
-    ``model/``-only scan -- reds this test naming the file and line.  And
-    nothing else under ``src/superglm/`` reaches any of the five, so the
-    widening arrives green.
+    ``model/``-only scan -- reds this test naming the file and line; so does
+    the relative form ``from ._overlap import tensor_penalty`` in the same
+    file, which the module test alone let through.  And nothing else under
+    ``src/superglm/`` reaches any of the five, so both arrive green.
     """
     import ast
     import pathlib
@@ -434,17 +466,18 @@ def test_no_production_module_imports_a_retired_gram_producer():
     re_export = root / "screening" / "__init__.py"
     offenders = []
     for path in sorted(root.rglob("*.py")):
+        watched = _RETIRED_GRAM_PRODUCERS
         if path == re_export:
-            continue
+            watched = watched - _RE_EXPORTED_PRODUCERS
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
-                "superglm.screening"
+            if isinstance(node, ast.ImportFrom) and (
+                (node.module or "").startswith("superglm.screening") or node.level > 0
             ):
                 for alias in node.names:
-                    if alias.name in _RETIRED_GRAM_PRODUCERS:
+                    if alias.name in watched:
                         offenders.append(f"{path.name}:{node.lineno} {alias.name}")
-            elif isinstance(node, ast.Attribute) and node.attr in _RETIRED_GRAM_PRODUCERS:
+            elif isinstance(node, ast.Attribute) and node.attr in watched:
                 offenders.append(f"{path.name}:{node.lineno} .{node.attr}")
     assert offenders == [], (
         "the dense screening path reads design factors since issue #257; these "
