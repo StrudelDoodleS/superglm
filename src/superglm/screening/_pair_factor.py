@@ -285,19 +285,44 @@ def numeric_cat_factor(
     :func:`pair_design_factor` uses carries it to the joint block:
     ``kron([1, menu_g[g]]', R_g[:, :2])`` beside ``R_g[:, -1]``.
 
-    **ONE GRAM SURVIVES HERE AND IT IS A STATED COMPROMISE.**  ``R_g`` is
-    rooted from the level's ``3 x 3`` moment block, which the bincount pass
-    already accumulates -- six channels of one O(n) sweep -- where taking it
-    from the rows would need them grouped by level, a sort of ``n``.  What is
-    squared is a two-dimensional geometry INSIDE a cell, whose conditioning is
-    a property of the covariate's scale and centring within that level and not
-    of the starved-level geometry #257 is about; for a treatment-coded menu the
-    probe's own block is diagonal in any case.  The root is taken through
-    ``eigh`` rather than a Cholesky, because a level carrying one row has a
-    rank-1 block and a Cholesky is entitled to refuse it.  Graded against a
-    row-space QR of the same levels in
-    ``test_the_numeric_cat_cell_gram_is_not_what_limits_the_pair``, including
-    on a level starved to a single row.
+    **THE PER-LEVEL FACTOR IS BUILT FROM CENTERED MOMENTS, AND THE RAW ONES
+    WERE MEASURED AND REFUSED.**  ``R_g`` could be rooted from the level's raw
+    ``3 x 3`` moment block ``[[w0, w1, s0], [w1, w2, s1], [s0, s1, q0]]``,
+    which one bincount sweep already accumulates.  That block is a GRAM, and a
+    level whose ``z`` is constant makes it exactly rank 1 -- so its root's
+    second row comes back at ``sqrt(eps)`` of the design rather than at ``eps``,
+    which is the square-root loss this whole change exists to remove, reappearing
+    two dimensions wide inside a cell.  It is not academic: on the wholly
+    absorbed ``numeric_cat`` geometry (a numeric constant within each level, so
+    the true profiled rank is 0) the raw root leaves ``R_eff`` at 1.5e-08 of the
+    design against a round-off cut of 4.7e-08 -- a margin of 3x, where the
+    centered form leaves it at 1e-16 and the margin is eight orders.
+
+    So the level's mean is subtracted BEFORE the second moment is formed, in a
+    second bincount pass over the rows, exactly as
+    :func:`superglm.screening._structured._centered_level_factors` does on the
+    structured path and for the reason its docstring gives -- the raw-moment
+    identity ``w2 - w1**2 / w0`` is unusable when the answer is many orders
+    below both terms.  The triangular factor is then written down rather than
+    factorized:
+
+        R_g = [[sqrt(w0), sqrt(w0) zbar, s0 / sqrt(w0)],
+               [0,        sqrt(m2),      c1 / sqrt(m2)],
+               [0,        0,             sqrt(rho)    ]]
+
+    with ``zbar = w1 / w0`` the level's weighted mean, ``m2 = sum w (z -
+    zbar)**2`` and ``c1 = sum s (z - zbar)`` its centered moments, and ``rho``
+    the response's own residual energy.  Its Gram is the raw block entry for
+    entry, so nothing is approximated; what changes is where the cancellation
+    happens -- on the ROWS, where the quantity is a sum of squares, instead of
+    on two assembled moments that nearly agree.  ``rho`` is the one entry still
+    formed by subtraction, and it is the one entry nothing downstream reads:
+    it is the reduction's residual, not part of ``V_eff`` or ``U_eff``.
+
+    A level with no mass, or one whose ``z`` carries none, contributes an exact
+    zero row rather than a division.  Graded against a row-space QR of the same
+    levels in ``test_the_numeric_cat_cell_gram_is_not_what_limits_the_pair``,
+    including on a level starved to a single row.
     """
     codes_g = np.asarray(codes_g, dtype=np.intp)
     menu_g = np.asarray(menu_g, dtype=np.float64)
@@ -322,20 +347,57 @@ def numeric_cat_factor(
     # Schwarz on ``S_cell <= sqrt(W_cell) * sqrt(sum s**2 / w)``), and a
     # zero-weight row contributes an exactly zero score, so the guarded divide
     # loses nothing.
-    safe = w > 0.0
-    q0 = cell(np.divide(score * score, w, out=np.zeros_like(score), where=safe))
-    s0, s1 = cell(score), cell(score * z)
-    w0, w1, w2 = cell(w), cell(w * z), cell(w * z * z)
+    s0 = cell(score)
+    w0 = cell(w)
+    positive = w0 > 0.0
+    # SHIFT, THEN CENTRE, THEN ACCUMULATE -- AND THE SHIFT IS WHAT MAKES A
+    # CONSTANT LEVEL EXACT RATHER THAN NEARLY SO.  ``zbar = sum(w z) / sum(w)``
+    # is two roundings away from ``z`` even when every row of the level carries
+    # the SAME ``z``, so ``z - zbar`` comes back at one ulp instead of at zero,
+    # ``m2`` at ``eps**2`` instead of at zero -- and ``c1 / sqrt(m2)`` is then
+    # the level's WHOLE response energy rather than none of it, because the
+    # round-off cancels out of that ratio exactly.  Measured on a level starved
+    # to a single row: the level's energy came back doubled, 0.4567 against a
+    # true 0.2284.
+    #
+    # Referencing every row to one of the level's own values first makes the
+    # difference EXACT for a constant level (and exact to the last bit for a
+    # nearly constant one, since subtracting nearby floats is), so ``m2`` is
+    # exactly zero there and ``m2 > 0`` is a rank test with no constant in it.
+    # Same device, and the same reason, as
+    # :func:`superglm.screening._structured._centered_level_factors`.
+    reference = np.zeros(n_g, dtype=np.float64)
+    reference[codes_g] = z
+    shifted = z - reference[codes_g]
+    offset = np.divide(cell(w * shifted), w0, out=np.zeros_like(w0), where=positive)
+    centered = shifted - offset[codes_g]
+    m2 = cell(w * centered * centered)
+    c1 = cell(score * centered)
+    zbar = reference + offset
 
-    grams = np.empty((n_g, 3, 3), dtype=np.float64)
-    grams[:, 0, 0] = w0
-    grams[:, 0, 1] = grams[:, 1, 0] = w1
-    grams[:, 1, 1] = w2
-    grams[:, 0, 2] = grams[:, 2, 0] = s0
-    grams[:, 1, 2] = grams[:, 2, 1] = s1
-    grams[:, 2, 2] = q0
-    values, vectors = np.linalg.eigh(grams)
-    factors = np.swapaxes(vectors * np.sqrt(np.clip(values, 0.0, None))[:, None, :], -1, -2)
+    root_w0 = np.sqrt(w0)
+    root_m2 = np.sqrt(m2)
+    spread = m2 > 0.0
+    factors = np.zeros((n_g, 3, 3), dtype=np.float64)
+    factors[:, 0, 0] = root_w0
+    factors[:, 0, 1] = root_w0 * zbar
+    factors[:, 0, 2] = np.divide(s0, root_w0, out=np.zeros_like(s0), where=positive)
+    factors[:, 1, 1] = root_m2
+    factors[:, 1, 2] = np.divide(c1, root_m2, out=np.zeros_like(c1), where=spread)
+    # THE RESIDUAL, ACCUMULATED RATHER THAN SUBTRACTED, AND IT COSTS NO EXTRA
+    # PASS.  ``rho`` closes the level's factor: the level's response energy
+    # splits by Pythagoras into the two projected terms above and this one.
+    # Taking it as ``q0 - (s0**2 / w0) - (c1**2 / m2)`` needs one bincount
+    # channel too -- ``q0 = sum s**2 / w`` -- and CANCELS, where accumulating
+    # the residual is a sum of squares.  The fit is evaluated in the SHIFTED
+    # coordinate for the same reason the moments are.
+    slope = np.divide(c1, m2, out=np.zeros_like(c1), where=spread)
+    level_mean = np.divide(s0, w0, out=np.zeros_like(s0), where=positive)
+    root_w = np.sqrt(w)
+    residual = np.divide(score, root_w, out=np.zeros_like(score), where=root_w > 0.0) - root_w * (
+        level_mean[codes_g] + slope[codes_g] * centered
+    )
+    factors[:, 2, 2] = np.sqrt(cell(residual * residual))
 
     k = menu_g.shape[1]
     overlap_width, tensor_width = 2 + k, k
@@ -395,6 +457,50 @@ def _pair_scale(factor: PairFactor) -> float:
     return float(np.sum(factor.joint[q : q + k, q : q + k] ** 2))
 
 
+def _profiled_rank_scale(factor: PairFactor) -> float:
+    """The scale a PROFILED direction's rank has to be decided against.
+
+    ``rank(V_eff)`` is the unpenalized rung's ``edf``, and the one thing that
+    must not decide it is ``R_eff``'s own largest direction.  On a wholly
+    absorbed block -- every probe column a multiple of a column the overlap
+    already carries -- ``R_eff`` is round-off in its entirety, so a cut taken
+    relative to its own top is a cut taken against the noise it must reject and
+    counts all of it.  Measured: 20 of 20 seeds of the reachable absorbed
+    ``numeric_cat`` path reported a nonzero ``edf0`` that way, which is the
+    same 37-of-40 failure :func:`superglm.screening._score_stat`'s deleted
+    ``_profiled_rank`` recorded for the same cut on ``V_eff``.
+
+    So the reference is the JOINT design's, where nothing has been residualized
+    away -- ``[X_o | X_T]``, the object the reduction was applied to.  That is
+    the factor-space form of the Guttman argument the moment route used:
+    ``rank([[V, C'], [C, M]]) - rank(M)`` counted both operands against the
+    JOINT's scale rather than against the difference's.  Here it is one count
+    rather than two, because the factor already carries the difference as a
+    block instead of leaving it to be formed.
+
+    BALANCED FIRST, for the reason :func:`_rank_floor`'s SCALE DISCIPLINE note
+    gives: the tensor block carries a numeric margin's scale SQUARED, so at 1e4
+    units it would set the reference for the whole joint and a real profiled
+    direction would fall under a cut the overlap's own scale never justified.
+    Scaling the tensor columns to the overlap's Frobenius mass is a column
+    scaling, so it preserves rank exactly, and it is undone on the way out so
+    the returned number applies to ``R_eff`` as it stands.
+    """
+    q, k = int(factor.overlap_width), int(factor.tensor_width)
+    if k == 0:
+        return 0.0
+    overlap = factor.joint[:, :q]
+    tensor = factor.joint[:, q : q + k]
+    mass_overlap = float(np.sum(overlap**2))
+    mass_tensor = float(np.sum(tensor**2))
+    balance = (
+        np.sqrt(mass_overlap / mass_tensor) if mass_overlap > 0.0 and mass_tensor > 0.0 else 1.0
+    )
+    balanced = np.concatenate((overlap, balance * tensor), axis=1)
+    top = float(np.linalg.norm(balanced, 2)) if balanced.size else 0.0
+    return top / balance
+
+
 def _profiled_factor(factor: PairFactor) -> tuple[NDArray, NDArray]:
     """``(R_eff, z_t)``: the tensor block residualized on the overlap, and its score.
 
@@ -404,6 +510,53 @@ def _profiled_factor(factor: PairFactor) -> tuple[NDArray, NDArray]:
     ``R_eff' R_eff`` is ``V - C' M^-1 C`` and ``R_eff' z_t`` is
     ``U - C' M^-1 u_m`` -- both without forming ``M``, inverting it, or
     subtracting anything.
+
+    **A RANK-DEFICIENT OVERLAP MAKES THAT SLICE WRONG ON ITS OWN, AND THE
+    REGIME IS REACHABLE RATHER THAN EXOTIC.**  The reduction is unpivoted, so a
+    column of ``X_o`` that its predecessors already span leaves a zero pivot,
+    and the direction ``Q`` puts there is an arbitrary unit vector orthogonal
+    to what came before -- NOT in ``range(X_o)``.  Residualizing on the whole
+    leading block then removes a component the overlap never explained, and the
+    profiled block loses curvature the pair genuinely carries.  An
+    ``OrderedCategorical`` margin reaches this by construction: its inner
+    spline menu can be wider than its level count, so the menu is rank
+    deficient before the pair is even formed.  Measured on the mixed suite's
+    ``band x power`` pair -- a 7-column menu on 5 levels, whose overlap is rank
+    14 of 17 -- taking the slice alone reports a statistic of 13.28 where the
+    exact design carries 22.31, and ``z`` moves from 10.07 to 5.67.
+
+    So the directions the overlap does NOT span are returned to the profiled
+    block, which is what the moment route's pseudo-inverse did implicitly:
+    with ``P`` the projector onto ``range(R_o)``,
+
+        X_T - P_{X_o} X_T = Q_o (I - P) R_ot + Q_T R_eff ,
+
+    so ``[(I - P) R_ot ; R_eff]`` is the residualized tensor block and
+    ``[(I - P) z_o ; z_t]`` its response.  A full-rank overlap makes ``I - P``
+    exactly zero and the returned factor is the bare slice, bit for bit.  The
+    rank is decided on ``R_o`` -- a factor formed by reduction, where nothing
+    has cancelled -- at :func:`._score_stat._factor_rank_floor`, the same cut
+    every other rank decision here takes.  The moment route took the same
+    decision and did not state it: ``cho_factor`` or, on refusal,
+    ``numpy.linalg.pinv``'s shape-derived default ``rcond``.
     """
-    q, k = factor.overlap_width, factor.tensor_width
-    return factor.joint[q : q + k, q : q + k], factor.joint[q : q + k, -1]
+    from superglm.screening._score_stat import _factor_rank_floor
+
+    q, k = int(factor.overlap_width), int(factor.tensor_width)
+    R_eff = factor.joint[q : q + k, q : q + k]
+    z_t = factor.joint[q : q + k, -1]
+    if q == 0 or k == 0:
+        return R_eff, z_t
+    R_o = factor.joint[:q, :q]
+    left, values, _ = np.linalg.svd(R_o)
+    top = float(values[0]) if values.size else 0.0
+    if top <= 0.0:
+        outside = left
+    else:
+        outside = left[:, values <= _factor_rank_floor(q) * top]
+    if outside.shape[1] == 0:
+        return R_eff, z_t
+    return (
+        np.concatenate((R_eff, outside.T @ factor.joint[:q, q : q + k]), axis=0),
+        np.concatenate((z_t, outside.T @ factor.joint[:q, -1])),
+    )

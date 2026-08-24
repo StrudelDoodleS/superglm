@@ -23,11 +23,10 @@ from superglm import SuperGLM
 from superglm.features import Categorical, Spline
 from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._arrow import factor_arrow
-from superglm.screening._overlap import pair_overlap_moments
+from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._pair_moments import pair_score_curvature
 from superglm.screening._score_stat import (
     _rank_floor,
-    _solve_psd,
     penalized_score_statistic_ladder,
 )
 from superglm.screening._structured import (
@@ -38,6 +37,24 @@ from superglm.screening._structured import (
 )
 
 BUDGETS = (2.0, 4.0, 8.0, 16.0)
+
+
+def _solve_psd(A, B):
+    """Solve ``A X = B`` for symmetric PSD ``A``, falling back to a pseudo-inverse.
+
+    THE MOMENT ROUTE'S OWN SOLVE, KEPT HERE AS AN ARBITER.  It used to live in
+    :mod:`superglm.screening._score_stat`, which formed ``V_eff`` as
+    ``V - C' M^-1 C``.  Since issue #257 that module reads a design factor and
+    inverts nothing, so nothing in production needs this -- but the tests that
+    grade the factor route against the moments do, and they need the SAME
+    fallback the moment route had, or the geometries where ``M`` is
+    numerically singular would be compared against a different quantity.
+    """
+    try:
+        factorization = scipy.linalg.cho_factor(A, check_finite=False)
+        return scipy.linalg.cho_solve(factorization, B, check_finite=False)
+    except scipy.linalg.LinAlgError:
+        return np.linalg.pinv(A, hermitian=True) @ B
 
 
 def _single_rung(p, budget=2.0):
@@ -163,15 +180,36 @@ def test_arrow_inverts_a_singular_system_as_a_pseudo_inverse():
     assert np.array_equal(f.Ginv[2], np.zeros((g, g)))
 
 
+def _dense_ladder(factor, penalty, **kw):
+    """The dense ladder, called the way production calls it since issue #257.
+
+    One name for the new contract, so a signature change is one edit here and
+    not forty in the bodies below.
+    """
+    return penalized_score_statistic_ladder(factor, penalty, **kw)
+
+
 def _capture(df, y, features, cand, sample_weight=None, **kw):
+    """Run the public screen on one pair and keep what the dense route saw.
+
+    ``grab["factor"]`` is the ``(PairFactor, penalty)`` the ladder is now
+    handed.  ``grab["args"]`` is the five-moment tuple it USED to be handed,
+    rebuilt here from the same menus and cell tables by the producers
+    themselves -- :func:`pair_score_curvature` and
+    :func:`pair_overlap_moments`, which are no longer on the production path
+    and are kept as this file's arbiter.  Consumers below grade the factor
+    route against those moments, so the rebuild has to go through the
+    producers rather than through anything the factor route computes.
+    """
     model = SuperGLM(family="gaussian", features=features)
     model.fit_reml(df, y, sample_weight=sample_weight)
     if sample_weight is not None:
         kw["sample_weight"] = sample_weight
     grab = {}
-    real_curv, real_cells, real_ladder = (
-        ops.pair_score_curvature,
+    real_factor, real_cells, real_root, real_ladder = (
+        ops.pair_design_factor,
         ops.pair_cell_moments,
+        ops.tensor_penalty_root,
         ops.penalized_score_statistic_ladder,
     )
 
@@ -179,23 +217,37 @@ def _capture(df, y, features, cand, sample_weight=None, **kw):
         grab["cells"] = real_cells(*a, **k)
         return grab["cells"]
 
-    def spy_curv(B_a, B_b, S_cell, W_cell):
+    def spy_factor(B_a, B_b, S_cell, W_cell):
         grab["menus"] = (B_a, B_b)
-        return real_curv(B_a, B_b, S_cell, W_cell)
+        return real_factor(B_a, B_b, S_cell, W_cell)
 
-    def spy_ladder(U, V, C, M, S_ti, **k):
-        grab["args"] = (U, V, C, M, S_ti, k.get("U_nuisance"))
-        return real_ladder(U, V, C, M, S_ti, **k)
+    def spy_root(S1, S2):
+        grab["margin_penalties"] = (S1, S2)
+        return real_root(S1, S2)
+
+    def spy_ladder(factor, penalty_root, **k):
+        grab["factor"] = (factor, penalty_root)
+        return real_ladder(factor, penalty_root, **k)
 
     ops.pair_cell_moments = spy_cells
-    ops.pair_score_curvature = spy_curv
+    ops.pair_design_factor = spy_factor
+    ops.tensor_penalty_root = spy_root
     ops.penalized_score_statistic_ladder = spy_ladder
     try:
         model.screen_interactions(df, y, candidates=[cand], edf0=BUDGETS, **kw)
     finally:
         ops.pair_cell_moments = real_cells
-        ops.pair_score_curvature = real_curv
+        ops.pair_design_factor = real_factor
+        ops.tensor_penalty_root = real_root
         ops.penalized_score_statistic_ladder = real_ladder
+    if "menus" in grab and "cells" in grab and "factor" in grab:
+        B_a, B_b = grab["menus"]
+        S_cell, W_cell = grab["cells"]
+        U, V = pair_score_curvature(B_a, B_b, S_cell, W_cell)
+        M, C, u_m = pair_overlap_moments(B_a, B_b, S_cell, W_cell)
+        margins = grab.get("margin_penalties")
+        S_ti = None if margins is None else tensor_penalty(*margins)
+        grab["args"] = (U, V, C, M, S_ti, u_m)
     return grab
 
 
@@ -544,8 +596,8 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
     """
     from superglm.screening._structured import structured_ladder
 
-    U, V, C, M, S_ti, u_m = moderate_pair["args"]
-    dense = penalized_score_statistic_ladder(U, V, C, M, S_ti, budgets=BUDGETS, U_nuisance=u_m)
+    factor, penalty_root = moderate_pair["factor"]
+    dense = _dense_ladder(factor, penalty_root, budgets=BUDGETS)
     struct = structured_ladder(
         spline_cat_moments(*_structured_inputs(moderate_pair)), budgets=BUDGETS
     )
@@ -1822,16 +1874,26 @@ def test_a_factor_above_the_dense_cap_is_scored_rather_than_refused():
 
 def test_the_wide_path_never_allocates_the_dense_blocks(monkeypatch):
     """A pair routed structurally must not touch either thing the dense gates
-    refused it for: the ``(L, L-1)`` contrast menu, or the ``(k, k)``
-    curvature the ladder would factorize."""
+    refused it for: the ``(L, L-1)`` contrast menu, or the ``(k, k)``-wide
+    reduction the ladder would factorize.
+
+    **RE-KEYED FOR ISSUE #257, AND THE RE-KEYING IS THE POINT.**  The spy used
+    to watch ``pair_score_curvature``, which was the dense path's allocator
+    until this branch and is now nothing's -- so leaving it there would have
+    left a green test watching a function the production route no longer
+    calls, which is the vacuous-pass failure this repo has recorded three
+    times.  ``pair_design_factor`` is what the dense route allocates now, and
+    shown to bite: pointing the spy back at the retired name passes under a
+    mutation that sends this pair down the dense track.
+    """
     calls = []
     monkeypatch.setattr(
         ops, "_contrast_menu", lambda spec: calls.append("menu") or np.zeros((1, 1))
     )
     monkeypatch.setattr(
         ops,
-        "pair_score_curvature",
-        lambda *a, **k: calls.append("curvature") or (np.zeros(1), np.zeros((1, 1))),
+        "pair_design_factor",
+        lambda *a, **k: calls.append("factor") or None,
     )
     monkeypatch.setattr(
         ops,
@@ -3095,10 +3157,7 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
 
     grab = _thin_level_pair(low_weight)
     factors = _reference_factors(grab)
-    U, V, C, M, S_ti, u_m = grab["args"]
-    dense = penalized_score_statistic_ladder(
-        U, V, C, M, S_ti, budgets=_EDGE_BUDGETS, U_nuisance=u_m
-    )
+    dense = _dense_ladder(*grab["factor"], budgets=_EDGE_BUDGETS)
     struct = structured_ladder(spline_cat_moments(*_structured_inputs(grab)), budgets=_EDGE_BUDGETS)
     assert struct is not None and len(struct) == len(_EDGE_BUDGETS)
     lam_lo, edf_lo, lam_hi, edf_hi = _CERTIFIED_EDGES[low_weight]
@@ -3591,10 +3650,7 @@ def test_a_level_with_no_mass_cannot_carry_a_free_degree_of_freedom(low_weight):
     from superglm.screening._structured import structured_ladder
 
     grab = _vanishing_mass_pair(low_weight)
-    U, V, C, M, S_ti, u_m = grab["args"]
-    dense = penalized_score_statistic_ladder(
-        U, V, C, M, S_ti, budgets=_VANISHING_BUDGETS, U_nuisance=u_m
-    )
+    dense = _dense_ladder(*grab["factor"], budgets=_VANISHING_BUDGETS)
     struct = structured_ladder(
         spline_cat_moments(*_structured_inputs(grab)), budgets=_VANISHING_BUDGETS
     )
@@ -4096,8 +4152,7 @@ def test_an_unpenalized_spline_margin_is_scored_at_one_rung_not_refused():
 
     grab = _thin_level_pair(1.0)
     B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(grab)
-    U, V, C, M, _, u_m = grab["args"]
-    dense = penalized_score_statistic_ladder(U, V, C, M, None, budgets=BUDGETS, U_nuisance=u_m)
+    dense = _dense_ladder(grab["factor"][0], None, budgets=BUDGETS)
     for penalty in (None, np.zeros_like(S_a)):
         struct = structured_ladder(
             spline_cat_moments(B_a, penalty, S_cell, W_cell, level_rows), budgets=BUDGETS
@@ -4250,6 +4305,103 @@ def test_a_real_starved_geometry_no_longer_leaves_the_filter_factor_bound():
     rungs = structured_ladder(p, budgets=BUDGETS)
     assert rungs is not None and len(rungs) == len(BUDGETS), rungs
     assert all(0.0 <= r.edf0 <= L * k_a and np.isfinite(r.statistic) for r in rungs), rungs
+
+
+def _bracket_probing_budgets(factor, penalty):
+    """Budgets that make the dense ladder answer at each edge from both sides.
+
+    The edges are learned from the ladder itself -- a budget above every
+    reachable ``edf`` clamps low, one below every reachable ``edf`` clamps high
+    -- and then approached from inside on a log grid.  A budget just inside an
+    edge is the one a searching rung resolves TO that edge, so it is where a
+    ladder carrying two estimators reports two answers for one ``lambda``.
+    Nothing here reaches into the kernel: the grid is a property of the
+    published bracket, so it survives the estimator being replaced.
+    """
+    ends = _dense_ladder(factor, penalty, budgets=(1e12, 0.0))
+    edf_lo, edf_hi = float(ends[0].edf0), float(ends[1].edf0)
+    offsets = 10.0 ** np.arange(-9.0, 0.0)
+    return tuple(
+        sorted(
+            {edf_lo, edf_hi}
+            | {float(edf_hi * (1.0 + t)) for t in offsets}
+            | {float(edf_lo * (1.0 - t)) for t in offsets}
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: _thin_level_pair(1.0),
+        lambda: _thin_level_pair(0.001),
+        lambda: _vanishing_mass_pair(1e-12),
+        lambda: _vanishing_mass_pair(1e-10),
+        _starved_bs_pair,
+    ],
+    ids=["thin-1.0", "thin-0.001", "vanishing-1e-12", "vanishing-1e-10", "starved-bs"],
+)
+def test_the_dense_ladder_reports_one_edf_per_lambda(build):
+    """One ``lambda``, one answer.  Structural, so it carries no tolerance.
+
+    The ladder used to answer a clamped rung from a factorization of
+    ``V_eff + lambda S`` and a searching rung from a simultaneous
+    diagonalization of the same pencil, so two rungs landing on one
+    ``lambda`` could publish two different degrees of freedom for it.  On the
+    Gram route, measured at this file's own fixtures with the grid above:
+
+        _vanishing_mass_pair(1e-12)   16.000004 against 16.999987  (1.000 df)
+        _vanishing_mass_pair(1e-10)   16.000555 against 17.000221  (1.000 df)
+        _starved_bs_pair()             0.999999 against  3.999986  (3.000 df)
+        _starved_bs_pair()            14.605916 against 22.799934  (8.194 df)
+
+    ``_thin_level_pair`` at 1.0 and 0.001 does NOT reproduce it, which is why
+    the parametrization carries five geometries rather than one: the defect is
+    a property of how far apart the two estimators land on a pair, and on an
+    easy pair they agree to well past what any published field shows.
+
+    There is one estimator now, and a rung's ``lambda`` decides its answer
+    completely -- so the comparison is EXACT equality rather than a rounding,
+    and this test has no constant in it to be wrong on another machine.
+    Issue #257; the same invariant #281 files as a strict xfail on one pair.
+    """
+    grab = build()
+    factor, penalty = grab["factor"]
+    budgets = _bracket_probing_budgets(factor, penalty)
+    rungs = _dense_ladder(factor, penalty, budgets=budgets)
+
+    answers: dict[float, set[tuple[float, float]]] = {}
+    for rung in rungs:
+        answers.setdefault(rung.lambda0, set()).add((rung.statistic, rung.edf0))
+    disagreeing = {lam: sorted(values) for lam, values in answers.items() if len(values) > 1}
+    assert disagreeing == {}, disagreeing
+
+
+def test_the_dense_high_edge_statistic_matches_the_stacked_qr_arbiter(moderate_pair):
+    """The dense arm at the rung where the two routes used to part.
+
+    ``test_structured_ladder_agrees_with_the_dense_ladder`` grades the
+    structured arm against ``_wood_stacked_statistic`` at ``rel=1e-9`` and the
+    dense arm at ``2.2e-5``, and says why: the dense half read the pair's
+    moments, so its own accuracy at this rung was ``eps * kappa`` with a
+    condition number of ~1e11.  Reading the design factor instead removes the
+    squaring, and this asserts the dense arm at the bound the structured arm
+    already meets.
+
+    RED on the Gram route, measured here: the dense statistic sits 1.1159e-05
+    relative from the arbiter where the structured one sits 1.7369e-11, and
+    ``edf0`` reads 23.000031 against 22.999931.
+    """
+    factor, penalty = moderate_pair["factor"]
+    dense = _dense_ladder(factor, penalty, budgets=BUDGETS)
+    pair = spline_cat_moments(*_structured_inputs(moderate_pair))
+    geometry = _profile(pair)
+    for rung in dense:
+        arbiter = _wood_stacked_statistic(pair, geometry, rung.lambda0)
+        assert rung.statistic == pytest.approx(arbiter, rel=1e-9), (rung.statistic, arbiter)
+        assert rung.edf0 == pytest.approx(
+            _wood_stacked_edf(pair, geometry, rung.lambda0), rel=1e-9
+        ), (rung.edf0, rung.lambda0)
 
 
 # The measured cross-machine spread of the ``lambda = 0`` rung on a near-rank

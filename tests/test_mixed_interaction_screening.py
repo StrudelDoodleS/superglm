@@ -720,17 +720,26 @@ def test_grouped_categorical_margins_screen_and_confirm_by_refit():
     assert np.isfinite(confirm.predict(df)).all()
 
 
-def test_clamped_ladder_costs_no_decomposition_and_agrees_with_every_rung(monkeypatch):
+def test_a_clamped_ladder_answers_every_rung_from_one_decomposition(monkeypatch):
     """For a spline_cat whose factor is wide, kron(S, I) has a null space above
     every budget, so all four rungs clamp to the same achieved edf.
 
-    Two things must hold.  The whole ladder costs ZERO decompositions -- the
-    ladder brackets first with two ordinary solves, and a rung that clamps is
-    answered from that bracket, so the pencil is never built.  This is the
-    case that matters most for wide factors, where decomposing would be
-    strictly more expensive than the solves it would replace.  And running any
-    single budget on its own must reproduce the ladder's row exactly, which is
-    the property the old clamped-rung skip relied on for its correctness.
+    **THIS TEST'S FIRST HALF USED TO ASSERT ZERO DECOMPOSITIONS AND NOW ASSERTS
+    ONE, AND THE CHANGE IS THE FIX RATHER THAN A COST.**  The ladder used to
+    bracket with two ordinary solves and answer a clamped rung from that
+    bracket, building the pencil only when some rung had to search -- so a
+    wholly clamped ladder decomposed nothing.  What that bought was two
+    estimators for one quantity: a clamped rung reported a factorization's
+    trace and a searching rung a diagonalization's filter-factor sum, and at
+    one lambda on the same pair they could differ by whole degrees of freedom
+    (issue #257; measured at 1.000, 3.000 and 8.194 df on three of this
+    suite's own fixtures).  Since the ladder reads the pair's design factor
+    there is ONE decomposition and it answers every rung, clamped or not.
+
+    So the invariant here is exactly one, not zero.  And running any single
+    budget on its own must still reproduce the ladder's row exactly, which is
+    what makes the shared decomposition a saving rather than a change of
+    answer.
     """
     import superglm.screening._score_stat as score_stat
 
@@ -751,17 +760,18 @@ def test_clamped_ladder_costs_no_decomposition_and_agrees_with_every_rung(monkey
     model.fit_reml(df, y)
 
     builds = []
-    real = score_stat._build_pencil
+    real = score_stat._pair_pencil
 
     def counted(*args, **kwargs):
         builds.append(1)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(score_stat, "_build_pencil", counted)
+    monkeypatch.setattr(score_stat, "_pair_pencil", counted)
 
     ladder = model.screen_interactions(df, y, candidates=[("x", "g")]).iloc[0]
-    # four rungs, no decomposition at all -- every one of them clamps
-    assert builds == []
+    # four rungs, ONE decomposition -- every one of them clamps, and they all
+    # clamp against the same pencil rather than against a second estimator
+    assert builds == [1]
     assert ladder["kind"] == "spline_cat"
     assert ladder["edf0"] > 16.0  # the achieved clamp sits above every budget
 
@@ -798,7 +808,7 @@ def test_bisecting_ladder_resolves_every_rung_from_one_decomposition(monkeypatch
     model.fit_reml(df, y)
 
     builds = []
-    real_build = score_stat._build_pencil
+    real_build = score_stat._pair_pencil
     lambdas = []
     real_ladder = score_stat.penalized_score_statistic_ladder
 
@@ -811,7 +821,7 @@ def test_bisecting_ladder_resolves_every_rung_from_one_decomposition(monkeypatch
         lambdas.append([r.lambda0 for r in out])
         return out
 
-    monkeypatch.setattr(score_stat, "_build_pencil", counted_build)
+    monkeypatch.setattr(score_stat, "_pair_pencil", counted_build)
     monkeypatch.setattr(
         "superglm.model.screening_ops.penalized_score_statistic_ladder", recording_ladder
     )

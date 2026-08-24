@@ -26,6 +26,7 @@ from superglm.screening._numeric_margin import (
 from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
 from superglm.screening._pair_factor import (
     PairFactor,
+    _profiled_factor,
     numeric_cat_factor,
     numeric_numeric_factor,
     pair_design_factor,
@@ -60,9 +61,7 @@ def _profiled_from_grams(U, V, C, M, u_m):
 
 def _profiled_from_factor(factor: PairFactor):
     """``(V_eff, U_eff)`` off the factor, with no Gram difference anywhere."""
-    q, k = factor.overlap_width, factor.tensor_width
-    R_eff = factor.joint[q : q + k, q : q + k]
-    z_t = factor.joint[q : q + k, -1]
+    R_eff, z_t = _profiled_factor(factor)
     return R_eff.T @ R_eff, R_eff.T @ z_t
 
 
@@ -175,6 +174,47 @@ def test_the_factor_profiles_the_overlap_without_ever_differencing_two_grams():
 
     np.testing.assert_allclose(V_fac, V_gram, rtol=0, atol=1e-11 * np.abs(V_gram).max())
     np.testing.assert_allclose(U_fac, U_gram, rtol=0, atol=1e-11 * np.abs(U_gram).max())
+
+
+def test_a_rank_deficient_overlap_profiles_onto_its_own_range_and_no_further():
+    """A menu wider than its support, which an ``OrderedCategorical`` reaches.
+
+    The joint reduction is unpivoted, so a column of the overlap its
+    predecessors already span leaves a zero pivot and the direction ``Q`` puts
+    there is an arbitrary unit vector orthogonal to what came before -- NOT in
+    ``range(X_o)``.  Residualizing on the whole leading block then removes
+    curvature the overlap never explained.
+
+    The arbiter is the moment route's own profiling with a PSEUDO-inverse,
+    which projects onto ``range(M)`` and nothing wider.  Measured on the mixed
+    suite's ``band x power`` pair -- a 7-column inner-spline menu on 5 levels,
+    overlap rank 14 of 17 -- the bare slice reported a statistic of 13.28
+    against an exact-design 22.31, and moved the published ``z`` from 10.07 to
+    5.67.  This is the same defect on a fixture small enough to state.
+    """
+    rng = np.random.default_rng(21)
+    n_a, n_b, k_b = 5, 9, 3
+    # SEVEN columns on FIVE support points: two of them are exactly dependent,
+    # so the overlap is rank deficient before the pair is formed.
+    base = rng.normal(size=(n_a, 5))
+    B_a = np.concatenate([base, base[:, :2] @ rng.normal(size=(2, 2))], axis=1)
+    B_b = rng.normal(size=(n_b, k_b))
+    codes_a = rng.integers(0, n_a, 4000)
+    codes_b = rng.integers(0, n_b, 4000)
+    S_cell, W_cell = pair_cell_moments(
+        codes_a, codes_b, n_a, n_b, rng.normal(size=4000), rng.uniform(0.2, 2.0, 4000)
+    )
+    U, V = pair_score_curvature(B_a, B_b, S_cell, W_cell)
+    M, C, u_m = pair_overlap_moments(B_a, B_b, S_cell, W_cell)
+    assert np.linalg.matrix_rank(M) < M.shape[0], "the fixture's premise"
+
+    MinvC = np.linalg.pinv(M, hermitian=True) @ C
+    V_gram = 0.5 * ((V - C.T @ MinvC) + (V - C.T @ MinvC).T)
+    U_gram = U - MinvC.T @ u_m
+    V_fac, U_fac = _profiled_from_factor(pair_design_factor(B_a, B_b, S_cell, W_cell))
+
+    np.testing.assert_allclose(V_fac, V_gram, rtol=0, atol=1e-9 * np.abs(V_gram).max())
+    np.testing.assert_allclose(U_fac, U_gram, rtol=0, atol=1e-9 * np.abs(U_gram).max())
 
 
 def _numeric_cat_case(seed, L=7, n=3000, thin=None):
@@ -300,3 +340,57 @@ def test_the_numeric_cat_cell_gram_is_not_what_limits_the_pair(thin):
     scale = max(np.abs(V_rows).max(), 1e-300)
     assert np.abs(V_cell - V_rows).max() / scale < 1e-10, thin
     assert np.abs(U_cell - U_rows).max() / max(np.abs(U_rows).max(), 1e-300) < 1e-10, thin
+
+
+# The producers that assembled the dense route's Grams.  They are KEPT -- every
+# test above grades the factor against them, and
+# ``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` cannot
+# make its point without them -- but they must not regain a production caller,
+# which is what this list is for.
+_RETIRED_GRAM_PRODUCERS = frozenset(
+    {
+        "pair_score_curvature",
+        "pair_overlap_moments",
+        "numeric_pair_moments",
+        "numeric_numeric_moments",
+        "tensor_penalty",
+    }
+)
+
+
+def test_no_model_module_imports_a_retired_gram_producer():
+    """The fingerprint of the rule issue #257 replaced, enforced by import.
+
+    #322's precedent is to delete what nothing calls.  These five are kept
+    instead, and the reason is that they still have real callers -- as this
+    suite's arbiter, which is a use rather than dead code, and the same
+    standing ``_reference_edf`` has in the structured suite.  What must not
+    happen is one of them quietly becoming the production route again for a
+    pair some future branch adds, because the moment route's accuracy ceiling
+    is architectural and a new caller would inherit it without being told.
+
+    An AST scan rather than a grep: a name reached through
+    ``superglm.screening.pair_score_curvature`` is the same defect as an
+    ``import``, and both are import statements in the tree under
+    ``src/superglm/model/``, which is where every screening caller lives.
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "src" / "superglm" / "model"
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                "superglm.screening"
+            ):
+                for alias in node.names:
+                    if alias.name in _RETIRED_GRAM_PRODUCERS:
+                        offenders.append(f"{path.name}:{node.lineno} {alias.name}")
+            elif isinstance(node, ast.Attribute) and node.attr in _RETIRED_GRAM_PRODUCERS:
+                offenders.append(f"{path.name}:{node.lineno} .{node.attr}")
+    assert offenders == [], (
+        "the dense screening path reads design factors since issue #257; these "
+        f"reach for the moments it replaced: {offenders}"
+    )

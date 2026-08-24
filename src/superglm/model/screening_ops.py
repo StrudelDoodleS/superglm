@@ -18,7 +18,8 @@ indicator columns and ``kron`` of a spline menu with one reproduces the
 per-level curve blocks, column for column.  A NUMERIC margin never grids: it
 enters its probe linearly (a per-level slope, or a product of two numerics),
 so z-weighted moments accumulated over the other margin's cells are the exact
-sufficient statistics — see ``screening/_numeric_margin``.  Such a pair is
+sufficient statistics, and one centered pass beside them turns each level's
+into a FACTOR — see ``screening/_pair_factor``.  Such a pair is
 therefore exact whenever it is computed at all: it has no binning fallback,
 so a factor margin too wide for the pair's blocks is REFUSED with a NaN row
 rather than approximated.
@@ -96,14 +97,14 @@ from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
 from superglm.features.spline import _SplineBase
 from superglm.screening import (
-    numeric_numeric_moments,
-    numeric_pair_moments,
+    numeric_cat_factor,
+    numeric_numeric_factor,
     pair_cell_moments,
-    pair_score_curvature,
+    pair_design_factor,
     penalized_score_statistic_ladder,
     working_score,
 )
-from superglm.screening._overlap import pair_overlap_moments, tensor_penalty
+from superglm.screening._overlap import tensor_penalty_root
 from superglm.screening._structured import spline_cat_moments, structured_ladder
 from superglm.solvers.dispersion import (
     model_weight_semantics,
@@ -931,15 +932,20 @@ def screen_interactions(
         return codes, n, menu, S
 
     def _pair_penalty(S_a, S_b, k_a, k_b):
-        """The pair's block penalty, or None when no margin carries one.
+        """A FACTOR of the pair's block penalty, or None when it has none.
 
-        ``tensor_penalty(S, 0)`` is ``kron(S, I)``, which is exactly the
-        block-diagonal per-level penalty a varying-coefficient refit applies
-        (up to the column permutation the statistic is invariant to).
+        ``tensor_penalty_root(S, 0)`` factors ``kron(S, I)``, which is exactly
+        the block-diagonal per-level penalty a varying-coefficient refit
+        applies (up to the column permutation the statistic is invariant to).
+        The root rather than the assembly, because the ladder's high edge
+        multiplies the penalty's smallest resolved direction by ``1e10`` and an
+        eigendecomposition of the ASSEMBLY resolves an exactly-null direction
+        only to the assembled dimension's round-off -- six orders, measured at
+        the builder.
         """
         if S_a is None and S_b is None:
             return None
-        return tensor_penalty(
+        return tensor_penalty_root(
             np.zeros((k_a, k_a)) if S_a is None else S_a,
             np.zeros((k_b, k_b)) if S_b is None else S_b,
         )
@@ -1131,7 +1137,7 @@ def screen_interactions(
         # surfaces as its own error rather than a dtype failure downstream.
         kind = _pair_kind(margin_kinds[feat_a], margin_kinds[feat_b])
         # Set only by the spline_cat arrow path below; every other pair leaves
-        # it None and is scored from the dense moments as before.
+        # it None and is scored from its own design factor.
         structured_results = None
         if kind in ("numeric_cat", "numeric_numeric"):
             # A numeric margin enters the probe LINEARLY, so the pair has no
@@ -1142,9 +1148,9 @@ def screen_interactions(
             # OTHER margin's own blocks, which is why a factor too wide for
             # them is refused below — refusal is the only degradation a
             # z-moment pair has, since it cannot approximate.
-            S_ti, approx = None, False
+            S_root, approx = None, False
             if kind == "numeric_numeric":
-                U, V, C, M, u_m = numeric_numeric_moments(
+                factor = numeric_numeric_factor(
                     _raw_numeric(feat_a), _raw_numeric(feat_b), score, working_weights
                 )
                 # Two numerics contract to 3x3 blocks whatever the supports.
@@ -1172,7 +1178,7 @@ def screen_interactions(
                     )
                     continue
                 _, _, menu_g, _ = _margin(cat_name, False)
-                U, V, C, M, u_m = numeric_pair_moments(
+                factor = numeric_cat_factor(
                     codes_g, n_g, menu_g, _raw_numeric(num_name), score, working_weights
                 )
         else:
@@ -1382,17 +1388,19 @@ def screen_interactions(
                 S_cell, W_cell = pair_cell_moments(
                     codes_l, codes_r, n_l, n_r, score, working_weights, max_cells=max_cells
                 )
-                U, V = pair_score_curvature(menu_l, menu_r, S_cell, W_cell)
-                M, C, u_m = pair_overlap_moments(menu_l, menu_r, S_cell, W_cell)
-                S_ti = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
+                factor = pair_design_factor(menu_l, menu_r, S_cell, W_cell)
+                S_root = _pair_penalty(S_l, S_r, menu_l.shape[1], menu_r.shape[1])
         # An unpenalized block has no bandwidth to scan: every rung returns the
         # same achieved rank, statistic and lambda0=0, so one rung is the ladder.
-        penalized = structured_results is None and S_ti is not None and bool(np.any(S_ti))
-        # The whole ladder shares ONE decomposition.  The pencil that turns
-        # edf(lambda) and T(lambda) into closed forms depends on neither
-        # lambda nor edf0, so every rung after the first costs O(k) instead of
-        # a fresh O(k^3) solve — and the bisection that used to re-solve ~27
-        # times per rung now runs on the closed form.
+        # A penalty whose every direction is round-off reaches here as an EMPTY
+        # root, which is the same predicate the assembled ``np.any(S_ti)`` made.
+        penalized = structured_results is None and S_root is not None and S_root.size > 0
+        # The whole ladder shares ONE decomposition, and since issue #257 that
+        # is true of the CLAMPED rungs too.  The pencil that turns edf(lambda)
+        # and T(lambda) into closed forms depends on neither lambda nor edf0,
+        # so every rung after the first costs O(k) instead of a fresh O(k^3)
+        # solve — and the bisection that used to re-solve ~27 times per rung
+        # now runs on the closed form.
         #
         # This also retires the clamped-rung skip that used to guard the same
         # cost.  Its own justification was that a rung clamping UPWARD returns
@@ -1400,16 +1408,18 @@ def screen_interactions(
         # lower budget; an identical triple gives an identical z, and the
         # comparison below is STRICT, so recomputing those rungs cannot
         # displace the incumbent.  Same output, one less special case.
+        #
+        # AND IT RETIRES THE SECOND ESTIMATOR THE BRACKET USED TO CARRY.  A
+        # clamped rung used to be answered from the bracket's own
+        # factorization of V_eff + lambda S while a searching rung read the
+        # pencil, so two rungs landing on one lambda could publish two
+        # different degrees of freedom for it.  Both read the pencil now.
         results = structured_results
         if results is None:
             results = penalized_score_statistic_ladder(
-                U,
-                V,
-                C,
-                M,
-                S_ti,
+                factor,
+                S_root,
                 budgets=tuple(float(b) for b in (budgets if penalized else budgets[:1])),
-                U_nuisance=u_m,
             )
         best_z, best = -np.inf, None
         for result in results:

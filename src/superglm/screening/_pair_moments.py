@@ -10,6 +10,23 @@ Exactness contract: the cell-space assembly must reproduce the dense
 row-Kronecker assembly to floating-point reordering, because the same
 sufficient-statistic identity underpins lossless support compression.  The
 release pin lives in tests/test_interaction_screening.py.
+
+``pair_cell_moments`` and ``working_score`` are live: the factor builders of
+:mod:`superglm.screening._pair_factor` consume exactly the cell tables the
+first produces.  ``pair_score_curvature`` is not.
+
+**NO LONGER THE PRODUCTION ROUTE, AND KEPT DELIBERATELY.**  Issue #257 moved
+the dense screening path onto design factors -- ``_pair_factor`` reduces the
+same cell tables to one triangular factor and the ladder reads ``V_eff`` off a
+block of it, so no Gram is formed and the spectrum the statistic works in is
+the design's rather than its square.  What is below is the DEFINITION that
+factor is graded against: every exactness pin in
+``tests/test_pair_design_factor.py`` compares the two, and
+``test_the_dense_path_s_ceiling_is_its_gram_and_not_its_arithmetic`` counts the
+directions the Gram cannot resolve, which needs the Gram.  Precedent for
+keeping a live-tested non-caller is ``_reference_edf`` in the structured suite.
+An import guard keeps it from becoming production again by accident:
+``test_no_model_module_imports_a_retired_gram_producer``.
 """
 
 from __future__ import annotations
@@ -102,6 +119,9 @@ def pair_score_curvature(
     ``V[(p,q),(r,s)] = sum_i B_a[i,p] B_a[i,r] * (sum_j W[i,j] B_b[j,q] B_b[j,s])``
 
     Flattening is C-order, matching ``np.kron`` column ordering.
+
+    Not on the production path since issue #257 -- see the module docstring for
+    what it is for now and why it stays.
     """
     B_a = np.asarray(B_a, dtype=np.float64)
     B_b = np.asarray(B_b, dtype=np.float64)

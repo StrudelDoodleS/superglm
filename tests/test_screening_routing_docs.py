@@ -52,21 +52,28 @@ def _quadratic_ceiling(max_cells: int) -> int:
 def _route(pair, model, df, y, **kw):
     """Which kernel scored ``pair``: the dense moments or the arrow kernel."""
     seen: dict[str, object] = {}
-    real_curv, real_struct = ops.pair_score_curvature, ops.spline_cat_moments
+    real_factor, real_struct = ops.pair_design_factor, ops.spline_cat_moments
 
     def spy_struct(menu_l, S_l, S_cell, W_cell, level_rows):
         seen.update(route="arrow", k_s=int(menu_l.shape[1]), levels=int(level_rows.size))
         return real_struct(menu_l, S_l, S_cell, W_cell, level_rows)
 
-    def spy_curv(B_a, B_b, S_cell, W_cell):
+    def spy_factor(B_a, B_b, S_cell, W_cell):
+        # THE DENSE ROUTE'S ALLOCATOR SINCE ISSUE #257.  This spy watched
+        # ``pair_score_curvature`` until that change moved the dense path onto
+        # design factors; the old name is still importable as the screening
+        # suites' arbiter, so a spy left on it would have gone quiet rather
+        # than red and every "dense" reading below would have become
+        # "refused".  Shown to bite: re-keyed back, three of this file's five
+        # tests fail.
         seen.update(route="dense", k_s=int(B_a.shape[1]), levels=int(B_b.shape[1]))
-        return real_curv(B_a, B_b, S_cell, W_cell)
+        return real_factor(B_a, B_b, S_cell, W_cell)
 
-    ops.spline_cat_moments, ops.pair_score_curvature = spy_struct, spy_curv
+    ops.spline_cat_moments, ops.pair_design_factor = spy_struct, spy_factor
     try:
         row = model.screen_interactions(df, y, candidates=[pair], edf0=BUDGETS, **kw).iloc[0]
     finally:
-        ops.spline_cat_moments, ops.pair_score_curvature = real_struct, real_curv
+        ops.spline_cat_moments, ops.pair_design_factor = real_struct, real_factor
     return seen.get("route", "refused"), seen, row
 
 

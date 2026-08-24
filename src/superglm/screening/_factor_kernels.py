@@ -232,13 +232,43 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
     penalty factorization recovers it, so nothing here is waiting on a better
     cut.
     """
+    lifted, Q, dropped, unresolved = _penalty_spectrum(S_a)
+    keep = lifted > 0.0
+    return (Q[:, keep] * np.sqrt(lifted[keep])).T, dropped, unresolved
+
+
+def _penalty_spectrum(S_a: NDArray) -> tuple[NDArray, NDArray, float, float]:
+    """:func:`_penalty_root`'s POLICY, before it is collapsed into a factor.
+
+    Returns ``(lifted, Q, dropped, unresolved)``: the non-negative eigenvalues
+    the policy above admits, their eigenvectors, the spectral-norm distance the
+    drop branch moved ``S_a``, and the cut it decided on.  Every word of that
+    policy is documented in :func:`_penalty_root`, which is this function
+    followed by one line.
+
+    It is split out because a KRONECKER SUM must be rooted from its margins'
+    spectra rather than from its own.  ``eigh`` is accurate ABSOLUTELY, to
+    ``n eps ||S||_2``, so rooting an assembled ``kron(S1, I) + kron(I, S2)``
+    resolves a direction that is exactly null in exact arithmetic only to the
+    ASSEMBLED dimension's round-off -- and the ladder's high edge multiplies
+    that residue by ``1e10``.  Measured on ``moderate_pair``, whose penalty is
+    ``kron(S_a, I_23)`` with ``S_a`` nine wide: rooting the 207-wide assembly
+    puts ``edf`` 8.26e-07 from the stacked-QR arbiter, and rooting the 9-wide
+    margin and combining the spectra puts it 4.99e-13 from the same point.
+    Six orders, from where the eigendecomposition is taken.
+    See :func:`superglm.screening._overlap.tensor_penalty_root`.
+    """
     n = S_a.shape[0]
     if n == 0:
-        return np.zeros((0, 0), dtype=np.float64), 0.0, 0.0
+        return (
+            np.zeros(0, dtype=np.float64),
+            np.zeros((0, 0), dtype=np.float64),
+            0.0,
+            0.0,
+        )
     w, Q = np.linalg.eigh(0.5 * (S_a + S_a.T))
     unresolved = float(float(n) * np.finfo(np.float64).eps * float(np.max(np.abs(w), initial=0.0)))
     lifted = np.where(w >= -unresolved, np.abs(w), 0.0)
-    keep = lifted > 0.0
     # The spectral-norm distance to the cone contributed by the CERTIFIED
     # negatives only.  A zero eigenvalue -- exact, or positive and inside the
     # bar -- leaves ``rootS`` through ``keep`` and is not counted here: that is
@@ -248,4 +278,4 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
     # this function cut on rather than recomputing ``||S||_2`` by a second
     # routine that would agree only to roundoff.
     dropped = float(np.max(-w, initial=0.0, where=w < -unresolved))
-    return (Q[:, keep] * np.sqrt(lifted[keep])).T, dropped, unresolved
+    return lifted, Q, dropped, unresolved

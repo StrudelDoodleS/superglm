@@ -9,11 +9,105 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import scipy.linalg
 
 from superglm.distributions import Gamma, Poisson
 from superglm.links import LogLink
 from superglm.screening import pair_cell_moments, pair_score_curvature, working_score
+from superglm.screening._pair_factor import PairFactor
 from superglm.screening._score_stat import penalized_score_statistic_ladder
+
+
+def _solve_psd(A, B):
+    """Solve ``A X = B`` for symmetric PSD ``A``, falling back to a pseudo-inverse.
+
+    THE MOMENT ROUTE'S OWN SOLVE, KEPT HERE AS AN ARBITER.  It used to live in
+    :mod:`superglm.screening._score_stat`, which formed ``V_eff`` as
+    ``V - C' M^-1 C``; since issue #257 that module reads a design factor and
+    inverts nothing.  The tests that state a pair by its MOMENTS still need the
+    profiling that route performed, and they need the same pseudo-inverse
+    fallback, or a geometry whose overlap is numerically singular would be
+    compared against a different quantity.
+    """
+    try:
+        factorization = scipy.linalg.cho_factor(A, check_finite=False)
+        return scipy.linalg.cho_solve(factorization, B, check_finite=False)
+    except scipy.linalg.LinAlgError:
+        return np.linalg.pinv(A, hermitian=True) @ B
+
+
+def _psd_root(A):
+    """A factor ``R`` with ``R' R = A``, for a symmetric PSD ``A``."""
+    A = np.asarray(A, dtype=float)
+    w, Q = np.linalg.eigh(0.5 * (A + A.T))
+    keep = w > 0.0
+    return (Q[:, keep] * np.sqrt(w[keep])).T
+
+
+def _factor_from_moments(U, V, C=None, M=None, u_m=None):
+    """A :class:`PairFactor` whose Gram blocks are exactly the moments given.
+
+    **AN ADAPTER FOR MOMENT-SPECIFIED FIXTURES, AND NOT A PRODUCTION ROUTE.**
+    Since issue #257 the ladder is handed a factor of the pair's design, and
+    the production builders in :mod:`superglm.screening._pair_factor` reduce
+    that design directly -- they never form a Gram, which is the point.  The
+    tests below are about the LADDER's algebra rather than about the
+    reduction's accuracy, and they state their pairs as ``(U, V, C, M, u_m)``
+    because that is the shape the property under test is easiest to write in:
+    a curvature that dwarfs its penalty, a probe exactly nested in its overlap,
+    a block whose rank is known by construction.  This turns such a
+    specification into the factor with those moments, by the block Cholesky the
+    joint moment matrix admits:
+
+        joint = [[R_o, R_ot, z_o], [0, R_eff, z_t], [0, 0, 0]]
+
+    with ``R_o' R_o = M``, ``R_o' R_ot = C``, ``R_ot' R_ot + R_eff' R_eff = V``
+    and the response column carrying ``u_m`` and ``U``.  Round-tripping a Gram
+    through a root and back is exact to a rounding, so the fixture states what
+    it means to state; what it does NOT do is give the ladder more information
+    than the moments carry, which is exactly right for tests whose subject is
+    the moments.
+
+    ``C``/``M``/``u_m`` omitted is a pair with no overlap to profile -- the
+    shape the ladder used to accept as ``C = M = None``.
+    """
+    U = np.asarray(U, dtype=float)
+    V = 0.5 * (np.asarray(V, dtype=float) + np.asarray(V, dtype=float).T)
+    k = V.shape[0]
+    if (C is None) != (M is None):
+        raise ValueError("C and M profile the overlap together; supply both or neither")
+    if C is None:
+        q = 0
+        R_o = np.zeros((0, 0))
+        R_ot = np.zeros((0, k))
+        z_o = np.zeros(0)
+        V_eff, U_eff = V, U
+    else:
+        C = np.asarray(C, dtype=float)
+        M = 0.5 * (np.asarray(M, dtype=float) + np.asarray(M, dtype=float).T)
+        u_m = np.zeros(M.shape[0]) if u_m is None else np.asarray(u_m, dtype=float)
+        q = M.shape[0]
+        R_o = np.zeros((q, q))
+        root_m = _psd_root(M)
+        R_o[: root_m.shape[0]] = root_m
+        R_ot = np.linalg.lstsq(R_o.T, C, rcond=None)[0]
+        z_o = np.linalg.lstsq(R_o.T, u_m, rcond=None)[0]
+        MinvC = _solve_psd(M, C)
+        V_eff = 0.5 * ((V - C.T @ MinvC) + (V - C.T @ MinvC).T)
+        U_eff = U - MinvC.T @ u_m
+    R_eff = np.zeros((k, k))
+    root_v = _psd_root(V_eff)
+    R_eff[: root_v.shape[0]] = root_v
+    z_t = np.linalg.lstsq(R_eff.T, U_eff, rcond=None)[0]
+
+    width = q + k + 1
+    joint = np.zeros((width, width))
+    joint[:q, :q] = R_o
+    joint[:q, q : q + k] = R_ot
+    joint[:q, -1] = z_o
+    joint[q : q + k, q : q + k] = R_eff
+    joint[q : q + k, -1] = z_t
+    return PairFactor(joint=joint, overlap_width=q, tensor_width=k)
 
 
 def _pair_case(seed, n=4000, n_a=17, n_b=13, k_a=4, k_b=3, signed=False):
@@ -189,7 +283,7 @@ def test_statistic_reduces_to_unpenalized_without_penalty():
     V = _pd_matrix(rng, p)
     U = rng.normal(size=p)
 
-    result = penalized_score_statistic(U, V, S_ti=None)
+    result = penalized_score_statistic(_factor_from_moments(U, V), None)
 
     np.testing.assert_allclose(result.statistic, U @ np.linalg.solve(V, U), rtol=1e-11)
     assert result.lambda0 == 0.0
@@ -214,7 +308,7 @@ def test_whitening_keeps_an_identifiable_mode_that_is_merely_small():
     S = np.diag([1.0, 1e-13, 0.0])
     U = np.array([0.0, np.sqrt(1e-13), 0.0])
 
-    got = penalized_score_statistic(U, V, S_ti=S, edf0=1.0)
+    got = penalized_score_statistic(_factor_from_moments(U, V), _psd_root(S), edf0=1.0)
 
     # what the direct solver resolves, recomputed here rather than asserted
     A = V + 1.0 * S
@@ -232,10 +326,11 @@ def test_screening_kernels_are_internal_and_the_root_api_is_self_consistent():
 
     ``superglm.screening.__all__`` reads like a public claim, and a reviewer
     took it as one: ``from superglm import penalized_score_statistic_ladder``
-    raises.  So it does for all eight names there, every one of which predates
-    the ladder, and the resolution is that none of them belongs at the root
-    rather than that the ladder does -- they take raw assembled moment
-    matrices, so they are unusable without the internals that build them.
+    raises.  So it does for every name there, and the resolution is that none
+    of them belongs at the root rather than that the ladder does -- they take
+    raw assembled moments, or since issue #257 a reduced design factor whose
+    column layout is itself internal, so they are unusable without the
+    internals that build them.
 
     This test pins that decision so it is not silently reversed, and guards the
     class of defect the reviewer was actually pointing at: a name advertised
@@ -282,7 +377,6 @@ def test_a_wholly_absorbed_probe_is_scored_rather_than_discarded():
     from superglm import Categorical, SuperGLM
     from superglm.features.numeric import Numeric
     from superglm.screening._numeric_margin import numeric_pair_moments
-    from superglm.screening._score_stat import _solve_psd
 
     L, n = 5, 4000
     values = np.array([0.5, 1.5, 2.5, 3.5, 4.5])
@@ -491,7 +585,6 @@ def test_a_probe_exactly_nested_in_the_overlap_reports_only_its_free_directions(
     and any rule that needs one counts three.
     """
     from superglm.screening import penalized_score_statistic
-    from superglm.screening._score_stat import _solve_psd
 
     M = np.array([[float.fromhex("0x1.c60ae65c20699p-2")]])
     C = np.array([[float.fromhex("0x1.7d086fd7cd3a2p-5"), 0.0, 0.0]])
@@ -500,7 +593,7 @@ def test_a_probe_exactly_nested_in_the_overlap_reports_only_its_free_directions(
     V_eff = V - C.T @ _solve_psd(M, C)
     assert (np.linalg.eigvalsh(0.5 * (V_eff + V_eff.T)) >= 0).all()
 
-    got = penalized_score_statistic(np.zeros(3), V, C, M, None, U_nuisance=np.zeros(1))
+    got = penalized_score_statistic(_factor_from_moments(np.zeros(3), V, C, M, np.zeros(1)), None)
     assert got.edf0 == 2.0, got.edf0
 
 
@@ -529,7 +622,7 @@ def test_a_curvature_that_dwarfs_its_penalty_keeps_the_penalty():
     U[0] = 1e10
     assert np.array_equal(V + S, V), "the premise: the sum loses S"
 
-    got = penalized_score_statistic(U, V, S_ti=S, edf0=2.0)
+    got = penalized_score_statistic(_factor_from_moments(U, V), _psd_root(S), edf0=2.0)
 
     assert got.edf0 == pytest.approx(2.0, abs=1e-6)
     assert got.statistic == pytest.approx(0.5, rel=1e-6)
@@ -575,7 +668,7 @@ def test_a_weakly_identified_block_is_scored_not_discarded():
         U = np.zeros(k)
         U[0] = np.sqrt(1e-4)
 
-        got = penalized_score_statistic(U, V, eye, eye, None, U_nuisance=np.zeros(k))
+        got = penalized_score_statistic(_factor_from_moments(U, V, eye, eye, np.zeros(k)), None)
 
         assert got.edf0 == float(k), (k, got.edf0)
         assert got.statistic == pytest.approx(float(U @ np.linalg.solve(V_eff, U)), rel=1e-9), k
@@ -599,7 +692,7 @@ def test_unpenalized_edf_is_a_rank_not_a_cholesky_trace():
     scipy.linalg.cho_factor(V, check_finite=False)  # accepts it; that is the trap
     assert np.linalg.matrix_rank(V) == 2
 
-    result = penalized_score_statistic(np.array([1.0, 1.0, 1.0]), V, S_ti=None)
+    result = penalized_score_statistic(_factor_from_moments(np.array([1.0, 1.0, 1.0]), V), None)
     assert result.edf0 == 2.0
     assert result.lambda0 == 0.0
 
@@ -632,7 +725,6 @@ def test_unpenalized_edf_matches_the_dense_rank_on_a_profiled_block():
     """
     from superglm.screening import penalized_score_statistic
     from superglm.screening._numeric_margin import numeric_pair_moments
-    from superglm.screening._score_stat import _solve_psd
 
     L, n = 40, 8000
     menu = np.eye(L)[:, 1:]
@@ -650,7 +742,7 @@ def test_unpenalized_edf_matches_the_dense_rank_on_a_profiled_block():
         V_eff = 0.5 * (V_eff + V_eff.T)
         assert np.linalg.matrix_rank(V_eff) == L - 2, seed
 
-        result = penalized_score_statistic(U, V, C, M, None, U_nuisance=u_m)
+        result = penalized_score_statistic(_factor_from_moments(U, V, C, M, u_m), None)
         # Never ABOVE the rank: that inequality is the defect itself, and it
         # fires only on the seeds cho_factor accepts.
         assert result.edf0 <= L - 2, (seed, result.edf0)
@@ -676,7 +768,7 @@ def test_singular_pencil_answer_does_not_depend_on_the_units():
         V = s * np.diag([1.0, 2.0, 0.0])
         S = s * np.diag([2.0, 1.0, 0.0])
         U = np.sqrt(s) * np.array([1.0, 1.0, 0.0])
-        got = penalized_score_statistic(U, V, S_ti=S, edf0=1.0)
+        got = penalized_score_statistic(_factor_from_moments(U, V), _psd_root(S), edf0=1.0)
         answers.append((got.statistic, got.edf0))
     # lambda0 = 1 makes V + lambda S = 3s I on the identifiable block, so the
     # statistic is U' (3s I)^-1 U = 2/3 and edf0 is 1 -- at every scale.
@@ -694,7 +786,7 @@ def test_edf_solver_hits_target():
     S = _pd_matrix(rng, p, strength=0.3)
     U = rng.normal(size=p)
 
-    result = penalized_score_statistic(U, V, S_ti=S, edf0=3.5)
+    result = penalized_score_statistic(_factor_from_moments(U, V), _psd_root(S), edf0=3.5)
 
     achieved = np.trace(np.linalg.solve(V + result.lambda0 * S, V))
     assert abs(achieved - 3.5) <= 1e-6
@@ -714,7 +806,9 @@ def test_profiling_removes_overlap_explained_score():
     U = C.T @ np.linalg.solve(M, u_m)  # score fully explained by the overlap
     S = _pd_matrix(rng, p, strength=0.2)
 
-    result = penalized_score_statistic(U, V, C, M, S, edf0=3.0, U_nuisance=u_m)
+    result = penalized_score_statistic(
+        _factor_from_moments(U, V, C, M, u_m), _psd_root(S), edf0=3.0
+    )
 
     assert abs(result.statistic) < 1e-18
 
@@ -730,7 +824,9 @@ def test_infinite_penalty_limit_restricts_to_null_space():
     S[null_dim:, null_dim:] = _pd_matrix(rng, p - null_dim)
     U = rng.normal(size=p)
 
-    result = penalized_score_statistic(U, V, S_ti=S, edf0=float(null_dim))
+    result = penalized_score_statistic(
+        _factor_from_moments(U, V), _psd_root(S), edf0=float(null_dim)
+    )
 
     V_nn = V[:null_dim, :null_dim]
     expected = U[:null_dim] @ np.linalg.solve(V_nn, U[:null_dim])
@@ -738,13 +834,25 @@ def test_infinite_penalty_limit_restricts_to_null_space():
     np.testing.assert_allclose(result.statistic, expected, rtol=1e-3)
 
 
-def test_c_without_m_raises():
+def test_a_factor_cannot_be_built_from_widths_it_does_not_have():
+    """The half-specification guard, moved to where the specification now is.
+
+    This used to pin ``penalized_score_statistic(U, V, C=...)`` raising for a
+    ``C`` with no ``M``: the overlap was two arguments and supplying one of
+    them was a caller error the interface had to catch.  Since issue #257 the
+    overlap is not an argument at all -- it is the leading block of the pair's
+    own factor -- so that error is unreachable and the class of defect it
+    guarded moved with it.  What can still be half-stated is the factor's
+    SHAPE, and :class:`PairFactor` checks it rather than inferring it, because
+    a caller that guessed the widths from the shape would slice a transposed
+    pair silently and only ``edf0`` would show it.
+    """
     import pytest
 
-    from superglm.screening import penalized_score_statistic
-
-    with pytest.raises(ValueError, match="supply both"):
-        penalized_score_statistic(np.ones(2), np.eye(2), C=np.ones((1, 2)))
+    with pytest.raises(ValueError, match="joint must be"):
+        PairFactor(joint=np.eye(4), overlap_width=2, tensor_width=2)
+    # ...and the widths that DO describe that factor are accepted.
+    assert PairFactor(joint=np.eye(4), overlap_width=1, tensor_width=2).tensor_width == 2
 
 
 def test_overlap_moments_match_dense_assembly():
@@ -807,7 +915,9 @@ def test_full_chain_zeroes_an_additive_signal():
     M, C, u_m = pair_overlap_moments(A, B, S_cell, W_cell)
     S_ti = tensor_penalty(_pd_matrix(rng, k_a), _pd_matrix(rng, k_b))
 
-    result = penalized_score_statistic(U, V, C, M, S_ti, edf0=3.0, U_nuisance=u_m)
+    result = penalized_score_statistic(
+        _factor_from_moments(U, V, C, M, u_m), _psd_root(S_ti), edf0=3.0
+    )
 
     scale = float(np.abs(U).max())
     assert abs(result.statistic) < 1e-16 * max(scale, 1.0) ** 2 + 1e-12
@@ -1835,7 +1945,11 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
     # A budget above ``p`` is unreachable, so the rung clamps to the bracket's
     # LOW edge and reports the lambda it clamped at.  Read back rather than
     # hard-coded: the bracket is scale-relative and this pins no constant.
-    lam = float(penalized_score_statistic_ladder(U, V, S_ti=S, budgets=(4.0 * p,))[0].lambda0)
+    lam = float(
+        penalized_score_statistic_ladder(
+            _factor_from_moments(U, V), _psd_root(S), budgets=(4.0 * p,)
+        )[0].lambda0
+    )
 
     A = V + lam * S
     Ainv_S = np.linalg.solve(A, S)
@@ -1874,7 +1988,9 @@ def _low_edge_sensitivity(sigma_min, p=24, units=1.0, penalty="I"):
         # geometries, with lambda itself moving 0 to 7.9e-16 relative.  Driving
         # the ladder anyway costs one call and removes the argument.
         rung = penalized_score_statistic_ladder(
-            U, 0.5 * (operand + operand.T), S_ti=S, budgets=(4.0 * p,)
+            _factor_from_moments(U, 0.5 * (operand + operand.T)),
+            _psd_root(S),
+            budgets=(4.0 * p,),
         )[0]
         return float(rung.edf0)
 
@@ -2168,7 +2284,9 @@ def test_the_clamped_low_edge_reproduces_the_isotropic_closed_form(p, scale):
     """
     V = scale * np.eye(p)
     S = np.eye(p)
-    rung = penalized_score_statistic_ladder(np.ones(p), V, S_ti=S, budgets=(4.0 * p,))[0]
+    rung = penalized_score_statistic_ladder(
+        _factor_from_moments(np.ones(p), V), _psd_root(S), budgets=(4.0 * p,)
+    )[0]
 
     # ``abs=0.0`` IS WHAT MAKES THIS A PIN.  ``pytest.approx`` keeps a default
     # absolute tolerance of 1e-12 whenever only ``rel`` is given, and the lambda

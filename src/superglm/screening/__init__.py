@@ -13,10 +13,11 @@ and the tests — not what a caller imports.  The supported entry point for
 screening is ``SuperGLM.screen_interactions``; nothing here is re-exported from
 the package root, deliberately and uniformly, and that includes
 ``penalized_score_statistic_ladder``.  Promoting any of it would be promoting
-an interface that takes raw assembled moment matrices — ``U``, ``V``, the
-overlap ``C``/``M``, a tensor penalty — whose construction is itself internal
-and undocumented, so it is not usable without the internals that build it.
-Every module here is underscore-prefixed for the same reason.
+an interface that takes a reduced DESIGN FACTOR — a ``PairFactor`` whose column
+layout, overlap ordering and working-response convention are all internal — or,
+for the producers kept as this suite's arbiter, raw assembled moment matrices.
+Neither is usable without the internals that build it.  Every module here is
+underscore-prefixed for the same reason.
 
 Plans: docs/superpowers/plans/2026-07-28-interaction-screening.md and
 docs/superpowers/plans/2026-07-31-mixed-interaction-screening.md.
@@ -25,6 +26,12 @@ docs/superpowers/plans/2026-07-31-mixed-interaction-screening.md.
 from superglm.screening._numeric_margin import (
     numeric_numeric_moments,
     numeric_pair_moments,
+)
+from superglm.screening._pair_factor import (
+    PairFactor,
+    numeric_cat_factor,
+    numeric_numeric_factor,
+    pair_design_factor,
 )
 from superglm.screening._pair_moments import (
     pair_cell_moments,
@@ -38,10 +45,14 @@ from superglm.screening._score_stat import (
 )
 
 __all__ = [
+    "PairFactor",
     "ScreenedPair",
+    "numeric_cat_factor",
+    "numeric_numeric_factor",
     "numeric_numeric_moments",
     "numeric_pair_moments",
     "pair_cell_moments",
+    "pair_design_factor",
     "pair_score_curvature",
     "penalized_score_statistic",
     "penalized_score_statistic_ladder",
