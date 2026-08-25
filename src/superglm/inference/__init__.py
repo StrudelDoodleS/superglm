@@ -4,11 +4,7 @@
 """
 
 from superglm.inference.coef_tables import build_basis_detail, build_coef_rows
-from superglm.inference.covariance import (
-    _penalised_xtwx_inv,
-    _penalised_xtwx_inv_gram,
-    _second_diff_penalty,
-)
+from superglm.inference.covariance import _second_diff_penalty
 from superglm.inference.factor_smooths import FactorSmoothResult
 from superglm.inference.metrics import ModelMetrics
 from superglm.inference.random_effects import RandomEffectResult
@@ -28,7 +24,6 @@ from superglm.inference.term import (
     _recenter_term,
     _resolve_group_lambda,
     _safe_exp,
-    compute_coef_covariance,
     drop1,
     feature_se_from_cov,
     refit_unpenalised,
@@ -40,8 +35,6 @@ from superglm.inference.term import (
 
 __all__ = [
     # covariance
-    "_penalised_xtwx_inv",
-    "_penalised_xtwx_inv_gram",
     "_second_diff_penalty",
     # metrics
     "ModelMetrics",
@@ -64,7 +57,6 @@ __all__ = [
     "_recenter_term",
     "_resolve_group_lambda",
     "_safe_exp",
-    "compute_coef_covariance",
     "drop1",
     "feature_se_from_cov",
     "refit_unpenalised",

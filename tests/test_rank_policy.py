@@ -254,9 +254,13 @@ def test_reflecting_the_residues_sign_moves_neither_the_rank_nor_the_covariance(
             "the covariance scale has moved; under version 2 this read 3.638 "
             "on thirteen of fourteen configurations and 1.817e+15 on the other"
         )
-    # Both arms are still inside the certification band, which is the separate
-    # and unfixed half of #356: the verdict is computed correctly here and
-    # `inference/covariance.py` does not consult it.
+    # Both arms are still inside the certification band, which is where #356's
+    # verdict half lived.  `inference/covariance.py` used to reach that band
+    # without consulting the verdict; #367 made both of its inversions consult
+    # it, and the chain that held them was then deleted outright as unreachable
+    # from any fit (PR "Delete the covariance chain no production fit reaches").
+    # What consults the verdict on the live path is `model/state_ops.py` and
+    # `inference/metrics.py`.
     assert needs_factor_certification(delivered_decomposition)
     assert needs_factor_certification(reflected_decomposition)
 

@@ -274,72 +274,36 @@ class TestCandidateGradePaths:
         assert seen == [3e-8]
 
 
-class TestRunnerPathSentinel:
-    """The single-pass runner wrapper implements the None convention too.
-
-    No live caller reaches it today, but it is a public-adjacent seam
-    (SuperGLM._run_reml_once) and runner.py compares max_change < reml_tol,
-    which raises TypeError on None if the sentinel is forwarded verbatim.
-
-    The engine classification follows the stopping criterion, not the inner
-    solver: runner.py gates on the per-step lambda change in BOTH branches
-    (use_direct only selects the coefficient solver), so the sentinel must
-    resolve to the step default regardless of use_direct. Resolving 1e-9
-    here would hand a Newton-grade bar to a linear-rate fixed point --
-    exactly the combination the engine scoping exists to prevent.
-    """
-
-    def test_model_run_reml_once_resolves_the_sentinel_as_a_step_engine(self, monkeypatch):
-        import types
-
-        from superglm.model import reml_ops
-
-        captured: list[float] = []
-
-        def fake_run_reml_once(*args, **kwargs):
-            captured.append(kwargs["reml_tol"])
-            return "RESULT", "DM"
-
-        monkeypatch.setattr(reml_ops, "run_reml_once", fake_run_reml_once)
-        monkeypatch.setattr(reml_ops, "configured_penalty", lambda model: None)
-        model = types.SimpleNamespace(
-            _dm="DM0",
-            _distribution=None,
-            _link=None,
-            _groups=[],
-            _active_set=None,
-            _direct_solve="auto",
-            _reml_penalties=None,
-        )
-        for use_direct, reml_tol, expected in (
-            (True, None, 1e-6),
-            (False, None, 1e-6),
-            (True, 3e-7, 3e-7),
-        ):
-            reml_ops.model_run_reml_once(
-                model,
-                None,
-                None,
-                None,
-                [],
-                {},
-                {},
-                max_reml_iter=1,
-                reml_tol=reml_tol,
-                verbose=False,
-                use_direct=use_direct,
-            )
-        assert captured == [1e-6, 1e-6, 3e-7]
-
-
 class TestEngineSeamSentinels:
     """Every model-bound engine wrapper resolves the sentinel for the engine
     it actually forwards to.
 
-    These are the same public-adjacent seam class as the runner wrapper:
-    each forwards to exactly one engine whose loop would TypeError on a
+    Each forwards to exactly one engine whose loop would TypeError on a
     verbatim None (discrete.py floats the tolerance; efs.py compares
     against it), so the wrapper owns the resolution.
+
+    **Two of the three seams below are production-reached; one is not.**
+    ``model_optimize_direct_reml`` and ``model_optimize_efs_reml`` are live --
+    ``fit_ops.py:2011-2012`` injects both into ``optimize_reml_best``, which
+    calls them at ``reml_execute.py:343,387`` and ``:366,410``.
+    ``model_optimize_discrete_reml_cached_w`` is NOT: its only inbound
+    reference anywhere is ``SuperGLM._optimize_discrete_reml_cached_w``
+    (``api.py:2081``), which nothing calls, plus the test below.  What runs the
+    discrete cached-W optimizer in production is ``reml/direct.py:150``
+    reaching ``reml.discrete.optimize_discrete_reml_cached_w`` directly, past
+    this adapter chain entirely.
+
+    That is the other half of audit finding S1
+    (``docs/audit/2026-07-28/subsystems/model-orchestration.md``), which names
+    the ``run_reml_once`` chain and this one together.  The first half was
+    deleted by the PR "Delete the covariance chain no production fit reaches",
+    which also dropped ``TestRunnerPathSentinel``: that class drove the deleted
+    ``model_run_reml_once`` wrapper with a monkeypatched engine, so it pinned
+    the wrapper and nothing else.  The sentinel contract it asserted --
+    ``resolve_reml_tol`` picking the engine the seam forwards to -- survives at
+    the two live seams below.  The discrete-cached-W seam is left in place and
+    tracked as the follow-up rather than deleted alongside it, so that the
+    remaining half of S1 is retired on its own evidence.
     """
 
     @staticmethod

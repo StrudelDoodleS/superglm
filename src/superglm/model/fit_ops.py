@@ -52,7 +52,6 @@ from superglm.model.reml_ops import (
     model_reml_direct_hessian,
     model_reml_laml_objective,
     model_reml_w_correction,
-    model_run_reml_once,
 )
 from superglm.model.reml_setup import (
     collect_reml_groups,
@@ -91,7 +90,6 @@ __all__ = [
     "model_reml_direct_hessian",
     "model_reml_laml_objective",
     "model_reml_w_correction",
-    "model_run_reml_once",
 ]
 
 

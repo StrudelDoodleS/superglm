@@ -707,7 +707,6 @@ class TestMetricsCaching:
         model.fit(X, y)
         metrics = model.metrics(X, y, sample_weight=np.linspace(0.7, 1.3, len(X)))
 
-        covariance_calls = 0
         metrics_calls = 0
 
         # Both entry points count: a decomposition this path consumes is one it
@@ -722,10 +721,6 @@ class TestMetricsCaching:
 
             return counted
 
-        def bump_covariance():
-            nonlocal covariance_calls
-            covariance_calls += 1
-
         def bump_metrics():
             nonlocal metrics_calls
             metrics_calls += 1
@@ -735,15 +730,17 @@ class TestMetricsCaching:
             "moments",
             lambda *_args, **_kwargs: pytest.fail("rebuilt the grouped raw Gram"),
         )
-        # Every way out of ``inference/covariance.py``: the Gram entry point
-        # and the factor route the certification band sends it to.  This path
-        # takes neither, which is the claim.
-        for name in ("decompose_gram_if_authoritative", "decompose_factor"):
-            monkeypatch.setattr(
-                covariance_module,
-                name,
-                counted_decomposition(covariance_module, name, bump_covariance),
-            )
+        # This used to count every way out of ``inference/covariance.py`` -- the
+        # Gram entry point and the factor route the certification band sends it
+        # to -- and assert zero.  That claim now holds by construction: the dead
+        # covariance chain was deleted (PR "Delete the covariance chain no
+        # production fit reaches") and the module has no decomposition entry
+        # point left to take.  Asserted rather than assumed, so reintroducing
+        # one there reddens this test instead of slipping past it.
+        assert not any(
+            hasattr(covariance_module, name)
+            for name in ("decompose_gram", "decompose_gram_if_authoritative", "decompose_factor")
+        )
         for name in ("decompose_gram", "decompose_gram_if_authoritative"):
             monkeypatch.setattr(
                 metrics_module,
@@ -753,7 +750,6 @@ class TestMetricsCaching:
 
         _ = metrics._active_info
 
-        assert covariance_calls == 0
         assert metrics_calls == 2  # raw inverse + reusable profiled data rank
 
     def test_numeric_evaluation_does_not_allocate_full_fitted_penalty(self, monkeypatch):

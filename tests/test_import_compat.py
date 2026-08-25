@@ -184,7 +184,14 @@ def test_reml_optimizer_canonical():
     from superglm.reml.efs import optimize_efs_reml  # noqa: F401
     from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian  # noqa: F401
     from superglm.reml.objective import reml_laml_objective  # noqa: F401
-    from superglm.reml.runner import run_reml_once  # noqa: F401
+
+    # ``superglm.reml.runner.run_reml_once`` was here until the dead covariance
+    # chain was deleted (PR "Delete the covariance chain no production fit
+    # reaches"). Its whole module is gone: the only inbound chain ended at
+    # ``SuperGLM._run_reml_once``, which nothing called, and a full-suite
+    # runtime trace recorded zero production frames on it. This entry is
+    # dropped deliberately -- it is a supported-surface removal, not an
+    # oversight, and it belongs in 0.30.0's changelog.
     from superglm.reml.w_derivatives import (  # noqa: F401
         compute_d2W_deta2,
         compute_dW_deta,
@@ -202,6 +209,12 @@ def test_reml_multi_penalty_canonical():
 
 
 def test_inference_term_canonical():
+    # ``compute_coef_covariance`` was listed here until the dead covariance
+    # chain was deleted (PR "Delete the covariance chain no production fit
+    # reaches").  It recomputed W from scratch and called
+    # ``_penalised_xtwx_inv_gram``; ``model/state_ops.coef_covariance``
+    # superseded it, and nothing in ``src/`` called it.  Dropping it from this
+    # contract is a deliberate supported-surface removal for 0.30.0.
     from superglm.inference.term import (  # noqa: F401
         _VALID_CENTERING,
         InteractionInference,
@@ -211,7 +224,6 @@ def test_inference_term_canonical():
         _recenter_term,
         _resolve_group_lambda,
         _safe_exp,
-        compute_coef_covariance,
         feature_se_from_cov,
         spline_group_enrichment,
         term_inference,
@@ -239,9 +251,17 @@ def test_inference_summary_canonical():
 
 
 def test_inference_covariance_canonical():
+    # ``_penalised_xtwx_inv`` and ``_penalised_xtwx_inv_gram`` were listed here
+    # until the dead covariance chain was deleted (PR "Delete the covariance
+    # chain no production fit reaches").  Neither had a production caller: the
+    # gram form was reached only from ``compute_coef_covariance`` and
+    # ``reml/runner.py``, both themselves dead, and the dense form was a
+    # test-only oracle.  Their supported-surface removal lands in 0.30.0.
+    # ``_active_penalty_matrix`` is the live half of that assembly and is added
+    # here in their place, since ``inference/metrics.py`` and
+    # ``model/state_ops.py`` both import it across package boundaries.
     from superglm.inference.covariance import (  # noqa: F401
-        _penalised_xtwx_inv,
-        _penalised_xtwx_inv_gram,
+        _active_penalty_matrix,
         _second_diff_penalty,
     )
 
