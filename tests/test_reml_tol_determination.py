@@ -282,14 +282,28 @@ class TestEngineSeamSentinels:
     verbatim None (discrete.py floats the tolerance; efs.py compares
     against it), so the wrapper owns the resolution.
 
-    A fourth seam, ``model_run_reml_once``, was pinned here by
-    ``TestRunnerPathSentinel`` until the dead covariance chain was deleted (PR
-    "Delete the covariance chain no production fit reaches").  That class went
-    with its subject: it drove the wrapper directly with a monkeypatched
-    engine, so it pinned the deleted wrapper and nothing else, and its own
-    docstring recorded that no live caller reached it.  The sentinel contract
-    it asserted -- ``resolve_reml_tol`` picking the engine the seam forwards to
-    -- stays pinned at the three live seams below.
+    **Two of the three seams below are production-reached; one is not.**
+    ``model_optimize_direct_reml`` and ``model_optimize_efs_reml`` are live --
+    ``fit_ops.py:2011-2012`` injects both into ``optimize_reml_best``, which
+    calls them at ``reml_execute.py:343,387`` and ``:366,410``.
+    ``model_optimize_discrete_reml_cached_w`` is NOT: its only inbound
+    reference anywhere is ``SuperGLM._optimize_discrete_reml_cached_w``
+    (``api.py:2081``), which nothing calls, plus the test below.  What runs the
+    discrete cached-W optimizer in production is ``reml/direct.py:150``
+    reaching ``reml.discrete.optimize_discrete_reml_cached_w`` directly, past
+    this adapter chain entirely.
+
+    That is the other half of audit finding S1
+    (``docs/audit/2026-07-28/subsystems/model-orchestration.md``), which names
+    the ``run_reml_once`` chain and this one together.  The first half was
+    deleted by the PR "Delete the covariance chain no production fit reaches",
+    which also dropped ``TestRunnerPathSentinel``: that class drove the deleted
+    ``model_run_reml_once`` wrapper with a monkeypatched engine, so it pinned
+    the wrapper and nothing else.  The sentinel contract it asserted --
+    ``resolve_reml_tol`` picking the engine the seam forwards to -- survives at
+    the two live seams below.  The discrete-cached-W seam is left in place and
+    tracked as the follow-up rather than deleted alongside it, so that the
+    remaining half of S1 is retired on its own evidence.
     """
 
     @staticmethod

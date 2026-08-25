@@ -4,13 +4,15 @@ Extracted from ``metrics.py`` to break the inference <-> metrics circular
 dependency.  These functions depend only on numpy, scipy, group_matrix, and
 types — they have no dependency on inference results or metrics classes.
 
-The module no longer inverts anything.  ``_penalised_xtwx_inv`` and
-``_penalised_xtwx_inv_gram`` used to assemble ``(X'WX + S)`` here and take its
-pseudo-inverse; both were dead in production and were removed.  Coefficient
-covariance is published by ``model/state_ops.py`` and ``inference/metrics.py``,
-which consult ``decompose_gram_if_authoritative`` and fall back to a streamed
-observation factor themselves.  ``_active_penalty_matrix`` -- the ``S`` half of
-that assembly -- stayed, because those two are its callers.
+The module no longer assembles or decomposes a penalised Hessian.
+``_penalised_xtwx_inv`` and ``_penalised_xtwx_inv_gram`` used to build
+``(X'WX + S)`` here and take its pseudo-inverse; both were dead in production
+and were removed.  The accessors below still apply an inverse, but only
+through a factorisation handed to them.  Coefficient covariance is published by
+``model/state_ops.py`` and ``inference/metrics.py``, which consult
+``decompose_gram_if_authoritative`` and fall back to a streamed observation
+factor themselves.  ``_active_penalty_matrix`` -- the ``S`` half of that
+assembly -- stayed, because those two are its callers.
 """
 
 from __future__ import annotations

@@ -196,23 +196,6 @@ class TestPenaltyComponents:
 # ── penalised-Hessian assembly uses stored omega ─────────────────
 
 
-def _bordered_hessian(moments, W, penalty):
-    """``[[sum W, X'W1], [X'W1, X'WX + S]]`` -- the intercept-bordered system.
-
-    The deleted ``_penalised_xtwx_inv_gram`` built this from the same fused
-    moments; the arithmetic is three assignments and is kept here so the
-    augmented halves of the pins below still compare an augmented system.
-    """
-    hessian = moments.gram + penalty
-    width = hessian.shape[0]
-    bordered = np.empty((width + 1, width + 1))
-    bordered[0, 0] = float(np.sum(W))
-    bordered[0, 1:] = moments.xtw
-    bordered[1:, 0] = moments.xtw
-    bordered[1:, 1:] = hessian
-    return bordered
-
-
 class TestPenalisedHessianAssembly:
     """The bug fix: CRS gets its correct omega, not _second_diff_penalty.
 
@@ -225,6 +208,19 @@ class TestPenalisedHessianAssembly:
     for the penalty half, ``MatrixExecutionPlan.moments`` for the Gram half,
     and ``decompose_gram`` / ``decompose_factor`` for the inversion -- so each
     is re-expressed against that machinery at the same tolerance.
+
+    None of them carries an augmented ``(p + 1)`` half any more.  Production
+    never assembles ``[[sum W, X'W1], [X'W1, X'WX + S]]``: the live augmented
+    covariance is a Schur border taken in closed form on an ALREADY-inverted
+    profiled block (``inference/metrics.py:143-150``), so a bordered matrix
+    here would be one the test itself built -- the same reason
+    ``test_factor_certification_authority.py`` gives for dropping its own
+    augmented comparison.  It was also measured to add no discrimination: on
+    this fixture the bordered system is the same regime as the unaugmented one
+    (width 21 rank 21 against 20/20, condition 8.7e+02 against 7.6e+02) and
+    over four decades of injected penalty error the two discrepancies track to
+    three significant figures, so the augmented assertion could never fail
+    while its unaugmented sibling passed.
     """
 
     def test_crs_penalty_differs_from_second_diff(self, poisson_data):
@@ -294,14 +290,6 @@ class TestPenalisedHessianAssembly:
         inv_dict = decompose_gram(moments.gram + S_dict).pseudo_inverse()
         np.testing.assert_allclose(inv_scalar, inv_dict, atol=1e-10)
 
-        aug_scalar = _bordered_hessian(moments, W, S_scalar)
-        aug_dict = _bordered_hessian(moments, W, S_dict)
-        np.testing.assert_allclose(
-            decompose_gram(aug_scalar).pseudo_inverse(),
-            decompose_gram(aug_dict).pseudo_inverse(),
-            atol=1e-10,
-        )
-
     def test_gram_matches_qr(self, poisson_data):
         """The Gram and the augmented QR invert the same penalised Hessian alike.
 
@@ -312,8 +300,7 @@ class TestPenalisedHessianAssembly:
         ``model/state_ops.py`` falls back to when the Gram cannot certify
         itself.  Their agreement is the equivalence this test always pinned,
         and it is a property of the pair, not of any caller.  Measured on this
-        fixture: 1.1e-14 on the coefficient system and 5.7e-15 on the augmented
-        one, against the 1e-8 bar this file already used.
+        fixture: 1.1e-14 against the 1e-8 bar this file already used.
         """
         X, y, w = poisson_data
         model = SuperGLM(
@@ -346,57 +333,52 @@ class TestPenalisedHessianAssembly:
         inv_qr = decompose_factor(np.vstack((design * sqrt_W, smooth_factor))).pseudo_inverse()
         np.testing.assert_allclose(inv_qr, inv_gram, atol=1e-8)
 
-        aug_smooth = np.zeros((smooth_factor.shape[0], smooth_factor.shape[1] + 1))
-        aug_smooth[:, 1:] = smooth_factor  # no penalty on the intercept
-        aug_design = np.column_stack((np.ones(len(W)), design))
-        aug_gram = decompose_gram(_bordered_hessian(moments, W, S)).pseudo_inverse()
-        aug_qr = decompose_factor(
-            np.vstack((aug_design * sqrt_W, aug_smooth)),
-        ).pseudo_inverse()
-        np.testing.assert_allclose(aug_qr, aug_gram, atol=1e-8)
+    @staticmethod
+    def _discretized_fusion_fixture(seed=20260719, n=240, n_bins=24):
+        """One discretized SSP group and the weights the fused pass reduces."""
+        rng = np.random.default_rng(seed)
+        gm = DiscretizedSSPGroupMatrix(
+            rng.normal(size=(n_bins, 4)),
+            np.eye(4),
+            np.resize(np.arange(n_bins, dtype=np.intp), n),
+        )
+        return gm, rng.uniform(0.2, 2.0, size=n), n
 
-    def test_gram_covariance_fuses_discrete_gram_and_intercept_product(self, monkeypatch):
-        """The active covariance plan must not make separate compressed passes.
+    @staticmethod
+    def _forbid_unfused_passes(monkeypatch):
+        """Redden if anything reaches the compressed design twice."""
+        for method in ("gram", "rmatvec"):
+            monkeypatch.setattr(
+                DiscretizedSSPGroupMatrix,
+                method,
+                lambda *_args, **_kwargs: pytest.fail(
+                    "the fused moments pass must use gram_rmatvec"
+                ),
+            )
 
-        Retargeted onto the kernel API the deleted site called --
-        ``MatrixExecutionPlan.moments(W, include_xtw=True)`` -- which is the
-        live fused pass: ``reml/objective.py``, ``reml/w_derivatives.py``,
-        ``solvers/_structured/moments.py`` and ``_group_matrix_centered.py``
-        all take it.  The monkeypatched failure on the unfused ``gram`` and
-        ``rmatvec`` methods is the contract, and it is unchanged.
+    def test_fused_moments_pass_serves_gram_and_intercept_product(self, monkeypatch):
+        """``moments(W, include_xtw=True)`` makes ONE compressed pass, not two.
+
+        This used to say "covariance" because it drove the deleted
+        ``_penalised_xtwx_inv_gram``.  After that deletion no covariance code
+        calls this API at all -- the live covariance path streams through
+        ``iter_dense_chunks`` / ``streamed_weighted_factor`` -- so both the name
+        and the failure message named the one subsystem that does not use it.
+        The live consumers of the fused pass are ``reml/objective.py:143``,
+        ``reml/w_derivatives.py:472``, ``solvers/_structured/moments.py`` and
+        ``_group_matrix_centered.py``; the test below this one drives the first
+        of them so the pin keeps a production caller and not only the kernel.
         """
-        rng = np.random.default_rng(20260719)
-        n = 240
-        n_bins = 24
-        bin_idx = np.resize(np.arange(n_bins, dtype=np.intp), n)
-        B_unique = rng.normal(size=(n_bins, 4))
-        gm = DiscretizedSSPGroupMatrix(B_unique, np.eye(4), bin_idx)
+        gm, W, n = self._discretized_fusion_fixture()
         group = GroupSlice(name="x", start=0, end=4, penalized=False)
-        W = rng.uniform(0.2, 2.0, size=n)
         X = gm.toarray()
 
-        monkeypatch.setattr(
-            DiscretizedSSPGroupMatrix,
-            "gram",
-            lambda *_args, **_kwargs: pytest.fail("covariance must use gram_rmatvec"),
-        )
-        monkeypatch.setattr(
-            DiscretizedSSPGroupMatrix,
-            "rmatvec",
-            lambda *_args, **_kwargs: pytest.fail("covariance must use gram_rmatvec"),
-        )
+        self._forbid_unfused_passes(monkeypatch)
 
         penalty = _active_penalty_matrix([gm], [group], [group], 0.0)
         moments = MatrixExecutionPlan([gm], n=n).moments(W, include_xtw=True)
-        augmented_hessian = _bordered_hessian(moments, W, penalty)
 
         expected_gram = X.T @ (W[:, None] * X)
-        expected_augmented = np.block(
-            [
-                [np.array([[np.sum(W)]]), (X.T @ W)[None, :]],
-                [(X.T @ W)[:, None], expected_gram],
-            ]
-        )
         np.testing.assert_allclose(moments.gram, expected_gram, rtol=2e-12, atol=2e-10)
         np.testing.assert_allclose(moments.xtw, X.T @ W, rtol=2e-12, atol=2e-10)
         np.testing.assert_allclose(
@@ -404,12 +386,58 @@ class TestPenalisedHessianAssembly:
             np.linalg.pinv(expected_gram),
             atol=2e-10,
         )
-        np.testing.assert_allclose(
-            decompose_gram(augmented_hessian).pseudo_inverse(),
-            np.linalg.pinv(expected_augmented),
-            atol=2e-10,
+        # An unpenalised group contributes nothing, so ``penalty`` is zero by
+        # construction and asserting that is vacuous.  What is not vacuous is
+        # that the same group under a live lambda DOES contribute, which is
+        # what makes the zero above a decision rather than a default.
+        penalized_group = GroupSlice(name="x", start=0, end=4, penalized=True)
+        assert np.any(_active_penalty_matrix([gm], [penalized_group], [penalized_group], 0.7))
+
+    def test_reml_objective_reaches_the_fused_moments_pass(self, monkeypatch):
+        """A live caller anchor for the pin above, not the kernel in isolation.
+
+        ``reml_laml_objective`` takes ``dm.execution_plan.moments(W,
+        include_xtw=True)`` at ``reml/objective.py:143`` whenever it is handed
+        no cached ``XtWX``, which is the ordinary standalone evaluation.  Under
+        the same two monkeypatches it must complete: if the fused route stops
+        being taken, the objective reaches the compressed design twice and this
+        reddens, which is the shape the original covariance-anchored test had.
+        """
+        from superglm.distributions import Poisson
+        from superglm.group_matrix import DesignMatrix
+        from superglm.links import LogLink
+        from superglm.reml.objective import reml_laml_objective
+        from superglm.solvers.pirls import PIRLSResult
+
+        gm, W, n = self._discretized_fusion_fixture()
+        dm = DesignMatrix([gm], n=n, p=4)
+        rng = np.random.default_rng(4242)
+        y = np.asarray(rng.poisson(2.0, size=n), dtype=float)
+        result = PIRLSResult(
+            beta=np.full(4, 0.05),
+            intercept=0.3,
+            n_iter=3,
+            deviance=float(n),
+            converged=True,
+            phi=1.0,
+            effective_df=4.0,
         )
-        np.testing.assert_array_equal(penalty, np.zeros((4, 4)))
+
+        self._forbid_unfused_passes(monkeypatch)
+
+        value = reml_laml_objective(
+            dm,
+            Poisson(),
+            LogLink(),
+            [GroupSlice(name="x", start=0, end=4, penalized=False)],
+            y=y,
+            result=result,
+            lambdas={},
+            sample_weight=W,
+            offset_arr=np.zeros(n),
+            weight_semantics="frequency",
+        )
+        assert np.isfinite(value)
 
 
 # ── _compute_R_inv override ──────────────────────────────────────
@@ -2145,6 +2173,10 @@ class TestComponentNamedLambda2LegacyAssembly:
         into the same inversion; ``_active_penalty_matrix`` takes
         ``S_override`` itself and is live, and ``decompose_gram`` is the live
         inversion, so the comparison is the same one at the same tolerances.
+
+        The augmented half is not carried over, for the reason
+        ``TestPenalisedHessianAssembly`` records: production never assembles
+        that border, and it was measured to add no discrimination here.
         """
         from superglm.model.fit_state import fitted_lambda2
         from superglm.reml.penalty_algebra import build_penalty_matrix
@@ -2160,14 +2192,10 @@ class TestComponentNamedLambda2LegacyAssembly:
         S_ref = _active_penalty_matrix(gms, groups, groups, lambdas, S_override=S)
         S_legacy = _active_penalty_matrix(gms, groups, groups, lambdas)
 
-        moments = MatrixExecutionPlan(gms, n=len(W)).moments(W, include_xtw=True)
-        inv_ref = decompose_gram(moments.gram + S_ref).pseudo_inverse()
-        inv_legacy = decompose_gram(moments.gram + S_legacy).pseudo_inverse()
-        aug_ref = decompose_gram(_bordered_hessian(moments, W, S_ref)).pseudo_inverse()
-        aug_legacy = decompose_gram(_bordered_hessian(moments, W, S_legacy)).pseudo_inverse()
+        gram = MatrixExecutionPlan(gms, n=len(W)).moments(W).gram
+        inv_ref = decompose_gram(gram + S_ref).pseudo_inverse()
+        inv_legacy = decompose_gram(gram + S_legacy).pseudo_inverse()
 
         scale = np.linalg.norm(inv_ref)
+        np.testing.assert_allclose(S_legacy, S_ref, rtol=1e-5, atol=1e-7 * np.linalg.norm(S_ref))
         np.testing.assert_allclose(inv_legacy, inv_ref, rtol=1e-5, atol=1e-7 * scale)
-        np.testing.assert_allclose(
-            aug_legacy, aug_ref, rtol=1e-5, atol=1e-7 * np.linalg.norm(aug_ref)
-        )
