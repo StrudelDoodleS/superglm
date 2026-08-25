@@ -1,6 +1,4 @@
-"""Focused regressions for the legacy fixed-point REML runner."""
-
-from types import SimpleNamespace
+"""Focused regressions for the cached direct-REML centered Gram."""
 
 import numpy as np
 
@@ -39,7 +37,20 @@ def test_direct_fit_caches_authoritative_centered_gram() -> None:
 
 
 def test_cached_direct_gram_uses_authoritative_profiled_geometry() -> None:
-    from superglm.reml.runner import _center_cached_direct_gram
+    """Inverting the cached CENTERED Gram profiles the intercept exactly.
+
+    Retargeted off ``reml/runner.py``'s ``_center_cached_direct_gram`` when the
+    dead covariance chain was deleted (PR "Delete the covariance chain no
+    production fit reaches").  That helper was a validator that returned its
+    input unchanged, reachable only from ``run_reml_once``, and it went with
+    it; what it guarded is this identity, which belongs to the centered
+    coordinates that ``fit_irls_direct`` caches (pinned by the test above) and
+    to ``_safe_decompose_H``, both live.  The translation-invariance half of
+    the old test asserted that the validator ignored a shifted ``mean_x`` --
+    a claim about the validator, not about the geometry -- so it is not
+    carried over; the large feature offsets below exercise the same
+    location-scale hazard on the identity itself.
+    """
     from superglm.solvers.irls_direct import _safe_decompose_H
 
     x = np.linspace(-1.2, 1.5, 17)
@@ -48,11 +59,9 @@ def test_cached_direct_gram_uses_authoritative_profiled_geometry() -> None:
     sum_w = float(np.sum(weights))
     mean_x = (X.T @ weights) / sum_w
     centered_design = X - mean_x
-    authoritative_gram = centered_design.T @ (weights[:, None] * centered_design)
-    result = SimpleNamespace(rank_info=SimpleNamespace(sum_w=sum_w, mean_x=mean_x))
+    centered_gram = centered_design.T @ (weights[:, None] * centered_design)
     penalty = np.diag([0.8, 1.3])
 
-    centered_gram = _center_cached_direct_gram(authoritative_gram, result)
     cheap_inverse, _, _ = _safe_decompose_H(centered_gram + penalty)
 
     augmented = np.column_stack((np.ones(len(x)), X))
@@ -61,13 +70,3 @@ def test_cached_direct_gram_uses_authoritative_profiled_geometry() -> None:
     full_hessian = augmented.T @ (weights[:, None] * augmented) + full_penalty
     expected = np.linalg.inv(full_hessian)[1:, 1:]
     np.testing.assert_allclose(cheap_inverse, expected, rtol=1e-12, atol=1e-12)
-
-    shifted = X + np.array([-1.0e10, 6.0e9])
-    shifted_mean = (shifted.T @ weights) / sum_w
-    shifted_result = SimpleNamespace(rank_info=SimpleNamespace(sum_w=sum_w, mean_x=shifted_mean))
-    np.testing.assert_allclose(
-        _center_cached_direct_gram(authoritative_gram, shifted_result),
-        centered_gram,
-        rtol=1e-12,
-        atol=1e-12,
-    )

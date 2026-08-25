@@ -8,17 +8,19 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
+from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.distributions import NegativeBinomial
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
 from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
 from superglm.inference.covariance import (
-    _penalised_xtwx_inv,
-    _penalised_xtwx_inv_gram,
+    _active_penalty_matrix,
     _second_diff_penalty,
 )
 from superglm.reml import REMLResult, _map_beta_between_bases
+from superglm.solvers.centered_system import penalty_factor
+from superglm.solvers.rank import decompose_factor, decompose_gram
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.types import GroupSlice
 
@@ -191,11 +193,39 @@ class TestPenaltyComponents:
         assert len(set(names)) == len(names)  # unique names
 
 
-# ── _penalised_xtwx_inv uses stored omega ───────────────────────
+# ── penalised-Hessian assembly uses stored omega ─────────────────
 
 
-class TestPenalisedXtwxInvOmega:
-    """The bug fix: CRS gets its correct omega, not _second_diff_penalty."""
+def _bordered_hessian(moments, W, penalty):
+    """``[[sum W, X'W1], [X'W1, X'WX + S]]`` -- the intercept-bordered system.
+
+    The deleted ``_penalised_xtwx_inv_gram`` built this from the same fused
+    moments; the arithmetic is three assignments and is kept here so the
+    augmented halves of the pins below still compare an augmented system.
+    """
+    hessian = moments.gram + penalty
+    width = hessian.shape[0]
+    bordered = np.empty((width + 1, width + 1))
+    bordered[0, 0] = float(np.sum(W))
+    bordered[0, 1:] = moments.xtw
+    bordered[1:, 0] = moments.xtw
+    bordered[1:, 1:] = hessian
+    return bordered
+
+
+class TestPenalisedHessianAssembly:
+    """The bug fix: CRS gets its correct omega, not _second_diff_penalty.
+
+    Renamed from ``TestPenalisedXtwxInvOmega``, and the three tests below
+    retargeted, when the dead covariance chain was deleted (PR "Delete the
+    covariance chain no production fit reaches").  They used to drive
+    ``_penalised_xtwx_inv`` and ``_penalised_xtwx_inv_gram``, which had no
+    production caller.  Every pin they carried is a property of the LIVE
+    machinery those wrappers were built out of -- ``_active_penalty_matrix``
+    for the penalty half, ``MatrixExecutionPlan.moments`` for the Gram half,
+    and ``decompose_gram`` / ``decompose_factor`` for the inversion -- so each
+    is re-expressed against that machinery at the same tolerance.
+    """
 
     def test_crs_penalty_differs_from_second_diff(self, poisson_data):
         """CRS model's covariance should use the integrated f'' penalty."""
@@ -220,8 +250,24 @@ class TestPenalisedXtwxInvOmega:
         # They should differ
         assert not np.allclose(S_crs, S_d2, atol=1e-8)
 
+    @staticmethod
+    def _working_weights(model, X, w):
+        """The IRLS weights the covariance layer forms at convergence."""
+        mu = model.predict(X)
+        V = model._distribution.variance(mu)
+        eta = model._link.link(mu)
+        dmu = model._link.deriv_inverse(eta)
+        return w * dmu**2 / V
+
     def test_dict_lambda2(self, poisson_data):
-        """_penalised_xtwx_inv accepts dict[str, float] for per-group lambdas."""
+        """The penalty assembly accepts dict[str, float] for per-group lambdas.
+
+        Retargeted off ``_penalised_xtwx_inv`` onto ``_active_penalty_matrix``,
+        which is where the scalar/dict polymorphism actually lives and which
+        ``inference/metrics.py`` and ``model/state_ops.py`` both call.  The
+        inverses are compared through ``decompose_gram`` so the pin still
+        reaches the published quantity and not only the penalty block.
+        """
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
@@ -233,26 +279,42 @@ class TestPenalisedXtwxInvOmega:
         )
         model.fit(X[["x1", "x2"]], y, sample_weight=w)
 
-        beta = model.result.beta
-        mu = model.predict(X[["x1", "x2"]])
-        V = model._distribution.variance(mu)
-        eta = model._link.link(mu)
-        dmu = model._link.deriv_inverse(eta)
-        W = w * dmu**2 / V
+        W = self._working_weights(model, X[["x1", "x2"]], w)
+        gms = list(model._dm.group_matrices)
+        groups = list(model._groups)
 
         # Scalar lambda2 should match dict with same value
-        _, inv_scalar, aug_scalar, _, _ = _penalised_xtwx_inv(
-            beta, W, model._dm.group_matrices, model._groups, 0.1
-        )
-        lam_dict = {g.name: 0.1 for g in model._groups}
-        _, inv_dict, aug_dict, _, _ = _penalised_xtwx_inv(
-            beta, W, model._dm.group_matrices, model._groups, lam_dict
-        )
+        S_scalar = _active_penalty_matrix(gms, groups, groups, 0.1)
+        lam_dict = {g.name: 0.1 for g in groups}
+        S_dict = _active_penalty_matrix(gms, groups, groups, lam_dict)
+        np.testing.assert_allclose(S_scalar, S_dict, atol=1e-10)
+
+        moments = MatrixExecutionPlan(gms, n=len(W)).moments(W, include_xtw=True)
+        inv_scalar = decompose_gram(moments.gram + S_scalar).pseudo_inverse()
+        inv_dict = decompose_gram(moments.gram + S_dict).pseudo_inverse()
         np.testing.assert_allclose(inv_scalar, inv_dict, atol=1e-10)
-        np.testing.assert_allclose(aug_scalar, aug_dict, atol=1e-10)
+
+        aug_scalar = _bordered_hessian(moments, W, S_scalar)
+        aug_dict = _bordered_hessian(moments, W, S_dict)
+        np.testing.assert_allclose(
+            decompose_gram(aug_scalar).pseudo_inverse(),
+            decompose_gram(aug_dict).pseudo_inverse(),
+            atol=1e-10,
+        )
 
     def test_gram_matches_qr(self, poisson_data):
-        """_penalised_xtwx_inv_gram gives same result as _penalised_xtwx_inv."""
+        """The Gram and the augmented QR invert the same penalised Hessian alike.
+
+        Retargeted off the deleted wrappers onto the two decompositions they
+        were built from.  ``decompose_gram`` solves the normal equations;
+        ``decompose_factor`` takes the augmented QR of ``[sqrt(W) X ; sqrt(S)]``
+        -- which is what ``penalty_factor`` produces and what
+        ``model/state_ops.py`` falls back to when the Gram cannot certify
+        itself.  Their agreement is the equivalence this test always pinned,
+        and it is a property of the pair, not of any caller.  Measured on this
+        fixture: 1.1e-14 on the coefficient system and 5.7e-15 on the augmented
+        one, against the 1e-8 bar this file already used.
+        """
         X, y, w = poisson_data
         model = SuperGLM(
             family="poisson",
@@ -265,28 +327,44 @@ class TestPenalisedXtwxInvOmega:
         )
         model.fit(X, y, sample_weight=w)
 
-        beta = model.result.beta
-        mu = model.predict(X)
-        V = model._distribution.variance(mu)
-        eta = model._link.link(mu)
-        dmu = model._link.deriv_inverse(eta)
-        W = w * dmu**2 / V
+        W = self._working_weights(model, X, w)
+        gms = list(model._dm.group_matrices)
+        groups = list(model._groups)
+        lam_dict = {g.name: 0.1 for g in groups}
 
-        lam_dict = {g.name: 0.1 for g in model._groups}
+        # Every group is active on this fixture, so the two routes see the same
+        # width; a fixture that dropped one would compare different systems.
+        assert all(np.linalg.norm(model.result.beta[g.sl]) > 1e-12 for g in groups)
 
-        _, inv_qr, aug_qr, groups_qr, _ = _penalised_xtwx_inv(
-            beta, W, model._dm.group_matrices, model._groups, lam_dict
-        )
-        inv_gram, aug_gram, groups_gram, _, _ = _penalised_xtwx_inv_gram(
-            beta, W, model._dm.group_matrices, model._groups, lam_dict
-        )
+        S = _active_penalty_matrix(gms, groups, groups, lam_dict)
+        smooth_factor = penalty_factor(S)
+        moments = MatrixExecutionPlan(gms, n=len(W)).moments(W, include_xtw=True)
+        design = model._dm.toarray()
+        sqrt_W = np.sqrt(W)[:, None]
 
-        assert len(groups_qr) == len(groups_gram)
+        inv_gram = decompose_gram(moments.gram + S).pseudo_inverse()
+        inv_qr = decompose_factor(np.vstack((design * sqrt_W, smooth_factor))).pseudo_inverse()
         np.testing.assert_allclose(inv_qr, inv_gram, atol=1e-8)
+
+        aug_smooth = np.zeros((smooth_factor.shape[0], smooth_factor.shape[1] + 1))
+        aug_smooth[:, 1:] = smooth_factor  # no penalty on the intercept
+        aug_design = np.column_stack((np.ones(len(W)), design))
+        aug_gram = decompose_gram(_bordered_hessian(moments, W, S)).pseudo_inverse()
+        aug_qr = decompose_factor(
+            np.vstack((aug_design * sqrt_W, aug_smooth)),
+        ).pseudo_inverse()
         np.testing.assert_allclose(aug_qr, aug_gram, atol=1e-8)
 
     def test_gram_covariance_fuses_discrete_gram_and_intercept_product(self, monkeypatch):
-        """The active covariance plan must not make separate compressed passes."""
+        """The active covariance plan must not make separate compressed passes.
+
+        Retargeted onto the kernel API the deleted site called --
+        ``MatrixExecutionPlan.moments(W, include_xtw=True)`` -- which is the
+        live fused pass: ``reml/objective.py``, ``reml/w_derivatives.py``,
+        ``solvers/_structured/moments.py`` and ``_group_matrix_centered.py``
+        all take it.  The monkeypatched failure on the unfused ``gram`` and
+        ``rmatvec`` methods is the contract, and it is unchanged.
+        """
         rng = np.random.default_rng(20260719)
         n = 240
         n_bins = 24
@@ -294,7 +372,6 @@ class TestPenalisedXtwxInvOmega:
         B_unique = rng.normal(size=(n_bins, 4))
         gm = DiscretizedSSPGroupMatrix(B_unique, np.eye(4), bin_idx)
         group = GroupSlice(name="x", start=0, end=4, penalized=False)
-        beta = np.ones(4)
         W = rng.uniform(0.2, 2.0, size=n)
         X = gm.toarray()
 
@@ -309,13 +386,9 @@ class TestPenalisedXtwxInvOmega:
             lambda *_args, **_kwargs: pytest.fail("covariance must use gram_rmatvec"),
         )
 
-        inverse, augmented, active_groups, gram, penalty = _penalised_xtwx_inv_gram(
-            beta,
-            W,
-            [gm],
-            [group],
-            0.0,
-        )
+        penalty = _active_penalty_matrix([gm], [group], [group], 0.0)
+        moments = MatrixExecutionPlan([gm], n=n).moments(W, include_xtw=True)
+        augmented_hessian = _bordered_hessian(moments, W, penalty)
 
         expected_gram = X.T @ (W[:, None] * X)
         expected_augmented = np.block(
@@ -324,10 +397,18 @@ class TestPenalisedXtwxInvOmega:
                 [(X.T @ W)[:, None], expected_gram],
             ]
         )
-        np.testing.assert_allclose(gram, expected_gram, rtol=2e-12, atol=2e-10)
-        np.testing.assert_allclose(inverse, np.linalg.pinv(expected_gram), atol=2e-10)
-        np.testing.assert_allclose(augmented, np.linalg.pinv(expected_augmented), atol=2e-10)
-        assert [active.name for active in active_groups] == ["x"]
+        np.testing.assert_allclose(moments.gram, expected_gram, rtol=2e-12, atol=2e-10)
+        np.testing.assert_allclose(moments.xtw, X.T @ W, rtol=2e-12, atol=2e-10)
+        np.testing.assert_allclose(
+            decompose_gram(moments.gram + penalty).pseudo_inverse(),
+            np.linalg.pinv(expected_gram),
+            atol=2e-10,
+        )
+        np.testing.assert_allclose(
+            decompose_gram(augmented_hessian).pseudo_inverse(),
+            np.linalg.pinv(expected_augmented),
+            atol=2e-10,
+        )
         np.testing.assert_array_equal(penalty, np.zeros((4, 4)))
 
 
@@ -2055,24 +2136,35 @@ class TestComponentNamedLambda2LegacyAssembly:
         assert value_compact > 0
         np.testing.assert_allclose(value_legacy, value_compact, rtol=1e-6)
 
-    def test_penalised_xtwx_inv_legacy_matches_component_path(self, tensor_reml_fit):
+    def test_penalty_override_legacy_matches_component_path(self, tensor_reml_fit):
+        """A full-width override, sliced to active, matches the legacy assembly.
+
+        Retargeted off the deleted ``_penalised_xtwx_inv`` (PR "Delete the
+        covariance chain no production fit reaches").  The wrapper's only role
+        here was to route ``S_override`` and the internally-assembled penalty
+        into the same inversion; ``_active_penalty_matrix`` takes
+        ``S_override`` itself and is live, and ``decompose_gram`` is the live
+        inversion, so the comparison is the same one at the same tolerances.
+        """
         from superglm.model.fit_state import fitted_lambda2
         from superglm.reml.penalty_algebra import build_penalty_matrix
 
         model, X, y = tensor_reml_fit
         lambdas = dict(fitted_lambda2(model))
         gms = list(model._dm.group_matrices)
+        groups = list(model._groups)
         p = model._dm.shape[1]
-        S = build_penalty_matrix(
-            gms, model._groups, lambdas, p, reml_penalties=model._reml_penalties
-        )
+        S = build_penalty_matrix(gms, groups, lambdas, p, reml_penalties=model._reml_penalties)
         W = np.ones(model._dm.shape[0])
-        beta = model.result.beta
 
-        _, inv_ref, aug_ref, _, _ = _penalised_xtwx_inv(
-            beta, W, gms, model._groups, lambdas, S_override=S
-        )
-        _, inv_legacy, aug_legacy, _, _ = _penalised_xtwx_inv(beta, W, gms, model._groups, lambdas)
+        S_ref = _active_penalty_matrix(gms, groups, groups, lambdas, S_override=S)
+        S_legacy = _active_penalty_matrix(gms, groups, groups, lambdas)
+
+        moments = MatrixExecutionPlan(gms, n=len(W)).moments(W, include_xtw=True)
+        inv_ref = decompose_gram(moments.gram + S_ref).pseudo_inverse()
+        inv_legacy = decompose_gram(moments.gram + S_legacy).pseudo_inverse()
+        aug_ref = decompose_gram(_bordered_hessian(moments, W, S_ref)).pseudo_inverse()
+        aug_legacy = decompose_gram(_bordered_hessian(moments, W, S_legacy)).pseudo_inverse()
 
         scale = np.linalg.norm(inv_ref)
         np.testing.assert_allclose(inv_legacy, inv_ref, rtol=1e-5, atol=1e-7 * scale)
