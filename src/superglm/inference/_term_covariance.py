@@ -9,50 +9,12 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR
 from superglm.inference._term_helpers import _spline_se, mean_centered_variance
 from superglm.inference._term_types import _safe_exp
 
 if TYPE_CHECKING:
-    from superglm.distributions import Distribution
-    from superglm.group_matrix import DesignMatrix
-    from superglm.links import Link
     from superglm.solvers.pirls import PIRLSResult
     from superglm.types import GroupSlice
-
-
-def compute_coef_covariance(
-    dm: DesignMatrix,
-    distribution: Distribution,
-    link: Link,
-    groups: list[GroupSlice],
-    result: PIRLSResult,
-    fit_weights: NDArray,
-    fit_offset: NDArray | None,
-    lambda2: float | dict[str, float],
-    S_override: NDArray | None = None,
-) -> tuple[NDArray, list[GroupSlice]]:
-    """Phi-scaled Bayesian covariance for active coefficients."""
-    from superglm.inference.covariance import _penalised_xtwx_inv_gram
-    from superglm.links import stabilize_eta
-
-    beta = result.beta
-    eta = dm.matvec(beta) + result.intercept
-    if fit_offset is not None:
-        eta = eta + fit_offset
-    from superglm.distributions import clip_mu
-
-    eta = stabilize_eta(eta, link)
-    mu = clip_mu(link.inverse(eta), distribution)
-    V = distribution.variance(mu)
-    dmu_deta = link.deriv_inverse(eta)
-    W = fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
-
-    XtWX_S_inv, XtWX_S_inv_aug, active_groups, _, _ = _penalised_xtwx_inv_gram(
-        beta, W, dm.group_matrices, groups, lambda2, S_override=S_override
-    )
-    cov_features = result.phi * XtWX_S_inv_aug[1:, 1:]
-    return cov_features, active_groups
 
 
 def _active_subgroup_columns(
@@ -402,7 +364,6 @@ def simultaneous_bands(
 
 
 __all__ = [
-    "compute_coef_covariance",
     "feature_se_from_cov",
     "piecewise_knot_covariance",
     "simultaneous_bands",

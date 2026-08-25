@@ -2135,33 +2135,3 @@ class SuperGLM:
             verbose=verbose,
             penalty_caches=penalty_caches,
         )
-
-    def _run_reml_once(
-        self,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        *,
-        max_reml_iter,
-        reml_tol,
-        verbose,
-        use_direct,
-        penalty_caches=None,
-    ):
-        return fit_ops.model_run_reml_once(
-            self,
-            y,
-            sample_weight,
-            offset_arr,
-            reml_groups,
-            penalty_ranks,
-            lambdas,
-            max_reml_iter=max_reml_iter,
-            reml_tol=reml_tol,
-            verbose=verbose,
-            use_direct=use_direct,
-            penalty_caches=penalty_caches,
-        )

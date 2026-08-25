@@ -274,72 +274,22 @@ class TestCandidateGradePaths:
         assert seen == [3e-8]
 
 
-class TestRunnerPathSentinel:
-    """The single-pass runner wrapper implements the None convention too.
-
-    No live caller reaches it today, but it is a public-adjacent seam
-    (SuperGLM._run_reml_once) and runner.py compares max_change < reml_tol,
-    which raises TypeError on None if the sentinel is forwarded verbatim.
-
-    The engine classification follows the stopping criterion, not the inner
-    solver: runner.py gates on the per-step lambda change in BOTH branches
-    (use_direct only selects the coefficient solver), so the sentinel must
-    resolve to the step default regardless of use_direct. Resolving 1e-9
-    here would hand a Newton-grade bar to a linear-rate fixed point --
-    exactly the combination the engine scoping exists to prevent.
-    """
-
-    def test_model_run_reml_once_resolves_the_sentinel_as_a_step_engine(self, monkeypatch):
-        import types
-
-        from superglm.model import reml_ops
-
-        captured: list[float] = []
-
-        def fake_run_reml_once(*args, **kwargs):
-            captured.append(kwargs["reml_tol"])
-            return "RESULT", "DM"
-
-        monkeypatch.setattr(reml_ops, "run_reml_once", fake_run_reml_once)
-        monkeypatch.setattr(reml_ops, "configured_penalty", lambda model: None)
-        model = types.SimpleNamespace(
-            _dm="DM0",
-            _distribution=None,
-            _link=None,
-            _groups=[],
-            _active_set=None,
-            _direct_solve="auto",
-            _reml_penalties=None,
-        )
-        for use_direct, reml_tol, expected in (
-            (True, None, 1e-6),
-            (False, None, 1e-6),
-            (True, 3e-7, 3e-7),
-        ):
-            reml_ops.model_run_reml_once(
-                model,
-                None,
-                None,
-                None,
-                [],
-                {},
-                {},
-                max_reml_iter=1,
-                reml_tol=reml_tol,
-                verbose=False,
-                use_direct=use_direct,
-            )
-        assert captured == [1e-6, 1e-6, 3e-7]
-
-
 class TestEngineSeamSentinels:
     """Every model-bound engine wrapper resolves the sentinel for the engine
     it actually forwards to.
 
-    These are the same public-adjacent seam class as the runner wrapper:
-    each forwards to exactly one engine whose loop would TypeError on a
+    Each forwards to exactly one engine whose loop would TypeError on a
     verbatim None (discrete.py floats the tolerance; efs.py compares
     against it), so the wrapper owns the resolution.
+
+    A fourth seam, ``model_run_reml_once``, was pinned here by
+    ``TestRunnerPathSentinel`` until the dead covariance chain was deleted (PR
+    "Delete the covariance chain no production fit reaches").  That class went
+    with its subject: it drove the wrapper directly with a monkeypatched
+    engine, so it pinned the deleted wrapper and nothing else, and its own
+    docstring recorded that no live caller reached it.  The sentinel contract
+    it asserted -- ``resolve_reml_tol`` picking the engine the seam forwards to
+    -- stays pinned at the three live seams below.
     """
 
     @staticmethod

@@ -5,7 +5,6 @@ implementation details into smaller internal modules.
 """
 
 from superglm.inference._term_covariance import (
-    compute_coef_covariance,
     feature_se_from_cov,
     simultaneous_bands,
 )
@@ -38,7 +37,6 @@ __all__ = [
     "_recenter_term",
     "_resolve_group_lambda",
     "_safe_exp",
-    "compute_coef_covariance",
     "drop1",
     "feature_se_from_cov",
     "InteractionInference",

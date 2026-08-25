@@ -6,7 +6,6 @@ from superglm.model.fit_state import configured_penalty
 from superglm.reml.direct import optimize_direct_reml
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import reml_laml_objective
-from superglm.reml.runner import run_reml_once
 from superglm.reml.w_derivatives import compute_dW_deta, reml_w_correction
 from superglm.solvers.dispersion import model_weight_semantics
 
@@ -294,66 +293,6 @@ def model_optimize_efs_reml(
         ),
         reml_penalties=reml_penalties,
         estimated_names=estimated_names,
-        pirls_tol=pirls_tol,
-        max_pirls_iter=max_pirls_iter,
-    )
-    model._dm = dm
-    return result
-
-
-def model_run_reml_once(
-    model,
-    y,
-    sample_weight,
-    offset_arr,
-    reml_groups,
-    penalty_ranks,
-    lambdas,
-    *,
-    max_reml_iter,
-    reml_tol,
-    verbose,
-    use_direct,
-    penalty_caches=None,
-    pirls_tol=1e-6,
-    max_pirls_iter=100,
-):
-    """Run a single REML fixed-point outer loop from a chosen initial lambda scale."""
-    from superglm.model.base import rebuild_dm_with_lambdas
-    from superglm.model.reml_execute import resolve_reml_tol
-
-    # runner.py gates on max_change < reml_tol -- a step criterion -- in BOTH
-    # branches; use_direct only selects the inner coefficient solver, not the
-    # stopping rule. The engine classification follows the criterion, so this
-    # seam always resolves the sentinel to the step default: handing the
-    # Newton-grade 1e-9 to a linear-rate fixed point is exactly the
-    # combination the engine scoping exists to prevent.
-    reml_tol = resolve_reml_tol(reml_tol, engine="step")
-
-    result, dm = run_reml_once(
-        model._dm,
-        model._distribution,
-        model._link,
-        model._groups,
-        configured_penalty(model),
-        model._active_set,
-        y,
-        sample_weight,
-        offset_arr,
-        reml_groups,
-        penalty_ranks,
-        lambdas,
-        weight_semantics=model_weight_semantics(model),
-        max_reml_iter=max_reml_iter,
-        reml_tol=reml_tol,
-        verbose=verbose,
-        use_direct=use_direct,
-        penalty_caches=penalty_caches,
-        rebuild_dm=lambda lambdas, sample_weight: rebuild_dm_with_lambdas(
-            model, lambdas, sample_weight
-        ),
-        direct_solve=getattr(model, "_direct_solve", "auto"),
-        reml_penalties=getattr(model, "_reml_penalties", None),
         pirls_tol=pirls_tol,
         max_pirls_iter=max_pirls_iter,
     )
