@@ -1,0 +1,2567 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+        <link rel="prev" href="../validation/">
+      
+      
+        <link rel="next" href="../deployment/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Inspecting Results - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#inspecting-results" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Inspecting Results
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#summary-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#diagnostic-weight-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Diagnostic weight semantics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#per-term-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-term inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credibility-reports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credibility reports
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#plotting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plotting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#plot-data-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plot data export
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relativity-dataframes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relativity DataFrames
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rating-table-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rating table export
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Rating table export">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#exact-continuous-blocks-with-continuous_kindppform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exact continuous blocks with continuous_kind="ppform"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#continuous-offsets-offset_kindper_unit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Continuous offsets: offset_kind="per_unit"
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Families
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../screening-evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#summary-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Summary table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#diagnostic-weight-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Diagnostic weight semantics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#per-term-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-term inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credibility-reports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credibility reports
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#plotting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plotting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#plot-data-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plot data export
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relativity-dataframes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relativity DataFrames
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rating-table-export" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rating table export
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Rating table export">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#exact-continuous-blocks-with-continuous_kindppform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exact continuous blocks with continuous_kind="ppform"
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#continuous-offsets-offset_kindper_unit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Continuous offsets: offset_kind="per_unit"
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Families
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="inspecting-results">Inspecting Results<a class="headerlink" href="#inspecting-results" title="Permanent link">&para;</a></h1>
+<p>The examples on this page assume the Poisson rate workflow with
+<code>weight_semantics="frequency"</code>, where <code>exposure</code> is a replication weight. The
+contract is declared per model and the default is <code>"prior"</code>; see
+<a href="../families/#weight-semantics">Families &amp; Dispersion</a> before carrying this
+spelling into another fit.</p>
+<h2 id="summary-table">Summary table<a class="headerlink" href="#summary-table" title="Permanent link">&para;</a></h2>
+<p>Statsmodels-style summary with SEs, p-values, and smooth tests:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">summary</span><span class="p">())</span>                          <span class="c1"># exact original levels, expanded</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">summary</span><span class="p">(</span><span class="n">level_display</span><span class="o">=</span><span class="s2">&quot;grouped&quot;</span><span class="p">))</span>  <span class="c1"># one fitted row per group + legend</span>
+</code></pre></div>
+<p>Categorical levels are expanded by default, including reference levels. If fitted levels have been
+collapsed together, each exact original label remains visible and a separate <code>Level group</code> column
+shows IDs such as <code>G1</code>. Grouped mode shows one row per fitted group and a membership legend instead.
+These IDs restart within each feature, exist only for presentation, and never rename level labels.</p>
+<p>The same <code>level_display="expanded"</code> or <code>"grouped"</code> option is available from a metrics summary:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">m</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">metrics</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">)</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">m</span><span class="o">.</span><span class="n">summary</span><span class="p">(</span><span class="n">level_display</span><span class="o">=</span><span class="s2">&quot;grouped&quot;</span><span class="p">))</span>
+</code></pre></div>
+<h2 id="diagnostic-weight-semantics">Diagnostic weight semantics<a class="headerlink" href="#diagnostic-weight-semantics" title="Permanent link">&para;</a></h2>
+<p>Quantile residuals and diagnostic simulations follow the same declared
+contract as fitting:</p>
+<ul>
+<li>under <code>weight_semantics="frequency"</code>, the row's response distribution is
+  unchanged by its weight; the weight represents repeated likelihood
+  contribution rather than smaller row variance</li>
+<li>under <code>"prior"</code>, row <span class="arithmatex">\(i\)</span> has observation-specific dispersion
+  <span class="arithmatex">\(\phi / w_i\)</span>, which is used by both its CDF residual and simulation</li>
+</ul>
+<p>For exact discrete Poisson quantile residuals, diagnose raw claim counts with
+<code>log(exposure)</code> as an offset. A fractional rate response with exposure as a
+frequency weight is useful for fitting, but the replication API cannot
+reconstruct that row's count distribution from <code>sample_weight</code>.</p>
+<p>The diagnostic Pearson denominator follows the same declaration:
+<code>sum(sample_weight) - edf</code> under <code>"frequency"</code> and the positive-weight row
+count minus <code>edf</code> under <code>"prior"</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">fig</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">plot_diagnostics</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">)</span>
+</code></pre></div>
+<h2 id="per-term-inference">Per-term inference<a class="headerlink" href="#per-term-inference" title="Permanent link">&para;</a></h2>
+<p>The <code>TermInference</code> dataclass holds everything about a single term: grid values, relativities, confidence intervals, spline metadata.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">ti</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">term_inference</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">)</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">ti</span><span class="o">.</span><span class="n">x</span>                        <span class="c1"># evaluation grid (spline/polynomial) or levels (categorical)</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">ti</span><span class="o">.</span><span class="n">relativity</span>               <span class="c1"># exp(f(x)) relativity curve</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="n">ti</span><span class="o">.</span><span class="n">ci_lower</span><span class="p">,</span> <span class="n">ti</span><span class="o">.</span><span class="n">ci_upper</span>    <span class="c1"># pointwise CI bounds</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="n">ti</span><span class="o">.</span><span class="n">edf</span>                      <span class="c1"># effective degrees of freedom</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="n">ti</span><span class="o">.</span><span class="n">spline</span>                   <span class="c1"># SplineMetadata (interior_knots, boundary_knots, basis_dim, ...)</span>
+</code></pre></div>
+<p>For a spline-backed <code>OrderedCategorical</code>, inference is a single whole-smooth Wood test. Its ordered
+level rows report effect estimates, standard errors, and confidence intervals for interpretation;
+they intentionally do not present separate level p-values or significance stars.</p>
+<p>By default this is the canonical fitted term contribution under the model's
+identifiability constraint. If you want a rebased reporting view where the
+geometric mean of relativities is 1, pass <code>centering="mean"</code> explicitly:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">ti</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">term_inference</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">centering</span><span class="o">=</span><span class="s2">&quot;mean&quot;</span><span class="p">)</span>
+</code></pre></div>
+<h2 id="credibility-reports">Credibility reports<a class="headerlink" href="#credibility-reports" title="Permanent link">&para;</a></h2>
+<p>Random effects expose the fitted variance component and one row per level:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">brand</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">random_effects</span><span class="p">(</span><span class="s2">&quot;VehBrand&quot;</span><span class="p">,</span> <span class="n">exposure</span><span class="o">=</span><span class="n">train</span><span class="p">[</span><span class="s2">&quot;Exposure&quot;</span><span class="p">])</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">brand</span><span class="o">.</span><span class="n">tau_squared</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">brand</span><span class="o">.</span><span class="n">effective_df</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="n">brand</span><span class="o">.</span><span class="n">table</span><span class="p">[[</span><span class="s2">&quot;level&quot;</span><span class="p">,</span> <span class="s2">&quot;effect&quot;</span><span class="p">,</span> <span class="s2">&quot;posterior_se&quot;</span><span class="p">,</span> <span class="s2">&quot;credibility&quot;</span><span class="p">,</span> <span class="s2">&quot;shrinkage&quot;</span><span class="p">]]</span>
+</code></pre></div>
+<p>Factor smooths expose the shared smoothing parameters, normalized
+block-credibility summaries, and posterior curves:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">region_age</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">factor_smooth</span><span class="p">(</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="s2">&quot;DrivAge:Region:fs&quot;</span><span class="p">,</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    <span class="n">grid</span><span class="o">=</span><span class="mi">80</span><span class="p">,</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">levels</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;R11&quot;</span><span class="p">,</span> <span class="s2">&quot;R24&quot;</span><span class="p">],</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="p">)</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="n">region_age</span><span class="o">.</span><span class="n">lambdas</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="n">region_age</span><span class="o">.</span><span class="n">table</span><span class="p">[[</span><span class="s2">&quot;level&quot;</span><span class="p">,</span> <span class="s2">&quot;effective_df&quot;</span><span class="p">,</span> <span class="s2">&quot;credibility&quot;</span><span class="p">,</span> <span class="s2">&quot;sufficient_support&quot;</span><span class="p">]]</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="n">region_age</span><span class="o">.</span><span class="n">curves</span><span class="p">[[</span><span class="s2">&quot;level&quot;</span><span class="p">,</span> <span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="s2">&quot;effect&quot;</span><span class="p">,</span> <span class="s2">&quot;posterior_se&quot;</span><span class="p">,</span> <span class="s2">&quot;lower&quot;</span><span class="p">,</span> <span class="s2">&quot;upper&quot;</span><span class="p">]]</span>
+</code></pre></div>
+<p>See <a href="../credibility/">Credibility terms</a> for the definitions and interpretation.</p>
+<h2 id="plotting">Plotting<a class="headerlink" href="#plotting" title="Permanent link">&para;</a></h2>
+<p>All plotting goes through <code>model.plot()</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># Single-term chart</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">model</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">X</span><span class="o">=</span><span class="n">df</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">)</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1"># All terms in a grid</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="n">model</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">X</span><span class="o">=</span><span class="n">df</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">)</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="c1"># Subset of terms</span>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="n">model</span><span class="o">.</span><span class="n">plot</span><span class="p">([</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="s2">&quot;VehAge&quot;</span><span class="p">],</span> <span class="n">X</span><span class="o">=</span><span class="n">df</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">)</span>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="c1"># Interactive Plotly main-effect explorer</span>
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="n">model</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="n">engine</span><span class="o">=</span><span class="s2">&quot;plotly&quot;</span><span class="p">,</span> <span class="n">X</span><span class="o">=</span><span class="n">df</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">)</span>
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="c1"># Plotly subset explorer</span>
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="n">model</span><span class="o">.</span><span class="n">plot</span><span class="p">([</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="s2">&quot;VehAge&quot;</span><span class="p">],</span> <span class="n">engine</span><span class="o">=</span><span class="s2">&quot;plotly&quot;</span><span class="p">,</span> <span class="n">X</span><span class="o">=</span><span class="n">df</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">)</span>
+<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a>
+<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="c1"># Plotly interaction contour + exposure HDR view</span>
+<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="n">model</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span>
+<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a>    <span class="s2">&quot;DrivAge:VehAge&quot;</span><span class="p">,</span>
+<a id="__codelineno-7-19" name="__codelineno-7-19" href="#__codelineno-7-19"></a>    <span class="n">engine</span><span class="o">=</span><span class="s2">&quot;plotly&quot;</span><span class="p">,</span>
+<a id="__codelineno-7-20" name="__codelineno-7-20" href="#__codelineno-7-20"></a>    <span class="n">interaction_view</span><span class="o">=</span><span class="s2">&quot;contour_pair&quot;</span><span class="p">,</span>
+<a id="__codelineno-7-21" name="__codelineno-7-21" href="#__codelineno-7-21"></a>    <span class="n">X</span><span class="o">=</span><span class="n">df</span><span class="p">,</span>
+<a id="__codelineno-7-22" name="__codelineno-7-22" href="#__codelineno-7-22"></a>    <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">,</span>
+<a id="__codelineno-7-23" name="__codelineno-7-23" href="#__codelineno-7-23"></a><span class="p">)</span>
+<a id="__codelineno-7-24" name="__codelineno-7-24" href="#__codelineno-7-24"></a>
+<a id="__codelineno-7-25" name="__codelineno-7-25" href="#__codelineno-7-25"></a><span class="c1"># Interaction</span>
+<a id="__codelineno-7-26" name="__codelineno-7-26" href="#__codelineno-7-26"></a><span class="n">model</span><span class="o">.</span><span class="n">plot</span><span class="p">(</span><span class="s2">&quot;DrivAge:Area&quot;</span><span class="p">)</span>
+</code></pre></div>
+<p><code>engine="matplotlib"</code> is the chart/export path. <code>engine="plotly"</code> is the multi-term main-effect explorer path and requires at least two main effects (or <code>terms=None</code>).</p>
+<p>Options: <code>ci</code> (<code>"pointwise"</code>, <code>"simultaneous"</code>, <code>"both"</code>, <code>None</code>, <code>False</code>), <code>show_knots</code>, <code>show_density</code>, <code>title</code>, <code>subtitle</code>, <code>engine</code>.</p>
+<h2 id="plot-data-export">Plot data export<a class="headerlink" href="#plot-data-export" title="Permanent link">&para;</a></h2>
+<p>Use <code>model.plot_data()</code> when you need the underlying x/y/grid data to rebuild a
+plot outside SuperGLM:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># Main-effect data</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">payload</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">plot_data</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">X</span><span class="o">=</span><span class="n">df</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">,</span> <span class="n">show_knots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">curve_df</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">&quot;terms&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;effect&quot;</span><span class="p">]</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">density_df</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">&quot;terms&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;density&quot;</span><span class="p">]</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="n">knots_df</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">&quot;terms&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;knots&quot;</span><span class="p">]</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="c1"># Continuous x continuous interaction grid</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="n">payload</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">plot_data</span><span class="p">(</span><span class="s2">&quot;DrivAge:VehAge&quot;</span><span class="p">,</span> <span class="n">X</span><span class="o">=</span><span class="n">df</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">,</span> <span class="n">n_points</span><span class="o">=</span><span class="mi">220</span><span class="p">)</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="n">surface_df</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">&quot;effect&quot;</span><span class="p">]</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="n">hdr_df</span> <span class="o">=</span> <span class="n">payload</span><span class="p">[</span><span class="s2">&quot;density&quot;</span><span class="p">]</span>  <span class="c1"># includes density + hdr_mass columns</span>
+</code></pre></div>
+<h2 id="relativity-dataframes">Relativity DataFrames<a class="headerlink" href="#relativity-dataframes" title="Permanent link">&para;</a></h2>
+<p>For manual access or export:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">rels</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">relativities</span><span class="p">(</span><span class="n">with_se</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>  <span class="c1"># canonical fitted-term view</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="c1"># dict of {feature_name: DataFrame}</span>
+</code></pre></div>
+<p>Use <code>centering="mean"</code> only when you explicitly want to rebase each term for
+reporting or cross-feature comparison:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">rels</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">relativities</span><span class="p">(</span><span class="n">with_se</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">centering</span><span class="o">=</span><span class="s2">&quot;mean&quot;</span><span class="p">)</span>
+</code></pre></div>
+<h2 id="rating-table-export">Rating table export<a class="headerlink" href="#rating-table-export" title="Permanent link">&para;</a></h2>
+<p>Use <code>export_rating_tables()</code> to create deployment-oriented Excel tables with
+binned spline effects:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">model</span><span class="o">.</span><span class="n">export_rating_tables</span><span class="p">(</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>    <span class="s2">&quot;rating_tables.xlsx&quot;</span><span class="p">,</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>    <span class="n">X_train</span><span class="p">,</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>    <span class="n">y_train</span><span class="p">,</span>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure_train</span><span class="p">,</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="n">n_bins</span><span class="o">=</span><span class="mi">150</span><span class="p">,</span>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="p">)</span>
+</code></pre></div>
+<p>The exported table is <strong>multiplicative</strong>: a base relativity times one relativity per block
+reproduces <code>model.predict</code> row by row. That only holds under a <strong>log link</strong>, because only then is
+the mean a product of per-term factors — so the export is restricted to log-link models and raises
+<code>ValueError</code> for anything else. Under an identity link the same arithmetic would return
+<code>exp(linear predictor)</code> rather than the prediction, and under a logit link it would return the
+odds. Poisson, Gamma, Tweedie and negative-binomial fits all take the log link by default and are
+unaffected; a Gaussian fit left on its own default link is refused.</p>
+<p><code>Binomial</code> is refused outright, whatever its link. <code>model.predict</code> finishes by clamping a binomial
+mean into <code>[1e-7, 1 - 1e-7]</code>, and a clamp is not a factor, so no multiplicative table can carry it.
+Even on a log link the two agree only for <code>-16.118 &lt;= eta &lt;= -1e-7</code> — 20.1% of the permitted range —
+and outside it the workbook returns a "probability" above one, or below the clamp, while the model
+returns the clamped value. Predicting above one out of sample is the characteristic behaviour of
+log-binomial regression, so this is refused by family rather than checked per frame: the exported
+table is applied to risks the export never saw.</p>
+<p>For the same reason the export refuses a fit that <strong>saturates</strong>. <code>model.predict</code> clips a log-link
+predictor to <code>[-80, 80]</code>, and a clip is not a factor either; a frame that already reaches it would
+produce a workbook that silently disagrees with the model it came from. Such a fit is
+quasi-separated or mis-scaled — refit or rescale rather than export it. The same applies to every
+<strong>individual relativity</strong>, on a main-effect block and on an interaction cell alike: a factor a
+consumer cannot multiply by — <code>inf</code>, <code>nan</code>, <code>0.0</code>, negative, subnormal, or at or beyond the
+<code>exp(±500)</code> range <code>superglm</code> clips confidence bounds to — is refused rather than exported. Two
+blocks whose contributions cancel can leave the prediction healthy while neither factor is the
+model's, so this is checked per block rather than on the product. A factor of exactly <code>0.0</code> is
+refused for the same reason an infinite base is: it zeroes every premium it touches while every
+relativity <em>ratio</em> on the sheet still reads correctly.</p>
+<p>Bin boundaries and interaction axis values are printed at <strong>round-trip precision</strong> — the string in
+the workbook converts back to exactly the number the model binned on, so applying the printed table
+puts every risk in the same bin the model did.</p>
+<h3 id="exact-continuous-blocks-with-continuous_kindppform">Exact continuous blocks with <code>continuous_kind="ppform"</code><a class="headerlink" href="#exact-continuous-blocks-with-continuous_kindppform" title="Permanent link">&para;</a></h3>
+<p>A binned continuous block is an approximation, and the default <code>n_bins=150</code> is a <strong>budget</strong> rather
+than a target: the exporter emits at most that many intervals, and a covariate with fewer distinct
+values than the budget is still binned — 30 distinct ages export as 29 interval rows, not 30 exact
+ones. On a motor book with 81 distinct ages the worst row came out <strong>mis-rated by 60%</strong>,
+concentrated in the wide intervals the quantile strategy opens in the sparse tails, which is where
+exposure is thinnest and a single large risk absorbs all of it.</p>
+<p><code>continuous_kind="ppform"</code> declines that approximation and exports the fitted spline as the exact
+piecewise cubic it already is — one row per knot interval, four coefficients:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">model</span><span class="o">.</span><span class="n">export_rating_tables</span><span class="p">(</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>    <span class="s2">&quot;rating_tables.xlsx&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>    <span class="n">X_train</span><span class="p">,</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>    <span class="n">y_train</span><span class="p">,</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>    <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure_train</span><span class="p">,</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>    <span class="n">continuous_kind</span><span class="o">=</span><span class="s2">&quot;ppform&quot;</span><span class="p">,</span>
+<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a><span class="p">)</span>
+</code></pre></div>
+<p>A consumer <strong>reads both bounds back out of the interval key</strong> — <code>"[18.0, 25.363636363636363)"</code> — and
+evaluates <code>exp(a + b*u + c*u**2 + d*u**3)</code> with <code>u = (x - lower) / (upper - lower)</code>. The result
+reproduces <code>model.predict</code> to machine precision — 2.4e-15 against 6.0e-01 for the binned block it
+replaces — in usually an order of magnitude fewer rows. <code>u</code> is <strong>normalised</strong> onto <code>[0, 1]</code>; a raw
+<code>x - lower</code> on a covariate ranging to 1e5 loses enough precision in a fixed-scale decimal column to
+produce a 3.3× relativity error, which is worse than the binning it replaces.</p>
+<p>That formula is for <strong>bounded rows</strong>. The leading and trailing rows are unbounded and are <em>read</em>
+rather than evaluated: their factor is the <code>Relativity</code> beside them. <code>u</code> on an infinite width is
+<code>inf/inf</code>, which is <code>nan</code>, and the zero higher coefficients do not absorb it — <code>0 * nan</code> is <code>nan</code> —
+so a consumer applying the formula uniformly gets <code>nan</code> on exactly the rows that price the extremes
+of the book. The branch costs nothing, because a bound printed <code>-inf</code> has to be recognised before it
+can be parsed at all, and what it selects is the plain lookup the first three columns already
+provide. The workbook states this in a note beside every such block.</p>
+<p>The bounds are not repeated as their own columns. The key already holds them <em>exactly</em>: it is
+printed through <code>repr</code>, the shortest string that reads back as the same binary64, so parsing it
+recovers both bounds bit for bit and each row's upper bound is identically the next row's lower
+bound. A separate pair of float columns could only ever disagree with the key — and, being numbers,
+could not carry the infinite bound of a tail row through a spreadsheet at all.</p>
+<p>The block is <strong>seven columns rather than three</strong>, and a superset rather than a new shape. The
+familiar <code>&lt;feature&gt;</code>, <code>Relativity</code> and <code>Weight</code> stay in front of it unchanged, with <code>a</code>, <code>b</code>, <code>c</code>,
+<code>d</code> appended behind them, so a loader that cannot evaluate a polynomial still finds the block by the
+same header signature, slices the same three columns, and scores it as the step function it scores
+today, while an upgraded one reads the coefficients and is exact. <code>Relativity</code> is the curve's value
+at the row's lower bound rather than the interval's average, so the two readings of one row agree at
+its left edge. Because the blocks are laid out at their own widths, a seven-column block moves every
+block to its right — read the header row rather than assuming the three-column stride.</p>
+<p>If you store the coefficients, include them in any <strong>content digest</strong> you fingerprint a published
+package with. Two models differing only in their coefficients otherwise fingerprint identically,
+and the second is silently deduplicated into the first.</p>
+<p>Extrapolation is carried in the table rather than described beside it, because a cubic continued
+past its last knot is unbounded — 1581× the correct factor twenty-one years past the boundary of a
+real age curve. Under the default <code>extrapolation="clip"</code> the block emits a constant leading and a
+constant trailing row, so "match an interval and evaluate it" is correct outside the training range
+too. Under <code>extrapolation="error"</code> there are no unbounded rows at all and a value outside the knot
+range matches nothing, which is the answer the model itself gives — with one detail in the key:
+every row reads <code>[lower, upper)</code> except the last, which reads <code>[lower, upper]</code>. That term declines
+to price <em>above</em> the boundary knot, not <em>at</em> it, and <code>model.predict</code> rates the boundary; since the
+boundary is the observed maximum whenever knots are data-driven, a right-open final key would leave
+a row of the training frame unrateable by a table claiming to be exact. <strong>Read the closing
+bracket.</strong> <code>extrapolation="extend"</code> is
+refused unless you pass <code>allow_unbounded_extrapolation=True</code>, because it exports a tariff with no
+upper bound; exported with that acknowledgement its tails clip where the model extends, since an
+unbounded interval has no width and the normalised <code>u</code> does not exist there.</p>
+<p>The tail rows read <code>[-inf, 18.0)</code> and <code>[99.0, inf)</code> in the key, and every numeric cell in the block
+is a real number. A spreadsheet cell cannot hold an infinity, so keeping the bounds in the key —
+which is text — is what lets those rows survive the workbook at all. Their coefficients are
+<code>b = c = d = 0</code> and their <code>a</code> is the boundary value, so <code>Relativity</code> on a tail row is <code>exp(a)</code>
+exactly: the row a consumer reads and the row it would like to evaluate carry the same number, and
+only the reading of it is defined.</p>
+<p>Two term kinds are not converted. Terms carrying a <code>Constraint.postfit</code> repair are refused by name,
+because that path's repaired curve has never been verified to be piecewise polynomial on the term's
+own knots; <code>Constraint.fit</code> constraints convert unchanged. And <code>Polynomial</code> terms stay binned, as
+does the continuous-by-continuous interaction grid — the block is fixed at four coefficients while a
+polynomial's degree is not. One workbook therefore carries both kinds of block at once, and the
+discretization impact sweep still describes the ones that stayed binned.</p>
+<p>The <strong>offset multiplier</strong> block is exact whatever the fit's cardinality. Up to
+<code>offset_max_exact_levels</code> distinct multipliers it lists them; above that it is a single <code>per_unit</code>
+row. Binning it is opt-in, and a binned block is a summary rather than a per-row lookup — its rows
+are keyed on interval strings and each carries its bin's exposure-weighted average, and a bin with
+no exposure, reachable with <code>bin_strategy="uniform"</code> on a skewed exposure, reports the midpoint of
+its own interval at weight zero. Pass <code>offset_source=</code> to key the block on a raw column of the frame
+instead of on the multiplier.</p>
+<h3 id="continuous-offsets-offset_kindper_unit">Continuous offsets: <code>offset_kind="per_unit"</code><a class="headerlink" href="#continuous-offsets-offset_kindper_unit" title="Permanent link">&para;</a></h3>
+<p>An offset is not an estimated surface. Its coefficient is fixed at 1 by construction — no standard
+error, no lambda, nothing fitted — so a continuous offset is not a curve to approximate but a column
+to multiply by. What decides the exported shape is therefore not how many distinct values the source
+takes, but that the consumer multiplies rather than looks up.</p>
+<p>One rule covers both paths: <code>offset_max_exact_levels</code> governs both paths — the declared one reached
+through <code>offset_source=</code>, and the undeclared one that has nothing but the fitted offset vector.
+<code>offset_kind</code> chooses what each emits:</p>
+<table>
+<thead>
+<tr>
+<th>value</th>
+<th>behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"auto"</code> (default)</td>
+<td>one row per level up to <code>offset_max_exact_levels</code>, a single <code>per_unit</code> row above it</td>
+</tr>
+<tr>
+<td><code>"discrete"</code></td>
+<td>levels only; a declared source refuses above the cap, an undeclared one falls through to <code>per_unit</code></td>
+</tr>
+<tr>
+<td><code>"per_unit"</code></td>
+<td>always the relation</td>
+</tr>
+<tr>
+<td><code>"binned"</code></td>
+<td>the exposure summary below; undeclared offsets only, a declared source rejects it</td>
+</tr>
+</tbody>
+</table>
+<p>A per-unit block is one row, applied by multiplying the named column by its <code>Relativity</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>SumInsured | Relativity | Weight
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>per_unit   | 1.0        | 6000.0
+</code></pre></div>
+<p><code>log(Exposure)</code> gives a scale of exactly <code>1.0</code>; <code>log(Term/12)</code> gives <code>1/12</code>. It is the same shape
+<code>Numeric</code> terms already export, for the same reason.</p>
+<p><strong>It has no bounds and no extrapolation rule.</strong> Nothing in it is estimated, so nothing is known only
+over a training range — the relation holds at a sum insured of 10m on a book that saw 442k for
+exactly the reason it holds at 10k. The binned alternative could not: its top bin capped every risk
+above the fitted range at that bin's average. Measured on a continuous sum-insured offset, 6,000
+rows with 5,998 distinct values — binned, all 6,000 receive a factor that is not their own and the
+worst is out by <strong>1.022e+00</strong>, more than double; per-unit, the worst row is out by <strong>9.99e-16</strong>.</p>
+<p>The relation is derived on the log scale and verified on the multiplier scale against
+<code>offset_mapping_rtol</code>, relative to the block's own scale, on every row. Relative and not also
+absolute: a multiplier is scale-free, so an absolute tolerance acts as a relative one of
+<code>atol/scale</code> and loosens without limit as the scale shrinks — on <code>log(SumInsured/1e6)</code> the <code>1e-12</code>
+default would admit a 1e-6 departure. The discrete path is relative for the same reason: multipliers
+of 1e-13 and 2e-13 in one level sit within the <code>1e-12</code> absolute default of their geometric mean, so
+the level would publish as exact while mis-rating its rows by 41.4% and 29.3%. Both offset paths
+are therefore relative only, and the <code>offset_mapping_atol</code> keyword has been <strong>removed</strong> rather than
+left in place doing nothing — passing it is now a <code>TypeError</code>. A column the offset is not
+proportional to is refused by name rather than approximated.</p>
+<p>Low cardinality is left alone: <code>Term ∈ {12, 36}</code> still exports as the two-row lookup <code>12 → 1</code>,
+<code>36 → 3</code>, because for a handful of levels a lookup already <em>is</em> the exact answer and asks nothing
+of the consumer.</p>
+<p><strong>An undeclared offset follows that same rule.</strong> Exported with no <code>offset_source=</code>, an offset above
+the cap is one <code>per_unit</code> row as well — keyed on the offset multiplier rather than on a column,
+because the exporter is not told which column produced the offset and does not guess one from the
+frame. Its <code>Relativity</code> is exactly <code>1.0</code>: the consumer computes <code>exp(offset)</code> and the block hands
+that number back unchanged. That reads as though it says nothing, and it says exactly as much as the
+binned block it replaces — which was <em>also</em> keyed on the multiplier, so a consumer had to compute the
+same number before it could look anything up, and then received its bin's exposure-weighted average
+instead of the value it had just computed. Nothing bins an offset now unless a caller asks for it by
+name with <code>offset_kind="binned"</code>.</p>
+<p><strong>This changes the exported block for any model with a continuous offset and no <code>offset_source=</code>.</strong>
+Where such a model used to ship a block of <code>n_bins</code> rows keyed on interval strings, it now ships one
+row keyed <code>per_unit</code>, carried on the new <code>offset_per_unit</code> block kind. A consumer that stages the
+binned form — matching a computed multiplier against an interval key — needs the per-unit kind before
+it can load such a workbook; exporting with <code>offset_kind="binned"</code> reproduces the old shape in the
+meantime. What it reproduces was never rateable: the factor it returns is the bin average of a number
+the consumer had already computed exactly.</p>
+<p>The workbook includes selected-bin rating tables, a discretization impact sweep, and a structured
+Model Summary sheet. The sweep runs the <code>impact_bins</code> ladder — <code>20, 50, 100, 200, 250</code> by default —
+<strong>plus the <code>n_bins</code> the workbook was actually exported at</strong>, marked by the sheet's <code>exported</code> column.
+That row is the one that describes the table in hand. Take it rather than the smallest number on the
+sheet: each row is an independently measured error at its own resolution, not a point on a curve
+guaranteed to fall — a finer grid shrinks the worst-case bound, but successive nearest-node grids are
+not nested, so a nearer node can carry a value further from a given row. Passing <code>impact_bins=()</code>
+skips the sweep, leaving the worksheet present with its headers and no rows.</p>
+<p>The sweep covers the binned and sampled model terms: main-effect spline and polynomial terms, and a
+continuous-by-continuous interaction, which is sampled onto an <code>n_bins</code>-per-axis grid rather than
+binned into intervals. Its row is keyed on the interaction's name and its <code>actual_bins</code> counts the
+grid's <em>cells</em>, so an interaction swept at 20 reports 400 where a main effect reports 20. The metric
+columns are <strong>joint</strong> over everything discretized at that resolution — within one <code>n_bins</code> group only
+<code>feature</code> and <code>actual_bins</code> vary.</p>
+<p>Two approximations the workbook can carry are outside that measurement, so the sheet is a bound on
+the terms it lists rather than on every factor in the book. An <strong>offset multiplier</strong> block asked for
+as <code>offset_kind="binned"</code> is not swept
+(<a href="https://github.com/StrudelDoodleS/superglm/issues/314">#314</a>) — under the default there is no
+offset approximation left to sweep — and the sheet's own discretized
+predictor is stabilized where the workbook's product is not
+(<a href="https://github.com/StrudelDoodleS/superglm/issues/313">#313</a>).</p>
+<p>The <code>ModelOverview</code> and
+<code>TermInference</code> Excel tables use typed cells for metrics, estimates, intervals, and p-values instead
+of storing the formatted console summary as one text column. The editor exposes the same workbook
+through <strong>Export &gt; Excel rating workbook</strong> when explicit training or retained fit data is available
+and the session's model meets the log-link requirement above.</p>
+<p>Excel export remains expanded over the exact original categorical levels, regardless of the most
+recent summary view. <code>export_rating_tables()</code> does not accept <code>level_display</code> and does not emit the
+summary-only <code>Level group</code> column or <code>G1</code> metadata.</p>
+<h2 id="families">Families<a class="headerlink" href="#families" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Variance function</th>
+<th>Use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Poisson()</code></td>
+<td>V(μ) = μ</td>
+<td>Claim frequency</td>
+</tr>
+<tr>
+<td><code>NegativeBinomial(theta=1.0)</code></td>
+<td>V(μ) = μ + μ²/θ</td>
+<td>Overdispersed frequency</td>
+</tr>
+<tr>
+<td><code>Gamma()</code></td>
+<td>V(μ) = μ²</td>
+<td>Claim severity</td>
+</tr>
+<tr>
+<td><code>Tweedie(p=1.5)</code></td>
+<td>V(μ) = μᵖ</td>
+<td>Pure premium (frequency × severity)</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

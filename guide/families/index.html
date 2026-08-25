@@ -1,0 +1,2753 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+        <link rel="prev" href="../deployment/">
+      
+      
+        <link rel="next" href="../interactions/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Families & Dispersion - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#families-and-dispersion-estimation" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Families & Dispersion
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported families
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#binomial-binary-classification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Binomial (binary classification)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#weight-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Weight semantics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Weight semantics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-the-choice-moves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the choice moves
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#replication-parity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication parity
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#negative-binomial-estimating-theta" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Negative binomial: estimating theta
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Negative binomial: estimating theta">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#profile-confidence-interval" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profile confidence interval
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#profile-plot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profile plot
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tweedie-estimating-the-power-parameter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tweedie: estimating the power parameter
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Tweedie: estimating the power parameter">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#searching-and-publishing-under-different-regimes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Searching and publishing under different regimes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#profile-confidence-interval_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profile confidence interval
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#search-trace-and-profile-plots" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Search trace and profile plots
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-reml-treats-the-dispersion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How REML treats the dispersion
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-dispersion-a-tweedie-fit-publishes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which dispersion a Tweedie fit publishes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-aicbic-count-and-what-they-do-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What AIC/BIC count — and what they do not
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#no-quasi-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        No quasi families
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../screening-evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported families
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#binomial-binary-classification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Binomial (binary classification)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#weight-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Weight semantics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Weight semantics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-the-choice-moves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the choice moves
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#replication-parity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Replication parity
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#negative-binomial-estimating-theta" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Negative binomial: estimating theta
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Negative binomial: estimating theta">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#profile-confidence-interval" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profile confidence interval
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#profile-plot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profile plot
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tweedie-estimating-the-power-parameter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tweedie: estimating the power parameter
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Tweedie: estimating the power parameter">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#searching-and-publishing-under-different-regimes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Searching and publishing under different regimes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#profile-confidence-interval_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Profile confidence interval
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#search-trace-and-profile-plots" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Search trace and profile plots
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-reml-treats-the-dispersion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How REML treats the dispersion
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#which-dispersion-a-tweedie-fit-publishes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which dispersion a Tweedie fit publishes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-aicbic-count-and-what-they-do-not" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What AIC/BIC count — and what they do not
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#no-quasi-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        No quasi families
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="families-and-dispersion-estimation">Families and Dispersion Estimation<a class="headerlink" href="#families-and-dispersion-estimation" title="Permanent link">&para;</a></h1>
+<h2 id="supported-families">Supported families<a class="headerlink" href="#supported-families" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Variance function</th>
+<th>Default link</th>
+<th>Use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Gaussian()</code></td>
+<td>V(μ) = 1</td>
+<td>identity</td>
+<td>Continuous outcomes</td>
+</tr>
+<tr>
+<td><code>Poisson()</code></td>
+<td>V(μ) = μ</td>
+<td>log</td>
+<td>Claim frequency</td>
+</tr>
+<tr>
+<td><code>NegativeBinomial(theta=1.0)</code></td>
+<td>V(μ) = μ + μ²/θ</td>
+<td>log</td>
+<td>Overdispersed frequency</td>
+</tr>
+<tr>
+<td><code>Gamma()</code></td>
+<td>V(μ) = μ²</td>
+<td>log</td>
+<td>Claim severity</td>
+</tr>
+<tr>
+<td><code>Tweedie(p=1.5)</code></td>
+<td>V(μ) = μᵖ</td>
+<td>log</td>
+<td>Pure premium (frequency × severity)</td>
+</tr>
+<tr>
+<td><code>Binomial()</code></td>
+<td>V(μ) = μ(1 − μ)</td>
+<td>logit</td>
+<td>Binary classification</td>
+</tr>
+</tbody>
+</table>
+<p>The native API examples below assume <code>features</code> is an explicit mapping from
+input columns to feature specs, such as <code>{"age": Numeric()}</code>. SuperGLM does
+not guess an omitted native feature configuration at fit time.</p>
+<h2 id="binomial-binary-classification">Binomial (binary classification)<a class="headerlink" href="#binomial-binary-classification" title="Permanent link">&para;</a></h2>
+<p>For binary outcomes (y in {0, 1}):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">SuperGLM</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span><span class="n">family</span><span class="o">=</span><span class="s2">&quot;binomial&quot;</span><span class="p">,</span> <span class="n">selection_penalty</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">features</span><span class="o">=</span><span class="n">features</span><span class="p">)</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">model</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">probabilities</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>  <span class="c1"># returns P(Y=1)</span>
+</code></pre></div>
+<p>The default link is logit. Alternative links can be passed via <code>link=</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">SuperGLM</span><span class="p">,</span> <span class="n">ProbitLink</span><span class="p">,</span> <span class="n">CloglogLink</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="c1"># Probit link (latent variable interpretation)</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    <span class="n">family</span><span class="o">=</span><span class="s2">&quot;binomial&quot;</span><span class="p">,</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    <span class="n">link</span><span class="o">=</span><span class="n">ProbitLink</span><span class="p">(),</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>    <span class="n">selection_penalty</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="n">features</span><span class="o">=</span><span class="n">features</span><span class="p">,</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="p">)</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="c1"># Complementary log-log (asymmetric alternative)</span>
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span>
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>    <span class="n">family</span><span class="o">=</span><span class="s2">&quot;binomial&quot;</span><span class="p">,</span>
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>    <span class="n">link</span><span class="o">=</span><span class="n">CloglogLink</span><span class="p">(),</span>
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>    <span class="n">selection_penalty</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span>
+<a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a>    <span class="n">features</span><span class="o">=</span><span class="n">features</span><span class="p">,</span>
+<a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="p">)</span>
+</code></pre></div>
+<p>For sklearn-compatible binary classification, use <code>SuperGLMClassifier</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">SuperGLMClassifier</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">clf</span> <span class="o">=</span> <span class="n">SuperGLMClassifier</span><span class="p">(</span><span class="n">selection_penalty</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">spline_features</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">])</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">clf</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">clf</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>            <span class="c1"># hard labels (0/1)</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="n">clf</span><span class="o">.</span><span class="n">predict_proba</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>      <span class="c1"># (n, 2) class probabilities</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="n">clf</span><span class="o">.</span><span class="n">decision_function</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>  <span class="c1"># log-odds</span>
+</code></pre></div>
+<p>Scale is known (phi = 1) for binomial, so no dispersion estimation is needed.</p>
+<h2 id="weight-semantics">Weight semantics<a class="headerlink" href="#weight-semantics" title="Permanent link">&para;</a></h2>
+<p>What <code>sample_weight</code> says about a row is a <strong>declared modelling choice</strong>, not a
+consequence of the family. Set it with <code>weight_semantics</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">features</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;vehicle_age&quot;</span><span class="p">:</span> <span class="n">Spline</span><span class="p">(</span><span class="n">n_knots</span><span class="o">=</span><span class="mi">8</span><span class="p">),</span> <span class="s2">&quot;region&quot;</span><span class="p">:</span> <span class="n">Categorical</span><span class="p">()}</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="c1"># The default: sample_weight is a precision, e.g. exposure beside an average.</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span><span class="n">family</span><span class="o">=</span><span class="s2">&quot;gamma&quot;</span><span class="p">,</span> <span class="n">features</span><span class="o">=</span><span class="n">features</span><span class="p">,</span> <span class="n">weight_semantics</span><span class="o">=</span><span class="s2">&quot;prior&quot;</span><span class="p">)</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="c1"># The alternative: sample_weight counts identical rows.</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span><span class="n">family</span><span class="o">=</span><span class="s2">&quot;gamma&quot;</span><span class="p">,</span> <span class="n">features</span><span class="o">=</span><span class="n">features</span><span class="p">,</span> <span class="n">weight_semantics</span><span class="o">=</span><span class="s2">&quot;frequency&quot;</span><span class="p">)</span>
+</code></pre></div>
+<ul>
+<li><strong><code>"prior"</code> (default)</strong> — an EDM prior weight, a statement of <em>precision</em>:
+  <code>Var(Y_i | x_i) = phi * V(mu_i) / w_i</code>, contributing
+  <code>log f(y_i; mu_i, phi / w_i)</code>. This is what you have when the response is an
+  average: <code>incurred / exposure</code> weighted by exposure, or an average severity
+  weighted by claim count. It is what R's <code>glm</code> and glum give their single
+  weight argument, and what statsmodels calls <code>var_weights</code> and Stata calls
+  <code>aweight</code>.</li>
+<li><strong><code>"frequency"</code></strong> — a replication count, contributing
+  <code>w_i * log f(y_i; mu_i, phi)</code>. Row <code>i</code> stands in for <code>w_i</code> identical rows, so
+  an integer weight is exactly equivalent to repeating it. This is
+  statsmodels' <code>freq_weights</code>, Stata's <code>fweight</code>, and SAS <code>GENMOD</code>'s <code>FREQ</code>.</li>
+</ul>
+<p>The two agree only at <code>w == 1</code>. Integer weights do <strong>not</strong> make them coincide:
+at <code>w == 2</code> the likelihood size is <code>n</code> under <code>"prior"</code> and <code>2n</code> under
+<code>"frequency"</code>, so the residual degrees of freedom, <code>phi</code>, every Wald standard
+error and BIC all differ. At fractional weights only the prior reading is a
+likelihood at all: a row cannot be replicated 0.4 times, and the
+frequency reading's <code>sum(w) - edf</code> residual degrees of freedom stop counting
+anything. Exposure is continuous, which is why <code>"prior"</code> is the default.</p>
+<h3 id="what-the-choice-moves">What the choice moves<a class="headerlink" href="#what-the-choice-moves" title="Permanent link">&para;</a></h3>
+<p>Both contracts give the same score equations, so <strong><code>beta</code> and the deviance are
+unchanged</strong>. What moves is everything downstream of the likelihood's size:</p>
+<table>
+<thead>
+<tr>
+<th>quantity</th>
+<th><code>"prior"</code></th>
+<th><code>"frequency"</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>likelihood size</td>
+<td>rows carrying positive weight</td>
+<td><code>sum(sample_weight)</code></td>
+</tr>
+<tr>
+<td>residual d.f.</td>
+<td><code>n_positive - edf</code></td>
+<td><code>sum(w) - edf</code></td>
+</tr>
+<tr>
+<td><code>phi</code>, Wald SEs and intervals</td>
+<td>from that d.f.</td>
+<td>from that d.f.</td>
+</tr>
+<tr>
+<td>effective <code>n</code> in AIC/BIC</td>
+<td>same size</td>
+<td>same size</td>
+</tr>
+<tr>
+<td>REML criterion → <code>lambda</code> → <code>edf</code></td>
+<td>prior-weight saturated likelihood</td>
+<td>replicated saturated likelihood</td>
+</tr>
+<tr>
+<td>learned spline knots and bins</td>
+<td>physical rows</td>
+<td>weight mass</td>
+</tr>
+</tbody>
+</table>
+<p>Unweighted fits and fits with <code>w == 1</code> are identical under both.</p>
+<p>A zero weight is admissible under either contract and means the row leaves the
+likelihood: under <code>"frequency"</code> it drops out of <code>sum(w)</code> on its own, and under
+<code>"prior"</code> it is excluded from the row count, matching R's rule that
+"observations with zero weight [are] not used for calculating dispersion". The
+one exception is a Tweedie fit under <code>"prior"</code>, which requires strictly positive
+weights — its compound-Poisson normalizer carries <code>log w</code>, so <code>w = 0</code> is an
+unevaluable density rather than an uninformative row.</p>
+<h3 id="replication-parity">Replication parity<a class="headerlink" href="#replication-parity" title="Permanent link">&para;</a></h3>
+<p>The frequency-weight replication statement is conditional on an identical
+constructed design. Main-effect spline boundaries and the <code>quantile_rows</code> and
+<code>quantile_tempered</code> knot strategies use frequency mass and ignore zero-weight
+rows, matching integer row expansion and omission without materializing copies.
+Prior weights intentionally leave spline geometry determined by physical rows.
+Some tensor-interaction marginal centering, interaction-local spline geometry,
+and categorical/ordered/factor feature geometry can still depend on the physical
+row layout. Use fixed or preconstructed feature geometry when exact end-to-end
+replication parity matters.</p>
+<p>One limitation is declared rather than silent: <code>estimate_p</code> profiles the
+Tweedie power against the prior-weight likelihood, so it refuses
+<code>weight_semantics="frequency"</code> with non-unit weights rather than answer under
+the wrong one. Expand the rows the counts stand for, or profile under
+<code>"prior"</code>.</p>
+<p><code>sample_weight</code> never enters the linear predictor; use an offset when exposure
+should scale the conditional mean.</p>
+<h2 id="negative-binomial-estimating-theta">Negative binomial: estimating theta<a class="headerlink" href="#negative-binomial-estimating-theta" title="Permanent link">&para;</a></h2>
+<p>For overdispersed count data where the Poisson variance assumption is too restrictive:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">SuperGLM</span><span class="p">,</span> <span class="n">NegativeBinomial</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="n">log_exposure</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">exposure</span><span class="p">)</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="c1"># Fixed theta</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="n">family</span><span class="o">=</span><span class="n">NegativeBinomial</span><span class="p">(</span><span class="n">theta</span><span class="o">=</span><span class="mf">1.0</span><span class="p">),</span>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>    <span class="n">selection_penalty</span><span class="o">=</span><span class="mf">0.01</span><span class="p">,</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>    <span class="n">features</span><span class="o">=</span><span class="n">features</span><span class="p">,</span>
+<a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="p">)</span>
+<a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a><span class="n">model</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">offset</span><span class="o">=</span><span class="n">log_exposure</span><span class="p">)</span>
+<a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>
+<a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a><span class="c1"># Profile estimate theta (alternating GLM fit + safeguarded profile solve)</span>
+<a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a><span class="n">result</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">estimate_theta</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">offset</span><span class="o">=</span><span class="n">log_exposure</span><span class="p">)</span>
+<a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">theta_hat</span><span class="p">)</span>  <span class="c1"># estimated dispersion</span>
+</code></pre></div>
+<p>Here <code>y</code> contains raw counts, so exposure enters through the log offset rather
+than through <code>sample_weight</code>.</p>
+<p>With <code>NegativeBinomial("auto")</code>, <code>fit()</code> and <code>fit_reml()</code> estimate theta
+automatically. Under <code>fit_reml</code>, theta is first calibrated at the configured
+smoothing and then — since 0.29.0 — <strong>re-estimated at the REML fit and
+alternated with warm-started refits to a joint fixed point</strong>, because a theta
+frozen before smoothing selection absorbs lack-of-fit at the calibration
+smoothing into spurious overdispersion (biasing theta low and overstating
+<code>V(mu) = mu + mu²/theta</code>). The published <code>family.theta</code>,
+<code>model._nb_profile_result.theta_hat</code>, and the fit always describe the same
+final state.</p>
+<p><code>estimate_theta()</code> uses the classical alternating scheme (Venables &amp; Ripley
+2002, ch. 7.4): fit the GLM at the current theta, then update theta by a
+bracketed root find on the closed-form NB2 profile score given the fitted
+means (Lawless 1987), started from a method-of-moments estimate. Converges
+in 2–3 outer iterations. The theta search range defaults to the numerical
+guard rails <code>(1e-8, 1e8)</code>; an estimate that lands on an active bound is
+reported with <code>converged=False</code> plus an <code>NBThetaBoundWarning</code> rather than
+published as a converged interior value.</p>
+<h3 id="profile-confidence-interval">Profile confidence interval<a class="headerlink" href="#profile-confidence-interval" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">ci</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">ci</span><span class="p">(</span><span class="n">alpha</span><span class="o">=</span><span class="mf">0.05</span><span class="p">)</span>  <span class="c1"># (lower, upper) via profile likelihood ratio</span>
+</code></pre></div>
+<h3 id="profile-plot">Profile plot<a class="headerlink" href="#profile-plot" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">result</span><span class="o">.</span><span class="n">profile_plot</span><span class="p">()</span>  <span class="c1"># profile deviance curve + CI region</span>
+</code></pre></div>
+<h2 id="tweedie-estimating-the-power-parameter">Tweedie: estimating the power parameter<a class="headerlink" href="#tweedie-estimating-the-power-parameter" title="Permanent link">&para;</a></h2>
+<p>The examples below assume <code>y</code> is a per-exposure response, such as pure premium
+per unit of exposure.</p>
+<p>Fit with a fixed Tweedie power:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">SuperGLM</span><span class="p">,</span> <span class="n">Tweedie</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>    <span class="n">family</span><span class="o">=</span><span class="n">Tweedie</span><span class="p">(</span><span class="n">p</span><span class="o">=</span><span class="mf">1.5</span><span class="p">),</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">selection_penalty</span><span class="o">=</span><span class="mf">0.01</span><span class="p">,</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="n">features</span><span class="o">=</span><span class="n">features</span><span class="p">,</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="p">)</span>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="n">model</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">y</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">)</span>
+</code></pre></div>
+<p>Or estimate the power via profile likelihood:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>    <span class="n">family</span><span class="o">=</span><span class="n">Tweedie</span><span class="p">(</span><span class="n">p</span><span class="o">=</span><span class="mf">1.5</span><span class="p">),</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>    <span class="n">selection_penalty</span><span class="o">=</span><span class="mf">0.01</span><span class="p">,</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>    <span class="n">features</span><span class="o">=</span><span class="n">features</span><span class="p">,</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="p">)</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="n">result</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">estimate_p</span><span class="p">(</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a>    <span class="n">df</span><span class="p">,</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>    <span class="n">y</span><span class="p">,</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a>    <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">,</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a>    <span class="n">p_bounds</span><span class="o">=</span><span class="p">(</span><span class="mf">1.1</span><span class="p">,</span> <span class="mf">1.9</span><span class="p">),</span>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a>    <span class="n">ci_alpha</span><span class="o">=</span><span class="mf">0.05</span><span class="p">,</span>
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="p">)</span>
+<a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">p_hat</span><span class="p">)</span>  <span class="c1"># estimated Tweedie power</span>
+<a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a><span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">summary</span><span class="p">(</span><span class="n">alpha</span><span class="o">=</span><span class="mf">0.05</span><span class="p">))</span>
+</code></pre></div>
+<p><code>phi_method="mle"</code> and <code>method="auto"</code> are the defaults. For ordinary MLE
+profiles, <code>auto</code> evaluates the exact Tweedie likelihood and its joint <em>p</em>/φ
+derivatives in one compiled series sweep, then takes safeguarded Newton steps.
+Each accepted <em>p</em> still has a fully profiled φ, and the winning point is checked
+against neighboring exact profiles. Unsafe curvature, series work, constraints,
+validation, or bounds outside the stable <code>[1.05, 1.95]</code> joint range automatically
+fall back to the defensive Brent profile. Explicit
+<code>method="brent"</code> retains the nested scalar search. <code>phi_method="pearson"</code> is an explicit fast plug-in
+option when exploratory speed matters, but it is not a likelihood profile
+and cannot support a likelihood-ratio confidence interval.</p>
+<p>As with other local likelihood optimizers, joint ML and Brent convergence do
+not prove a global optimum on an arbitrarily multimodal surface. Use
+<code>method="grid_refine"</code> for an explicit broad search when boundary behavior or
+multiple basins are a substantive concern.</p>
+<p>Positive densities normally use the Wright–Bessel series. A diagnosed
+saddlepoint fallback is used only when that exact evaluation is not finite or
+certifiable. Inspect <code>density_method</code>, <code>density_exact</code>, <code>saddlepoint_fraction</code>,
+<code>near_power_boundary</code>, <code>outer_boundary</code>, and <code>warnings</code> on the result. Profiles
+at a search bound, and especially near <em>p</em>=1 and <em>p</em>=2, are naturally unstable;
+optimizer convergence alone does not make such an estimate reliable.</p>
+<p><code>sample_weight</code> follows the exponential-dispersion-model prior-weight convention:
+<code>Var(Yᵢ | xᵢ) = φ μᵢᵖ / wᵢ</code> (equivalently, observation-specific dispersion
+φ / wᵢ). These are prior weights, not replication counts. Zero-weight observations must be removed
+consistently from <code>X</code>, <code>y</code>, <code>sample_weight</code>, and <code>offset</code> before profiling; the
+profiler rejects non-positive prior weights.
+<code>sample_weight</code> does not enter the linear predictor or automatically scale the
+conditional mean. Use an explicit offset when exposure should also enter the mean.</p>
+<p>With <code>fit_mode="reml"</code>, REML selects spline smoothing penalties within each
+candidate fit. The <em>p</em>/φ profile is then evaluated conditionally; it does not jointly estimate <em>p</em> and φ
+using an mgcv-style REML objective.</p>
+<h3 id="searching-and-publishing-under-different-regimes">Searching and publishing under different regimes<a class="headerlink" href="#searching-and-publishing-under-different-regimes" title="Permanent link">&para;</a></h3>
+<p>A REML-mode search runs a full smoothing-parameter selection inside every
+candidate <em>p</em> evaluation, so its cost is roughly the number of search steps
+times the cost of one <code>fit_reml</code>. <code>search_fit_mode</code> decouples the two: select
+<em>p</em> under ordinary ML, then publish one REML fit at the selected <em>p</em>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">estimate_p</span><span class="p">(</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>    <span class="n">df</span><span class="p">,</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>    <span class="n">y</span><span class="p">,</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>    <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">,</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>    <span class="n">fit_mode</span><span class="o">=</span><span class="s2">&quot;reml&quot;</span><span class="p">,</span>        <span class="c1"># what gets published</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="n">search_fit_mode</span><span class="o">=</span><span class="s2">&quot;fit&quot;</span><span class="p">,</span>  <span class="c1"># what selects p</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="p">)</span>
+</code></pre></div>
+<p>Whichever coupling you choose, the published fit is publication-grade.
+Candidate fits exist only to rank powers, so they run at a loose smoothing
+tolerance; the published refit runs the tight publication default and
+re-profiles dispersion against its own fitted mean. <code>result.phi_hat</code>, the
+coefficients, and their standard errors always describe the model you get
+back, never the fits the search discarded.</p>
+<blockquote>
+<p><strong>Upgrading from 0.19.x:</strong> a default-tolerance <code>fit_reml</code> (and therefore
+every published <code>estimate_p</code> fit) now runs the smoothing optimizer to the
+determined answer (<code>reml_tol</code> 1e-6 → 1e-9 on the Newton engines), and
+<code>phi_hat</code> is re-profiled at the published fit. Standard errors on designs
+with flat log-lambda directions can move by tens of percent relative to
+0.19.x — once, to the values the old tolerance had left undetermined.
+Predictions are essentially unchanged. This is not a regression to file;
+pass <code>reml_tol=1e-6</code> to reproduce the old numbers.</p>
+</blockquote>
+<p>The two couplings differ in which objective <em>chooses</em> p, and in what can go
+wrong on the way:</p>
+<ul>
+<li><strong>Agreement.</strong> Selecting <em>p</em> under ML and publishing under REML is an
+  approximation. On the synthetic benchmark fixture in
+  <code>benchmarks/tweedie_reml_search_cost.py</code> it moved <em>p̂</em> by 1.1e-7 and ran
+  about 3× faster, and across a synthetic sweep spanning a 600× range of
+  fitted penalty strength the mode disagreement was uncorrelated with how
+  strongly REML actually shrinks. That is evidence, not a guarantee —
+  compare against <code>fit_mode="reml"</code> alone on your own data before adopting
+  it.</li>
+<li><strong>Robustness.</strong> A coupled search evaluates REML at every candidate power,
+  and some powers can have no certifiable penalized mode there; the search
+  routes around them and warns when the selected optimum sits against that
+  boundary, since the true optimum may lie beyond it (a censored estimate).
+  A decoupled search never meets that wall — but its single REML publication
+  can then fail at the selected <em>p</em>, with a typed
+  <code>superglm.PublicationModeError</code> that reports the certifiability score and
+  names the ways out: search under <code>fit_mode="reml"</code>, publish the ML fit, or
+  restrict <code>p_bounds</code>.</li>
+</ul>
+<p>Likelihood-ratio confidence intervals remain available for either coupling,
+eagerly via <code>ci_alpha</code> or lazily via <code>result.ci()</code>. The interval inverts the
+profile that was searched, around that profile's own value at <code>p_hat</code>
+(recorded as <code>result.search_nll</code>), so it describes the regime named by
+<code>search_fit_mode</code>; <code>result.nll</code> describes the published fit's re-profiled
+dispersion. <code>trace_plot</code> and <code>profile_plot</code> measure against the same searched
+reference.</p>
+<h3 id="profile-confidence-interval_1">Profile confidence interval<a class="headerlink" href="#profile-confidence-interval_1" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">ci</span> <span class="o">=</span> <span class="n">result</span><span class="o">.</span><span class="n">ci</span><span class="p">(</span><span class="n">alpha</span><span class="o">=</span><span class="mf">0.05</span><span class="p">)</span>  <span class="c1"># (lower, upper) via profile LRT</span>
+</code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code>result.ci()</code> is explicit and potentially expensive: each new boundary probe
+can require a full model refit. It is available only for MLE dispersion
+profiles. It updates the detached returned result, not the model's
+independently owned published profile state. Pass <code>ci_alpha=0.05</code> to
+<code>estimate_p()</code> when the interval should be computed transactionally and
+cached for <code>model.summary(alpha=0.05)</code>. Omitting <code>ci_alpha</code> retains the lazy,
+no-extra-CI-work path.</p>
+</div>
+<h3 id="search-trace-and-profile-plots">Search trace and profile plots<a class="headerlink" href="#search-trace-and-profile-plots" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">result</span><span class="o">.</span><span class="n">trace_plot</span><span class="p">()</span>    <span class="c1"># cached search evaluations; performs no new fits</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="n">result</span><span class="o">.</span><span class="n">profile_plot</span><span class="p">()</span>  <span class="c1"># dense profile curve; may fit additional uncached p values</span>
+</code></pre></div>
+<p><code>trace_plot()</code> sorts by <em>p</em> and connects only evaluations already cached by
+<code>estimate_p()</code>, making it the cheap diagnostic. <code>profile_plot()</code> evaluates a dense
+grid and fits any uncached <em>p</em> values, so it can be substantially expensive when
+<code>phi_method="mle"</code>.</p>
+<h2 id="how-reml-treats-the-dispersion">How REML treats the dispersion<a class="headerlink" href="#how-reml-treats-the-dispersion" title="Permanent link">&para;</a></h2>
+<p>For the estimated-scale families — Gaussian, Gamma, and Tweedie — <code>fit_reml</code>
+profiles the dispersion out of the Laplace-approximate REML criterion using
+the family's <strong>exact saturated log-likelihood</strong> (Wood 2011, Eq. 4; Wood, Pya
+&amp; Säfken 2016, §3.3). For Tweedie this matters structurally: the compound
+Poisson–gamma response has an atom at zero, so a zero row's saturated
+contribution is dispersion-free while positive rows carry the Dunn–Smyth
+series normalizer. Since 0.29.0 the criterion evaluates that likelihood
+exactly; earlier releases substituted a Gaussian-shaped
+<code>0.5·(n − Mp)·log(Dp)</code> term that overweighted the deviance arm in proportion
+to the zero fraction, which mis-set smoothing on zero-heavy Tweedie fits and
+could run weakly identified variance components to the boundary. Poisson,
+negative binomial, and binomial fix <code>phi = 1</code> and never enter this profile.</p>
+<p>A custom, user-supplied distribution with <code>scale_known=False</code> has no exact
+profiler; <code>fit_reml</code> falls back to the Gaussian-shaped substitution and warns
+that smoothing selection is approximate for such a family.</p>
+<h2 id="which-dispersion-a-tweedie-fit-publishes">Which dispersion a Tweedie fit publishes<a class="headerlink" href="#which-dispersion-a-tweedie-fit-publishes" title="Permanent link">&para;</a></h2>
+<p>Three entry points publish three different (individually standard) Tweedie
+dispersion estimators. They agree to a few percent on well-behaved data but
+are <strong>not</strong> interchangeable:</p>
+<ul>
+<li><strong><code>fit_reml</code></strong> publishes the Pearson estimator
+  <code>phi = sum(w·(y−mu)²/V(mu)) / (n − edf)</code> in <code>result.phi</code>. The REML
+  criterion internally uses the exact profile MLE to choose the smoothing;
+  the published value remains Pearson.</li>
+<li><strong><code>estimate_p</code></strong> publishes the profile <strong>MLE</strong> of phi, re-profiled at the
+  published fit's mean (<code>result.phi_hat</code>).</li>
+<li>The <strong>QP monotone passthrough</strong> path publishes the deviance-based
+  <code>Dp / (n − Mp)</code>.</li>
+</ul>
+<p>This inventory is deliberate documentation of the current state, not an
+endorsement: a future release may unify them (the exact MLE is already
+computed internally). Until then, compare dispersions across entry points
+only with this table in hand. For reference, mgcv's default reported scale
+is a Fletcher-(2012)-improved Pearson estimator, which is a fourth
+convention again.</p>
+<h2 id="what-aicbic-count-and-what-they-do-not">What AIC/BIC count — and what they do not<a class="headerlink" href="#what-aicbic-count-and-what-they-do-not" title="Permanent link">&para;</a></h2>
+<p><code>metrics().aic</code> is <code>−2·loglik(mu_hat, phi_hat) + 2·edf</code> with <code>edf = tr(F)</code>,
+and BIC uses the same likelihood with a <code>log(n)·edf</code> complexity term (<code>n</code> is
+the family's likelihood size: <code>sum(w)</code> for frequency-weighted families,
+the row count for Tweedie prior weights). Two deliberate limitations:</p>
+<ul>
+<li><strong>No estimated family parameter is counted.</strong> An auto-estimated NB2 theta,
+  an estimated Tweedie power <code>p</code>, and the estimated dispersion <code>phi</code> add
+  zero to the complexity term. Within one family this matches statsmodels
+  (which never counts the scale) though not R's <code>logLik.glm</code> (which counts
+  the Gaussian sigma); across families it means a
+  <code>Poisson</code> vs <code>NegativeBinomial("auto")</code> comparison, or a fixed-<code>p</code> vs
+  <code>estimate_p</code> comparison, gives the model with the extra estimated
+  parameter that parameter for free. Penalize such comparisons by hand
+  (one parameter ≈ 2 AIC points) or compare on held-out deviance.</li>
+<li><strong>No smoothing-uncertainty correction.</strong> <code>edf = tr(F)</code> is the conditional
+  effective dimension given the selected lambdas; the Wood–Pya–Säfken (2016)
+  corrected AIC, which accounts for smoothing-parameter estimation, is not
+  implemented.</li>
+</ul>
+<h2 id="no-quasi-families">No quasi families<a class="headerlink" href="#no-quasi-families" title="Permanent link">&para;</a></h2>
+<p>There is no quasi-Poisson or quasi-binomial path: Poisson and Binomial pin
+<code>phi = 1</code> with no overdispersion escape hatch. For overdispersed counts use
+<code>NegativeBinomial("auto")</code> (theta absorbs the overdispersion) or a Tweedie
+in <code>1 &lt; p &lt; 2</code>; for overdispersed binary data no shipped family applies.
+<code>Binomial</code> is Bernoulli-only by contract — grouped binomial data must be
+expanded to one row per trial (or use frequency weights on 0/1 rows).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

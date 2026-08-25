@@ -1,0 +1,4897 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+        <link rel="prev" href="../model/">
+      
+      
+        <link rel="next" href="../families/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Features - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#features" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Features
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/screening-evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#factory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Factory
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Factory">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Spline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spline
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#spline-classes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spline Classes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Spline Classes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.PSpline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PSpline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.BSplineSmooth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        BSplineSmooth
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.NaturalSpline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NaturalSpline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.CubicRegressionSpline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CubicRegressionSpline
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#other-feature-classes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other Feature Classes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Other Feature Classes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Categorical
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Categorical">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.adopt_dtype_categories" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        adopt_dtype_categories
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.apply_level_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        apply_level_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.resolve_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        resolve_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RandomEffect
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="RandomEffect">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.adopt_dtype_categories" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        adopt_dtype_categories
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.apply_level_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        apply_level_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.resolve_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        resolve_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.validate_prediction_values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        validate_prediction_values
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numeric
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Numeric">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Polynomial
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Polynomial">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interaction-specs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interaction Specs
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Interaction Specs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FactorSmooth
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="FactorSmooth">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.parent_names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        parent_names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.adopt_dtype_categories" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        adopt_dtype_categories
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.apply_level_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        apply_level_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.resolve_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        resolve_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.build_discrete" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build_discrete
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.validate_population_prediction_values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        validate_population_prediction_values
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.validate_prediction_values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        validate_prediction_values
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.marginal_basis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        marginal_basis
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#factory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Factory
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Factory">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Spline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spline
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#spline-classes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spline Classes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Spline Classes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.PSpline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PSpline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.BSplineSmooth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        BSplineSmooth
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.NaturalSpline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NaturalSpline
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.CubicRegressionSpline" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CubicRegressionSpline
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#other-feature-classes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other Feature Classes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Other Feature Classes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Categorical
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Categorical">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.adopt_dtype_categories" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        adopt_dtype_categories
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.apply_level_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        apply_level_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.resolve_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        resolve_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Categorical.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RandomEffect
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="RandomEffect">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.adopt_dtype_categories" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        adopt_dtype_categories
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.apply_level_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        apply_level_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.resolve_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        resolve_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.validate_prediction_values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        validate_prediction_values
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.RandomEffect.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numeric
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Numeric">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Numeric.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Polynomial
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Polynomial">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.Polynomial.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interaction-specs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interaction Specs
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Interaction Specs">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FactorSmooth
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="FactorSmooth">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.parent_names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        parent_names
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.adopt_dtype_categories" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        adopt_dtype_categories
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.apply_level_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        apply_level_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.resolve_binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        resolve_binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.build_discrete" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        build_discrete
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.validate_population_prediction_values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        validate_population_prediction_values
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.validate_prediction_values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        validate_prediction_values
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.marginal_basis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        marginal_basis
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.score" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        score
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.transform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        transform
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#superglm.FactorSmooth.reconstruct" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        reconstruct
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="features">Features<a class="headerlink" href="#features" title="Permanent link">&para;</a></h1>
+<p>Feature specs define how raw columns become model terms. This page keeps the
+public <code>Spline(...)</code> factory separate from the concrete feature classes so the
+API reads in the same order users encounter it.</p>
+<h2 id="factory">Factory<a class="headerlink" href="#factory" title="Permanent link">&para;</a></h2>
+<p><code>Spline(...)</code> is the public entry point for spline specs. Use <code>kind="ps"</code> for a
+difference-penalized P-spline and <code>kind="bs"</code> for an integrated-derivative
+B-spline smooth.</p>
+<p>Use <code>constraint=</code> to request monotone or curvature-constrained fits:</p>
+<ul>
+<li><code>Constraint.fit.increasing</code></li>
+<li><code>Constraint.fit.decreasing</code></li>
+<li><code>Constraint.fit.convex</code></li>
+<li><code>Constraint.fit.concave</code></li>
+<li><code>Constraint.postfit.increasing</code></li>
+<li><code>Constraint.postfit.decreasing</code></li>
+<li><code>Constraint.postfit.convex</code></li>
+<li><code>Constraint.postfit.concave</code></li>
+</ul>
+<p>These constraints are interpreted on the spline term's contribution to the
+linear predictor. For non-identity links, that means the constrained object is
+the term on the <code>eta</code> scale, not the back-transformed response mean.</p>
+<p>Fit-time engine selection depends on the concrete spline class:</p>
+<table>
+<thead>
+<tr>
+<th>Feature spec</th>
+<th>Fit-time constraints</th>
+<th>Engine</th>
+<th><code>fit_reml()</code> automatic lambda behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PSpline(..., constraint=Constraint.fit.increasing/decreasing/convex/concave)</code></td>
+<td>monotone + curvature</td>
+<td>SCOP</td>
+<td>integrated constrained REML / EFS</td>
+</tr>
+<tr>
+<td><code>BSplineSmooth(..., constraint=Constraint.fit.increasing/decreasing/convex/concave)</code></td>
+<td>monotone + curvature</td>
+<td>QP</td>
+<td>unconstrained REML followed by constrained refit at those lambdas</td>
+</tr>
+<tr>
+<td><code>CubicRegressionSpline(..., constraint=Constraint.fit.increasing/decreasing/convex/concave)</code></td>
+<td>monotone + curvature</td>
+<td>QP</td>
+<td>unconstrained REML followed by constrained refit at those lambdas</td>
+</tr>
+</tbody>
+</table>
+<p><code>Constraint.postfit.*</code> keeps the unconstrained fit and applies a repair later
+with <code>model.apply_shape_postfit(...)</code>.</p>
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="superglm.Spline" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s1">&#39;ps&#39;</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_knots</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">degree</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">knot_strategy</span><span class="o">=</span><span class="s1">&#39;uniform&#39;</span><span class="p">,</span> <span class="n">penalty</span><span class="o">=</span><span class="s1">&#39;ssp&#39;</span><span class="p">,</span> <span class="n">select</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">knots</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">discrete</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">n_bins</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">extrapolation</span><span class="o">=</span><span class="s1">&#39;clip&#39;</span><span class="p">,</span> <span class="n">boundary</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">knot_alpha</span><span class="o">=</span><span class="mf">0.2</span><span class="p">,</span> <span class="n">constraint</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">m</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">lambda_policy</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.Spline" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+
+        <p>Create a spline feature spec.</p>
+
+
+    </div>
+
+</div><h2 id="spline-classes">Spline Classes<a class="headerlink" href="#spline-classes" title="Permanent link">&para;</a></h2>
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.PSpline" class="doc doc-heading">
+            <code>PSpline</code>
+
+
+<a href="#superglm.PSpline" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+            <p class="doc doc-class-bases">
+              Bases: <code><span title="superglm.features.spline._BSplineBase">_BSplineBase</span></code></p>
+
+
+
+        <p>P-spline: B-spline basis with a discrete-difference penalty.</p>
+<p>This is the concrete P-spline implementation. For the recommended
+public API, use :func:<code>Spline</code> which dispatches to <code>PSpline</code>,
+<code>NaturalSpline</code>, or <code>CubicRegressionSpline</code> based on <code>kind</code>.</p>
+<p>The <code>m</code> parameter controls the discrete difference order(s) for the
+penalty (default 2, second-difference).</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>n_knots</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Number of interior knots.</p>
+              </div>
+            </td>
+            <td>
+                  <code>10</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>degree</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>B-spline polynomial degree.</p>
+              </div>
+            </td>
+            <td>
+                  <code>3</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>knot_strategy</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>"uniform" (default), "quantile", "quantile_rows", or
+"quantile_tempered".</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;uniform&#39;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>penalty</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>"ssp" enables SSP reparametrisation, "none" disables it.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;ssp&#39;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>select</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If True, decompose the spline into null-space (linear) and
+range-space (wiggly) subgroups for three-way selection:
+nonlinear -&gt; linear -&gt; dropped.</p>
+<p><strong>Double penalty</strong>: The null-space (linear) subgroup is
+penalised with a ridge penalty (<code>penalty_matrix=eye(1)</code>).
+With <code>fit_reml()</code>, REML estimates separate lambdas for the
+linear and spline subgroups — driving the linear lambda to
+infinity effectively zeros the linear component (three-way
+selection: nonlinear -&gt; linear -&gt; dropped). See Wood (2011).</p>
+              </div>
+            </td>
+            <td>
+                  <code>False</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>knots</code>
+            </td>
+            <td>
+                  <code><span title="array">array</span> - <span title="like">like</span> or None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Explicit interior knot positions.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>constraint</code>
+            </td>
+            <td>
+                  <code><span title="superglm.features.constraint.ConstraintSpec">ConstraintSpec</span> or None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Public shape-constraint token. Use <code>Constraint.fit.increasing</code>,
+<code>Constraint.fit.decreasing</code>, <code>Constraint.fit.convex</code>,
+<code>Constraint.fit.concave</code>, <code>Constraint.postfit.increasing</code>,
+<code>Constraint.postfit.decreasing</code>, <code>Constraint.postfit.convex</code>, or
+<code>Constraint.postfit.concave</code>. For <code>PSpline</code>, fit-time shape
+constraints apply on the spline term's linear-predictor contribution
+and use the SCOP engine. This works in both exact and
+<code>discrete=True</code> fitting paths. With <code>fit_reml()</code>, fixed lambdas
+work directly and automatic lambda estimation uses the dedicated
+shape-aware SCOP REML / EFS path. Fit-time convexity/concavity is
+supported for degrees one through three; higher degrees require a
+<code>Constraint.postfit.*</code> token.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.BSplineSmooth" class="doc doc-heading">
+            <code>BSplineSmooth</code>
+
+
+<a href="#superglm.BSplineSmooth" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+            <p class="doc doc-class-bases">
+              Bases: <code><span title="superglm.features.spline._BSplineBase">_BSplineBase</span></code></p>
+
+
+
+        <p>B-spline smooth: B-spline basis with an integrated-derivative penalty.</p>
+<p>Same raw B-spline basis as <code>PSpline</code>, but penalised via the
+<em>integrated squared m-th derivative</em> rather than the discrete
+difference penalty.  This is the analogue of mgcv's <code>"bs"</code> smooth.</p>
+<p>The penalty matrix is::</p>
+<div class="highlight"><pre><span></span><code>omega_ij = int B_i^(m)(x) B_j^(m)(x) dx
+</code></pre></div>
+<p>computed by Gauss--Legendre quadrature over each knot span.  <code>m</code>
+is the integrated derivative order (default 2 = integrated
+second-derivative penalty).  Compare with <code>PSpline</code> where <code>m</code>
+is the finite-difference order on the coefficient vector.</p>
+<p>Cubic by default (<code>degree=3</code>) but general degree is allowed.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>n_knots</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Number of interior knots.</p>
+              </div>
+            </td>
+            <td>
+                  <code>10</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>degree</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>B-spline polynomial degree.</p>
+              </div>
+            </td>
+            <td>
+                  <code>3</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>knot_strategy</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>"uniform"</code> or <code>"quantile"</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;uniform&#39;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>penalty</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p><code>"ssp"</code> enables SSP reparametrisation, <code>"none"</code> for raw.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;ssp&#39;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>select</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>If True, add double-penalty shrinkage (null + range space).</p>
+              </div>
+            </td>
+            <td>
+                  <code>False</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>knots</code>
+            </td>
+            <td>
+                  <code><span title="array">array</span> - <span title="like">like</span> or None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Explicit interior knot positions.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>constraint</code>
+            </td>
+            <td>
+                  <code><span title="superglm.features.constraint.ConstraintSpec">ConstraintSpec</span> or None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Public shape-constraint token. Use <code>Constraint.fit.increasing</code>,
+<code>Constraint.fit.decreasing</code>, <code>Constraint.fit.convex</code>,
+<code>Constraint.fit.concave</code>, <code>Constraint.postfit.increasing</code>,
+<code>Constraint.postfit.decreasing</code>, <code>Constraint.postfit.convex</code>, or
+<code>Constraint.postfit.concave</code>. For <code>BSplineSmooth</code>, fit-time
+monotone and curvature constraints apply on the spline term's
+linear-predictor contribution and use the constrained QP solver
+path. With <code>fit_reml()</code>, fixed lambdas work directly; automatic
+lambda estimation uses the QP passthrough heuristic
+(unconstrained REML followed by constrained refit), not exact
+joint constrained REML. Fit-time convexity/concavity is supported for
+degrees one through three; higher degrees require a
+<code>Constraint.postfit.*</code> token.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>m</code>
+            </td>
+            <td>
+                  <code>int or tuple of int</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Integrated derivative order(s) for the penalty.</p>
+              </div>
+            </td>
+            <td>
+                  <code>2</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>lambda_policy</code>
+            </td>
+            <td>
+                  <code><span title="superglm.types.LambdaPolicy">LambdaPolicy</span> or <span title="dict">dict</span> or None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Per-component lambda control.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.NaturalSpline" class="doc doc-heading">
+            <code>NaturalSpline</code>
+
+
+<a href="#superglm.NaturalSpline" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+            <p class="doc doc-class-bases">
+              Bases: <code><span title="superglm.features.spline._SplineBase">_SplineBase</span></code></p>
+
+
+
+        <p>Natural P-spline: f''=0 at boundaries, linear tails.</p>
+<p>Applies natural boundary constraints: f''(boundary) = 0 at both
+ends. The underlying basis therefore has linear tails beyond the
+boundary knots, preventing the tail explosions common with
+unconstrained B-splines. Prediction behavior outside the training
+range is then controlled by <code>extrapolation</code>: <code>"clip"</code>
+(default) freezes at the boundary, while <code>"extend"</code> exposes the
+linear tails.</p>
+<p>Uses a second-difference penalty (like BS) rather than the
+integrated-f'' penalty of <code>CubicRegressionSpline</code>.  The
+boundary constraints reduce the penalty null space to 1 dimension
+(constant only), so <code>select=True</code> is not supported — use
+<code>kind="cr"</code> or <code>kind="ps"</code> for double-penalty selection.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.CubicRegressionSpline" class="doc doc-heading">
+            <code>CubicRegressionSpline</code>
+
+
+<a href="#superglm.CubicRegressionSpline" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+            <p class="doc doc-class-bases">
+              Bases: <code><span title="superglm.features.spline._SplineBase">_SplineBase</span></code></p>
+
+
+
+        <p>CR spline: integrated f'' squared penalty + natural boundary constraints.</p>
+<p>Compatible with the standard cubic regression spline construction
+used in GAM packages. Always cubic (degree=3).
+Natural boundary constraints (f''=0 at boundaries) are mandatory.
+The basis has linear tails, but default prediction still clips at
+the training boundary unless <code>extrapolation="extend"</code> is used.</p>
+<p>The penalty matrix is the wiggliness penalty: omega_ij = int B_i''(x) B_j''(x) dx,
+computed via Gauss-Legendre quadrature over each knot interval.</p>
+<p>Multi-order penalties (m tuple) are a SuperGLM extension, not strict
+mgcv <code>bs="cr"</code> parity.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>constraint</code>
+            </td>
+            <td>
+                  <code><span title="superglm.features.constraint.ConstraintSpec">ConstraintSpec</span> or None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Public shape-constraint token. Use <code>Constraint.fit.increasing</code>,
+<code>Constraint.fit.decreasing</code>, <code>Constraint.fit.convex</code>,
+<code>Constraint.fit.concave</code>, or any of the corresponding
+<code>Constraint.postfit.*</code> kinds. Fit-time constraints apply on the
+spline term's linear-predictor contribution and use the constrained
+QP solver path. With <code>fit_reml()</code>, fixed lambdas work directly;
+automatic lambda estimation uses the QP passthrough heuristic
+(unconstrained REML followed by constrained refit), not exact joint
+constrained REML.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div><h2 id="other-feature-classes">Other Feature Classes<a class="headerlink" href="#other-feature-classes" title="Permanent link">&para;</a></h2>
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.Categorical" class="doc doc-heading">
+            <code>Categorical</code>
+
+
+<a href="#superglm.Categorical" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>One-hot encoded categorical feature.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>base</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>How to choose the reference level.
+'most_exposed' - level with highest total sample_weight (default, best for insurance)
+'first'        - first level in the level universe (alphabetical when inferred,
+                 as declared when <code>levels=</code> or a categorical dtype bounds it)
+Or pass a specific level name as a string.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;most_exposed&#39;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>grouping</code>
+            </td>
+            <td>
+                  <code><span title="superglm.features.grouping.LevelGrouping">LevelGrouping</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Collapse original levels into groups before fitting.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>levels</code>
+            </td>
+            <td>
+                  <code><span title="list">list</span> | <span title="tuple">tuple</span> | <span title="Series">Series</span> | <span title="ndarray">ndarray</span> | <span title="CategoricalDtype">CategoricalDtype</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>The level universe to bind to (spec 2026-08-11, §3.1).  With a
+<code>grouping</code> this declares the RAW, pre-collapse universe.  Levels with
+no training rows are pinned to base rather than dropped; training rows
+outside the universe are an error.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>unseen</code>
+            </td>
+            <td>
+                  <code>(&#39;error&#39;, &#39;base&#39;)</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Predict-time policy for levels outside the universe.  'error' (default)
+is the historical behavior; 'base' routes those rows to the base level
+with one warning per call.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#39;error&#39;</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Categorical.adopt_dtype_categories" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">adopt_dtype_categories</span><span class="p">(</span><span class="n">categories</span><span class="p">)</span></code>
+
+<a href="#superglm.Categorical.adopt_dtype_categories" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Adopt a dtype-declared universe unless one is already declared.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Categorical.apply_level_binding" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">apply_level_binding</span><span class="p">(</span><span class="n">binding</span><span class="p">)</span></code>
+
+<a href="#superglm.Categorical.apply_level_binding" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Adopt a full-frame binding: universe if unset, base pin if unpinned.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Categorical.resolve_binding" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">resolve_binding</span><span class="p">(</span><span class="n">values</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.Categorical.resolve_binding" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Compute this spec's full-frame binding without mutating the spec.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Categorical.build" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">build</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.Categorical.build" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Build sparse one-hot design columns, choosing the base level from <em>x</em>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Categorical.transform" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">transform</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></code>
+
+<a href="#superglm.Categorical.transform" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>One-hot encode using levels learned during build().</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Categorical.score" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">score</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.Categorical.score" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Score the fitted categorical contribution directly on new data.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Categorical.reconstruct" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">reconstruct</span><span class="p">(</span><span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.Categorical.reconstruct" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Coefficients -&gt; relativity table.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.RandomEffect" class="doc doc-heading">
+            <code>RandomEffect</code>
+
+
+<a href="#superglm.RandomEffect" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>All-level categorical effect with a REML-estimated variance component.</p>
+<p><code>levels=</code> binds the level universe (spec 2026-08-11, §3.1) from an
+explicit sequence, a data column, or a categorical dtype.  A declared level
+with no training rows is not pinned the way an unpenalized dummy is: it
+keeps its own coefficient and shrinks to the population value through the
+variance component, exactly as a thinly observed level does.</p>
+
+
+<details class="note" open>
+  <summary>Notes</summary>
+  <p>When a REML-estimated <code>RandomEffect</code> is fitted beside an unpenalised
+<code>Categorical</code> whose levels include some with exposure but no positive
+response (under a log link with a zero-mass family such as Tweedie or
+Poisson), those levels separate -- their coefficients have no finite MLE
+-- and the marginal likelihood becomes nearly flat in this term's
+variance.  The fitted variance component is then poorly determined, and
+for the estimated-scale Tweedie criterion it is additionally biased
+upward relative to exact-likelihood REML.  <code>fit_reml</code> warns on that
+configuration; treat the published <code>tau_squared</code> with care there.</p>
+</details>
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.RandomEffect.adopt_dtype_categories" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">adopt_dtype_categories</span><span class="p">(</span><span class="n">categories</span><span class="p">)</span></code>
+
+<a href="#superglm.RandomEffect.adopt_dtype_categories" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Adopt a dtype-declared universe unless one is already declared.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.RandomEffect.apply_level_binding" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">apply_level_binding</span><span class="p">(</span><span class="n">binding</span><span class="p">)</span></code>
+
+<a href="#superglm.RandomEffect.apply_level_binding" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Adopt a full-frame universe when nothing more specific declared one.</p>
+<p>Only the levels are read: a penalized term has no base level, so its
+bindings carry <code>base=None</code> and there is nothing to pin.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.RandomEffect.resolve_binding" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">resolve_binding</span><span class="p">(</span><span class="n">values</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.RandomEffect.resolve_binding" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Compute this spec's full-frame binding without mutating the spec.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.RandomEffect.build" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">build</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.RandomEffect.build" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Factorize all fitted levels without dropping a reference category.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.RandomEffect.validate_prediction_values" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">validate_prediction_values</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></code>
+
+<a href="#superglm.RandomEffect.validate_prediction_values" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Reject missing values without applying the unseen-level policy.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.RandomEffect.score" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">score</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.RandomEffect.score" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Select fitted level effects without materializing one-hot columns.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.RandomEffect.transform" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">transform</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></code>
+
+<a href="#superglm.RandomEffect.transform" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Materialize a small all-level one-hot reference matrix.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.RandomEffect.reconstruct" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">reconstruct</span><span class="p">(</span><span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.RandomEffect.reconstruct" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return one fitted effect for every represented level.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.Numeric" class="doc doc-heading">
+            <code>Numeric</code>
+
+
+<a href="#superglm.Numeric" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>A single continuous feature used as-is.</p>
+<p>Group lasso on a size-1 group = standard L1 soft-thresholding.
+The column is passed through without any transformation.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Numeric.build" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">build</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.Numeric.build" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Build a single-column design matrix.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Numeric.transform" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">transform</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></code>
+
+<a href="#superglm.Numeric.transform" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Transform new data (pass-through).</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Numeric.score" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">score</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.Numeric.score" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Score the fitted numeric contribution directly on new data.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Numeric.reconstruct" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">reconstruct</span><span class="p">(</span><span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.Numeric.reconstruct" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Reconstruct the coefficient on the original scale.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.Polynomial" class="doc doc-heading">
+            <code>Polynomial</code>
+
+
+<a href="#superglm.Polynomial" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Orthogonal polynomial feature (orthonormal in the training-weight measure).</p>
+<p>Scales x to [-1, 1] using training-data min/max, seeds a Legendre
+basis (including the constant), and orthonormalizes it against the
+training <code>sample_weight</code> by weighted thin QR.  The constant column
+is dropped from the emitted block — the model intercept carries it.</p>
+<p>Normalization convention: with training weights <code>w</code>, the emitted
+components <code>phi_j</code> (one per stated power) satisfy</p>
+<div class="highlight"><pre><span></span><code>(1 / sum(w)) * sum_i w_i * phi_j(x_i) * phi_k(x_i) = delta_jk
+</code></pre></div>
+<p>i.e. they are orthonormal in the <em>mean</em> empirical inner product of the
+training <code>sample_weight</code>, and each is orthogonal to the constant in
+the same inner product.  When exposure enters through an offset (the
+documented count workflow) <code>sample_weight</code> stays at ones, so the
+basis is orthonormalized against the row-count measure.  The weights
+are followed under either weight contract — including <code>"prior"</code>, where
+they are precisions: orthonormalization is inference/selection geometry
+(the spanned column space is weight-invariant), not model geometry,
+so the spline physical-rows rule deliberately does not apply.  Under
+Gaussian/fixed-weight fitting this makes the per-power coefficient
+estimates exactly uncorrelated, and it gives the group penalty the
+within-group orthonormal geometry that the group lasso assumes (Yuan
+&amp; Lin 2006, JRSS-B 68:49-67; Simon &amp; Tibshirani 2012, Statistica
+Sinica 22(3):983-1001 — orthonormalizing within the group is exactly
+equivalent to their standardized group lasso).</p>
+<p>The triangular factor of the weighted QR is stored as fitted state
+beside the min/max scaling.  <code>transform</code>/<code>score</code> push new x
+through the same seed basis and the <em>stored</em> factor — they never
+re-orthogonalize against new data or new weights.  Out-of-range x is
+plain polynomial evaluation on the scaled seed basis (unbounded
+growth); every orthogonality and uncorrelatedness statement is a
+property of the <em>training</em> measure only.</p>
+<p>Honest caveats:</p>
+<ul>
+<li>Exact uncorrelatedness of the per-power estimates holds under the
+  training weights (the fixed-weight/Gaussian world).  In a GLM it is
+  approximate at the IRLS working weights; no published result
+  quantifies that gap, and published group-penalty practice makes the
+  same fixed spherical approximation of the working Hessian (Simon &amp;
+  Tibshirani 2012, section 5.3).</li>
+<li>Dropping powers by their z-statistics is response-driven selection.
+  Validate out-of-fold, or state <code>powers</code> from the plan.</li>
+</ul>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>degree</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Maximum polynomial degree; sugar for <code>powers=range(1, degree+1)</code>.
+2 (quadratic) or 3 (cubic) are the standard insurance choices.
+Defaults to 3 when neither <code>degree</code> nor <code>powers</code> is given.
+Mutually exclusive with <em>powers</em>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>powers</code>
+            </td>
+            <td>
+                  <code>sequence of int</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Distinct integers &gt;= 1 naming the orthogonal components to keep,
+e.g. <code>powers=[1, 2, 4]</code>.  The orthogonal basis is built up to
+<code>max(powers)</code> and the stated components are selected, so under
+fixed weights dropping a middle power leaves the retained
+components' fitted coefficients unchanged.  Excluding "power 3"
+excludes the degree-3 <em>orthogonal component</em>, not the raw <code>x**3</code>
+monomial — on asymmetric exposure the degree-4 orthogonal
+polynomial carries <code>x**3</code> monomial content.  API precedent for
+a degree list: <code>numpy.polynomial.Polynomial.fit(deg=[...])</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<details class="note" open>
+  <summary>Notes</summary>
+  <p>Group size = <code>len(powers)</code>.  Columns are emitted in ascending power
+order and summary rows are labelled by the stated power.</p>
+<p>The QR-on-Legendre-seed build is the published standardized-group-
+lasso algorithm and is well conditioned at degree &lt;= 8 on min/max-
+scaled data.  If the degree ceiling ever rises, the upgrade path is
+the three-term recurrence for weighted discrete measures (Forsythe
+1957; Gautschi 2004, <em>Orthogonal Polynomials: Computation and
+Approximation</em>): store the recurrence coefficients instead of the
+triangular factor and evaluate new x by re-running the recurrence.</p>
+<p>The rank guard admits pivots down to 1e-10 of the largest (which is
+exactly 1 — the constant column under normalized weights), so a build
+just clearing it has cond(R) near 1e10 and its computed columns are
+orthonormal only to roughly eps * cond(R) ~ 1e-6: near the guard
+boundary the orthonormality and uncorrelatedness statements hold to
+that reduced precision, not machine precision.</p>
+</details>
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Polynomial.build" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">build</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.Polynomial.build" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Learn min/max and the weighted orthonormalization from <em>x</em>.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Polynomial.transform" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">transform</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></code>
+
+<a href="#superglm.Polynomial.transform" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Evaluate the fitted orthonormal components at new <em>x</em>.</p>
+<p>Pushes x through the stored min/max scaling, the Legendre seed,
+and the stored triangular factor.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Polynomial.score" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">score</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.Polynomial.score" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Score the fitted polynomial contribution directly on new data.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.Polynomial.reconstruct" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">reconstruct</span><span class="p">(</span><span class="n">beta</span><span class="p">,</span> <span class="n">n_points</span><span class="o">=</span><span class="mi">200</span><span class="p">)</span></code>
+
+<a href="#superglm.Polynomial.reconstruct" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Evaluate the fitted polynomial on a grid and return relativities.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div><h2 id="interaction-specs">Interaction Specs<a class="headerlink" href="#interaction-specs" title="Permanent link">&para;</a></h2>
+<p><code>FactorSmooth(variable, group=..., basis=..., kind=...)</code> separates two choices:</p>
+<ul>
+<li><code>basis="fs"</code> builds fully penalized random curves with shared wiggle and
+  null-space REML components. A global spline is optional.</li>
+<li><code>basis="sz"</code> builds pointwise sum-to-zero deviation curves with one shared
+  wiggle component. A matching global <code>Spline</code> is required.</li>
+<li><code>kind="ps"</code> selects the marginal P-spline basis for either construction.</li>
+</ul>
+<p>The grouping column must not also be configured as <code>Categorical</code> or
+<code>RandomEffect</code>; that would duplicate lower-order group geometry.</p>
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h3 id="superglm.FactorSmooth" class="doc doc-heading">
+            <code>FactorSmooth</code>
+
+
+<a href="#superglm.FactorSmooth" class="headerlink" title="Permanent link">&para;</a></h3>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>A factor-by-P-spline interaction.</p>
+<p><code>basis="fs"</code> is fully penalized and retains independent level curves.
+<code>basis="sz"</code> represents centered sum-to-zero deviations; its specialized
+geometry is populated by the design-matrix builder.</p>
+<p><code>levels=</code> binds the grouping column's level universe (spec 2026-08-11,
+§3.1).  Under <code>basis="fs"</code> a declared level with no training rows keeps
+its own curve block and shrinks to zero through the penalty.  <code>basis="sz"</code>
+rejects one: its sum-to-zero contrast is what identifies the deviations, and
+an empty level makes that constraint vacuous.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h4 id="superglm.FactorSmooth.parent_names" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">parent_names</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+<a href="#superglm.FactorSmooth.parent_names" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>The numeric marginal and grouping columns read by this interaction.</p>
+
+    </div>
+
+</div>
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.adopt_dtype_categories" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">adopt_dtype_categories</span><span class="p">(</span><span class="n">categories</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.adopt_dtype_categories" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Adopt a dtype-declared universe unless one is already declared.</p>
+<p>Not reached by the main-loop hooks this release: FactorSmooth lives in
+the interaction specs, and dm_builder/binding_ops bind main-loop
+features only. Declare <code>levels=</code> explicitly; this hook exists so the
+wiring lands in one place when interaction binding is added.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.apply_level_binding" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">apply_level_binding</span><span class="p">(</span><span class="n">binding</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.apply_level_binding" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Adopt a full-frame universe when nothing more specific declared one.</p>
+<p>Only the levels are read: a penalized term has no base level, so its
+bindings carry <code>base=None</code> and there is nothing to pin.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.resolve_binding" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">resolve_binding</span><span class="p">(</span><span class="n">values</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.resolve_binding" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Compute this spec's full-frame group binding without mutating the spec.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.build" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">build</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">group</span><span class="p">,</span> <span class="n">specs</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.build" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Build one exact compact factor-by-spline block.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.build_discrete" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">build_discrete</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">group</span><span class="p">,</span> <span class="n">specs</span><span class="p">,</span> <span class="n">n_bins</span><span class="p">,</span> <span class="n">sample_weight</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.build_discrete" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Build compact support-space geometry with a fixed natural basis.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.validate_population_prediction_values" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">validate_population_prediction_values</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">group</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.validate_population_prediction_values" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Validate rows for a population prediction that skips this deviation.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.validate_prediction_values" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">validate_prediction_values</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">group</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.validate_prediction_values" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Validate new rows and return the numeric marginal and fitted-level codes.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.marginal_basis" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">marginal_basis</span><span class="p">(</span><span class="n">x</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.marginal_basis" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Evaluate the fitted natural marginal basis on requested numeric values.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.score" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">score</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">group</span><span class="p">,</span> <span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.score" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Score fitted level-specific deviations without expanding factor geometry.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.transform" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">transform</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">group</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.transform" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Materialize a small prediction matrix for compatibility and references.</p>
+
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="superglm.FactorSmooth.reconstruct" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">reconstruct</span><span class="p">(</span><span class="n">beta</span><span class="p">)</span></code>
+
+<a href="#superglm.FactorSmooth.reconstruct" class="headerlink" title="Permanent link">&para;</a></h4>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return fitted natural-basis coefficients by level.</p>
+
+
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

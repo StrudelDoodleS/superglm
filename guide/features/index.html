@@ -1,0 +1,3026 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+        <link rel="prev" href="../fitting/">
+      
+      
+        <link rel="next" href="../credibility/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Feature Types - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#feature-types" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Feature Types
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#splines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Splines
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Splines">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#which-spline-kind-to-choose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which spline kind to choose
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#knot-strategies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Knot strategies
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#selecttrue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        select=True
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multi-order-penalties-with-m" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-order penalties with m=
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#monotone-splines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monotone Splines
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#polynomial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Polynomial
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#piecewise" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Piecewise
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Piecewise">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-hinge-composition-curvature-plus-a-stated-corner" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The hinge composition (curvature plus a stated corner)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#categorical" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Categorical
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Categorical">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-level-universe" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The level universe
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#levels-with-no-training-rows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Levels with no training rows
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unseen-levels-at-predict-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unseen levels at predict time
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cv-and-level-universes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CV and level universes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#true-holdouts-and-level-universes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        True holdouts and level universes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#collapsing-sparse-levels" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Collapsing Sparse Levels
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Collapsing Sparse Levels">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#where-a-merged-group-sits-on-an-ordered-axis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where a merged group sits on an ordered axis
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#randomeffect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RandomEffect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#orderedcategorical" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OrderedCategorical
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OrderedCategorical">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#choosing-the-shape-on-a-band-axis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing the shape on a band axis
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#free-levels-specials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Free levels (specials=)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#numeric" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numeric
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../screening-evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#splines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Splines
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Splines">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#which-spline-kind-to-choose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Which spline kind to choose
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#knot-strategies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Knot strategies
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#selecttrue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        select=True
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#multi-order-penalties-with-m" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-order penalties with m=
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#monotone-splines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Monotone Splines
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#polynomial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Polynomial
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#piecewise" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Piecewise
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Piecewise">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-hinge-composition-curvature-plus-a-stated-corner" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The hinge composition (curvature plus a stated corner)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#categorical" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Categorical
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Categorical">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-level-universe" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The level universe
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#levels-with-no-training-rows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Levels with no training rows
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unseen-levels-at-predict-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unseen levels at predict time
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cv-and-level-universes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CV and level universes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#true-holdouts-and-level-universes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        True holdouts and level universes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#collapsing-sparse-levels" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Collapsing Sparse Levels
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Collapsing Sparse Levels">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#where-a-merged-group-sits-on-an-ordered-axis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where a merged group sits on an ordered axis
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#randomeffect" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RandomEffect
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#orderedcategorical" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OrderedCategorical
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OrderedCategorical">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#choosing-the-shape-on-a-band-axis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing the shape on a band axis
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#free-levels-specials" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Free levels (specials=)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#numeric" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numeric
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#interactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interactions
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="feature-types">Feature Types<a class="headerlink" href="#feature-types" title="Permanent link">&para;</a></h1>
+<p>Choose the simplest feature type that matches the shape you want in the final
+pricing model.</p>
+<h2 id="splines">Splines<a class="headerlink" href="#splines" title="Permanent link">&para;</a></h2>
+<p><code>Spline(kind, k)</code> is the main public spline API. <code>k</code> is the public basis size
+in the mgcv sense; the fitted smooth then absorbs the identifiability
+constraint.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;ps&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">14</span><span class="p">)</span>                   <span class="c1"># default P-spline choice</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;bs&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">14</span><span class="p">)</span>                   <span class="c1"># integrated-derivative B-spline smooth</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>                   <span class="c1"># cubic regression spline</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;ns&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>                   <span class="c1"># natural spline</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;ps&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">14</span><span class="p">,</span> <span class="n">select</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>      <span class="c1"># REML + double-penalty shrinkage</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">12</span><span class="p">,</span> <span class="n">m</span><span class="o">=</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>         <span class="c1"># multi-order penalty</span>
+</code></pre></div>
+<h3 id="which-spline-kind-to-choose">Which spline kind to choose<a class="headerlink" href="#which-spline-kind-to-choose" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Use when</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"ps"</code></td>
+<td>default pricing spline</td>
+<td>P-spline with difference penalty</td>
+</tr>
+<tr>
+<td><code>"bs"</code></td>
+<td>you want a proper B-spline smooth / mgcv-style <code>bs</code> basis</td>
+<td>integrated-derivative penalty on the same raw B-spline geometry</td>
+</tr>
+<tr>
+<td><code>"cr"</code></td>
+<td>you want a cubic regression spline / mgcv-style <code>cr</code> basis</td>
+<td>natural boundary constraints plus identifiability</td>
+</tr>
+<tr>
+<td><code>"ns"</code></td>
+<td>you want a natural spline with fixed natural boundaries</td>
+<td>does not support monotone fitting</td>
+</tr>
+</tbody>
+</table>
+<h3 id="knot-strategies">Knot strategies<a class="headerlink" href="#knot-strategies" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"uniform"</code></td>
+<td>evenly spaced interior knots</td>
+</tr>
+<tr>
+<td><code>"quantile_rows"</code></td>
+<td>more knots where the training data is dense</td>
+</tr>
+<tr>
+<td><code>"quantile_tempered"</code></td>
+<td>blend between uniform and quantile placement</td>
+</tr>
+</tbody>
+</table>
+<p><code>quantile_tempered</code> with a small <code>knot_alpha</code> is often a good pricing default
+for skewed variables like Bonus-Malus.</p>
+<h3 id="selecttrue"><code>select=True</code><a class="headerlink" href="#selecttrue" title="Permanent link">&para;</a></h3>
+<p><code>select=True</code> adds mgcv-style double-penalty shrinkage to the spline term. This
+is the REML-native way to let a smooth shrink toward linear or zero while
+staying in the <code>fit_reml()</code> workflow.</p>
+<h3 id="multi-order-penalties-with-m">Multi-order penalties with <code>m=</code><a class="headerlink" href="#multi-order-penalties-with-m" title="Permanent link">&para;</a></h3>
+<p><code>m</code> can be a single integer or a tuple. With a tuple, the spline emits
+multiple penalty components on the same coefficient block, each with its own
+REML smoothing parameter.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">12</span><span class="p">,</span> <span class="n">m</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">12</span><span class="p">,</span> <span class="n">m</span><span class="o">=</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">))</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;ps&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">14</span><span class="p">,</span> <span class="n">m</span><span class="o">=</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">))</span>
+</code></pre></div>
+<p>Current limitations:</p>
+<ul>
+<li><code>select=True + m=(...)</code> is supported for tuples allowed by the selected
+  spline class (for example, <code>m=(1, 2)</code> for P-splines and cubic regression
+  splines). It produces separate null-space and derivative-order penalty
+  components, each with its own REML lambda. Per-class order limits still
+  apply.</li>
+<li>tensor interactions with multi-order spline parents are not yet supported</li>
+<li><code>kind="cr_cardinal"</code> currently supports only <code>m=2</code></li>
+</ul>
+<h2 id="monotone-splines">Monotone Splines<a class="headerlink" href="#monotone-splines" title="Permanent link">&para;</a></h2>
+<p>If monotonicity is part of the model specification, prefer solver-backed
+monotone fitting rather than post-fit repair.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">BSplineSmooth</span><span class="p">,</span> <span class="n">Constraint</span><span class="p">,</span> <span class="n">CubicRegressionSpline</span><span class="p">,</span> <span class="n">PSpline</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">BSplineSmooth</span><span class="p">(</span><span class="n">n_knots</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">constraint</span><span class="o">=</span><span class="n">Constraint</span><span class="o">.</span><span class="n">fit</span><span class="o">.</span><span class="n">increasing</span><span class="p">)</span>   <span class="c1"># QP</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">CubicRegressionSpline</span><span class="p">(</span><span class="n">n_knots</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">constraint</span><span class="o">=</span><span class="n">Constraint</span><span class="o">.</span><span class="n">fit</span><span class="o">.</span><span class="n">decreasing</span><span class="p">)</span>  <span class="c1"># QP</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">PSpline</span><span class="p">(</span><span class="n">n_knots</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">constraint</span><span class="o">=</span><span class="n">Constraint</span><span class="o">.</span><span class="n">fit</span><span class="o">.</span><span class="n">increasing</span><span class="p">)</span>        <span class="c1"># SCOP</span>
+</code></pre></div>
+<p>See <a href="../monotone/">Monotone Splines</a> for the full decision guide.</p>
+<h2 id="polynomial">Polynomial<a class="headerlink" href="#polynomial" title="Permanent link">&para;</a></h2>
+<p>Orthogonal polynomials are a good option when the shape is simple and stable.
+The basis is orthonormalized against the training <code>sample_weight</code>, so the
+per-power coefficient estimates are uncorrelated (exactly under fixed weights,
+approximately at the IRLS working weights) and the classic "is the cubic
+needed?" drop test reads cleanly from the per-power z-statistics. When exposure
+enters through an offset (<code>offset=np.log(exposure)</code>, the documented count
+workflow) <code>sample_weight</code> stays at ones, so the basis is orthonormalized
+against the row-count measure.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">Polynomial</span><span class="p">(</span><span class="n">degree</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>            <span class="c1"># common quadratic pricing curve</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">Polynomial</span><span class="p">(</span><span class="n">degree</span><span class="o">=</span><span class="mi">3</span><span class="p">)</span>            <span class="c1"># cubic</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">Polynomial</span><span class="p">(</span><span class="n">powers</span><span class="o">=</span><span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">4</span><span class="p">])</span>    <span class="c1"># keep the linear, quadratic and quartic components</span>
+</code></pre></div>
+<p><code>powers=</code> selects orthogonal <em>components</em>: the basis is built up to
+<code>max(powers)</code> and the stated components are kept, so under fixed weights
+dropping a middle power leaves the retained coefficients unchanged. Excluding
+power 3 excludes the degree-3 orthogonal component, not the raw <code>x**3</code>
+monomial. Dropping powers by their z-statistics is response-driven selection —
+validate out-of-fold or state the powers from the plan. The standardization is
+a main-effect property: interaction blocks built from polynomial margins are
+products of components and are not themselves weight-orthonormal.</p>
+<h2 id="piecewise">Piecewise<a class="headerlink" href="#piecewise" title="Permanent link">&para;</a></h2>
+<p><code>Piecewise(breaks=[...])</code> fits a continuous kinked line on stated breakpoints:
+one coefficient per knot, each the log relativity of that knot against the
+base knot. Free joins are already a binned <code>Categorical</code> and smooth joins are
+already a <code>Spline</code>; this is the remaining cell — continuous, deliberately not
+smooth, with every kink a stated, testable input.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">Piecewise</span><span class="p">(</span><span class="n">breaks</span><span class="o">=</span><span class="p">[</span><span class="mi">3000</span><span class="p">,</span> <span class="mi">6000</span><span class="p">,</span> <span class="mi">12000</span><span class="p">])</span>   <span class="c1"># stated kinks — the filed form</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">Piecewise</span><span class="p">(</span><span class="n">breaks</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>                     <span class="c1"># exploratory: weighted-quantile placement</span>
+</code></pre></div>
+<p>Because the breaks are <em>inputs</em>, the design stays linear in every parameter
+and each per-knot Wald row is ordinary regression inference — none of the
+estimated-breakpoint machinery (Muggeo 2003, <em>Stat. Med.</em> 22:3055–3071) is
+needed, and none of its corrections apply.</p>
+<p>On the numeric axis a <code>Piecewise</code> is deliberately degree-1 only: the exported
+knot rows <em>are</em> the model under linear interpolation, so the workbook alone
+reproduces every prediction exactly. Any higher degree would break that
+workbook-alone contract, so a numeric-axis <code>degrees=</code> other than all-1 refuses
+loudly. Higher-degree shapes on a numeric axis belong to <code>Spline</code>, or to the
+composition below.</p>
+<h3 id="the-hinge-composition-curvature-plus-a-stated-corner">The hinge composition (curvature plus a stated corner)<a class="headerlink" href="#the-hinge-composition-curvature-plus-a-stated-corner" title="Permanent link">&para;</a></h3>
+<p>To combine a smooth body with a stated corner at <code>c</code> — the cap-then-flat and
+curve-then-straight shapes banded factors keep wanting — compose two terms on
+transformed columns instead of reaching for a segmented numeric basis:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="n">X</span> <span class="o">=</span> <span class="n">X</span><span class="o">.</span><span class="n">assign</span><span class="p">(</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="n">age_body</span><span class="o">=</span><span class="n">X</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">clip</span><span class="p">(</span><span class="n">upper</span><span class="o">=</span><span class="mi">60</span><span class="p">),</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>    <span class="n">age_tail</span><span class="o">=</span><span class="n">X</span><span class="p">[</span><span class="s2">&quot;age&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">clip</span><span class="p">(</span><span class="n">lower</span><span class="o">=</span><span class="mi">60</span><span class="p">),</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="p">)</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="n">family</span><span class="o">=</span><span class="s2">&quot;poisson&quot;</span><span class="p">,</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    <span class="n">selection_penalty</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span>
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    <span class="n">features</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>        <span class="s2">&quot;age_body&quot;</span><span class="p">:</span> <span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">n_knots</span><span class="o">=</span><span class="mi">6</span><span class="p">),</span>   <span class="c1"># smooth below the corner</span>
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>        <span class="s2">&quot;age_tail&quot;</span><span class="p">:</span> <span class="n">Piecewise</span><span class="p">(</span><span class="n">breaks</span><span class="o">=</span><span class="p">[</span><span class="mi">70</span><span class="p">]),</span>         <span class="c1"># kinked line above it</span>
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    <span class="p">},</span>
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="p">)</span>
+</code></pre></div>
+<p>Value continuity at <code>c</code> is structural (both terms are flat past their own
+range), the kink at <code>c</code> is an estimated, testable contrast, and the penalties
+stay block-separate. The device is the additive hinge basis of MARS —
+reflected pairs of one-sided truncated power functions (Friedman 1991,
+"Multivariate Adaptive Regression Splines", <em>Ann. Statist.</em> 19(1):1–67) —
+with the knot stated rather than searched. A C¹ seam between the blocks would
+need a cross-block constraint and is out of scope; if the join must be smooth,
+use one <code>Spline</code> with stated knots instead.</p>
+<h2 id="categorical">Categorical<a class="headerlink" href="#categorical" title="Permanent link">&para;</a></h2>
+<p>Categoricals are one-hot encoded with a reference level. The entire factor is
+treated as one group for selection and inference.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">Categorical</span><span class="p">(</span><span class="n">base</span><span class="o">=</span><span class="s2">&quot;most_exposed&quot;</span><span class="p">)</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">Categorical</span><span class="p">(</span><span class="n">base</span><span class="o">=</span><span class="s2">&quot;first&quot;</span><span class="p">)</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">Categorical</span><span class="p">(</span><span class="n">base</span><span class="o">=</span><span class="s2">&quot;B&quot;</span><span class="p">)</span>
+</code></pre></div>
+<h3 id="the-level-universe">The level universe<a class="headerlink" href="#the-level-universe" title="Permanent link">&para;</a></h3>
+<p>A <code>Categorical</code> fits the levels it was <em>bound</em> to, not "the levels this
+training slice happened to contain". Four sources bind that universe, in
+precedence order:</p>
+<ol>
+<li><strong><code>levels=</code> on the term</strong> — the stated universe.</li>
+<li><strong>The column dtype</strong> — a <code>pd.CategoricalDtype</code> (or a polars <code>Enum</code>) carries
+   its declared categories through the frame boundary.</li>
+<li><strong>A full frame</strong> — <code>model.bind_levels(df)</code>, or <code>cross_validate</code> doing the
+   same pass on its own input, resolved once and before any split.</li>
+<li><strong>The training data</strong> — per-fit inference, the historical fallback, still
+   what a plain <code>fit</code> on a plain object column does.</li>
+</ol>
+<p><code>levels=</code> accepts exactly three shapes:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">Categorical</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="n">Categorical</span><span class="p">(</span><span class="n">levels</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;A&quot;</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">,</span> <span class="s2">&quot;E&quot;</span><span class="p">,</span> <span class="s2">&quot;F&quot;</span><span class="p">])</span>                        <span class="c1"># a list or tuple</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="n">Categorical</span><span class="p">(</span><span class="n">levels</span><span class="o">=</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;Area&quot;</span><span class="p">])</span>                                  <span class="c1"># a Series or array</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="n">Categorical</span><span class="p">(</span><span class="n">levels</span><span class="o">=</span><span class="n">pd</span><span class="o">.</span><span class="n">CategoricalDtype</span><span class="p">([</span><span class="s2">&quot;A&quot;</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">,</span> <span class="s2">&quot;E&quot;</span><span class="p">,</span> <span class="s2">&quot;F&quot;</span><span class="p">]))</span>   <span class="c1"># a dtype</span>
+</code></pre></div>
+<p>A list or tuple <em>is</em> the universe, in the order given, so <code>base="first"</code> means
+first-declared. A Series or array of plain object data contributes its sorted
+uniques; a Series of <em>categorical</em> data contributes the dtype's declared
+categories in dtype order, which is how a level that exists but was not sampled
+still gets counted. A <code>CategoricalDtype</code> contributes its <code>.categories</code>. Labels
+must be unique, and a <code>NaN</code> anywhere in the source is an error — a level cannot
+be missing.</p>
+<p>An already-fitted encoder's vocabulary is a plain array, so pass it directly:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.preprocessing</span><span class="w"> </span><span class="kn">import</span> <span class="n">OneHotEncoder</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">encoder</span> <span class="o">=</span> <span class="n">OneHotEncoder</span><span class="p">()</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">df</span><span class="p">[[</span><span class="s2">&quot;Area&quot;</span><span class="p">]])</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">area</span> <span class="o">=</span> <span class="n">Categorical</span><span class="p">(</span><span class="n">levels</span><span class="o">=</span><span class="n">encoder</span><span class="o">.</span><span class="n">categories_</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+</code></pre></div>
+<p>The encoder object itself is not a level source, and neither is
+<code>pd.get_dummies</code> output: recovering a vocabulary by parsing dummy column names
+is exactly the brittle step this argument exists to remove. Pre-one-hot-encoded
+input is not accepted either — it bypasses the base level, the exposure
+weighting, <code>grouping=</code>, and every other term-level semantic.</p>
+<p>Typing the column once is the alternative to stating the universe on every term
+that reads it: a bare <code>Categorical()</code> then carries the full universe, and so
+does every interaction built on it.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">area_levels</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">CategoricalDtype</span><span class="p">([</span><span class="s2">&quot;A&quot;</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">,</span> <span class="s2">&quot;E&quot;</span><span class="p">,</span> <span class="s2">&quot;F&quot;</span><span class="p">])</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="n">df</span> <span class="o">=</span> <span class="n">df</span><span class="o">.</span><span class="n">assign</span><span class="p">(</span><span class="n">Area</span><span class="o">=</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;Area&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">area_levels</span><span class="p">))</span>
+</code></pre></div>
+<p><strong>This changes what an existing categorical-dtype column does.</strong> The frame
+boundary used to flatten such a column and discard its declared categories, so
+typing the universe bought nothing and said nothing. Those categories now bind:
+refitting on a column typed this way can produce pinned levels and the warning
+that names them, and the level table gains their rows. Nothing changes for a
+plain object column with no <code>levels=</code> — that path still infers per fit and
+raises the same error on an unseen level at predict time.</p>
+<h3 id="levels-with-no-training-rows">Levels with no training rows<a class="headerlink" href="#levels-with-no-training-rows" title="Permanent link">&para;</a></h3>
+<p>A bound level that no training row carries — or that only zero-weight rows
+carry — is <strong>pinned to base</strong> rather than rejected. No design column is emitted
+for it (so no all-zero column and no rank-deficiency roulette), one warning
+names it and the term, and its rows predict as the base level. It stays a
+<em>known</em> level: <code>reconstruct()</code> reports it at relativity 1.0 and the summary
+gives it a row whose <code>Fit</code> column reads <code>pinned</code>.</p>
+<p>Training rows <em>outside</em> a bound universe are the opposite case and a hard
+error. You declared the world; data exceeding it is a data bug, never something
+to group or drop silently.</p>
+<p>If the declared <code>base=</code> is the empty one, intercept and dummy sum would be
+collinear, so the base falls back deterministically — to the most-exposed
+observed level, or to the first observed level in universe order when
+unweighted — with a loud warning. Coefficient identity moves; predictions do
+not, and the swap is recorded in the summary.</p>
+<h3 id="unseen-levels-at-predict-time">Unseen levels at predict time<a class="headerlink" href="#unseen-levels-at-predict-time" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">Categorical</span><span class="p">(</span><span class="n">levels</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;A&quot;</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">,</span> <span class="s2">&quot;E&quot;</span><span class="p">,</span> <span class="s2">&quot;F&quot;</span><span class="p">])</span>                    <span class="c1"># unseen level -&gt; error</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="n">Categorical</span><span class="p">(</span><span class="n">levels</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;A&quot;</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">,</span> <span class="s2">&quot;E&quot;</span><span class="p">,</span> <span class="s2">&quot;F&quot;</span><span class="p">],</span> <span class="n">unseen</span><span class="o">=</span><span class="s2">&quot;base&quot;</span><span class="p">)</span>     <span class="c1"># unseen level -&gt; base</span>
+</code></pre></div>
+<p><code>unseen="error"</code> is the default and keeps the historical <code>ValueError</code>. No
+data-derived universe is ever complete against production, so <code>unseen="base"</code>
+is the opt-in policy for that: rows carrying a level outside the universe
+predict as the base level, and one warning per <code>predict</code> call names the novel
+levels and how many rows they cover. It is deliberately never silent — a routed
+row is indistinguishable from a genuine base row in the output, so the warning
+is the only record that it happened.</p>
+<h3 id="cv-and-level-universes">CV and level universes<a class="headerlink" href="#cv-and-level-universes" title="Permanent link">&para;</a></h3>
+<p><code>cross_validate</code> resolves the universe for every categorical-family term that
+does not already have one on the <strong>full</strong> frame before splitting, resolves
+<code>base="most_exposed"</code> once there too, and stamps both onto every fold. <strong>CV
+scores therefore change wherever folds used to fail</strong>: a level landing only in
+one fold's test rows previously raised at predict time and, under the default
+<code>error_score</code>, left that fold warned about and NaN-scored. It now completes,
+and every fold reports the same base, so per-fold coefficients are comparable.
+Sharing the level <em>set</em> across folds is R factor semantics — the
+vocabulary is a property of the column, not of the training subset — and moves
+no target information between folds. Everything that legitimately depends on
+training rows (knots, penalty scaling, coefficients) still binds per fold.</p>
+<p>For a filed model, state it on the term anyway: <code>levels=</code> plus an explicit
+<code>base=</code> makes the term completely data-independent, so the same spec builds the
+same design on any slice, in any order, at any refresh.</p>
+<h3 id="true-holdouts-and-level-universes">True holdouts and level universes<a class="headerlink" href="#true-holdouts-and-level-universes" title="Permanent link">&para;</a></h3>
+<p><code>cross_validate</code> binds from the frame <em>it</em> is given, so a train/val/test carve
+made before any CV needs the universe supplied from the outermost frame.
+<code>bind_levels</code> is that pass, called by hand:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.model_selection</span><span class="w"> </span><span class="kn">import</span> <span class="n">train_test_split</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">Categorical</span><span class="p">,</span> <span class="n">SuperGLM</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span><span class="n">family</span><span class="o">=</span><span class="s2">&quot;poisson&quot;</span><span class="p">,</span> <span class="n">features</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;Area&quot;</span><span class="p">:</span> <span class="n">Categorical</span><span class="p">()})</span><span class="o">.</span><span class="n">bind_levels</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="n">train</span><span class="p">,</span> <span class="n">test</span> <span class="o">=</span> <span class="n">train_test_split</span><span class="p">(</span><span class="n">df</span><span class="p">,</span> <span class="n">test_size</span><span class="o">=</span><span class="mf">0.2</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="n">model</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">train</span><span class="o">.</span><span class="n">drop</span><span class="p">(</span><span class="n">columns</span><span class="o">=</span><span class="s2">&quot;ClaimNb&quot;</span><span class="p">),</span> <span class="n">train</span><span class="p">[</span><span class="s2">&quot;ClaimNb&quot;</span><span class="p">])</span>
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="n">model</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">test</span><span class="o">.</span><span class="n">drop</span><span class="p">(</span><span class="n">columns</span><span class="o">=</span><span class="s2">&quot;ClaimNb&quot;</span><span class="p">))</span>
+</code></pre></div>
+<p>Bind on the <strong>full</strong> frame, before the split. Every later fit — on any slice,
+in any order — then shares one universe and one base identity, so a level
+living only in the test rows is a known, pinned level instead of a predict-time
+error, and coefficients from two slices are comparable. This is
+fit-the-encoder-on-the-full-data, minus the encoder object: the vocabulary is
+read once and stored on the term, and no encoded matrix ever leaves the model.</p>
+<p>Only columns the model's features reference are scanned, and a feature column
+missing from the frame is an immediate error. Precedence is unchanged —
+<code>levels=</code> and a dtype-declared universe both outrank the binding, which fills
+gaps and pins an unresolved <code>base="most_exposed"</code>. A frame value outside a
+term's <em>declared</em> universe fails right here, with the same error the fit would
+have raised, just earlier and louder. Calling <code>bind_levels</code> again replaces the
+stored bindings.</p>
+<p><code>cross_validate</code> respects what is already bound: run it on the training slice
+and its own pre-pass fills only the terms <code>bind_levels</code> did not reach, so every
+fold keeps the full-frame universe.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">sklearn.model_selection</span><span class="w"> </span><span class="kn">import</span> <span class="n">KFold</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">cross_validate</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span><span class="n">family</span><span class="o">=</span><span class="s2">&quot;poisson&quot;</span><span class="p">,</span> <span class="n">features</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;Area&quot;</span><span class="p">:</span> <span class="n">Categorical</span><span class="p">()})</span><span class="o">.</span><span class="n">bind_levels</span><span class="p">(</span><span class="n">df</span><span class="p">)</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="n">result</span> <span class="o">=</span> <span class="n">cross_validate</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">train</span><span class="p">,</span> <span class="n">train</span><span class="p">[</span><span class="s2">&quot;ClaimNb&quot;</span><span class="p">],</span> <span class="n">cv</span><span class="o">=</span><span class="n">KFold</span><span class="p">(</span><span class="mi">5</span><span class="p">))</span>
+</code></pre></div>
+<h3 id="collapsing-sparse-levels">Collapsing Sparse Levels<a class="headerlink" href="#collapsing-sparse-levels" title="Permanent link">&para;</a></h3>
+<p><code>collapse_levels(...)</code> lets you merge sparse levels for fitting while keeping
+the mapping back to original levels for inference and plotting.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">Categorical</span><span class="p">,</span> <span class="n">collapse_levels</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="n">grouping</span> <span class="o">=</span> <span class="n">collapse_levels</span><span class="p">(</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;Area&quot;</span><span class="p">],</span> <span class="n">groups</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;Rural&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;E&quot;</span><span class="p">,</span> <span class="s2">&quot;F&quot;</span><span class="p">]})</span>
+<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="n">area</span> <span class="o">=</span> <span class="n">Categorical</span><span class="p">(</span><span class="n">base</span><span class="o">=</span><span class="s2">&quot;most_exposed&quot;</span><span class="p">,</span> <span class="n">grouping</span><span class="o">=</span><span class="n">grouping</span><span class="p">)</span>
+</code></pre></div>
+<p>This is useful when a tariff factor has many thin levels but you still want a
+single grouped factor inside the model. Interaction terms and interaction
+screening use the same mapping: pass original labels at fit and predict time,
+and each grouped interaction is built in the collapsed level geometry.</p>
+<p>With a <code>grouping</code>, <code>levels=</code> declares the <strong>raw</strong>, pre-collapse universe, and
+the grouping must cover every declared level or the build errors — a declared
+level quietly falling through to itself is the silent identity mapping the
+declaration exists to prevent. A grouping built from the full column, as above,
+covers by construction.</p>
+<h4 id="where-a-merged-group-sits-on-an-ordered-axis">Where a merged group sits on an ordered axis<a class="headerlink" href="#where-a-merged-group-sits-on-an-ordered-axis" title="Permanent link">&para;</a></h4>
+<p><code>OrderedCategorical</code> puts every level at a numeric coordinate — the <code>values=</code>
+you declare, or an even spacing over <code>order=</code> — and the inner basis is evaluated
+there. <strong>A merged group sits at the mean of its members' coordinates</strong>,
+whatever the group is called. Naming the group after one of its members,
+<code>groups={"Mi001": ["Mi001", "Mi002"]}</code>, is a convenient way to keep the
+surviving label stable in a rating table and does <em>not</em> pin the group to
+<code>Mi001</code>'s own coordinate; a label names a table row, and renaming a group never
+changes the fit.</p>
+<p>To put a group somewhere else, say so in <code>values=</code> — give its members the
+coordinate you want, and the mean of equal values is that value exactly:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">OrderedCategorical</span><span class="p">,</span> <span class="n">Spline</span><span class="p">,</span> <span class="n">collapse_levels</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="n">order</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;A&quot;</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">,</span> <span class="s2">&quot;C&quot;</span><span class="p">,</span> <span class="s2">&quot;D&quot;</span><span class="p">]</span>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="n">grouping</span> <span class="o">=</span> <span class="n">collapse_levels</span><span class="p">(</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;BonusClass&quot;</span><span class="p">],</span> <span class="n">groups</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;B&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;B&quot;</span><span class="p">,</span> <span class="s2">&quot;C&quot;</span><span class="p">]},</span> <span class="n">order</span><span class="o">=</span><span class="n">order</span><span class="p">)</span>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="c1"># B and C share B&#39;s coordinate, so their group sits exactly there</span>
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="n">values</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;A&quot;</span><span class="p">:</span> <span class="mf">0.0</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">:</span> <span class="mf">0.1</span><span class="p">,</span> <span class="s2">&quot;C&quot;</span><span class="p">:</span> <span class="mf">0.1</span><span class="p">,</span> <span class="s2">&quot;D&quot;</span><span class="p">:</span> <span class="mf">0.3</span><span class="p">}</span>
+<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="n">bonus_class</span> <span class="o">=</span> <span class="n">OrderedCategorical</span><span class="p">(</span>
+<a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a>    <span class="n">values</span><span class="o">=</span><span class="n">values</span><span class="p">,</span> <span class="n">basis</span><span class="o">=</span><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">n_knots</span><span class="o">=</span><span class="mi">2</span><span class="p">),</span> <span class="n">grouping</span><span class="o">=</span><span class="n">grouping</span>
+<a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a><span class="p">)</span>
+</code></pre></div>
+<p>A <code>Piecewise</code> or <code>Polynomial</code> inner basis is different: it evaluates on level
+<em>positions</em> <code>0..L-1</code>, where a group is one band with one position and the
+question does not arise.</p>
+<h2 id="randomeffect">RandomEffect<a class="headerlink" href="#randomeffect" title="Permanent link">&para;</a></h2>
+<p><code>RandomEffect()</code> gives every observed factor level a penalized intercept. REML
+estimates the shared variance component, so thin levels shrink more strongly
+toward the portfolio prediction than thick levels.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="n">RandomEffect</span><span class="p">()</span>                              <span class="c1"># unseen levels use the population prediction</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="n">RandomEffect</span><span class="p">(</span><span class="n">unseen</span><span class="o">=</span><span class="s2">&quot;error&quot;</span><span class="p">)</span>                <span class="c1"># fail on an unseen level</span>
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="n">RandomEffect</span><span class="p">(</span><span class="n">levels</span><span class="o">=</span><span class="n">df</span><span class="p">[</span><span class="s2">&quot;Region&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">unique</span><span class="p">())</span>  <span class="c1"># bind the level universe</span>
+</code></pre></div>
+<p>It is the SuperGLM analogue of mgcv's <code>s(group, bs="re")</code>. Unlike
+<code>Categorical</code>, it retains every level rather than choosing a reference level,
+and it requires <code>fit_reml()</code>. See <a href="../credibility/">Credibility terms</a> for
+reporting, prediction, and a real insurance example.</p>
+<p><code>levels=</code> takes the same three source shapes as <code>Categorical</code>, and the dtype
+and full-frame channels apply here too. A penalized term needs no pin: a
+declared level with no training rows shrinks all the way to the population
+value through its own penalty, exactly as an empty stretch of a numeric spline
+is bridged, so it gets a coefficient rather than a warning. <code>FactorSmooth</code>
+takes the same argument, with one exception — <code>basis="sz"</code> refuses an empty
+declared level, because its sum-to-zero contrast stops identifying the
+deviations once a level carries nothing.</p>
+<h2 id="orderedcategorical">OrderedCategorical<a class="headerlink" href="#orderedcategorical" title="Permanent link">&para;</a></h2>
+<p>Use <code>OrderedCategorical(...)</code> when a factor has a real order and you want a
+smooth effect across levels. Level positions are equally spaced unless you
+provide an explicit <code>values={level: position}</code> mapping.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">OrderedCategorical</span><span class="p">(</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>    <span class="n">order</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;A&quot;</span><span class="p">,</span> <span class="s2">&quot;B&quot;</span><span class="p">,</span> <span class="s2">&quot;C&quot;</span><span class="p">,</span> <span class="s2">&quot;D&quot;</span><span class="p">],</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>    <span class="n">basis</span><span class="o">=</span><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;ps&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">6</span><span class="p">),</span>
+<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="p">)</span>
+</code></pre></div>
+<p><code>basis=</code> is the only configuration channel and takes the shape itself — a
+<code>Spline(...)</code>, a <code>Piecewise(...)</code>, or a <code>Polynomial(...)</code> object; omitting
+<code>basis</code> keeps the default P-spline (<code>kind="ps"</code>, <code>n_knots=5</code>). The legacy
+<code>basis="spline"</code> string, the spline shortcut arguments (<code>kind=</code>, <code>n_knots=</code>,
+<code>degree=</code>, <code>select=</code>, <code>penalty=</code>), and step smoothing with <code>basis="step"</code> were
+removed in 0.24.0 — configure the shape on <code>basis=</code>, or use <code>Categorical(...)</code>
+for independent level effects.</p>
+<p>With <code>basis=Spline(...)</code>, inference follows the spline model, not a saturated
+categorical model. The summary reports one Wood-style whole-smooth p-value for
+the ordered term; its null hypothesis is that the smooth contributes no
+variation after centering. Per-level rows are base-relative effect estimates
+with standard errors and confidence intervals, but deliberately have no
+p-values or significance codes. Changing the reporting base therefore changes
+the displayed level contrasts, not the whole-smooth p-value.</p>
+<h3 id="choosing-the-shape-on-a-band-axis">Choosing the shape on a band axis<a class="headerlink" href="#choosing-the-shape-on-a-band-axis" title="Permanent link">&para;</a></h3>
+<p>Every option states structure in band vocabulary; pick by what you are
+prepared to defend:</p>
+<ul>
+<li><strong>Smooth, with knots at stated bands</strong> — <code>Spline(knots=["Mi060", "Mi066"])</code>.
+  A spline <em>is</em> the C¹ piecewise polynomial, so smooth-at-stated-breaks needs
+  no new device: each knot name resolves to the named level's <em>value</em> on the
+  smooth's axis, so names and numeric entries live on one scale.</li>
+<li><strong>A corner you can test</strong> — <code>Piecewise(breaks=["Mi060", "Mi066"])</code>. Stated
+  kinks, no smoothing penalty, one summary row per break answering "do I need
+  this kink?". Integer positions are the escape hatch for unnamed axes.</li>
+<li><strong>No breaks, one global shape</strong> — <code>Polynomial(powers=[1, 2])</code>: the classical
+  orthogonal ordinal contrasts (<code>contr.poly</code>'s device) on the level positions,
+  orthonormalized against the training exposure, one clean-z row per stated
+  power. Classical trend practice keeps lower-order contrasts under a
+  significant higher one (the hierarchical convention); <code>powers=</code> deliberately
+  allows non-contiguous subsets, each component individually in or out.</li>
+<li><strong>Segmented curves</strong> — <code>Piecewise(breaks=[...], degrees=[...])</code>, one degree
+  per segment: the classical grafted/segmented polynomial (Gallant &amp; Fuller
+  1973, <em>JASA</em> 68:144–147) with value-continuous seams.</li>
+<li><strong>A grouped tail</strong> — degree <code>0</code>: the plateau model (Anderson &amp; Nelson 1975,
+  <em>Biometrics</em> 31:303–318). <code>degrees=[2, 1, 0]</code> reads "curved, then straight,
+  then flat".</li>
+</ul>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="n">mileage_bands</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;Mi006&quot;</span><span class="p">,</span> <span class="s2">&quot;Mi030&quot;</span><span class="p">,</span> <span class="s2">&quot;Mi060&quot;</span><span class="p">,</span> <span class="s2">&quot;Mi090&quot;</span><span class="p">,</span> <span class="s2">&quot;Mi120&quot;</span><span class="p">,</span> <span class="s2">&quot;Mi180&quot;</span><span class="p">]</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="n">OrderedCategorical</span><span class="p">(</span>
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>    <span class="n">order</span><span class="o">=</span><span class="n">mileage_bands</span><span class="p">,</span>
+<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a>    <span class="n">basis</span><span class="o">=</span><span class="n">Piecewise</span><span class="p">(</span><span class="n">breaks</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;Mi060&quot;</span><span class="p">,</span> <span class="s2">&quot;Mi120&quot;</span><span class="p">],</span> <span class="n">degrees</span><span class="o">=</span><span class="p">[</span><span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">]),</span>
+<a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>    <span class="n">specials</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;MISSING&quot;</span><span class="p">],</span>
+<a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a><span class="p">)</span>
+</code></pre></div>
+<p>The inner basis evaluates on level <em>positions</em> <code>0..L-1</code> (with <code>values=</code>, the
+values still set the order but not the spacing — band structure is
+positional). Rating-table export stays one row per band whatever the basis, so
+the workbook is exact at any degree — which is why per-segment <code>degrees=</code>
+exist here and are refused on the numeric axis. <code>Piecewise</code>'s <code>extrapolation</code>
+parameter is inert on a level axis (every level is in range by construction).</p>
+<p>For a segmented term the summary reports <strong>structural contrasts</strong>: one
+slope-change Wald row per stated break and one curvature row per segment of
+degree ≥ 2 — ordinary fixed-knot inference in the truncated-power
+parameterization (Smith 1979, <em>Am. Statist.</em> 33(2):57–62). There are
+deliberately no per-segment per-power z rows: with value-continuous seams the
+segments share their joint values, so within-segment orthogonal components
+are not free parameters and that clean-z geometry does not exist. The clean
+per-power z is exactly what <code>basis=Polynomial(...)</code> gives, because there the
+whole term is one orthogonal family.</p>
+<p>An editor collapse (or a <code>grouping=</code>) that merges a stated break level with a
+neighbour, or spans levels on both sides of one, refuses loudly naming the
+break — a break is a stated kink, and regrouping it is a spec change, not an
+edit. Grouping entirely within a segment stays allowed, and the named break
+follows its level to the new position. The same guard covers <code>Spline</code> knots
+given by name.</p>
+<p>A grouped term's plot draws the fitted shape itself, whatever the basis — the
+stated break is a vertex of the drawn line, so the kink you declared is the
+kink you see, and a <code>Spline</code> basis draws the spline that was fitted. Expanding
+a grouped term back to its original levels moves the <strong>markers</strong> and nothing
+else: <code>term_inference()</code> and <code>plot_data()</code> carry the fitted curve with its own
+<code>se_log_relativity</code> / <code>ci_lower</code> / <code>ci_upper</code>, and the rated values are the band
+markers themselves, with their own standard errors.</p>
+<p><code>plot_data()</code> is the exception: it always exports the <strong>expanded</strong> axis and takes
+no <code>grouped_level_display=</code>. For a merged group that puts the payload's two
+pieces on different axes — <code>effect["x_position"]</code> on the declared level values,
+<code>smooth_curve["x"]</code> on the fitted (group-mean) axis — so join them through the
+level table rather than on x.</p>
+<p>By default a grouped <code>OrderedCategorical</code> panel is drawn <strong>collapsed</strong> — one
+marker per group, at the group's position — which is exactly where the fit is.
+Ask for <code>grouped_level_display="expanded"</code> and you get one marker per original
+level at its declared coordinate instead; a merged group's members then sit at
+two coordinates carrying one fitted value, and the curve spans the fitted axis
+rather than the declared one, so a merge at either end leaves the curve short of
+the outermost markers. That is deliberate — the curve is only drawn where the
+model was fitted.</p>
+<p>Terms with a <code>Piecewise</code> or <code>Polynomial</code> basis cannot parent interactions and
+are deferred by interaction screening (the interaction machinery crosses a
+penalized marginal smooth).</p>
+<h3 id="free-levels-specials">Free levels (<code>specials=</code>)<a class="headerlink" href="#free-levels-specials" title="Permanent link">&para;</a></h3>
+<p>Some levels do not belong on the ordering at all — a <code>MISSING</code> band, a
+structural zero. Listing them in <code>specials=</code> holds them out of the smooth and
+fits each one as a free, unpenalized level effect:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="n">OrderedCategorical</span><span class="p">(</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>    <span class="n">order</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;1&quot;</span><span class="p">,</span> <span class="s2">&quot;2&quot;</span><span class="p">,</span> <span class="s2">&quot;3&quot;</span><span class="p">,</span> <span class="s2">&quot;4&quot;</span><span class="p">,</span> <span class="s2">&quot;5&quot;</span><span class="p">,</span> <span class="s2">&quot;6&quot;</span><span class="p">],</span>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>    <span class="n">specials</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;MISSING&quot;</span><span class="p">],</span>
+<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a>    <span class="n">basis</span><span class="o">=</span><span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;ps&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">6</span><span class="p">),</span>
+<a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="p">)</span>
+</code></pre></div>
+<p>The smooth then spans the ordered levels only, and the special reports its own
+base-relative relativity beside them. Use this for levels that are
+<em>structurally</em> different, never for merely sparse ones: the penalty already
+handles a sparse band better than a free level does.</p>
+<p>The summary marks each level in a <code>Fit</code> column reading <code>smooth</code>, <code>free</code>, or
+<code>pinned</code>, and the exported workbook records the term as <code>smooth+free</code> with the
+special's own row as a <code>free level</code>. Plots draw the fitted curve across the
+ordered levels and place free levels as detached points past its end.</p>
+<p><strong>The reported intercept changes when you add or remove a special.</strong> The
+smooth's identifiability constraint is taken over the rows it is built on, so
+with <code>specials=</code> the intercept is the baseline of the <em>ordered</em> rows alone;
+without it, the special's rows are inside that baseline. Reporting relativities
+against the base level removes that constraint shift exactly, so the two models'
+level relativities are directly comparable; their intercepts are not.</p>
+<p>That is a statement about <em>reporting</em>, not a claim that the fitted curve is
+identical. Adding a special leaves the ordered levels' fitted values unchanged
+to machine precision only when the term is the model's sole predictor and the
+smoothing parameter is held fixed. With another correlated, imbalanced predictor
+the shared IRLS weights change and the ordered curve moves a little — measured
+at around 1e-3 in log relativity with one imbalanced factor at a 5% special
+share — and it moves again if <code>fit_reml()</code> re-selects the smoothing parameter,
+which the default path does. Expect small differences rather than none.</p>
+<p>A declared special that the training data does not carry — no rows at all, or
+only zero-weight rows — is <strong>pinned</strong> rather than rejected: no indicator column
+is emitted for it, it contributes zero, one warning names it, and its <code>Fit</code>
+column reads <code>pinned</code> instead of <code>free</code>. An all-zero indicator has no
+identifiable coefficient, so the alternative was a hard error, and a thin
+special declared on the whole book but missing from one CV fold used to kill
+that fold. The level stays declared and keeps its row in the rating table. A
+special may not be the reporting <code>base=</code>, and may not be merged into a level
+group. <code>specials=</code> works with every <code>basis=</code> — the main block comes first and
+the unpenalized special block second, always; interactions and PSST screening
+on a term with specials are not supported yet and are reported as deferred
+rather than silently skipped.</p>
+<p>This interpretation depends on the numeric positions assigned to the levels.
+<code>order=[...]</code> uses equal spacing on <code>[0, 1]</code>; use <code>values={...}</code> when the real
+distances are unequal. If spacing and smoothness are not defensible assumptions,
+fit <code>Categorical(...)</code> and use a whole-term comparison instead.</p>
+<h2 id="numeric">Numeric<a class="headerlink" href="#numeric" title="Permanent link">&para;</a></h2>
+<p><code>Numeric()</code> is a simple passthrough for continuous variables that should enter
+linearly.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="n">Numeric</span><span class="p">()</span>
+</code></pre></div>
+<h2 id="interactions">Interactions<a class="headerlink" href="#interactions" title="Permanent link">&para;</a></h2>
+<p>Interactions are declared separately via <code>interactions=[(...)]</code>, and the type
+is inferred from the parent specs.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperGLM</span><span class="p">(</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>    <span class="n">features</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;age&quot;</span><span class="p">:</span> <span class="n">Spline</span><span class="p">(</span><span class="n">kind</span><span class="o">=</span><span class="s2">&quot;ps&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">14</span><span class="p">),</span> <span class="s2">&quot;region&quot;</span><span class="p">:</span> <span class="n">Categorical</span><span class="p">()},</span>
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>    <span class="n">interactions</span><span class="o">=</span><span class="p">[(</span><span class="s2">&quot;age&quot;</span><span class="p">,</span> <span class="s2">&quot;region&quot;</span><span class="p">)],</span>
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a>    <span class="n">selection_penalty</span><span class="o">=</span><span class="mf">0.01</span><span class="p">,</span>
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a><span class="p">)</span>
+</code></pre></div>
+<p>See <a href="../interactions/">Interactions</a> for the full interaction map.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

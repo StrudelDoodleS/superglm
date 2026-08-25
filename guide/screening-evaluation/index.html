@@ -1,0 +1,3423 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+        <link rel="prev" href="../screening/">
+      
+      
+        <link rel="next" href="../optimization/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Screening Evaluation - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#screening-evaluation" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Screening Evaluation
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-was-compared" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What was compared
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setup
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#result-ranking-quality" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result: ranking quality
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Result: ranking quality">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#why-the-two-verdicts-disagree" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the two verdicts disagree
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mechanism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mechanism
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#where-fast-wins" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where FAST wins
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-baseline-deviance-against-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The baseline: deviance against shape
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-rank-to-decision-does-the-pair-pay-for-its-own-df" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From rank to decision: does the pair pay for its own df?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="From rank to decision: does the pair pay for its own df?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-threshold-is-not-a-constant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The threshold is not a constant
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-total-does-not-say-how-to-fit-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The total does not say how to fit it
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#caveats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Caveats
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproducing
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-was-compared" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What was compared
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setup
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#result-ranking-quality" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result: ranking quality
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Result: ranking quality">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#why-the-two-verdicts-disagree" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the two verdicts disagree
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#mechanism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mechanism
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#where-fast-wins" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where FAST wins
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-baseline-deviance-against-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The baseline: deviance against shape
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#from-rank-to-decision-does-the-pair-pay-for-its-own-df" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From rank to decision: does the pair pay for its own df?
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="From rank to decision: does the pair pay for its own df?">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-threshold-is-not-a-constant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The threshold is not a constant
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-total-does-not-say-how-to-fit-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The total does not say how to fit it
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#caveats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Caveats
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproducing
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="screening-evaluation">Screening Evaluation<a class="headerlink" href="#screening-evaluation" title="Permanent link">&para;</a></h1>
+<p>This page records a head-to-head evaluation of PSST interaction screening
+against the closest existing tool, and a comparison of the mains model the
+screen is anchored to against a boosted alternative. It exists so the claims
+in <a href="../screening/">Interaction Screening</a> can be checked rather than taken on
+trust, and so the places where the comparison goes against us are on the
+record next to the places it does not.</p>
+<p>It is a point-in-time study on one book and one family. Read
+<a href="#caveats">Caveats</a> before quoting any number here.</p>
+<h2 id="what-was-compared">What was compared<a class="headerlink" href="#what-was-compared" title="Permanent link">&para;</a></h2>
+<p><a href="https://doi.org/10.1145/2487575.2487579">FAST</a> (Lou, Caruana, Gehrke &amp;
+Hooker 2013), the pair-ranking algorithm behind GA2M, shipped as
+<code>measure_interactions</code> in InterpretML. It solves the same problem shape as
+PSST: rank candidate pairs against an already-fitted additive model from one
+pass of cell tables, leaving a refit as the gate.</p>
+<p>Both screens ranked the same candidate set against the same fitted baseline,
+and every candidate pair was then <strong>actually refit</strong> to establish ground
+truth — no top-k shortlist.</p>
+<h2 id="setup">Setup<a class="headerlink" href="#setup" title="Permanent link">&para;</a></h2>
+<p>freMTPL2 frequency, under the replication weight contract
+(<code>weight_semantics="frequency"</code>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">df</span><span class="p">[</span><span class="s2">&quot;Exposure&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s2">&quot;Exposure&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">clip</span><span class="p">(</span><span class="n">lower</span><span class="o">=</span><span class="mf">0.01</span><span class="p">)</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">exposure</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s2">&quot;Exposure&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">to_numpy</span><span class="p">(</span><span class="nb">float</span><span class="p">)</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">y</span> <span class="o">=</span> <span class="n">df</span><span class="p">[</span><span class="s2">&quot;ClaimNb&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">to_numpy</span><span class="p">(</span><span class="nb">float</span><span class="p">)</span> <span class="o">/</span> <span class="n">exposure</span>   <span class="c1"># claim RATE</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">sample_weight</span> <span class="o">=</span> <span class="n">exposure</span>
+</code></pre></div>
+<p>Here exposure is a Poisson frequency weight: it is not the EDM prior-weight
+contract used by Tweedie.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full book</td>
+<td>678,013 rows / 36,102 claims</td>
+</tr>
+<tr>
+<td>Study sample</td>
+<td>200,000 rows (<code>random_state=0</code>) / 10,633 claims</td>
+</tr>
+<tr>
+<td>Split</td>
+<td>70/30 hash of <code>IDpol</code> → 139,790 train / 60,210 holdout</td>
+</tr>
+</tbody>
+</table>
+<p>Both <em>screens</em> handle the full book comfortably. The binding constraint is the
+gold standard: one confirmatory refit of the cheapest pair on 678k rows takes
+<strong>733.8 s</strong>, and the study needed 36 refits. The subsample is applied
+identically to both methods and to the gold standard, and every ranking was
+re-run on the full 678k book to confirm no conclusion depends on it.</p>
+<p>Two specifications were run, because the choice turns out to be load-bearing:</p>
+<table>
+<thead>
+<tr>
+<th>spec</th>
+<th>DrivAge</th>
+<th>VehAge</th>
+<th>BonusMalus</th>
+<th>VehBrand</th>
+<th>Region</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A</td>
+<td><code>Spline(ps, k=8)</code></td>
+<td><code>Spline(ps, k=6)</code></td>
+<td><code>Numeric()</code></td>
+<td><code>Categorical()</code></td>
+<td><code>Categorical()</code></td>
+</tr>
+<tr>
+<td>B</td>
+<td><code>Spline(ps, k=8)</code></td>
+<td><code>Spline(ps, k=6)</code></td>
+<td><code>Spline(ps, k=8)</code></td>
+<td><code>Categorical()</code></td>
+<td><code>Categorical()</code></td>
+</tr>
+</tbody>
+</table>
+<p>FAST was handed the fitted superglm baseline as <code>init_score</code> on the link
+scale, verified equivalent by two independent checks: the Poisson deviance
+recomputed by hand at that <code>eta</code> matches the fit's own to machine precision,
+and re-parameterising as counts with a <code>log(exposure)</code> offset and unit weights
+rescales every strength by exactly the mean exposure, leaving the ranking
+identical.</p>
+<h2 id="result-ranking-quality">Result: ranking quality<a class="headerlink" href="#result-ranking-quality" title="Permanent link">&para;</a></h2>
+<p>Spearman correlation of each screen's ranking against the ranking by
+<strong>realized out-of-sample deviance gain</strong> from the confirmatory refit.</p>
+<table>
+<thead>
+<tr>
+<th>ranker</th>
+<th style="text-align: right;">spec A (n=8)</th>
+<th style="text-align: right;">spec B (n=10)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>PSST <code>z</code></strong></td>
+<td style="text-align: right;"><strong>+0.810</strong></td>
+<td style="text-align: right;"><strong>+0.830</strong></td>
+</tr>
+<tr>
+<td>FAST, default</td>
+<td style="text-align: right;">+0.667</td>
+<td style="text-align: right;">+0.612</td>
+</tr>
+<tr>
+<td>FAST, <code>Purify</code> flag</td>
+<td style="text-align: right;">+0.714</td>
+<td style="text-align: right;">+0.661</td>
+</tr>
+<tr>
+<td>FAST, on its own EBM baseline</td>
+<td style="text-align: right;">+0.714</td>
+<td style="text-align: right;">+0.661</td>
+</tr>
+<tr>
+<td>FAST, no baseline at all</td>
+<td style="text-align: right;">+0.667</td>
+<td style="text-align: right;">+0.564</td>
+</tr>
+<tr>
+<td>FAST, full-tensor gain</td>
+<td style="text-align: right;">+0.524</td>
+<td style="text-align: right;">+0.321</td>
+</tr>
+</tbody>
+</table>
+<p>PSST ranks better on every FAST configuration found, on both specs, on
+Spearman and Kendall.</p>
+<p>Against <strong>in-sample</strong> gain the result reverses — FAST +0.394 against PSST
++0.309 — and against a complexity-penalised in-sample view (<code>gain - 2*edf</code>)
+<code>Purify</code>-flagged FAST is the best ranker in the whole study at +0.964, above
+PSST's +0.855. All three are reported because the choice of gold standard, not
+the screens, decides the winner.</p>
+<h3 id="why-the-two-verdicts-disagree">Why the two verdicts disagree<a class="headerlink" href="#why-the-two-verdicts-disagree" title="Permanent link">&para;</a></h3>
+<p>One row accounts for it. <code>VehBrand x Region</code> is an 11 x 22 factor block:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>effective df</td>
+<td>208</td>
+</tr>
+<tr>
+<td>in-sample deviance gain</td>
+<td>+237.6 (rank <strong>2 of 10</strong>)</td>
+</tr>
+<tr>
+<td>out-of-sample deviance gain</td>
+<td><strong>−903.7</strong> (rank 10 of 10)</td>
+</tr>
+<tr>
+<td>PSST rank</td>
+<td>10 of 10 (<code>z</code> = −5.89)</td>
+</tr>
+<tr>
+<td>FAST rank</td>
+<td>10 of 10</td>
+</tr>
+</tbody>
+</table>
+<p>It buys the second-largest training gain in the study and destroys nearly four
+times that on the holdout. Both screens rank it last; the in-sample gold ranks
+it second. <strong>Both screens are right and the in-sample gold standard is
+wrong</strong> — and because PSST is maximally "wrong" against that gold, this single
+row is most of the reason the in-sample comparison reverses.</p>
+<h2 id="mechanism">Mechanism<a class="headerlink" href="#mechanism" title="Permanent link">&para;</a></h2>
+<p>The two screens disagree materially on three pairs. For each, the realized
+interaction surface was refit, the shift in linear predictor extracted, and
+the fraction of its weighted variance reproducible by each screen's probe
+shape measured directly.</p>
+<p><strong><code>BonusMalus x VehBrand</code></strong> — PSST ranks it 2nd of 8, FAST 7th; the refit puts
+it <strong>2nd out of sample</strong> (+37.2 on 9.8 edf).</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>reproducible by a per-level linear slope (PSST's <code>numeric_cat</code> probe)</td>
+<td><strong>96.4%</strong></td>
+</tr>
+<tr>
+<td>reproducible by the best 4-quadrant step (FAST's probe)</td>
+<td>72.1%</td>
+</tr>
+<tr>
+<td>total weighted shift variance</td>
+<td><strong>576</strong></td>
+</tr>
+<tr>
+<td>…against <code>VehAge x Region</code></td>
+<td>32,778</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>VehAge x Region</code></strong> is the mirror image and FAST's clearest false positive:
+FAST ranks it 3rd–4th, PSST 7th–9th, and the refit shows a 30.8-edf term that
+gains 88 in training and <strong>loses</strong> it out of sample. FAST's probe explains only
+<strong>1.7%</strong> of that pair's shift — but 1.7% of 32,778 still exceeds 72.1% of 576.</p>
+<p>That is the whole mechanism: <strong>FAST reports a raw average Newton gain — an
+effect size. PSST normalizes against the block's own noise floor — a
+signal-to-noise ratio.</strong> A small, tightly identified, 10-edf effect worth +37
+out-of-sample deviance is exactly what an un-normalised measure buries.</p>
+<p>Corroborating this: FAST's <code>Purify</code> flag, which strips main-effect-shaped
+components out of the tensor, moves FAST <em>toward</em> PSST's ordering and is its
+best-performing variant. Purification is a coarse version of what PSST's
+efficient-score profiling does exactly.</p>
+<p>The obvious alternative explanation was tested and <strong>refuted</strong>. 57% of rows
+share a single <code>BonusMalus</code> value, so tie-heavy quantile binning was the
+suspect; rank-uniformising the margins and raising <code>max_interaction_bins</code> to
+256 and 1024 leave FAST's ordering completely unchanged. Binning resolution is
+not the mechanism.</p>
+<h2 id="where-fast-wins">Where FAST wins<a class="headerlink" href="#where-fast-wins" title="Permanent link">&para;</a></h2>
+<p><code>VehAge x BonusMalus</code>. FAST ranks it <strong>2nd on every configuration and both
+splits</strong>, and the refit confirms it: gold rank 3 by both standards, +32.0 out
+of sample on 10.1 edf. Under spec A, PSST cannot rank it at all — spline x
+numeric is deferred.</p>
+<p>Stated fairly in both directions: superglm cannot <em>fit</em> that interaction under
+spec A either, so the deferral is internally consistent and the screen is not
+hiding something the model could exploit. And the remedy works — under spec B
+PSST ranks the same pair <strong>1st</strong> (<code>z</code> = 11.83), above FAST's 2nd.</p>
+<p>But the deeper reading is that spec A was the problem. <code>BonusMalus</code> fitted as a
+spline uses <strong>edf 7.5 of 11</strong> with chi2(8.2) = 1705.9; specifying it linearly
+costs 195 deviance in sample and 37 on the holdout. It is a strongly curved
+feature, and the only reason this pair was ever spline x numeric is that a
+worked example declared an obviously non-linear margin linear. The screening
+guide's example has since been respecified. What remains true is narrower: a
+practitioner who mis-specifies a curved numeric gets a queue with a real
+interaction silently absent, and FAST's queue does not have that hole.</p>
+<h2 id="cost">Cost<a class="headerlink" href="#cost" title="Permanent link">&para;</a></h2>
+<p>Ten candidate pairs, n = 200,000:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th style="text-align: right;">spec A</th>
+<th style="text-align: right;">spec B</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PSST <code>screen_interactions</code></td>
+<td style="text-align: right;">2.77 s</td>
+<td style="text-align: right;">4.89 s</td>
+</tr>
+<tr>
+<td>FAST <code>measure_interactions</code></td>
+<td style="text-align: right;">0.106 s</td>
+<td style="text-align: right;">0.113 s</td>
+</tr>
+<tr>
+<td><em>one</em> confirmatory refit (full book, cheapest pair)</td>
+<td style="text-align: right;"><strong>733.8 s</strong></td>
+<td style="text-align: right;"></td>
+</tr>
+</tbody>
+</table>
+<p>FAST is <strong>26–43× faster</strong> than PSST. Both are irrelevant beside what they
+replace: on the full book the cheapest single refit costs 295× a whole PSST
+sweep and 2,320× a whole FAST sweep.</p>
+<h2 id="the-baseline-deviance-against-shape">The baseline: deviance against shape<a class="headerlink" href="#the-baseline-deviance-against-shape" title="Permanent link">&para;</a></h2>
+<p>PSST is defined against the fitted mains model, so the quality of that model
+bounds the screen. FAST turns out to be nearly insensitive to which additive
+model it screens against — its ranking barely moves between the superglm
+baseline, an EBM baseline, and <em>no baseline at all</em> — which is itself a
+finding: on this book it behaves more like a marginal-dependence detector than
+a residual-structure detector. PSST has no such property.</p>
+<p>That makes the mains model worth measuring. Fitted on the same split
+(measurements below use an independently constructed 139,752/60,248 split, so
+they are internally consistent but not directly comparable to the refit gains
+above):</p>
+<table>
+<thead>
+<tr>
+<th>model</th>
+<th style="text-align: right;">train deviance</th>
+<th style="text-align: right;"><strong>holdout deviance</strong></th>
+<th style="text-align: right;">fit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>superglm (spec B, penalized splines)</td>
+<td style="text-align: right;">44,419.8</td>
+<td style="text-align: right;">18,933.8</td>
+<td style="text-align: right;">1.5 s</td>
+</tr>
+<tr>
+<td>EBM mains (<code>interactions=0</code>, 8 bags)</td>
+<td style="text-align: right;">43,550.3</td>
+<td style="text-align: right;"><strong>18,499.4</strong></td>
+<td style="text-align: right;">8.1 s</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The EBM mains model is genuinely better on deviance</strong> — by 870 in sample and
+<strong>434 out of sample</strong>. It is not merely more flexible; it generalises better.
+Stated plainly because it is the result.</p>
+<p>Two things follow. First, the gap is resolution on the smooth margins, not
+regularization of the factors:</p>
+<table>
+<thead>
+<tr>
+<th>variant</th>
+<th style="text-align: right;">holdout</th>
+<th style="text-align: right;">gap to EBM closed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>baseline (k=8/6/8, fixed factors)</td>
+<td style="text-align: right;">18,933.8</td>
+<td style="text-align: right;">—</td>
+</tr>
+<tr>
+<td>richer splines (k=20 each)</td>
+<td style="text-align: right;">18,705.9</td>
+<td style="text-align: right;"><strong>228 of 434</strong></td>
+</tr>
+<tr>
+<td>credibility factors (<code>RandomEffect</code>)</td>
+<td style="text-align: right;">18,932.6</td>
+<td style="text-align: right;">1 of 434</td>
+</tr>
+</tbody>
+</table>
+<p>Shrinking the 33 factor levels buys nothing. Knot resolution buys half the gap.</p>
+<p>Second — and this is why the deviance table is not the end of it — the shape
+EBM buys it with is not one a pricing model can ship. Measuring monotonicity
+violations along the fitted <code>BonusMalus</code> relativity over its observed range:</p>
+<table>
+<thead>
+<tr>
+<th>fit</th>
+<th style="text-align: right;">dips</th>
+<th style="text-align: right;"><strong>total violation</strong></th>
+<th style="text-align: right;">relativity at BM=230</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>superglm, ps k=8 uniform</td>
+<td style="text-align: right;">41</td>
+<td style="text-align: right;">0.175</td>
+<td style="text-align: right;">2.530</td>
+</tr>
+<tr>
+<td>superglm, ps k=12 <code>quantile_tempered</code></td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">0.233</td>
+<td style="text-align: right;">2.405</td>
+</tr>
+<tr>
+<td><strong>EBM mains</strong></td>
+<td style="text-align: right;">18</td>
+<td style="text-align: right;"><strong>4.094</strong></td>
+<td style="text-align: right;">1.995</td>
+</tr>
+</tbody>
+</table>
+<p>EBM's total violation is <strong>23× the penalized spline's</strong>, and it is not diffuse
+wiggle. Its fitted relativity runs 0.942 at BM=70 and <strong>0.620 at BM=90</strong> — the
+model asserts that a driver at bonus-malus 90 has materially lower claim
+frequency than one at 70. That is a reversal in the middle of the scale, on
+the one variable in the book whose direction is a matter of contractual
+definition rather than inference.</p>
+<p>So the honest summary is that EBM wins 434 holdout deviance and loses the
+shape, and on a rating factor like Bonus-Malus the shape is the binding
+constraint. This is the ordinary penalized-GAM-against-boosting trade, and it
+is stated here rather than left out because the deviance comparison alone
+would be misleading in our favour.</p>
+<p>Two practical notes fell out of the same measurements:</p>
+<ul>
+<li><strong>Tempered-quantile knots are worth using on Bonus-Malus</strong>, as
+  <a href="../features/">Feature Types</a> already recommends: they improve holdout
+  deviance and cut dips from 41 to 8. Plain <code>quantile_rows</code> is <strong>bit-identical
+  to uniform</strong> on this feature and buys nothing — with 57% of mass at the
+  scale minimum, every quantile up to the 57th <em>is</em> that value, so the interior
+  knots collapse onto one point and de-duplicate back to uniform. Tempering is
+  what rescues it.</li>
+<li>Enforcing monotonicity directly is the obvious response to the shape
+  problem, and it does not currently work through <code>fit_reml()</code>. See
+  <a href="https://github.com/StrudelDoodleS/superglm/issues/189">issue #189</a>.</li>
+</ul>
+<h2 id="from-rank-to-decision-does-the-pair-pay-for-its-own-df">From rank to decision: does the pair pay for its own df?<a class="headerlink" href="#from-rank-to-decision-does-the-pair-pay-for-its-own-df" title="Permanent link">&para;</a></h2>
+<p>Everything above ranks pairs. Ranking is a different question from whether the
+top-ranked pair should be refit, and at wide factors the two answers come apart
+far enough to invert the decision.</p>
+<p>This section is a <strong>simulation, not freMTPL2</strong> — Gaussian, balanced parents, a
+planted truth of known shape. The question needs the ground truth held fixed
+while the block's df is varied over a wide range, which one real book cannot
+supply. Read it as a mechanism study; the freMTPL2 numbers above are the
+evidence on real data.</p>
+<p>A 41×41 <code>cat_cat</code> pair carrying a genuine 6σ effect in 5 of its 1,681 cells
+scores <strong>z = 8.40</strong> on its own training split — clearing every constant cutoff
+in the sweep below, <code>z &gt; 2</code>, <code>z &gt; 3</code> and <code>z &gt; 5</code> — while sitting far under its
+own width-scaled bar of <strong>27.86</strong>. Refit as a fixed interaction it costs
+<strong>+22.5% holdout MSE</strong> (three replicates: +20.3%, +27.0%, +20.3%). In sample
+that refit looks like the best model available: train MSE 1.1071 → 0.7292. It
+spends <strong>1,633.3 effective df</strong> on 6,000 rows to recover five cells.</p>
+<p>The same cell fitted as a <code>RandomEffect</code> spends <strong>555.9 df</strong> and <em>improves</em>
+holdout by <strong>3.7%</strong>. So the pair is real, the detection is correct, and "add it
+as a fixed interaction" is still the wrong action — which is the case every
+constant cutoff gets wrong here and the width-scaled bar gets right.</p>
+<p>Two things that follow are established and one is not, so it is worth
+separating them up front.</p>
+<p><strong>Established.</strong> Mallows' Cp, written on PSST's own <code>z</code> scale, is an <em>exact</em>
+restatement rather than an approximation — <code>z &gt; sqrt(edf0/2)</code> is the same
+statement as <code>T/φ &gt; 2·edf0</code>, and the bar it implies grows with the block's df.
+The <em>shape</em> of a score carries information its total does not: at deliberately
+matched <code>z</code>, a truth concentrated in five cells and a diffuse one are separated
+34-fold by the participation ratio. And that shape reading pays off in the
+fitting decision — on the concentrated truth, the five best cells beat both the
+mains model and the full refit, while the identical procedure on a diffuse
+truth only degrades.</p>
+<p><strong>Not established.</strong> Whether thresholding on <code>sqrt(edf0/2)</code> actually beats a
+well-chosen constant cutoff <em>in general</em>. The worked example above is one case;
+on the sixteen-point sweep below the rule agrees with the sign of the holdout
+change one row more often than the best constant does, which at that sample
+size settles nothing. See <a href="#caveats">caveats 9 and 15</a>.</p>
+<h3 id="the-threshold-is-not-a-constant">The threshold is not a constant<a class="headerlink" href="#the-threshold-is-not-a-constant" title="Permanent link">&para;</a></h3>
+<p><a href="#caveats">Caveat 3</a> already notes that scoring by <code>gain - 2*edf</code> changes which
+screen wins. That is Mallows' Cp, and on PSST's own scale it is not a rescoring
+but a threshold. Since <code>z = (T/φ − edf0) / sqrt(2·edf0)</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>T/φ &gt; 2·edf0    ⟺    z &gt; sqrt(edf0 / 2)
+</code></pre></div>
+<p>Both sides read the <strong>same</strong> <code>edf0</code>, and for an unpenalized <code>cat_cat</code> the value
+<code>screen_interactions</code> returns is the block's <em>achieved rank</em>, not <code>(L−1)²</code> — it
+drops below the nominal rank whenever a joint cell is empty in the training
+split, which is routine at these widths. The <code>edf0</code> column below is therefore
+the screen's own value, read off the same row as <code>z</code>; the nominal rank is shown
+beside it.</p>
+<p>The bar <strong>grows with the block's df</strong>: z &gt; 4.95 at 8×8, z &gt; 28.27 at 41×41
+(both measured — the 41×41 value is the achieved rank from the next table's
+screen). Sweeping table width against effect size, taking the screen's own z
+and the holdout change from actually refitting:</p>
+<p>The <strong>mean ratio</strong> column is not the quotient of the two columns beside it.
+The Cp identity is a statement about one fit, so the gate is aggregated on
+its own scale -- <code>z_i / sqrt(edf0_i / 2)</code> formed per replicate and then
+averaged -- while <code>z</code> and <code>threshold</code> are shown as <code>mean(z_i)</code> and
+<code>sqrt(mean(edf0_i) / 2)</code>. Where the achieved rank is the same on every
+replicate the two agree, which is why the 8x8, 16x16 and 25x25 rows divide
+exactly; only 32x32 has a varying rank, and there the printed quotient is
+close to but not identical with the ratio the gate actually reads.</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: right;">levels</th>
+<th style="text-align: right;">edf0</th>
+<th style="text-align: right;">nominal</th>
+<th style="text-align: right;">threshold</th>
+<th style="text-align: right;">z</th>
+<th style="text-align: right;">mean ratio</th>
+<th style="text-align: right;">holdout Δ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">49.0</td>
+<td style="text-align: right;">49</td>
+<td style="text-align: right;">4.95</td>
+<td style="text-align: right;">0.80</td>
+<td style="text-align: right;">0.16</td>
+<td style="text-align: right;">+0.8%</td>
+</tr>
+<tr>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">49.0</td>
+<td style="text-align: right;">49</td>
+<td style="text-align: right;">4.95</td>
+<td style="text-align: right;">2.04</td>
+<td style="text-align: right;">0.41</td>
+<td style="text-align: right;">+0.6%</td>
+</tr>
+<tr>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">49.0</td>
+<td style="text-align: right;">49</td>
+<td style="text-align: right;">4.95</td>
+<td style="text-align: right;">5.46</td>
+<td style="text-align: right;">1.10</td>
+<td style="text-align: right;">+0.0% ✗</td>
+</tr>
+<tr>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">49.0</td>
+<td style="text-align: right;">49</td>
+<td style="text-align: right;">4.95</td>
+<td style="text-align: right;">15.83</td>
+<td style="text-align: right;">3.20</td>
+<td style="text-align: right;">−1.7%</td>
+</tr>
+<tr>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">225.0</td>
+<td style="text-align: right;">225</td>
+<td style="text-align: right;">10.61</td>
+<td style="text-align: right;">2.32</td>
+<td style="text-align: right;">0.22</td>
+<td style="text-align: right;">+3.1%</td>
+</tr>
+<tr>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">225.0</td>
+<td style="text-align: right;">225</td>
+<td style="text-align: right;">10.61</td>
+<td style="text-align: right;">6.17</td>
+<td style="text-align: right;">0.58</td>
+<td style="text-align: right;">+1.8%</td>
+</tr>
+<tr>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">225.0</td>
+<td style="text-align: right;">225</td>
+<td style="text-align: right;">10.61</td>
+<td style="text-align: right;">13.49</td>
+<td style="text-align: right;">1.27</td>
+<td style="text-align: right;">−0.7%</td>
+</tr>
+<tr>
+<td style="text-align: right;">16</td>
+<td style="text-align: right;">225.0</td>
+<td style="text-align: right;">225</td>
+<td style="text-align: right;">10.61</td>
+<td style="text-align: right;">28.96</td>
+<td style="text-align: right;">2.73</td>
+<td style="text-align: right;">−6.2%</td>
+</tr>
+<tr>
+<td style="text-align: right;">25</td>
+<td style="text-align: right;">576.0</td>
+<td style="text-align: right;">576</td>
+<td style="text-align: right;">16.97</td>
+<td style="text-align: right;">0.68</td>
+<td style="text-align: right;">0.04</td>
+<td style="text-align: right;">+9.0%</td>
+</tr>
+<tr>
+<td style="text-align: right;">25</td>
+<td style="text-align: right;">576.0</td>
+<td style="text-align: right;">576</td>
+<td style="text-align: right;">16.97</td>
+<td style="text-align: right;">5.73</td>
+<td style="text-align: right;">0.34</td>
+<td style="text-align: right;">+5.2%</td>
+</tr>
+<tr>
+<td style="text-align: right;">25</td>
+<td style="text-align: right;">576.0</td>
+<td style="text-align: right;">576</td>
+<td style="text-align: right;">16.97</td>
+<td style="text-align: right;">15.01</td>
+<td style="text-align: right;">0.88</td>
+<td style="text-align: right;">−1.5% ✗</td>
+</tr>
+<tr>
+<td style="text-align: right;">25</td>
+<td style="text-align: right;">576.0</td>
+<td style="text-align: right;">576</td>
+<td style="text-align: right;">16.97</td>
+<td style="text-align: right;">30.88</td>
+<td style="text-align: right;">1.82</td>
+<td style="text-align: right;">−12.8%</td>
+</tr>
+<tr>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">957.7</td>
+<td style="text-align: right;">961</td>
+<td style="text-align: right;">21.88</td>
+<td style="text-align: right;">0.74</td>
+<td style="text-align: right;">0.03</td>
+<td style="text-align: right;">+15.9%</td>
+</tr>
+<tr>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">957.7</td>
+<td style="text-align: right;">961</td>
+<td style="text-align: right;">21.88</td>
+<td style="text-align: right;">5.86</td>
+<td style="text-align: right;">0.27</td>
+<td style="text-align: right;">+9.9%</td>
+</tr>
+<tr>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">957.7</td>
+<td style="text-align: right;">961</td>
+<td style="text-align: right;">21.88</td>
+<td style="text-align: right;">15.54</td>
+<td style="text-align: right;">0.71</td>
+<td style="text-align: right;">−1.1% ✗</td>
+</tr>
+<tr>
+<td style="text-align: right;">32</td>
+<td style="text-align: right;">957.7</td>
+<td style="text-align: right;">961</td>
+<td style="text-align: right;">21.88</td>
+<td style="text-align: right;">26.97</td>
+<td style="text-align: right;">1.23</td>
+<td style="text-align: right;">−13.4%</td>
+</tr>
+</tbody>
+</table>
+<p>Only the 32×32 rows show the achieved rank falling below the nominal one — at
+the narrower widths 6,000 training rows fill every joint cell.</p>
+<p><strong>The rule agrees with the sign of the holdout change in 13/16.</strong> Fixed cutoffs
+on the same data: <code>z &gt; 2</code> in <strong>10/16</strong>, <code>z &gt; 3</code> in <strong>12/16</strong>, <code>z &gt; 5</code> in
+<strong>12/16</strong> — the last two score identically because no row falls between them.</p>
+<p><strong>This does not establish that the gate beats a fixed cutoff.</strong> One row out of
+sixteen is the entire margin, on a grid of sixteen points at three replicates,
+with the effect sizes chosen to straddle the bar in the first place
+(<a href="#caveats">caveat 9</a>). The comparison is inconclusive at this sample size and
+should not be quoted as a result. What the sweep does show is that the crossing
+tracks <code>sqrt(edf0/2)</code> across a 20× range of df, which is the shape the identity
+predicts.</p>
+<p>How the two rules fail is more informative than the count. Every fixed-cutoff
+miss here is a <strong>false positive</strong>: <code>z &gt; 3</code> admits z = 5.46, 6.17, 5.73 and 5.86,
+all comfortably "significant" and all harmful, and that population appears at
+every width in the sweep with the damage it admits growing from +0.0% at 8×8 to
++9.9% at 32×32. The width-scaled rule misses three rows, of two kinds: one where
+the holdout change rounds to zero (z = 5.46 at 8×8), and two <strong>false negatives</strong>
+at the wide end — z = 15.01 at 25×25 and z = 15.54 at 32×32, where refitting
+actually helped by 1.5% and 1.1%. Its bar is too <em>high</em> there. That is the
+opposite of a constant cutoff's failure, and it is direct evidence that the
+constant in <code>sqrt(edf0/2)</code> is not pinned by this data.</p>
+<h3 id="the-total-does-not-say-how-to-fit-it">The total does not say how to fit it<a class="headerlink" href="#the-total-does-not-say-how-to-fit-it" title="Permanent link">&para;</a></h3>
+<p>Every χ²-family score reads only the total: PSST's <code>T</code>, FAST's RSS gain,
+Information Value, mutual information, deviance change. None reads the shape, so
+none separates five live cells from 1,681 faintly live ones carrying the same
+total. The participation ratio of the per-cell contributions does:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>P = (Σ t_c)² / Σ t_c²        with  t_c = n_c · mean_c² / φ
+</code></pre></div>
+<p>For k independent χ²₁ contributions E[t] = 1 and E[t²] = 3, so the null sits at
+<code>P = k/3</code> <strong>for large k</strong>. Reporting <code>P / (k/3)</code> makes it comparable across the
+wide blocks this section is about, the same property that makes <code>z</code> comparable
+across them — but <code>k/3</code> is a limit, not the finite-sample expectation, and the
+null ratio sits above 1 at small k (measured: ≈1.15 at k = 25, ≈1.04 at k = 100,
+and exactly 3 at k = 1, where a single occupied cell carries everything by
+construction). See <a href="#caveats">caveat 14</a>.</p>
+<p>Spiky and diffuse truths at 41×41, magnitudes chosen so their <strong>z values
+coincide</strong> — the only honest way to ask whether <code>P</code> carries information <code>z</code>
+lacks. These fit the full 12,000 rows, where the table above and the one below
+fit a 6,000-row train split, so their <code>edf0</code> is the achieved rank on the full
+sample: 1,598.7 of a nominal 1,600, for a threshold of 28.27.</p>
+<table>
+<thead>
+<tr>
+<th>truth</th>
+<th style="text-align: right;">z</th>
+<th style="text-align: right;">P</th>
+<th style="text-align: right;">P/(k/3)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>noise</td>
+<td style="text-align: right;">−0.25</td>
+<td style="text-align: right;">574.1</td>
+<td style="text-align: right;">1.025</td>
+</tr>
+<tr>
+<td>5 cells @ 4.0</td>
+<td style="text-align: right;">8.02</td>
+<td style="text-align: right;">81.1</td>
+<td style="text-align: right;"><strong>0.145</strong></td>
+</tr>
+<tr>
+<td>diffuse sd=0.20</td>
+<td style="text-align: right;">7.48</td>
+<td style="text-align: right;">571.3</td>
+<td style="text-align: right;">1.020</td>
+</tr>
+<tr>
+<td>5 cells @ 6.0</td>
+<td style="text-align: right;">16.54</td>
+<td style="text-align: right;">29.1</td>
+<td style="text-align: right;"><strong>0.052</strong></td>
+</tr>
+<tr>
+<td>diffuse sd=0.30</td>
+<td style="text-align: right;">15.28</td>
+<td style="text-align: right;">562.6</td>
+<td style="text-align: right;">1.005</td>
+</tr>
+<tr>
+<td>5 cells @ 8.0</td>
+<td style="text-align: right;">27.15</td>
+<td style="text-align: right;">16.3</td>
+<td style="text-align: right;"><strong>0.029</strong></td>
+</tr>
+<tr>
+<td>diffuse sd=0.41</td>
+<td style="text-align: right;">26.15</td>
+<td style="text-align: right;">548.8</td>
+<td style="text-align: right;">0.980</td>
+</tr>
+</tbody>
+</table>
+<p>At z = 27.15 against z = 26.15 the scores are indistinguishable and <code>P</code> differs
+by 34×. The null checks out: 1,680 of the 1,681 cells are occupied at this
+sample size, so <code>k/3</code> predicts 559.9, and the noise row measures 574.1 — 2.5%
+high, in the direction the finite-k bias goes (<a href="#caveats">caveat 14</a>).</p>
+<p>Note also what the <code>z</code> column does <em>not</em> contain: no diffuse truth here clears
+the 28.27 bar, the widest reaching 26.15. That gap is why the decision table
+below is only partly measured: one cell on both axes but across two seeds
+rather than by a single run, one half, and the two above-threshold cells not at
+all (<a href="#caveats">caveat 11</a>).</p>
+<p>It pays off in the fitting decision. Ranking cells on <strong>training residuals
+only</strong> — ranking on the full sample is the target leakage that makes supervised
+binning look better than it is — and adding only the top m as levels. The last
+column is the plain fixed <code>cat_cat</code> refit on the same seed and the same split,
+so every cell in a row is one simulation. <code>P/(k/3)</code> here is the training-split
+value, which is why it differs from the full-sample figure in the table above:</p>
+<table>
+<thead>
+<tr>
+<th>truth</th>
+<th style="text-align: right;">P/(k/3)</th>
+<th style="text-align: right;">top-5</th>
+<th style="text-align: right;">top-10</th>
+<th style="text-align: right;">top-25</th>
+<th style="text-align: right;">top-50</th>
+<th style="text-align: right;">full refit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>5 cells @ 6.0</td>
+<td style="text-align: right;">0.149</td>
+<td style="text-align: right;"><strong>−9.2%</strong></td>
+<td style="text-align: right;">−8.1%</td>
+<td style="text-align: right;">−6.2%</td>
+<td style="text-align: right;">−3.8%</td>
+<td style="text-align: right;">+24.0%</td>
+</tr>
+<tr>
+<td>diffuse sd=0.30</td>
+<td style="text-align: right;">1.019</td>
+<td style="text-align: right;">+0.8%</td>
+<td style="text-align: right;">+1.2%</td>
+<td style="text-align: right;">+2.3%</td>
+<td style="text-align: right;">+4.1%</td>
+<td style="text-align: right;">+28.4%</td>
+</tr>
+</tbody>
+</table>
+<p>The df each arm buys over the mains model is 5, 10, 25, 50 and <strong>1,552</strong> — the
+last being the achieved rank of the interaction block on this split, not the
+nominal 1,600.</p>
+<p>The <strong>full refit</strong> column is the same model on the same configuration as the
+worked example's fixed arm — <code>spike</code> at 6.0, 41×41, <code>n</code> = 12,000, half-sample
+split — differing only in seed, <code>31337 + rep</code> here against <code>4242 + rep</code> there.
+So <strong>+24.0%</strong> and the worked example's <strong>+22.5%</strong> are two independent
+three-replicate estimates of one quantity, 1.5 points apart. That gap is well
+inside the worked example's own replicate spread of +20.3% to +27.0%, which is
+the cheapest calibration this section has of what a three-replicate holdout
+mean is worth at this width (<a href="#caveats">caveat 9</a>).</p>
+<p><strong>Five extra parameters beat 1,552 by 33.2 points of holdout MSE</strong>, and the
+optimum sits exactly at the true number of live cells. On the diffuse truth the
+identical procedure degrades monotonically — there is nothing localised to find,
+so every cell added is a memorised residual. <code>P</code> predicts which of the two you
+are in; <code>z</code> cannot, because by construction it is nearly the same in both.</p>
+<p>Together the two readings give a decision rather than a score:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th><code>P/(k/3)</code> ≈ 1</th>
+<th><code>P/(k/3)</code> ≪ 1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>z above threshold</strong></td>
+<td>refit the pair as a fixed interaction</td>
+<td>fit the few cells that carry it, and check the full refit against it</td>
+</tr>
+<tr>
+<td><strong>z below threshold</strong></td>
+<td>skip, or pool the cell</td>
+<td>fit the few cells that carry it</td>
+</tr>
+</tbody>
+</table>
+<p>The lower-right cell is the only one measured on both axes — but not by one
+run, and the seam is worth naming. The worked example puts z = 8.40 against a
+bar of 27.86 (table 4, seeded <code>4242 + rep</code>); the same configuration on a
+different seed reads <code>P/(k/3)</code> = 0.149 and has its five best cells beat both
+alternatives (table 3, seeded <code>31337 + rep</code>). Neither run spans the pair:
+table 4 runs the screen but never computes <code>P</code> and has no sparse arm, and
+table 3 has the sparse arm and <code>P</code> but no screen. So the chain screen → <code>P</code> →
+sparse fit → full fit is walked by no single run, and the cell is measured on
+two axes across two seeds rather than end to end. The other three are weaker —
+see <a href="#caveats">caveat 11</a> for exactly which parts are inference. The reasoning
+behind the right-hand column is worth recording either way: it stays
+the same above and below the bar because the two readings answer different
+questions. Clearing the Cp gate says a full refit beats <em>leaving the pair out</em> —
+not that it beats fitting the handful of cells that carry the signal. Raise the
+magnitude on a concentrated truth far enough and z crosses any bar while <code>P</code>
+stays near zero; taking that as "refit as fixed" throws away the shape
+information the participation ratio just supplied. The gate is a floor on the
+full refit, not a ranking of it against the sparse one.</p>
+<p>Neither reading is implemented in <code>screen_interactions</code>, and they do not cost
+the same to obtain. The <strong>gate is</strong> arithmetic on the returned row: <code>z</code> and
+<code>edf0</code> are both columns of it. <strong><code>P</code> is not</strong> — <code>screen_interactions</code> returns
+aggregates (<code>statistic</code>, <code>z</code>, <code>edf0</code>, <code>n_cells</code>), not the per-cell
+contributions, so obtaining it takes one extra pass over the mains-model
+residuals grouped by joint cell, which is what <code>cell_contributions</code> in the
+benchmark does. Reproduce with
+<code>uv run python benchmarks/screening_worth_gate.py</code>.</p>
+<h2 id="caveats">Caveats<a class="headerlink" href="#caveats" title="Permanent link">&para;</a></h2>
+<p>Any of these could change a conclusion.</p>
+<ol>
+<li><strong>Eight to ten pairs.</strong> A one-place swap moves Spearman by 0.05–0.10, so
+   the +0.83 against +0.61 margin is about two rank swaps wide. It reproduces
+   on both specs, both splits and the full book, but it is not a large-sample
+   claim.</li>
+<li><strong>One holdout.</strong> A single 60,210-row split, no repeated splitting or CV.
+   <code>VehBrand x Region</code>'s −904 is unambiguous; the ordering among the small
+   positives (+5.6, +2.5, +0.5, −0.25) is within holdout noise.</li>
+<li><strong>The gold standard's definition decides the winner.</strong> Out-of-sample gain
+   favours PSST, in-sample gain favours FAST, <code>gain - 2*edf</code> favours
+   <code>Purify</code>-FAST. The out-of-sample reading is taken as primary here; that
+   choice should be quoted alongside the result.</li>
+<li><strong>The gold standard is superglm's own refit</strong> — by construction the exact
+   basis PSST probes. A gold standard defined by EBM's own pair refit would
+   likely favour FAST. That experiment was not run. Scoring on out-of-sample
+   deviance mitigates this but does not remove it.</li>
+<li><strong>One book, one family.</strong> Poisson frequency on freMTPL2. The mechanism
+   above predicts the ordering generalises to any book mixing small
+   well-identified with large thinly-identified interactions — a prediction,
+   not a result.</li>
+<li><strong>Subsample.</strong> Gold-standard refits are at 200k of 678k rows. Both
+   rankings are stable at full scale; the refit gains themselves were not
+   recomputed at 678k.</li>
+<li><strong><code>DisableNewton</code></strong> is not reachable through the public
+   <code>measure_interactions</code> surface and was not swept.</li>
+</ol>
+<p>The remaining caveats apply to
+<a href="#from-rank-to-decision-does-the-pair-pay-for-its-own-df">From rank to decision</a>
+only, which is a separate simulated study.</p>
+<ol>
+<li><strong>Gaussian and balanced.</strong> <code>2*edf</code> is a Gaussian-family argument. The
+   constant has not been checked for Poisson with exposure — the family this
+   library is actually aimed at — and there is no reason to assume it carries
+   over unchanged. This is the first thing to check before the gate is quoted
+   anywhere else.</li>
+<li><strong>Sixteen points, three replicates, and a grid chosen to straddle the bar.</strong>
+   Enough to establish that the crossing tracks <code>sqrt(edf0/2)</code> across a 20×
+   range of df, not enough to pin the constant — and the two false negatives at
+   25×25 and 32×32 are direct evidence that it is not pinned, since both sit
+   below a bar the refit went on to beat. A true crossing at 0.8 rather than
+   1.0 would not be resolved by this data. Separately, the effect sizes at
+   each width were <strong>selected so z brackets <code>sqrt(edf0/2)</code> there</strong>, which is the
+   right design for locating the crossing but also guarantees a grid whose
+   boundary moves with width — precisely the configuration no constant cutoff
+   can track. Part of the margin over fixed cutoffs is therefore a property of
+   that selection rather than of the data; a grid drawn from some plausible
+   distribution over (width, effect) would give a different one. The margin is
+   one row in sixteen, which is not a result.</li>
+</ol>
+<p>There is one directly measured statement of what three replicates buy at
+   this width, and it is worth reading beside that margin. The same plain fixed
+   <code>cat_cat</code> refit appears twice on two seeds — <strong>+24.0%</strong> in the sparse-payoff
+   table and <strong>+22.5%</strong> in the worked example — and the worked example's own
+   three replicates span <strong>+20.3% to +27.0%</strong>. So a 1.5-point gap between two
+   three-replicate means of one quantity is comfortably inside the spread of a
+   single such mean, and differences of that size between arms should not be
+   read as separating them.
+10. <strong>The gate is for a plain fixed refit.</strong> A shrunk term spends less edf, so
+    its bar is lower, and the threshold answers "gate this into
+    <code>interactions=[...]</code>", not "is this pair ever usable". Measured on the
+    worked example: the <code>RandomEffect</code> fit spends 555.9 df against the fixed
+    fit's 1,633.3 and improves holdout by 3.7% where the fixed fit costs 22.5%.
+    So a pair the gate excludes can still be worth having — in another class.
+    What is <em>not</em> measured is where the shrunk term's own bar sits.
+11. <strong>No cell of the decision table is measured by a single run.</strong> The
+    lower-right — z below threshold, <code>P</code> ≪ 1, fit the few cells — comes
+    closest, and even it is two runs on two seeds: the worked example supplies
+    the screen, and the spiky row of the sparse-payoff table supplies <code>P</code> and
+    the sparse arms. Neither computes the other's half. The lower-left is
+    half measured: "skip" is backed by the diffuse row, where every top-m arm
+    degrades, but <strong>pooling on a diffuse truth was never run</strong>. Neither
+    upper cell is measured at all, and not by accident: <em>no</em> diffuse truth here
+    clears its own threshold — the widest, sd = 0.41, reaches z = 26.15 against
+    28.27 — while every truth in the gate ladder is spiky, so nothing in the
+    study puts a diffuse truth above the bar. The upper-right cell's advice to
+    check the sparse fit against the full one is reasoning, not a comparison:
+    no run puts a concentrated truth above its threshold and then fits both.
+12. <strong>Planted truths are scattered single cells.</strong> That is the best case for
+    top-m cell selection and the worst case for a group-structured penalty. A
+    contiguous block of live cells — arguably the more realistic shape for a
+    rating interaction — was not tested, and would probably reorder the
+    sparse-payoff table.
+13. <strong><code>P</code> is measured on the mains-model residuals</strong>, so it inherits whatever
+    the mains model failed to absorb. On a book where the additive fit is poor,
+    concentration would read structure that belongs to a margin.
+14. <strong><code>P/(k/3)</code> is calibrated for wide blocks only.</strong> <code>k/3</code> is the large-k
+    limit of the null, not its finite-sample expectation: the ratio's null mean
+    is ≈1.39 at k = 8, ≈1.15 at k = 25, ≈1.04 at k = 100 and ≈1.003 at k = 1600
+    (measured; pinned in <code>tests/test_screening_worth_gate.py</code>). At the bottom it
+    inverts outright — one occupied cell gives <code>P</code> = 1 by construction and the
+    ratio reads 3, the value that elsewhere means "as diffuse as noise". A
+    narrow or thinly occupied block needs a finite-k calibration before its
+    reading means anything.
+15. <strong>An earlier version of this section published figures the harness does not
+    produce. Every number above has since been re-measured.</strong> This is the most
+    useful thing recorded here, so it is worth stating precisely. Nothing in
+    this section is inherited: the four tables and the worked example were all
+    taken from runs of the committed benchmark, and where the new number
+    disagreed with the old one the new one stands.</p>
+<div class="highlight"><pre><span></span><code>The earlier gate ladder published z = 0.02, 0.72, 3.28, 12.02 at 8×8 and
+claimed the width-scaled rule agreed with the holdout sign in **15/16**
+against 10/16, 11/16 and 10/16 for fixed cutoffs. Running the harness
+unchanged gives z = 0.80, 2.04, 5.46, 15.83 on that rung and **13/16**
+against 10/16, 12/16 and 12/16 — so the headline margin was five rows and
+is one. The concentration and sparse-payoff tables disagreed with the
+harness too, the latter by 2 points of holdout MSE per column on its spiky
+row.
+
+Version drift does not explain it. Both the original figures and the
+re-check ran against `src/` at **`a2611cc`** — the tip of `master`, and the
+merge base of the branch that published them, which touched no `src/` file
+at the time. No `--n` in {4k, 6k, 8k, 12k, 24k} reproduces the published
+row either. The figures were simply never produced by the committed
+benchmark.
+
+**The library has moved since, and the tables moved with it.** The branch
+now carries eight changes to `src/superglm/solvers/rank.py` and its callers
+rather than one, and their claims are not equally strong — which matters
+here, because the rank-deficient path is exactly the path a wide `cat_cat`
+refit takes:
+
+- `b2de09d` replaced the alias-representative walk. Wherever the old walk
+  resolved a block, the two choose the same columns — measured across 958
+  deficient blocks with no disagreement — but on 126 of those the walk
+  resolved nothing at all. Reading the null basis makes a representative
+  candidate available there; the final severe-condition guard retains only
+  usable candidates and leaves the rest on the spectral path.
+- `0fbef7e` ([#196](https://github.com/StrudelDoodleS/superglm/issues/196))
+  certifies that choice on conditioning, and this one **does move which
+  columns are selected**, on blocks whose earliest independent columns are
+  near-duplicates.
+- `44e167a`, `4d2f321` and `18b06c3` stop building a Gram subspace that a
+  certification is about to discard. Their claim is **byte-identical fitted
+  output**, which is a stronger claim than equivalence and should not be
+  read as the same one.
+- `e80b440` records that the deficient answer can differ, in
+  `SHARED_RANK_POLICY.version`, now 2.
+- `6430239` replaced the conditioning fallback&#39;s criterion again, after
+  review found it read individual components of a null basis that
+  `eigh`/`svd` choose arbitrarily. It now selects on null-space
+  leverage, `diag(N N.T)`, which no rotation of that basis can move.
+  The selections it returns have identical conditioning to the rule it
+  replaces on all 287 blocks where the two were compared, so this
+  bought reproducibility rather than accuracy.
+- `0c4fa16` applied the same correction to the PRIMARY selector, after
+  review asked whether `_earliest_representatives` was invariant and a
+  constructed near-cutoff case showed it was not: its `sqrt(eps)` floor
+  read a single component, which moved it on 455 of 4000 subspaces
+  built inside the band where that matters, and moved the composite on
+  21.  It now decides on leverage too.  This is the change that
+  reaches the labels on almost every deficient block.
+- `c78edd7` added the judgement that decision still lacked:
+  `_principal_block_condition` conditions the actual principal block a
+  candidate selection hands the solver, and `_conditioned_representatives`
+  now decides between its two candidates on that rather than on the
+  amplification bound.  Under the bound, 24 of the switches measured over
+  9,654 anisotropic 3×4 blocks went to a block whose actual condition was
+  **worse**, by up to 1.34× — so &quot;the certificate never hands on a
+  worse-conditioned block&quot; is a guarantee this commit created, not a
+  property the design always had.
+- The final severe-condition guard closes the remaining absolute gap:
+  choosing the better of two representative blocks does not make either
+  usable. A deterministic walk-failure case produced a best principal
+  condition over twice `RankPolicy.severe_condition`; Cholesky accepted it
+  while the pseudo-inverse identity residual moved from about 0.004 on the
+  spectral route to 0.14. Both Gram and factor entry points now keep their
+  spectral solve when every representative crosses that existing policy
+  boundary.
+
+Tables 1 and 2 were first taken at `a2611cc` and have been re-taken with
+`src/` at **`0c4fa16`**, the tree with the first six changes in place:
+every published value is unchanged, to every digit printed. The committed
+complete-fit artifact measures `src/` at **`c78edd7`**, the seventh change.
+Neither later decision reaches its `cat_cat` fixture: on an exact alias the
+amplification is √2 against an achievable bound of √(1+k(m−k)), so
+candidate selection never changes, and its principal block remains below
+the severe boundary. A fresh one-repeat run against the eighth change is
+reported with the PR validation rather than silently rewriting the
+historical artifact. Tables 3 and 4 exist only on
+the fixed code and have not been re-taken since. The evidence that they are
+unaffected is indirect but specific: the 41×41 `cat_cat` refit they are
+built from was checked directly for #196 and produces bitwise-identical
+coefficients, predictions, edf and deviance across the conditioning
+certificate, because on that route every decomposition whose selection
+changes is superseded by a factor certification before the selection is
+used.
+
+That fix is also why the last two tables exist at all. On the old code one
+41×41 refit was measured at 668.55 s and the pair of tables needed twelve
+wide fits — a plausible reason nobody re-ran them, and not a reason to
+publish the output of a run that did not happen. The lesson is not &quot;check
+your arithmetic&quot;; it is that when re-running gets expensive enough,
+published numbers quietly stop being re-run, and the remedy is to make the
+rerun cheap and to name the command beside the figure.
+
+**No wall-clock figure is quoted anywhere in this guide as a property of
+this section&#39;s results.** Wall-clock does appear, and every occurrence is
+evidence about something else: the three figures below are evidence about
+measurement conditions, the 668.55 s and 9.27 s above and in the
+Reproducing section are evidence about a fixed defect, and the
+complete-fit table in the Reproducing section is evidence about that fix&#39;s
+live benchmark, quoted beside the load every run of it was taken under.
+None of them is offered as what this section&#39;s tables cost or as a finding
+of the study.
+
+The reason is worth recording as evidence rather than as a preference.
+Three consecutive runs of `--tables 4` — identical work, identical output —
+took **67 s, 100 s and 542 s** on a shared machine whose load average moved
+from 21 to 37 across them. An eight-fold spread on a fixed workload is what
+a contended wall-clock measurement is worth. The holdout and df columns are
+unaffected by any of it, which is why those are the only things quoted.
+</code></pre></div>
+<h2 id="reproducing">Reproducing<a class="headerlink" href="#reproducing" title="Permanent link">&para;</a></h2>
+<p>The FAST comparison requires <code>interpret-core</code>, which is not a dependency of
+this library; it was supplied out of tree and nothing in the package was
+modified to run it. The mains-model and relativity measurements in
+<a href="#the-baseline-deviance-against-shape">the baseline section</a> need only
+superglm and the freMTPL2 parquet.</p>
+<p><a href="#from-rank-to-decision-does-the-pair-pay-for-its-own-df">From rank to decision</a>
+is simulated and needs neither, so it runs from a clean checkout:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>uv run python benchmarks/screening_worth_gate.py
+</code></pre></div>
+<p>That prints all four tables at the defaults — three replicates, n = 12,000,
+41×41 for the wide ones. No figure here came from that bare command,
+though: each table was taken from its own <code>--tables</code> run, and they were not
+all taken at the same <code>src/</code> state (<a href="#caveats">caveat 15</a>). The values are
+unaffected, because each runner opens its own generators on per-table seeds,
+so a subset run and the full run produce identical rows.
+<code>--tables</code> runs a subset when only one table needs refreshing, and which
+command produced which table is:</p>
+<table>
+<thead>
+<tr>
+<th>table</th>
+<th>command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>gate ladder</td>
+<td><code>--tables 1</code></td>
+</tr>
+<tr>
+<td>concentration at matched z</td>
+<td><code>--tables 2</code></td>
+</tr>
+<tr>
+<td>sparse payoff</td>
+<td><code>--tables 3</code></td>
+</tr>
+<tr>
+<td>three model classes</td>
+<td><code>--tables 4</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each was taken from its own run of that command. The tables are deterministic
+given the seeds: three consecutive runs of <code>--tables 3</code> and of <code>--tables 4</code>
+produced byte-identical output apart from the wall-clock columns.</p>
+<p><strong>No runtime estimate for these commands is quoted here</strong>, and
+<a href="#caveats">caveat 15</a> records the measurement that is the reason. The wide <code>cat_cat</code> refits dominate the cost —
+twelve wide fits between tables 3 and 4, nine plain refits and three
+<code>RandomEffect</code> fits on the 1,681-level cell. What can be said without a
+stopwatch is structural: on the code before the alias-representative fix in
+this branch one of the nine refits was measured at <strong>668.55 s</strong>, against
+<strong>9.27 s</strong> after it (both figures from that commit, not from this benchmark).
+Those two now have a live producer:
+<code>benchmarks/rank_deficient_complete_fit.py</code> measures the same shape of fit,
+and it has been run five times. The measured ratio moved with the machine
+rather than the code, so every run is listed beside the 1-minute load average
+it ran under instead of any one of them being quoted alone:</p>
+<table>
+<thead>
+<tr>
+<th>run</th>
+<th style="text-align: right;">baseline</th>
+<th style="text-align: right;">branch</th>
+<th style="text-align: right;">ratio</th>
+<th>1-min load average</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td style="text-align: right;">262.62 s</td>
+<td style="text-align: right;">5.97 s</td>
+<td style="text-align: right;">44.0x</td>
+<td>not recorded per side</td>
+</tr>
+<tr>
+<td>2</td>
+<td style="text-align: right;">266.96 s</td>
+<td style="text-align: right;">7.87 s</td>
+<td style="text-align: right;">33.9x</td>
+<td>18-21</td>
+</tr>
+<tr>
+<td>3</td>
+<td style="text-align: right;">285.19 s</td>
+<td style="text-align: right;">6.58 s</td>
+<td style="text-align: right;">43.3x</td>
+<td>in the teens</td>
+</tr>
+<tr>
+<td>4</td>
+<td style="text-align: right;">264.58 s</td>
+<td style="text-align: right;">8.48 s</td>
+<td style="text-align: right;">31.2x</td>
+<td>18.92</td>
+</tr>
+<tr>
+<td>5</td>
+<td style="text-align: right;">271.27 s</td>
+<td style="text-align: right;">6.09 s</td>
+<td style="text-align: right;">44.5x</td>
+<td>quiet box -- branch: 0.05 before, 2.04 after; baseline: 1.46 before, 21.76 after</td>
+</tr>
+</tbody>
+</table>
+<p>Run 5 is the committed artifact: one fit per side with the CPU lock held on an
+otherwise idle box, the load read immediately before and after each timed side
+(the after reading of a multi-minute 16-thread fit contains the fit's own
+threads; the before readings are the contention evidence). Run 1's branch time
+was the min of 3 fits in one process; every later run is one fit per side.
+Runs 1--4 stay readable in the artifact's git history, and their spread is
+what a contended wall clock is worth. The claim the five runs support is that
+the fix makes this refit <strong>tens of times faster</strong>; no single multiplier
+survives them, so none is quoted. Where the pair above reads 72x, the live
+producer reads tens. Neither is wrong for the other's conditions -- the older
+pair came from a profiling session at settings this branch cannot now
+reconstruct -- but the disagreement is about 2.5x on the slower side and
+belongs in the open rather than between two documents that each look
+self-consistent.
+That is the difference between a run nobody repeats and a run anyone can.</p>
+<p><code>--tables</code> exists so that a partial rerun is a quotable command rather than a
+hand edit: anything taken from this section in future should be published with
+the command and the commit that produced it. The benchmark also arms a
+<code>faulthandler</code> watchdog by default, so a fit that hangs prints its own stack to
+stderr every five minutes instead of merely looking expensive — which is how
+the 668.55 s above stopped being mistaken for a big problem and started being a
+fixable one.</p>
+<p>Wall-clock here moves several-fold under CPU contention and should not be read
+as a benchmark of the fitting paths; the holdout columns are unaffected. The
+arithmetic underneath the two readings is guarded by
+<code>tests/test_screening_worth_gate.py</code>.</p>
+<p>One trap worth recording for anyone extending the FAST comparison:
+InterpretML's <code>term_features_</code> is <strong>sorted by arity then feature index</strong>
+(<code>order_terms</code>), not by FAST rank. Reading <code>term_features_[0]</code> as "the pair
+FAST liked most" measures column order — on the setup above, relabelling so the
+narrow pair sits at indices 0,1 rather than 2,3 moves it from "chosen first in
+0/6" to "6/6" on identical data. Recovering the real ranking requires
+instrumenting <code>calc_interaction_strength</code> and replaying the cross-bag
+aggregation, which averages ordinal ranks and discards strength.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
