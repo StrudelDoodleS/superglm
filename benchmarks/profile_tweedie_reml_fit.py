@@ -108,7 +108,6 @@ class Probes:
         consumer_names = [
             "superglm.reml.direct",
             "superglm.reml.discrete",
-            "superglm.reml.runner",
             "superglm.reml.efs",
             "superglm.reml.scop_efs",
             "superglm.model.reml_finalize",
@@ -459,7 +458,6 @@ def build_random_effect_model(discrete: bool):
         discrete=discrete,
         features={"grp": RandomEffect()},
     )
-
 
 
 # --- burn-cost shaped workload (synthetic reproduction of the target shape) ---
