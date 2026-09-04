@@ -41,6 +41,7 @@ def _natural_parameterization_from_r(
     *,
     rank: int,
     n_rows: int,
+    normalization_mass: float | None = None,
 ) -> tuple[NDArray, tuple[tuple[str, NDArray], ...]]:
     """Build a QR-whitened natural parameterization without materializing ``Q``."""
     R_array = np.asarray(R, dtype=np.float64)
@@ -55,6 +56,9 @@ def _natural_parameterization_from_r(
             "FactorSmooth marginal basis is rank deficient; use more distinct numeric values "
             "or a smaller k, or choose a suitable non-smooth feature."
         )
+    mass = float(n_rows) if normalization_mass is None else float(normalization_mass)
+    if not np.isfinite(mass) or mass <= 0.0:
+        raise ValueError("factor-smooth normalization mass must be finite and positive")
 
     R_inv = la.solve_triangular(R_array, np.eye(k), lower=False)
     transformed_penalty = R_inv.T @ S @ R_inv
@@ -75,11 +79,11 @@ def _natural_parameterization_from_r(
 
     natural_map = R_inv @ eigenvectors
     natural_map[:, :rank] /= np.sqrt(positive)
-    penalized_scale = np.sqrt(n_rows * rank / np.sum(1.0 / positive))
+    penalized_scale = np.sqrt(mass * rank / np.sum(1.0 / positive))
     natural_map[:, :rank] *= penalized_scale
     null_dim = k - rank
     if null_dim:
-        natural_map[:, rank:] *= np.sqrt(n_rows)
+        natural_map[:, rank:] *= np.sqrt(mass)
 
     wiggle = np.zeros((k, k), dtype=np.float64)
     wiggle[np.arange(rank), np.arange(rank)] = penalized_scale**2
@@ -364,12 +368,13 @@ class FactorSmooth:
     def _initialize_marginal_spline(
         self,
         x: NDArray,
+        geometry_weight: NDArray | None,
     ) -> tuple[PSpline, NDArray]:
         """Place the shared marginal knots and return its raw penalty."""
         from superglm.features.spline import PSpline, Spline
 
         spline = cast(PSpline, Spline(kind="ps", k=self.k, penalty="none", m=self.m))
-        spline._place_knots(x)
+        spline._place_knots(x, geometry_weight)
         # Factor-smooth marginals place one equally spaced knot sequence
         # across boundaries expanded by 0.1% of the data range. Ordinary
         # SuperGLM P-splines preserve their pre-expansion interior knots for
@@ -395,9 +400,22 @@ class FactorSmooth:
         x: NDArray,
         *,
         retain_basis: bool,
+        geometry_weight: NDArray | None,
     ) -> sp.csr_matrix | None:
         """Build the marginal with bounded QR memory when its coordinates permit it."""
-        spline, penalty = self._initialize_marginal_spline(x)
+        if geometry_weight is None:
+            weights = None
+            normalization_mass = float(len(x))
+        else:
+            weights = np.asarray(geometry_weight, dtype=np.float64).ravel()
+            if weights.shape != x.shape:
+                raise ValueError("FactorSmooth geometry weights must match its numeric rows.")
+            if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
+                raise ValueError("FactorSmooth geometry weights must be finite and non-negative.")
+            if not np.any(weights > 0.0):
+                raise ValueError("FactorSmooth geometry weights must retain at least one row.")
+            normalization_mass = float(np.sum(weights, dtype=np.float64))
+        spline, penalty = self._initialize_marginal_spline(x, weights)
         exact_basis: sp.csr_matrix | None
 
         if self._streaming_safe():
@@ -408,7 +426,12 @@ class FactorSmooth:
                     spline._basis_matrix(x[start : start + _MARGINAL_QR_CHUNK_ROWS]),
                     dtype=np.float64,
                 )
-                qr_r = _combine_qr_r(qr_r, basis_chunk)
+                if weights is None:
+                    qr_basis = basis_chunk
+                else:
+                    row_scale = np.sqrt(weights[start : start + _MARGINAL_QR_CHUNK_ROWS])
+                    qr_basis = basis_chunk.multiply(row_scale[:, None]).tocsr()
+                qr_r = _combine_qr_r(qr_r, qr_basis)
                 if chunks is not None:
                     chunks.append(basis_chunk)
             if qr_r is None:  # pragma: no cover - group validation rejects zero rows
@@ -426,7 +449,8 @@ class FactorSmooth:
             else:
                 exact_basis = None
                 raw_dense = np.asarray(spline._raw_basis_matrix(x), dtype=np.float64)
-            qr_r = np.asarray(np.linalg.qr(raw_dense, mode="r"), dtype=np.float64)
+            qr_basis = raw_dense if weights is None else raw_dense * np.sqrt(weights[:, None])
+            qr_r = np.asarray(np.linalg.qr(qr_basis, mode="r"), dtype=np.float64)
             self._marginal_build_backend = "dense_qr_compat"
 
         if (
@@ -444,6 +468,7 @@ class FactorSmooth:
                 penalty,
                 rank=self.k - self.m,
                 n_rows=len(x),
+                normalization_mass=normalization_mass,
             )
         else:
             natural_map = np.eye(self.k, dtype=np.float64)
@@ -491,13 +516,17 @@ class FactorSmooth:
         """Build one exact compact factor-by-spline block."""
         del specs
         numeric = self._validate_numeric(x)
-        # The weights reach the universe check only: they decide which declared
-        # levels are EFFECTIVELY empty (see `_declared_codes`). The basis and
-        # the penalty geometry stay weight-free as before.
+        # The supplied stream governs both effective-level occupancy and the
+        # marginal geometry: physical rows under prior semantics, replicated
+        # row mass under frequency semantics.
         codes = self._factorize_group(group, sample_weight)
         if len(numeric) != len(codes):
             raise ValueError("FactorSmooth variable and group lengths differ.")
-        exact_basis = self._build_marginal(numeric, retain_basis=True)
+        exact_basis = self._build_marginal(
+            numeric,
+            retain_basis=True,
+            geometry_weight=sample_weight,
+        )
         if exact_basis is None:  # pragma: no cover - required by retain_basis
             raise RuntimeError("FactorSmooth exact marginal basis was not retained.")
         return self._group_info(codes=codes, basis=exact_basis)
@@ -515,12 +544,16 @@ class FactorSmooth:
         from superglm.group_matrix import _discretize_column
 
         numeric = self._validate_numeric(x)
-        # Same rule as the exact path: weights inform the empty-level check and
-        # nothing else. The support grid and the natural basis are unweighted.
+        # Same geometry rule as the exact path; only the final evaluated basis
+        # is compressed onto the unweighted numeric support.
         codes = self._factorize_group(group, sample_weight)
         if len(numeric) != len(codes):
             raise ValueError("FactorSmooth variable and group lengths differ.")
-        self._build_marginal(numeric, retain_basis=False)
+        self._build_marginal(
+            numeric,
+            retain_basis=False,
+            geometry_weight=sample_weight,
+        )
         support, bin_idx = _discretize_column(numeric, n_bins)
         spline = self._spline
         if spline is None:  # pragma: no cover - populated by _build_marginal

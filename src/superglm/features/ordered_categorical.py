@@ -1262,6 +1262,20 @@ class OrderedCategorical:
         rows in THIS fit; when every declared special is pinned there is no
         second block and one GroupInfo comes back.
         """
+        return self._build_with_geometry(
+            x,
+            reporting_weight=sample_weight,
+            geometry_weight=sample_weight,
+        )
+
+    def _build_with_geometry(
+        self,
+        x: NDArray,
+        *,
+        reporting_weight: NDArray[np.floating] | None,
+        geometry_weight: NDArray[np.floating] | None,
+    ) -> GroupInfo | list[GroupInfo]:
+        """Build with explicit outer reporting mass and inner geometry mass."""
         x = self._canonical(np.asarray(x).ravel())
 
         if self._grouping is not None:
@@ -1271,7 +1285,7 @@ class OrderedCategorical:
         else:
             _validate_categorical_levels(x, self._known_levels)
 
-        return self._build_spline(x, sample_weight)
+        return self._build_spline(x, reporting_weight, geometry_weight)
 
     def _build_inner_info(
         self,
@@ -1280,23 +1294,12 @@ class OrderedCategorical:
     ) -> GroupInfo | list[GroupInfo]:
         """Build the inner basis on the mapped numeric axis.
 
-        A Spline keeps its historical contract bit-for-bit: knot placement on
-        the level values is model geometry, so no weights are passed. The
-        parametric bases DO receive the fit weights -- ``Polynomial``
-        orthonormalizes against the training exposure (the whole point of the
-        weighted ordinal contrasts, and deliberately under every family: the
-        documented inference-geometry rule) and ``Piecewise`` uses them for
-        ``base='most_exposed'`` and its support rules.
-
-        The exception is hosted MODEL geometry under the prior contract:
-        prior weights are precisions, not frequency mass, so a hosted
-        Piecewise's int-mode placement and base selection follow physical rows
-        exactly as the numeric-axis term does. The builder stamps
-        ``_inner_geometry_weight`` per build because only it knows the declared
-        contract, and it stamps the same array the numeric-axis terms get --
-        the positive-row indicator, not ``None``, so a zero-weight row shapes
-        no hosted boundary either. Direct spec-API builds are unstamped and
-        keep the replication reading.
+        ``sample_weight`` is the learned-state stream chosen by the caller and
+        every inner basis consumes it exactly. Distributional compilation
+        supplies physical retained rows under a prior contract and literal
+        replication mass under a frequency contract. Scalar compilation keeps
+        its historical Polynomial standardization stream; direct spec-API
+        callers retain the same control by supplying (or omitting) the stream.
         """
         from dataclasses import replace
 
@@ -1304,24 +1307,8 @@ class OrderedCategorical:
 
         inner = self._basis_spline
         if isinstance(inner, _SplineBase):
-            return inner.build(numeric)
-        if isinstance(inner, Piecewise) and getattr(self, "_inner_geometry_physical_rows", False):
-            # The positive-row indicator, derived HERE from the weights this
-            # call was given rather than from the builder's full-length array:
-            # with ``specials=`` the caller masks rows down to the ordered
-            # levels, so anything stamped whole would not align with
-            # ``numeric``. Deriving it from the already-masked weights is
-            # correct under both shapes, and matches exactly what the
-            # numeric-axis terms receive. ``None`` means every row carries
-            # weight, where the indicator is all ones and so says nothing.
-            geometry_weight = (
-                None
-                if sample_weight is None
-                else (np.asarray(sample_weight, dtype=np.float64) > 0.0).astype(np.float64)
-            )
-            info = inner.build(numeric, sample_weight=geometry_weight)
-        else:
-            info = inner.build(numeric, sample_weight=sample_weight)
+            return inner.build(numeric, sample_weight=sample_weight)
+        info = inner.build(numeric, sample_weight=sample_weight)
         if isinstance(info, GroupInfo):
             # Structurally unpenalized main block for BOTH parametric bases --
             # the same convention as the specials block, which is exactly an
@@ -1338,12 +1325,15 @@ class OrderedCategorical:
         return info
 
     def _build_spline(
-        self, x: NDArray, sample_weight: NDArray | None
+        self,
+        x: NDArray,
+        reporting_weight: NDArray | None,
+        geometry_weight: NDArray | None,
     ) -> GroupInfo | list[GroupInfo]:
         """Map levels to the numeric axis and delegate to the inner basis."""
-        self._choose_base(x, sample_weight)
+        self._choose_base(x, reporting_weight)
         if not self.has_specials:
-            return self._build_inner_info(self._map_to_numeric(x), sample_weight)
+            return self._build_inner_info(self._map_to_numeric(x), geometry_weight)
 
         special_mask = self._special_mask(x)
         # The DECLARED mask splits the design, not the active one: a pinned
@@ -1356,10 +1346,10 @@ class OrderedCategorical:
         # enough, because it is X'WX that has to see the indicator -- a special
         # carried only by zero-weight rows contributes nothing to it and its
         # unpenalized coefficient is exactly as unidentifiable as an absent one.
-        if sample_weight is None:
+        if reporting_weight is None:
             effective = special_mask.sum(axis=0).astype(np.float64)
         else:
-            effective = np.asarray(sample_weight, dtype=np.float64).ravel() @ special_mask
+            effective = np.asarray(reporting_weight, dtype=np.float64).ravel() @ special_mask
         self._active_specials = [j for j in range(len(self._specials)) if effective[j] > 0.0]
         self._pinned_specials = [
             self._special_display[j] for j in range(len(self._specials)) if not effective[j] > 0.0
@@ -1381,12 +1371,12 @@ class OrderedCategorical:
         # Building over all rows would break 1'(B@Z) = 0 once the special rows are
         # zeroed, and would let a fabricated coordinate reach knot placement.
         ordered_numeric = self._map_to_numeric(x[ordered_mask])
-        ordered_weight = (
+        ordered_geometry_weight = (
             None
-            if sample_weight is None
-            else np.asarray(sample_weight, dtype=np.float64).ravel()[ordered_mask]
+            if geometry_weight is None
+            else np.asarray(geometry_weight, dtype=np.float64).ravel()[ordered_mask]
         )
-        spline_info = self._build_inner_info(ordered_numeric, ordered_weight)
+        spline_info = self._build_inner_info(ordered_numeric, ordered_geometry_weight)
         # build() is declared as returning one GroupInfo or a list of them; the
         # spline bases reachable from here return exactly one, and _expand_rows and
         # the two-block contract both assume it. Say so rather than indexing on faith.

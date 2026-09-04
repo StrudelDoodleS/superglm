@@ -59,6 +59,114 @@ def test_toplevel_reexports():
         assert hasattr(superglm, name), f"superglm.{name} not accessible"
 
 
+def test_public_model_kernel_warmup_is_lazy_complete_and_idempotent() -> None:
+    script = r"""
+import inspect
+
+import numpy as np
+import superglm
+import superglm._group_matrix._group_matrix_kernels as group_kernels
+import superglm._tweedie_profile_kernel as profile_kernel
+import superglm.distributional.kernels._tweedie_numba as tweedie_numba
+from numba.core.registry import CPUDispatcher
+
+dispatchers = {}
+for module in (tweedie_numba, profile_kernel, group_kernels):
+    dispatchers.update(
+        {
+            f"{module.__name__}.{name}": value
+            for name, value in vars(module).items()
+            if isinstance(value, CPUDispatcher)
+            and value.py_func.__module__ == module.__name__
+        }
+    )
+assert dispatchers
+assert inspect.signature(superglm.warmup).parameters == {}
+assert all(not dispatcher.nopython_signatures for dispatcher in dispatchers.values())
+
+def signatures():
+    return {
+        name: tuple(dispatcher.nopython_signatures)
+        for name, dispatcher in dispatchers.items()
+    }
+
+def readonly(*arrays):
+    for array in arrays:
+        array.setflags(write=False)
+    return arrays
+
+superglm.warmup()
+compiled = signatures()
+assert all(compiled.values()), [name for name, signatures in compiled.items() if not signatures]
+
+writable_profile_arrays = (
+    np.array([0.0, 1.0], dtype=np.float64),
+    np.ones(2, dtype=np.float64),
+    np.ones(2, dtype=np.float64),
+)
+readonly_profile_arrays = readonly(*(values.copy() for values in writable_profile_arrays))
+writable_profile = profile_kernel._exact_profile_statistics_kernel(
+    *writable_profile_arrays, 1.5, 0.0, 100_000, 1_000_000
+)
+readonly_profile = profile_kernel._exact_profile_statistics_kernel(
+    *readonly_profile_arrays, 1.5, 0.0, 100_000, 1_000_000
+)
+assert writable_profile == readonly_profile
+
+values = np.array([1.0, 2.0], dtype=np.float64)
+codes = np.array([0, 1], dtype=np.intp)
+csr_indices = np.array([0, 1], dtype=np.int32)
+csr_indptr = np.array([0, 1, 2], dtype=np.int32)
+dense_small, = readonly(np.eye(2, dtype=np.float64))
+group_kernels._dense_small_weighted_moments(dense_small, values, values)
+group_kernels._factor_smooth_csr_dense_cross(
+    values, csr_indices, csr_indptr, codes, values, dense_small, 2, 2
+)
+group_kernels._factor_smooth_support_dense_cross(
+    np.eye(2, dtype=np.float64), codes, codes, values, dense_small, 2
+)
+group_kernels._factor_smooth_support_dense_cell_aggregates(
+    codes, codes, values, dense_small, 2, 2
+)
+
+row_patterns, unique_codes, offsets, pair_left, pair_right, pair_offsets, right_sizes = readonly(
+    np.array([0, 1], dtype=np.int32),
+    np.array([[0, 0], [1, 1]], dtype=np.int32),
+    np.array([0, 2, 4], dtype=np.intp),
+    codes[:1],
+    codes[1:],
+    np.array([0, 4], dtype=np.intp),
+    np.array([2], dtype=np.intp),
+)
+group_kernels._pattern_support_summaries(
+    row_patterns,
+    unique_codes,
+    values,
+    values,
+    offsets,
+    pair_left,
+    pair_right,
+    pair_offsets,
+    right_sizes,
+)
+assert signatures() == compiled
+
+superglm.warmup()
+assert signatures() == compiled
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+
+
 def test_an_exception_raised_by_a_root_export_is_catchable_from_the_root():
     """A caller must be able to catch what the top-level API can raise.
 

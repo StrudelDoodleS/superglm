@@ -89,6 +89,7 @@ class _BlockWeightCache:
         key = self._key(idx_a, idx_b, W, n_a, n_b)
         cached = self._hist2d.get(key)
         if cached is not None:
+            _profile_count(self._profile, "block_hist2d_reuses")
             return cached
 
         rev_key = self._key(idx_b, idx_a, W, n_b, n_a)
@@ -96,11 +97,13 @@ class _BlockWeightCache:
         if rev_cached is not None:
             hist = rev_cached.T
             self._hist2d[key] = hist
+            _profile_count(self._profile, "block_hist2d_reuses")
             return hist
 
         t0 = perf_counter() if self._profile is not None else 0.0
         hist = _disc_disc_2d_hist(idx_a, idx_b, W, n_a, n_b)
         _profile_elapsed(self._profile, "block_hist2d_s", t0)
+        _profile_count(self._profile, "block_hist2d_builds")
         self._hist2d[key] = hist
         return hist
 
@@ -118,6 +121,7 @@ class _BlockWeightCache:
             t0 = perf_counter() if self._profile is not None else 0.0
             w_grid, wz_grid = _fused_2d_bincount_2(gm.idx1, gm.idx2, W, Wz, gm.n_bins1, gm.n_bins2)
             _profile_elapsed(self._profile, "block_hist2d_s", t0)
+            _profile_count(self._profile, "block_hist2d_builds")
             self._hist2d[w_key] = w_grid
             self._hist2d[wz_key] = wz_grid
             return w_grid, wz_grid

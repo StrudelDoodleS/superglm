@@ -358,7 +358,31 @@ def test_identifiability_constraint_holds_on_the_ordered_rows():
     spline_info, _ = spec.build(frame["band"].to_numpy(), frame["exposure"].to_numpy())
     ordered = (frame["band"] != SPECIAL).to_numpy()
     centered = np.asarray(spline_info.columns.todense()) @ spline_info.projection
-    np.testing.assert_allclose(centered[ordered].sum(axis=0), 0.0, atol=1e-8)
+    geometry = frame.loc[ordered, "exposure"].to_numpy(dtype=np.float64)
+    ordered_columns = centered[ordered]
+    moment = geometry @ ordered_columns
+    dot_scale = np.abs(geometry) @ np.abs(ordered_columns)
+    gamma = (
+        max(ordered_columns.shape)
+        * np.finfo(np.float64).eps
+        / (1.0 - max(ordered_columns.shape) * np.finfo(np.float64).eps)
+    )
+    bound = 64.0 * gamma * np.maximum(1.0, dot_scale)
+    assert np.all(np.abs(moment) <= bound), (moment, bound)
+
+    # Special rows are structural zeros, not observations in the inner
+    # centering measure. This also proves the weighted assertion above is not
+    # made true by leaking their held-out coordinates back into the spline.
+    assert np.count_nonzero(centered[~ordered]) == 0
+
+    # Mutation catcher: the exposure geometry is deliberately nonuniform, and
+    # the stale unit-row moment is macroscopically nonzero on this fixture.
+    unit_moment = ordered_columns.sum(axis=0)
+    nonzero_bound = np.sqrt(np.finfo(np.float64).eps) * max(
+        1.0,
+        float(np.linalg.norm(ordered_columns, ord=1)),
+    )
+    assert np.linalg.norm(unit_moment, ord=np.inf) > nonzero_bound
 
 
 def test_ssp_gram_of_the_zero_filled_block_is_on_the_all_row_scale():

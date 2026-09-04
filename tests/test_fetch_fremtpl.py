@@ -105,7 +105,9 @@ def _steps(workflow: str) -> dict[str, str]:
 
 def _suite_step(workflow: str) -> str:
     """The step block that runs pytest."""
-    matches = [block for block in _steps(workflow).values() if "uv run pytest" in block]
+    matches = [
+        block for block in _steps(workflow).values() if "uv run --with mpmath pytest" in block
+    ]
     assert len(matches) == 1, f"expected exactly one pytest step, found {len(matches)}"
     return matches[0]
 

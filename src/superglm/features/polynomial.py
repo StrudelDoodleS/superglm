@@ -41,17 +41,18 @@ class Polynomial:
     training ``sample_weight``, and each is orthogonal to the constant in
     the same inner product.  When exposure enters through an offset (the
     documented count workflow) ``sample_weight`` stays at ones, so the
-    basis is orthonormalized against the row-count measure.  The weights
-    are followed under either weight contract — including ``"prior"``, where
-    they are precisions: orthonormalization is inference/selection geometry
-    (the spanned column space is weight-invariant), not model geometry,
-    so the spline physical-rows rule deliberately does not apply.  Under
-    Gaussian/fixed-weight fitting this makes the per-power coefficient
-    estimates exactly uncorrelated, and it gives the group penalty the
-    within-group orthonormal geometry that the group lasso assumes (Yuan
-    & Lin 2006, JRSS-B 68:49-67; Simon & Tibshirani 2012, Statistica
-    Sinica 22(3):983-1001 — orthonormalizing within the group is exactly
-    equivalent to their standardized group lasso).
+    basis is orthonormalized against the row-count measure. The feature itself
+    is weight-contract neutral: it follows exactly the stream its caller
+    supplies. Scalar SuperGLM preserves likelihood-weight standardization,
+    while distributional compilation supplies resolved data-derived geometry
+    (physical rows for prior weights and replication mass for frequency
+    weights). Under Gaussian/fixed-weight fitting where the supplied stream is
+    also the fitting measure, this makes the per-power coefficient estimates
+    exactly uncorrelated and gives the group penalty the within-group
+    orthonormal geometry that the group lasso assumes (Yuan & Lin 2006, JRSS-B
+    68:49-67; Simon & Tibshirani 2012, Statistica Sinica 22(3):983-1001 —
+    orthonormalizing within the group is exactly equivalent to their
+    standardized group lasso).
 
     The triangular factor of the weighted QR is stored as fitted state
     beside the min/max scaling.  ``transform``/``score`` push new x
@@ -63,9 +64,10 @@ class Polynomial:
 
     Honest caveats:
 
-    - Exact uncorrelatedness of the per-power estimates holds under the
-      training weights (the fixed-weight/Gaussian world).  In a GLM it is
-      approximate at the IRLS working weights; no published result
+    - Exact uncorrelatedness of the per-power estimates holds when the
+      supplied QR stream is also the fixed fitting measure (the scalar
+      fixed-weight/Gaussian world). In a GLM it is approximate at the IRLS
+      working weights; no published result
       quantifies that gap, and published group-penalty practice makes the
       same fixed spherical approximation of the working Hessian (Simon &
       Tibshirani 2012, section 5.3).
@@ -82,9 +84,9 @@ class Polynomial:
     powers : sequence of int, optional
         Distinct integers >= 1 naming the orthogonal components to keep,
         e.g. ``powers=[1, 2, 4]``.  The orthogonal basis is built up to
-        ``max(powers)`` and the stated components are selected, so under
-        fixed weights dropping a middle power leaves the retained
-        components' fitted coefficients unchanged.  Excluding "power 3"
+        ``max(powers)`` and the stated components are selected, so when the QR
+        and fitting measures coincide, dropping a middle power leaves the
+        retained components' fitted coefficients unchanged. Excluding "power 3"
         excludes the degree-3 *orthogonal component*, not the raw ``x**3``
         monomial — on asymmetric exposure the degree-4 orthogonal
         polynomial carries ``x**3`` monomial content.  API precedent for

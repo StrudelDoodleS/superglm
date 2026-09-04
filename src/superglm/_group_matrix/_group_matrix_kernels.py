@@ -389,3 +389,66 @@ def _cat_cat_weighted_crosstab(codes_i, codes_j, W, n_levels_i, n_levels_j):
         if ci < n_levels_i and cj < n_levels_j:
             result[ci, cj] += W[k]
     return result
+
+
+def _warmup_group_matrix_kernels() -> None:
+    values = np.array([1.0, 2.0], dtype=np.float64)
+    codes = np.array([0, 1], dtype=np.intp)
+    csr_indices = np.array([0, 1], dtype=np.int32)
+    csr_indptr = np.array([0, 1, 2], dtype=np.int32)
+    matrix = np.eye(2, dtype=np.float64)
+    frozen_matrix = matrix.copy()
+    frozen_matrix.setflags(write=False)
+    row_patterns = np.array([0, 1], dtype=np.int32)
+    unique_codes = np.array([[0, 0], [1, 1]], dtype=np.int32)
+    marginal_offsets = np.array([0, 2, 4], dtype=np.intp)
+    pair_left = codes[:1]
+    pair_right = codes[1:]
+    pair_offsets = np.array([0, 4], dtype=np.intp)
+    pair_right_sizes = np.array([2], dtype=np.intp)
+    for array in (
+        row_patterns,
+        unique_codes,
+        marginal_offsets,
+        pair_left,
+        pair_right,
+        pair_offsets,
+        pair_right_sizes,
+    ):
+        array.setflags(write=False)
+
+    _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2)
+    _weighted_bincount_2d(codes, values, matrix, 2)
+    _csr_weighted_bincount(values, csr_indices, csr_indptr, 2, codes, values, 2)
+    _disc_disc_2d_hist(codes, codes, values, 2, 2)
+    _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)
+    _fused_bincount_2(codes, values, values, 2)
+    _random_effect_sufficient_stats(codes, values, values, 2)
+    _factor_smooth_csr_matvec(values, csr_indices, csr_indptr, codes, matrix)
+    _factor_smooth_support_matvec(matrix, codes, codes, matrix)
+    _factor_smooth_csr_rmatvec(values, csr_indices, csr_indptr, codes, values, 2, 2)
+    _factor_smooth_support_rmatvec(matrix, codes, codes, values, 2)
+    _factor_smooth_csr_sufficient_stats(
+        values, csr_indices, csr_indptr, codes, values, values, 2, 2
+    )
+    _factor_smooth_support_cell_aggregates(codes, codes, values, values, 2, 2)
+    _factor_smooth_csr_dense_cross(
+        values, csr_indices, csr_indptr, codes, values, frozen_matrix, 2, 2
+    )
+    _factor_smooth_support_dense_cross(matrix, codes, codes, values, frozen_matrix, 2)
+    _factor_smooth_support_dense_cell_aggregates(codes, codes, values, frozen_matrix, 2, 2)
+    _dense_small_weighted_moments(frozen_matrix, values, values)
+    _fused_2d_bincount_2(codes, codes, values, values, 2, 2)
+    _pattern_support_summaries(
+        row_patterns,
+        unique_codes,
+        values,
+        values,
+        marginal_offsets,
+        pair_left,
+        pair_right,
+        pair_offsets,
+        pair_right_sizes,
+    )
+    _cat_weighted_bincount(codes, codes, values, 2, 2)
+    _cat_cat_weighted_crosstab(codes, codes, values, 2, 2)

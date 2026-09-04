@@ -197,9 +197,20 @@ def test_family_guide_states_the_declared_weight_contract():
     assert "`quantile_tempered` knot strategies use frequency mass" in weights
     assert "ignore zero-weight rows" in weights
     assert "Prior weights intentionally leave spline geometry" in weights
-    assert "tensor-interaction marginal centering" in weights
-    assert "categorical/ordered/factor feature geometry" in weights
-    assert "fixed or preconstructed feature geometry" in weights
+    normalized_weights = weights.casefold()
+    assert (
+        "tensor-interaction marginal centering and interaction-local spline geometry "
+        "use that same stream"
+    ) in normalized_weights
+    assert (
+        "scalar integer-frequency tensor fit matches literal row expansion through "
+        "fitting, reml smoothing selection and prediction"
+    ) in normalized_weights
+    assert "legacy custom tensor marginals" in normalized_weights
+    assert "refuse non-unit replication mass explicitly" in normalized_weights
+    assert "some tensor-interaction marginal centering" not in normalized_weights
+    assert "categorical/ordered/factor feature geometry can still depend" not in normalized_weights
+    assert "use fixed or preconstructed feature geometry" not in normalized_weights
     assert "Gamma fit does not implement that contract" not in weights
     assert "retain the individual claim-severity rows" not in weights
     assert "family-specific contract" not in weights

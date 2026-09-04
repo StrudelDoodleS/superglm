@@ -2,13 +2,48 @@
 
 import numpy as np
 import pytest
+from numba.core import types  # type: ignore[import-untyped]
+from numba.core.registry import CPUDispatcher  # type: ignore[import-untyped]
 
+import superglm._group_matrix._group_matrix_kernels as group_kernels
 import superglm.group_matrix as group_matrix
 from superglm import LambdaPolicy, RandomEffect
 from superglm._group_matrix._group_matrix_kernels import (
     _random_effect_sufficient_stats,
 )
 from superglm.dm_builder import _process_info
+
+
+def test_group_matrix_warmup_reaches_every_module_owned_dispatcher() -> None:
+    dispatchers = {
+        name: value
+        for name, value in vars(group_kernels).items()
+        if isinstance(value, CPUDispatcher) and value.py_func.__module__ == group_kernels.__name__
+    }
+    assert dispatchers
+
+    group_kernels._warmup_group_matrix_kernels()
+
+    assert all(dispatcher.nopython_signatures for dispatcher in dispatchers.values())
+
+
+def test_group_matrix_warmup_matches_constructor_owned_integer_dtypes() -> None:
+    group_kernels._warmup_group_matrix_kernels()
+
+    assert any(
+        signature.args[1].dtype == types.int32 and signature.args[2].dtype == types.int32
+        for signature in group_kernels._csr_weighted_gram.nopython_signatures
+    )
+    assert any(
+        signature.args[0].dtype == types.int32
+        and signature.args[1].dtype == types.int32
+        and signature.args[4].dtype == types.intp
+        for signature in group_kernels._pattern_support_summaries.nopython_signatures
+    )
+    assert any(
+        signature.args[0].dtype == types.intp
+        for signature in group_kernels._random_effect_sufficient_stats.nopython_signatures
+    )
 
 
 def test_random_effect_group_matrix_is_available():

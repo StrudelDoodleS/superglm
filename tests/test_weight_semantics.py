@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
+import superglm._count_lattice as neutral_count_lattice
 from superglm import (
     Categorical,
     FractionalFrequencyWeightWarning,
@@ -1049,10 +1050,81 @@ class TestTheBinomialPriorFormIsNotNormalised:
             weight_semantics="frequency",
         )
         frequency.fit(frame, y, sample_weight=weights)
-        np.testing.assert_array_equal(
-            frequency.metrics(frame, y, sample_weight=weights).residuals("quantile", seed=3),
-            residuals,
+        frequency_mu = np.asarray(frequency.predict(frame), dtype=np.float64)
+        frequency_residuals = frequency.metrics(
+            frame,
+            y,
+            sample_weight=weights,
+        ).residuals("quantile", seed=3)
+
+        # Contract invariance is exact at fixed state. The two ModelMetrics
+        # objects differ only in their declared semantics; y, mu, w, and the
+        # jitter stream are identical.
+        from superglm.inference.metrics import ModelMetrics
+
+        fixed_prior = ModelMetrics(
+            model,
+            y=y,
+            sample_weight=weights,
+            _mu=mu,
+        ).residuals("quantile", seed=3)
+        fixed_frequency = ModelMetrics(
+            frequency,
+            y=y,
+            sample_weight=weights,
+            _mu=mu,
+        ).residuals("quantile", seed=3)
+        np.testing.assert_array_equal(fixed_prior, fixed_frequency)
+
+        # End-to-end fits can select different floating-point representatives
+        # of the same spline geometry. Propagate their measured prediction gap
+        # through the inverse-normal transform rather than requiring bitwise
+        # equality from two separate BLAS solves.
+        prediction_gap = np.abs(frequency_mu - mu)
+        density_floor = np.minimum(
+            stats.norm.pdf(residuals),
+            stats.norm.pdf(frequency_residuals),
         )
+        fit_dimension = max(len(model.result.beta) + 1, len(frequency.result.beta) + 1)
+        gamma = (
+            fit_dimension
+            * np.finfo(np.float64).eps
+            / (1.0 - fit_dimension * np.finfo(np.float64).eps)
+        )
+        probability_roundoff = gamma * np.maximum.reduce(
+            [np.ones_like(mu), np.abs(mu), np.abs(frequency_mu)]
+        )
+        transform_roundoff = (
+            16.0
+            * np.finfo(np.float64).eps
+            * np.maximum.reduce(
+                [np.ones_like(residuals), np.abs(residuals), np.abs(frequency_residuals)]
+            )
+        )
+        residual_bound = (
+            prediction_gap + probability_roundoff
+        ) / density_floor + transform_roundoff
+        residual_gap = np.abs(frequency_residuals - residuals)
+        assert np.all(residual_gap <= residual_bound), (
+            float(residual_gap.max()),
+            float(residual_bound.max()),
+        )
+        assert stats.kstest(frequency_residuals, "norm").pvalue > 0.01
+
+        # Mutation check for the former prior-only ``mu**w`` split. It breaks
+        # the exact fixed-state semantics switch and the PIT macroscopically.
+        mutation_cut = 1.0 - np.power(mu, weights)
+        mutation_a = np.where(y == 0, 0.0, mutation_cut)
+        mutation_b = np.where(y == 0, mutation_cut, 1.0)
+        mutation_u = np.random.default_rng(3).uniform(mutation_a, mutation_b)
+        mutation_residuals = stats.norm.ppf(np.clip(mutation_u, 1e-10, 1.0 - 1e-10))
+        mutation_gap = np.linalg.norm(mutation_residuals - fixed_frequency, ord=np.inf)
+        nonzero_bound = np.sqrt(np.finfo(np.float64).eps) * max(
+            1.0,
+            float(np.linalg.norm(fixed_frequency, ord=np.inf)),
+        )
+        assert mutation_gap > nonzero_bound
+        assert stats.kstest(mutation_residuals, "norm").pvalue < np.finfo(np.float64).eps
 
 
 class TestTheCustomFamilyScaleTermUsesTheContract:
@@ -1739,6 +1811,122 @@ class TestVuongChecksTheContractOnEveryArm:
         a, b, X, y_eval = self._pair_fitted_on_lattice("frequency", "frequency")
         with pytest.warns(FractionalFrequencyWeightWarning):
             vuong_test(a, b, X, y_eval, sample_weight=np.full(len(y_eval), 2.5))
+
+
+class TestNeutralCountLatticeExtraction:
+    """The neutral predicates have an independently pinned numerical contract."""
+
+    def test_scalar_path_reexports_the_neutral_predicates_and_constants(self):
+        from superglm.model.input_validation import (
+            _LATTICE_MAXIMUM_SLACK,
+            _LATTICE_ULP_SLACK,
+            _is_exact_power_of_two,
+            _not_a_whole_number,
+            _off_integer_lattice,
+            _product_was_exact,
+        )
+
+        assert neutral_count_lattice._LATTICE_ULP_SLACK == _LATTICE_ULP_SLACK == 8.0
+        assert neutral_count_lattice._LATTICE_MAXIMUM_SLACK == _LATTICE_MAXIMUM_SLACK == 0.25
+        assert neutral_count_lattice._off_integer_lattice is _off_integer_lattice
+        assert neutral_count_lattice._not_a_whole_number is _not_a_whole_number
+        assert neutral_count_lattice._is_exact_power_of_two is _is_exact_power_of_two
+        assert neutral_count_lattice._product_was_exact is _product_was_exact
+
+    def test_computed_product_mask_is_explicit_at_every_binade(self):
+        candidates: list[float] = []
+        expected: list[bool] = []
+        for exponent in range(64):
+            magnitude = float(2**exponent)
+            spacing = np.spacing(magnitude)
+            candidates.append(magnitude)
+            expected.append(False)
+            if spacing <= 0.5:
+                candidates.append(magnitude + 0.5)
+                expected.append(True)
+            if spacing < 0.5:
+                candidates.append(np.nextafter(magnitude, np.inf))
+                expected.append(False)
+
+        np.testing.assert_array_equal(
+            neutral_count_lattice._off_integer_lattice(np.asarray(candidates)),
+            np.asarray(expected),
+        )
+
+    def test_supplied_count_adversaries_have_an_explicit_mask(self):
+        values = np.array(
+            [
+                0.0,
+                1.0,
+                1_000_000.0005,
+                1_000_000_000.5,
+                2.0**48 + 0.0625,
+                2.0**49 + 0.125,
+                2.0**52,
+            ]
+        )
+        np.testing.assert_array_equal(
+            neutral_count_lattice._not_a_whole_number(values),
+            [False, False, True, True, True, True, False],
+        )
+
+    def test_exact_product_predicates_have_explicit_masks_through_underflow(self):
+        weights = np.array(
+            [
+                np.nextafter(0.0, 1.0),
+                2.0**-40,
+                0.5,
+                1.0,
+                2.0,
+                3.0,
+                np.inf,
+            ]
+        )
+        response = np.array([0.5, 100.25, 3.5, 2.0**49 + 0.125, 7.0, 4.0, 1.0])
+        scaled = weights * response
+        np.testing.assert_array_equal(
+            neutral_count_lattice._is_exact_power_of_two(weights),
+            [True, True, True, True, True, False, False],
+        )
+        np.testing.assert_array_equal(
+            neutral_count_lattice._product_was_exact(weights, response, scaled),
+            [False, True, True, True, True, False, False],
+        )
+
+    def test_power_of_two_product_claims_match_independent_rational_arithmetic(self):
+        from fractions import Fraction
+
+        weights = np.array(
+            [
+                np.nextafter(0.0, 1.0),
+                np.nextafter(0.0, 1.0),
+                2.0**-40,
+                0.5,
+                2.0**1023,
+            ]
+        )
+        response = np.array([0.5, 2.0, 100.25, 3.5, 2.0])
+        with np.errstate(over="ignore", under="ignore"):
+            scaled = weights * response
+        expected = [
+            bool(np.isfinite(product) and Fraction(product) == Fraction(weight) * Fraction(value))
+            for weight, value, product in zip(weights, response, scaled, strict=True)
+        ]
+
+        np.testing.assert_array_equal(
+            neutral_count_lattice._product_was_exact(weights, response, scaled),
+            expected,
+        )
+
+    def test_measured_exposure_round_trips_have_no_off_lattice_rows(self):
+        rng = np.random.default_rng(20260831)
+        counts = rng.integers(0, 10_000, size=20_000).astype(np.float64)
+        exposure = rng.uniform(0.01, 50.0, size=20_000)
+        round_trip = (counts / exposure) * exposure
+        np.testing.assert_array_equal(
+            neutral_count_lattice._off_integer_lattice(round_trip),
+            np.zeros(len(round_trip), dtype=bool),
+        )
 
 
 class TestIntegralityToleranceSurvivesLargeMagnitudes:
