@@ -816,7 +816,9 @@ def evaluate_endpoint_laplace(
         raise EndpointLaplaceError("result is missing the face's reduced terminal rank")
     _validate_reduced_terminal_provenance(result, face=face, stored=reduced_rank)
     hessian_log_pdet = float(reduced_rank.log_pdet)
-    objective = result.objective + 0.5 * (hessian_log_pdet - projected_penalty.log_pdet)
+    penalized_optimizing = result.penalized_optimizing_log_likelihood
+    assert penalized_optimizing is not None
+    objective = -float(penalized_optimizing) + 0.5 * (hessian_log_pdet - projected_penalty.log_pdet)
     return EndpointLaplaceEvaluation(
         objective=objective,
         face_component_names=face.component_names,
