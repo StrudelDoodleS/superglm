@@ -129,10 +129,11 @@ constructed design. Main-effect spline boundaries and the `quantile_rows` and
 `quantile_tempered` knot strategies use frequency mass and ignore zero-weight
 rows, matching integer row expansion and omission without materializing copies.
 Prior weights intentionally leave spline geometry determined by physical rows.
-Some tensor-interaction marginal centering, interaction-local spline geometry,
-and categorical/ordered/factor feature geometry can still depend on the physical
-row layout. Use fixed or preconstructed feature geometry when exact end-to-end
-replication parity matters.
+Tensor-interaction marginal centering and interaction-local spline geometry use
+that same stream, so a scalar integer-frequency tensor fit matches literal row
+expansion through fitting, REML smoothing selection and prediction. Legacy
+custom tensor marginals that cannot accept a geometry stream are accepted only
+for unit/physical geometry and refuse non-unit replication mass explicitly.
 
 One limitation is declared rather than silent: `estimate_p` profiles the
 Tweedie power against the prior-weight likelihood, so it refuses

@@ -144,18 +144,18 @@ features = {
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
 #  feature_a  feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge BonusMalus          ti   5.691031  1.845515   2.000000 1.023164e+02     5244   False
-# BonusMalus   VehBrand  spline_cat  11.960590  0.438392  10.000039 7.818052e+09     1012   False
-#    DrivAge BonusMalus          ti   1.810776 -0.094612   2.000000 2.611293e+02     7360   False
-#     VehAge   VehBrand  spline_cat   7.805371 -0.490676   9.999710 3.779926e+09      627   False
-#    DrivAge     VehAge          ti   0.547721 -0.726139   1.999999 5.044231e+01     4560   False
-#    DrivAge   VehBrand  spline_cat   1.958248 -1.798192  10.000015 1.301005e+10      880   False
-# LogDensity   VehBrand numeric_cat   1.087365 -1.992926  10.000000 0.000000e+00       11   False
-# BonusMalus     Region  spline_cat   6.972247 -2.164535  21.000052 4.198782e+09     2024   False
-#    DrivAge     Region  spline_cat   6.754044 -2.198201  21.000021 6.858867e+09     1760   False
-# LogDensity     Region numeric_cat   5.266167 -2.427783  21.000000 0.000000e+00       22   False
-#     VehAge     Region  spline_cat   2.008955 -2.930334  20.999438 2.449232e+09     1254   False
-#   VehBrand     Region     cat_cat  39.860771 -8.243704 208.000000 0.000000e+00      242   False
+#     VehAge BonusMalus          ti   5.691019  1.845510   1.999999 1.023168e+02     5244   False
+# BonusMalus   VehBrand  spline_cat  11.960557  0.438409   9.999937 7.818059e+09     1012   False
+#    DrivAge BonusMalus          ti   1.810771 -0.094615   2.000001 2.611293e+02     7360   False
+#     VehAge   VehBrand  spline_cat   7.805321 -0.490661   9.999576 3.779926e+09      627   False
+#    DrivAge     VehAge          ti   0.547723 -0.726139   2.000001 5.044218e+01     4560   False
+#    DrivAge   VehBrand  spline_cat   1.958228 -1.798185   9.999927 1.301005e+10      880   False
+# LogDensity   VehBrand numeric_cat   1.087366 -1.992925  10.000000 0.000000e+00       11   False
+# BonusMalus     Region  spline_cat   6.972190 -2.164527  20.999891 4.198786e+09     2024   False
+#    DrivAge     Region  spline_cat   6.753990 -2.198193  20.999860 6.858867e+09     1760   False
+# LogDensity     Region numeric_cat   5.266162 -2.427784  21.000000 0.000000e+00       22   False
+#     VehAge     Region  spline_cat   2.008917 -2.930281  20.998740 2.449233e+09     1254   False
+#   VehBrand     Region     cat_cat  39.860759 -8.243705 208.000000 0.000000e+00      242   False
 ```
 
 Every eligible pair, four kinds, one ranking by `z` alone. Twelve rows, not
@@ -167,11 +167,11 @@ Confirming each by refit — the gate, not the score:
 
 | row | kind | `z` | probe df | refit gain |
 |---|---|---:|---:|---:|
-| `VehAge x BonusMalus` | `ti` | 1.85 | 2 | 43.9 |
-| `BonusMalus x VehBrand` | `spline_cat` | 0.44 | 10 | 73.1 |
+| `VehAge x BonusMalus` | `ti` | 1.85 | 2 | 43.0 |
+| `BonusMalus x VehBrand` | `spline_cat` | 0.44 | 10 | 73.0 |
 
 The second pair buys *more* deviance and ranks *below* the first. That is the
-design rather than a defect: 43.9 on 2 df is 22.0 per df against 7.3, and `z`
+design rather than a defect: 43.0 on 2 df is 21.5 per df against 7.3, and `z`
 normalizes each block against its own noise scale instead of reporting raw
 gain. A screen that ranked by gain would put the wider block first and spend
 the refit budget there. An independent holdout study of this ranking, against
@@ -190,7 +190,7 @@ a pair down the queue; it never promotes one. Nothing here was binned or
 refused (`approx` is False throughout, no NaN rows).
 
 Read the top row against its own kind's measured noise maximum below (7.31 for
-`ti`): 1.85 does not clear it — and the refit bought 43.9 deviance anyway. That
+`ti`): 1.85 does not clear it — and the refit bought 43.0 deviance anyway. That
 is the screen working as described rather than a contradiction: the floor is
 the largest value a wide null battery produced, not a threshold a real pair
 must beat, and the confirmatory refit is what settles the question.

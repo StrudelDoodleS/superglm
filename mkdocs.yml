@@ -88,6 +88,8 @@ nav:
     - Quick Start: getting-started/quickstart.md
   - User Guide:
     - Recommended Workflows: guide/workflows.md
+    - Distributional Models: models/distributional.md
+    - Checking A Distributional Fit: models/distributional-inference.md
     - Editing a Fitted Model: guide/editor.md
     - Choosing A Fitting Path: guide/fitting.md
     - Feature Types: guide/features.md
@@ -108,6 +110,7 @@ nav:
     - Cost Claims and the Clock: development/cost-and-timing.md
     - Python Support Policy: development/python-support.md
     - Data and Solver Boundaries: development/data-and-solver-boundaries.md
+    - Distributional Family Development: distributional-family-development.md
     - Editor Frontend for Python Developers: editor_frontend.md
     - SCOP Performance Prototype: guide/scop-performance-prototype.md
     - Tabmat Integration Notes: tabmat-integration-notes.md
