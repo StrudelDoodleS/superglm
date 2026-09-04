@@ -680,9 +680,13 @@ stationary point of the box and is reported as such.
 its own authority — the projected gradient and every gradient certificate
 within the bar for `stationary`, the Fellner–Schall residual within `reml_tol`
 otherwise — no curvature fallback occurred, no endpoint assessment was refused,
-and every exact face carries analytic endpoint evidence. The exact Hessian of
-the LAML in log λ at the stop is published as `smoothing_hessian` on the
-smoothing result, with its certificate, for smoothing-parameter uncertainty.
+and every exact face carries analytic endpoint evidence. When the Newton
+endgame computes the exact Hessian of the LAML in log λ, it publishes that
+matrix as `smoothing_hessian`, with its certificate, for smoothing-parameter
+uncertainty. A stationary fit can stop before that Hessian pass. If it retained
+the authenticated training rows, corrected-covariance inference can replay the
+Hessian once without mutating or republishing fit state; a compact fit without
+a published Hessian refuses corrected covariance.
 
 `outer="efs"` runs the Fellner–Schall loop alone and keeps its stopping rules:
 `practical_reml` stops after three accepted updates whose relative LAML change
