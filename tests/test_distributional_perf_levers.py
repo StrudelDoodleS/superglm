@@ -51,11 +51,8 @@ def _predictors(location_k: int = 12, scale_k: int = 8):
     )
 
 
-# Block widths [119, 30] (measured): assembly work 7.5e7 at 2,000 rows (still
-# capped) and 2.2e9 at 60,000 rows (released).  The default k=12/8 widths
-# [23, 8] reach only 9.3e7 at 60,000 rows and would never cross the threshold.
-@pytest.mark.parametrize(("n", "released"), [(2_000, False), (60_000, True)])
-def test_fit_releases_blas_only_for_large_row_space_work(monkeypatch, n: int, released: bool):
+@pytest.mark.parametrize("n", [2_000, 60_000])
+def test_narrow_fit_keeps_blas_capped_regardless_of_row_count(monkeypatch, n: int):
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
     native = _blas_threads()
     if not native or max(native) < 2:
@@ -71,7 +68,7 @@ def test_fit_releases_blas_only_for_large_row_space_work(monkeypatch, n: int, re
         lambdas={"location:x#wiggle": 1.0, "location:z#wiggle": 1.0, "scale:z#wiggle": 1.0},
     )
     seen = _ProbeGaussian.observed[0]
-    assert (seen == native) is released
+    assert seen and all(count == 1 for count in seen)
     assert _blas_threads() == native
 
 

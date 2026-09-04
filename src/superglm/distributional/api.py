@@ -687,24 +687,18 @@ class SuperLSS:
         practical_reml: bool = True,
         practical_reml_parameter_tol: float = 1.0e-3,
         reml_plateau_tol: float = 1.0e-7,
-        outer: Literal["efs", "efs+newton"] = "efs+newton",
+        outer: Literal["efs", "efs+newton"] = "efs",
         phase_recorder: FitPhaseRecorder | None = None,
     ) -> SuperLSS:
         """Fit coefficients and smoothing parameters by REML.
 
-        ``outer`` selects the smoothing optimiser.  Under the default
-        ``"efs+newton"`` the generalised Fellner--Schall loop is a warm-up: once
-        its largest accepted step falls to ``handoff_step`` (0.5 in log lambda)
-        or after ten iterations it hands over to Newton on the exact LAML
-        gradient and Hessian in log lambda, which stops at a stationary point of
-        the REML criterion (``smoothing_convergence_reason_ == "stationary"``).
-        ``"efs"`` runs the Fellner--Schall fixed point alone, as before.
+        ``outer`` selects the smoothing optimiser.  The default ``"efs"`` runs
+        the generalised Fellner--Schall fixed point.  ``"efs+newton"`` opts into
+        a Newton endgame on the exact LAML gradient and Hessian in log lambda.
 
         ``practical_reml`` stops the Fellner--Schall loop after sustained
-        negligible objective and fitted-parameter movement; under the default
-        ``outer`` it only shortens the warm-up, since the endgame has no
-        plateau stop.  Set it to ``False`` with ``outer="efs"`` when strict
-        Fellner--Schall stationarity is required.
+        negligible objective and fitted-parameter movement. Set it to ``False``
+        when strict Fellner--Schall stationarity is required.
 
         ``initial_lambda`` is the search start for every smoothing parameter
         without an explicit entry in ``lambdas``; the Fellner--Schall stops are

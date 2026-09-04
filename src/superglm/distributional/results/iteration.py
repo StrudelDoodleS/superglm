@@ -85,12 +85,9 @@ class DistributionalEFSConfig:
     acceleration: Literal["none", "multisecant"] = "none"
     acceleration_history: int = 5
     acceleration_max_amplification: float = 8.0
-    # The outer method.  ``"efs+newton"`` runs the Fellner--Schall loop as a
-    # warm-up and hands over to Newton on the exact LAML gradient once the
-    # largest accepted |delta log lambda| falls to ``handoff_step`` or after
-    # ``handoff_iterations`` warm-up iterations, whichever comes first;
-    # ``"efs"`` is the Fellner--Schall fixed point alone.
-    outer: Literal["efs", "efs+newton"] = "efs+newton"
+    # The outer method. ``"efs"`` is the Fellner--Schall fixed point;
+    # ``"efs+newton"`` opts into a Newton endgame after the warm-up.
+    outer: Literal["efs", "efs+newton"] = "efs"
     handoff_step: float = 0.5
     handoff_iterations: int = 10
     # The endgame's own budget, the finite-difference step of the row-curvature

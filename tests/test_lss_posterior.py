@@ -47,7 +47,9 @@ def _predictors() -> list[Predictor]:
 @pytest.fixture(scope="module")
 def fit_case() -> tuple[DenseDistributionalModel, pd.DataFrame, np.ndarray]:
     X, y = _simulated()
-    model = SuperLSS(family=GaussianLS(), predictors=_predictors()).fit_reml(X, y)
+    model = SuperLSS(family=GaussianLS(), predictors=_predictors()).fit_reml(
+        X, y, outer="efs+newton"
+    )
     return model._require_fitted(), X, y
 
 
