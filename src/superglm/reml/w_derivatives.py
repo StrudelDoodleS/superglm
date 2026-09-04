@@ -28,6 +28,7 @@ from superglm.reml.penalty_algebra import (
     coerce_reml_penalties,
     penalty_component_matvec,
 )
+from superglm.solvers.centered_system import iter_grouped_design_chunks
 from superglm.solvers.hessian_factor import (
     DenseHessianFactor,
     HessianFactor,
@@ -46,6 +47,39 @@ from superglm.solvers.structured import (
     structured_design_rmatvec,
 )
 from superglm.types import GroupSlice, PenaltyComponent
+
+
+def _leverage_gradient_rhs(
+    dm: DesignMatrix,
+    inverse: NDArray,
+    mean_x: NDArray,
+    row_weights: NDArray,
+    sum_w: float,
+) -> NDArray:
+    """Accumulate X_c' times the exact leverage-gradient row channel."""
+    result = np.zeros(dm.p, dtype=np.float64)
+    compensation = np.zeros(dm.p, dtype=np.float64)
+    for start, stop, design in iter_grouped_design_chunks(dm):
+        weights = row_weights[start:stop]
+        active = weights != 0.0
+        if not np.any(active):
+            continue
+        centered = design[active]
+        centered -= mean_x
+        scaled = centered * np.sqrt(np.abs(weights[active]))[:, None]
+        weighted_leverage = np.sign(weights[active]) * np.einsum(
+            "ij,ij->i",
+            scaled @ inverse,
+            scaled,
+            optimize=True,
+        )
+        row_channel = 0.5 * (weighted_leverage + weights[active] / sum_w)
+        contribution = centered.T @ row_channel
+        corrected = contribution - compensation
+        updated = result + corrected
+        compensation = (updated - result) - corrected
+        result = updated
+    return result
 
 
 def _missing_w_derivative_methods(link: Any, distribution: Any) -> list[str]:
@@ -245,7 +279,12 @@ def reml_w_correction(
     *,
     reml_penalties: list[PenaltyComponent] | None = None,
     geometry: ObservedREMLGeometry | None = None,
-) -> tuple[NDArray, dict[int, NDArray]] | tuple[NDArray, dict[int, NDArray], NDArray | None] | None:
+    gradient_only: bool = False,
+) -> (
+    tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator] | None]
+    | tuple[NDArray, dict[int, NDArray | CompactSymmetricOperator], NDArray | None]
+    | None
+):
     """W(rho) correction for REML derivatives (first- or second-order).
 
     Wood (2011) Section 3.4 / Appendix C: implicit differentiation of beta_hat(rho)
@@ -286,12 +325,19 @@ def reml_w_correction(
     a working-model criterion.  The inverse passed as ``XtWX_S_inv`` must
     correspond to the same geometry.
 
+    ``gradient_only`` uses the exact leverage identity for the first derivative
+    and returns no Hessian correction. It is available only for a
+    dense inverse and first-order modified Newton; callers retain responsibility
+    for safeguarding the resulting simpler outer Hessian.
+
     ``dH2_cross`` is an ``(m, m)`` array of second-order Hessian
     corrections.  It includes the second derivative of the profiled data
     Hessian ``X_c' W X_c`` (including both weighted-mean outer terms) and the
     scalar curvature of ``0.5 * log(sum(W))``.
     """
     w_correction_order = validate_w_correction_order(w_correction_order)
+    if gradient_only and w_correction_order != 1:
+        raise ValueError("gradient_only requires w_correction_order=1")
     penalties = coerce_reml_penalties(
         reml_groups=reml_groups,
         reml_penalties=reml_penalties,
@@ -436,6 +482,30 @@ def reml_w_correction(
             groups,
             dominant_group_index=structured_group_index,
         )
+
+    if gradient_only:
+        if not isinstance(factor, DenseHessianFactor):
+            raise ValueError("gradient_only requires a dense Hessian inverse")
+        if sum_w is None:
+            raise ValueError("gradient_only requires profiled-intercept weight metadata")
+        rhs = _leverage_gradient_rhs(
+            dm,
+            factor.inverse,
+            mean_x,
+            dW_deta,
+            sum_w,
+        )
+        penalty_rhs = np.zeros((p, m), dtype=np.float64)
+        for i, pc in enumerate(penalties):
+            gm = gms[pc.group_index]
+            beta_g = pirls_result.beta[pc.group_sl]
+            penalty_rhs[pc.group_sl, i] = lambdas[pc.name] * penalty_component_matvec(
+                pc,
+                beta_g,
+                gm,
+            )
+        grad_correction[:] = rhs @ -factor.solve(penalty_rhs)
+        return grad_correction, None
 
     def centered_signed_gram(
         row_weights: NDArray,
