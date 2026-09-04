@@ -253,6 +253,13 @@ def _install_execution_doubles(monkeypatch) -> dict[str, object]:
 
     for name in ("fit", "fit_reml", "apply_shape_postfit"):
         _method_double(monkeypatch, superglm.SuperGLM, name, side_effect=return_model)
+    _method_double(monkeypatch, superglm.SuperLSS, "fit_reml", side_effect=return_model)
+    _method_double(
+        monkeypatch,
+        superglm.SuperLSS,
+        "predict_parameters",
+        return_value=pd.DataFrame(),
+    )
     _method_double(monkeypatch, superglm.SuperGLM, "predict", side_effect=predict)
     _method_double(monkeypatch, superglm.SuperGLM, "summary", return_value="model summary")
     _method_double(monkeypatch, superglm.SuperGLM, "metrics", return_value=metrics)

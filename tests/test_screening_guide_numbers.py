@@ -9,8 +9,10 @@ move, and both moved together — the Pearson denominator went from
 ``count_nonzero(w) - edf`` to ``sum(w) - edf`` (on this book ``sum(w)`` is
 roughly half of ``n``, so ``phi`` nearly doubles) and ``quantile_tempered``
 knot placement started consuming frequency mass, which shifts the
-``BonusMalus`` margin the example is built around.  The prose was rewritten to
-describe the new contract; the numbers were not regenerated.
+``BonusMalus`` margin the example is built around.  Scalar tensor and
+interacting-spline refits now consume that same frequency geometry stream too,
+so the committed measurement covers the confirmatory refits as well as the
+screen table.
 
 Two layers keep the guide honest:
 
@@ -35,6 +37,7 @@ pins the argument for why it did not have to be.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import re
@@ -56,6 +59,7 @@ from . import _datasets
 _ROOT = Path(__file__).resolve().parents[1]
 _GUIDE_PATH = _ROOT / "docs/guide/screening.md"
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "screening_guide_fremtpl.json"
+_FREQ_SHA256 = "47d65ed2dc49828c34f01baba6a8c8d34839d537254eb057ab196ac06456a845"
 
 _WORD_NUMBERS = {
     "one": 1,
@@ -198,7 +202,7 @@ def test_screening_guide_confirmatory_refit_table_matches_the_measured_gains(
             f"{pair} refit gain"
         )
 
-    # "43.9 on 2 df is 22.0 per df against 7.3"
+    # "43.0 on 2 df is 21.5 per df against 7.3"
     density = _search(guide, r"([0-9.]+) on ([0-9]+) df is ([0-9.]+) per df against ([0-9.]+)")
     first, second = measured["confirmatory_refits"]
     first_row, second_row = (
@@ -278,7 +282,7 @@ def test_screening_guide_top_row_is_read_against_the_published_ti_floor(guide, m
     rows = measured["rows"]
     first = measured["confirmatory_refits"][0]
 
-    # "(7.31 for `ti`): 4.40 does not clear it -- and the refit bought 43.9
+    # "(7.31 for `ti`): 1.85 does not clear it -- and the refit bought 43.0
     # deviance anyway."
     floor = _search(
         guide,
@@ -399,27 +403,17 @@ def _guide_frame(n_rows: int):
 
 @FREQ_SKIP
 def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
-    """Regression guard for an ALREADY-SHIPPED fix, plus the fixture's anchor.
+    """Anchor the complete frequency-geometry measurement to one real book.
 
-    Two honest labels, because this test cannot do what its siblings do.
+    The exact parquet hash, deterministic sample and explicit feature map make
+    this a reproducible measurement rather than a fixture back-filled from a
+    failing assertion.  In particular, the scalar ``TensorInteraction`` refit
+    must center and place every inner spline with frequency mass: substituting
+    unit/physical-row geometry moves the ``VehAge x BonusMalus`` gain from the
+    measured value back to 43.908 and fails this anchor.  The spline-factor
+    confirmatory row likewise certifies its interacting-spline geometry.
 
-    *It cannot fail against 37a1c18, by construction.*  The behaviour it pins
-    shipped in 67b90f8 ("fix: resolve numerical audit findings"), an ancestor
-    of this branch's parent: the screen's Pearson denominator moved from
-    ``count_nonzero(w) - edf`` to the fit's own ``sum(w) - edf`` contract, and
-    ``quantile_tempered`` knot placement started consuming frequency mass.
-    Issue #219 is the docs half of that change — the branch diff touches no
-    ``src/`` line — so a docs-only yardstick has nothing here to detect.  What
-    it does fail against is a surgical revert of either half of 67b90f8:
-    restoring ``n_eff = count_nonzero(weights)`` in ``screen_interactions``
-    turns the ``phi`` identity below into 2.554 against 4.821, and restoring
-    ``del sample_weight`` / ``spec._place_knots(x)`` in
-    ``_spline_build.build_group_info`` moves the ``BonusMalus`` margin and
-    breaks the mains ``effective_df`` assertion before the screen is even
-    reached.  Both were demonstrated; if a future change makes neither break
-    this test, the test has gone inert and should be deleted rather than kept.
-
-    *It is also the fixture's only tie to reality.*  The five
+    This is also the fixture's only tie to reality.  The five
     ``test_screening_guide_*`` tests compare the published document to
     ``tests/fixtures/screening_guide_fremtpl.json``, which would be circular
     if the fixture were back-filled from whatever a fixing agent happened to
@@ -428,6 +422,12 @@ def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
     It skips wherever the gitignored parquet is absent, CI included; run it
     locally to regenerate the fixture after any deliberate contract change.
     """
+    parquet = _datasets.find("freMTPL2freq.parquet")
+    assert parquet is not None
+    with parquet.open("rb") as stream:
+        assert hashlib.file_digest(stream, "sha256").hexdigest() == _FREQ_SHA256
+    assert measured["sample"]["sha256"] == _FREQ_SHA256
+
     df, y, exposure = _guide_frame(measured["n_rows"])
     # The dispersion contract this example documents only bites because the
     # exposure mass is far below the row count: sum(w) - edf is the denominator,

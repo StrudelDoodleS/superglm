@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from numpy.polynomial.legendre import legvander
 
-from superglm import Polynomial, SuperGLM
+from superglm import OrderedCategorical, Polynomial, SuperGLM
 from superglm.features.polynomial import Polynomial as PolynomialDirect
 
 
@@ -459,6 +459,37 @@ class TestWeightPolicyAndRestore:
         assert np.abs(G_unit - np.eye(3)).max() > 0.05
         unit_cols = PolynomialDirect(degree=3).build(x).columns
         assert np.abs(Phi - unit_cols).max() > 1e-3
+
+    def test_scalar_ordered_polynomial_keeps_prior_weight_geometry(self):
+        """The shared scalar compiler preserves its historical QR stream."""
+        levels = [f"L{index}" for index in range(6)]
+        labels = np.repeat(levels, 12)
+        positions = np.repeat(np.arange(len(levels), dtype=np.float64), 12)
+        weights = np.geomspace(0.1, 4.0, labels.size)
+        response = 0.3 + positions - 0.15 * positions**2
+
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=None,
+            features={
+                "band": OrderedCategorical(
+                    order=levels,
+                    basis=Polynomial(degree=2),
+                )
+            },
+        )
+        model.fit(pd.DataFrame({"band": labels}), response, sample_weight=weights)
+
+        inner = model._specs["band"]._basis_spline
+        columns = inner.transform(positions)
+        weighted_moments = (columns * weights[:, None]).sum(axis=0) / weights.sum()
+        tolerance = 64.0 * np.finfo(np.float64).eps * max(columns.shape)
+        np.testing.assert_allclose(weighted_moments, 0.0, atol=tolerance, rtol=0.0)
+
+        # Mutation catcher: routing physical-row geometry through the shared
+        # scalar path instead gives unit-row moments and misses this condition.
+        unit_moments = columns.mean(axis=0)
+        assert np.linalg.norm(unit_moments, ord=np.inf) > 0.1
 
     def test_zero_weight_outlier_does_not_stretch_scaling(self):
         x, w = _heaped_exposure(n=600, seed=17)

@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.features._spline_identifiability import (
+    apply_identifiability_for_spec,
+    build_identifiability_projection_for_spec,
+)
+from superglm.features._spline_multi_penalty import build_multi_m_components
+from superglm.features._spline_select import build_select
 from superglm.types import GroupInfo, TensorMarginalInfo
 
 
@@ -72,7 +78,7 @@ def build_group_info(
     basis = spec._basis_matrix(x).tocsr()
 
     if spec.select:
-        return spec._build_select(x, basis)
+        return build_select(spec, x, basis, sample_weight)
 
     omega = spec._build_penalty()
     if _uses_fit_time_scop_constraints(spec):
@@ -80,6 +86,15 @@ def build_group_info(
         centered_basis, scop_penalty, scop_reparam = spec._build_scop_reparameterization(
             basis_dense, omega
         )
+        if sample_weight is not None:
+            geometry_weight = np.asarray(sample_weight, dtype=np.float64).ravel()
+            correction = np.average(
+                centered_basis,
+                axis=0,
+                weights=geometry_weight,
+            )
+            centered_basis = centered_basis - correction
+            spec._scop_col_means = np.asarray(spec._scop_col_means) + correction
         n_cols_scop = centered_basis.shape[1]
         return GroupInfo(
             columns=centered_basis,
@@ -92,13 +107,36 @@ def build_group_info(
         )
 
     basis, omega, n_cols, projection = spec._apply_constraints(basis, omega)
-    omega, n_cols, projection = spec._apply_identifiability(x, omega, projection)
+    omega, n_cols, projection = apply_identifiability_for_spec(
+        spec,
+        x,
+        omega,
+        projection,
+        sample_weight,
+    )
     spec._interaction_projection = projection
 
     penalty_components = None
     if len(spec._m_orders) > 1:
-        penalty_components = spec._build_multi_m_components(x, basis, projection)
-        omega = sum(component_omega for _, component_omega in penalty_components)
+        penalty_components = build_multi_m_components(
+            x=x,
+            m_orders=spec._m_orders,
+            build_penalty_for_order=spec._build_penalty_for_order,
+            apply_constraints=spec._apply_constraints,
+            apply_identifiability=lambda values, penalty, constraint: (
+                apply_identifiability_for_spec(
+                    spec,
+                    values,
+                    penalty,
+                    constraint,
+                    sample_weight,
+                )
+            ),
+        )
+        omega = cast(
+            NDArray,
+            sum(component_omega for _, component_omega in penalty_components),
+        )
 
     constraints = None
     monotone_engine = None
@@ -122,7 +160,7 @@ def build_group_info(
         raw_to_solver_map=raw_to_solver_map,
     )
     if spec._lambda_policy is not None and info.penalty_components is None:
-        info.penalty_components = [("wiggle", info.penalty_matrix)]
+        info.penalty_components = [("wiggle", cast(NDArray, info.penalty_matrix))]
         info.component_types = {"wiggle": "difference"}
     info.lambda_policies = spec._resolve_lambda_policies(info)
     return info
@@ -150,15 +188,43 @@ def build_knots_and_penalty(
             spec._eigendecompose_select(omega_for_select, projection)
         else:
             spec._eigendecompose_select(omega_constrained, projection)
-        spec._interaction_projection = spec._identifiability_projection(x, projection)
+        spec._interaction_projection = build_identifiability_projection_for_spec(
+            spec,
+            x,
+            projection,
+            sample_weight,
+        )
         return omega_constrained, n_cols, projection
 
-    omega_ident, n_cols, projection = spec._apply_identifiability(x, omega_constrained, projection)
+    omega_ident, n_cols, projection = apply_identifiability_for_spec(
+        spec,
+        x,
+        omega_constrained,
+        projection,
+        sample_weight,
+    )
     spec._interaction_projection = projection
 
     if len(spec._m_orders) > 1:
-        spec._penalty_components = spec._build_multi_m_components(x, None, projection)
-        omega_ident = sum(component_omega for _, component_omega in spec._penalty_components)
+        spec._penalty_components = build_multi_m_components(
+            x=x,
+            m_orders=spec._m_orders,
+            build_penalty_for_order=spec._build_penalty_for_order,
+            apply_constraints=spec._apply_constraints,
+            apply_identifiability=lambda values, penalty, constraint: (
+                apply_identifiability_for_spec(
+                    spec,
+                    values,
+                    penalty,
+                    constraint,
+                    sample_weight,
+                )
+            ),
+        )
+        omega_ident = cast(
+            NDArray,
+            sum(component_omega for _, component_omega in spec._penalty_components),
+        )
     else:
         spec._penalty_components = None
 

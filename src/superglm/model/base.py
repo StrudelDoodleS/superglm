@@ -1042,8 +1042,14 @@ def model_build_design_matrix(
     )
     model._distribution = result.distribution
     model._link = result.link
+    # The builder compiles into an owned clone rather than mutating the caller's
+    # spec graph in place, so learned state is adopted by rebinding here.
+    model._specs = dict(result.compiled.specs)
+    model._feature_order = list(result.compiled.feature_order)
+    model._interaction_specs = dict(result.compiled.interaction_specs)
+    model._interaction_order = list(result.compiled.interaction_order)
     model._pending_interactions = ()
-    model._groups = result.groups
+    model._groups = list(result.compiled.groups)
     _validate_group_feature_names(model, result.groups)
     validate_penalty_features(configured_penalty(model), result.groups)
     model._dm = result.dm

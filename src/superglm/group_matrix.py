@@ -19,6 +19,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._group_matrix import _group_matrix_algebra
+from ._group_matrix._cross_matrix_execution import (
+    CrossMatrixExecutionPlan as CrossMatrixExecutionPlan,
+)
 from ._group_matrix._group_matrix_bin_space import (
     MixedBinSpaceCenteringPlan,
     build_mixed_bin_space_centering_plan,

@@ -8,6 +8,9 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.features._spline_identifiability import (
+    build_identifiability_projection_for_spec,
+)
 from superglm.types import GroupInfo, LambdaPolicy
 
 
@@ -125,7 +128,12 @@ def build_select_group_info(
     return info
 
 
-def build_select(spec: Any, x: NDArray, B: Any) -> GroupInfo:
+def build_select(
+    spec: Any,
+    x: NDArray,
+    B: Any,
+    geometry_weight: NDArray | None = None,
+) -> GroupInfo:
     """Build select=True GroupInfo for a spline spec."""
     if len(spec._m_orders) == 1:
         omega_for_eigen = spec._build_penalty()
@@ -134,7 +142,12 @@ def build_select(spec: Any, x: NDArray, B: Any) -> GroupInfo:
         omega_for_eigen = spec._build_penalty_for_order(max_order)
     _, omega_c, _, Z = spec._apply_constraints(None, omega_for_eigen)
 
-    spec._interaction_projection = spec._identifiability_projection(x, Z)
+    spec._interaction_projection = build_identifiability_projection_for_spec(
+        spec,
+        x,
+        Z,
+        geometry_weight,
+    )
     spec._eigendecompose_select(omega_c, Z)
     assert spec._U_null is not None
     assert spec._U_range is not None

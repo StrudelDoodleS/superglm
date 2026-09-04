@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.solvers.rank as rank_module
 from superglm import SuperGLM
 from superglm.distributions import Gaussian
 from superglm.features.numeric import Numeric
@@ -157,6 +158,43 @@ def test_shared_rank_policy_matches_normal_equation_boundary() -> None:
     assert SHARED_RANK_POLICY.certification_band == 32.0
     assert SHARED_RANK_POLICY.warning_condition == pytest.approx(1.0 / np.sqrt(eps))
     assert SHARED_RANK_POLICY.severe_condition == pytest.approx(1.0 / eps)
+
+
+def test_verified_spd_decomposition_matches_shared_rank_solve() -> None:
+    rng = np.random.default_rng(721)
+    basis, _ = np.linalg.qr(rng.normal(size=(12, 12)))
+    matrix = basis @ np.diag(np.linspace(0.75, 2.25, 12)) @ basis.T
+    rhs = rng.normal(size=12)
+
+    verified = rank_module.try_decompose_verified_spd_gram(matrix)
+    shared = decompose_gram(matrix)
+
+    assert verified is not None
+    assert verified.method == "cholesky"
+    assert verified.rank == len(matrix)
+    np.testing.assert_allclose(verified.solve(rhs), shared.solve(rhs), rtol=1e-13, atol=1e-13)
+    assert verified.log_pdet == pytest.approx(shared.log_pdet, rel=1e-13, abs=1e-13)
+    assert verified.pre_truncation_condition == pytest.approx(
+        shared.pre_truncation_condition,
+        rel=1e-13,
+    )
+
+
+@pytest.mark.parametrize(
+    "matrix",
+    [
+        np.diag([1.0, 0.0]),
+        np.array(
+            [
+                [1.0, 1.0 - SHARED_RANK_POLICY.factor_rcond / 2.0],
+                [1.0 - SHARED_RANK_POLICY.factor_rcond / 2.0, 1.0],
+            ]
+        ),
+        np.array([[1.0, 2.0], [2.0, 1.0]]),
+    ],
+)
+def test_verified_spd_decomposition_rejects_uncertified_systems(matrix: np.ndarray) -> None:
+    assert rank_module.try_decompose_verified_spd_gram(matrix) is None
 
 
 def _reflected_residue_fixture() -> tuple[np.ndarray, np.ndarray]:

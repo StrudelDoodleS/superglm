@@ -190,7 +190,7 @@ jobs:
 
       - name: Run ${{ matrix.label }}
         run: >-
-          uv run --with pyarrow pytest tests/ -q -m "not browser" --maxfail=1
+          uv run --with pyarrow --with mpmath pytest tests/ -q -m "not browser" --maxfail=1
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
 

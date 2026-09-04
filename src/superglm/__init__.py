@@ -26,8 +26,10 @@ sklearn-compatible API:
 from superglm import families
 from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
 from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
+from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
+from superglm.distributional.api import SuperLSS
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
 from superglm.features.categorical import Categorical
@@ -125,13 +127,28 @@ from superglm.validation import (
     loss_ratio_chart,
 )
 
+
+def warmup() -> None:
+    """Compile optional model-fitting kernels before the first fit."""
+    from superglm._group_matrix._group_matrix_kernels import _warmup_group_matrix_kernels
+    from superglm._tweedie_profile_kernel import _warmup_tweedie_profile
+    from superglm.distributional.kernels.tweedie import _warmup_tweedie
+
+    _warmup_tweedie()
+    _warmup_tweedie_profile()
+    _warmup_group_matrix_kernels()
+
+
 __all__ = [
     "families",
+    "warmup",
     "SuperGLM",
+    "SuperLSS",
     "PathResult",
     "PublicationModeError",
     "DiscretizationResult",
     "discretization_impact",
+    "FitDiagnosticReport",
     "export_rating_tables",
     "RatingTableBaseNotRepresentableError",
     "ModelMetrics",
