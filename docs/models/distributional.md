@@ -631,14 +631,15 @@ duplicated in `lambdas`. Every other penalty component needs a supplied value fo
 
 `fit_reml()` estimates every component whose policy is `LambdaPolicy.estimate()`
 by minimising the negative Laplace-approximate marginal likelihood (LAML) in
-log λ over the box `[1e-6, max_lambda]`. Under the default `outer="efs+newton"`
-the search has two stages:
+log λ over the box `[1e-6, max_lambda]`. The default `outer="efs"` uses the
+generalised Fellner–Schall fixed-point iteration, safeguarded by objective
+backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
 
 1. **Warm-up.** The generalised Fellner–Schall (EFS) fixed-point iteration of
    Wood and Fasiolo (2017), safeguarded by objective backtracking, moves λ from
    its start while its steps are large. It hands over once its largest accepted
    step falls to 0.5 in log λ, or after ten iterations, whichever comes first.
-   `practical_reml=True` (the default) only shortens this warm-up.
+   In this opt-in mode, `practical_reml=True` only shortens the warm-up.
 2. **Endgame.** Newton on the exact gradient and Hessian of the LAML in log λ,
    the construction of Wood, Pya and Säfken (2016): the implicit derivative of
    the coefficient mode through the observed penalised Hessian, the derivative
@@ -654,14 +655,13 @@ the search has two stages:
    `reml_tol * (1 + |LAML|)`, the objective change below the same bar, and the
    Newton step it would still take below `reml_tol` in log λ.
 
-`smoothing_convergence_reason_` reports how the search ended. `stationary` is
-the endgame's converged stop; `lambda_change` and `objective_plateau` are the
-Fellner–Schall fixed point's, which the endgame supersedes under the default
-because that fixed point is not a stationary point of the LAML beyond the
-Gaussian case (Wood and Fasiolo neglect the dependence of the Hessian on λ
-through the mode). `gradient_unresolved` means a component's gradient
-certificate exceeded the stationarity bar, so the optimum could not be
-certified; the certificate is published in `training_telemetry()`.
+With the default `outer="efs"`, `practical_reml=True` permits a sustained
+objective-and-parameter plateau to stop the fit. `smoothing_convergence_reason_`
+reports how the search ended. `stationary` is the optional endgame's converged
+stop; `lambda_change` and `objective_plateau` are the Fellner–Schall fixed
+point's. `gradient_unresolved` means a component's gradient certificate exceeded
+the stationarity bar, so the optimum could not be certified; the certificate is
+published in `training_telemetry()`.
 
 A component at `max_lambda` whose gradient still points outward beyond the bar
 is assessed at the exact face: the endpoint LAML derivative at τ = 1/λ = 0

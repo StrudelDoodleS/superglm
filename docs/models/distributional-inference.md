@@ -276,11 +276,12 @@ the reference distribution is a chi-squared and not an F.
 
 Bands and tests treat the smoothing parameters as fixed at their estimates.
 Passing `covariance="corrected"` asks instead for the first-order correction of
-Wood, Pya and Säfken (2016). A stationary fit can use a trusted smoothing
-Hessian published by the Newton endgame, or authenticate the terminal fit and
-replay that Hessian once from retained training rows. The replay is ephemeral:
-it does not mutate, cache, or republish fit state. A compact fit without a
-published Hessian refuses, as does a non-stationary or unauthenticated fit.
+Wood, Pya and Säfken (2016). Fit with `outer="efs+newton"` when this correction
+will be requested. A stationary fit can use a trusted smoothing Hessian
+published by the Newton endgame, or authenticate the terminal fit and replay
+that Hessian once from retained training rows. The replay is ephemeral: it does
+not mutate, cache, or republish fit state. A compact fit without a published
+Hessian refuses, as does a non-stationary or unauthenticated fit.
 `term_inference()`, `term_test()`, `plot()` and `summary()` validate their term,
 grid and frame inputs first, then resolve corrected covariance at most once per
 top-level call; a multi-panel plot or summary cannot replay it term by term.

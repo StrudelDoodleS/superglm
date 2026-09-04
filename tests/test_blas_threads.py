@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from threadpoolctl import ThreadpoolController
 
 from superglm._blas_threads import _resolve_limit, solver_blas_threads
@@ -213,49 +212,3 @@ def test_enter_failure_does_not_leak_scope_counter(monkeypatch):
     with solver_blas_threads():
         assert all(count == 1 for count in _blas_thread_counts())
     assert _blas_thread_counts() == before
-
-
-def test_assembly_work_counts_packed_channels() -> None:
-    from superglm._blas_threads import assembly_work
-
-    # k=3 predictors of width 71 at n=100,000: six packed channels of 2*n*71*71.
-    assert assembly_work(100_000, [71, 71, 71]) == pytest.approx(6 * 2.0 * 100_000 * 71 * 71)
-    assert assembly_work(5_000, [40]) == pytest.approx(2.0 * 5_000 * 40 * 40)
-
-
-def test_row_space_work_releases_the_auto_cap_above_threshold(monkeypatch):
-    from superglm._blas_threads import (
-        _ROW_SPACE_WORK_THRESHOLD,
-        allow_row_space_work,
-        solver_blas_threads,
-    )
-
-    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
-    before = _blas_thread_counts()
-    if not before or max(before) < 2:
-        pytest.skip("BLAS pool has a single thread; a release is unobservable")
-    with solver_blas_threads():
-        allow_row_space_work(1_000, [10])  # 2e5 << threshold: stays capped
-        assert all(count == 1 for count in _blas_thread_counts())
-        allow_row_space_work(200_000, [71, 71, 71])  # 1.2e10 >= threshold: released
-        assert _blas_thread_counts() == before
-    assert _blas_thread_counts() == before
-    assert _ROW_SPACE_WORK_THRESHOLD == 1.0e9
-
-
-def test_row_space_work_without_an_owning_scope_is_a_noop(monkeypatch):
-    from superglm._blas_threads import allow_row_space_work
-
-    monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
-    before = _blas_thread_counts()
-    allow_row_space_work(10**7, [500, 500])
-    assert _blas_thread_counts() == before
-
-
-def test_explicit_integer_cap_is_not_released_by_row_space_work(monkeypatch):
-    from superglm._blas_threads import allow_row_space_work, solver_blas_threads
-
-    monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "1")
-    with solver_blas_threads():
-        allow_row_space_work(10**7, [500, 500])
-        assert all(count == 1 for count in _blas_thread_counts())

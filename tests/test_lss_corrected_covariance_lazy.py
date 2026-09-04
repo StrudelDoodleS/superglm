@@ -52,7 +52,7 @@ def stationary_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
                 Predictor("scale", {"x": Spline("cr", k=5)}),
             ],
         )
-        .fit_reml(frame, response)
+        .fit_reml(frame, response, outer="efs+newton")
         ._require_fitted()
     )
     assert fitted.smoothing is not None

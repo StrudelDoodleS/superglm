@@ -14,13 +14,8 @@ BLAS pools -- tabmat's OpenMP kernels and numba threading are untouched.
 
 ``SUPERGLM_BLAS_THREADS`` overrides the policy: unset or ``auto`` caps BLAS
 to one thread during fits; an integer caps to that many; ``native`` disables
-capping and leaves the user's BLAS configuration alone.
-
-Two release rules widen the automatic cap for the remainder of the calling
-fit's scope: ``allow_wide_design`` when the design width reaches the p^3
-break-even (``_WIDE_DESIGN_THRESHOLD``), and ``allow_row_space_work`` when a
-fit's packed curvature assembly (an n·q² GEMM that does scale with threads)
-reaches ``_ROW_SPACE_WORK_THRESHOLD`` FLOPs per assembly.
+capping and leaves the user's BLAS configuration alone. Wide designs release
+the automatic cap once they reach the measured p³ break-even.
 """
 
 from __future__ import annotations
@@ -28,7 +23,6 @@ from __future__ import annotations
 import os
 import threading
 import warnings
-from collections.abc import Sequence
 from contextlib import contextmanager
 
 _ENV_VAR = "SUPERGLM_BLAS_THREADS"
@@ -81,24 +75,6 @@ def _auto_policy() -> bool:
     return False
 
 
-# Row-space assembly (X_a^T diag(h) X_b over every packed channel) is a GEMM
-# that scales with threads, unlike the p^3 kernels the cap was written for.
-# Use a conservative work threshold before releasing the automatic cap; users
-# can override the policy with SUPERGLM_BLAS_THREADS for different hardware.
-_ROW_SPACE_WORK_THRESHOLD = 1.0e9
-
-
-def assembly_work(n_observations: int, block_widths: Sequence[int]) -> float:
-    """FLOPs of one packed curvature assembly: 2·n·Σ_{a≤b} q_a·q_b."""
-    widths = [int(width) for width in block_widths]
-    pairs = sum(
-        widths[left] * widths[right]
-        for left in range(len(widths))
-        for right in range(left, len(widths))
-    )
-    return 2.0 * float(n_observations) * float(pairs)
-
-
 def _release_current_scope() -> None:
     global _registration, _wide_scopes
     stack = _scope_stack()
@@ -125,20 +101,6 @@ def allow_wide_design(p: int) -> None:
     re-armed for any narrow fits still running.
     """
     if p < _WIDE_DESIGN_THRESHOLD or not _auto_policy():
-        return
-    _release_current_scope()
-
-
-def allow_row_space_work(n_observations: int, block_widths: Sequence[int]) -> None:
-    """Release the automatic cap while a fit whose assembly is GEMM-bound is active.
-
-    Same ownership rules as :func:`allow_wide_design`: only the automatic
-    policy widens, the release belongs to the calling fit's scope, and a call
-    without an owning scope is a no-op.
-    """
-    if not _auto_policy():
-        return
-    if assembly_work(n_observations, block_widths) < _ROW_SPACE_WORK_THRESHOLD:
         return
     _release_current_scope()
 

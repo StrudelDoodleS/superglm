@@ -64,7 +64,7 @@ def _fit(frame: pd.DataFrame, y: np.ndarray) -> DenseDistributionalModel:
             ),
             Predictor("scale", {"x": Spline("cr", k=6)}),
         ],
-    ).fit_reml(frame, y)
+    ).fit_reml(frame, y, outer="efs+newton")
     return model._require_fitted()
 
 

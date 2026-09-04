@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm._blas_threads import allow_row_space_work, allow_wide_design
+from superglm._blas_threads import allow_wide_design
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -539,13 +539,6 @@ def _fit_candidate(
     with measure_phase(phase_recorder, "layout_penalty_assembly"):
         layout = build_stacked_layout(compiled)
     allow_wide_design(layout.n_coefficients)
-    allow_row_space_work(
-        layout.predictors[0].design.n,
-        [
-            state.coefficient_slice.stop - state.coefficient_slice.start
-            for state in layout.predictors
-        ],
-    )
     if efs_config is None:
         with measure_phase(phase_recorder, "layout_penalty_assembly"):
             ordered_lambdas = _fixed_fit_lambdas(layout, lambdas)

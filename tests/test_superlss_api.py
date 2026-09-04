@@ -1564,17 +1564,16 @@ def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     return model, frame, response
 
 
-def test_fit_reml_outer_defaults_to_the_newton_endgame_and_is_validated() -> None:
+def test_fit_reml_outer_defaults_to_efs_and_is_validated() -> None:
     model, frame, response = _small_gaussian_reml_model()
     model.fit_reml(frame, response)
     smoothing = model._require_fitted().smoothing
     assert smoothing is not None
-    assert smoothing.config.outer == "efs+newton"
-    assert smoothing.convergence_reason in {"stationary", "fixed_only"}
+    assert smoothing.config.outer == "efs"
     with pytest.raises(ValueError, match="outer"):
         model.fit_reml(frame, response, outer="newton")
-    efs_model, _, _ = _small_gaussian_reml_model()
-    efs_model.fit_reml(frame, response, outer="efs")
-    efs = efs_model._require_fitted().smoothing
-    assert efs is not None
-    assert efs.config.outer == "efs"
+    newton_model, _, _ = _small_gaussian_reml_model()
+    newton_model.fit_reml(frame, response, outer="efs+newton")
+    newton = newton_model._require_fitted().smoothing
+    assert newton is not None
+    assert newton.config.outer == "efs+newton"
