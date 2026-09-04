@@ -3556,6 +3556,35 @@ def test_scalar_endpoint_matches_closed_form_without_deciding_the_boundary(
     )
 
 
+def test_endpoint_objective_uses_the_validated_likelihood_field() -> None:
+    """An overridden convenience property cannot change endpoint authority."""
+
+    class ObjectiveOverride(DenseSolverResult):
+        @property
+        def objective(self) -> float:
+            return super().objective + 7.0
+
+    layout, face, lambdas, result = _scalar_endpoint_fit(0.5)
+    forged = ObjectiveOverride(
+        **{field.name: getattr(result, field.name) for field in fields(result)}
+    )
+
+    baseline = evaluate_endpoint_laplace(
+        result,
+        layout=layout,
+        lambdas=lambdas,
+        face=face,
+    )
+    evaluated = evaluate_endpoint_laplace(
+        forged,
+        layout=layout,
+        lambdas=lambdas,
+        face=face,
+    )
+
+    assert evaluated.objective == baseline.objective
+
+
 def test_efs_rechecks_a_true_infinity_optimum_before_reporting_convergence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
