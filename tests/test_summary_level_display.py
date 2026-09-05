@@ -830,8 +830,9 @@ def _pinned_level_model(base: str = "A"):
     model = SuperGLM(
         features={"territory": Categorical(base=base, levels=["A", "B", "C", "D"])},
     )
-    with pytest.warns(UserWarning, match="pinned to base"):
+    with pytest.warns(UserWarning, match=r"pinned to base|falling back") as caught:
         model.fit(X, y)
+    assert any("pinned to base" in str(w.message) for w in caught)
     return model
 
 

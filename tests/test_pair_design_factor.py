@@ -781,7 +781,8 @@ def test_a_zero_weight_row_cannot_overflow_the_shift_itself(top):
     asserted, is that the row changes nothing the builder does.
     """
     outlier = -np.finfo(np.float64).max
-    assert not np.isfinite(outlier - top), "this magnitude no longer overflows the shift"
+    with np.errstate(over="ignore"):
+        assert not np.isfinite(outlier - top), "this magnitude no longer overflows the shift"
 
     def case(with_row):
         codes = [0, 0, 1, 1, 1]

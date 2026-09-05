@@ -28,7 +28,7 @@ from superglm.export.excel import write_rating_table_workbook
 from superglm.export.rating_tables import build_rating_table_payload
 from superglm.export.summary import _adapt_compact_summary, build_summary_export_payload
 from superglm.inference._term_covariance import feature_se_from_cov
-from tests._piecewise_cases import CASE_NAMES, make_case
+from tests._piecewise_cases import CASE_NAMES, WARNING_CASES, make_case
 
 _EPS = float(np.finfo(np.float64).eps)
 
@@ -76,7 +76,11 @@ def _fit(case_name: str, extrapolation: str | None = None) -> tuple[SuperGLM, ob
                 "density": Numeric(),
             },
         )
-        model.fit(case.X, case.y, sample_weight=case.sample_weight)
+        if case_name in WARNING_CASES:
+            with pytest.warns(UserWarning, match=WARNING_CASES[case_name]):
+                model.fit(case.X, case.y, sample_weight=case.sample_weight)
+        else:
+            model.fit(case.X, case.y, sample_weight=case.sample_weight)
         _FITTED[key] = model
     return _FITTED[key], make_case(case_name, extrapolation=extrapolation)
 
