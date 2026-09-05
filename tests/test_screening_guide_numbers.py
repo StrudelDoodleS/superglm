@@ -26,7 +26,7 @@ they run everywhere.
 ``test_screening_guide_fixture_matches_the_real_book`` recomputes that
 measurement from the freMTPL2 parquet, so the fixture cannot itself go stale
 behind a code change.  It skips when the (gitignored) parquet is absent, so it
-does not run in CI; read its docstring for what it does and does not prove.
+runs in the Real data CI workflow, which fetches the pinned public data.
 
 One number the closing paragraph reads against — the ``ti`` null floor, 7.31 —
 comes from a *different* measurement, the 160-fit null battery in
@@ -59,7 +59,6 @@ from . import _datasets
 _ROOT = Path(__file__).resolve().parents[1]
 _GUIDE_PATH = _ROOT / "docs/guide/screening.md"
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "screening_guide_fremtpl.json"
-_FREQ_SHA256 = "47d65ed2dc49828c34f01baba6a8c8d34839d537254eb057ab196ac06456a845"
 
 _WORD_NUMBERS = {
     "one": 1,
@@ -405,7 +404,7 @@ def _guide_frame(n_rows: int):
 def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
     """Anchor the complete frequency-geometry measurement to one real book.
 
-    The exact parquet hash, deterministic sample and explicit feature map make
+    The effective-input hash, deterministic sample and explicit feature map make
     this a reproducible measurement rather than a fixture back-filled from a
     failing assertion.  In particular, the scalar ``TensorInteraction`` refit
     must center and place every inner spline with frequency mass: substituting
@@ -419,16 +418,25 @@ def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
     if the fixture were back-filled from whatever a fixing agent happened to
     print.  This test refits the real 80,000-row book and rederives every
     committed value, so the fixture is a measurement and not an assertion.
-    It skips wherever the gitignored parquet is absent, CI included; run it
-    locally to regenerate the fixture after any deliberate contract change.
+    It skips wherever the gitignored parquet is absent; the Real data workflow
+    fetches the pinned artifacts and requires this check to run.
     """
-    parquet = _datasets.find("freMTPL2freq.parquet")
-    assert parquet is not None
-    with parquet.open("rb") as stream:
-        assert hashlib.file_digest(stream, "sha256").hexdigest() == _FREQ_SHA256
-    assert measured["sample"]["sha256"] == _FREQ_SHA256
-
     df, y, exposure = _guide_frame(measured["n_rows"])
+    # Pin row order and consumed values, not writer-dependent Parquet bytes.
+    # Density is hashed before log1p; Exposure already has the documented clip.
+    columns = [
+        "IDpol",
+        "ClaimNb",
+        "Exposure",
+        "DrivAge",
+        "VehAge",
+        "BonusMalus",
+        "Density",
+        "VehBrand",
+        "Region",
+    ]
+    inputs = df[columns].to_csv(index=False, float_format="%.17g", lineterminator="\n")
+    assert hashlib.sha256(inputs.encode("utf-8")).hexdigest() == measured["sample"]["input_sha256"]
     # The dispersion contract this example documents only bites because the
     # exposure mass is far below the row count: sum(w) - edf is the denominator,
     # not n - edf, so the two differ by roughly a factor of two here.
