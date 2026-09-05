@@ -971,11 +971,6 @@ def _cross_gram_spline_categorical_spline_categorical(
     same_cat_parent = getattr(gm_i, "spline_cat_feature", None) is not None and getattr(
         gm_i, "spline_cat_feature", None
     ) == getattr(gm_j, "spline_cat_feature", None)
-    if same_cat_parent and getattr(gm_i, "spline_cat_level", None) != getattr(
-        gm_j, "spline_cat_level", None
-    ):
-        return np.zeros((gm_i.shape[1], gm_j.shape[1]))
-
     if same_cat_parent and np.array_equal(gm_i.row_idx, gm_j.row_idx):
         rows = gm_i.row_idx
         i_discrete = hasattr(gm_i, "B_unique")

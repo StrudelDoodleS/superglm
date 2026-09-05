@@ -20,6 +20,7 @@ from superglm.diagnostics.fit_report import (
     JsonValue,
     SmoothingComponentProfile,
 )
+from superglm.distributional.family import ExpectedInformationFamily
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.model import DenseDistributionalModel
 from superglm.distributional.result import (
@@ -28,9 +29,9 @@ from superglm.distributional.result import (
     DistributionalEFSResult,
     DistributionalFitResult,
 )
-from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.timing import FitPhaseSnapshot
 from superglm.features.spline import CubicRegressionSpline
+from superglm.solvers.rank import SHARED_RANK_POLICY, _eigensolver_relative_bar
 from superglm.types import PenaltyComponent
 
 _MIN_DOMINANCE_UPDATES = 4
@@ -52,6 +53,7 @@ type _EvidenceProvenance = Literal[
 ]
 type _FindingSeverity = Literal["error", "warning", "info"]
 type _FindingConfidence = Literal["certified", "strong", "suggestive", "unresolved"]
+type _CurvatureMatrixKind = Literal["data", "penalized"]
 # Recorded phases that never enclose another recorded phase, so their seconds
 # add up without double counting; ``initialization`` and
 # ``terminal_observed_retry_fallback`` wrap leaf phases and are left out.  The
@@ -76,6 +78,7 @@ class _LSSDiagnosticContext:
     revision: int
     n_observations: int
     family_name: str
+    terminal_policy_matrix_kind: _CurvatureMatrixKind
     layout: StackedLayout
     linear_spline_terms: tuple[str, ...]
     fitted_result: DistributionalFitResult
@@ -92,6 +95,10 @@ class _LSSDiagnosticContext:
             revision=state.revision,
             n_observations=state.null_model.n_observations,
             family_name=type(model.family).__name__,
+            terminal_policy_matrix_kind=(
+                state.solver_result.terminal_curvature.matrix_kind
+                or ("data" if isinstance(model.family, ExpectedInformationFamily) else "penalized")
+            ),
             layout=state.layout,
             linear_spline_terms=tuple(
                 f"{predictor.name}:{term}"
@@ -351,42 +358,164 @@ def _compact_not_converged_finding(
     )
 
 
-def _curvature_indefinite_finding(telemetry: CurvatureTelemetry) -> DiagnosticFinding | None:
-    if telemetry.minimum_eigenvalue >= 0.0:
+def _curvature_coordinates(fit: DenseSolverResult) -> tuple[int, str]:
+    face = fit.coefficient_face
+    if face is None:
+        return len(fit.coefficients), "full"
+    return face.reduced_width, "reduced_exact_face"
+
+
+def _retained_policy_curvature(context: _LSSDiagnosticContext) -> np.ndarray:
+    fit = context.terminal_fit
+    matrix = (
+        fit.terminal_data_curvature
+        if context.terminal_policy_matrix_kind == "data"
+        else fit.terminal_penalized_curvature
+    )
+    face = fit.coefficient_face
+    return np.asarray(matrix, dtype=np.float64) if face is None else face.reduce_matrix(matrix)
+
+
+def _negative_eigenvalue_resolution(matrix: np.ndarray) -> float:
+    width = matrix.shape[0]
+    scale = max(1.0, float(np.linalg.norm(matrix, ord=2)))
+    relative_bar = max(
+        100.0 * SHARED_RANK_POLICY.gram_rcond,
+        _eigensolver_relative_bar(width),
+    )
+    return relative_bar * scale
+
+
+def _curvature_indefinite_finding(
+    context: _LSSDiagnosticContext,
+) -> DiagnosticFinding | None:
+    fit = context.terminal_fit
+    telemetry = fit.terminal_curvature
+    minimum = float(telemetry.minimum_eigenvalue)
+    active_width, coordinate_space = _curvature_coordinates(fit)
+    if active_width == 0:
         return None
+    used_fallback = telemetry.actual_source != telemetry.requested_source
+    material_fallback = used_fallback and telemetry.reason == "material_indefiniteness_after_retry"
+    resolution: float | None = None
+    if used_fallback:
+        # The accepted terminal matrix is Fisher curvature, but the retained
+        # minimum is from the rejected requested spectrum.  Its matrix scale is
+        # not retained, so the solver's materiality decision is the only sound
+        # authority; do not compare that minimum with the accepted Fisher norm.
+        if not material_fallback:
+            return None
+    else:
+        if minimum >= 0.0:
+            return None
+        resolution = _negative_eigenvalue_resolution(_retained_policy_curvature(context))
+        if minimum >= -resolution:
+            return None
+
+    matrix_kind = context.terminal_policy_matrix_kind
+    coordinate_phrase = (
+        "full coefficient coordinates"
+        if coordinate_space == "full"
+        else "retained exact-face coordinates"
+    )
+    source_label = f"requested {telemetry.requested_source} {matrix_kind} curvature"
+    if resolution is None:
+        headline = f"The terminal policy found the {source_label} materially indefinite."
+        observed = (
+            f"The {source_label} in {coordinate_phrase} recorded raw minimum eigenvalue "
+            f"{minimum:.3e}; the terminal policy's diagonally equilibrated analysis classified "
+            f"the requested matrix as materially indefinite before accepting "
+            f"{telemetry.actual_source} curvature."
+        )
+        minimum_evidence = DiagnosticEvidence(
+            metric="minimum_eigenvalue",
+            value=minimum,
+            unit=None,
+            window="requested terminal coefficient curvature",
+            provenance=_CURVATURE_TELEMETRY,
+        )
+        resolution_caveat = (
+            "The raw minimum eigenvalue and the policy's diagonally equilibrated rank analysis "
+            "are different diagnostics. The requested matrix norm and numerical threshold are "
+            "not retained after fallback; materiality comes from the terminal curvature-policy "
+            f"decision, not from the accepted {telemetry.actual_source} rank or condition estimate."
+        )
+    else:
+        headline = f"The {source_label} has a resolved negative eigenvalue."
+        observed = (
+            f"The {source_label} in {coordinate_phrase} has minimum eigenvalue {minimum:.3e}, "
+            f"below the sign-resolution boundary {-resolution:.3e}."
+        )
+        minimum_evidence = DiagnosticEvidence(
+            metric="minimum_eigenvalue",
+            value=minimum,
+            unit=None,
+            window="requested terminal coefficient curvature",
+            provenance=_CURVATURE_TELEMETRY,
+            comparator="<",
+            threshold=-resolution,
+        )
+        resolution_caveat = (
+            "The sign boundary uses the shared Gram-rank policy, retained coordinate dimension, "
+            "floating-point epsilon, and the retained matrix spectral norm."
+        )
+
+    if telemetry.requested_source == "observed":
+        interpretation = (
+            "This is resolved local nonconcavity of the unpenalized likelihood geometry in a "
+            "active coefficient direction."
+            if matrix_kind == "data"
+            else (
+                "This is resolved local nonconcavity of the penalized objective geometry in a "
+                "active coefficient direction."
+            )
+        )
+        action_question = (
+            "Does comparing requested and accepted curvature, terminal score, and held-out "
+            "objective isolate a consequential nonconcave direction?"
+        )
+    else:
+        interpretation = (
+            f"The {source_label} matrix has a resolved negative direction in the assessed "
+            "coefficient coordinates."
+        )
+        action_question = (
+            "Does comparing requested and accepted curvature, terminal score, and held-out "
+            "objective isolate a consequential indefinite curvature direction?"
+        )
     return _finding(
         "fit.curvature_indefinite",
         priority=1,
         severity="warning",
-        impacts=("fit_validity", "inference_reliability"),
-        headline="The accepted terminal curvature has a negative eigenvalue.",
-        observed=(
-            f"The {telemetry.actual_source} curvature at the accepted solution has minimum "
-            f"eigenvalue {telemetry.minimum_eigenvalue:.3e} (rank {telemetry.rank})."
-        ),
-        interpretation=(
-            "A negative direction in the penalized curvature means the likelihood is still "
-            "increasing along it: typically a separated categorical level whose effect is "
-            "infinite, or a smoothing parameter held at its cap. The covariance and EDF along "
-            "that direction are not trustworthy."
-        ),
+        confidence="strong",
+        impacts=("fit_reliability",),
+        headline=headline,
+        observed=observed,
+        interpretation=interpretation,
         caveats=(
-            "Within the rank tolerance the direction was treated as numerically null, so the "
-            "fit was accepted; the finding reports the sign, not a failed policy.",
+            "Curvature alone does not show that the likelihood is increasing in this direction, "
+            "identify its statistical cause, or establish that a different accepted curvature "
+            "matrix is indefinite.",
+            resolution_caveat,
         ),
-        evidence=_evidence_set(
-            _CURVATURE_TELEMETRY,
-            ("minimum_eigenvalue", float(telemetry.minimum_eigenvalue)),
-            ("rank", telemetry.rank),
-            ("condition_estimate", telemetry.condition_estimate),
-            ("actual_source", telemetry.actual_source),
+        evidence=(
+            minimum_evidence,
+            *_evidence_set(
+                _CURVATURE_TELEMETRY,
+                ("requested_source", telemetry.requested_source),
+                ("accepted_source", telemetry.actual_source),
+                ("curvature_policy_reason", telemetry.reason),
+            ),
+            *_evidence_set(
+                "solver_history",
+                ("curvature_matrix", matrix_kind),
+                ("coordinate_space", coordinate_space),
+                ("active_coordinate_dimension", active_width),
+            ),
         ),
-        action_kind="inspect_design_cells",
-        action_question=(
-            "Which categorical level or crossed cell carries exposure with only boundary "
-            "responses, and does collapsing it remove the negative eigenvalue?"
-        ),
-        action_metrics=("minimum_eigenvalue", "holdout log-likelihood"),
+        action_kind="compare_curvature_policy",
+        action_question=action_question,
+        action_metrics=("minimum_eigenvalue", "terminal score", "holdout log-likelihood"),
     )
 
 
@@ -417,7 +546,7 @@ def _analyze_fit_status(context: _LSSDiagnosticContext) -> tuple[DiagnosticFindi
         findings.extend(_gradient_unresolved_findings(context, smoothing))
     if not context.fitted_result.converged and not terminal_failed and not smoothing_failed:
         findings.append(_compact_not_converged_finding(context.fitted_result))
-    curvature = _curvature_indefinite_finding(context.terminal_fit.terminal_curvature)
+    curvature = _curvature_indefinite_finding(context)
     if curvature is not None:
         findings.append(curvature)
     return tuple(findings)
@@ -1344,16 +1473,25 @@ def _analyze_numerics(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding
 
     condition = fit.terminal_curvature.condition_estimate
     if condition is not None and condition >= _CONDITION_WARNING_THRESHOLD:
+        accepted_source = fit.terminal_curvature.actual_source
+        matrix_kind = context.terminal_policy_matrix_kind
+        source_label = f"accepted {accepted_source} {matrix_kind} curvature"
         findings.append(
             _finding(
                 "numerics.conditioning_warning",
                 priority=2,
                 confidence="strong",
-                headline="The retained terminal curvature is poorly conditioned.",
-                observed="Its retained condition estimate meets the warning threshold.",
-                interpretation="Small perturbations may be amplified in retained fitted directions.",
+                headline=f"The {source_label} has a large pre-truncation condition estimate.",
+                observed="Its pre-truncation condition estimate meets the warning threshold.",
+                interpretation=(
+                    "This is a factor-scale conditioning estimate for the diagonally equilibrated "
+                    "policy matrix before numerical rank truncation."
+                ),
                 caveats=(
-                    "This uses retained terminal telemetry and does not reconstruct eigenvalues.",
+                    "The estimator and its norm depend on the accepted decomposition path; it is "
+                    "not the condition number of the unscaled curvature matrix.",
+                    "A post-truncation condition estimate is not retained, so this does not "
+                    "establish amplification among retained fitted directions.",
                 ),
                 evidence=(
                     DiagnosticEvidence(
@@ -1364,6 +1502,17 @@ def _analyze_numerics(context: _LSSDiagnosticContext) -> tuple[DiagnosticFinding
                         provenance=_CURVATURE_TELEMETRY,
                         comparator=">=",
                         threshold=float(_CONDITION_WARNING_THRESHOLD),
+                    ),
+                    *_evidence_set(
+                        _CURVATURE_TELEMETRY,
+                        ("accepted_source", accepted_source),
+                        ("condition_scope", "pre_truncation"),
+                    ),
+                    *_evidence_set(
+                        "solver_history",
+                        ("curvature_matrix", matrix_kind),
+                        ("coordinate_space", coordinate_space),
+                        ("active_coordinate_dimension", width),
                     ),
                 ),
                 action_kind="compare_conditioning",

@@ -7,7 +7,7 @@ import io
 import json
 import pickle
 from collections.abc import Iterator, Mapping
-from dataclasses import fields, replace
+from dataclasses import fields, is_dataclass, replace
 from types import MappingProxyType
 
 import numpy as np
@@ -1474,7 +1474,7 @@ def test_resolution_limited_exact_face_reason_round_trips_without_certification(
     serialized = serialize_distributional_model(resolution_limited_model)
     restored = deserialize_distributional_model(serialized)
     restored_smoothing = restored.smoothing
-    assert json.loads(serialized)["schema_version"] == SCHEMA_VERSION == "8.0.0"
+    assert json.loads(serialized)["schema_version"] == SCHEMA_VERSION == "9.0.0"
     assert restored_smoothing is not None
     assert restored_smoothing.terminal_fit.convergence_reason == "resolution_limited_stationarity"
     np.testing.assert_array_equal(
@@ -1723,6 +1723,59 @@ def test_rehashed_payload_cannot_shift_every_terminal_face_penalty(
         deserialize_distributional_model(forged)
 
 
+def test_artifact_binds_the_curvature_matrix_scope() -> None:
+    model, _, _, _ = _fixed_model()
+    manifest = distributional_manifest(model)
+    assert manifest["solver"]["curvature_telemetry"]["matrix_kind"] == "penalized"
+    restored = deserialize_distributional_model(serialize_distributional_model(model))
+    assert restored.result.terminal_curvature.matrix_kind == "penalized"
+
+
+def test_schema_eight_missing_curvature_scope_preserves_legacy_manifest() -> None:
+    model, _, _, _ = _fixed_model()
+    artifact = json.loads(serialize_distributional_model(model))
+
+    def remove_scope(restored):
+        seen = set()
+
+        def visit(value):
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            if isinstance(value, CurvatureTelemetry):
+                if "matrix_kind" in vars(value):
+                    object.__delattr__(value, "matrix_kind")
+            elif is_dataclass(value):
+                for field in fields(value):
+                    visit(getattr(value, field.name))
+            elif isinstance(value, Mapping):
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, tuple):
+                for item in value:
+                    visit(item)
+
+        visit(restored)
+
+    artifact = json.loads(_rehash_pickled_artifact(artifact, remove_scope))
+    artifact["schema_version"] = "8.0.0"
+
+    def strip_manifest(value):
+        if isinstance(value, dict):
+            value.pop("matrix_kind", None)
+            for item in value.values():
+                strip_manifest(item)
+        elif isinstance(value, list):
+            for item in value:
+                strip_manifest(item)
+
+    strip_manifest(artifact["manifest"])
+    restored = deserialize_distributional_model(json.dumps(artifact).encode())
+    assert restored.result.terminal_curvature.matrix_kind is None
+    assert distributional_manifest(restored) == artifact["manifest"]
+    np.testing.assert_array_equal(restored.result.coefficients, model.result.coefficients)
+
+
 def test_unreleased_previous_major_is_refused_before_unpickling() -> None:
     model, _, _, _ = _fixed_model()
     artifact = _with_unpickle_sentinel(json.loads(serialize_distributional_model(model)))
@@ -1913,14 +1966,14 @@ def test_manifest_key_set_is_pinned_to_the_current_major(
     _decomposition_models,
     _joint_exact_face_model,
 ) -> None:
-    """Pin the exact schema-8 manifest before its first release.
+    """Pin the schema-9 manifest, including terminal curvature scope.
 
     ``deserialize_distributional_model`` compares the recomputed manifest to the
     stored one for equality, so omitting a behavior-driving key leaves that state
-    unauthenticated. Once schema 8 is released, deliberate manifest changes must
-    bump the major component and update these key sets together.
+    unauthenticated. Deliberate manifest changes must bump the major component
+    and update these key sets together.
     """
-    assert SCHEMA_VERSION == "8.0.0"
+    assert SCHEMA_VERSION == "9.0.0"
 
     manifest = distributional_manifest(_fixed_model()[0])
     assert set(manifest) == {
@@ -1959,6 +2012,16 @@ def test_manifest_key_set_is_pinned_to_the_current_major(
         *_LIKELIHOOD_DECOMPOSITION_FIELDS,
     }
     assert set(manifest["solver"]) == solver_fields
+    assert set(manifest["solver"]["curvature_telemetry"]) == {
+        "requested_source",
+        "actual_source",
+        "reason",
+        "minimum_eigenvalue",
+        "rank",
+        "condition_estimate",
+        "fallback_count",
+        "matrix_kind",
+    }
     smoothing_model = _decomposition_models[1]
     smoothing = smoothing_model.smoothing
     assert smoothing is not None

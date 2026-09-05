@@ -13,9 +13,14 @@ from superglm.distributional import (
     ConfigurableDistributionalFamily,
     GammaLS,
     GaussianLS,
+    GeneralizedGammaLSS,
+    GeneralizedParetoLSS,
     LikelihoodPlanValidatingFamily,
+    LogNormalLS,
     NegativeBinomialLS,
     TweedieLSS,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
 )
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -58,6 +63,42 @@ def _capabilities(**overrides: object) -> FamilyCapabilities:
     }
     values.update(overrides)
     return FamilyCapabilities(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("family", "point"),
+    [
+        (GaussianLS(), [2.0, 0.9]),
+        (GammaLS(), [2.0, 0.9]),
+        (TweedieLSS(), [2.0, 0.9, 1.6]),
+        (NegativeBinomialLS(), [2.0, 1.5]),
+        (GeneralizedGammaLSS(), [2.0, 0.9, 0.3]),
+        (GeneralizedParetoLSS(), [2.0, 0.25]),
+        (LogNormalLS(), [2.0, 0.9]),
+        (TwoPieceNormalLSS(), [2.0, 0.9, 0.2]),
+        (TwoPieceLogNormalLSS(), [2.0, 0.9, 0.2]),
+    ],
+)
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+def test_value_screen_preserves_each_builtin_likelihood(family, point, semantics) -> None:
+    """A value-only trial must not reject a different target than its full trial."""
+    y = np.array([1.0, 2.0, 1.0, 4.0, 3.0, 2.0, 7.0, 1.0])
+    weights = resolve_likelihood_weights(
+        np.ones(len(y)) if semantics == "prior" else np.arange(1.0, len(y) + 1.0),
+        n_observations=len(y),
+        contract=WeightContract(semantics),
+    )
+    plan = family.bind_likelihood(y, weights, COMPLETE_OBSERVATION)
+    theta = np.tile(point, (len(y), 1)) * np.linspace(0.8, 1.2, len(y))[:, None]
+    value = family.evaluate_natural(y, theta, plan, derivative_order=0)
+    full = family.evaluate_natural(y, theta, plan, derivative_order=2)
+
+    assert np.all(full.valid)
+    np.testing.assert_array_equal(value.valid, full.valid)
+    np.testing.assert_array_equal(value.optimizing_log_likelihood, full.optimizing_log_likelihood)
+    np.testing.assert_array_equal(
+        value.parameter_independent_carrier, full.parameter_independent_carrier
+    )
 
 
 def _parameter(name: str) -> ParameterSpec:

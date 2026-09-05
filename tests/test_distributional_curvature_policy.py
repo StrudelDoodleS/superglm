@@ -187,6 +187,24 @@ def test_telemetry_serializes_exact_required_benchmark_fields() -> None:
     assert json.loads(json.dumps(record)) == record
 
 
+@pytest.mark.parametrize("matrix_kind", ["data", "penalized"])
+def test_curvature_scope_survives_retry_and_fisher_fallback(matrix_kind) -> None:
+    matrix = np.array([[1.0, 2.0], [2.0, 1.0]])
+    first = resolve_curvature("observed", matrix, matrix_kind=matrix_kind)
+    second = resolve_curvature(
+        "observed",
+        matrix,
+        fisher_matrix=np.eye(2),
+        state=first.state,
+        matrix_kind=matrix_kind,
+    )
+    assert first.retry_required
+    assert second.telemetry.actual_source == "fisher"
+    for decision in (first, second):
+        assert decision.telemetry.matrix_kind == matrix_kind
+        assert decision.telemetry.to_dict()["matrix_kind"] == matrix_kind
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

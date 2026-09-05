@@ -8,9 +8,11 @@ import pytest
 
 from superglm.diagnostics import DiagnosticEvidence
 from superglm.distributional.families.gaussian import GaussianLS
+from superglm.distributional.families.negative_binomial import NegativeBinomialLS
 from superglm.distributional.fit_diagnostics import (
     _analyze_exact_faces,
     _analyze_fit_status,
+    _analyze_numerics,
     _fit_status,
     _LSSDiagnosticContext,
     _ordinary_updates,
@@ -126,6 +128,67 @@ def _with_terminal_condition(model, condition_estimate: float):
         result=replace(model.fit_state.result, curvature_telemetry=terminal.terminal_curvature),
     )
     return DenseDistributionalModel(family=model.family, _fit_state=state)
+
+
+def _context_with_controlled_negative_curvature(model, *, resolution_multiple: float):
+    context = _LSSDiagnosticContext.from_model(model)
+    terminal = context.terminal_fit
+    face = terminal.coefficient_face
+    active_width = context.layout.n_coefficients if face is None else face.reduced_width
+    assert active_width >= 2
+
+    eps = np.finfo(np.float64).eps
+    nominal_resolution = max(100, active_width) * eps
+    negative = resolution_multiple * nominal_resolution
+    active_curvature = np.eye(active_width)
+    diagonal = 0.5 * (1.0 - negative)
+    off_diagonal = 0.5 * (1.0 + negative)
+    active_curvature[-2:, -2:] = (
+        (diagonal, off_diagonal),
+        (off_diagonal, diagonal),
+    )
+    if face is None:
+        data_curvature = active_curvature
+        retained_curvature = data_curvature
+        coordinate_space = "full"
+    else:
+        data_curvature = (
+            face.null_basis @ active_curvature @ face.null_basis.T
+            + face.constraint_basis @ face.constraint_basis.T
+        )
+        data_curvature = 0.5 * (data_curvature + data_curvature.T)
+        retained_curvature = face.reduce_matrix(data_curvature)
+        coordinate_space = "reduced_exact_face"
+    resolution = (
+        max(100, active_width) * eps * max(1.0, float(np.linalg.norm(retained_curvature, ord=2)))
+    )
+    telemetry = replace(
+        terminal.terminal_curvature,
+        requested_source="observed",
+        actual_source="observed",
+        reason=None,
+        minimum_eigenvalue=-resolution_multiple * resolution,
+        rank=active_width,
+        condition_estimate=None,
+        fallback_count=0,
+    )
+    terminal = replace(
+        terminal,
+        terminal_data_curvature=(
+            data_curvature
+            if context.terminal_policy_matrix_kind == "data"
+            else data_curvature - terminal.penalty
+        ),
+        terminal_penalized_curvature=(
+            data_curvature + terminal.penalty
+            if context.terminal_policy_matrix_kind == "data"
+            else data_curvature
+        ),
+        terminal_curvature=telemetry,
+        converged=False,
+        convergence_reason="max_iterations",
+    )
+    return replace(context, terminal_fit=terminal), resolution, coordinate_space
 
 
 def _replace_smoothing(model, smoothing):
@@ -468,6 +531,205 @@ def test_nonconverged_findings_name_authoritative_loop_and_reason(
     assert {item["terminal_reason"] for item in evidence} == expected_reasons
 
 
+def test_roundoff_scale_negative_data_curvature_is_not_reported_as_indefinite() -> None:
+    context, _, _ = _context_with_controlled_negative_curvature(
+        _fixed_model(),
+        resolution_multiple=0.5,
+    )
+
+    findings = _analyze_fit_status(context)
+
+    assert all(finding.code != "fit.curvature_indefinite" for finding in findings)
+
+
+def test_material_negative_reports_requested_data_curvature_on_retained_face(face_model) -> None:
+    context = _LSSDiagnosticContext.from_model(face_model)
+    context = replace(context, terminal_policy_matrix_kind="data")
+    terminal = context.terminal_fit
+    face = terminal.coefficient_face
+    assert face is not None
+    terminal = replace(
+        terminal,
+        terminal_curvature=replace(
+            terminal.terminal_curvature,
+            requested_source="observed",
+            actual_source="fisher",
+            reason="material_indefiniteness_after_retry",
+            minimum_eigenvalue=-1.0,
+            rank=face.reduced_width,
+            condition_estimate=3.0,
+            fallback_count=1,
+        ),
+        converged=False,
+        convergence_reason="max_iterations",
+    )
+    context = replace(context, terminal_fit=terminal)
+
+    findings = _analyze_fit_status(context)
+
+    finding = next(item for item in findings if item.code == "fit.curvature_indefinite")
+    evidence = {item.metric: item for item in finding.evidence}
+    assert evidence["minimum_eigenvalue"].value == -1.0
+    assert evidence["minimum_eigenvalue"].comparator is None
+    assert evidence["minimum_eigenvalue"].threshold is None
+    assert evidence["requested_source"].value == "observed"
+    assert evidence["accepted_source"].value == "fisher"
+    assert evidence["curvature_matrix"].value == "data"
+    assert evidence["coordinate_space"].value == "reduced_exact_face"
+    assert evidence["active_coordinate_dimension"].value == face.reduced_width
+    wording = " ".join(
+        (finding.headline, finding.observed, finding.interpretation, *finding.caveats)
+    ).lower()
+    assert "requested observed data curvature" in wording
+    assert "materially indefinite" in wording
+    assert "accepting fisher curvature" in wording
+    assert "penalized curvature" not in wording
+    assert "likelihood is still increasing" not in wording
+    assert "separation" not in wording
+
+
+@pytest.mark.parametrize("requested_source", ["fisher", "hybrid"])
+def test_nonobserved_negative_curvature_does_not_claim_local_nonconcavity(
+    requested_source: str,
+) -> None:
+    context, _, _ = _context_with_controlled_negative_curvature(
+        _fixed_model(),
+        resolution_multiple=2.0,
+    )
+    terminal = context.terminal_fit
+    terminal = replace(
+        terminal,
+        terminal_curvature=replace(
+            terminal.terminal_curvature,
+            requested_source=requested_source,
+            actual_source=requested_source,
+        ),
+    )
+    context = replace(context, terminal_fit=terminal)
+
+    findings = _analyze_fit_status(context)
+
+    finding = next(item for item in findings if item.code == "fit.curvature_indefinite")
+    wording = " ".join(
+        (
+            finding.headline,
+            finding.observed,
+            finding.interpretation,
+            finding.actions[0].question,
+            *finding.caveats,
+        )
+    ).lower()
+    assert "matrix has a resolved negative direction" in wording
+    assert "nonconcav" not in wording
+
+
+def test_material_fallback_is_authoritative_when_raw_minimum_is_nonnegative(face_model) -> None:
+    context = _LSSDiagnosticContext.from_model(face_model)
+    terminal = context.terminal_fit
+    face = terminal.coefficient_face
+    assert face is not None
+    terminal = replace(
+        terminal,
+        terminal_curvature=replace(
+            terminal.terminal_curvature,
+            requested_source="observed",
+            actual_source="fisher",
+            reason="material_indefiniteness_after_retry",
+            minimum_eigenvalue=0.0,
+            rank=face.reduced_width,
+            condition_estimate=3.0,
+            fallback_count=1,
+        ),
+        converged=False,
+        convergence_reason="max_iterations",
+    )
+    context = replace(context, terminal_fit=terminal)
+
+    findings = _analyze_fit_status(context)
+
+    finding = next(item for item in findings if item.code == "fit.curvature_indefinite")
+    evidence = {item.metric: item for item in finding.evidence}
+    assert evidence["minimum_eigenvalue"].value == 0.0
+    assert evidence["minimum_eigenvalue"].comparator is None
+    assert evidence["minimum_eigenvalue"].threshold is None
+    assert evidence["requested_source"].value == "observed"
+    assert evidence["accepted_source"].value == "fisher"
+    assert evidence["curvature_policy_reason"].value == "material_indefiniteness_after_retry"
+    assert evidence["coordinate_space"].value == "reduced_exact_face"
+    wording = " ".join((finding.headline, finding.observed, *finding.caveats)).lower()
+    assert "materially indefinite" in wording
+    assert "minimum eigenvalue 0.000e+00" in wording
+    assert "resolved negative eigenvalue" not in wording
+
+
+def test_non_expected_information_family_reports_penalized_curvature_provenance() -> None:
+    rng = np.random.default_rng(2026083115)
+    n = 240
+    x_mean = rng.permutation(np.linspace(-1.0, 1.0, n))
+    x_theta = rng.permutation(np.linspace(-1.0, 1.0, n))
+    exposure = np.resize(np.array([0.5, 1.0, 1.5, 2.0]), n)
+    mean_offset = 0.08 * np.sin(np.pi * x_mean)
+    theta_offset = -0.06 * np.cos(np.pi * x_theta)
+    mean = np.exp(0.55 + 0.35 * x_mean + mean_offset)
+    theta = np.exp(0.20 - 0.25 * x_theta + theta_offset)
+    count = rng.negative_binomial(exposure * theta, theta / (mean + theta)).astype(np.float64)
+    model = fit_dense_distributional(
+        pd.DataFrame({"x_mean": x_mean, "x_theta": x_theta}),
+        count / exposure,
+        family=NegativeBinomialLS(),
+        predictors=(
+            Predictor("mean", {"x_mean": Numeric()}),
+            Predictor("theta", {"x_theta": Numeric()}),
+        ),
+        weight_contract=WeightContract("prior"),
+        sample_weight=exposure,
+        offsets={"mean": mean_offset, "theta": theta_offset},
+        lambdas={},
+        config=DenseSolverConfig(
+            coefficient_curvature="observed",
+            tolerance=1.0e-8,
+            max_iterations=100,
+        ),
+        retain_rows=False,
+    )
+    context, _, _ = _context_with_controlled_negative_curvature(
+        model,
+        resolution_multiple=2.0,
+    )
+    threshold = 1.0 / np.sqrt(np.finfo(np.float64).eps)
+    terminal = context.terminal_fit
+    terminal = replace(
+        terminal,
+        terminal_curvature=replace(
+            terminal.terminal_curvature,
+            condition_estimate=threshold,
+        ),
+    )
+    context = replace(context, terminal_fit=terminal)
+
+    assert context.terminal_policy_matrix_kind == "penalized"
+    curvature = next(
+        item for item in _analyze_fit_status(context) if item.code == "fit.curvature_indefinite"
+    )
+    curvature_evidence = {item.metric: item for item in curvature.evidence}
+    assert curvature_evidence["requested_source"].value == "observed"
+    assert curvature_evidence["curvature_matrix"].value == "penalized"
+    curvature_wording = " ".join(
+        (curvature.headline, curvature.observed, curvature.interpretation)
+    ).lower()
+    assert "requested observed penalized curvature" in curvature_wording
+    assert "penalized objective geometry" in curvature_wording
+    assert "unpenalized likelihood geometry" not in curvature_wording
+
+    conditioning = next(
+        item for item in _analyze_numerics(context) if item.code == "numerics.conditioning_warning"
+    )
+    conditioning_evidence = {item.metric: item for item in conditioning.evidence}
+    assert conditioning_evidence["accepted_source"].value == "observed"
+    assert conditioning_evidence["curvature_matrix"].value == "penalized"
+    assert "accepted observed penalized curvature" in conditioning.headline.lower()
+
+
 @pytest.mark.parametrize(
     ("counts", "expected_count", "fallback_word"),
     [({-1: 1}, 1, "fallback"), ({0: 1, -1: 2}, 3, "fallbacks")],
@@ -697,7 +959,7 @@ def test_estimable_rank_below_active_full_coordinate_dimension_reports_rank_loss
     assert evidence["coordinate_space"] == "full"
 
 
-def test_conditioning_warning_uses_retained_terminal_estimate_and_exact_threshold(
+def test_conditioning_warning_uses_exact_pre_truncation_threshold(
     certified_model,
 ) -> None:
     threshold = 1.0 / np.sqrt(np.finfo(np.float64).eps)
@@ -712,7 +974,60 @@ def test_conditioning_warning_uses_retained_terminal_estimate_and_exact_threshol
     assert evidence["condition_estimate"].provenance == "curvature_telemetry"
     wording = f"{finding.headline} {finding.observed} {finding.interpretation}".lower()
     assert "certified condition estimate" not in wording
-    assert "retained condition estimate" in wording or "reported condition estimate" in wording
+    assert "pre-truncation condition estimate" in wording
+    assert "retained condition estimate" not in wording
+
+
+def test_conditioning_warning_names_accepted_pre_truncation_curvature_on_face(
+    face_model,
+) -> None:
+    threshold = 1.0 / np.sqrt(np.finfo(np.float64).eps)
+    context = _LSSDiagnosticContext.from_model(face_model)
+    context = replace(context, terminal_policy_matrix_kind="data")
+    terminal = context.terminal_fit
+    face = terminal.coefficient_face
+    assert face is not None
+    terminal = replace(
+        terminal,
+        terminal_curvature=replace(
+            terminal.terminal_curvature,
+            requested_source="observed",
+            actual_source="fisher",
+            reason="material_indefiniteness_after_retry",
+            minimum_eigenvalue=-1.0,
+            rank=face.reduced_width,
+            condition_estimate=threshold,
+            fallback_count=1,
+        ),
+        converged=False,
+        convergence_reason="max_iterations",
+    )
+    context = replace(context, terminal_fit=terminal)
+
+    findings = _analyze_numerics(context)
+
+    finding = next(item for item in findings if item.code == "numerics.conditioning_warning")
+    evidence = {item.metric: item for item in finding.evidence}
+    assert evidence["condition_estimate"].value == threshold
+    assert evidence["condition_estimate"].comparator == ">="
+    assert evidence["condition_estimate"].threshold == threshold
+    assert evidence["accepted_source"].value == "fisher"
+    assert evidence["curvature_matrix"].value == "data"
+    assert evidence["coordinate_space"].value == "reduced_exact_face"
+    assert evidence["active_coordinate_dimension"].value == face.reduced_width
+    assert evidence["condition_scope"].value == "pre_truncation"
+    wording = " ".join(
+        (finding.headline, finding.observed, finding.interpretation, *finding.caveats)
+    ).lower()
+    assert "accepted fisher data curvature" in wording
+    assert "pre-truncation condition estimate" in wording
+    assert "factor-scale conditioning estimate" in wording
+    assert "diagonally equilibrated" in wording
+    assert "decomposition path" in wording
+    assert "retained condition estimate" not in wording
+    assert "small perturbations may be amplified in retained fitted directions" not in wording
+    assert "does not establish amplification among retained fitted directions" in wording
+    assert "post-truncation condition estimate is not retained" in wording
 
 
 def test_exact_faced_spline_reports_suppressed_penalized_subspace_and_retained_null_space(

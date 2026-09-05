@@ -603,8 +603,9 @@ mean and theta for `NegativeBinomialLS`) before any coefficient is fitted and
 emits a `SeparationWarning` naming the levels and the remedies; `"error"`
 refuses the design; `"ignore"` skips the scan. `GaussianLS` and `GammaLS`
 have no reachable boundary and are never scanned. Ordered-categorical smooths
-are not scanned. A fit that slips through still shows itself in
-`diagnose_distributional_fit` as `fit.curvature_indefinite`.
+are not scanned. The scan does not cover all separation patterns, and
+`fit.curvature_indefinite` is a curvature diagnostic, not a separation detector.
+The absence of either warning does not rule out separation.
 
 ## Fixed penalties and EFS
 
@@ -947,12 +948,14 @@ scoring instead and is accepted only for a family that supplies expected
 information. Every current built-in except `NegativeBinomialLS` and
 `TweedieLSS` supplies it; a family implementing that capability does not change
 the default solve. Under either policy the accepted terminal point is
-re-examined with the observed curvature: if it is materially indefinite the
-solver retries with a tighter tolerance, then falls back to expected information
-when the family supplies it and refuses the fit otherwise. The requested policy
+re-examined with the penalized observed Hessian `A + S`, restricted to the
+active coefficient subspace when needed. If it is materially indefinite the
+solver retries with a tighter tolerance, then falls back to penalized expected
+information `F + S` when the family supplies it and refuses the fit otherwise.
+The requested policy
 is `training_telemetry().curvature_policy`;
 the terminal source and any fallback are in `training_telemetry().curvature`
-(`actual_source`, `fallback_count`).
+(`actual_source`, `fallback_count`, `matrix_kind`).
 
 ```python
 newton = SuperLSS(family=GammaLS(), predictors=predictors)
@@ -967,7 +970,7 @@ ends at four:
 
 | Level | What is solved | Orders of the row log-likelihood |
 |---|---|---|
-| Coefficient solve at fixed λ (Newton) | the penalised mode `β̂(λ)` | 1 and 2: score and observed Hessian, every cross term included |
+| Coefficient solve at fixed λ (Newton) | the penalised mode `β̂(λ)` | 0, 1 and 2: value-only backtrack screens, then score and observed Hessian with every cross term included |
 | Fellner–Schall fixed point (`outer="efs"`) | λ from `β̂(λ)` and `H` | 2 only: it reuses the Hessian and never differentiates it |
 | LAML gradient in log λ (the Newton endgame's step direction, and the stationarity certificate) | `dV/dρ` through `dβ̂/dρ` | 3: the derivative of `H` along the direction the mode moves, which is the third derivative contracted with `X dβ̂/dρ` |
 | LAML Hessian in log λ (the Newton endgame's step, and `smoothing_hessian`) | `d²V/dρ²` through `d²β̂/dρ²` | 4: the fourth derivative contracted with two such directions, plus the third contracted with `d²β̂/dρ²` |
@@ -980,7 +983,12 @@ needs a fifth: the outer problem is the last one, and its Newton step is the
 most derivative-hungry thing anyone runs. Wood, Pya and Säfken (2016) is the
 reference for the whole construction.
 
-Every family supplies orders 1 and 2 analytically as one fused row kernel
+Every family supports orders 0, 1 and 2. Order 0 supplies likelihood values
+without derivatives for inexpensive rejection of repeated backtracks; every
+accepted point still receives a full order-2 evaluation. Wherever order 2 is
+valid, order 0 must also be valid and return the same optimizing values and
+carrier terms.
+Built-in families supply orders 1 and 2 analytically as one fused row kernel
 (`evaluate_natural`: log density, score and the packed cross-derivative
 Hessian in its natural parameters, chained through the links by the solver).
 Order 3 is optional (`PredictorCurvatureDirectionalFamily`, the directional
@@ -1044,17 +1052,19 @@ make hostile pickle safe.
 
 Artifacts carry two independent version numbers. The envelope's
 `schema_version` versions the fitted state itself, and **MAJOR is a read
-barrier**: a build refuses any artifact whose major differs from its own and
-says so with a version error naming both versions. MINOR and PATCH promise
-readability. Because the loader recomputes the manifest and compares it for
+barrier unless explicitly supported**. This build writes envelope `9.0.0`
+and also reads `8.0.0`. New fits record whether curvature diagnostics assessed
+the data matrix or the penalized matrix; older fits keep their original
+family-dependent interpretation. Unsupported majors receive a version error
+naming both versions. MINOR and PATCH promise readability. Because the loader
+recomputes the manifest and compares it for
 equality, any change to what the manifest describes must be a MAJOR bump — so a
 manifest mismatch always means corruption or tampering, never age. The
 `public_api` block carries its own `schema_version` for the SuperLSS wrapper
 metadata alone; it moves independently of the envelope's, and both are written
 into every artifact so that whichever layer refuses a stale artifact names its
-own version. Envelope `8.0.0` and wrapper `2.0.0` are the first released
-artifact schemas. Lower numbers identify development-only shapes that are
-refused, not compatibility promises.
+own version. The wrapper remains at `2.0.0`. Envelope majors below 8 identify
+development-only shapes that are refused, not compatibility promises.
 
 ### Diagnosing a fit
 

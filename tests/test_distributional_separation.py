@@ -11,11 +11,9 @@ import pytest
 from superglm import SuperLSS
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.distributional import GammaLS, GaussianLS, NegativeBinomialLS, Predictor, TweedieLSS
-from superglm.distributional import fit_diagnostics as diagnostics_module
 from superglm.distributional.curvature import RepeatedCurvatureIndefinitenessError
 from superglm.distributional.family import ResponseBoundaryFamily
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
-from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.features import Categorical, Spline
 from superglm.links import IdentityLink, LogLink
 
@@ -131,16 +129,8 @@ def test_invalid_policy_is_refused_at_construction() -> None:
         _tweedie_model(separation="maybe")
 
 
-def test_indefinite_terminal_curvature_is_reported_through_the_fit_read_path() -> None:
-    """Wiring test: an accepted fit whose terminal curvature telemetry carries a negative
-    minimum eigenvalue yields exactly one fit.curvature_indefinite warning.
-
-    A natural fixture does not exist: the solver refuses a materially indefinite terminal
-    curvature (RepeatedCurvatureIndefinitenessError), and the thinner separated levels
-    measured +1.956e-6 and +2.1e-15 at the terminal point, so the finding can only fire on
-    a round-off-level negative whose sign is platform-dependent.  The telemetry is
-    therefore replaced on a real fitted model, through the result validators.
-    """
+def test_roundoff_negative_curvature_does_not_infer_separation_through_fit_read_path() -> None:
+    """A telemetry sign beneath numerical resolution is not separation evidence."""
     frame, y, exposure = _separated_tweedie_fixture()
     y = y.copy()
     y[np.flatnonzero(frame["region"].to_numpy() == "d")[:5]] = 4.0
@@ -148,44 +138,14 @@ def test_indefinite_terminal_curvature_is_reported_through_the_fit_read_path() -
     model.fit(frame, y, sample_weight=exposure, lambdas={"mean:x#wiggle": 1.0})
     fitted = model._require_fitted()
     telemetry = fitted.fit_state.solver_result.terminal_curvature
-    negative = replace(telemetry, minimum_eigenvalue=-1.25e-13)
+    negative = replace(telemetry, minimum_eigenvalue=-np.finfo(np.float64).eps)
     solver_result = replace(fitted.fit_state.solver_result, terminal_curvature=negative)
     fit_state = replace(fitted.fit_state, solver_result=solver_result)
     injected = replace(fitted, _fit_state=fit_state)
     report = diagnose_distributional_fit(injected)
-    findings = [f for f in report.findings if f.code == "fit.curvature_indefinite"]
-    assert len(findings) == 1
-    assert findings[0].severity == "warning"
-    assert "separated" in findings[0].interpretation
-    evidence = {item.metric: item.value for item in findings[0].evidence}
-    assert evidence["minimum_eigenvalue"] == -1.25e-13
-    assert evidence["rank"] == telemetry.rank
+    assert not [f for f in report.findings if f.code == "fit.curvature_indefinite"]
     clean = diagnose_distributional_fit(fitted)
     assert not [f for f in clean.findings if f.code == "fit.curvature_indefinite"]
-
-
-def test_curvature_indefinite_finding_reads_the_telemetry_sign() -> None:
-    negative = CurvatureTelemetry(
-        requested_source="observed",
-        actual_source="observed",
-        reason=None,
-        minimum_eigenvalue=-1.25e-13,
-        rank=11,
-        condition_estimate=3.0e8,
-        fallback_count=0,
-    )
-    finding = diagnostics_module._curvature_indefinite_finding(negative)
-    assert finding is not None
-    assert finding.code == "fit.curvature_indefinite"
-    assert finding.severity == "warning"
-    assert "separated" in finding.interpretation
-    evidence = {item.metric: item.value for item in finding.evidence}
-    assert evidence["minimum_eigenvalue"] == -1.25e-13
-    assert evidence["rank"] == 11
-    assert (
-        diagnostics_module._curvature_indefinite_finding(replace(negative, minimum_eigenvalue=0.0))
-        is None
-    )
 
 
 def test_a_clean_fit_has_no_curvature_finding() -> None:
