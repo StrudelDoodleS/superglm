@@ -411,6 +411,29 @@ def _exact_profile_statistics_kernel(
     )
 
 
+def _warmup_tweedie_profile() -> None:
+    _digamma_positive(1.0)
+    _trigamma_positive(1.0)
+    _log_series_term(1, 0.0, 1.0)
+    term = _series_term_derivatives(1, 0.0, 0.0, 0.0, 2.0)
+    _series_term_is_finite(term)
+    _failure_tuple(PROFILE_KERNEL_WORK_LIMIT, 0, 0)
+    arrays = (
+        np.array([0.0, 1.0], dtype=np.float64),
+        np.ones(2, dtype=np.float64),
+        np.ones(2, dtype=np.float64),
+    )
+    for _ in range(2):
+        raw = _exact_profile_statistics_kernel(
+            *arrays, 1.5, 0.0, _DEFAULT_MAX_TERMS, _DEFAULT_MAX_TOTAL_TERMS
+        )
+        status = int(raw[0])
+        if status != PROFILE_KERNEL_OK:
+            raise RuntimeError(f"Tweedie profile kernel warmup returned status {status}")
+        for values in arrays:
+            values.setflags(write=False)
+
+
 def exact_profile_statistics(
     y: NDArray,
     mu: NDArray,

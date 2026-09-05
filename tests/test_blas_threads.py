@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from threadpoolctl import ThreadpoolController
 
 from superglm._blas_threads import _resolve_limit, solver_blas_threads
@@ -27,7 +28,8 @@ def test_resolver_policy(monkeypatch):
     monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "0")
     assert _resolve_limit() is None
     monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "not-a-number")
-    assert _resolve_limit() == 1
+    with pytest.warns(UserWarning, match="SUPERGLM_BLAS_THREADS"):
+        assert _resolve_limit() == 1
 
 
 def test_context_caps_and_restores(monkeypatch):
@@ -53,8 +55,6 @@ def test_off_synonyms_disable_capping(monkeypatch):
 
 
 def test_unparseable_value_warns_and_caps(monkeypatch):
-    import pytest
-
     from superglm._blas_threads import _auto_policy
 
     monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "fastest")
@@ -87,6 +87,17 @@ def test_wide_design_respects_explicit_cap(monkeypatch):
         allow_wide_design(5_000)
         assert all(count == 2 for count in _blas_thread_counts())
     assert _blas_thread_counts() == before
+
+
+def test_wide_design_without_an_owning_scope_is_a_noop(monkeypatch):
+    import superglm._blas_threads as blas
+
+    class ForeignRegistration:
+        def unregister(self):
+            raise AssertionError("an unscoped fit released another fit's BLAS cap")
+
+    monkeypatch.setattr(blas, "_registration", ForeignRegistration())
+    blas.allow_wide_design(5_000)
 
 
 def test_overlapping_scopes_restore_native_state(monkeypatch):

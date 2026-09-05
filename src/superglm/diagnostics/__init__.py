@@ -4,6 +4,13 @@
 """
 
 from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
+from superglm.diagnostics.fit_report import (
+    DiagnosticAction,
+    DiagnosticEvidence,
+    DiagnosticFinding,
+    DiagnosticSubject,
+    FitDiagnosticReport,
+)
 from superglm.diagnostics.spline_checks import SplineRedundancyReport, spline_redundancy
 from superglm.diagnostics.term_diagnostics import (
     _drop_term_holdout,
@@ -13,6 +20,12 @@ from superglm.diagnostics.term_diagnostics import (
 )
 
 __all__ = [
+    # fit_report
+    "DiagnosticAction",
+    "DiagnosticEvidence",
+    "DiagnosticFinding",
+    "DiagnosticSubject",
+    "FitDiagnosticReport",
     # spline_checks
     "SplineRedundancyReport",
     "spline_redundancy",

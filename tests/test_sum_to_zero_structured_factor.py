@@ -1207,6 +1207,7 @@ def test_wide_sum_to_zero_certifies_local_factor_geometry(
     )
 
 
+@pytest.mark.filterwarnings("error:`block_diag` is switching:DeprecationWarning")
 def test_sum_to_zero_certifies_full_local_blocks_in_public_coordinates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

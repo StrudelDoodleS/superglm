@@ -1498,6 +1498,217 @@ class TestTensorInteractionModelSpecifics:
         )
 
 
+class TestTensorInteractionFrequencyReplication:
+    """Integer frequency mass is literal row replication for scalar tensors."""
+
+    @staticmethod
+    def _fixture():
+        rng = np.random.default_rng(12)
+        n = 120
+        x1 = rng.uniform(0.0, 1.0, n)
+        x2 = rng.uniform(0.0, 1.0, n)
+        counts = rng.integers(1, 4, n)
+        eta = (
+            0.2
+            + 0.8 * np.sin(2.0 * np.pi * x1)
+            + 0.7 * np.cos(2.0 * np.pi * x2)
+            + 0.65 * np.sin(2.0 * np.pi * x1) * np.cos(2.0 * np.pi * x2)
+        )
+        y = rng.poisson(np.exp(eta)).astype(np.float64)
+        frame = pd.DataFrame({"x1": x1, "x2": x2})
+        expanded = frame.loc[frame.index.repeat(counts)].reset_index(drop=True)
+        return frame, y, counts, expanded, np.repeat(y, counts)
+
+    @staticmethod
+    def _model():
+        return SuperGLM(
+            family="poisson",
+            features={"x1": Spline(n_knots=3), "x2": Spline(n_knots=3)},
+            interactions=[("x1", "x2")],
+            selection_penalty=0.0,
+            spline_penalty=0.35,
+            weight_semantics="frequency",
+            direct_solve="gram",
+            tol=1e-11,
+            max_iter=200,
+        )
+
+    @staticmethod
+    def _kkt_certificate(model, frame, y, sample_weight, *, reml):
+        from superglm.model.reml_setup import collect_reml_groups
+        from superglm.reml.penalty_algebra import (
+            build_penalty_context,
+            build_penalty_matrix,
+        )
+
+        weights = np.asarray(sample_weight, dtype=np.float64)
+        design = model._dm.toarray()
+        mu = np.asarray(model.predict(frame), dtype=np.float64)
+        beta = np.asarray(model.result.beta, dtype=np.float64)
+        if reml:
+            reml_groups = collect_reml_groups(model._groups, model._dm.group_matrices)
+            components, _, _ = build_penalty_context(
+                model._dm.group_matrices,
+                reml_groups,
+            )
+            penalty = build_penalty_matrix(
+                model._dm.group_matrices,
+                model._groups,
+                model._reml_lambdas,
+                model._dm.p,
+                reml_penalties=components,
+            )
+        else:
+            penalty = build_penalty_matrix(
+                model._dm.group_matrices,
+                model._groups,
+                model.lambda2,
+                model._dm.p,
+            )
+
+        score = design.T @ (weights * (y - mu))
+        penalty_score = penalty @ beta
+        intercept_score = float(np.sum(weights * (y - mu)))
+        kkt_scale = max(
+            1.0,
+            float(np.linalg.norm(score, ord=np.inf)),
+            float(np.linalg.norm(penalty_score, ord=np.inf)),
+        )
+        kkt_residual = float(
+            np.linalg.norm(
+                np.concatenate(([intercept_score], score - penalty_score)),
+                ord=np.inf,
+            )
+            / kkt_scale
+        )
+
+        augmented = np.column_stack([np.ones(len(frame)), design])
+        hessian = augmented.T @ ((weights * mu)[:, None] * augmented)
+        hessian[1:, 1:] += penalty
+        condition = float(np.linalg.cond(hessian))
+        dimension = hessian.shape[0]
+        gamma = dimension * np.finfo(np.float64).eps
+        certification_bound = 128.0 * gamma * max(1.0, condition)
+        return kkt_residual, certification_bound
+
+    def test_fixed_and_reml_fits_match_literal_row_replication(self):
+        frame, y, counts, expanded, expanded_y = self._fixture()
+        weights = counts.astype(np.float64)
+
+        for reml in (False, True):
+            compressed = self._model()
+            literal = self._model()
+            if reml:
+                compressed.fit_reml(
+                    frame,
+                    y,
+                    sample_weight=weights,
+                    max_reml_iter=60,
+                    reml_tol=1e-9,
+                )
+                literal.fit_reml(
+                    expanded,
+                    expanded_y,
+                    max_reml_iter=60,
+                    reml_tol=1e-9,
+                )
+                assert compressed._reml_result.converged
+                assert literal._reml_result.converged
+            else:
+                compressed.fit(frame, y, sample_weight=weights)
+                literal.fit(expanded, expanded_y)
+
+            compressed_kkt, compressed_bound = self._kkt_certificate(
+                compressed,
+                frame,
+                y,
+                weights,
+                reml=reml,
+            )
+            literal_kkt, literal_bound = self._kkt_certificate(
+                literal,
+                expanded,
+                expanded_y,
+                np.ones(len(expanded_y)),
+                reml=reml,
+            )
+            bound = max(compressed_bound, literal_bound)
+            assert compressed_kkt <= bound
+            assert literal_kkt <= bound
+
+            compressed_prediction = np.asarray(compressed.predict(frame), dtype=np.float64)
+            literal_prediction = np.asarray(literal.predict(frame), dtype=np.float64)
+            scale = max(
+                1.0,
+                float(np.linalg.norm(compressed_prediction, ord=np.inf)),
+                float(np.linalg.norm(literal_prediction, ord=np.inf)),
+            )
+            np.testing.assert_allclose(
+                compressed_prediction,
+                literal_prediction,
+                rtol=bound,
+                atol=bound * scale,
+            )
+            assert compressed.result.deviance == pytest.approx(
+                literal.result.deviance,
+                rel=bound,
+                abs=bound * max(1.0, abs(literal.result.deviance)),
+            )
+            assert compressed.result.effective_df == pytest.approx(
+                literal.result.effective_df,
+                rel=bound,
+                abs=bound * max(1.0, abs(literal.result.effective_df)),
+            )
+
+            if reml:
+                assert compressed._reml_lambdas.keys() == literal._reml_lambdas.keys()
+                for name in compressed._reml_lambdas:
+                    assert np.log(compressed._reml_lambdas[name]) == pytest.approx(
+                        np.log(literal._reml_lambdas[name]),
+                        rel=bound,
+                        abs=bound,
+                    )
+
+    def test_omitting_only_tensor_geometry_mass_breaks_replication(self, monkeypatch):
+        frame, y, counts, expanded, expanded_y = self._fixture()
+        literal = self._model()
+        literal.fit(expanded, expanded_y)
+
+        original_build = TensorInteraction.build
+
+        def _build_without_tensor_geometry(
+            interaction,
+            x1,
+            x2,
+            parent_specs,
+            sample_weight=None,
+            **kwargs,
+        ):
+            if sample_weight is not None:
+                sample_weight = np.ones(len(sample_weight), dtype=np.float64)
+            return original_build(
+                interaction,
+                x1,
+                x2,
+                parent_specs,
+                sample_weight=sample_weight,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(TensorInteraction, "build", _build_without_tensor_geometry)
+        mutated = self._model()
+        mutated.fit(frame, y, sample_weight=counts.astype(np.float64))
+
+        literal_prediction = np.asarray(literal.predict(frame), dtype=np.float64)
+        mutated_prediction = np.asarray(mutated.predict(frame), dtype=np.float64)
+        mutation_gap = float(np.linalg.norm(mutated_prediction - literal_prediction, ord=np.inf))
+        nonzero_bound = np.sqrt(np.finfo(np.float64).eps) * max(
+            1.0,
+            float(np.linalg.norm(literal_prediction, ord=np.inf)),
+        )
+        assert mutation_gap > nonzero_bound
+
+
 class TestDirectInteractionPrediction:
     @pytest.mark.parametrize(
         ("features", "interaction", "columns"),

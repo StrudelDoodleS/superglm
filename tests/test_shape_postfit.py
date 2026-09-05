@@ -1292,7 +1292,8 @@ def test_postfit_recertifies_after_editor_invalidates_an_installed_repair():
     model.apply_shape_postfit(X)
     assert "x" in model._shape_repairs
 
-    session = EditorSession.from_model(model, terms=["x"])
+    with pytest.warns(UserWarning, match="post-fit shape projection"):
+        session = EditorSession.from_model(model, terms=["x"])
     session.terms["x"].edited_log_effect[:] = np.linspace(1.0, -1.0, session.terms["x"].size)
     edited = session.to_model()
     groups = [group for group in edited._groups if group.feature_name == "x"]

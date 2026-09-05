@@ -61,7 +61,7 @@ class TabmatCenteringState:
 
 
 def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
-    """Yield bounded dense rows only for rare factor-rank certification."""
+    """Yield bounded dense row blocks from a grouped design."""
     bytes_per_row = 3 * np.dtype(np.float64).itemsize * max(dm.p, 1)
     chunk_rows = max(1, min(_FACTOR_CHUNK_ROWS, _FACTOR_CHUNK_BYTES // bytes_per_row))
     for start in range(0, dm.n, chunk_rows):

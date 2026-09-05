@@ -46,7 +46,7 @@ from superglm.editor.terms import term_type_from_spec, term_weights_from_data
 from superglm.export.summary import build_summary_export_payload
 from superglm.features.piecewise import Piecewise
 from superglm.plotting.comparison import _build_term_comparison_data, _resolve_comparable_terms
-from tests._piecewise_cases import CASE_NAMES, PiecewiseCase, make_case
+from tests._piecewise_cases import CASE_NAMES, WARNING_CASES, PiecewiseCase, make_case
 
 _EPS = float(np.finfo(np.float64).eps)
 
@@ -80,7 +80,11 @@ def _fit(case_name: str, extrapolation: str | None = None) -> tuple[SuperGLM, Pi
             "density": Numeric(),
         },
     )
-    model.fit(case.X, case.y, sample_weight=case.sample_weight)
+    if case_name in WARNING_CASES:
+        with pytest.warns(UserWarning, match=WARNING_CASES[case_name]):
+            model.fit(case.X, case.y, sample_weight=case.sample_weight)
+    else:
+        model.fit(case.X, case.y, sample_weight=case.sample_weight)
     return model, case
 
 
@@ -426,7 +430,9 @@ class TestLocality:
 
         # The round trip is exact, not approximate: the assignment is direct,
         # so what the editor shows is what the refitted term reports.
-        assert_array_equal(edited.term_inference("x").log_relativity, target)
+        with pytest.warns(UserWarning, match="Editor coefficient edits"):
+            inference = edited.term_inference("x")
+        assert_array_equal(inference.log_relativity, target)
 
 
 # ══════════════════════════════════════════════════════════════════

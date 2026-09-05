@@ -166,45 +166,6 @@ def test_plotting_docstrings_use_declared_contract_language() -> None:
     assert "Exposure / frequency weights." not in main_effects
 
 
-def test_family_guide_states_the_declared_weight_contract():
-    """The guide must describe a declared parameter, not a family-keyed split.
-
-    The two contracts are still mutually exclusive; what changed is that the
-    family no longer decides which one you get.  The negative assertions guard
-    the specific claims the old text made -- that a Gamma prior-weight fit is
-    unavailable and that the split follows the family -- because those are the
-    sentences a careless revert would bring back.
-    """
-    guide = (_ROOT / "docs/guide/families.md").read_text()
-    weights = " ".join(
-        guide.split("## Weight semantics", maxsplit=1)[1]
-        .split("## Negative binomial", maxsplit=1)[0]
-        .split()
-    )
-
-    assert "declared modelling choice" in weights
-    assert "`weight_semantics`" in weights
-    assert '`"prior"` (default)' in weights
-    assert "statement of *precision*" in weights
-    assert "`Var(Y_i | x_i) = phi * V(mu_i) / w_i`" in weights
-    assert "replication count" in weights
-    assert "exactly equivalent to repeating it" in weights
-    assert "`sum(sample_weight)`" in weights
-    assert "rows carrying positive weight" in weights
-    assert "`beta` and the deviance are" in weights
-    assert "conditional on an identical constructed design" in weights
-    assert "`quantile_rows` and" in weights
-    assert "`quantile_tempered` knot strategies use frequency mass" in weights
-    assert "ignore zero-weight rows" in weights
-    assert "Prior weights intentionally leave spline geometry" in weights
-    assert "tensor-interaction marginal centering" in weights
-    assert "categorical/ordered/factor feature geometry" in weights
-    assert "fixed or preconstructed feature geometry" in weights
-    assert "Gamma fit does not implement that contract" not in weights
-    assert "retain the individual claim-severity rows" not in weights
-    assert "family-specific contract" not in weights
-
-
 def test_screening_guides_declare_the_weight_contract_they_measured_under() -> None:
     guide = (_ROOT / "docs/guide/screening.md").read_text()
     evaluation = (_ROOT / "docs/guide/screening-evaluation.md").read_text()

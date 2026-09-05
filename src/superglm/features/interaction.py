@@ -83,7 +83,12 @@ def _categorical_predict_labels(
     return x
 
 
-def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = None):
+def interaction_spline_spec(
+    spec,
+    x: NDArray,
+    n_knots_override: int | None = None,
+    geometry_weight: NDArray | None = None,
+):
     """The spline spec an INTERACTION marginal is built from.
 
     Cubic regression splines carry two implementations.  A main effect uses
@@ -155,11 +160,18 @@ def interaction_spline_spec(spec, x: NDArray, n_knots_override: int | None = Non
         m=spec._m_orders[0],
         lambda_policy=None,
     )
-    cardinal._place_knots(np.asarray(x, dtype=np.float64).ravel())
+    cardinal._place_knots(
+        np.asarray(x, dtype=np.float64).ravel(),
+        geometry_weight,
+    )
     return cardinal
 
 
-def _varying_coefficient_spline_spec(spec, x: NDArray):
+def _varying_coefficient_spline_spec(
+    spec,
+    x: NDArray,
+    geometry_weight: NDArray | None = None,
+):
     """``interaction_spline_spec`` for a per-level masked block, centered.
 
     A resolved spec is freshly constructed, so unlike a fitted parent it
@@ -176,9 +188,13 @@ def _varying_coefficient_spline_spec(spec, x: NDArray):
     compressed support it is handed, so the tensor path resolves the spec
     without paying for this one.
     """
-    resolved = interaction_spline_spec(spec, x)
+    resolved = interaction_spline_spec(
+        spec,
+        x,
+        geometry_weight=geometry_weight,
+    )
     if resolved is not spec:
-        resolved.build_knots_and_penalty(x)
+        resolved.build_knots_and_penalty(x, geometry_weight)
     return resolved
 
 
@@ -325,7 +341,11 @@ class SplineCategorical:
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
         # Interaction marginals use the cardinal cr basis; store the resolved
         # spec so transform()/score() rebuild the SAME basis at predict time.
-        spline_spec = _varying_coefficient_spline_spec(spline_spec, x_spline)
+        spline_spec = _varying_coefficient_spline_spec(
+            spline_spec,
+            x_spline,
+            sample_weight,
+        )
 
         self._spline_spec = spline_spec
         self._knots = spline_spec._knots
@@ -417,7 +437,11 @@ class SplineCategorical:
 
         x_spline = np.asarray(x_spline, dtype=np.float64).ravel()
         # Same resolution as build(); see _varying_coefficient_spline_spec.
-        spline_spec = _varying_coefficient_spline_spec(spline_spec, x_spline)
+        spline_spec = _varying_coefficient_spline_spec(
+            spline_spec,
+            x_spline,
+            sample_weight,
+        )
 
         self._spline_spec = spline_spec
         self._knots = spline_spec._knots
@@ -1422,6 +1446,7 @@ class TensorInteraction:
         *,
         support: NDArray | None = None,
         counts: NDArray | None = None,
+        geometry_weight: NDArray | None = None,
     ) -> TensorMarginalInfo:
         """Get marginal ingredients from a parent spec, optionally overriding n_knots.
 
@@ -1445,12 +1470,17 @@ class TensorInteraction:
 
         def marginal_ingredients(candidate) -> TensorMarginalInfo:
             method = candidate.tensor_marginal_ingredients
-            if support is None:
+            if support is None and geometry_weight is None:
                 return method(x)
+
+            effective_support = x if support is None else support
+            effective_counts = geometry_weight if counts is None else counts
+            if effective_counts is None:  # pragma: no cover - guarded by the branch above
+                raise RuntimeError("tensor marginal geometry mass is unavailable")
 
             def compact_legacy(legacy: TensorMarginalInfo) -> TensorMarginalInfo:
                 support_clipped = np.clip(
-                    np.asarray(support, dtype=np.float64), legacy.lo, legacy.hi
+                    np.asarray(effective_support, dtype=np.float64), legacy.lo, legacy.hi
                 )
                 compact_basis = np.asarray(legacy.raw_basis_eval(support_clipped), dtype=np.float64)
                 compact_basis = compact_basis @ legacy.projection
@@ -1464,14 +1494,29 @@ class TensorInteraction:
                 parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
             )
             if accepts_keywords or {"support", "counts"} <= parameters.keys():
-                compact = method(x, support=support, counts=counts)
-                if np.asarray(compact.basis).shape[0] == len(support):
+                compact = method(
+                    x,
+                    support=effective_support,
+                    counts=effective_counts,
+                )
+                if np.asarray(compact.basis).shape[0] == len(effective_support):
                     return compact
                 return compact_legacy(compact)
 
             # Compatibility for custom spline subclasses overriding the old
             # one-argument method. Preserve their projection/penalty geometry,
-            # but retain only its evaluation on the discrete support.
+            # but retain only its evaluation on the discrete support.  Such a
+            # method can certify physical-row geometry only: without the
+            # support/count contract it has no way to center in non-unit
+            # replication mass.
+            if geometry_weight is not None and not np.all(
+                np.asarray(geometry_weight, dtype=np.float64) == 1.0
+            ):
+                raise NotImplementedError(
+                    "legacy tensor marginal method cannot certify non-unit geometry weights; "
+                    "implement tensor_marginal_ingredients(..., support=..., counts=...) "
+                    "to support frequency geometry"
+                )
             return compact_legacy(method(x))
 
         # Route cubic regression splines through the cardinal CR
@@ -1479,7 +1524,12 @@ class TensorInteraction:
         # the older projected-B-spline CR path.  A cr parameterisation the
         # cardinal basis cannot express comes back unchanged and takes the
         # ordinary marginal path below, penalty order and all.
-        cardinal = interaction_spline_spec(spec, x, n_knots_override)
+        cardinal = interaction_spline_spec(
+            spec,
+            x,
+            n_knots_override,
+            geometry_weight,
+        )
         if cardinal is not spec:
             info = marginal_ingredients(cardinal)
             info.normalize_penalty = True
@@ -1501,7 +1551,7 @@ class TensorInteraction:
             if "degree" in inspect.signature(type(spec).__init__).parameters:
                 kwargs["degree"] = spec.degree
             clone = type(spec)(**kwargs)
-            clone._place_knots(x)
+            clone._place_knots(x, geometry_weight)
             return marginal_ingredients(clone)
         return marginal_ingredients(spec)
 
@@ -1517,6 +1567,7 @@ class TensorInteraction:
         x2: NDArray,
         parent_specs: dict,
         *,
+        geometry_weight: NDArray | None = None,
         discrete_supports: tuple[
             tuple[NDArray, NDArray],
             tuple[NDArray, NDArray],
@@ -1549,6 +1600,7 @@ class TensorInteraction:
             nk1,
             support=support1,
             counts=counts1,
+            geometry_weight=geometry_weight,
         )
         self._marginal2 = self._marginal_from_spec(
             spec2,
@@ -1556,6 +1608,7 @@ class TensorInteraction:
             nk2,
             support=support2,
             counts=counts2,
+            geometry_weight=geometry_weight,
         )
 
         self._p1 = self._marginal1.K_eff
@@ -1567,8 +1620,14 @@ class TensorInteraction:
         x1: NDArray,
         x2: NDArray,
         parent_specs: dict,
+        geometry_weight: NDArray | None,
     ) -> tuple[sp.csr_matrix, sp.csr_matrix, NDArray, NDArray]:
-        m1, m2 = self._prepare_marginal_infos(x1, x2, parent_specs)
+        m1, m2 = self._prepare_marginal_infos(
+            x1,
+            x2,
+            parent_specs,
+            geometry_weight=geometry_weight,
+        )
 
         B1 = sp.csr_matrix(m1.basis)
         B2 = sp.csr_matrix(m2.basis)
@@ -1645,7 +1704,12 @@ class TensorInteraction:
         parent_specs: dict,
         sample_weight: NDArray | None = None,
     ) -> GroupInfo | list[GroupInfo]:
-        B1, B2, S1, S2 = self._prepare_centered_marginals(x1, x2, parent_specs)
+        B1, B2, S1, S2 = self._prepare_centered_marginals(
+            x1,
+            x2,
+            parent_specs,
+            sample_weight,
+        )
 
         # Row-wise Kronecker product
         T = _row_kron(B1, B2)
@@ -1672,12 +1736,21 @@ class TensorInteraction:
         """Build a discretized tensor basis on observed joint support pairs."""
         support1, idx1 = _discretize_column(x1, int(n_bins[0]))
         support2, idx2 = _discretize_column(x2, int(n_bins[1]))
-        counts1 = np.bincount(idx1, minlength=len(support1))
-        counts2 = np.bincount(idx2, minlength=len(support2))
+        counts1 = np.bincount(
+            idx1,
+            weights=sample_weight,
+            minlength=len(support1),
+        )
+        counts2 = np.bincount(
+            idx2,
+            weights=sample_weight,
+            minlength=len(support2),
+        )
         m1, m2 = self._prepare_marginal_infos(
             x1,
             x2,
             parent_specs,
+            geometry_weight=sample_weight,
             discrete_supports=((support1, counts1), (support2, counts2)),
         )
         S1 = _normalize_tensor_penalty(m1.penalty) if m1.normalize_penalty else m1.penalty

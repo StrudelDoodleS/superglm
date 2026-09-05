@@ -24,7 +24,7 @@ import scipy.sparse as sp
 
 from superglm import Categorical, Piecewise, SuperGLM
 from superglm.features.piecewise import _SMALL_SEGMENT_WEIGHT_FRACTION, _STRATEGIES
-from tests._piecewise_cases import CASE_NAMES, make_case
+from tests._piecewise_cases import CASE_NAMES, WARNING_CASES, make_case
 
 _EPS = float(np.finfo(np.float64).eps)
 _NONZEROS_PER_ROW = 2
@@ -41,7 +41,11 @@ def _fitted(name: str, extrapolation: str | None = None):
     model = SuperGLM(
         features={"x": case.spec, "region": Categorical(base="first")},
     )
-    model.fit(case.X, case.y, sample_weight=case.sample_weight)
+    if name in WARNING_CASES:
+        with pytest.warns(UserWarning, match=WARNING_CASES[name]):
+            model.fit(case.X, case.y, sample_weight=case.sample_weight)
+    else:
+        model.fit(case.X, case.y, sample_weight=case.sample_weight)
     spec = model._specs["x"]
     group = next(g for g in model._groups if g.feature_name == "x")
     beta = np.asarray(model._result.beta[group.start : group.end], dtype=np.float64)
@@ -616,7 +620,10 @@ class TestZeroWeightRows:
     @pytest.mark.parametrize("semantics", ["frequency", "prior"])
     def test_the_fit_is_identical_with_and_without_the_zero_weight_rows(self, semantics):
         case = make_case("zero_weight_rows")
-        keep = case.sample_weight > 0.0
+        sample_weight = (
+            np.ceil(case.sample_weight) if semantics == "frequency" else case.sample_weight
+        )
+        keep = sample_weight > 0.0
         assert not np.all(keep), "fixture must actually carry zero-weight rows"
 
         def fitted(X, y, w):
@@ -630,11 +637,11 @@ class TestZeroWeightRows:
             model.fit(X, y, sample_weight=w)
             return model
 
-        full = fitted(case.X, case.y, case.sample_weight)
+        full = fitted(case.X, case.y, sample_weight)
         dropped = fitted(
             case.X.loc[keep].reset_index(drop=True),
             case.y[keep],
-            case.sample_weight[keep],
+            sample_weight[keep],
         )
 
         np.testing.assert_array_equal(full._specs["x"]._knots, dropped._specs["x"]._knots)

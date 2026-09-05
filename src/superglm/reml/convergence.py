@@ -231,8 +231,8 @@ def project_reml_gradient(
     rho: NDArray,
     estimated_mask: NDArray,
     *,
-    log_lower: float,
-    log_upper: float,
+    log_lower: float | NDArray,
+    log_upper: float | NDArray,
     bound_window: float = 0.01,
 ) -> NDArray:
     """Project fixed and outward-pointing bound scores to zero."""

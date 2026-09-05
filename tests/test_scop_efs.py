@@ -5,6 +5,7 @@ Part 2: Tests for build_scop_penalty_components.
 """
 
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,11 +14,15 @@ import pytest
 
 import superglm.reml.scop_efs as scop_efs_module
 from superglm import Constraint, Numeric, SuperGLM
+from superglm.factor_smooth_geometry import sum_to_zero_contrast
 from superglm.families import Gaussian, Poisson
 from superglm.features.spline import PSpline
 from superglm.inference.covariance import _active_penalty_matrix
 from superglm.model.base import model_build_design_matrix
-from superglm.reml.penalty_algebra import build_penalty_matrix
+from superglm.reml.penalty_algebra import (
+    build_penalty_matrix,
+    penalty_component_dense_matrix,
+)
 from superglm.reml.scop_efs import (
     assemble_joint_hessian,
     build_scop_penalty_components,
@@ -1163,6 +1168,267 @@ class TestSCOPPenaltyQuad:
 
         # With lambda=0, both subtracting and adding contribute zero
         np.testing.assert_allclose(pq, 0.0, atol=1e-15)
+
+
+class TestSCOPPenaltyQuadCompactComponents:
+    """A matched component must be contracted through its own ``penalty_kind``.
+
+    ``compute_scop_aware_penalty_quad`` reads ``omega_ssp``/``omega_raw`` off
+    each matched ``PenaltyComponent``.  That array is the *compact* penalty:
+    only ``penalty_kind="dense"`` stores a full group-width block.  ``identity``
+    stores nothing, ``repeated`` one diagonal block, and ``sum_to_zero`` a
+    raw-level block that means nothing without the ``[I; -1]`` contrast.
+
+    No public API builds such a component for a SCOP group today --
+    ``monotone_engine="scop"`` is stamped only by the spline builder, and a
+    spline group always yields a dense penalty -- so these are unit-level pins
+    on the contract, constructed directly, not end-to-end fits.  Their job is to
+    stop the trap being reopened, in particular the two-level ``sum_to_zero``
+    case, which is shape-compatible at the group width and therefore silently
+    off by a factor of two rather than raising.
+    """
+
+    @staticmethod
+    def _quad(component, beta_eff, lam, *, group_width):
+        """Run one matched component through the function under test.
+
+        The SCOP group spans the whole coefficient vector, so the mapped-space
+        term the function subtracts exactly cancels the one it starts from and
+        the return value is the matched component's contribution alone.
+        """
+        rng = np.random.default_rng(2024)
+        gamma_eff = np.exp(rng.standard_normal(group_width))
+        dense = np.asarray(
+            penalty_component_dense_matrix(component),
+            dtype=np.float64,
+        )
+        states = {
+            0: {
+                "group_name": "mono",
+                "group_sl": slice(0, group_width),
+                "beta_eff": beta_eff,
+                "S_scop": dense,
+            }
+        }
+        return compute_scop_aware_penalty_quad(
+            gamma_eff,
+            lam * dense,
+            states,
+            {component.name: lam},
+            reml_penalties=[component],
+        )
+
+    def test_two_level_sum_to_zero_is_not_silently_halved(self):
+        """The local block is group-wide at two levels: wrong strength, no error."""
+        block_width = 3
+        n_levels = 2
+        lam = 1.75
+        rng = np.random.default_rng(5150)
+        local = _first_diff_penalty(block_width)
+        beta_eff = rng.standard_normal((n_levels - 1) * block_width)
+
+        component = PenaltyComponent(
+            name="mono:wiggle",
+            group_name="mono",
+            group_index=0,
+            group_sl=slice(0, (n_levels - 1) * block_width),
+            omega_raw=local,
+            omega_ssp=local,
+            rank=float((n_levels - 1) * np.linalg.matrix_rank(local)),
+            penalty_kind="sum_to_zero",
+            repeat_count=n_levels,
+            block_width=block_width,
+        )
+
+        actual = self._quad(
+            component,
+            beta_eff,
+            lam,
+            group_width=(n_levels - 1) * block_width,
+        )
+
+        # Truth from the parameterisation itself: the free blocks are lifted to
+        # raw level blocks by the contrast, and each raw block is penalized.
+        raw = sum_to_zero_contrast(n_levels) @ beta_eff.reshape(n_levels - 1, block_width)
+        expected = lam * float(sum(row @ local @ row for row in raw))
+        assert actual == pytest.approx(expected, rel=1e-13, abs=1e-13)
+
+        # The discarded reading contracts the local block against the free
+        # coefficients directly.  It is shape-compatible here, which is exactly
+        # why it never announced itself.
+        naive = lam * float(beta_eff @ local @ beta_eff)
+        assert actual == pytest.approx(2.0 * naive, rel=1e-13)
+        assert not np.isclose(actual, naive, rtol=1e-6)
+
+    def test_three_level_sum_to_zero_uses_the_contrast(self):
+        """Above two levels the naive reading is not even shape-compatible."""
+        block_width = 2
+        n_levels = 3
+        lam = 0.6
+        rng = np.random.default_rng(4242)
+        local = _first_diff_penalty(block_width)
+        beta_eff = rng.standard_normal((n_levels - 1) * block_width)
+
+        component = PenaltyComponent(
+            name="mono:wiggle",
+            group_name="mono",
+            group_index=0,
+            group_sl=slice(0, (n_levels - 1) * block_width),
+            omega_raw=local,
+            omega_ssp=local,
+            rank=float((n_levels - 1) * np.linalg.matrix_rank(local)),
+            penalty_kind="sum_to_zero",
+            repeat_count=n_levels,
+            block_width=block_width,
+        )
+
+        actual = self._quad(
+            component,
+            beta_eff,
+            lam,
+            group_width=(n_levels - 1) * block_width,
+        )
+
+        raw = sum_to_zero_contrast(n_levels) @ beta_eff.reshape(n_levels - 1, block_width)
+        expected = lam * float(sum(row @ local @ row for row in raw))
+        assert actual == pytest.approx(expected, rel=1e-13, abs=1e-13)
+
+    def test_repeated_component_penalizes_every_level_block(self):
+        """A repeated penalty is ``I_repeat kron local``, not ``local``."""
+        block_width = 3
+        repeat_count = 4
+        lam = 2.25
+        rng = np.random.default_rng(31337)
+        local = _first_diff_penalty(block_width)
+        beta_eff = rng.standard_normal(repeat_count * block_width)
+
+        component = PenaltyComponent(
+            name="mono:wiggle",
+            group_name="mono",
+            group_index=0,
+            group_sl=slice(0, repeat_count * block_width),
+            omega_raw=local,
+            omega_ssp=local,
+            rank=float(repeat_count * np.linalg.matrix_rank(local)),
+            penalty_kind="repeated",
+            repeat_count=repeat_count,
+            block_width=block_width,
+        )
+
+        actual = self._quad(
+            component,
+            beta_eff,
+            lam,
+            group_width=repeat_count * block_width,
+        )
+
+        blocks = beta_eff.reshape(repeat_count, block_width)
+        expected = lam * float(sum(row @ local @ row for row in blocks))
+        assert actual == pytest.approx(expected, rel=1e-13, abs=1e-13)
+
+    def test_identity_component_carries_no_matrix(self):
+        """An implicit identity penalty stores no array at all."""
+        width = 5
+        lam = 3.5
+        rng = np.random.default_rng(8128)
+        beta_eff = rng.standard_normal(width)
+
+        component = PenaltyComponent(
+            name="mono:re",
+            group_name="mono",
+            group_index=0,
+            group_sl=slice(0, width),
+            omega_raw=None,
+            omega_ssp=None,
+            rank=float(width),
+            penalty_kind="identity",
+        )
+
+        actual = self._quad(component, beta_eff, lam, group_width=width)
+
+        expected = lam * float(beta_eff @ beta_eff)
+        assert actual == pytest.approx(expected, rel=1e-13, abs=1e-13)
+
+    def test_dense_component_reading_is_unchanged(self):
+        """The kind that already worked must keep its exact value."""
+        width = 4
+        lam = 1.25
+        rng = np.random.default_rng(1848)
+        omega = _first_diff_penalty(width)
+        beta_eff = rng.standard_normal(width)
+
+        component = PenaltyComponent(
+            name="mono:wiggle",
+            group_name="mono",
+            group_index=0,
+            group_sl=slice(0, width),
+            omega_raw=omega,
+            omega_ssp=omega,
+            rank=float(np.linalg.matrix_rank(omega)),
+        )
+
+        actual = self._quad(component, beta_eff, lam, group_width=width)
+
+        expected = lam * float(beta_eff @ omega @ beta_eff)
+        assert actual == pytest.approx(expected, rel=1e-13, abs=1e-13)
+
+    def test_dense_component_without_a_solver_block_is_refused_by_name(self):
+        """``omega_ssp=None`` is a missing conversion, not a licence to guess.
+
+        ``omega_raw`` is the penalty on the group's RAW coordinates; the
+        solver-space block is ``R_inv.T @ omega_raw @ R_inv``.  Reading
+        ``omega_raw`` in place of ``omega_ssp`` is that conversion with
+        ``R_inv`` assumed to be the identity -- shape-compatible at the group
+        width whatever the reparametrisation, so a wrong penalty strength
+        would be returned rather than raised.  ``compute_scop_aware_penalty_quad``
+        matches components without their group matrices, so it cannot perform
+        the conversion, and refusing names the component that needs one.
+        """
+        width = 4
+        lam = 0.8
+        rng = np.random.default_rng(1914)
+        omega = _first_diff_penalty(width)
+        beta_eff = rng.standard_normal(width)
+
+        component = PenaltyComponent(
+            name="mono:wiggle",
+            group_name="mono",
+            group_index=0,
+            group_sl=slice(0, width),
+            omega_raw=omega,
+            omega_ssp=None,
+            rank=float(np.linalg.matrix_rank(omega)),
+        )
+
+        rng_state = np.random.default_rng(2024)
+        gamma_eff = np.exp(rng_state.standard_normal(width))
+        states = {
+            0: {
+                "group_name": "mono",
+                "group_sl": slice(0, width),
+                "beta_eff": beta_eff,
+                "S_scop": omega,
+            }
+        }
+        with pytest.raises(ValueError, match="mono:wiggle"):
+            compute_scop_aware_penalty_quad(
+                gamma_eff,
+                lam * omega,
+                states,
+                {component.name: lam},
+                reml_penalties=[component],
+            )
+
+        # The same component with its solver-space block filled is accepted,
+        # so the refusal is about the missing conversion and nothing else.
+        resolved = replace(component, omega_ssp=omega)
+        assert compute_scop_aware_penalty_quad(
+            gamma_eff,
+            lam * omega,
+            states,
+            {resolved.name: lam},
+            reml_penalties=[resolved],
+        ) == pytest.approx(lam * float(beta_eff @ omega @ beta_eff), rel=1e-13, abs=1e-13)
 
 
 # ---------------------------------------------------------------------------

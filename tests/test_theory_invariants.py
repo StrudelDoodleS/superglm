@@ -593,10 +593,8 @@ class TestBackendLinearAlgebraInvariants:
 
         np.testing.assert_allclose(compact, dense, rtol=1e-10, atol=1e-10)
 
-    def test_different_categorical_spline_cat_levels_return_zero_without_intersection(
-        self, monkeypatch
-    ):
-        """Different levels of the same categorical parent are disjoint by construction."""
+    def test_disjoint_categorical_spline_cat_levels_return_zero(self):
+        """Disjoint row supports give zero, independently of their labels."""
         import superglm._group_matrix._group_matrix_algebra as algebra
         from superglm.group_matrix import DiscretizedSplineCategoricalGroupMatrix
 
@@ -618,14 +616,46 @@ class TestBackendLinearAlgebraInvariants:
         left.spline_cat_level = "B"
         right.spline_cat_level = "C"
 
-        def fail_intersect(*args, **kwargs):
-            raise AssertionError("different-level spline-category cross-Gram should be zero")
-
-        monkeypatch.setattr(algebra.np, "intersect1d", fail_intersect)
-
         cross = algebra._cross_gram(left, right, rng.normal(size=n))
 
         np.testing.assert_allclose(cross, np.zeros((left.shape[1], right.shape[1])), atol=0.0)
+
+    @pytest.mark.parametrize("left_compressed", [False, True])
+    @pytest.mark.parametrize("right_compressed", [False, True])
+    @pytest.mark.parametrize(
+        ("right_rows", "expected"),
+        [([1, 2], -2.0), ([0, 1], -1.0), ([2], 0.0)],
+        ids=["overlap", "identical", "disjoint"],
+    )
+    def test_spline_category_labels_do_not_determine_row_overlap(
+        self, left_compressed, right_compressed, right_rows, expected
+    ):
+        """Independent groupings can share rows despite different level names."""
+        import scipy.sparse as sp
+
+        from superglm.group_matrix import (
+            SplineCategoricalGroupMatrix,
+            SupportCompressedSplineCategoricalGroupMatrix,
+        )
+
+        def make_group(rows, compressed):
+            if compressed:
+                return SupportCompressedSplineCategoricalGroupMatrix(
+                    np.ones((1, 1)), np.eye(1), np.zeros(3, dtype=np.intp), np.array(rows)
+                )
+            return SplineCategoricalGroupMatrix(
+                sp.csr_matrix(np.ones((3, 1))), np.eye(1), np.array(rows)
+            )
+
+        left = make_group([0, 1], left_compressed)
+        right = make_group(right_rows, right_compressed)
+        left.spline_cat_feature = right.spline_cat_feature = "group"
+        left.spline_cat_level = "AB"
+        right.spline_cat_level = "BC"
+        weights = np.array([1.0, -2.0, 4.0])
+
+        np.testing.assert_array_equal(_cross_gram(left, right, weights), [[expected]])
+        np.testing.assert_array_equal(_cross_gram(right, left, weights), [[expected]])
 
     def test_spline_categorical_cross_level_gram_is_zero(self):
         """Disjoint spline-by-category level groups have an exact zero cross-block."""

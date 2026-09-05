@@ -17,8 +17,9 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import Gamma, Gaussian, Tweedie
+from superglm.distributions import Binomial, Gamma, Gaussian, Tweedie
 from superglm.group_matrix import DesignMatrix
+from superglm.links import LogitLink
 from superglm.reml.convergence import (
     classify_dead_feasible_exit,
     direction_penalty_ranks,
@@ -64,7 +65,7 @@ from superglm.reml.scale import (
 )
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
 from superglm.solvers.centered_system import TabmatCenteringState
-from superglm.solvers.hessian_factor import as_hessian_factor
+from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.structured import record_auto_backend_decision, resolve_structured_backend
@@ -74,6 +75,11 @@ from superglm.types import GroupSlice, PenaltyComponent
 # now, shared with the terminal publication gate in model/reml_finalize.py so
 # the two can never drift apart.
 _OBSERVED_PIRLS_TOL_CEILING = OBSERVED_PIRLS_TOL_CEILING
+
+# One dense leverage pass replaces one derivative Gram per penalty. Mixed
+# spline/categorical timings cross over at four penalties on the reference host;
+# below that, the specialized Gram route remains cheaper.
+_LEVERAGE_GRADIENT_MIN_PENALTIES = 4
 
 
 def optimize_direct_reml(
@@ -758,7 +764,16 @@ def optimize_direct_reml(
 
         # W(rho) correction
         _t0 = _time.perf_counter()
+        leverage_gradient = False
         if not discrete:
+            leverage_gradient = bool(
+                type(distribution) is Binomial
+                and type(link) is LogitLink
+                and w_correction_order == 1
+                and len(penalties) >= _LEVERAGE_GRADIENT_MIN_PENALTIES
+                and geometry is None
+                and isinstance(as_hessian_factor(reml_inverse), DenseHessianFactor)
+            )
             # The correction is built from this iterate's weight derivatives, so
             # a LinAlgError out of it says the same thing the geometry seams do:
             # no usable curvature at this point. The only LinAlgError reachable
@@ -797,6 +812,7 @@ def optimize_direct_reml(
                     w_correction_order=w_correction_order,
                     reml_penalties=penalties,
                     geometry=geometry,
+                    gradient_only=leverage_gradient,
                 )
             except np.linalg.LinAlgError as error:
                 raise ObservedModeNotConvergedError(
@@ -809,6 +825,11 @@ def optimize_direct_reml(
                 ) from error
         else:
             w_corr = None
+        if profile is not None:
+            correction_mode = "none"
+            if w_corr is not None:
+                correction_mode = "leverage_gradient" if w_corr[1] is None else "derivative_grams"
+            profile["reml_w_correction_mode"] = correction_mode
         _t_w_correction += _time.perf_counter() - _t0
         if w_corr is not None:
             grad_w_correction = w_corr[0]

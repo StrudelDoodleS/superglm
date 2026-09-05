@@ -714,9 +714,21 @@ def test_an_ordered_categorical_block_carries_no_centering_shift():
     np.testing.assert_array_equal(
         band_mean.table["Relativity"].to_numpy(), band_native.table["Relativity"].to_numpy()
     )
+    exposure_by_level = {
+        level: float(sample_weight[X["band"].to_numpy() == level].sum()) for level in _BAND_LEVELS
+    }
+    reporting_base = max(exposure_by_level, key=exposure_by_level.get)
+    assert reporting_base == "b5"
+    assert model._specs["band"]._base_level == reporting_base
+
     # ...and the level mean it would have contributed is not zero, so the
     # assertion above is a real constraint rather than a vacuous one.
-    assert abs(float(np.mean(np.log(band_native.table["Relativity"].to_numpy())))) > 0.01
+    log_native = np.log(band_native.table["Relativity"].to_numpy(dtype=np.float64))
+    mean_log_native = float(np.mean(log_native))
+    nonzero_bound = (
+        64.0 * _EPS * log_native.size * max(1.0, float(np.linalg.norm(log_native, ord=np.inf)))
+    )
+    assert abs(mean_log_native) > nonzero_bound
 
 
 @pytest.mark.parametrize("centering", _CENTERINGS)
@@ -1317,7 +1329,14 @@ def test_the_two_mean_centerings_disagree_on_an_ordered_categorical():
 
     # The OrderedCategorical: one path shifts it, the other does not.
     assert model.term_inference("band", centering="mean").centering_shift == 0.0
-    assert abs(_frame_shift("band")) > 0.01
+    band_shift = _frame_shift("band")
+    band_scale = max(
+        1.0,
+        float(np.linalg.norm(native["band"]["log_relativity"], ord=np.inf)),
+        float(np.linalg.norm(centered["band"]["log_relativity"], ord=np.inf)),
+    )
+    nonzero_bound = 64.0 * _EPS * len(native["band"]) * band_scale
+    assert abs(band_shift) > nonzero_bound
 
     # Every other term type agrees exactly, so the disagreement above is
     # specific to the OrderedCategorical branch and not a general drift

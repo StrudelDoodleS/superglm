@@ -128,7 +128,7 @@ jobs:
         env:
           SUPERGLM_REQUIRE_DATA: "1"
         run: >-
-          uv run pytest -q
+          uv run --with mpmath pytest -q
           tests/test_realdata_parity.py
           tests/test_screening_guide_numbers.py
           tests/test_mixed_interaction_screening.py

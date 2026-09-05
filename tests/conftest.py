@@ -5,6 +5,11 @@ import pytest
 
 def pytest_addoption(parser):
     parser.addoption("--run-browser", action="store_true", help="run Playwright editor tests")
+    parser.addoption(
+        "--regenerate-golden",
+        action="store_true",
+        help="rewrite the distributional reorganisation golden record",
+    )
 
 
 def pytest_collection_modifyitems(config, items):

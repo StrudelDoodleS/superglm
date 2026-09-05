@@ -6,38 +6,45 @@
     "value here from data/freMTPL2freq.parquet and fails on any drift.",
     "Recorded under the non-Tweedie case/frequency-weight dispersion contract",
     "(phi denominator sum(sample_weight) - edf) with weighted quantile_tempered",
-    "knot placement."
+    "knot placement and frequency-mass tensor/interacting-spline geometry."
   ],
   "n_rows": 80000,
-  "sample": {"source": "freMTPL2freq.parquet", "random_state": 0, "exposure_clip_lower": 0.01},
+  "sample": {
+    "source": "freMTPL2freq.parquet",
+    "source_sha256": "47d65ed2dc49828c34f01baba6a8c8d34839d537254eb057ab196ac06456a845",
+    "input_sha256": "2166db75c4be92572f994256199fa887e880a90abd5040c91126b39d1bcb23f1",
+    "input_hash_encoding": "Sampled input columns, clipped exposure, UTF-8 CSV, no index, %.17g floats, LF newlines; independent of Parquet encoding.",
+    "random_state": 0,
+    "exposure_clip_lower": 0.01
+  },
   "sum_sample_weight": 42405.3,
-  "mains_edf": 52.86778948250816,
+  "mains_edf": 52.8677894825078,
   "mains_deviance": 25016.43132435702,
-  "phi": 4.821131435487084,
+  "phi": 4.82113563912902,
   "_retired_phi_comment": [
     "The same Pearson sum over the RETIRED count_nonzero(w) - edf denominator,",
     "i.e. the phi this guide published before 67b90f8 changed the contract.",
     "Recorded so the regeneration can be reconciled against the old number",
     "instead of merely replacing it."
   ],
-  "retired_phi_n_minus_edf": 2.554020871312444,
+  "retired_phi_n_minus_edf": 2.55402307360138,
   "rows": [
-    {"feature_a": "VehAge", "feature_b": "BonusMalus", "kind": "ti", "statistic": 5.691031, "z": 1.845515, "edf0": 2.000000, "lambda0": 1.023164e+02, "n_cells": 5244, "approx": false},
-    {"feature_a": "BonusMalus", "feature_b": "VehBrand", "kind": "spline_cat", "statistic": 11.960590, "z": 0.438392, "edf0": 10.000039, "lambda0": 7.818052e+09, "n_cells": 1012, "approx": false},
-    {"feature_a": "DrivAge", "feature_b": "BonusMalus", "kind": "ti", "statistic": 1.810776, "z": -0.094612, "edf0": 2.000000, "lambda0": 2.611293e+02, "n_cells": 7360, "approx": false},
-    {"feature_a": "VehAge", "feature_b": "VehBrand", "kind": "spline_cat", "statistic": 7.805371, "z": -0.490676, "edf0": 9.999710, "lambda0": 3.779926e+09, "n_cells": 627, "approx": false},
-    {"feature_a": "DrivAge", "feature_b": "VehAge", "kind": "ti", "statistic": 0.547721, "z": -0.726139, "edf0": 1.999999, "lambda0": 5.044231e+01, "n_cells": 4560, "approx": false},
-    {"feature_a": "DrivAge", "feature_b": "VehBrand", "kind": "spline_cat", "statistic": 1.958248, "z": -1.798192, "edf0": 10.000015, "lambda0": 1.301005e+10, "n_cells": 880, "approx": false},
-    {"feature_a": "LogDensity", "feature_b": "VehBrand", "kind": "numeric_cat", "statistic": 1.087365, "z": -1.992926, "edf0": 10.000000, "lambda0": 0.0, "n_cells": 11, "approx": false},
-    {"feature_a": "BonusMalus", "feature_b": "Region", "kind": "spline_cat", "statistic": 6.972247, "z": -2.164535, "edf0": 21.000052, "lambda0": 4.198782e+09, "n_cells": 2024, "approx": false},
-    {"feature_a": "DrivAge", "feature_b": "Region", "kind": "spline_cat", "statistic": 6.754044, "z": -2.198201, "edf0": 21.000021, "lambda0": 6.858867e+09, "n_cells": 1760, "approx": false},
-    {"feature_a": "LogDensity", "feature_b": "Region", "kind": "numeric_cat", "statistic": 5.266167, "z": -2.427783, "edf0": 21.000000, "lambda0": 0.0, "n_cells": 22, "approx": false},
-    {"feature_a": "VehAge", "feature_b": "Region", "kind": "spline_cat", "statistic": 2.008955, "z": -2.930334, "edf0": 20.999438, "lambda0": 2.449232e+09, "n_cells": 1254, "approx": false},
-    {"feature_a": "VehBrand", "feature_b": "Region", "kind": "cat_cat", "statistic": 39.860771, "z": -8.243704, "edf0": 208.000000, "lambda0": 0.0, "n_cells": 242, "approx": false}
+    {"feature_a": "VehAge", "feature_b": "BonusMalus", "kind": "ti", "statistic": 5.691018917361012, "z": 1.8455103882417723, "edf0": 1.9999990330945765, "lambda0": 102.31677571414723, "n_cells": 5244, "approx": false},
+    {"feature_a": "BonusMalus", "feature_b": "VehBrand", "kind": "spline_cat", "statistic": 11.960557139650913, "z": 0.43840942611320155, "edf0": 9.999936779699167, "lambda0": 7818059192.852414, "n_cells": 1012, "approx": false},
+    {"feature_a": "DrivAge", "feature_b": "BonusMalus", "kind": "ti", "statistic": 1.8107708076512452, "z": -0.094615024495992, "edf0": 2.0000008991812526, "lambda0": 261.12928405423713, "n_cells": 7360, "approx": false},
+    {"feature_a": "VehAge", "feature_b": "VehBrand", "kind": "spline_cat", "statistic": 7.805321175212184, "z": -0.4906606187357753, "edf0": 9.999575607190561, "lambda0": 3779926029.080366, "n_cells": 627, "approx": false},
+    {"feature_a": "DrivAge", "feature_b": "VehAge", "kind": "ti", "statistic": 0.5477225861480312, "z": -0.7261389253654371, "edf0": 2.0000006859129194, "lambda0": 50.44218019332373, "n_cells": 4560, "approx": false},
+    {"feature_a": "DrivAge", "feature_b": "VehBrand", "kind": "spline_cat", "statistic": 1.9582278779362927, "z": -1.7981851194293264, "edf0": 9.999926752337242, "lambda0": 13010053723.163033, "n_cells": 880, "approx": false},
+    {"feature_a": "LogDensity", "feature_b": "VehBrand", "kind": "numeric_cat", "statistic": 1.087366290367857, "z": -1.9929254833293593, "edf0": 10.0, "lambda0": 0.0, "n_cells": 11, "approx": false},
+    {"feature_a": "BonusMalus", "feature_b": "Region", "kind": "spline_cat", "statistic": 6.972190038116502, "z": -2.1645268915435887, "edf0": 20.99989122758863, "lambda0": 4198785666.3218575, "n_cells": 2024, "approx": false},
+    {"feature_a": "DrivAge", "feature_b": "Region", "kind": "spline_cat", "statistic": 6.75399012668442, "z": -2.198192802736925, "edf0": 20.99986030244357, "lambda0": 6858866790.944001, "n_cells": 1760, "approx": false},
+    {"feature_a": "LogDensity", "feature_b": "Region", "kind": "numeric_cat", "statistic": 5.266162426740413, "z": -2.427783845313385, "edf0": 21.0, "lambda0": 0.0, "n_cells": 22, "approx": false},
+    {"feature_a": "VehAge", "feature_b": "Region", "kind": "spline_cat", "statistic": 2.008916650971619, "z": -2.9302812787661843, "edf0": 20.998740130904725, "lambda0": 2449232552.9535804, "n_cells": 1254, "approx": false},
+    {"feature_a": "VehBrand", "feature_b": "Region", "kind": "cat_cat", "statistic": 39.860759194109946, "z": -8.2437045179799, "edf0": 208.0, "lambda0": 0.0, "n_cells": 242, "approx": false}
   ],
   "confirmatory_refits": [
-    {"feature_a": "VehAge", "feature_b": "BonusMalus", "kind": "ti", "deviance_gain": 43.908238},
-    {"feature_a": "BonusMalus", "feature_b": "VehBrand", "kind": "spline_cat", "deviance_gain": 73.052326}
+    {"feature_a": "VehAge", "feature_b": "BonusMalus", "kind": "ti", "deviance_gain": 43.03700031272092},
+    {"feature_a": "BonusMalus", "feature_b": "VehBrand", "kind": "spline_cat", "deviance_gain": 73.04812077103634}
   ],
   "ti_null_floor_max_z": 7.31
 }

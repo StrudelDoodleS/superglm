@@ -244,3 +244,68 @@ def test_prior_weights_do_not_move_hosted_piecewise_geometry():
 
     frequency_weighted = fitted_inner(Tweedie(p=1.5), weight, "frequency")
     assert not np.array_equal(frequency_weighted._knots, prior_unweighted._knots)
+
+
+def test_scalar_ordered_reporting_mass_is_separate_from_inner_prior_geometry():
+    """Reporting follows exposure while the learned spline follows physical rows.
+
+    ``L0`` wins by row count, while ``L7`` wins by sample-weight mass. Sending
+    one stream to both decisions either reports against the wrong level or
+    moves the quantile-row knots away from the unit-physical reference.
+    """
+    from superglm import OrderedCategorical
+
+    levels = [f"L{index}" for index in range(8)]
+    counts = np.array([10, 2, 6, 5, 4, 3, 2, 1], dtype=np.intp)
+    labels = np.repeat(levels, counts)
+    positions = np.repeat(np.arange(len(levels), dtype=np.float64), counts)
+    weight = np.where(labels == "L7", 20.0, 1.0)
+    frame = pd.DataFrame({"band": labels})
+    response = 0.4 + 0.2 * positions - 0.03 * positions**2
+
+    def fit(sample_weight):
+        model = SuperGLM(
+            family="gaussian",
+            selection_penalty=0.0,
+            features={
+                "band": OrderedCategorical(
+                    order=levels,
+                    base="most_exposed",
+                    basis=Spline(
+                        kind="cr",
+                        n_knots=5,
+                        knot_strategy="quantile_rows",
+                    ),
+                )
+            },
+            weight_semantics="prior",
+        )
+        model.fit(frame, response, sample_weight=sample_weight)
+        return model._specs["band"]
+
+    weighted = fit(weight)
+    physical = fit(np.ones_like(weight))
+
+    assert weighted._base_level == "L7"
+    assert physical._base_level == "L0"
+    np.testing.assert_array_equal(weighted._basis_spline._knots, physical._basis_spline._knots)
+
+
+def test_direct_ordered_build_uses_sample_weight_for_outer_and_inner_state():
+    """The split compiler contract does not change the direct feature API."""
+    from superglm import OrderedCategorical
+
+    levels = [f"L{index}" for index in range(8)]
+    counts = np.array([10, 2, 6, 5, 4, 3, 2, 1], dtype=np.intp)
+    labels = np.repeat(levels, counts)
+    positions = np.repeat(np.linspace(0.0, 1.0, len(levels)), counts)
+    weight = np.where(labels == "L7", 20.0, 1.0)
+    inner = Spline(kind="cr", n_knots=5, knot_strategy="quantile_rows")
+    spec = OrderedCategorical(order=levels, base="most_exposed", basis=inner)
+
+    spec.build(labels, sample_weight=weight)
+    reference = Spline(kind="cr", n_knots=5, knot_strategy="quantile_rows")
+    reference.build(positions, sample_weight=weight)
+
+    assert spec._base_level == "L7"
+    np.testing.assert_array_equal(spec._basis_spline._knots, reference._knots)

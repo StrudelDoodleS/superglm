@@ -60,7 +60,7 @@ jobs:
         run: uv sync --python ${{ matrix.python-version }} --extra dev
 
       - name: Run complete compatibility suite
-        run: uv run --with pyarrow pytest tests/ -q -m "not browser"
+        run: uv run --with pyarrow --with mpmath pytest tests/ -q -m "not browser"
 
   test-coverage:
     name: Python 3.13 · coverage shard ${{ matrix.label }}
@@ -95,7 +95,7 @@ jobs:
         env:
           COVERAGE_FILE: .coverage.${{ matrix.group }}
         run: >-
-          uv run --with pyarrow pytest tests/ -q -m "not browser"
+          uv run --with pyarrow --with mpmath pytest tests/ -q -m "not browser"
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
           --cov=superglm --cov-branch --cov-report=
