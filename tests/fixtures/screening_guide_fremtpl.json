@@ -9,7 +9,14 @@
     "knot placement and frequency-mass tensor/interacting-spline geometry."
   ],
   "n_rows": 80000,
-  "sample": {"source": "freMTPL2freq.parquet", "sha256": "47d65ed2dc49828c34f01baba6a8c8d34839d537254eb057ab196ac06456a845", "random_state": 0, "exposure_clip_lower": 0.01},
+  "sample": {
+    "source": "freMTPL2freq.parquet",
+    "source_sha256": "47d65ed2dc49828c34f01baba6a8c8d34839d537254eb057ab196ac06456a845",
+    "input_sha256": "2166db75c4be92572f994256199fa887e880a90abd5040c91126b39d1bcb23f1",
+    "input_hash_encoding": "Sampled input columns, clipped exposure, UTF-8 CSV, no index, %.17g floats, LF newlines; independent of Parquet encoding.",
+    "random_state": 0,
+    "exposure_clip_lower": 0.01
+  },
   "sum_sample_weight": 42405.3,
   "mains_edf": 52.8677894825078,
   "mains_deviance": 25016.43132435702,
