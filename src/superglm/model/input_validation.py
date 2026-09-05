@@ -32,7 +32,7 @@ _product_was_exact = _count_lattice_module._product_was_exact
 
 
 class PriorWeightLatticeWarning(UserWarning):
-    """A discrete family's prior-weighted response left its own support."""
+    """A counting response or binomial weight lacks an exact probability law."""
 
 
 class FractionalFrequencyWeightWarning(UserWarning):
@@ -245,34 +245,14 @@ def _check_counting_lattice(
     *,
     theta_role: str | None = None,
 ) -> None:
-    """Warn when a prior-weighted counting response is off its own lattice.
+    """Warn about replicated counting responses and prior binomial weights.
 
-    The prior construction for Poisson and the negative binomial is
-    ``w Y ~ Poisson(w mu)`` and ``w Y ~ NB2(w mu, w theta)``, both supported on
-    the non-negative integers.  Where ``w * y`` is not integral the reported
-    density evaluates ``gammaln`` at a fractional argument, which interpolates
-    the counting density: the value is finite and smooth, but it is not a
-    probability.  The log-likelihood, AIC and BIC are then a quasi-likelihood,
-    and for the negative binomial the interpolated ``Gamma(w y + w theta) /
-    Gamma(w theta)`` factor is theta-dependent, so it reaches ``theta_hat``
-    and its profile interval too.
-
-    This warns rather than raises deliberately.  The canonical case is
-    on-lattice by construction -- ``y = count / exposure`` weighted by
-    ``exposure`` -- and where it is not, the two contracts still share a score
-    equation, so ``beta``, the fitted means and the deviance are unaffected.
-    Refusing an otherwise valid fit over a defect confined to its reported
-    likelihood would cost more than it protects; saying so plainly does not.
+    Prior Poisson/NB rates may be deliberately adjusted, or carry round-off
+    from dividing counts by exposure. They are accepted without an integrality
+    warning; fitting and likelihood evaluation use the supplied values.
     """
     if weight_semantics == FREQUENCY_WEIGHTS:
-        # Replication does not move the support.  "This row appeared w times"
-        # leaves each appearance an ordinary draw from the counting family, so
-        # ``y`` itself must still be a whole count -- and unlike the prior arm
-        # the weight never enters that question, so an integral or omitted
-        # weight says nothing about it.  A fractional ``y`` here reaches the
-        # same interpolated ``gammaln`` the prior arm warns about, and did so
-        # with nothing to mark it because this function returned early for
-        # every frequency model.
+        # Replication leaves each row's counting support unchanged.
         if not isinstance(family, Poisson | NegativeBinomial):
             return
         _warn_frequency_counting_response(y, weights, family, theta_role)
@@ -281,45 +261,6 @@ def _check_counting_lattice(
         return
     if isinstance(family, Binomial):
         _warn_prior_weighted_binomial(weights)
-        return
-    if not isinstance(family, Poisson | NegativeBinomial):
-        return
-    scaled = weights * y
-    # The product tolerance is only earned where a product was actually formed.
-    # IEEE-754 multiplication by an exact power of two -- and w == 1 above all,
-    # which is what an unweighted fit passes -- is exact, so `scaled` is the
-    # caller's response bit for bit and the supplied-value rule applies. Lending
-    # those rows the round-off allowance let a directly supplied response like
-    # 2**49 + 0.125 through, in the most common fit there is.
-    exact_product = _product_was_exact(weights, y, scaled)
-    count = int(
-        np.count_nonzero(
-            np.where(
-                exact_product,
-                _not_a_whole_number(scaled),
-                _off_integer_lattice(scaled),
-            )
-        )
-    )
-    if count == 0:
-        return
-    import warnings
-
-    name = type(family).__name__
-    reach = _interpolated_density_reach(family, theta_role=theta_role or _theta_role_for(family))
-    warnings.warn(
-        f"{count} of {len(scaled)} rows have a non-integral sample_weight * y "
-        f'under weight_semantics="prior", which puts them off the {name} '
-        "lattice, so the reported log-likelihood, AIC and BIC are a "
-        "quasi-likelihood rather than an exact density, and randomized "
-        "quantile residuals round those rows onto a neighbouring count."
-        + reach
-        + " The canonical weighting (y = count / exposure with "
-        "sample_weight = exposure) is on-lattice; pass "
-        'weight_semantics="frequency" if the weights are replication counts.',
-        PriorWeightLatticeWarning,
-        stacklevel=4,
-    )
 
 
 def check_weight_contract(
@@ -330,19 +271,10 @@ def check_weight_contract(
     *,
     theta_role: str | None = None,
 ) -> None:
-    """Both halves of the declared-contract check, behind one call.
+    """Check frequency replication and binomial likelihood interpretations.
 
-    Each contract has its own way of being unhonourable, and each is silent
-    about the other's: ``_check_counting_lattice`` returns immediately under
-    ``"frequency"``, and ``_check_frequency_counts`` returns immediately under
-    ``"prior"``. A caller that wires in only one therefore looks correct and
-    covers half the models it sees -- which is exactly what happened when the
-    evaluation boundaries were first given the lattice check alone, leaving
-    every frequency-weighted evaluation unwarned.
-
-    Call this at any point where a likelihood, an information criterion or a
-    residual degrees-of-freedom is about to be computed from caller-supplied
-    weights. It is the single seam; do not call the halves directly.
+    Fit and evaluation boundaries share this warning policy. Prior-weighted
+    Poisson/NB rates are accepted quietly, including fractional adjustments.
     """
     _check_frequency_counts(weights, weight_semantics)
     _check_counting_lattice(y, weights, family, weight_semantics, theta_role=theta_role)

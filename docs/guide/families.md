@@ -93,15 +93,24 @@ model = SuperGLM(family="gamma", features=features, weight_semantics="frequency"
 The two agree only at `w == 1`. Integer weights do **not** make them coincide:
 at `w == 2` the likelihood size is `n` under `"prior"` and `2n` under
 `"frequency"`, so the residual degrees of freedom, `phi`, every Wald standard
-error and BIC all differ. At fractional weights only the prior reading is a
-likelihood at all: a row cannot be replicated 0.4 times, and the
-frequency reading's `sum(w) - edf` residual degrees of freedom stop counting
-anything. Exposure is continuous, which is why `"prior"` is the default.
+error and BIC all differ. Fractional prior weights have a precision
+interpretation; fractional frequency weights no longer count literal row
+replications. Exposure is continuous, which is why `"prior"` is the default.
+
+For scalar Poisson and negative-binomial models, prior-weighted rates may be
+fractional or deliberately adjusted, such as a 20% uplift. No count-integrality
+warning is emitted, and fitting and likelihood evaluation do not round them.
+If `sample_weight * y` is fractional, the reported likelihood uses a
+gamma-function continuation, not an exact count probability; see the
+[count-likelihood caveat](../development/migrations/weight-semantics-prior.md#counting-families-have-a-lattice).
+Frequency-replication and prior-weighted binomial warnings are unchanged.
 
 ### What the choice moves
 
-Both contracts give the same score equations, so **`beta` and the deviance are
-unchanged**. What moves is everything downstream of the likelihood's size:
+With the same family parameters, design and penalty, both contracts give the
+same mean score equations. This does **not** guarantee identical complete fits:
+estimated NB `theta`, REML smoothing parameters, and learned design geometry
+can differ and change the fitted means. Other affected quantities include:
 
 | quantity | `"prior"` | `"frequency"` |
 |---|---|---|
