@@ -51,7 +51,10 @@ def fitted_comparison_models(comparison_data):
     ordered = SuperGLM(
         features={
             "VehAge": Spline(n_knots=8),
-            "BonusBand": OrderedCategorical(order=["50-60", "60-70", "70-80", "80-100", "100+"]),
+            "BonusBand": OrderedCategorical(
+                order=["50-60", "60-70", "70-80", "80-100", "100+"],
+                basis=Spline(kind="ps", n_knots=4),
+            ),
         }
     )
     ordered.fit(X, y, sample_weight=sample_weight)
