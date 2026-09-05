@@ -8148,7 +8148,6 @@
     "tests/test_sum_to_zero_structured_factor.py::test_constrained_null_leverage_beneath_its_noise_floor_is_zero_on_either_sign[1.0]": 0.00038478802889585495,
     "tests/test_sum_to_zero_structured_factor.py::test_constrained_null_leverage_floor_still_governs_above_the_two_bars_crossing[-1.0]": 0.00041410583071410656,
     "tests/test_sum_to_zero_structured_factor.py::test_constrained_null_leverage_floor_still_governs_above_the_two_bars_crossing[1.0]": 0.0004104301333427429,
-    "tests/test_tweedie_profile_docs.py::test_family_guide_states_the_declared_weight_contract": 0.0003835470415651798,
     "tests/test_tweedie_profile_docs.py::test_plotting_docstrings_use_declared_contract_language": 0.0004481470678001642,
     "tests/test_tweedie_profile_docs.py::test_public_fit_docstrings_explain_the_declared_weight_contract": 0.000488328980281949,
     "tests/test_tweedie_profile_docs.py::test_screening_guides_declare_the_weight_contract_they_measured_under": 0.0010956951882690191,
