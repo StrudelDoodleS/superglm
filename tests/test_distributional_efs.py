@@ -3483,16 +3483,18 @@ def test_positive_raw_pressure_at_the_exact_upper_cap_is_unresolved(
     refusal = smoothing.history[0]
     assert refusal.accepted is False
     assert refusal.refused_face_components == (target,)
-    assert refusal.endpoint_direction_evidence is None
-    assert refusal.endpoint_assessment_failure_reason == "provenance_changed"
+    direction = refusal.endpoint_direction_evidence
+    assert isinstance(direction, EndpointDirectionEvidence)
+    assert direction.decision == "finite"
+    assert direction.upper_bound < 0.0
+    assert direction.fit_indices == refusal.coefficient_fit_indices == (1, 2)
+    assert direction.coefficient_tolerance == refusal.coefficient_tolerances[0]
+    assert refusal.endpoint_assessment_failure_reason is None
     assert len(smoothing.coefficient_fits) == 3
-    with pytest.raises(ValueError, match="failure reason"):
-        replace(refusal, endpoint_assessment_failure_reason=None)
-    with pytest.raises(ValueError, match="provenance failure reason"):
-        replace(
-            smoothing,
-            history=(replace(refusal, endpoint_assessment_failure_reason="analytic_unavailable"),),
-        )
+    with pytest.raises(ValueError, match="direction evidence or a failure reason"):
+        replace(refusal, endpoint_direction_evidence=None)
+    with pytest.raises(ValueError, match="event without direction evidence"):
+        replace(refusal, endpoint_assessment_failure_reason="analytic_unavailable")
     assert smoothing.matched_certified is False
     with pytest.raises(RuntimeError, match="certification"):
         smoothing.assert_matched_certified()
@@ -3534,11 +3536,13 @@ def test_cap_not_stationary_receipt_authenticates_retained_score(
         cap_fit,
         terminal_score=nonstationary_score,
         score_relative=0.0,
+        convergence_reason="objective_and_step",
     )
     receipt = replace(
         refusal,
         coefficient_fit_indices=(1,),
         coefficient_tolerances=(tolerance,),
+        endpoint_direction_evidence=None,
         endpoint_assessment_failure_reason="cap_not_stationary",
     )
 
@@ -3631,6 +3635,7 @@ def test_endpoint_not_stationary_receipt_authenticates_retained_face_score(
     )
     receipt = replace(
         refusal,
+        endpoint_direction_evidence=None,
         endpoint_assessment_failure_reason="endpoint_not_stationary",
     )
     cap_objective = cap_fit.penalized_optimizing_log_likelihood

@@ -358,9 +358,9 @@ def _coefficient_curvature(
     Every family is solved with the observed Hessian unless Fisher scoring is
     requested, and a request needs the expected-information capability.  The
     fallback is unchanged and lives in the solver: a materially indefinite
-    terminal observed curvature falls back to expected information when the
-    family supplies it and is refused otherwise.  The chunked route keeps its
-    own requirement in ``solver/solver.py``.
+    terminal penalized observed Hessian falls back to penalized expected
+    information when the family supplies it and is refused otherwise.  The
+    chunked route keeps its own requirement in ``solver/solver.py``.
     """
     if requested not in ("observed", "fisher"):
         raise ValueError("coefficient_curvature must be 'observed' or 'fisher'")
@@ -557,8 +557,8 @@ class SuperLSS:
         ``"observed"`` (the default) is Newton's method on the observed Hessian
         for every family; ``"fisher"`` requests Fisher scoring and needs a
         family with expected information.  Under either policy a materially
-        indefinite terminal observed curvature falls back to expected
-        information when the family supplies it, and is refused otherwise.
+        indefinite terminal penalized observed Hessian falls back to penalized
+        expected information when the family supplies it, and is refused otherwise.
         """
         return self._coefficient_curvature
 

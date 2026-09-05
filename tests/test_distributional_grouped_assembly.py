@@ -7,11 +7,16 @@ import pytest
 from superglm._frame import as_eager_frame
 from superglm._group_matrix._cross_matrix_execution import CrossMatrixExecutionPlan
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
-from superglm.distributional.assembly import assemble_grouped_geometry
+from superglm.distributional.assembly import (
+    _assemble_dense_geometry_from_matrices,
+    assemble_grouped_geometry,
+    dense_predictor_matrices,
+)
 from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.features import Numeric, Spline
+from superglm.features import Categorical, Numeric, Spline, SplineCategorical
+from superglm.features.grouping import collapse_levels
 from superglm.group_matrix import DiscretizedSSPGroupMatrix
 
 from ._distributional_weights import resolved_prior
@@ -149,3 +154,48 @@ def test_compressed_grouped_assembly_does_not_materialize_discrete_slopes(
         rtol=4e-13,
         atol=4e-12,
     )
+
+
+def test_grouped_lss_cross_curvature_keeps_overlapping_category_groupings() -> None:
+    n = 120
+    frame = pd.DataFrame({"x": np.linspace(-1.0, 1.0, n), "g": np.resize(["a", "b", "c", "d"], n)})
+    predictors = tuple(
+        Predictor(
+            name,
+            {
+                "x": Spline(kind="cr", n_knots=4),
+                "g": Categorical(base="d", grouping=collapse_levels(frame["g"], groups=groups)),
+            },
+            interaction_specs={"x:g": SplineCategorical("x", "g")},
+        )
+        for name, groups in (("location", {"AB": ["a", "b"]}), ("scale", {"BC": ["b", "c"]}))
+    )
+    compiled = compile_predictors(
+        as_eager_frame(frame),
+        resolved_prior(np.ones(n)),
+        (_parameter("location"), _parameter("scale", "log")),
+        predictors,
+    )
+    layout = build_stacked_layout(compiled)
+    score, curvature = _channels(n)
+    coefficients = np.linspace(-0.1, 0.1, layout.n_coefficients)
+    penalty = np.diag(np.linspace(0.1, 0.3, layout.n_coefficients))
+    expected = _assemble_dense_geometry_from_matrices(
+        layout,
+        dense_predictor_matrices(layout),
+        score,
+        curvature,
+        penalty=penalty,
+        coefficients=coefficients,
+    )
+    actual = assemble_grouped_geometry(
+        layout, score, curvature, penalty=penalty, coefficients=coefficients
+    )
+    # Bound accumulated products in the explicit design coordinates, not coefficients.
+    designs = [np.column_stack((np.ones(n), state.design.toarray())) for state in layout.predictors]
+    scale = max(np.linalg.norm(design, "fro") ** 2 for design in designs)
+    tolerance = 8 * n * np.finfo(float).eps * scale * np.max(np.abs(curvature))
+    for field in ("score_data", "score_penalized", "data_curvature", "penalized_curvature"):
+        np.testing.assert_allclose(
+            getattr(actual, field), getattr(expected, field), rtol=0.0, atol=tolerance
+        )

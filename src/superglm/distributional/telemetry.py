@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -21,6 +21,8 @@ class CurvatureTelemetry:
     rank: int
     condition_estimate: float | None
     fallback_count: int
+    # Absent in schema 8, whose scope depended on the family's Fisher support.
+    matrix_kind: Literal["data", "penalized"] | None = None
 
     def __post_init__(self) -> None:
         valid_sources = ("observed", "fisher", "hybrid")
@@ -28,6 +30,8 @@ class CurvatureTelemetry:
             raise ValueError(f"invalid requested curvature source: {self.requested_source!r}")
         if self.actual_source not in valid_sources:
             raise ValueError(f"invalid actual curvature source: {self.actual_source!r}")
+        if self.matrix_kind not in (None, "data", "penalized"):
+            raise ValueError("matrix_kind must be 'data', 'penalized', or None for legacy state")
         if self.reason is not None and (not isinstance(self.reason, str) or not self.reason):
             raise ValueError("reason must be None or a non-empty string")
         if isinstance(self.minimum_eigenvalue, bool) or not np.isfinite(self.minimum_eigenvalue):
@@ -50,7 +54,7 @@ class CurvatureTelemetry:
 
     def to_dict(self) -> dict[str, Any]:
         """Return exactly the versioned curvature-fallback fields."""
-        return {
+        result = {
             "requested_source": self.requested_source,
             "actual_source": self.actual_source,
             "reason": self.reason,
@@ -61,6 +65,9 @@ class CurvatureTelemetry:
             ),
             "fallback_count": self.fallback_count,
         }
+        if self.matrix_kind is not None:
+            result["matrix_kind"] = self.matrix_kind
+        return result
 
     def assert_no_fallback(self) -> None:
         """Reject telemetry that cannot certify an algorithm-matched fixture."""

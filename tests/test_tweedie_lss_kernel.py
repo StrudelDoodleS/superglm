@@ -721,6 +721,163 @@ def _recompile_compiled_positive_path(compiled_module) -> None:
     compiled_module._evaluate_tweedie_batch_core.recompile()
 
 
+def _recompile_compiled_series_path(compiled_module) -> None:
+    compiled_module._log_gamma_increment.recompile()
+    compiled_module._log_adjacent_ratio.recompile()
+    compiled_module._locate_series_mode.recompile()
+    compiled_module._series_summary.recompile()
+
+
+def test_series_prepares_log_gamma_coefficients_only_when_first_needed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiled_module = tweedie_kernel._compiled
+    original_fill = compiled_module._fill_log_gamma_increment_coefficients
+    cases = (
+        ("integer-large", 2.0 * math.log(10_007.0), 2.0, 1.0, 100_000, 0, 0),
+        ("noninteger-low-x", -10.0, 1.5, 0.5, 100_000, 0, 0),
+        ("noninteger-crosses-threshold", 14.0, 1.5, 0.5, 100_000, 0, 1),
+        (
+            "refusal-before-large-increment",
+            -10.0,
+            1.5,
+            0.5,
+            1,
+            compiled_module.KERNEL_MAX_TERMS,
+            0,
+        ),
+    )
+    baselines = {}
+    for case_id, zeta, inverse_r, alpha, max_terms, _status, _fills in cases:
+        for derivative_order in range(3):
+            baselines[case_id, derivative_order] = compiled_module._series_summary(
+                zeta,
+                0.25,
+                -0.125,
+                inverse_r,
+                alpha,
+                derivative_order,
+                max_terms,
+                37.0,
+                np.empty(10, dtype=np.float64),
+            )
+
+    @njit
+    def counted_fill(alpha, coefficients):
+        original_fill(alpha, coefficients)
+        coefficients[10] += 1.0
+
+    monkeypatch.setattr(
+        compiled_module,
+        "_fill_log_gamma_increment_coefficients",
+        counted_fill,
+    )
+    _recompile_compiled_series_path(compiled_module)
+    try:
+        for (
+            case_id,
+            zeta,
+            inverse_r,
+            alpha,
+            max_terms,
+            expected_status,
+            expected_fills,
+        ) in cases:
+            for derivative_order in range(3):
+                coefficients = np.empty(11, dtype=np.float64)
+                coefficients[10] = 0.0
+                summary = compiled_module._series_summary(
+                    zeta,
+                    0.25,
+                    -0.125,
+                    inverse_r,
+                    alpha,
+                    derivative_order,
+                    max_terms,
+                    37.0,
+                    coefficients,
+                )
+
+                assert summary[0] == expected_status
+                np.testing.assert_equal(summary, baselines[case_id, derivative_order])
+                assert int(coefficients[10]) == expected_fills
+    finally:
+        compiled_module._fill_log_gamma_increment_coefficients = original_fill
+        _recompile_compiled_series_path(compiled_module)
+
+
+def test_series_reuses_mode_boundary_ratios_for_first_window_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiled_module = tweedie_kernel._compiled
+    original_ratio = compiled_module._log_adjacent_ratio
+    large_mode = 10_007
+    cases = (
+        ("mode-one", math.log(2.0), 1),
+        ("large-mode", 2.0 * math.log(float(large_mode)), large_mode),
+    )
+    baselines = {
+        (case_id, derivative_order): compiled_module._series_summary(
+            zeta,
+            0.25,
+            -0.125,
+            2.0,
+            1.0,
+            derivative_order,
+            100_000,
+            37.0,
+            np.empty(10, dtype=np.float64),
+        )
+        for case_id, zeta, _expected_mode in cases
+        for derivative_order in range(3)
+    }
+
+    @njit
+    def counted_ratio(j, zeta, alpha, coefficients):
+        if j == 1:
+            coefficients[10] += 1.0
+        if j == large_mode - 1:
+            coefficients[11] += 1.0
+        if j == large_mode:
+            coefficients[12] += 1.0
+        return original_ratio(j, zeta, alpha, coefficients)
+
+    monkeypatch.setattr(compiled_module, "_log_adjacent_ratio", counted_ratio)
+    compiled_module._locate_series_mode.recompile()
+    compiled_module._series_summary.recompile()
+    try:
+        for case_id, zeta, expected_mode in cases:
+            coefficients = np.empty(13, dtype=np.float64)
+            coefficients[10:] = 0.0
+            compiled_module._fill_log_gamma_increment_coefficients(1.0, coefficients)
+            located = compiled_module._locate_series_mode(zeta, 1.0, coefficients)
+            assert located[0] == compiled_module.KERNEL_OK
+            assert located[1] == expected_mode
+            locate_counts = coefficients[10:].copy()
+
+            for derivative_order in range(3):
+                coefficients[10:] = 0.0
+                summary = compiled_module._series_summary(
+                    zeta,
+                    0.25,
+                    -0.125,
+                    2.0,
+                    1.0,
+                    derivative_order,
+                    100_000,
+                    37.0,
+                    coefficients,
+                )
+
+                assert summary[0] == compiled_module.KERNEL_OK
+                np.testing.assert_equal(summary, baselines[case_id, derivative_order])
+                np.testing.assert_array_equal(coefficients[10:], locate_counts)
+    finally:
+        compiled_module._log_adjacent_ratio = original_ratio
+        compiled_module._locate_series_mode.recompile()
+        compiled_module._series_summary.recompile()
+
+
 def test_production_order_one_batch_skips_poisoned_trigamma(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -985,17 +1142,16 @@ def test_ratio_bracket_finds_exact_plateau_and_adversarial_distant_mode() -> Non
     coefficients = np.empty(10, dtype=np.float64)
     # alpha=1 and zeta=log(2) make q_1 == q_2 exactly in the ratio formula.
     tweedie_kernel._compiled._fill_log_gamma_increment_coefficients(1.0, coefficients)
-    assert tweedie_kernel._compiled._locate_series_mode(math.log(2.0), 1.0, coefficients) == (
-        0,
-        1,
-    )
+    located = tweedie_kernel._compiled._locate_series_mode(math.log(2.0), 1.0, coefficients)
+    assert located[:2] == (0, 1)
 
     # This literal defeats the old asymptotic estimate plus two adjacent q
     # checks.  The ratio transition itself uniquely brackets the mode.
     alpha = 0.1
     zeta = 16.75
     tweedie_kernel._compiled._fill_log_gamma_increment_coefficients(alpha, coefficients)
-    status, mode = tweedie_kernel._compiled._locate_series_mode(zeta, alpha, coefficients)
+    located = tweedie_kernel._compiled._locate_series_mode(zeta, alpha, coefficients)
+    status, mode = located[:2]
     assert status == 0
     assert mode == 5_058_592
     before = tweedie_kernel._compiled._log_adjacent_ratio(

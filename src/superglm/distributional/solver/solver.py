@@ -305,6 +305,9 @@ def _theta_from_eta(context: _SolverContext, eta: NDArray) -> NDArray[np.float64
 def _evaluate_state_unmeasured(
     context: _SolverContext,
     coefficients: NDArray,
+    *,
+    derivative_order: Literal[0, 2] = 2,
+    prepared: _AcceptedState | None = None,
 ) -> _AcceptedState | None:
     """Build a new trial without mutating any previously accepted state."""
     try:
@@ -343,25 +346,37 @@ def _evaluate_state_unmeasured(
 
         if context.dense_matrices is None:
             raise RuntimeError("dense solver context is missing predictor matrices")
-        eta = _evaluate_predictors_from_matrices(
-            context.layout,
-            coefficient_values,
-            context.dense_matrices,
-        )
-        theta = _theta_from_eta(context, eta)
+        if prepared is None:
+            eta = _evaluate_predictors_from_matrices(
+                context.layout,
+                coefficient_values,
+                context.dense_matrices,
+            )
+            theta = _theta_from_eta(context, eta)
+        else:
+            # A passing value screen already evaluated these exact coefficients.
+            eta, theta = prepared.eta, prepared.theta
+            if eta is None or theta is None:
+                raise RuntimeError("dense trial is missing predictor values")
         natural = context.family.evaluate_natural(
             context.response,
             theta,
             context.likelihood_plan,
-            derivative_order=2,
+            derivative_order=derivative_order,
         )
-        if natural.derivative_order != 2:
-            raise UnsupportedLikelihoodContractError("family must return exact derivative order 2")
+        if natural.derivative_order != derivative_order:
+            raise UnsupportedLikelihoodContractError(
+                f"family must return exact derivative order {derivative_order}"
+            )
         if natural.valid is not None and not np.all(natural.valid):
             return None
-        derivatives = transform_natural_derivatives(natural, eta, context.links)
+        derivatives = (
+            transform_natural_derivatives(natural, eta, context.links)
+            if derivative_order == 2
+            else None
+        )
         fisher = None
-        if context.coefficient_curvature == "fisher":
+        if derivative_order == 2 and context.coefficient_curvature == "fisher":
             if context.fisher_family is None:
                 raise RuntimeError("validated Fisher context is missing expected information")
             information_natural = context.fisher_family.expected_information_natural(
@@ -400,9 +415,13 @@ def _evaluate_state(
     coefficients: NDArray,
     *,
     phase_recorder: FitPhaseRecorder | None = None,
+    derivative_order: Literal[0, 2] = 2,
+    prepared: _AcceptedState | None = None,
 ) -> _AcceptedState | None:
     with measure_phase(phase_recorder, "likelihood_evaluation"):
-        return _evaluate_state_unmeasured(context, coefficients)
+        return _evaluate_state_unmeasured(
+            context, coefficients, derivative_order=derivative_order, prepared=prepared
+        )
 
 
 def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
@@ -754,11 +773,31 @@ def _run_iterations(
             if np.array_equal(candidate_coefficients, state.coefficients):
                 reached_identical_candidate = True
                 break
+            # Keep the usual full-step path and score-only certification unchanged.
+            screen = stop_policy == "ordinary" and context.chunk_size is None and attempt > 0
             candidate = _evaluate_state(
                 context,
                 candidate_coefficients,
                 phase_recorder=phase_recorder,
+                derivative_order=0 if screen else 2,
             )
+            directional_derivative = float(geometry.score_penalized @ applied_step)
+            required = (
+                state.penalized_optimizing_log_likelihood
+                + config.armijo_constant * directional_derivative
+            )
+            if screen:
+                candidate = (
+                    _evaluate_state(
+                        context,
+                        candidate_coefficients,
+                        phase_recorder=phase_recorder,
+                        prepared=candidate,
+                    )
+                    if candidate is not None
+                    and candidate.penalized_optimizing_log_likelihood >= required
+                    else None
+                )
             if candidate is not None:
                 distinct_finite_trial_evaluated = True
                 if stop_policy == "score_only":
@@ -767,11 +806,6 @@ def _run_iterations(
                         or candidate.penalized_optimizing_log_likelihood
                         > state.penalized_optimizing_log_likelihood
                     )
-            directional_derivative = float(geometry.score_penalized @ applied_step)
-            required = (
-                state.penalized_optimizing_log_likelihood
-                + config.armijo_constant * directional_derivative
-            )
             if (
                 candidate is not None
                 and candidate.penalized_optimizing_log_likelihood >= required
@@ -1131,11 +1165,7 @@ def _fit_dense_fixed_lambda_core(
             )
         )
         fisher_available = context.fisher_family is not None
-        requested_terminal_curvature = (
-            observed_geometry.data_curvature
-            if fisher_available
-            else observed_geometry.penalized_curvature
-        )
+        requested_terminal_curvature = observed_geometry.penalized_curvature
         terminal_fisher_geometry: DenseJointGeometry | None = None
         if context.coefficient_face is not None and context.coefficient_face.reduced_width == 0:
             empty_matrix = _readonly(np.zeros((0, 0), dtype=np.float64))
@@ -1151,6 +1181,7 @@ def _fit_dense_fixed_lambda_core(
                     rank=0,
                     condition_estimate=None,
                     fallback_count=0,
+                    matrix_kind="penalized",
                 ),
                 retry_required=False,
                 state=CurvaturePolicyState(),
@@ -1160,6 +1191,7 @@ def _fit_dense_fixed_lambda_core(
                 "observed",
                 _policy_curvature(context, requested_terminal_curvature),
                 state=CurvaturePolicyState(),
+                matrix_kind="penalized",
             )
         if curvature.retry_required:
             retry_tolerance = max(
@@ -1227,12 +1259,8 @@ def _fit_dense_fixed_lambda_core(
                     )
                 )
                 terminal_fisher_geometry = fisher_geometry
-                fisher_matrix = fisher_geometry.data_curvature
-            requested_terminal_curvature = (
-                observed_geometry.data_curvature
-                if fisher_available
-                else observed_geometry.penalized_curvature
-            )
+                fisher_matrix = fisher_geometry.penalized_curvature
+            requested_terminal_curvature = observed_geometry.penalized_curvature
             curvature = resolve_curvature(
                 "observed",
                 _policy_curvature(context, requested_terminal_curvature),
@@ -1240,53 +1268,31 @@ def _fit_dense_fixed_lambda_core(
                     None if fisher_matrix is None else _policy_curvature(context, fisher_matrix)
                 ),
                 state=curvature.state,
+                matrix_kind="penalized",
             )
         if curvature.retry_required or curvature.matrix is None or curvature.decomposition is None:
             raise RuntimeError("terminal curvature policy did not reach an accepted result")
 
-        if context.coefficient_face is None and fisher_available:
-            terminal_data_curvature = np.asarray(curvature.matrix, dtype=np.float64)
-            terminal_penalized_curvature = terminal_data_curvature + context.penalty
-            terminal_penalized_curvature = 0.5 * (
-                terminal_penalized_curvature + terminal_penalized_curvature.T
-            )
-            with measure_phase(phase_recorder, "coefficient_decomposition_solve"):
-                terminal_rank = decompose_gram(terminal_penalized_curvature)
-            terminal_reduced_rank = None
-        elif context.coefficient_face is None:
-            terminal_data_curvature = np.asarray(
-                observed_geometry.data_curvature,
-                dtype=np.float64,
-            )
-            terminal_penalized_curvature = np.asarray(
-                observed_geometry.penalized_curvature,
-                dtype=np.float64,
-            )
+        if curvature.telemetry.actual_source == "fisher":
+            if terminal_fisher_geometry is None:
+                raise RuntimeError("Fisher fallback is missing its full curvature geometry")
+            accepted_geometry = terminal_fisher_geometry
+        else:
+            accepted_geometry = observed_geometry
+        terminal_data_curvature = np.asarray(
+            accepted_geometry.data_curvature,
+            dtype=np.float64,
+        )
+        terminal_penalized_curvature = np.asarray(
+            accepted_geometry.penalized_curvature,
+            dtype=np.float64,
+        )
+        if context.coefficient_face is None:
             terminal_rank = curvature.decomposition
             terminal_reduced_rank = None
         else:
             face = context.coefficient_face
-            if fisher_available and curvature.telemetry.actual_source == "fisher":
-                if terminal_fisher_geometry is None:
-                    raise RuntimeError("Fisher fallback is missing its full curvature geometry")
-                accepted_data_curvature = terminal_fisher_geometry.data_curvature
-            else:
-                accepted_data_curvature = observed_geometry.data_curvature
-            terminal_data_curvature = np.asarray(
-                accepted_data_curvature,
-                dtype=np.float64,
-            )
-            terminal_penalized_curvature = terminal_data_curvature + context.penalty
-            terminal_penalized_curvature = 0.5 * (
-                terminal_penalized_curvature + terminal_penalized_curvature.T
-            )
-            if not fisher_available:
-                terminal_reduced_rank = curvature.decomposition
-            else:
-                with measure_phase(phase_recorder, "coefficient_decomposition_solve"):
-                    terminal_reduced_rank = decompose_gram(
-                        face.reduce_matrix(terminal_penalized_curvature)
-                    )
+            terminal_reduced_rank = curvature.decomposition
             terminal_rank = face.lift_rank_decomposition(terminal_reduced_rank)
         terminal_score_geometry = observed_geometry
         penalty_value = 0.5 * float(state.coefficients @ context.penalty @ state.coefficients)

@@ -82,6 +82,10 @@ curvature channels. `bind_likelihood()` owns the resolved weights in a plan;
 requested derivatives. A derivative order of zero has neither score nor
 Hessian, order one has a score but no Hessian, and order two has both. Values
 other than an integer from zero through two, including booleans, are refused.
+Wherever order two is valid, order zero must also be valid and return the same
+optimizing likelihood values and carrier terms. Dense backtracking can use
+order zero to reject a trial cheaply; it rechecks acceptance with order two
+before retaining a point.
 
 For `k` parameters, `hessian_packed` has width `k * (k + 1) // 2`. It is the
 raw signed Hessian of the weighted per-row optimizing log likelihood, in
@@ -129,7 +133,7 @@ protocols below. Do not add family-name branches to a solver or facade.
 | Protocol | Member and responsibility | Behavior when absent |
 | --- | --- | --- |
 | `LikelihoodPlanValidatingFamily` | `validate_likelihood_plan(y, plan)` performs one-shot family-owned plan validation and returns the canonical, finite, exact-shape, read-only `float64` response. | Fixed fitting validates the plan's structural invariants and freezes the supplied finite response itself. |
-| `ExpectedInformationFamily` | `expected_information_natural(theta, plan)` returns natural-scale Fisher information. It is the fallback when the terminal observed curvature is materially indefinite, and `SuperLSS(coefficient_curvature="fisher")` requests it for the whole solve. | The default coefficient solve is the same: Newton on the observed Hessian. `SuperLSS(coefficient_curvature="fisher")` refuses at construction, a route explicitly requesting Fisher chunking refuses, and repeated material indefiniteness of the terminal observed curvature refuses the fit instead of falling back. |
+| `ExpectedInformationFamily` | `expected_information_natural(theta, plan)` returns natural-scale Fisher information. The solver adds the penalty for fallback when the terminal penalized observed Hessian is materially indefinite; `SuperLSS(coefficient_curvature="fisher")` requests Fisher scoring for the whole solve. | The default coefficient solve is the same: Newton on the observed Hessian. `SuperLSS(coefficient_curvature="fisher")` refuses at construction, a route explicitly requesting Fisher chunking refuses, and repeated material indefiniteness of the terminal penalized observed Hessian refuses the fit instead of falling back. |
 | `PredictorCurvatureDirectionalFamily` | `predictor_curvature_directional_derivative(y, eta, eta_direction, links, plan)` supplies the exact directional derivative of `curvature_packed` (the negated predictor-scale Hessian, packed upper-triangular) along `eta_direction`. | The engine differences the family's own order-two evaluation along the unit direction (Richardson order four, link-scale step 1e-3) and carries an error certificate into the endpoint decision band; the evidence is labelled `finite-difference-curvature-direction/v1`. Implement the analytic method only when you need `matched_certified`. |
 | `DefaultPredictionFamily` | `default_prediction_name` names the response quantity and `default_prediction(theta)` computes it. | `predict_parameters()` remains available; `predict()` raises `NotImplementedError` and tells the caller to use `predict_parameters()`. |
 | `DistributionFunctionFamily` | `cdf(y, theta)` and `quantile(p, theta)` row-wise from natural parameters; backs `predict_cdf()` / `predict_quantile()`. | Both facade methods raise `NotImplementedError` naming `predict_parameters()`. |

@@ -11,8 +11,10 @@ Schema versioning
 ``SCHEMA_VERSION`` is a semantic version, and MAJOR is the only component the
 reader consults:
 
-* **MAJOR is a read barrier.**  Known pre-contract majors receive the typed
-  legacy-weight refusal; all other majors receive an ordinary version error.
+* **MAJOR is a read barrier unless explicitly supported.** Schema 8 retains
+  its original telemetry encoding and family-dependent curvature scope. Known
+  pre-contract majors receive the typed legacy-weight refusal; other majors
+  receive an ordinary version error.
 * **MINOR and PATCH promise readability.**  A reader accepts any artifact that
   shares its major.
 
@@ -1390,7 +1392,7 @@ def deserialize_distributional_model(
     """Load a trusted native artifact after schema, digest, and manifest checks.
 
     Refuses known pre-contract majors with the typed legacy-weight error and
-    every other major with an ordinary version error. Per the module docstring,
+    unsupported majors with an ordinary version error. Per the module docstring,
     a manifest mismatch raised past that gate always means
     the artifact was tampered with or corrupted — never that it is merely old.
     """

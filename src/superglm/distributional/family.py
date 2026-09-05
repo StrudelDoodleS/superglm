@@ -338,7 +338,14 @@ class DistributionalFamily(Protocol):
         plan: FamilyLikelihoodPlan,
         *,
         derivative_order: int = 2,
-    ) -> NaturalLikelihoodEvaluation: ...
+    ) -> NaturalLikelihoodEvaluation:
+        """Evaluate one likelihood target; derivative order only controls work.
+
+        At fixed rows, parameters and plan, order zero must return the same
+        optimizing value and carrier as order two wherever the latter is valid.
+        A value-only screen must not refuse a point that has valid derivatives.
+        """
+        ...
 
 
 @runtime_checkable

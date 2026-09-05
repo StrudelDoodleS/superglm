@@ -212,6 +212,8 @@ def _log_gamma_increment(
         return total + correction
     if x < 4096.0:
         return math.lgamma(x + alpha) - math.lgamma(x)
+    if math.isnan(coefficients[0]):
+        _fill_log_gamma_increment_coefficients(alpha, coefficients)
     inverse = 1.0 / x
     power_value = inverse
     correction = 0.0
@@ -237,23 +239,23 @@ def _locate_series_mode(
     zeta: float,
     alpha: float,
     coefficients: NDArray[np.float64],
-) -> tuple[int, int]:
+) -> tuple[int, int, float, float]:
     first = _log_adjacent_ratio(1, zeta, alpha, coefficients)
     if not math.isfinite(first):
-        return KERNEL_MODE_RATIO, 0
+        return KERNEL_MODE_RATIO, 0, math.nan, math.nan
     if first <= 0.0:
-        return KERNEL_OK, 1
+        return KERNEL_OK, 1, math.nan, first
 
     lower = 1
     upper = 2
     while True:
         ratio = _log_adjacent_ratio(upper, zeta, alpha, coefficients)
         if not math.isfinite(ratio):
-            return KERNEL_MODE_RATIO, 0
+            return KERNEL_MODE_RATIO, 0, math.nan, math.nan
         if ratio <= 0.0:
             break
         if upper >= _MAX_SAFE_MODE:
-            return KERNEL_MODE_RANGE, 0
+            return KERNEL_MODE_RANGE, 0, math.nan, math.nan
         lower = upper
         upper = min(2 * upper, _MAX_SAFE_MODE)
 
@@ -261,7 +263,7 @@ def _locate_series_mode(
         midpoint = lower + (upper - lower) // 2
         ratio = _log_adjacent_ratio(midpoint, zeta, alpha, coefficients)
         if not math.isfinite(ratio):
-            return KERNEL_MODE_RATIO, 0
+            return KERNEL_MODE_RATIO, 0, math.nan, math.nan
         if ratio > 0.0:
             lower = midpoint
         else:
@@ -270,8 +272,8 @@ def _locate_series_mode(
     before = _log_adjacent_ratio(upper - 1, zeta, alpha, coefficients)
     after = _log_adjacent_ratio(upper, zeta, alpha, coefficients)
     if before <= 0.0 or after > 0.0:
-        return KERNEL_MODE_BRACKET, 0
-    return KERNEL_OK, upper
+        return KERNEL_MODE_BRACKET, 0, math.nan, math.nan
+    return KERNEL_OK, upper, before, after
 
 
 @njit(cache=True)
@@ -332,8 +334,12 @@ def _series_summary(
     log_cutoff: float,
     coefficients: NDArray[np.float64],
 ):
-    _fill_log_gamma_increment_coefficients(alpha, coefficients)
-    status, mode = _locate_series_mode(zeta, alpha, coefficients)
+    coefficients[0] = math.nan  # Lazy scratch, reset for this row's alpha.
+    status, mode, mode_lower_ratio, mode_upper_ratio = _locate_series_mode(
+        zeta,
+        alpha,
+        coefficients,
+    )
     if status != KERNEL_OK:
         return _series_failure(status, 0)
     terms = 1
@@ -376,7 +382,10 @@ def _series_summary(
     while current > 1:
         if terms >= max_terms:
             return _series_failure(KERNEL_MAX_TERMS, 0)
-        ratio_value = _log_adjacent_ratio(current - 1, zeta, alpha, coefficients)
+        if current == mode:
+            ratio_value = mode_lower_ratio
+        else:
+            ratio_value = _log_adjacent_ratio(current - 1, zeta, alpha, coefficients)
         if not math.isfinite(ratio_value) or ratio_value <= 0.0:
             return _series_failure(KERNEL_LOWER_RATIO, 0)
         relative_log -= ratio_value
@@ -416,7 +425,10 @@ def _series_summary(
             return _series_failure(KERNEL_MAX_TERMS, 0)
         if current >= _MAX_SAFE_MODE:
             return _series_failure(KERNEL_WINDOW_RANGE, 0)
-        ratio_value = _log_adjacent_ratio(current, zeta, alpha, coefficients)
+        if current == mode:
+            ratio_value = mode_upper_ratio
+        else:
+            ratio_value = _log_adjacent_ratio(current, zeta, alpha, coefficients)
         if not math.isfinite(ratio_value) or ratio_value > 0.0:
             return _series_failure(KERNEL_UPPER_RATIO, 0)
         relative_log += ratio_value

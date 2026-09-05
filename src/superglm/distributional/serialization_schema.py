@@ -7,14 +7,12 @@ holds the data that policy consults, so the reader and the writer agree on it.
 
 from __future__ import annotations
 
-# 8.0.0 is the first public schema.  It advertises distribution-function
-# capabilities consistently with the methods implemented by each family.
-SCHEMA_VERSION = "8.0.0"
+# 9.0.0 records whether terminal policy assessed data or penalized curvature.
+SCHEMA_VERSION = "9.0.0"
 
-# No earlier distributional artifact schema was released publicly.  Treat all
-# other majors as incompatible instead of carrying migration promises for
-# development-only artifacts.
-READABLE_PREVIOUS_MAJORS: frozenset[int] = frozenset()
+# Schema 8 remains readable: its missing scope retains the family-dependent
+# interpretation, and omission from telemetry preserves the original manifest.
+READABLE_PREVIOUS_MAJORS: frozenset[int] = frozenset({8})
 
 #: Manifest type names are the classes' canonical compatibility paths, held
 #: fixed across the package reorganisation so the manifest authenticates fitted

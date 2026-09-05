@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -135,6 +136,7 @@ def _telemetry(
     minimum_eigenvalue: float,
     analysis: _CurvatureAnalysis,
     fallback_count: int,
+    matrix_kind: Literal["data", "penalized"] | None,
 ) -> CurvatureTelemetry:
     return CurvatureTelemetry(
         requested_source=requested_source,
@@ -144,6 +146,7 @@ def _telemetry(
         rank=analysis.decomposition.rank,
         condition_estimate=analysis.condition_estimate,
         fallback_count=fallback_count,
+        matrix_kind=matrix_kind,
     )
 
 
@@ -154,6 +157,7 @@ def resolve_curvature(
     fisher_matrix: NDArray | None = None,
     state: CurvaturePolicyState | None = None,
     policy: RankPolicy = SHARED_RANK_POLICY,
+    matrix_kind: Literal["data", "penalized"] | None = None,
 ) -> CurvatureDecision:
     """Apply the binding one-retry policy to a family-supplied curvature.
 
@@ -183,6 +187,7 @@ def resolve_curvature(
             minimum_eigenvalue=requested.minimum_eigenvalue,
             analysis=requested,
             fallback_count=current_state.fallback_count,
+            matrix_kind=matrix_kind,
         )
         return CurvatureDecision(
             matrix=requested.matrix,
@@ -206,6 +211,7 @@ def resolve_curvature(
             minimum_eigenvalue=requested.minimum_eigenvalue,
             analysis=requested,
             fallback_count=current_state.fallback_count,
+            matrix_kind=matrix_kind,
         )
         return CurvatureDecision(
             matrix=None,
@@ -234,6 +240,7 @@ def resolve_curvature(
         minimum_eigenvalue=requested.minimum_eigenvalue,
         analysis=fisher,
         fallback_count=fallback_count,
+        matrix_kind=matrix_kind,
     )
     return CurvatureDecision(
         matrix=fisher.matrix,

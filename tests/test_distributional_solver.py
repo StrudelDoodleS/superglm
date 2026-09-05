@@ -20,6 +20,7 @@ from superglm.distributional.family import (
     ObservationContract,
 )
 from superglm.distributional.layout import build_stacked_layout
+from superglm.distributional.penalty_face import build_penalty_face
 from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.solver import DenseSolverConfig, fit_dense_fixed_lambda
 from superglm.distributional.weights import (
@@ -28,7 +29,7 @@ from superglm.distributional.weights import (
     WeightContract,
     resolve_likelihood_weights,
 )
-from superglm.features import Numeric
+from superglm.features import Numeric, RandomEffect
 from superglm.group_matrix import DesignMatrix
 
 from ._distributional_weights import resolved_prior
@@ -581,6 +582,198 @@ def test_observed_only_terminal_policy_assesses_penalized_curvature(
     result.terminal_curvature.assert_no_fallback()
 
 
+def test_expected_information_terminal_policy_assesses_penalized_curvature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stabilizing penalty must avoid a spurious Fisher fallback."""
+    base_family, layout = _intercept_layout(4)
+    family = _ExpectedInformationSpyGaussian(base_family)
+    scale = base_family.scale_floor + 1.0
+    response = np.array([-scale, -scale, scale, scale])
+    observed_data_curvature = np.array([[1.0, 2.0], [2.0, 1.0]])
+    penalty = 2.0 * np.eye(layout.n_coefficients)
+    original_geometry = solver_module._geometry
+
+    def force_indefinite_observed_data(context, state, source):
+        geometry = original_geometry(context, state, source)
+        if source != "observed":
+            return geometry
+        return replace(
+            geometry,
+            data_curvature=observed_data_curvature,
+            penalized_curvature=observed_data_curvature + geometry.penalty,
+        )
+
+    monkeypatch.setattr(solver_module, "_geometry", force_indefinite_observed_data)
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        _plan(family, response, np.ones(len(response))),
+        penalty,
+        initial=np.zeros(layout.n_coefficients),
+        config=DenseSolverConfig(coefficient_curvature="observed"),
+    )
+
+    np.testing.assert_array_equal(result.terminal_data_curvature, observed_data_curvature)
+    np.testing.assert_array_equal(
+        result.terminal_penalized_curvature,
+        np.array([[3.0, 2.0], [2.0, 3.0]]),
+    )
+    assert result.terminal_curvature.requested_source == "observed"
+    assert result.terminal_curvature.actual_source == "observed"
+    assert result.terminal_curvature.minimum_eigenvalue == pytest.approx(1.0)
+    assert result.terminal_curvature.rank == layout.n_coefficients
+    assert (
+        result.terminal_curvature.condition_estimate
+        == result.terminal_rank.pre_truncation_condition
+    )
+    result.terminal_curvature.assert_no_fallback()
+    assert family.expected_information_calls == 0
+
+
+def test_expected_information_terminal_policy_falls_back_for_unpenalized_negative_direction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A penalty cannot authorize a negative direction outside its range."""
+    base_family, layout = _intercept_layout(4)
+    family = _ExpectedInformationSpyGaussian(base_family)
+    scale = base_family.scale_floor + 1.0
+    response = np.array([-scale, -scale, scale, scale])
+    observed_data_curvature = np.diag(np.array([-1.0, 1.0]))
+    penalty = np.diag(np.array([0.0, 2.0]))
+    original_geometry = solver_module._geometry
+
+    def force_negative_unpenalized_direction(context, state, source):
+        geometry = original_geometry(context, state, source)
+        if source != "observed":
+            return geometry
+        return replace(
+            geometry,
+            data_curvature=observed_data_curvature,
+            penalized_curvature=observed_data_curvature + geometry.penalty,
+        )
+
+    monkeypatch.setattr(solver_module, "_geometry", force_negative_unpenalized_direction)
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        _plan(family, response, np.ones(len(response))),
+        penalty,
+        initial=np.zeros(layout.n_coefficients),
+        config=DenseSolverConfig(
+            coefficient_curvature="observed",
+            max_iterations=1,
+            terminal_retry_iterations=1,
+            tolerance=1.0e-14,
+        ),
+    )
+
+    assert result.terminal_curvature.requested_source == "observed"
+    assert result.terminal_curvature.actual_source == "fisher"
+    assert result.terminal_curvature.reason == "material_indefiniteness_after_retry"
+    assert result.terminal_curvature.minimum_eigenvalue == pytest.approx(-1.0)
+    assert result.terminal_curvature.fallback_count == 1
+    assert result.terminal_rank.rank == layout.n_coefficients
+    assert np.linalg.eigvalsh(result.terminal_penalized_curvature)[0] > 0.0
+    assert family.expected_information_calls == 1
+
+
+def test_expected_information_terminal_policy_assesses_penalized_curvature_on_face(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact-face policy must assess the reduced penalized Hessian."""
+    n = 4
+    frame = as_eager_frame(
+        pd.DataFrame(
+            {
+                "first": ["a", "b", "a", "b"],
+                "second": ["c", "c", "d", "d"],
+            }
+        )
+    )
+    base_family = GaussianLS()
+    family = _ExpectedInformationSpyGaussian(base_family)
+    layout = build_stacked_layout(
+        compile_predictors(
+            frame,
+            resolved_prior(np.ones(n)),
+            family.parameters,
+            (
+                Predictor(
+                    "location",
+                    {"first": RandomEffect(), "second": RandomEffect()},
+                    intercept=False,
+                ),
+                Predictor("scale", {}),
+            ),
+        )
+    )
+    first, second = layout.penalties
+    assert first.penalty_kind == second.penalty_kind == "identity"
+    face = build_penalty_face(layout, (first.name,))
+    penalty = layout.penalty_matrix({first.name: 0.0, second.name: 2.0})
+    observed_data_curvature = 2.0 * np.eye(layout.n_coefficients)
+    observed_data_curvature[second.group_sl.start, second.group_sl.start] = -1.0
+    observed_penalized_curvature = observed_data_curvature + penalty
+    original_geometry = solver_module._geometry
+
+    def force_indefinite_retained_observed_data(context, state, source):
+        geometry = original_geometry(context, state, source)
+        if source != "observed":
+            return geometry
+        return replace(
+            geometry,
+            data_curvature=observed_data_curvature,
+            penalized_curvature=observed_data_curvature + geometry.penalty,
+        )
+
+    monkeypatch.setattr(
+        solver_module,
+        "_geometry",
+        force_indefinite_retained_observed_data,
+    )
+    response = np.array([-1.0, -0.5, 0.5, 1.0])
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        _plan(family, response, np.ones(n)),
+        penalty,
+        initial=np.zeros(layout.n_coefficients),
+        config=DenseSolverConfig(
+            coefficient_curvature="observed",
+            max_iterations=1,
+            terminal_retry_iterations=1,
+            tolerance=1.0e-14,
+        ),
+        coefficient_face=face,
+    )
+
+    reduced_data = face.reduce_matrix(observed_data_curvature)
+    reduced_penalized = face.reduce_matrix(observed_penalized_curvature)
+    assert np.linalg.eigvalsh(reduced_data)[0] == pytest.approx(-1.0)
+    assert np.linalg.eigvalsh(reduced_penalized)[0] == pytest.approx(1.0)
+    np.testing.assert_array_equal(result.terminal_data_curvature, observed_data_curvature)
+    np.testing.assert_array_equal(
+        result.terminal_penalized_curvature,
+        observed_penalized_curvature,
+    )
+    assert result.terminal_curvature.requested_source == "observed"
+    assert result.terminal_curvature.actual_source == "observed"
+    assert result.terminal_curvature.minimum_eigenvalue == pytest.approx(1.0)
+    assert result.terminal_curvature.rank == face.reduced_width
+    assert result.terminal_reduced_rank is not None
+    assert result.terminal_reduced_rank.rank == face.reduced_width
+    assert (
+        result.terminal_curvature.condition_estimate
+        == result.terminal_reduced_rank.pre_truncation_condition
+    )
+    result.terminal_curvature.assert_no_fallback()
+    assert family.expected_information_calls == 0
+
+
 def test_observed_only_terminal_policy_refuses_repeated_material_indefiniteness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1010,6 +1203,158 @@ def test_nonfinite_trial_is_rejected_without_mutating_accepted_state(
     assert result.penalized_log_likelihood > result.initial_penalized_log_likelihood
     np.testing.assert_array_equal(initial, initial_before)
     assert np.all(np.isfinite(result.coefficients))
+
+
+def test_dense_accepted_first_trial_does_not_add_value_screen(monkeypatch) -> None:
+    """Kills screening the first trial as well as rejected backtracks."""
+    y = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
+    base, layout = _intercept_layout(len(y))
+    family = _ExpectedInformationSpyGaussian(base)
+    evaluate = family.evaluate_natural
+    orders = []
+
+    def record(y, theta, plan, *, derivative_order=2):
+        orders.append(derivative_order)
+        return evaluate(y, theta, plan, derivative_order=derivative_order)
+
+    monkeypatch.setattr(family, "evaluate_natural", record)
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        y,
+        _plan(family, y, np.ones(len(y))),
+        np.zeros((2, 2)),
+        initial=np.array([0.04, 0.0]),
+        config=DenseSolverConfig(max_iterations=1),
+    )
+
+    assert result.iterations == 1
+    assert result.backtracking_steps == 0
+    assert set(orders) == {2}
+
+
+def test_dense_backtracking_avoids_derivatives_at_rejected_points(monkeypatch) -> None:
+    """Kills evaluating order two at every rejected backtrack."""
+    y = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
+    base, layout = _intercept_layout(len(y))
+    family = _ExpectedInformationSpyGaussian(base)
+    evaluate = family.evaluate_natural
+    calls = []
+
+    def record(y, theta, plan, *, derivative_order=2):
+        calls.append((derivative_order, theta.tobytes()))
+        return evaluate(y, theta, plan, derivative_order=derivative_order)
+
+    monkeypatch.setattr(family, "evaluate_natural", record)
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        y,
+        _plan(family, y, np.ones(len(y))),
+        np.zeros((2, 2)),
+        initial=np.array([0.4, 0.0]),
+        config=DenseSolverConfig(max_iterations=1, armijo_constant=0.9),
+    )
+
+    screened = {point for order, point in calls if order == 0}
+    differentiated = {point for order, point in calls if order == 2}
+    assert result.backtracking_steps >= 2
+    assert screened - differentiated
+    assert result.theta.tobytes() in differentiated
+
+
+def test_dense_backtracking_rechecks_full_objective_after_value_screen(monkeypatch) -> None:
+    """An optimistic value-only evaluation cannot authorize a worse full trial."""
+    y = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
+    base, layout = _intercept_layout(len(y))
+    family = _ExpectedInformationSpyGaussian(base)
+    plan = _plan(family, y, np.ones(len(y)))
+    config = DenseSolverConfig(max_iterations=1, armijo_constant=0.9)
+    initial = np.array([0.4, 0.0])
+    expected = fit_dense_fixed_lambda(
+        family, layout, y, plan, np.zeros((2, 2)), initial=initial, config=config
+    )
+    evaluate = family.evaluate_natural
+    screened = []
+
+    def optimistic(y, theta, plan, *, derivative_order=2):
+        result = evaluate(y, theta, plan, derivative_order=derivative_order)
+        if derivative_order == 0:
+            screened.append(theta.copy())
+            return replace(
+                result,
+                optimizing_log_likelihood=result.optimizing_log_likelihood + 1000.0,
+            )
+        return result
+
+    monkeypatch.setattr(family, "evaluate_natural", optimistic)
+    actual = fit_dense_fixed_lambda(
+        family, layout, y, plan, np.zeros((2, 2)), initial=initial, config=config
+    )
+
+    assert len(screened) >= 2
+    np.testing.assert_array_equal(actual.coefficients, expected.coefficients)
+    assert actual.penalized_log_likelihood == expected.penalized_log_likelihood
+    assert actual.backtracking_steps == expected.backtracking_steps
+
+
+def test_dense_backtracking_rejects_failed_full_derivatives_after_screen(monkeypatch) -> None:
+    y = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
+    base, layout = _intercept_layout(len(y))
+    family = _ExpectedInformationSpyGaussian(base)
+    evaluate = family.evaluate_natural
+    screened = set()
+    refused = []
+
+    def fail_materialization(y, theta, plan, *, derivative_order=2):
+        point = theta.tobytes()
+        if derivative_order == 0:
+            screened.add(point)
+        elif point in screened and not refused:
+            refused.append(point)
+            raise FloatingPointError("trial derivatives cannot be evaluated")
+        return evaluate(y, theta, plan, derivative_order=derivative_order)
+
+    monkeypatch.setattr(family, "evaluate_natural", fail_materialization)
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        y,
+        _plan(family, y, np.ones(len(y))),
+        np.zeros((2, 2)),
+        initial=np.array([0.4, 0.0]),
+        config=DenseSolverConfig(max_iterations=1, armijo_constant=0.9),
+    )
+
+    assert len(refused) == 1
+    assert result.theta.tobytes() != refused[0]
+    assert result.penalized_log_likelihood > result.initial_penalized_log_likelihood
+
+
+def test_score_only_backtracking_retains_complete_trial_evidence(monkeypatch) -> None:
+    y = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
+    base, layout = _intercept_layout(len(y))
+    family = _ExpectedInformationSpyGaussian(base)
+    evaluate = family.evaluate_natural
+    orders = []
+
+    def record(y, theta, plan, *, derivative_order=2):
+        orders.append(derivative_order)
+        return evaluate(y, theta, plan, derivative_order=derivative_order)
+
+    monkeypatch.setattr(family, "evaluate_natural", record)
+    result = solver_module._fit_dense_fixed_lambda_score_only(
+        family,
+        layout,
+        y,
+        _plan(family, y, np.ones(len(y))),
+        np.zeros((2, 2)),
+        initial=np.array([0.4, 0.0]),
+        config=DenseSolverConfig(max_iterations=1, armijo_constant=0.9),
+    )
+
+    assert result.backtracking_steps >= 2
+    assert set(orders) == {2}
 
 
 def test_dense_solver_materializes_each_immutable_design_once(
