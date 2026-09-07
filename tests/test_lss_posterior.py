@@ -26,6 +26,7 @@ from superglm.distributional.posterior import (
     resolve_quantity,
     simultaneous_critical_value,
 )
+from superglm.distributional.prediction_design import build_joint_prediction_design
 
 
 def _simulated(n: int = 1500, seed: int = 20260903) -> tuple[pd.DataFrame, np.ndarray]:
@@ -211,7 +212,21 @@ def test_chunking_never_changes_the_pushforward(fit_case) -> None:
         [block for _, block in posterior_parameters(fitted, head, drawn, chunk_rows=7)], axis=1
     )
     assert whole.shape == (32, 40, 2)
-    assert np.array_equal(whole, chunked)
+    design = build_joint_prediction_design(
+        as_eager_frame(head), fitted.compiled_predictors, fitted.layout
+    )
+    product_scale = max(
+        np.linalg.norm(design.local[state.name], ord=np.inf)
+        * np.max(np.abs(drawn.coefficients[:, state.coefficient_slice]))
+        for state in fitted.layout.predictors
+    )
+    eps = np.finfo(float).eps
+    q_eps = fitted.layout.n_coefficients * eps
+    dot_bound = 2.0 * q_eps / (1.0 - q_eps) * product_scale
+    # Two dot products, propagated through this fixture's identity/log links.
+    value_scale = max(1.0, float(np.max(np.abs(whole))))
+    parameter_bound = value_scale * (np.expm1(dot_bound) + 4.0 * eps)
+    np.testing.assert_allclose(whole, chunked, rtol=0.0, atol=parameter_bound)
 
     rows = [row_slice for row_slice, _ in posterior_parameters(fitted, head, drawn, chunk_rows=7)]
     assert rows[0] == slice(0, 7)
@@ -238,7 +253,14 @@ def test_chunking_never_changes_the_pushforward(fit_case) -> None:
     quantity = ("parameter", "scale")
     unchunked = posterior_bounds(fitted, head, quantity, draws=drawn)
     small = posterior_bounds(fitted, head, quantity, draws=drawn, chunk_rows=7)
-    assert np.array_equal(unchunked.to_numpy(), small.to_numpy())
+    # Quantiles/means are sup-norm Lipschitz; sample SD adds sqrt(n/(n-1)).
+    summary_scale = max(1.0, float(np.max(np.abs(unchunked.to_numpy()))))
+    n_eps = drawn.n_draws * eps
+    summary_bound = (
+        np.sqrt(drawn.n_draws / (drawn.n_draws - 1.0)) * parameter_bound
+        + 8.0 * n_eps / (1.0 - n_eps) * summary_scale
+    )
+    np.testing.assert_allclose(unchunked.to_numpy(), small.to_numpy(), rtol=0.0, atol=summary_bound)
 
 
 def test_parameter_bounds_bracket_the_plug_in_estimate(fit_case) -> None:

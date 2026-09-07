@@ -526,8 +526,8 @@ def posterior_parameters(
 
     Each predictor's local prediction design multiplies the draw matrix on the
     link scale, the predictor offset is added there, and the fitted inverse link
-    maps to the natural parameter.  The design is built once for all rows and
-    sliced, so chunked and unchunked pushforwards are bit-identical.
+    maps to the natural parameter. The same design and draws serve every
+    chunk; changing chunk sizes may change matrix-product roundoff.
     """
     if not isinstance(draws, PosteriorDraws):
         raise TypeError("draws must be a PosteriorDraws")
