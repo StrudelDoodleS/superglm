@@ -45,6 +45,22 @@ def test_variance_range_refusal_is_distinct_from_divergence(scale):
         GeneralizedParetoLSS().variance(theta)
 
 
+def test_subnormal_intermediate_cannot_publish_inaccurate_normal_variance():
+    mp = pytest.importorskip("mpmath")
+    scale = float(np.ldexp(3.0, -540))
+    shape = np.nextafter(0.5, 0.0)
+    with mp.workdps(100):
+        s, xi = mp.mpf(scale), mp.mpf(float(shape))
+        reference = float(s**2 / ((1 - xi) ** 2 * (1 - 2 * xi)))
+    assert reference >= np.finfo(float).tiny
+    try:
+        actual = GeneralizedParetoLSS().variance(np.array([[scale, shape]]))[0]
+    except gp.GeneralizedParetoDomainError as error:
+        assert "variance" in str(error) and "numerical" in str(error)
+    else:
+        assert actual == pytest.approx(reference, rel=2048 * np.finfo(float).eps, abs=0)
+
+
 def _bind(family, y, values, semantics):
     return family.bind_likelihood(y, _weights(values, semantics), COMPLETE_OBSERVATION)
 

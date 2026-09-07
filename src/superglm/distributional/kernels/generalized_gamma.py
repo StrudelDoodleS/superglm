@@ -728,7 +728,9 @@ def generalized_gamma_variance(
             logmean = math.log(float(first_values[i]))
         else:
             loading = (
-                0.0 if q == s else log_mean_loading(scales[i : i + 1], shapes[i : i + 1])[0][0]
+                0.0
+                if q == s
+                else float(log_mean_loading(scales[i : i + 1], shapes[i : i + 1])[0][0])
             )
             logmean = float(first_values[i]) + loading
             # On the second-moment domain, v > -1/2: the unreduced mean
