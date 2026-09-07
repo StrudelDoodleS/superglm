@@ -14,6 +14,37 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+def _replicated_quantiles(
+    values: NDArray[np.float64],
+    aggregation_mass: NDArray[np.float64],
+    probabilities: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Match ``np.quantile(np.repeat(values, mass), probabilities)`` without expansion."""
+    data = np.asarray(values, dtype=np.float64)
+    mass = np.asarray(aggregation_mass, dtype=np.float64)
+    if data.shape != mass.shape:
+        raise ValueError("aggregation mass must give one weight per value")
+    if np.all(mass == 1.0):
+        return np.asarray(np.quantile(data, probabilities), dtype=np.float64)
+
+    order = np.argsort(data)
+    ordered = data[order]
+    cumulative = np.cumsum(mass[order].astype(np.int64), dtype=np.int64)
+    count = int(cumulative[-1])
+    ranks = (count - 1) * np.asarray(probabilities, dtype=np.float64)
+    lower_ranks = np.floor(ranks).astype(np.int64)
+    upper_ranks = np.ceil(ranks).astype(np.int64)
+    lower = ordered[np.searchsorted(cumulative, lower_ranks, side="right")]
+    upper = ordered[np.searchsorted(cumulative, upper_ranks, side="right")]
+    fraction = ranks - lower_ranks
+    difference = upper - lower
+    return np.where(
+        fraction >= 0.5,
+        upper - difference * (1.0 - fraction),
+        lower + difference * fraction,
+    )
+
+
 def _weight_vector(values: NDArray, *, name: str) -> NDArray[np.float64]:
     vector = np.asarray(values, dtype=np.float64)
     if vector.ndim != 1:

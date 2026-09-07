@@ -30,6 +30,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional.checks._aggregate import _replicated_quantiles
 from superglm.distributional.checks.scores import (
     _retained_crps,
     _retained_log_score,
@@ -343,37 +344,6 @@ def _level_quantiles(fitted: Any, rows: _ScoringRows, level: float) -> NDArray[n
     return np.asarray(family.quantile(levels, theta), dtype=np.float64)
 
 
-def _replicated_quantiles(
-    values: NDArray[np.float64],
-    aggregation_mass: NDArray[np.float64],
-    probabilities: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    """Match ``np.quantile(np.repeat(values, mass), probabilities)`` without expansion."""
-    data = np.asarray(values, dtype=np.float64)
-    mass = np.asarray(aggregation_mass, dtype=np.float64)
-    if data.shape != mass.shape:
-        raise ValueError("aggregation mass must give one value per default-grid value")
-    if np.all(mass == 1.0):
-        return np.asarray(np.quantile(data, probabilities), dtype=np.float64)
-
-    order = np.argsort(data)
-    ordered = data[order]
-    cumulative = np.cumsum(mass[order].astype(np.int64), dtype=np.int64)
-    count = int(cumulative[-1])
-    ranks = (count - 1) * np.asarray(probabilities, dtype=np.float64)
-    lower_ranks = np.floor(ranks).astype(np.int64)
-    upper_ranks = np.ceil(ranks).astype(np.int64)
-    lower = ordered[np.searchsorted(cumulative, lower_ranks, side="right")]
-    upper = ordered[np.searchsorted(cumulative, upper_ranks, side="right")]
-    fraction = ranks - lower_ranks
-    difference = upper - lower
-    return np.where(
-        fraction >= 0.5,
-        upper - difference * (1.0 - fraction),
-        lower + difference * fraction,
-    )
-
-
 def _default_thresholds(
     *columns: NDArray[np.float64],
     aggregation_mass: NDArray[np.float64] | None = None,
@@ -422,15 +392,19 @@ def compare_models(
     thresholds: NDArray | None = None,
     sample_weight: NDArray | None = None,
     offsets: Mapping[str, NDArray] | None = None,
+    a_offsets: Mapping[str, NDArray] | None = None,
+    b_offsets: Mapping[str, NDArray] | None = None,
     n_nodes: int = 64,
 ) -> Comparison:
     """Compare two fits on the same rows by their per-row score differences.
 
     The difference is ``score(a) - score(b)``, so a negative mean says ``a`` is
-    the better model.  The two fits must share the row set and, if ``offsets``
-    are given, the predictor names they are keyed by; they need not share a
-    family.  Non-unit ``sample_weight`` requires the candidates to declare the
-    same likelihood-weight semantics.  Prior semantics changes each row's law;
+    the better model. The two fits share the row set but need not share a
+    family. ``offsets`` is shared shorthand; ``a_offsets`` and ``b_offsets``
+    supply each candidate's own predictor-keyed mapping. Mixing the shared
+    and candidate-specific forms is refused. Non-unit ``sample_weight``
+    requires the candidates to declare the same likelihood-weight semantics.
+    Prior semantics changes each row's law;
     frequency semantics gives it literal replication mass.  Zero-weight rows
     are omitted from the comparison.  ``by`` segments the difference, by a
     column name of ``X`` or by an array of labels.  ``murphy_quantile`` adds the
@@ -439,6 +413,9 @@ def compare_models(
     """
     if which not in ("log", "crps"):
         raise ValueError(f"unknown score {which!r}; compare_models scores 'log' or 'crps'")
+    if offsets is not None and (a_offsets is not None or b_offsets is not None):
+        raise ValueError("cannot mix shared offsets with candidate-specific a_offsets or b_offsets")
+    candidate_offsets = (offsets, offsets) if offsets is not None else (a_offsets, b_offsets)
     frame = as_eager_frame(X)
     n_observations = len(frame)
     response = np.asarray(y, dtype=np.float64)
@@ -475,9 +452,9 @@ def compare_models(
             frame,
             response,
             sample_weight=sample_weight,
-            offsets=offsets,
+            offsets=fitted_offsets,
         )
-        for fitted in (a_fitted, b_fitted)
+        for fitted, fitted_offsets in zip((a_fitted, b_fitted), candidate_offsets, strict=True)
     ]
     if declared_semantics[0] != declared_semantics[1] and not all(
         row.resolved.provenance.all_unit for row in rows

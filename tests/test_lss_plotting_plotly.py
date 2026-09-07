@@ -733,6 +733,41 @@ def test_diagnostics_figure_draws_six_panels(qq, worm, pit, case) -> None:
     assert axes == {"x", "x2", "x3", "x4", "x5", "x6"}
 
 
+@pytest.mark.parametrize("copies", [3, 251])
+def test_review_diagnostics_uses_aligned_atom_occurrences(qq, worm, pit, case, monkeypatch, copies):
+    from superglm.distributional.residuals import _sample_residuals
+
+    physical = case[3]
+    residuals = replace(
+        physical,
+        weights=np.full(physical.n_rows, float(copies)),
+        weight_semantics="frequency",
+        randomised_rows=physical.n_rows,
+        pit_lower=np.zeros(physical.n_rows),
+        pit_upper=np.ones(physical.n_rows),
+    )
+    expected = _sample_residuals(residuals)
+    seen = {}
+    real_sd = dp._equal_count_sd
+
+    def sd(x, y):
+        seen.update(x=x, y=y)
+        return real_sd(x, y)
+
+    monkeypatch.setattr(dp, "_equal_count_sd", sd)
+    fig = dp.plotly_diagnostics_figure(qq, worm, pit, residuals, max_points=100_001)
+    scatter = next(trace for trace in fig.data if trace.name == "residuals")
+    np.testing.assert_array_equal(scatter.x, residuals.eta[expected.rows, 0])
+    np.testing.assert_array_equal(scatter.y, expected.quantile)
+    np.testing.assert_array_equal(seen["x"], residuals.eta[expected.rows, 1])
+    np.testing.assert_array_equal(seen["y"], expected.quantile)
+    density = next(trace for trace in fig.data if trace.name == "residual density")
+    lo, hi = np.percentile(expected.quantile, [0.5, 99.5])
+    np.testing.assert_array_equal(
+        density.x, expected.quantile[(expected.quantile >= lo) & (expected.quantile <= hi)]
+    )
+
+
 def test_diagnostics_figure_boxes_the_worm_q_statistics_in_the_corner(qq, worm, pit, case) -> None:
     _, _, _, residuals = case
     fig = dp.plotly_diagnostics_figure(qq, worm, pit, residuals)

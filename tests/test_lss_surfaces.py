@@ -99,6 +99,289 @@ def _assert_json_leaves(payload: object) -> None:
     assert not (isinstance(payload, float) and math.isnan(payload))
 
 
+class _SpreadLaw:
+    default_prediction_name = "mean"
+    parameters = (SimpleNamespace(name="mean"), SimpleNamespace(name="tail"))
+
+    def default_prediction(self, theta):
+        return theta[:, 0]
+
+    def cdf(self, y, theta):
+        return 1.0 - theta[:, 1]
+
+    def quantile(self, p, theta):
+        return theta[:, 1]
+
+
+def _spread_stub(semantics="frequency"):
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.weights import WeightContract
+
+    def predict(X, offsets=None):
+        frame = as_eager_frame(X)
+        values = np.column_stack([frame.column_array("mean"), frame.column_array("tail")])
+        assert np.all(np.isfinite(values)), "excluded rows reached prediction"
+        if offsets is not None:
+            values[:, 0] += offsets["mean"]
+        return values
+
+    return SimpleNamespace(
+        family=_SpreadLaw(),
+        fit_state=SimpleNamespace(weight_contract=WeightContract(semantics)),
+        predict_parameters=predict,
+    )
+
+
+def test_review_frequency_spread_hand_calculated_fragments():
+    X = pd.DataFrame({"mean": [0.0, 10.0, 20.0, 30.0], "tail": [0.1, 0.2, 0.8, 0.9]})
+    counts = np.array([1, 5, 1, 1])
+    result = parameter_spread(_spread_stub(), X, threshold=1, n_bins=2, sample_weight=counts)
+    table = result.identically_priced
+    np.testing.assert_array_equal(table["n"], [4, 4])
+    np.testing.assert_allclose(
+        table[["weight", "mean_lo", "mean_hi", "mean", "p_lo", "p_hi"]],
+        [[4, 0, 10, 7.5, 0.115, 0.2], [4, 10, 30, 17.5, 0.2, 0.885]],
+    )
+    assert table["n"].dtype == np.int64
+    for histogram, values in [
+        (result.parameters["mean"], X["mean"]),
+        (result.tail_quantile, X["tail"]),
+    ]:
+        expected, edges = np.histogram(np.repeat(values, counts), bins=30)
+        np.testing.assert_array_equal(histogram.counts, expected)
+        np.testing.assert_array_equal(histogram.edges, edges)
+        assert histogram.counts.dtype == np.int64
+
+
+@pytest.mark.parametrize("counts,bins", [([3, 2, 4], 4), ([1, 5, 1], 2)])
+def test_review_frequency_spread_stable_ties_match_expansion(counts, bins):
+    X = pd.DataFrame({"mean": [10.0, 10.0, 20.0], "tail": [0.1, 0.8, 0.9]})
+    compact = parameter_spread(
+        _spread_stub(), X, threshold=1, n_bins=bins, sample_weight=np.array(counts)
+    )
+    expanded = parameter_spread(
+        _spread_stub(), X.iloc[np.repeat(np.arange(3), counts)], threshold=1, n_bins=bins
+    )
+    pd.testing.assert_frame_equal(compact.identically_priced, expanded.identically_priced)
+
+
+def test_review_frequency_spread_huge_counts_stay_compact(monkeypatch):
+    def no_repeat(*args, **kwargs):
+        raise AssertionError("frequency spread must not expand rows")
+
+    monkeypatch.setattr(np, "repeat", no_repeat)
+    X = pd.DataFrame({"mean": [0.0, 10.0], "tail": [0.1, 0.9]})
+    result = parameter_spread(
+        _spread_stub(), X, threshold=1, n_bins=7, sample_weight=np.array([10**12, 10**12 + 3])
+    )
+    assert result.identically_priced["n"].sum() == 2 * 10**12 + 3
+    assert result.tail_quantile.counts.sum() == 2 * 10**12 + 3
+
+
+def test_review_spread_zero_rows_and_offsets_at_builder_boundary():
+    X = pd.DataFrame({"mean": [0.0, np.nan, 20.0], "tail": [0.1, np.nan, 0.9]})
+    result = parameter_spread(
+        _spread_stub(),
+        X,
+        threshold=1,
+        n_bins=2,
+        sample_weight=np.array([2, 0, 2]),
+        weights=np.array([1.0, np.nan, 1.0]),
+        offsets={"mean": np.array([3.0, np.nan, 4.0])},
+    )
+    np.testing.assert_array_equal(result.identically_priced["mean"], [3.0, 24.0])
+
+
+def test_review_portfolio_zero_rows_offsets_and_segments(gamma_case):
+    fitted, X, _ = gamma_case
+    X = X.head(4).copy()
+    X.iloc[1, X.columns.get_loc("x")] = np.nan
+    weights = np.array([2.0, 0.0, 3.0, 1.0])
+    offsets = {"mean": np.array([0.1, np.nan, 0.2, 0.3])}
+    labels = np.array(["a", None, "b", "a"], dtype=object)
+    kept = np.array([0, 2, 3])
+    actual = portfolio(
+        fitted,
+        X,
+        weights=weights,
+        offsets=offsets,
+        by=labels,
+        n_draws=10,
+        return_draws=True,
+        parameter_uncertainty=False,
+    )
+    expected = portfolio(
+        fitted,
+        X.iloc[kept],
+        weights=weights[kept],
+        offsets={"mean": offsets["mean"][kept]},
+        by=labels[kept],
+        n_draws=10,
+        return_draws=True,
+        parameter_uncertainty=False,
+    )
+    np.testing.assert_array_equal(actual.total_draws, expected.total_draws)
+    pd.testing.assert_frame_equal(actual.by_segment, expected.by_segment)
+
+
+def test_review_density_weights_follow_swept_prior_law(gaussian_case):
+    fitted, X, _ = gaussian_case
+    fan = density_fan(fitted, X, {"g": "a"}, "x", n_points=5, n_y=40, weights=np.full(5, 4.0))
+    sweep = pd.DataFrame({"x": fan.x, "g": "a"})
+    theta = fitted.predict_parameters(sweep)
+    cdf = np.column_stack(
+        [
+            fitted.family.cdf_prior_weighted(np.full(5, v), theta, np.full(5, 4.0))
+            for v in fan.y_grid
+        ]
+    )
+    np.testing.assert_allclose(fan.density, np.maximum(np.gradient(cdf, fan.y_grid, axis=1), 0.0))
+    for probability, curve in zip(fan.quantile_levels, fan.quantiles, strict=True):
+        np.testing.assert_allclose(
+            curve,
+            fitted.family.quantile_prior_weighted(np.full(5, probability), theta, np.full(5, 4.0)),
+        )
+    for invalid in (np.ones(4), np.array([1, 1, 0, 1, 1]), np.full(5, np.nan)):
+        with pytest.raises(ValueError, match="positive prior weight"):
+            density_fan(fitted, X, {}, "x", n_points=5, weights=invalid)
+
+
+@pytest.mark.parametrize("edge", [1.0, 1e20, np.nan, np.inf])
+def test_review_density_refuses_unresolvable_grid(gaussian_case, edge):
+    fitted, X, _ = gaussian_case
+
+    class DegenerateCDF:
+        def cdf(self, y, theta):
+            return np.full(len(theta), 0.5)
+
+        def quantile(self, p, theta):
+            return np.full(len(theta), edge)
+
+    stub = SimpleNamespace(
+        family=DegenerateCDF(),
+        compiled_predictors=fitted.compiled_predictors,
+        predict_parameters=fitted.predict_parameters,
+    )
+    with pytest.raises(ValueError, match="response grid"):
+        density_fan(stub, X, {}, "x", n_points=3)
+
+
+def test_review_density_refuses_atoms_and_nonfinite_density(gaussian_case):
+    from superglm.distributional.families.tweedie import TweedieLSS
+
+    fitted, X, _ = gaussian_case
+    stub = SimpleNamespace(
+        family=TweedieLSS(),
+        compiled_predictors=fitted.compiled_predictors,
+        predict_parameters=lambda X, offsets=None: np.tile([1.0, 0.5, 1.5], (len(X), 1)),
+    )
+    with pytest.raises(NotImplementedError, match="continuous"):
+        density_fan(stub, X, {}, "x", n_points=3, n_y=20)
+
+
+def test_review_density_grid_loses_distinct_float_points(gaussian_case):
+    fitted, X, _ = gaussian_case
+
+    class NarrowCDF:
+        def cdf(self, y, theta):
+            return np.full(len(theta), 0.5)
+
+        def quantile(self, p, theta):
+            return np.where(p < 0.5, 1e20, np.nextafter(1e20, np.inf))
+
+    stub = SimpleNamespace(
+        family=NarrowCDF(),
+        compiled_predictors=fitted.compiled_predictors,
+        predict_parameters=fitted.predict_parameters,
+    )
+    with pytest.raises(ValueError, match="response grid"):
+        density_fan(stub, X, {}, "x", n_points=3, n_y=20)
+
+
+def test_review_density_unit_weights_and_unsupported_prior_law(gaussian_case):
+    fitted, X, _ = gaussian_case
+    plain = density_fan(fitted, X, {}, "x", n_points=4, n_y=30)
+    unit = density_fan(fitted, X, {}, "x", n_points=4, n_y=30, weights=np.ones(4))
+    np.testing.assert_array_equal(plain.density, unit.density)
+    np.testing.assert_array_equal(plain.quantiles, unit.quantiles)
+    stub = SimpleNamespace(
+        family=_MeanlessFamily(fitted.family),
+        compiled_predictors=fitted.compiled_predictors,
+        predict_parameters=fitted.predict_parameters,
+    )
+    with pytest.raises(NotImplementedError, match="prior-weighted"):
+        density_fan(stub, X, {}, "x", n_points=4, weights=np.full(4, 2.0))
+    with pytest.raises(ValueError, match="strictly inside"):
+        density_fan(fitted, X, {}, "x", n_points=4, quantiles=(1.0,))
+
+
+@pytest.mark.parametrize("builder", ["spread", "portfolio"])
+def test_review_surface_zero_only_book_refuses(gaussian_case, builder):
+    fitted, X, _ = gaussian_case
+    with pytest.raises(ValueError, match="retain at least one row"):
+        if builder == "spread":
+            parameter_spread(fitted, X.head(2), sample_weight=np.zeros(2), threshold=1, n_bins=1)
+        else:
+            portfolio(fitted, X.head(2), weights=np.zeros(2), n_draws=2)
+
+
+def test_review_prior_spread_keeps_physical_geometry_and_drops_extremes():
+    X = pd.DataFrame({"mean": [0.0, 1e200, 10.0, 20.0, 30.0], "tail": [0.1, 1e200, 0.2, 0.8, 0.9]})
+    counts = np.array([1.0, 0.0, 5.0, 1.0, 1.0])
+    result = parameter_spread(_spread_stub("prior"), X, threshold=1, n_bins=2, sample_weight=counts)
+    table = result.identically_priced
+    np.testing.assert_array_equal(table["n"], [2, 2])
+    np.testing.assert_allclose(table["mean"], [50 / 6, 25])
+    np.testing.assert_allclose(table[["p_lo", "p_hi"]], [[0.105, 0.195], [0.805, 0.895]])
+    assert result.tail_quantile.counts.sum() == 4
+    assert result.parameters["mean"].edges[-1] == 30.0
+
+
+def test_review_frequency_fragments_bound_storage():
+    import tracemalloc
+
+    from superglm.distributional.surfaces import _frequency_bin_fragments
+
+    n, bins = 2000, 1999
+    values = np.arange(n, dtype=float) % 13
+    counts = np.arange(n, dtype=np.int64) + 10**10
+    tracemalloc.start()
+    try:
+        source, codes, mass = _frequency_bin_fragments(values, counts, bins)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # Conservative linear budget covers Python lists and array conversion;
+    # even one int64 row-by-bin overlap matrix exceeds it by a factor of four.
+    assert peak < 2048 * (n + bins)
+    assert len(source) == len(codes) == len(mass) <= n + bins - 1
+    restored = np.zeros(n, dtype=np.int64)
+    np.add.at(restored, source, mass)
+    np.testing.assert_array_equal(restored, counts)
+    quotient, remainder = divmod(int(counts.sum()), bins)
+    sizes = np.full(bins, quotient, dtype=np.int64)
+    sizes[:remainder] += 1
+    actual = np.zeros(bins, dtype=np.int64)
+    np.add.at(actual, codes, mass)
+    np.testing.assert_array_equal(actual, sizes)
+
+
+def test_review_nonfinite_density_refuses():
+    with pytest.raises(ValueError, match="finite density"):
+        _clipped_density(np.array([[np.nan, np.inf]]))
+
+
+def test_review_sweep_and_reference_accept_mixed_categories():
+    from superglm._frame import as_eager_frame
+    from superglm.distributional.surfaces import _covariate_grid, _default_value
+
+    frame = as_eager_frame(pd.DataFrame({"g": [1, "b", 1, "a"]}))
+    values, levels, positions = _covariate_grid(frame, "g", 10)
+    assert set(values) == {1, "a", "b"}
+    assert len(levels) == len(positions) == 3
+    assert _default_value(frame, "g") == 1
+
+
 def test_json_scalars_are_plain_values_and_nothing_unrepresentable() -> None:
     assert _json_scalar(None) is None
     assert _json_scalar(np.nan) is None

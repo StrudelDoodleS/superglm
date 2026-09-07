@@ -633,7 +633,12 @@ class SuperLSS:
         phase_snapshot = _phase_delta(recorder.snapshot(), before)
         self._model = candidate
         self._fit_phase_snapshot = phase_snapshot
-        self._training_frame = X
+        frame = as_eager_frame(X)
+        positions = resolve_likelihood_weights(
+            sample_weight, n_observations=len(frame), contract=self._weight_contract
+        ).input_positions
+        # Positional selection owns the retained rows and preserves pandas indices.
+        self._training_frame = frame.take_rows(positions)
         return self
 
     def fit(
@@ -1329,6 +1334,9 @@ class SuperLSS:
         which: ScoreName = "log",
         by: str | Sequence[Any] | NDArray | None = None,
         sample_weight: NDArray | None = None,
+        offsets: Mapping[str, NDArray] | None = None,
+        a_offsets: Mapping[str, NDArray] | None = None,
+        b_offsets: Mapping[str, NDArray] | None = None,
         **kwargs: Any,
     ) -> Comparison:
         """Return the paired score difference against another fitted candidate.
@@ -1341,6 +1349,8 @@ class SuperLSS:
         the candidates' declared likelihood-weight semantics; incompatible
         non-unit semantics are refused.  A negative mean difference favours
         this model.
+        Use ``a_offsets`` and ``b_offsets`` for different predictor offsets;
+        ``offsets`` is shared shorthand and cannot be mixed with either.
         """
         candidate = other._require_fitted() if isinstance(other, SuperLSS) else other
         return compare_models(
@@ -1351,6 +1361,9 @@ class SuperLSS:
             which=which,
             by=by,
             sample_weight=sample_weight,
+            offsets=offsets,
+            a_offsets=a_offsets,
+            b_offsets=b_offsets,
             **kwargs,
         )
 
@@ -1548,6 +1561,9 @@ class SuperLSS:
         point rather than a few quantiles of it: it is the picture that shows a
         shape change -- a mass moving into the tail, a mode splitting -- which
         no set of quantile curves states outright.
+        This payload supports continuous families only; families with atoms
+        refuse. ``weights`` gives positive prior-law weights per swept point,
+        with the unit law as the default, as in :meth:`risk_curves`.
         """
         return density_fan(
             self._require_fitted(),
@@ -1563,6 +1579,7 @@ class SuperLSS:
         *,
         threshold: float,
         sample_weight: NDArray | None = None,
+        offsets: Mapping[str, NDArray] | None = None,
         **kwargs: Any,
     ) -> Spread:
         """Return how far the fitted parameters spread, and how far identical prices do.
@@ -1575,6 +1592,8 @@ class SuperLSS:
         ``sample_weight`` enters twice, because it means the same thing in both
         places: it weighs the ratio of sums the table reports and it is part of
         each row's own law.
+        Frequency weights replicate bins, percentiles and histogram counts.
+        Zero-weight rows and their offsets are omitted before prediction.
         """
         return parameter_spread(
             self._require_fitted(),
@@ -1582,6 +1601,7 @@ class SuperLSS:
             threshold=threshold,
             sample_weight=sample_weight,
             weights=self._prior_law_weight(sample_weight),
+            offsets=offsets,
             **kwargs,
         )
 
@@ -1590,6 +1610,7 @@ class SuperLSS:
         X: FrameLike | EagerFrame,
         *,
         sample_weight: NDArray | None = None,
+        offsets: Mapping[str, NDArray] | None = None,
         **kwargs: Any,
     ) -> Portfolio:
         """Return the simulated total over a book of rows, optionally by segment.
@@ -1606,6 +1627,7 @@ class SuperLSS:
             self._require_fitted(),
             X,
             weights=self._prior_law_weight(sample_weight),
+            offsets=offsets,
             **kwargs,
         )
 

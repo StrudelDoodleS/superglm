@@ -48,6 +48,142 @@ def _close_figures():
     plt.close("all")
 
 
+def test_review_training_defaults_own_positive_rows():
+    from superglm._frame import as_eager_frame
+
+    frame = pd.DataFrame({"x": np.r_[np.linspace(-1, 1, 30), 1e6]}, index=np.arange(31) + 70)
+    original = frame.iloc[:30].copy()
+    y = np.sin(frame["x"].to_numpy()) + np.random.default_rng(2).normal(0, 0.2, 31)
+    model = SuperLSS(
+        family=GaussianLS(),
+        predictors=[Predictor("location", {"x": Spline("cr", k=4)}), Predictor("scale", {})],
+    ).fit(frame, y, sample_weight=np.r_[np.ones(30), 0.0], lambdas={"location:x#wiggle": 1.0})
+    retained = as_eager_frame(model._term_training_frame(None)).native
+    pd.testing.assert_frame_equal(retained, original)
+    frame.loc[:, "x"] = -999.0
+    pd.testing.assert_frame_equal(as_eager_frame(model._term_training_frame(None)).native, original)
+    effect = model.term_inference("location", "x")
+    assert effect.x.max() <= 1.0
+    explicit = original.assign(x=lambda df: df.x * 2)
+    assert model._term_training_frame(explicit) is explicit
+
+
+def test_review_mixed_categories_reach_surface_predictions():
+    frame = pd.DataFrame({"g": np.array([1, "b"] * 20, dtype=object), "x": np.linspace(-1, 1, 40)})
+    y = frame["x"].to_numpy() + np.random.default_rng(3).normal(0, 0.5, 40)
+    model = SuperLSS(
+        family=GaussianLS(),
+        predictors=[
+            Predictor("location", {"g": Categorical(), "x": Spline("cr", k=4)}),
+            Predictor("scale", {}),
+        ],
+    ).fit(frame, y, lambdas={"location:x#wiggle": 1.0})
+    swept = model.risk_curves({}, "g", n_draws=5)
+    assert set(swept.levels) == {"1", "b"}
+    assert np.all(np.isfinite(swept.values))
+    referenced = model.density_fan({}, "x", n_points=4, n_y=30)
+    assert referenced.reference["g"] == 1
+    assert np.all(np.isfinite(referenced.density))
+
+
+def test_review_surface_facades_align_call_time_weights_and_offsets(case):
+    model, frame, _ = case
+    X = frame.head(5).copy()
+    X.iloc[3, X.columns.get_loc("x")] = np.nan
+    weights = np.array([2.0, 3.0, 1.0, 0.0, 4.0])
+    offset = np.array([0.1, 0.2, 0.3, np.nan, 0.4])
+    kept = np.array([0, 1, 2, 4])
+    full = model.parameter_spread(
+        X, threshold=1, n_bins=2, sample_weight=weights, offsets={"location": offset}
+    )
+    retained = model.parameter_spread(
+        X.iloc[kept],
+        threshold=1,
+        n_bins=2,
+        sample_weight=weights[kept],
+        offsets={"location": offset[kept]},
+    )
+    pd.testing.assert_frame_equal(full.identically_priced, retained.identically_priced)
+    labels = np.array(["a", "a", "b", None, "b"], dtype=object)
+    full_book = model.portfolio(
+        X,
+        sample_weight=weights,
+        offsets={"location": offset},
+        by=labels,
+        n_draws=5,
+        return_draws=True,
+    )
+    retained_book = model.portfolio(
+        X.iloc[kept],
+        sample_weight=weights[kept],
+        offsets={"location": offset[kept]},
+        by=labels[kept],
+        n_draws=5,
+        return_draws=True,
+    )
+    np.testing.assert_array_equal(full_book.total_draws, retained_book.total_draws)
+    pd.testing.assert_frame_equal(full_book.by_segment, retained_book.by_segment)
+
+
+@pytest.mark.parametrize("which", ["log", "crps"])
+def test_review_compare_candidate_offsets(case, which):
+    from superglm.distributional.checks.compare import murphy_diagram
+
+    model, frame, y = case
+    frame, y = frame.head(8).copy(), y[:8].copy()
+    frame.iloc[2, frame.columns.get_loc("x")] = np.nan
+    y[2] = np.nan
+    weights = np.array([1, 1, 0, 1, 1, 1, 1, 1], dtype=float)
+    a = {"location": np.full(8, 0.1)}
+    b = {"location": np.full(8, 0.8)}
+    a["location"][2] = b["location"][2] = np.nan
+    result = model.compare(
+        model,
+        frame,
+        y,
+        which=which,
+        sample_weight=weights,
+        a_offsets=a,
+        b_offsets=b,
+        murphy_quantile=0.5,
+    )
+    a_score = model.scores(frame, y, which=(which,), sample_weight=weights, offsets=a)[which]
+    b_score = model.scores(frame, y, which=(which,), sample_weight=weights, offsets=b)[which]
+    assert result.overall["mean_diff"] == pytest.approx((a_score - b_score).mean())
+    assert result.overall["mean_diff"] != 0
+    kept = np.flatnonzero(weights)
+    forecasts = [
+        model.predict_parameters(frame.iloc[kept], offsets={"location": off["location"][kept]})[
+            "location"
+        ].to_numpy()
+        for off in (a, b)
+    ]
+    expected_murphy = murphy_diagram(
+        *forecasts, y[kept], level=0.5, thresholds=result.murphy.thresholds
+    )
+    np.testing.assert_array_equal(result.murphy.a, expected_murphy.a)
+    np.testing.assert_array_equal(result.murphy.b, expected_murphy.b)
+    with pytest.raises(ValueError, match="shared.*candidate|mix"):
+        model.compare(model, frame, y, offsets=a, a_offsets=a)
+
+
+def test_review_compare_different_candidate_predictor_names(weighted_fits):
+    gaussian = weighted_fits["gaussian"][0]
+    gamma, frame, y, _ = weighted_fits["gamma"]
+    frame, y = frame.head(6), y[:6]
+    a = {"location": np.full(6, 0.2)}
+    b = {"mean": np.full(6, 0.4)}
+    actual = compare_models(
+        gaussian._require_fitted(), gamma._require_fitted(), frame, y, a_offsets=a, b_offsets=b
+    )
+    difference = (
+        gaussian.scores(frame, y, offsets=a)["log"] - gamma.scores(frame, y, offsets=b)["log"]
+    )
+    assert actual.overall["mean_diff"] == pytest.approx(difference.mean())
+    shifted = gaussian.compare(gamma, frame, y, b_offsets=b)
+    assert shifted.overall["mean_diff"] != actual.overall["mean_diff"]
+
+
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #

@@ -1722,7 +1722,10 @@ def plotly_diagnostics_figure(
     _worm_panel(fig, worm.panels[0], row=1, col=2, showlegend=False)
     _pit_panel(fig, pit, row=1, col=3, showlegend=False)
 
-    values = np.asarray(residuals.quantile, dtype=np.float64)
+    from superglm.distributional.residuals import _sample_residuals
+
+    sample = _sample_residuals(residuals)
+    values = sample.quantile
     finite = values[np.isfinite(values)]
     low, high = (float(bound) for bound in np.percentile(finite, [0.5, 99.5]))
     clipped = finite[(finite >= low) & (finite <= high)]
@@ -1754,7 +1757,7 @@ def plotly_diagnostics_figure(
         col=1,
     )
 
-    eta = np.asarray(residuals.eta, dtype=np.float64)
+    eta = np.asarray(residuals.eta, dtype=np.float64)[sample.rows]
     location = eta[:, 0]
     scale = eta[:, 1] if eta.shape[1] > 1 else eta[:, 0]
     _scatter_or_binned(

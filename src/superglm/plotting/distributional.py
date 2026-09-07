@@ -36,7 +36,7 @@ from superglm.distributional.checks.compare import Comparison
 from superglm.distributional.checks.pit import PITPayload
 from superglm.distributional.checks.qq import QQPayload
 from superglm.distributional.checks.worm import WormPanel, WormPayload
-from superglm.distributional.residuals import ResidualSet, replication_sample
+from superglm.distributional.residuals import ResidualSet, _sample_residuals
 from superglm.distributional.surfaces import DensityFan, Histogram, Portfolio, RiskCurves, Spread
 from superglm.distributional.terms import ParameterTermEffect
 from superglm.plotting.editor_style import (
@@ -500,8 +500,11 @@ def plot_actual_expected(payload: ActualExpected, *, ax: Axes | None = None) -> 
         # of a thin bin otherwise drag the axis under it; a signed target that
         # really does reach below zero keeps its own floor.
         ax.set_ylim(bottom=float(np.nanmin(np.append(ratio - error, 0.0))))
-        overall = float(np.sum(payload.actual)) / float(np.sum(payload.expected))
-        ax.set_title(f"{payload.covariate}: actual over expected, overall {overall:.3f}")
+        expected = float(np.sum(payload.expected))
+        overall = (
+            f"{float(np.sum(payload.actual)) / expected:.3f}" if expected != 0.0 else "undefined"
+        )
+        ax.set_title(f"{payload.covariate}: actual over expected, overall {overall}")
         ax.set_xlabel(payload.covariate)
         ax.set_ylabel("actual / expected")
         return _finish(fig, [ax])
@@ -1036,9 +1039,9 @@ def plot_diagnostics_figure(
     max_points: int = 50_000,
 ) -> Figure:
     """Draw the six-panel distributional diagnostic."""
-    index = replication_sample(residuals)
-    values = np.asarray(residuals.quantile, dtype=np.float64)[index]
-    eta = np.asarray(residuals.eta, dtype=np.float64)[index]
+    sample = _sample_residuals(residuals)
+    values = sample.quantile
+    eta = np.asarray(residuals.eta, dtype=np.float64)[sample.rows]
     scale_eta = eta[:, 1] if eta.shape[1] >= 2 else eta[:, 0]
     scale_name = "scale" if eta.shape[1] >= 2 else "location"
     with matplotlib_context():
