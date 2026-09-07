@@ -99,6 +99,48 @@ def _assert_json_leaves(payload: object) -> None:
     assert not (isinstance(payload, float) and math.isnan(payload))
 
 
+@pytest.mark.parametrize("chunk_rows", [1, 2])
+def test_task7_portfolio_rejects_overflowing_total(gaussian_case, chunk_rows):
+    fitted, X, _ = gaussian_case
+    with pytest.raises(ValueError, match="reduction.*non-finite"):
+        portfolio(
+            fitted,
+            X.head(2),
+            n_draws=2,
+            parameter_uncertainty=False,
+            offsets={"location": np.full(2, 1e308)},
+            chunk_rows=chunk_rows,
+        )
+
+
+def test_task7_portfolio_rejects_overflowing_segments(gaussian_case):
+    fitted, X, _ = gaussian_case
+    with pytest.raises(ValueError, match="segment.*non-finite"):
+        portfolio(
+            fitted,
+            X.head(4),
+            n_draws=2,
+            parameter_uncertainty=False,
+            offsets={"location": np.array([1e308, -1e308, 1e308, -1e308])},
+            by=np.array(["positive", "negative", "positive", "negative"]),
+            chunk_rows=2,
+        )
+
+
+@pytest.mark.parametrize("segmented", [False, True])
+def test_task7_portfolio_refuses_nonfinite_summary(gaussian_case, segmented):
+    fitted, X, _ = gaussian_case
+    with pytest.raises(ValueError, match="summary.*non-finite"):
+        portfolio(
+            fitted,
+            X.head(1),
+            n_draws=2,
+            parameter_uncertainty=False,
+            offsets={"location": np.array([1e308])},
+            by=np.array(["a"]) if segmented else None,
+        )
+
+
 class _SpreadLaw:
     default_prediction_name = "mean"
     parameters = (SimpleNamespace(name="mean"), SimpleNamespace(name="tail"))

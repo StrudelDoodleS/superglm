@@ -45,6 +45,60 @@ def _predictors() -> list[Predictor]:
     ]
 
 
+@pytest.mark.parametrize("shift", [1000.0, -1000.0])
+def test_task7_posterior_rejects_unsupported_pushforward(fit_case, shift):
+    fitted, X, _ = fit_case
+    draws = PosteriorDraws(
+        coefficients=np.asarray(fitted.coefficients)[None, :],
+        covariance_kind="fixed",
+        seed=0,
+        coefficient_names=tuple(fitted.layout.coefficient_names),
+    )
+    with pytest.raises(ValueError, match="scale.*supported"):
+        list(posterior_parameters(fitted, X.head(2), draws, offsets={"scale": np.full(2, shift)}))
+
+
+@pytest.mark.parametrize("chunk_rows", [1, 2])
+def test_task7_predictive_rejects_unrepresentable_sum(fit_case, chunk_rows):
+    fitted, X, _ = fit_case
+    kwargs = dict(
+        n_draws=2,
+        parameter_uncertainty=False,
+        offsets={"location": np.full(2, 1e308)},
+        chunk_rows=chunk_rows,
+    )
+    assert np.all(np.isfinite(posterior_predictive(fitted, X.head(2), **kwargs)))
+    with pytest.raises(ValueError, match="reduction.*non-finite"):
+        posterior_predictive(fitted, X.head(2), reduce="sum", **kwargs)
+
+
+@pytest.mark.parametrize("ndim", [1, 2])
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_task7_predictive_rejects_nonfinite_callable(fit_case, ndim, value):
+    fitted, X, _ = fit_case
+
+    def reduce(block):
+        return np.full((len(block),) if ndim == 1 else (len(block), 1), value)
+
+    with pytest.raises(ValueError, match="reduction.*non-finite"):
+        posterior_predictive(
+            fitted, X.head(2), n_draws=2, parameter_uncertainty=False, reduce=reduce
+        )
+
+
+def test_task7_predictive_finite_additive_control(fit_case):
+    fitted, X, _ = fit_case
+    actual = posterior_predictive(
+        fitted,
+        X.head(5),
+        n_draws=3,
+        parameter_uncertainty=False,
+        reduce=lambda block: np.full(len(block), block.shape[1]),
+        chunk_rows=2,
+    )
+    np.testing.assert_array_equal(actual, [5, 5, 5])
+
+
 @pytest.fixture(scope="module")
 def fit_case() -> tuple[DenseDistributionalModel, pd.DataFrame, np.ndarray]:
     X, y = _simulated()

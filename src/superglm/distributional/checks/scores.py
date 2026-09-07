@@ -43,6 +43,7 @@ from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     DistributionFunctionFamily,
     PriorWeightedDistributionFunctionFamily,
+    validated_parameter_matrix,
 )
 from superglm.distributional.kernels.log_normal import location_of_mean
 
@@ -178,7 +179,10 @@ def crps_closed_form(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.floa
             f"{name} has no catalogued closed-form CRPS; score it with the numeric "
             "quantile-score integral (crps_numeric or method='numeric')"
         )
-    return formula(family, y, theta)
+    values = validated_parameter_matrix(
+        theta, n_observations=None, parameters=family.parameters, family_name=name
+    )
+    return formula(family, y, values)
 
 
 # --------------------------------------------------------------------------
@@ -432,13 +436,19 @@ def _retained_crps(
 
     closed_theta = _closed_form_parameters(fitted.family, theta, rows.prior_law)
     if method == "closed":
-        if closed_theta is None:
+        if closed_theta is None or not has_closed_form_crps(fitted.family):
             raise NotImplementedError(
                 f"{type(fitted.family).__name__} has no catalogued prior-weighted closed-form CRPS"
             )
-        return crps_closed_form(fitted.family, rows.response, closed_theta)
+        # Prediction validated raw parameters; prior-law scales may legitimately
+        # fall below the fitted family's raw parameter floor.
+        return _CLOSED_FORMS[type(fitted.family).__name__](
+            fitted.family, rows.response, closed_theta
+        )
     if has_closed_form_crps(fitted.family) and closed_theta is not None:
-        return crps_closed_form(fitted.family, rows.response, closed_theta)
+        return _CLOSED_FORMS[type(fitted.family).__name__](
+            fitted.family, rows.response, closed_theta
+        )
     return crps_numeric(row_law, rows.response, theta, n_nodes=n_nodes)
 
 

@@ -225,6 +225,8 @@ def _murphy_diagram(
     response = np.asarray(y, dtype=np.float64)
     if response.ndim != 1:
         raise ValueError("the Murphy diagram needs a one-dimensional response of at least two rows")
+    if not np.all(np.isfinite(response)):
+        raise ValueError("the Murphy diagram needs finite response values")
     mass = (
         np.ones(len(response), dtype=np.float64)
         if aggregation_mass is None
@@ -240,6 +242,8 @@ def _murphy_diagram(
         array = np.asarray(values, dtype=np.float64)
         if array.shape != response.shape:
             raise ValueError("the Murphy diagram needs one forecast per row for both models")
+        if not np.all(np.isfinite(array)):
+            raise ValueError("the Murphy diagram needs finite forecast values for both models")
         forecasts.append(array)
     grid = np.asarray(thresholds, dtype=np.float64)
     if grid.ndim != 1 or len(grid) < 1:
