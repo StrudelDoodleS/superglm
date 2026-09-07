@@ -30,7 +30,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
-from superglm.distributional.residuals import ResidualSet, replication_sample
+from superglm.distributional.residuals import ResidualSet, _sample_residuals
 
 #: Row set for a check without a seed of its own: the replication default.
 _REPLICATION_SEED = 42
@@ -109,9 +109,9 @@ def pit_payload(residuals: ResidualSet, *, n_bins: int = 20, alpha: float = 0.05
     if not 0.0 < level < 1.0:
         raise ValueError("alpha must lie strictly inside (0, 1)")
 
-    rows = replication_sample(residuals, seed=_REPLICATION_SEED)
-    counts, edges = np.histogram(residuals.pit[rows], bins=bins, range=(0.0, 1.0))
-    n_rows = len(rows)
+    sample = _sample_residuals(residuals, seed=_REPLICATION_SEED)
+    counts, edges = np.histogram(sample.pit, bins=bins, range=(0.0, 1.0))
+    n_rows = len(sample.rows)
     lower, upper = stats.binom.ppf([level / 2.0, 1.0 - level / 2.0], n_rows, 1.0 / bins)
     return PITPayload(
         edges=edges,

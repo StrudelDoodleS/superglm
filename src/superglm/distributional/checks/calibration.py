@@ -90,7 +90,13 @@ from superglm.distributional.model import (
     _unvalidated_response_shape,
 )
 from superglm.distributional.posterior import posterior_predictive
-from superglm.distributional.residuals import ResidualSet, compute_residuals, replication_sample
+from superglm.distributional.residuals import (
+    ResidualSet,
+    _residual_rng,
+    _sample_residuals,
+    _validate_residual_evaluation,
+    compute_residuals,
+)
 
 # ``_equal_count_bins`` splits rows by rank rather than by value, which is what
 # keeps a decile table ten rows wide even for a parameter the model holds
@@ -238,7 +244,9 @@ class CalibrationPayload:
         is what a family with an atom needs -- see the module docstring.
 
     ``tails`` and :class:`ActualExpected` compare totals and are the same under
-    either law.
+    either law. Randomised coverage/quantile ``n``, ``weight`` and errors count
+    sampled occurrences (capped at 100,000); response-law tables retain full
+    weighted totals. ``n_rows`` always counts retained physical input rows.
     """
 
     coverage: pd.DataFrame
@@ -352,7 +360,7 @@ def reliability_curve(
     observed = np.add.reduceat(outcome[order], starts) / mass
     calibrated = _pava(observed, mass)
 
-    generator = np.random.default_rng(seed)
+    generator = _residual_rng(seed, 5)
     resampled = np.empty((boot, len(unique)), dtype=np.float64)
     draws = (generator.uniform(size=(boot, len(forecast))) < sorted_forecast).astype(np.float64)
     pooled = np.add.reduceat(draws, starts, axis=1) / mass
@@ -413,6 +421,8 @@ def _retained_rows(
             _unvalidated_offset_shapes(offsets, n_observations), positions
         )
     weights = np.asarray(resolved.values, dtype=np.float64)
+    if not np.all(np.isfinite(response)):
+        raise ValueError("retained diagnostic responses must be finite")
     prior = contract.semantics == "prior"
     return _Rows(
         frame=frame,
@@ -504,6 +514,8 @@ def _row_variance(
         return np.asarray(family.variance(theta), dtype=np.float64), "family"
     else:
         law = "draws"
+    if n_draws < 2:
+        raise ValueError("n_draws must be at least two to estimate variance by simulation")
     draws = posterior_predictive(
         fitted,
         rows.frame,
@@ -637,8 +649,8 @@ def calibration_payload(
     ``by_parameter_deciles`` adds, beside the overall row, one row per decile of
     each predicted parameter to the coverage table and one per decile of the
     predicted exceedance probability to the tail table.  Passing ``residuals``
-    reuses an already-computed residual payload and spares a second parameter
-    prediction; it is checked against the rows this call resolved, because
+    reuses its randomised values after checking the current deterministic
+    evaluation, including parameters, CDF intervals and weights, because
     residuals from another model or another sample would silently make every
     table below a statement about the wrong fit.
 
@@ -652,17 +664,18 @@ def calibration_payload(
     asked_thresholds = tuple(float(value) for value in thresholds)
 
     rows = _retained_rows(fitted, X, y, sample_weight=sample_weight, offsets=offsets)
+    family = fitted.family
+    cdf, quantile = _row_law(family, rows.prior_law)
     if residuals is None:
         residuals = compute_residuals(
             fitted, X, y, sample_weight=sample_weight, offsets=offsets, seed=seed
         )
     elif not isinstance(residuals, ResidualSet):
         raise TypeError("residuals must be a ResidualSet")
-    if residuals.n_rows != len(rows.positions) or not np.array_equal(residuals.y, rows.response):
-        raise ValueError("residuals must come from the same rows as X and y")
-
-    family = fitted.family
-    cdf, quantile = _row_law(family, rows.prior_law)
+    else:
+        _validate_residual_evaluation(
+            residuals, fitted, X, y, sample_weight=sample_weight, offsets=offsets
+        )
     theta = residuals.theta
     response = rows.response
     # A family with a point mass answers "is the response inside this interval"
@@ -673,18 +686,20 @@ def calibration_payload(
     # the same law -- there the two agree row for row anyway.
     randomised = isinstance(family, AtomFamily) or residuals.randomised_rows > 0
     law: CalibrationLaw = "randomised_pit" if randomised else "response"
-    transform = residuals.pit
-    # Coverage, exceedance and quantile indicators are per-row facts rather than
-    # rates, so they are weighted by replication only: ones under the prior
-    # contract, where the declared weight is already inside the row's own law,
-    # and the declared counts under the frequency contract.
+    sample = _sample_residuals(residuals, seed=seed)
+    transform = sample.pit if randomised else residuals.pit
+    # Response-only totals use full physical frequency counts. Randomised
+    # coverage and quantiles count independent sampled occurrences instead.
     weights = residuals.weights
     n_rows = len(response)
+    calibration_weights = np.ones(len(sample.rows)) if randomised else weights
+    calibration_theta = theta[sample.rows] if randomised else theta
+    calibration_n = len(calibration_weights)
 
-    groupings = [_overall(n_rows)]
+    groupings = [_overall(calibration_n)]
     if by_parameter_deciles:
         groupings.extend(
-            _decile_grouping(theta[:, index], spec.name)
+            _decile_grouping(calibration_theta[:, index], spec.name)
             for index, spec in enumerate(family.parameters)
         )
 
@@ -702,7 +717,7 @@ def calibration_payload(
         for grouping in groupings:
             width = len(grouping.labels)
             _, exposure, realised = grouped_ratio(
-                weights * covered, weights, grouping.codes, n_groups=width
+                calibration_weights * covered, calibration_weights, grouping.codes, n_groups=width
             )
             counts = np.bincount(grouping.codes, minlength=width).astype(np.int64)
             error = _binomial_error(realised, exposure)
@@ -718,13 +733,13 @@ def calibration_payload(
         for key in ("threshold", "group", "n", "weight", "expected", "realised", "se", "log_score")
     }
     reliability: dict[float, ReliabilityCurve] = {}
-    replication = replication_sample(residuals, seed=seed)
+    replication = sample.rows
     for threshold in asked_thresholds:
         exceedance = 1.0 - np.asarray(cdf(np.full(n_rows, threshold), theta), dtype=np.float64)
         event = (response > threshold).astype(np.float64)
         clipped = np.clip(exceedance, _LOG_SCORE_FLOOR, 1.0 - _LOG_SCORE_FLOOR)
         score = -(event * np.log(clipped) + (1.0 - event) * np.log1p(-clipped))
-        tail_groupings = list(groupings[:1])
+        tail_groupings = [_overall(n_rows)]
         if by_parameter_deciles:
             tail_groupings.append(_decile_grouping(exceedance, "exceedance"))
         for grouping in tail_groupings:
@@ -758,16 +773,18 @@ def calibration_payload(
     quantiles: dict[str, list[Any]] = {
         key: [] for key in ("p", "n", "weight", "expected", "realised_exceedance", "se")
     }
-    codes = np.zeros(n_rows, dtype=np.intp)
+    codes = np.zeros(calibration_n, dtype=np.intp)
     for probability in asked_grid:
         if randomised:
             exceeded = (transform > probability).astype(np.float64)
         else:
             predicted = np.asarray(quantile(np.full(n_rows, probability), theta), dtype=np.float64)
             exceeded = (response > predicted).astype(np.float64)
-        _, exposure, realised = grouped_ratio(weights * exceeded, weights, codes, n_groups=1)
+        _, exposure, realised = grouped_ratio(
+            calibration_weights * exceeded, calibration_weights, codes, n_groups=1
+        )
         quantiles["p"].append(probability)
-        quantiles["n"].append(n_rows)
+        quantiles["n"].append(calibration_n)
         quantiles["weight"].append(float(exposure[0]))
         quantiles["expected"].append(1.0 - probability)
         quantiles["realised_exceedance"].append(float(realised[0]))
