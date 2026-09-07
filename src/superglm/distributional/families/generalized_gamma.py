@@ -38,6 +38,7 @@ from superglm.distributional.kernels.generalized_gamma import (
     generalized_gamma_expected_shortfall,
     generalized_gamma_expected_shortfall_from_mean,
     generalized_gamma_quantile,
+    generalized_gamma_variance,
     initialize_generalized_gamma,
     location_expected_information,
     location_of_mean,
@@ -387,6 +388,13 @@ class GeneralizedGammaLSS:
         if self.parametrisation == "mean":
             return readonly(values[:, 0])
         return mean_of_location(values[:, 0], values[:, 1], values[:, 2])
+
+    def variance(self, theta: NDArray) -> NDArray[np.float64]:
+        """Population variance, with infinity for a divergent second moment."""
+        values = self._theta(theta, None)
+        return generalized_gamma_variance(
+            values[:, 0], values[:, 1], values[:, 2], parametrisation=self.parametrisation
+        )
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         values = self._theta(theta, None)

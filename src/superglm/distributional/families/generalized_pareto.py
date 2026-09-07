@@ -340,6 +340,22 @@ class GeneralizedParetoLSS:
         values = self._theta(theta, None)
         return generalized_pareto_mean(values[:, 0], values[:, 1])
 
+    def variance(self, theta) -> NDArray[np.float64]:
+        """Population variance; infinite when the shape is at least one half."""
+        values = self._theta(theta, None)
+        scale, shape = values.T
+        finite = shape < 0.5
+        result = np.full(len(values), np.inf)
+        with np.errstate(over="ignore", under="ignore"):
+            result[finite] = (scale[finite] / (1.0 - shape[finite])) ** 2 / (
+                1.0 - 2.0 * shape[finite]
+            )
+        if np.any(~np.isfinite(result[finite]) | (result[finite] <= 0.0)):
+            raise GeneralizedParetoDomainError(
+                "generalized Pareto finite variance is unresolved in the numerical range"
+            )
+        return readonly(result)
+
     def cdf(self, y, theta) -> NDArray[np.float64]:
         values = self._theta(theta, None)
         response = np.broadcast_to(np.asarray(y, dtype=np.float64), (len(values),))

@@ -29,6 +29,22 @@ def _weights(values, semantics):
     )
 
 
+def test_variance_has_the_exact_second_moment_domain_without_losing_finite_means():
+    family = GeneralizedParetoLSS()
+    theta = np.array([[2.0, 0.25], [2.0, 0.5], [2.0, 0.75]])
+    variance = family.variance(theta)
+    assert variance[0] == pytest.approx(4.0 / (0.75**2 * 0.5))
+    assert np.all(np.isposinf(variance[1:]))
+    assert np.all(np.isfinite(family.default_prediction(theta)))
+
+
+@pytest.mark.parametrize("scale", [1e-166, 1e200])
+def test_variance_range_refusal_is_distinct_from_divergence(scale):
+    theta = np.array([[scale, np.nextafter(0.5, 0.0)]])
+    with pytest.raises(gp.GeneralizedParetoDomainError, match="variance.*numerical range"):
+        GeneralizedParetoLSS().variance(theta)
+
+
 def _bind(family, y, values, semantics):
     return family.bind_likelihood(y, _weights(values, semantics), COMPLETE_OBSERVATION)
 
@@ -91,7 +107,9 @@ def test_nonunit_prior_weights_are_refused_and_unit_prior_bridges_to_frequency()
     assert plan.row_law == "unit-prior-explicitly-equals-frequency/v1"
     frequency = _bind(family, y, [1.0, 1.0, 1.0, 1.0], "frequency")
     assert frequency.row_law == "gpd-excess-literal-replication/v1"
-    theta = family.initialize(y, plan).theta
+    # These moments imply negative shape, outside this family's shape walls.
+    with pytest.warns(gp.GeneralizedParetoInitializationWarning, match="method-of-moments"):
+        theta = family.initialize(y, plan).theta
     a = family.evaluate_natural(y, theta, plan)
     b = family.evaluate_natural(y, theta, frequency)
     assert np.array_equal(a.reported_log_likelihood, b.reported_log_likelihood)

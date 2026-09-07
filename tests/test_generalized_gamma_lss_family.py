@@ -27,6 +27,93 @@ def _weights(values, semantics):
     )
 
 
+@pytest.mark.parametrize("parametrisation", ["mean", "location"])
+def test_variance_second_moment_domain_preserves_finite_mean(parametrisation):
+    family = GeneralizedGammaLSS(parametrisation=parametrisation)
+    theta = np.array([[2.0, s, -1.0] for s in [0.25, 0.5, 0.75]])
+    variance = family.variance(theta)
+    assert np.isfinite(variance[0]) and variance[0] > 0.0
+    assert np.all(np.isposinf(variance[1:]))
+    assert np.all(np.isfinite(family.default_prediction(theta)))
+
+
+@pytest.mark.parametrize("parametrisation", ["mean", "location"])
+@pytest.mark.parametrize("sigma", [1e-2, 1e-8, 1e-14, 1e-100])
+@pytest.mark.parametrize("special_case", ["gamma", "lognormal"])
+def test_variance_matches_gamma_and_lognormal_identities(parametrisation, sigma, special_case):
+    family = GeneralizedGammaLSS(parametrisation=parametrisation, scale_floor=0)
+    q = sigma if special_case == "gamma" else 0.0
+    first = 2.0 if parametrisation == "mean" else np.log(2.0)
+    mean = 2.0 if parametrisation == "mean" or q != 0 else 2.0 * np.exp(sigma**2 / 2)
+    expected = mean**2 * (sigma**2 if q != 0 else np.expm1(sigma**2))
+    actual = family.variance(np.array([[first, sigma, q]]))[0]
+    assert actual > 0.0
+    assert actual == pytest.approx(expected, rel=2048 * np.finfo(float).eps, abs=0)
+
+
+@pytest.mark.parametrize("parametrisation", ["mean", "location"])
+@pytest.mark.parametrize(
+    "sigma,q",
+    [
+        (0.7, 0.4),
+        (0.3, -0.8),
+        (1e-14, 1.0),
+        (1e-14, -1.0),
+        (1e-14, 1e4),
+        (1e-14, -1e4),
+        (1e-14, 1e-6),
+        (0.7, 0.9e-8),
+        (0.7, -0.9e-8),
+        (0.7, 1.1e-8),
+        (0.7, -1.1e-8),
+        (1e-14, 0.9e-8),
+        (1e-14, -1.1e-8),
+        (0.1428, 1.0),
+        (0.1429, 1.0),
+        (0.1111, -1.0),
+        (0.1112, -1.0),
+    ],
+)
+def test_variance_matches_independent_high_precision_moments(parametrisation, sigma, q):
+    mp = pytest.importorskip("mpmath")
+    with mp.workdps(100):
+        s, shape = mp.mpf(sigma), mp.mpf(q)
+        k = 1 / shape**2
+
+        def loading(order):
+            return (
+                order * s / shape * mp.log(shape**2)
+                + mp.loggamma(k + order * s / shape)
+                - mp.loggamma(k)
+            )
+
+        logmean = mp.log(2) if parametrisation == "mean" else mp.mpf(0.5) + loading(1)
+        expected = float(mp.exp(2 * logmean) * mp.expm1(loading(2) - 2 * loading(1)))
+    family = GeneralizedGammaLSS(parametrisation=parametrisation, scale_floor=0)
+    theta = np.array([[2.0 if parametrisation == "mean" else 0.5, sigma, q]])
+    actual = family.variance(theta)[0]
+    assert actual > 0.0
+    assert actual == pytest.approx(expected, rel=8192 * np.finfo(float).eps, abs=0)
+
+
+@pytest.mark.parametrize("q", [0.0, 1.0, -1.0, 1e-200])
+@pytest.mark.parametrize("parametrisation", ["mean", "location"])
+def test_variance_avoids_intermediate_range_loss(q, parametrisation):
+    family = GeneralizedGammaLSS(scale_floor=0, parametrisation=parametrisation)
+    first = 1e200 if parametrisation == "mean" else np.log(1e200)
+    actual = family.variance(np.array([[first, 1e-200, q]]))[0]
+    # The coefficient of sigma² is Var(log(G))/Q²; at Q=0 it is one.
+    expected = 1.0 if abs(q) < 1e-100 else np.pi**2 / 6
+    assert actual == pytest.approx(expected, rel=8192 * np.finfo(float).eps, abs=0)
+
+
+@pytest.mark.parametrize("mean,sigma", [(1e300, 1.0), (1e-300, 1e-100)])
+def test_finite_variance_outside_float_range_is_a_numerical_refusal(mean, sigma):
+    family = GeneralizedGammaLSS(scale_floor=0)
+    with pytest.raises(gg.GeneralizedGammaDomainError, match="variance.*(range|represent)"):
+        family.variance(np.array([[mean, sigma, 0.0]]))
+
+
 def _bind(family, y, values, semantics):
     return family.bind_likelihood(y, _weights(values, semantics), COMPLETE_OBSERVATION)
 

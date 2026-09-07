@@ -617,6 +617,121 @@ def log_mean_loading(sigma: NDArray, shape: NDArray) -> tuple[NDArray[np.float64
     return tuple(readonly(value) for value in values)
 
 
+def _log_variance_loading(sigma: float, q: float) -> float:
+    """Log of ``expm1(L(2 sigma)-2 L(sigma))`` on the second-moment domain.
+
+    At small relative increment, center at x=k+h, h=sigma/Q. The positive
+    series D=sum(h**(2j)*zeta(2j,x)/j) has relative remainder bounded by
+    r**(2J)/((J+1)*(1-r*r)), r=abs(h)/x. Log scaling retains tiny D even
+    when sigma squared underflows. Unresolved special-function range refuses.
+    """
+    refusal = "generalized gamma variance is unresolved in the numerical range"
+    if q == 0.0:
+        logd = 2.0 * math.log(sigma)
+    elif q == sigma:
+        # Gamma recurrence: expm1(D) = sigma squared, including tiny sigma.
+        return 2.0 * math.log(sigma)
+    else:
+        v = sigma * q
+        q2 = q * q
+        if not math.isfinite(v) or not math.isfinite(q2) or q2 == 0.0:
+            raise GeneralizedGammaDomainError(refusal)
+        x = (1.0 + v) / q2
+        r = abs(v) / (1.0 + v)
+        if not math.isfinite(x) or x <= 0.0 or not 0.0 <= r < 1.0:
+            raise GeneralizedGammaDomainError(refusal)
+        if r <= 0.125:
+            z2 = float(special.zeta(2, x))
+            if not math.isfinite(z2) or z2 <= 0.0:
+                raise GeneralizedGammaDomainError(refusal)
+            logh = math.log(sigma) - math.log(abs(q))
+            logfirst = 2.0 * logh + math.log(z2)
+            correction = 1.0
+            for j in range(1, 10):
+                if r ** (2 * j) / ((j + 1) * (1.0 - r * r)) <= _EPS / 8:
+                    break
+                z = float(special.zeta(2 * (j + 1), x))
+                if not math.isfinite(z) or z <= 0.0:
+                    raise GeneralizedGammaDomainError(refusal)
+                correction += math.exp(
+                    2 * (j + 1) * logh + math.log(z) - math.log(j + 1) - logfirst
+                )
+            logd = logfirst + math.log(correction)
+        else:
+            # Ordinary loading subtraction is accepted only with a small
+            # propagated error, including its unreduced Stirling terms.
+            scales = np.array([sigma, 2.0 * sigma])
+            shapes = np.full(2, q)
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                loading = log_mean_loading(scales, shapes)[0]
+                vs = scales * q
+                arguments = (1.0 + vs) / q2
+                budget = (
+                    scales**2 * (np.abs(series_l2(vs)) + np.abs(series_l1(vs)))
+                    + 0.5 * np.abs(np.log1p(vs))
+                    + np.abs(stirling_remainder(arguments))
+                    + abs(float(stirling_remainder(np.array([1.0 / q2]))[0]))
+                )
+                # Construction of 1+v becomes ill-conditioned near the
+                # second-moment pole. Include its log/Stirling sensitivity.
+                budget += (
+                    np.abs(vs)
+                    / (1.0 + vs)
+                    * (0.5 + np.abs(arguments * stirling_remainder_d1(arguments)))
+                )
+            d = float(loading[1] - 2.0 * loading[0])
+            error = 128 * _EPS * float(budget[1] + 2.0 * budget[0])
+            if not math.isfinite(d) or d <= 0.0 or not math.isfinite(error):
+                raise GeneralizedGammaDomainError(refusal)
+            if error / -math.expm1(-d) > 1e-10:
+                raise GeneralizedGammaDomainError(refusal)
+            logd = math.log(d)
+    if logd < math.log(_EPS):
+        return logd  # expm1(D)/D differs from one by less than epsilon.
+    if logd > math.log(np.finfo(_FLOAT).max):
+        raise GeneralizedGammaDomainError(refusal)
+    d = math.exp(logd)
+    return d + math.log(-math.expm1(-d))
+
+
+def generalized_gamma_variance(
+    first: NDArray, sigma: NDArray, shape: NDArray, *, parametrisation: Parametrisation
+) -> NDArray[np.float64]:
+    """Variance with mathematical divergence distinct from numerical refusal."""
+    first_values = _vector(first, name=parametrisation)
+    scales = _positive_vector(sigma, name="sigma")
+    shapes = _vector(shape, name="shape")
+    if first_values.shape != scales.shape or shapes.shape != scales.shape:
+        raise GeneralizedGammaDomainError("generalized gamma row arrays must have the same shape")
+    with np.errstate(over="ignore"):
+        product = scales * -shapes
+        finite = (shapes >= 0.0) | (product < 0.5)
+    # A rounded product at the wall can hide a finite second moment. Resolve
+    # only this ambiguous comparison exactly, before any numerical evaluation.
+    for i in np.flatnonzero((shapes < 0.0) & (product == 0.5)):
+        sn, sd = float(scales[i]).as_integer_ratio()
+        qn, qd = float(-shapes[i]).as_integer_ratio()
+        finite[i] = 2 * sn * qn < sd * qd
+    result = np.full(len(scales), np.inf)
+    for i in np.flatnonzero(finite):
+        s, q = float(scales[i]), float(shapes[i])
+        logfactor = _log_variance_loading(s, q)
+        if parametrisation == "mean":
+            logmean = math.log(float(first_values[i]))
+        else:
+            loading = (
+                0.0 if q == s else log_mean_loading(scales[i : i + 1], shapes[i : i + 1])[0][0]
+            )
+            logmean = float(first_values[i]) + loading
+        with np.errstate(over="ignore", under="ignore"):
+            result[i] = np.exp(2.0 * logmean + logfactor)
+        if not np.isfinite(result[i]) or result[i] <= 0.0:
+            raise GeneralizedGammaDomainError(
+                "generalized gamma finite variance is outside representable range"
+            )
+    return readonly(result)
+
+
 def location_of_mean(mean: NDArray, sigma: NDArray, shape: NDArray) -> NDArray[np.float64]:
     """``mu = log m - log C(sigma, Q)``."""
     m = _positive_vector(mean, name="mean")
