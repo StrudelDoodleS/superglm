@@ -154,7 +154,8 @@ class TestNB2ExactREML:
     """NB2 fit_reml(discrete=False) — parity vs mgcv."""
 
     @pytest.fixture(scope="class")
-    def model(self):
+    @classmethod
+    def model(cls):
         df, y, offset = _load_nb2_data()
         m = SuperGLM(
             features=_features(),
@@ -198,7 +199,8 @@ class TestNB2DiscreteREML:
     """NB2 fit_reml(discrete=True) — parity vs exact REML."""
 
     @pytest.fixture(scope="class")
-    def models(self):
+    @classmethod
+    def models(cls):
         df, y, offset = _load_nb2_data()
         m_exact = SuperGLM(
             features=_features(),
@@ -262,7 +264,8 @@ class TestNB2DirectFitSanity:
     """NB2 fit(selection_penalty=0) — convergence and rough prediction check."""
 
     @pytest.fixture(scope="class")
-    def model(self):
+    @classmethod
+    def model(cls):
         df, y, offset = _load_nb2_data()
         m = SuperGLM(
             features=_features(),
@@ -295,7 +298,8 @@ class TestNB2GroupLassoSanity:
     """NB2 fit(lambda1>0) — convergence and rough prediction check."""
 
     @pytest.fixture(scope="class")
-    def model(self):
+    @classmethod
+    def model(cls):
         df, y, offset = _load_nb2_data()
         m = SuperGLM(
             features=_features(),
@@ -346,7 +350,8 @@ class TestGammaExactREML:
     """Gamma fit_reml(discrete=False) — parity vs mgcv."""
 
     @pytest.fixture(scope="class")
-    def model(self):
+    @classmethod
+    def model(cls):
         df, y = _load_gamma_data()
         m = SuperGLM(features=_features(), family="gamma", selection_penalty=0)
         m.fit_reml(df, y, max_reml_iter=30)
@@ -407,7 +412,8 @@ class TestGammaDiscreteREML:
     """Gamma fit_reml(discrete=True) — parity vs exact REML."""
 
     @pytest.fixture(scope="class")
-    def models(self):
+    @classmethod
+    def models(cls):
         df, y = _load_gamma_data()
         m_exact = SuperGLM(features=_features(), family="gamma", selection_penalty=0)
         m_exact.fit_reml(df, y, max_reml_iter=30)
@@ -460,7 +466,8 @@ class TestGammaDirectFitSanity:
     """Gamma fit(selection_penalty=0) — convergence and rough prediction check."""
 
     @pytest.fixture(scope="class")
-    def model(self):
+    @classmethod
+    def model(cls):
         df, y = _load_gamma_data()
         m = SuperGLM(features=_features(), family="gamma", selection_penalty=0, spline_penalty=1.0)
         m.fit(df, y)
@@ -488,7 +495,8 @@ class TestGammaGroupLassoSanity:
     """Gamma fit(lambda1>0) — convergence and rough prediction check."""
 
     @pytest.fixture(scope="class")
-    def model(self):
+    @classmethod
+    def model(cls):
         df, y = _load_gamma_data()
         m = SuperGLM(
             features=_features(),

@@ -326,6 +326,7 @@ def test_polars_editor_category_collapse_matches_pandas_and_retains_native_frame
     )
 
 
+@pytest.mark.filterwarnings("error::DeprecationWarning:joblib[.]numpy_pickle")
 def test_serialize_validated_model_round_trip_predictions(editor_model, editor_frame):
     import io
 

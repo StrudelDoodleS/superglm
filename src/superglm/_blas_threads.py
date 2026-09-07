@@ -14,7 +14,8 @@ BLAS pools -- tabmat's OpenMP kernels and numba threading are untouched.
 
 ``SUPERGLM_BLAS_THREADS`` overrides the policy: unset or ``auto`` caps BLAS
 to one thread during fits; an integer caps to that many; ``native`` disables
-capping and leaves the user's BLAS configuration alone.
+capping and leaves the user's BLAS configuration alone. Wide designs release
+the automatic cap once they reach the measured p³ break-even.
 """
 
 from __future__ import annotations
@@ -74,6 +75,21 @@ def _auto_policy() -> bool:
     return False
 
 
+def _release_current_scope() -> None:
+    global _registration, _wide_scopes
+    stack = _scope_stack()
+    scope = stack[-1] if stack else None
+    if scope is None:
+        return
+    with _scope_lock:
+        if not scope["wide"]:
+            scope["wide"] = True
+            _wide_scopes += 1
+        if _registration is not None:
+            _registration.unregister()
+            _registration = None
+
+
 def allow_wide_design(p: int) -> None:
     """Release the automatic cap while a wide design's fit is active.
 
@@ -84,18 +100,9 @@ def allow_wide_design(p: int) -> None:
     calling fit's scope, and when the last wide scope exits the cap is
     re-armed for any narrow fits still running.
     """
-    global _registration, _wide_scopes
     if p < _WIDE_DESIGN_THRESHOLD or not _auto_policy():
         return
-    stack = _scope_stack()
-    scope = stack[-1] if stack else None
-    with _scope_lock:
-        if scope is not None and not scope["wide"]:
-            scope["wide"] = True
-            _wide_scopes += 1
-        if _registration is not None:
-            _registration.unregister()
-            _registration = None
+    _release_current_scope()
 
 
 def _resolve_limit() -> int | None:

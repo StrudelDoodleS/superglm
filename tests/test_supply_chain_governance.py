@@ -246,7 +246,7 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
         assert f'"{version}"' in compatibility_job
     # 3.13 gets dedicated coverage-shard jobs below; running it here too is waste.
     assert '"3.13"' not in compatibility_job
-    assert "uv run --with pyarrow pytest tests/" in compatibility_job
+    assert "uv run --with pyarrow --with mpmath pytest tests/" in compatibility_job
     assert '-m "not browser"' in compatibility_job
     assert "--splits" not in compatibility_job
     assert "--cov" not in compatibility_job
@@ -257,7 +257,7 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     for group, label in enumerate(("A", "B", "C", "D"), start=1):
         assert f"- group: {group}" in coverage_shard_job
         assert f"label: {label}" in coverage_shard_job
-    assert "uv run --with pyarrow pytest tests/" in coverage_shard_job
+    assert "uv run --with pyarrow --with mpmath pytest tests/" in coverage_shard_job
     assert '-m "not browser"' in coverage_shard_job
     assert "--splits 4" in coverage_shard_job
     assert "--group ${{ matrix.group }}" in coverage_shard_job
@@ -307,7 +307,7 @@ def test_dev_ci_parallelizes_complete_python314_suite():
         assert f"label: {label}" in pytest_job
     assert "uv python install 3.14" in pytest_job
     assert "uv sync --python 3.14 --extra dev" in pytest_job
-    assert "uv run --with pyarrow pytest tests/" in pytest_job
+    assert "uv run --with pyarrow --with mpmath pytest tests/" in pytest_job
     assert '-m "not browser"' in pytest_job
     assert "--splits 4" in pytest_job
     assert "--group ${{ matrix.group }}" in pytest_job

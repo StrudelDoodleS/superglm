@@ -91,15 +91,17 @@ class TestZeroWeightAndBaseFallback:
 
     def test_empty_declared_base_falls_back_deterministically(self):
         spec = Categorical(base="c", levels=["a", "b", "c"])
-        with pytest.warns(UserWarning, match="fall"):
+        with pytest.warns(UserWarning, match=r"falling back|pinned to base") as caught:
             _build(spec, ["a", "b", "b"], w=np.array([1.0, 2.0, 2.0]))
+        assert any("falling back" in str(w.message) for w in caught)
         assert spec._base_level == "b"  # most exposed observed
         assert spec._base_fallback == ("c", "b")
 
     def test_empty_base_fallback_unweighted_first_observed(self):
         spec = Categorical(base="c", levels=["a", "b", "c"])
-        with pytest.warns(UserWarning, match="fall"):
+        with pytest.warns(UserWarning, match=r"falling back|pinned to base") as caught:
             _build(spec, ["b", "a", "b"])
+        assert any("falling back" in str(w.message) for w in caught)
         assert spec._base_level == "a"  # first observed in universe order
 
     def test_most_exposed_ignores_pinned_levels(self):
@@ -880,6 +882,7 @@ class TestGroupedBindingEndToEnd:
         g[0] = "RARE"  # one raw level most folds never train on
         X = pd.DataFrame({"g": g, "x": rng.normal(size=n)})
         y = rng.poisson(1.0, size=n).astype(float)
+        y[0] = 1.0  # keep the singleton cell finite; this fixture tests binding
         return X, y
 
     def _model(self, X):

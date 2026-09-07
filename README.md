@@ -9,7 +9,8 @@
 Penalised GLMs and GAM-style pricing models for insurance. SuperGLM combines
 explicit feature specs, exact REML, large-`n` discrete REML, solver-backed
 monotone splines, actuarial validation tooling, and deployable fitted
-estimators for Poisson, Gamma, NB2, Tweedie, Binomial, and Gaussian models.
+estimators for Poisson, Gamma, NB2, Tweedie, Binomial, Gaussian, and Gaussian
+or Gamma location–scale models.
 
 ## Installation
 
@@ -138,6 +139,102 @@ features = {
 model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
 model.fit_reml(df, y, sample_weight=exposure)
 ```
+
+## Distributional Location–Scale Models
+
+`SuperLSS` jointly models multiple parameters of a response. Gaussian
+LS models conditional location and standard deviation:
+
+```python
+from superglm import Spline, SuperLSS
+from superglm.distributional import GaussianLS, Predictor
+
+lss = SuperLSS(
+    family=GaussianLS(scale_floor=0.05),
+    predictors=(
+        Predictor("location", {"DrivAge": Spline(kind="cr", k=10)}),
+        Predictor("scale", {"DrivAge": Spline(kind="cr", k=8, select=True)}),
+    ),
+)
+lss.fit_reml(train_df, y_train)
+
+parameters = lss.predict_parameters(holdout_df)  # location and scale
+```
+
+Use this for heteroskedastic continuous outcomes, such as transformed claim
+severity. Raw claim frequency still requires a Poisson or negative-binomial
+model; Gaussian LS is not a count likelihood. See
+[distributional location–scale models](docs/models/distributional.md) for inference,
+diagnostics, and known limits. Discrete fitting remains available for scalar
+`SuperGLM` models, but `SuperLSS` currently refuses `discrete=True` until its
+multi-parameter route is complete.
+
+`GammaLS` models a strictly positive response:
+
+```python
+from superglm import Spline, SuperLSS
+from superglm.distributional import GammaLS, Predictor
+
+gamma_lss = SuperLSS(
+    family=GammaLS(),
+    predictors=(
+        Predictor("mean", {"DrivAge": Spline(kind="cr", k=10)}),
+        Predictor("scale", {"DrivAge": Spline(kind="cr", k=8, select=True)}),
+    ),
+).fit_reml(train_df, y_train)
+```
+
+Here `scale` is the coefficient of variation, not variance or Gamma shape. At
+unit prior weight, `Var(Y | x) = mean² × scale²`; under prior precision weight
+`w` (the default semantics), it is `mean² × scale² / w`. Explicit
+`weight_semantics="frequency"` instead means literal integer row replication.
+The mgcv/MSSM dispersion is `φ = scale²`. Gamma support is strictly positive,
+so a zero response requires a different model.
+
+The coefficient core is established IRLS/PIRLS/Fisher–Newton repeated penalized
+weighted least squares, with EFS/LAML outside it for automatic smoothing; IRLS
+itself is not an originality claim. `GammaLS` provides CDF, quantile, and
+expected-shortfall calculations, and predictive simulation uses its quantile.
+
+`TweedieLSS` is the dense three-predictor model for a nonnegative response with
+a point mass at zero. Its predictors are ordered `mean`, `dispersion`, then
+`power`; `power_lower` and `power_upper` configure an open interval strictly
+inside `(1, 2)`:
+
+```python
+from superglm import LambdaPolicy, Spline, SuperLSS
+from superglm.distributional import Predictor, TweedieLSS
+
+estimate = LambdaPolicy.estimate()
+tweedie_lss = SuperLSS(
+    family=TweedieLSS(power_lower=1.08, power_upper=1.92),
+    predictors=(
+        Predictor("mean", {"DrivAge": Spline(kind="cr", k=10, lambda_policy=estimate)}),
+        Predictor(
+            "dispersion",
+            {"DrivAge": Spline(kind="cr", k=8, lambda_policy=estimate)},
+        ),
+        Predictor("power", {"DrivAge": Spline(kind="cr", k=8, lambda_policy=estimate)}),
+    ),
+).fit_reml(
+    train_df,
+    y_train,
+    lambdas={
+        "mean:DrivAge#wiggle": 1.0,
+        "dispersion:DrivAge#wiggle": 1.0,
+        "power:DrivAge#wiggle": 1.0,
+    },
+    max_reml_iter=120,
+    reml_tol=1.0e-4,
+    max_log_step=1.0,
+)
+```
+
+The public Tweedie route is dense and uses observed coefficient curvature.
+Prior weights remain the default precision contract; explicit integer
+`weight_semantics="frequency"` means literal row replication. CDF and quantile
+calculations and quantile-based predictive simulation are available; Fisher
+fallback and `discrete=True` are not.
 
 ## Validation And Model Comparison
 
@@ -332,6 +429,7 @@ That is advanced usage. It should not be your default starting point.
 - [Recommended workflows](docs/guide/workflows.md)
 - [Choosing a fitting path](docs/guide/fitting.md)
 - [Monotone splines](docs/guide/monotone.md)
+- [Distributional location–scale models](docs/models/distributional.md)
 - [Validation and model comparison](docs/guide/validation.md)
 - [Deployment](docs/guide/deployment.md)
 - [Optimization and solver internals](docs/guide/optimization.md)

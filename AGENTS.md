@@ -28,6 +28,14 @@ a green tick for tests that never ran.
 Use `apply_patch` for repository file edits. Do not discard dirty-worktree
 changes or use destructive git commands.
 
+## Sub-agent naming and model selection
+
+Use `gpt-6-astra` for sub-agents unless the user requests otherwise. Set the
+model and reasoning effort explicitly when spawning. Include both in the
+agent's task name, for example `scores_astra_low` or `posterior_review_astra_high`.
+Use low effort for straightforward fixes, medium for multi-module or semantic
+work, and high/xhigh for difficult mathematical or numerical work.
+
 ## Project structure and style
 
 Package code lives under `src/superglm/`; tests under `tests/`; benchmarks and

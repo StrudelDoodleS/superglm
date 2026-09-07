@@ -157,6 +157,9 @@ def assemble_clamped_knot_vector(spec: Any, interior: NDArray) -> None:
 def transform(spec: Any, x: NDArray) -> NDArray:
     """Build the design matrix using knots learned during build()."""
     basis = spec._basis_matrix(x).toarray()
+    distributional_mean = getattr(spec, "_distributional_basis_mean", None)
+    if distributional_mean is not None:
+        basis = basis - distributional_mean
     scop_sigma = getattr(spec, "_scop_Sigma", None)
     if scop_sigma is not None:
         null_dim = getattr(spec, "_scop_null_dim", 1)

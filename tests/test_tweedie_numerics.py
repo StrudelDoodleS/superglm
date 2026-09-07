@@ -21,6 +21,28 @@ from superglm.profiling.tweedie import (
 )
 
 
+def test_profile_kernel_warmup_reaches_the_compiled_root() -> None:
+    import superglm._tweedie_profile_kernel as profile_kernel
+
+    profile_kernel._warmup_tweedie_profile()
+
+    assert profile_kernel._exact_profile_statistics_kernel.nopython_signatures
+
+
+def test_profile_kernel_warmup_requires_a_success_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import superglm._tweedie_profile_kernel as profile_kernel
+
+    def refusing_root(*_args):
+        return (profile_kernel.PROFILE_KERNEL_WORK_LIMIT,) + (0.0,) * 8
+
+    monkeypatch.setattr(profile_kernel, "_exact_profile_statistics_kernel", refusing_root)
+
+    with pytest.raises(RuntimeError, match="profile kernel warmup.*status 1"):
+        profile_kernel._warmup_tweedie_profile()
+
+
 def _log_t_with_series_mode(a: float, mode: int) -> float:
     return float(np.log(mode + 1.0) + gammaln(a * (mode + 1.0)) - gammaln(a * mode))
 

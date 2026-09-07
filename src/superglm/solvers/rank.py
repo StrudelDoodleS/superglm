@@ -1295,6 +1295,86 @@ def _conditioned_representatives(
     return selected
 
 
+def try_decompose_verified_spd_gram(
+    matrix: NDArray,
+    *,
+    policy: RankPolicy = SHARED_RANK_POLICY,
+    residual_tol: float = 1e-6,
+) -> RankDecomposition | None:
+    """Return a conservative full-rank Cholesky decomposition or ``None``.
+
+    This is a fast path for coefficient systems already expected to be
+    positive definite.  It uses the shared Gram equilibration, but accepts the
+    factor only when every column is structurally active and LAPACK's
+    reciprocal condition estimate remains above the stricter factor-scale
+    rank tolerance.  Ambiguous systems must use :func:`decompose_gram`.
+    """
+
+    if not isinstance(policy, RankPolicy):
+        raise TypeError("policy must be a RankPolicy")
+    if (
+        isinstance(residual_tol, bool)
+        or not isinstance(residual_tol, int | float)
+        or not np.isfinite(residual_tol)
+        or residual_tol <= 0.0
+    ):
+        raise ValueError("residual_tol must be finite and positive")
+    try:
+        equilibrated, column_scale, active_columns, _ = _equilibrate_gram(matrix)
+    except (ValueError, np.linalg.LinAlgError):
+        return None
+    width = len(column_scale)
+    if width == 0 or len(active_columns) != width:
+        return None
+    try:
+        factor = scipy.linalg.cholesky(equilibrated, lower=True, check_finite=False)
+        matrix_norm = float(np.linalg.norm(equilibrated, ord=1))
+        pocon = scipy.linalg.get_lapack_funcs("pocon", (factor,))
+        reciprocal_condition, info = pocon(factor, matrix_norm, uplo="L")
+        if (
+            info != 0
+            or not np.isfinite(reciprocal_condition)
+            or reciprocal_condition <= policy.factor_rcond
+        ):
+            return None
+        probe = np.arange(1.0, width + 1.0)
+        solved = scipy.linalg.cho_solve((factor, True), probe, check_finite=False)
+        residual = np.linalg.norm(equilibrated @ solved - probe) / max(
+            np.linalg.norm(probe),
+            np.finfo(float).tiny,
+        )
+        if not np.isfinite(residual) or residual > residual_tol:
+            return None
+    except (ValueError, np.linalg.LinAlgError):
+        return None
+
+    log_pdet = 2.0 * float(np.sum(np.log(np.diag(factor)))) + 2.0 * float(
+        np.sum(np.log(column_scale))
+    )
+    null = _null_basis(
+        width,
+        active_columns,
+        column_scale,
+        np.zeros((width, 0)),
+    )
+    return RankDecomposition(
+        policy_version=policy.version,
+        method="cholesky",
+        column_scale=_freeze(column_scale),
+        active_columns=_freeze(active_columns, dtype=int),
+        rank=width,
+        pre_truncation_condition=float(np.sqrt(1.0 / reciprocal_condition)),
+        cutoff=policy.gram_rcond * matrix_norm,
+        rank_truncated=False,
+        used_svd_fallback=False,
+        resolution_limited=False,
+        log_pdet=log_pdet,
+        cholesky_factor=_freeze(factor),
+        parameter_null_basis=_freeze(null),
+        structural_aliases=_freeze(np.zeros(width, dtype=bool), dtype=bool),
+    )
+
+
 def _scaled_subspace_logdet(coordinates: NDArray) -> float:
     """Return ``log(det(coordinates.T @ coordinates))`` across extreme row scales."""
     width = coordinates.shape[1]

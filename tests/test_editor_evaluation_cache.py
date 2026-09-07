@@ -8,7 +8,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from superglm import Numeric, SuperGLM
+from superglm import FractionalFrequencyWeightWarning, Numeric, SuperGLM
 from superglm.distributions import Gaussian, Tweedie
 from superglm.editor.evaluation import EvaluationDataset, coerce_dataset
 from superglm.editor.evaluation_cache import (
@@ -187,7 +187,7 @@ def weighted_offset_fit():
     n = 120
     x = rng.normal(size=n)
     X = pd.DataFrame({"x": x})
-    sample_weight = rng.uniform(0.6, 1.8, size=n)
+    sample_weight = rng.integers(1, 4, size=n).astype(np.float64)
     offset = np.linspace(-0.7, 0.9, n)
     y = 0.9 + 0.35 * x + offset + rng.normal(0.0, 0.08, size=n)
     model = SuperGLM(
@@ -418,8 +418,10 @@ def test_editor_bic_preserves_fractional_frequency_likelihood_size():
         sample_weight=weights,
     )
 
-    editor_metrics = compute_dataset_metrics(model, dataset)
-    core_metrics = model.metrics(dataset.X, dataset.y, sample_weight=weights)
+    with pytest.warns(FractionalFrequencyWeightWarning):
+        editor_metrics = compute_dataset_metrics(model, dataset)
+    with pytest.warns(FractionalFrequencyWeightWarning):
+        core_metrics = model.metrics(dataset.X, dataset.y, sample_weight=weights)
 
     assert np.sum(weights) == pytest.approx(0.5)
     assert editor_metrics["bic"] == pytest.approx(core_metrics.bic)

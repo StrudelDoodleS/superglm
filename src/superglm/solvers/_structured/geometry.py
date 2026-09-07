@@ -967,8 +967,9 @@ def _sum_to_zero_public_spectral_estimability(
         combined_row_space,
     )
 
+    # Keep the sparse-matrix return type as SciPy switches its default.
     active_null_basis_map = scipy.sparse.block_diag(
-        scaled_null_bases,
+        (scipy.sparse.csr_matrix(scaled_null_bases[0]), *scaled_null_bases[1:]),
         format="csr",
     )[active_columns]
 

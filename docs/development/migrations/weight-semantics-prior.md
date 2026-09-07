@@ -227,19 +227,22 @@ non-negative integers. The canonical weighting is on that lattice by
 construction — `y = count / exposure` with `sample_weight = exposure` recovers
 the count — and that is the case this change exists to serve.
 
-Where `w * y` is *not* integral, the density evaluates `gammaln` at a
-fractional argument, which interpolates the counting density: finite, smooth,
-and not a probability. Coefficients, fitted means and deviance are unaffected
-(the two contracts share a score equation), but the reported log-likelihood,
-AIC and BIC are then a quasi-likelihood — and for the negative binomial the
-interpolated `Gamma(w y + w theta) / Gamma(w theta)` factor is
-`theta`-dependent, so it reaches `theta_hat` and its profile interval as well.
+Prior-weighted Poisson and negative-binomial rates are accepted **without an
+integrality warning**, including deliberately adjusted rates (for example, a
+20% uplift) and round-off in `w * y`. Fitting and likelihood evaluation do not
+round the supplied response.
 
-A fit in that position emits `PriorWeightLatticeWarning` naming the affected
-row count. It warns rather than raises: refusing an otherwise valid fit over a
-defect confined to its reported likelihood would cost more than it protects.
-If the weights are replication counts, `weight_semantics="frequency"` is the
-right declaration and the lattice question does not arise.
+Where `w * y` is not integral, `gammaln` gives a smooth continuation of the
+count likelihood, not an exact count probability. Interpret the reported
+log-likelihood, AIC and BIC accordingly. For Poisson and NB with fixed `theta`,
+the gamma-function terms do not depend on the mean. When estimating `theta`,
+the negative-binomial continuation is `theta`-dependent and can affect the
+estimated `theta`, its profile interval and, through refitting, the fitted
+means. Randomized quantile residuals still use neighbouring integer counts.
+
+Use `weight_semantics="frequency"` only for replication weights. That contract
+still warns about fractional replication weights or fractional counting
+responses. The prior-weighted binomial warning is also unchanged.
 
 ### One declared limitation
 
