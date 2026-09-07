@@ -704,6 +704,32 @@ def test_portfolio_draws_the_total_and_the_segments(book) -> None:
     assert len(quantile_lines) == len(book.quantiles) + 1
 
 
+@pytest.mark.parametrize("quantiles", [(0.9, 0.99), (0.01, 0.1), (0.99, 0.9)])
+@pytest.mark.parametrize("return_draws", [False, True])
+def test_task10_portfolio_quantile_interval_independent_of_mean(case, quantiles, return_draws):
+    fitted, X, _, _ = case
+    payload = portfolio(
+        fitted,
+        X,
+        n_draws=80,
+        by="g",
+        seed=6,
+        parameter_uncertainty=False,
+        quantiles=quantiles,
+        return_draws=return_draws,
+    )
+    fig = dp.plotly_portfolio(payload)
+    means, interval = fig.data[-2:]
+    np.testing.assert_array_equal(means.y, payload.by_segment["mean_total"])
+    lower = payload.by_segment[f"q{min(quantiles):g}"].to_numpy()
+    upper = payload.by_segment[f"q{max(quantiles):g}"].to_numpy()
+    assert np.all(np.asarray(interval.error_y.array) >= 0)
+    assert np.all(np.asarray(interval.error_y.arrayminus) >= 0)
+    np.testing.assert_allclose(np.asarray(interval.y) - interval.error_y.arrayminus, lower)
+    np.testing.assert_allclose(np.asarray(interval.y) + interval.error_y.array, upper)
+    np.testing.assert_array_equal(np.asarray(interval.customdata), np.column_stack([lower, upper]))
+
+
 def test_portfolio_without_draws_or_segments_plots_the_quantiles(book_total_only) -> None:
     fig = dp.plotly_portfolio(book_total_only)
     assert book_total_only.total_draws is None and book_total_only.by_segment is None

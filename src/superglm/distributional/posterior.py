@@ -925,6 +925,8 @@ def posterior_predictive(
             raise ValueError("non-finite predictive draws cannot be represented or reduced")
         with np.errstate(over="ignore", invalid="ignore"):
             piece = simulated if combine is None else np.asarray(combine(simulated))
+        if piece.ndim not in (1, 2) or piece.shape[0] != count:
+            raise ValueError("reduce must return one row per posterior draw")
         if not np.all(np.isfinite(piece)):
             raise ValueError("Predictive reduction produced non-finite values")
         pieces.append(piece)
@@ -976,6 +978,8 @@ def simultaneous_critical_value(
     errors = np.asarray(se, dtype=np.float64)
     if errors.shape != (grid.shape[0],):
         raise ValueError("se must give one standard error per grid point")
+    if not np.all(np.isfinite(errors)) or np.any(errors < 0.0):
+        raise ValueError("standard errors must be finite and nonnegative")
     probability = float(alpha)
     if not 0.0 < probability < 1.0:
         raise ValueError("alpha must lie strictly inside (0, 1)")
