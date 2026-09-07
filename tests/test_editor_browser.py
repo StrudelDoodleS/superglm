@@ -424,13 +424,14 @@ def test_editor_browser_failed_term_switch_keeps_authoritative_term(
             page.wait_for_function(
                 """() => !document.querySelector('#appAlert')?.hidden &&
                     document.querySelector('#appAlertMessage')?.textContent.includes(
-                        'region unavailable'
+                        'internal editor error'
                     )
                 """
             )
 
             assert page.locator("#term").input_value() == "age"
             assert browser_editor_widget.selected_term == "age"
+            assert "region unavailable" not in page.locator("#appAlertMessage").inner_text()
 
             age_points = browser_editor_widget.terms["age"]["n_points"]
             page.locator('button[data-op="select_all"]').click()
@@ -479,13 +480,14 @@ def test_editor_browser_lost_term_response_uses_recovered_authoritative_term(
             page.wait_for_function(
                 """() => !document.querySelector('#appAlert')?.hidden &&
                     document.querySelector('#appAlertMessage')?.textContent.includes(
-                        'response lost'
+                        'internal editor error'
                     )
                 """
             )
 
             assert page.locator("#term").input_value() == "region"
             assert browser_editor_widget.selected_term == "region"
+            assert "response lost" not in page.locator("#appAlertMessage").inner_text()
 
             region_points = browser_editor_widget.terms["region"]["n_points"]
             page.locator('button[data-op="select_all"]').click()
@@ -567,7 +569,7 @@ def test_editor_browser_report_error_clears_mismatched_report(browser_editor_wid
             page.locator('.app-tab[data-view="final"]').click()
             page.wait_for_function(
                 "document.querySelector('#reportFreshness')?.textContent.includes("
-                "'final unavailable'"
+                "'internal editor error'"
                 ")"
             )
 
@@ -576,5 +578,6 @@ def test_editor_browser_report_error_clears_mismatched_report(browser_editor_wid
             assert final_html == ""
             assert page.locator("#reportTitle").text_content() == "Final Fit Report"
             assert page.locator("#reportFreshness").get_attribute("data-freshness") == "stale"
+            assert "final unavailable" not in page.locator("#reportFreshness").inner_text()
         finally:
             browser.close()
