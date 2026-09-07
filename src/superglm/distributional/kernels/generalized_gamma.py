@@ -691,6 +691,13 @@ def _log_variance_loading(sigma: float, q: float) -> float:
     if logd > math.log(np.finfo(_FLOAT).max):
         raise GeneralizedGammaDomainError(refusal)
     d = math.exp(logd)
+    # An O(eps) log-D error is amplified by D/(1-exp(-D)) in
+    # log(expm1(D)). Include the log-scaled inputs, not just the final D.
+    log_error_scale = 1.0 + abs(logd) + abs(math.log(sigma))
+    if q != 0.0:
+        log_error_scale += abs(math.log(abs(q)))
+    if 128 * _EPS * log_error_scale * (d / -math.expm1(-d)) > 1e-10:
+        raise GeneralizedGammaDomainError(refusal)
     return d + math.log(-math.expm1(-d))
 
 
@@ -716,6 +723,7 @@ def generalized_gamma_variance(
     for i in np.flatnonzero(finite):
         s, q = float(scales[i]), float(shapes[i])
         logfactor = _log_variance_loading(s, q)
+        assembly_scale = abs(logfactor)
         if parametrisation == "mean":
             logmean = math.log(float(first_values[i]))
         else:
@@ -723,6 +731,23 @@ def generalized_gamma_variance(
                 0.0 if q == s else log_mean_loading(scales[i : i + 1], shapes[i : i + 1])[0][0]
             )
             logmean = float(first_values[i]) + loading
+            # On the second-moment domain, v > -1/2: the unreduced mean
+            # loading terms are controlled by sigma², log1p(v), and log|Q|.
+            # The Gamma shortcut has exactly zero loading.
+            loading_scale = 0.0
+            if q != s:
+                loading_scale = abs(loading) + s * s + abs(math.log1p(s * q))
+                if q != 0.0:
+                    loading_scale += abs(math.log(abs(q)))
+            assembly_scale += 2.0 * (abs(float(first_values[i])) + loading_scale)
+        assembly_scale += 2.0 * abs(logmean)
+        # Absolute error in log variance becomes relative variance error.
+        # This conservative estimate is a refusal policy, not a universal
+        # special-function certificate; finite cancellation alone is unsafe.
+        if not math.isfinite(assembly_scale) or 128 * _EPS * assembly_scale > 1e-10:
+            raise GeneralizedGammaDomainError(
+                "generalized gamma variance is unresolved in the numerical range"
+            )
         with np.errstate(over="ignore", under="ignore"):
             result[i] = np.exp(2.0 * logmean + logfactor)
         if not np.isfinite(result[i]) or result[i] <= 0.0:
