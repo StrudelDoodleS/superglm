@@ -270,7 +270,9 @@ def _positive_score_tail(
     eps = np.finfo(np.float64).eps
     if type(family) is GeneralizedParetoLSS:
         psi, xi = theta.T
-        log_base = np.log1p(xi * endpoint / psi)
+        # Remove response units before multiplying by a tiny shape: xi*B can
+        # underflow although the dimensionless xi*(B/psi) is representable.
+        log_base = np.log1p(xi * (endpoint / psi))
         # Divide the small log1p first: 2/xi can overflow near the exponential
         # limit even though the log tail and score remain representable.
         log_tail = np.log(psi) - np.log(2.0 - xi) + (xi - 2.0) * (log_base / xi)

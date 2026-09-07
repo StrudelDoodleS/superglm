@@ -170,6 +170,14 @@ def test_task11_public_gpd_near_exponential_tail_stays_representable():
     )
 
 
+def test_task11_review_gpd_tail_normalizes_scale_before_small_shape():
+    psi, xi = 2e-200, 1e-200
+    # Independently, int_0^infinity S(z)^2 dz = psi/(2-xi). Multiplying xi
+    # by the dimensionful endpoint first underflows and almost doubles this.
+    actual = crps_numeric(GeneralizedParetoLSS(), np.array([0.0]), np.array([[psi, xi]]))
+    np.testing.assert_allclose(actual, psi / (2 - xi), rtol=2e-8, atol=0)
+
+
 def test_task11_numeric_requires_an_established_tail_bound():
     with pytest.raises(NotImplementedError, match="tail|variance"):
         crps_numeric(_UniformDistribution(), 0.5, np.zeros((1, 1)))
