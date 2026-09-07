@@ -45,6 +45,14 @@ def test_saturated_update_checks_inverse_products_before_cancellation() -> None:
     assert names == {"smooth"}
     # The exact multiplier is 1 / ((1 + 3λ) λ 9·2^-80), safely above one.
     assert stable.raw_log_steps["smooth"] > math.log(100.0)
+    assert stable.proposal_kinds["smooth"] == "gfs"
+    assert stable.stationarity_log_residuals["smooth"] > 0.0
+    np.testing.assert_allclose(
+        math.exp(-stable.stationarity_log_residuals["smooth"]),
+        lam * (stable.quadratic_forms["smooth"] + stable.trace_terms["smooth"]),
+        rtol=8.0 * np.finfo(float).eps,
+        atol=0.0,
+    )
     projection_bound = (
         64.0 * beta.size * np.finfo(float).eps * np.linalg.norm(factor) * np.linalg.norm(beta)
     )
@@ -53,8 +61,47 @@ def test_saturated_update_checks_inverse_products_before_cancellation() -> None:
         <= projection_bound
     )
 
+    # A trace rounded below the nominal saturation threshold still needs repair.
+    rounded = replace(
+        raw, trace_terms={"smooth": (1.0 - 2.0 * math.sqrt(np.finfo(float).eps)) / lam}
+    )
+    retried, names = _stable_isolated_gfs_update((component,), fit, inverse, rounded, config)
+    assert names == {"smooth"}
+    assert retried.raw_log_steps == stable.raw_log_steps
+    assert retried.stationarity_log_residuals == stable.stationarity_log_residuals
+    assert retried.trace_terms == stable.trace_terms
+
     _, refused = _stable_isolated_gfs_update((component,), fit, 2.0 * inverse, raw, config)
     assert refused == frozenset()
+
+
+def test_saturated_update_refuses_an_unresolved_residual_product() -> None:
+    penalty = np.array([[0.5, -0.5], [-0.5, 0.5]])
+    common = np.eye(2) - penalty
+    large = 2.0**40
+    small = np.spacing(large)
+    lam = 2.0**16
+    curvature = large * np.ones((2, 2)) + small * np.eye(2)
+    inverse = common / (2.0 * large + small) + penalty / (lam + small)
+    beta = np.array([0.001, -0.001])
+    component = EFSComponentState("smooth", slice(0, 2), penalty, 1.0, lam, LambdaPolicy.estimate())
+    fit = SimpleNamespace(
+        coefficients=beta,
+        coefficient_face=None,
+        terminal_rank=SimpleNamespace(rank=2),
+        terminal_data_curvature=curvature,
+        terminal_penalized_curvature=curvature + lam * penalty,
+    )
+    update = wood_fasiolo_update((component,), beta, inverse)
+
+    # The true residual is smaller than the rounding bound of the matrix product.
+    scale = float(np.sum(np.abs(penalty) * (np.abs(inverse) @ np.abs(curvature)).T))
+    assert small / (lam + small) < beta.size * np.finfo(float).eps * scale
+    stable, names = _stable_isolated_gfs_update(
+        (component,), fit, inverse, update, DistributionalEFSConfig()
+    )
+    assert names == frozenset()
+    assert stable is update
 
 
 @pytest.mark.parametrize(
