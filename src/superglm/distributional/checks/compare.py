@@ -167,8 +167,15 @@ def _paired_summary(
         # Preserve constant inputs before normalization can round or overflow.
         return {"mean_diff": float(values[0]), "se": 0.0, "t": float("nan"), "n": count}
     probability = mass / count if count else mass
+    mean = float("nan")
     with np.errstate(over="ignore", invalid="ignore"):
-        mean = float(np.dot(probability, values)) if count else float("nan")
+        if count:
+            # Normalize scores too: even a convex dot product can round past
+            # maxfloat. Enforce its mathematical bounds before restoring units.
+            scale = float(np.max(np.abs(values))) or 1.0
+            scaled = values / scale
+            average = np.clip(np.dot(probability, scaled), np.min(scaled), np.max(scaled))
+            mean = float(np.clip(scale * average, np.min(values), np.max(values)))
     if count and not np.isfinite(mean):
         raise ValueError("paired mean must be finite and representable")
     if count < 2:

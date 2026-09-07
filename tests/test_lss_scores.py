@@ -451,6 +451,18 @@ def test_task10_review_constant_extreme_scores(value):
     assert result["n"] == 5
 
 
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_task10_review_nonconstant_extreme_mean_stays_in_convex_hull(sign):
+    maximum = np.finfo(float).max
+    values = sign * np.array([np.nextafter(maximum, 0.0), maximum, maximum])
+    result = _paired_summary(values, np.array([1, 2, 2]))
+    assert result["n"] == 5
+    assert np.min(values) <= result["mean_diff"] <= np.max(values)
+    assert np.isfinite(result["mean_diff"])
+    assert np.isfinite(result["se"]) and result["se"] > 0.0
+    assert np.isfinite(result["t"])
+
+
 @pytest.mark.parametrize("values", [[], [np.finfo(float).max]])
 def test_task10_review_constant_guard_preserves_insufficient_count(values):
     result = _paired_summary(np.array(values))
