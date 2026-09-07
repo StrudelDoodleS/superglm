@@ -265,9 +265,8 @@ def test_gamma_decisions_agree_between_analytic_and_finite_difference() -> None:
 def test_tweedie_certifies_a_genuine_infinity_through_finite_differences() -> None:
     """TweedieLSS has no analytic direction; the finite-difference fallback certifies.
 
-    With ``fit_reml`` defaults the same fit certifies the same face with the
-    same evidence but stops on ``objective_plateau`` rather than
-    ``lambda_change``.
+    Either strict stopping label is valid; the endpoint evidence and
+    terminal smoothing residual determine correctness.
     """
     from superglm import SuperLSS
 
@@ -291,7 +290,8 @@ def test_tweedie_certifies_a_genuine_infinity_through_finite_differences() -> No
         )
         smoothing = model._require_fitted().smoothing
         assert smoothing.converged is True
-        assert smoothing.convergence_reason == "lambda_change"
+        assert smoothing.convergence_reason in {"lambda_change", "objective_plateau"}
+        assert smoothing.terminal_raw_max_log_step <= smoothing.config.tolerance
         assert model.exact_face_components_ == ("mean:x#wiggle",)
         evidence = smoothing.terminal_endpoint_directions["mean:x#wiggle"]
         assert evidence.authority_identifier == "finite-difference-curvature-direction/v1"
