@@ -25,6 +25,53 @@ def _rel(a, b):
     return abs(a - b) / (1.0 + abs(b))
 
 
+def test_variance_centered_loading_catches_naive_subtraction_mutation():
+    mp = pytest.importorskip("mpmath")
+    sigma, q = 1e-14, -1.0
+    with mp.workdps(100):
+        s = mp.mpf(sigma)
+        difference = mp.loggamma(1 - 2 * s) - 2 * mp.loggamma(1 - s)
+        reference = float(mp.expm1(difference))
+    got = math.exp(gg._log_variance_loading(sigma, q))
+    assert got == pytest.approx(reference, rel=2048 * np.finfo(float).eps, abs=0)
+    loading = gg.log_mean_loading(np.array([sigma, 2 * sigma]), np.array([q, q]))[0]
+    naive = np.expm1(loading[1] - 2 * loading[0])
+    # An active mutation witness: replacing the centered branch by subtraction
+    # fails this positive variance oracle by many orders of magnitude.
+    assert not np.isclose(naive, reference, rtol=1e-6, atol=0)
+
+
+@pytest.mark.parametrize("q", [1e200, -1e200, 1e-200])
+def test_variance_unresolved_coordinates_refuse_without_claiming_divergence(q):
+    sigma = 1e-201
+    assert gg.mean_exists(np.array([2 * sigma]), np.array([q]))[0]
+    with pytest.raises(gg.GeneralizedGammaDomainError, match="variance.*numerical range"):
+        gg.generalized_gamma_variance(
+            np.array([1.0]), np.array([sigma]), np.array([q]), parametrisation="mean"
+        )
+
+
+@pytest.mark.parametrize("q", [-0.8, -1.0, -1.1, -3.0])
+def test_variance_refuses_unresolved_proximity_to_second_moment_boundary(q):
+    sigma = np.nextafter(0.5 / abs(q), 0.0)
+    with pytest.raises(gg.GeneralizedGammaDomainError, match="variance.*numerical range"):
+        gg.generalized_gamma_variance(
+            np.array([1.0]), np.array([sigma]), np.array([q]), parametrisation="mean"
+        )
+
+
+def test_variance_rounded_boundary_does_not_mislabel_finite_moment_as_infinite():
+    mp = pytest.importorskip("mpmath")
+    sigma, q = 0.5 / 0.7, -0.7
+    assert sigma * abs(q) == 0.5
+    with mp.workdps(100):
+        assert mp.mpf(sigma) * abs(mp.mpf(q)) < mp.mpf(0.5)
+    with pytest.raises(gg.GeneralizedGammaDomainError, match="variance.*numerical range"):
+        gg.generalized_gamma_variance(
+            np.array([1.0]), np.array([sigma]), np.array([q]), parametrisation="mean"
+        )
+
+
 @pytest.mark.parametrize("x", [0.3, 1.0, 2.5, 7.9, 8.0, 8.1, 25.0, 400.0, 1.0e6])
 def test_stirling_remainders_match_mpmath_across_the_series_switch(x):
     mp = pytest.importorskip("mpmath")

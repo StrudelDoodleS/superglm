@@ -508,6 +508,129 @@ class _StubFitted:
         )
 
 
+class _HeavyTailFitted(_StubFitted):
+    def predict_parameters(self, X, offsets=None):
+        frame = as_eager_frame(X)
+        return np.column_stack(
+            [frame.column_array(p.name, dtype=np.float64) for p in self.family.parameters]
+        )
+
+
+def _heavy_tail_case(kind, tail):
+    from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+    from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+
+    if kind == "pareto":
+        family = GeneralizedParetoLSS()
+        theta = [[1.0, tail]]
+    else:
+        family = GeneralizedGammaLSS(parametrisation=kind)
+        theta = [[2.0 if kind == "mean" else 0.0, tail, -1.0]]
+    frame = pd.DataFrame(theta, columns=[p.name for p in family.parameters])
+    return _HeavyTailFitted(family, "frequency"), frame
+
+
+@pytest.mark.parametrize("kind", ["pareto", "mean", "location"])
+@pytest.mark.parametrize("tail", [0.5, 0.75])
+def test_heavy_tail_actual_expected_refuses_infinite_variance(kind, tail):
+    fitted, frame = _heavy_tail_case(kind, tail)
+    assert np.all(np.isfinite(fitted.family.default_prediction(frame.to_numpy())))
+    # On the unfixed implementation this is a finite Monte Carlo SE, despite
+    # a divergent population second moment. Include its value in RED output.
+    try:
+        result = actual_expected_check(fitted, frame, np.ones(1), np.array(["a"]), name="a")
+    except ValueError as error:
+        assert "finite" in str(error) and "variance" in str(error)
+    else:
+        pytest.fail(f"infinite population variance returned ratio_se={result.ratio_se!r}")
+
+
+@pytest.mark.parametrize("kind", ["pareto", "mean", "location"])
+def test_heavy_tail_analytic_variance_selects_rows_and_replicates(kind):
+    fitted, frame = _heavy_tail_case(kind, 0.25)
+    _, divergent = _heavy_tail_case(kind, 0.75)
+    combined = pd.concat([frame, divergent], ignore_index=True)
+    selected = actual_expected_check(
+        fitted,
+        combined,
+        np.ones(2),
+        np.array(["a", "a"]),
+        name="a",
+        sample_weight=np.array([3.0, 0.0]),
+        n_draws=1,
+    )
+    repeated = actual_expected_check(
+        fitted,
+        pd.concat([frame] * 3),
+        np.ones(3),
+        np.array(["a"] * 3),
+        name="a",
+        n_draws=1,
+    )
+    assert selected.variance_law == repeated.variance_law == "family"
+    assert selected.ratio_se == pytest.approx(repeated.ratio_se)
+    assert np.all(np.isfinite(selected.ratio_se))
+
+
+@pytest.mark.parametrize("variance", [-1.0, np.nan, np.inf])
+def test_actual_expected_requires_finite_nonnegative_row_variance(variance):
+    frame = pd.DataFrame({"mu": [1.0], "var": [variance]})
+    with pytest.raises(ValueError, match="finite.*variance"):
+        actual_expected_check(
+            _StubFitted(_MeanVarianceFamily()), frame, np.ones(1), np.array(["a"]), name="a"
+        )
+
+
+def test_actual_expected_refuses_aggregate_variance_overflow_and_preserves_zero():
+    frame = pd.DataFrame({"mu": [1.0, 1.0], "var": [1e308, 1e308]})
+    with pytest.raises(ValueError, match="finite.*variance"):
+        actual_expected_check(
+            _StubFitted(_MeanVarianceFamily()), frame, np.ones(2), np.array(["a", "a"]), name="a"
+        )
+    frame["var"] = 0.0
+    result = actual_expected_check(
+        _StubFitted(_MeanVarianceFamily()), frame, np.ones(2), np.array(["a", "a"]), name="a"
+    )
+    assert result.ratio_se[0] == 0.0
+
+
+@pytest.mark.parametrize("variance,expected", [(0.0, 0.0), (1e-300, 1e-150)])
+def test_actual_expected_large_prior_weights_preserve_representable_variance(variance, expected):
+    frame = pd.DataFrame({"mu": [1.0], "var": [variance]})
+    result = actual_expected_check(
+        _StubFitted(_MeanVarianceFamily()),
+        frame,
+        np.ones(1),
+        np.array(["a"]),
+        name="a",
+        sample_weight=np.array([1e200]),
+    )
+    assert result.ratio_se[0] == pytest.approx(expected, rel=1e-13, abs=0)
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "gamma", "tweedie"])
+def test_actual_expected_real_prior_variance_precedence(kind):
+    family = {"gaussian": GaussianLS(), "gamma": GammaLS(), "tweedie": TweedieLSS()}[kind]
+    # Gaussian: sigma²/w; Gamma: mean² sigma²/w; Tweedie: phi mean**p/w.
+    theta, unit_variance = {
+        "gaussian": ([2.0, 3.0], 9.0),
+        "gamma": ([2.0, 3.0], 36.0),
+        "tweedie": ([2.0, 3.0, 1.5], 3.0 * 2.0**1.5),
+    }[kind]
+    frame = pd.DataFrame([theta], columns=[p.name for p in family.parameters])
+    result = actual_expected_check(
+        _HeavyTailFitted(family),
+        frame,
+        np.ones(1),
+        np.array(["a"]),
+        name="a",
+        sample_weight=np.array([4.0]),
+        n_draws=1,
+    )
+    assert result.variance_law == "family_prior_weighted"
+    assert result.ratio_se[0] == pytest.approx(np.sqrt(4 * unit_variance) / 8)
+
+
 def test_actual_expected_is_the_ratio_of_weighted_totals() -> None:
     """Two rows in one bin: 14 over 4, not the mean of 2 and 4/3."""
     frame = pd.DataFrame({"mu": [1.0, 1.0], "var": [1.0, 1.0], "band": ["one", "one"]})

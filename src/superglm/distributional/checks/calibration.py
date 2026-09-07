@@ -584,8 +584,19 @@ def actual_expected_check(
     variance, variance_law = _row_variance(
         fitted, rows, theta, n_draws=int(n_draws), seed=int(seed)
     )
-    scale = weights * weights if rows.semantics == "prior" else weights
-    total_variance = np.bincount(binning.codes, weights=scale * variance, minlength=width)
+    if not np.all(np.isfinite(variance) & (variance >= 0.0)):
+        raise ValueError(
+            "actual-versus-expected standard errors require finite nonnegative predictive variance"
+        )
+    with np.errstate(over="ignore", invalid="ignore"):
+        weighted_variance = weights * variance
+        if rows.semantics == "prior":
+            weighted_variance = weights * weighted_variance
+        total_variance = np.bincount(binning.codes, weights=weighted_variance, minlength=width)
+    if not np.all(np.isfinite(total_variance)):
+        raise ValueError(
+            "actual-versus-expected standard errors require finite representable aggregate variance"
+        )
     error = np.full(width, np.nan, dtype=np.float64)
     magnitude = np.abs(expected)
     np.divide(np.sqrt(total_variance), magnitude, out=error, where=magnitude > 0.0)
