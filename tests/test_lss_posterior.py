@@ -351,6 +351,7 @@ def test_named_posterior_bounds_refuse_non_finite_functional_draws(fit_case) -> 
         predict_parameters=fitted.predict_parameters,
         layout=fitted.layout,
         compiled_predictors=fitted.compiled_predictors,
+        fit_state=fitted.fit_state,
     )
 
     with pytest.raises(ValueError, match="non-finite.*posterior.*quantity"):
@@ -585,7 +586,85 @@ def _covariance_shim(covariance: np.ndarray) -> SimpleNamespace:
             n_coefficients=width,
         ),
         smoothing=None,
+        fit_state=SimpleNamespace(result=SimpleNamespace(fit_id="covariance-shim"), revision=1),
     )
+
+
+def test_generated_draws_reject_other_basis_and_successful_refit() -> None:
+    X, y = _simulated(n=120)
+
+    def fit(frame):
+        return SuperLSS(
+            family=GaussianLS(),
+            predictors=[Predictor("location", {"x": Spline("cr", k=5)}), Predictor("scale", {})],
+        ).fit(frame, y, lambdas={"location:x#wiggle": 1.0})
+
+    model = fit(X)
+    fitted = model._require_fitted()
+    draws = posterior_draws(fitted, 8)
+    other = fit(X.assign(x=3.0 * X.x + 2.0))._require_fitted()
+    assert fitted.layout.coefficient_names == other.layout.coefficient_names
+    assert fitted.fit_state.revision == other.fit_state.revision
+    with pytest.raises(ValueError, match="fit.*revision|different fit"):
+        list(posterior_parameters(other, X, draws))
+    retained = dataclasses.replace(draws, coefficients=draws.coefficients[:2])
+    assert list(posterior_parameters(fitted, X, retained))
+    revised = DenseDistributionalModel(
+        family=fitted.family,
+        _fit_state=dataclasses.replace(fitted.fit_state, revision=fitted.fit_state.revision + 1),
+    )
+    with pytest.raises(ValueError, match="different fit or revision"):
+        list(posterior_parameters(revised, X, retained))
+    with pytest.raises(ValueError):
+        model.fit(X, np.full(len(y), np.nan))
+    assert list(posterior_parameters(model._require_fitted(), X, draws))
+    model.fit(X, y + 0.1, lambdas={"location:x#wiggle": 1.0})
+    with pytest.raises(ValueError, match="fit.*revision|different fit"):
+        list(posterior_parameters(model._require_fitted(), X, draws))
+
+
+def test_one_manual_draw_pushes_forward_but_cannot_estimate_bounds(fit_case) -> None:
+    fitted, X, _ = fit_case
+    draws = PosteriorDraws(
+        fitted.result.coefficients[None, :], "fixed", 42, fitted.layout.coefficient_names
+    )
+    assert list(posterior_parameters(fitted, X.iloc[:2], draws))
+    with pytest.raises(ValueError, match="at least 2"):
+        posterior_bounds(fitted, X.iloc[:2], "mean", draws=draws)
+
+
+@pytest.mark.parametrize("reduce", [None, "sum", "callable"])
+def test_predictive_refuses_real_lognormal_overflow_before_reduction(reduce) -> None:
+    from superglm.distributional.families.log_normal import LogNormalLS
+
+    X = pd.DataFrame({"x": np.linspace(-1, 1, 60)})
+    y = np.exp(np.random.default_rng(71).normal(size=len(X)))
+    fitted = (
+        SuperLSS(
+            family=LogNormalLS(parametrisation="location"),
+            predictors=[Predictor("location", {}), Predictor("scale", {})],
+        )
+        .fit(X, y)
+        ._require_fitted()
+    )
+    finite = posterior_predictive(fitted, X, 8, parameter_uncertainty=False)
+    assert np.all(np.isfinite(finite)) and np.all(finite > 0)
+    seen = []
+
+    def reducer(block):
+        seen.append(block)
+        return block.sum(axis=1)
+
+    with np.errstate(over="ignore"), pytest.raises(ValueError, match="non-finite predictive"):
+        posterior_predictive(
+            fitted,
+            X,
+            8,
+            parameter_uncertainty=False,
+            offsets={"location": np.full(len(X), 1000.0)},
+            reduce=reducer if reduce == "callable" else reduce,
+        )
+    assert not seen
 
 
 def test_a_negative_eigenvalue_is_an_error_and_a_null_direction_is_a_clip() -> None:
@@ -677,6 +756,9 @@ def test_posterior_draws_defend_their_own_shape() -> None:
         PosteriorDraws(np.zeros((2, 3)), "fixed", 0, names)
     with pytest.raises(ValueError, match="covariance_kind"):
         PosteriorDraws(np.zeros((2, 2)), "approximate", 0, names)
+    for provenance in ("id", ("", 1), ("id", True), ("id", 0), ("id", 1, 2)):
+        with pytest.raises(ValueError, match="provenance"):
+            PosteriorDraws(np.zeros((2, 2)), "fixed", 0, names, provenance)
 
     mismatched = _covariance_shim(np.eye(3))
     mismatched.result = SimpleNamespace(coefficients=np.zeros(2))

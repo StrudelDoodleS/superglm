@@ -23,7 +23,7 @@ integral above the level, the representation of Acerbi and Tasche (2002),
 from __future__ import annotations
 
 from collections.abc import Callable, Generator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 import numpy as np
@@ -100,14 +100,31 @@ def _row_index(X: FrameLike | EagerFrame, n_observations: int) -> pd.Index:
 
 @dataclass(frozen=True)
 class PosteriorDraws:
-    """Coefficient draws in the qualified global coordinates of the fit."""
+    """Coefficient draws in the qualified global coordinates of the fit.
+
+    Generated draws carry portable fit/revision provenance to catch accidental
+    reuse. This is not authentication. Manually constructed draws with no
+    provenance are name-checked; their coordinates are the caller's responsibility.
+    ``dataclasses.replace`` retains provenance when subsetting generated draws.
+    """
 
     coefficients: NDArray[np.float64]
     covariance_kind: CovarianceKind
     seed: int
     coefficient_names: tuple[str, ...]
+    provenance: tuple[str, int] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self.provenance is not None:
+            if (
+                not isinstance(self.provenance, tuple)
+                or len(self.provenance) != 2
+                or not isinstance(self.provenance[0], str)
+                or not self.provenance[0]
+                or type(self.provenance[1]) is not int
+                or self.provenance[1] < 1
+            ):
+                raise ValueError("provenance must be a (fit identifier, positive revision) tuple")
         values = np.array(self.coefficients, dtype=np.float64, copy=True)
         if values.ndim != 2 or values.shape[0] < 1:
             raise ValueError("posterior draws must be a (draws, coefficients) matrix")
@@ -476,6 +493,7 @@ def _posterior_draws_from_covariance(
         covariance_kind=covariance,
         seed=int(seed),
         coefficient_names=tuple(fitted.layout.coefficient_names),
+        provenance=(fitted.fit_state.result.fit_id, fitted.fit_state.revision),
     )
 
 
@@ -534,6 +552,11 @@ def posterior_parameters(
     layout = fitted.layout
     if draws.coefficient_names != tuple(layout.coefficient_names):
         raise ValueError("draw coefficient names do not match the fitted layout")
+    if draws.provenance is not None and draws.provenance != (
+        fitted.fit_state.result.fit_id,
+        fitted.fit_state.revision,
+    ):
+        raise ValueError("posterior draws belong to a different fit or revision")
 
     frame = as_eager_frame(X)
     n_observations = len(frame)
@@ -719,6 +742,10 @@ def posterior_bounds(
         raise ValueError("level must lie strictly inside (0, 1)")
     if draws is None:
         draws = posterior_draws(fitted, n_draws, covariance=covariance, seed=seed)
+    if not isinstance(draws, PosteriorDraws):
+        raise TypeError("draws must be a PosteriorDraws")
+    if draws.n_draws < 2:
+        raise ValueError("posterior bounds need at least 2 draws to estimate variance")
 
     frame = as_eager_frame(X)
     n_observations = len(frame)
@@ -890,6 +917,8 @@ def posterior_predictive(
             else family.quantile_prior_weighted(levels, theta, np.tile(row_weights[rows], count))
         )
         simulated = np.asarray(drawn, dtype=np.float64).reshape(count, width)
+        if not np.all(np.isfinite(simulated)):
+            raise ValueError("non-finite predictive draws cannot be represented or reduced")
         pieces.append(simulated if combine is None else np.asarray(combine(simulated)))
 
     if not pieces:

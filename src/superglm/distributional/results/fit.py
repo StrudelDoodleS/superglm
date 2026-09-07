@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
+from uuid import uuid4
 
 import numpy as np
 from numpy.typing import NDArray
@@ -57,6 +58,7 @@ class DistributionalFitResult:
     rank: int
     curvature_telemetry: CurvatureTelemetry
     exact_face_components: tuple[str, ...] = ()
+    fit_id: str = field(default_factory=lambda: str(uuid4()), repr=False, compare=False)
 
     def __post_init__(self) -> None:
         coefficients = _readonly_finite(self.coefficients, name="coefficients")
