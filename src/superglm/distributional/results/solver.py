@@ -339,11 +339,10 @@ class SolverIteration:
 
 
 def _readonly_finite(values: NDArray, *, name: str) -> NDArray[np.float64]:
-    result = np.array(values, dtype=np.float64, copy=True)
+    result = np.asarray(values, dtype=np.float64)
     if not np.all(np.isfinite(result)):
         raise ValueError(f"{name} must contain only finite values")
-    result.setflags(write=False)
-    return result
+    return np.frombuffer(result.tobytes(order="C"), dtype=result.dtype).reshape(result.shape)
 
 
 def _validate_newton_decrement_certificate(

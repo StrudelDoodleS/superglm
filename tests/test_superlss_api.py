@@ -1102,6 +1102,30 @@ def test_failed_second_fit_keeps_the_previous_complete_revision() -> None:
     np.testing.assert_array_equal(model.predict(frame), accepted_prediction)
 
 
+def test_published_arrays_cannot_rearm_writes_and_isolate_constructor_inputs() -> None:
+    frame, response, _, _ = _fixture()
+    original = _linear_model().fit(frame, response)
+    for model in (original, SuperLSS.from_bytes(original.to_bytes())):
+        expected = model.predict(frame).copy()
+        solver = model._require_fitted().result
+        arrays = [model.result_.coefficients, model.covariance_, *model.coef_by_predictor_.values()]
+        arrays.extend(value for value in vars(solver).values() if isinstance(value, np.ndarray))
+        for value in arrays:
+            assert value.dtype == np.float64
+            with pytest.raises(ValueError):
+                value.setflags(write=True)
+            base = value.base
+            while isinstance(base, np.ndarray):
+                with pytest.raises(ValueError):
+                    base.setflags(write=True)
+                base = base.base
+        source = model.result_.covariance.copy()
+        published = replace(model.result_, covariance=source)
+        source[:] = 0.0
+        np.testing.assert_array_equal(published.covariance, model.covariance_)
+        np.testing.assert_array_equal(model.predict(frame), expected)
+
+
 def test_public_artifact_round_trip_preserves_fitted_state_and_execution_config() -> None:
     frame, response, weights, offsets = _fixture()
     model = SuperLSS(

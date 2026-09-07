@@ -1321,11 +1321,22 @@ def _reconstruct_invariant_dataclass(value: Any, memo: dict[int, Any]) -> Any:
         cached = memo.get(id(value))
         if cached is not None:
             return cached
-        changes = {
-            field.name: _reconstruct_invariant_dataclass(getattr(value, field.name), memo)
-            for field in dataclasses.fields(value)
-            if field.init
-        }
+        changes = {}
+        for field in dataclasses.fields(value):
+            if not field.init:
+                continue
+            if (
+                isinstance(value, DistributionalFitResult)
+                and field.name == "fit_id"
+                and field.name not in vars(value)
+            ):
+                # Legacy artifacts never stored a reuse ID. Each load receives
+                # its own, persisted on the next save, without rebuilding twice.
+                changes[field.name] = field.default_factory()
+            else:
+                changes[field.name] = _reconstruct_invariant_dataclass(
+                    getattr(value, field.name), memo
+                )
         rebuilt = dataclasses.replace(value, **changes)
         memo[id(value)] = rebuilt
         return rebuilt

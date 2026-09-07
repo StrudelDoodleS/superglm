@@ -105,6 +105,30 @@ def _gamma_model(*, retain_rows: bool = True):
     return model, frame
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_posterior_provenance_survives_current_artifacts_and_migrates_legacy(legacy) -> None:
+    from superglm.distributional.posterior import posterior_draws, posterior_parameters
+
+    model, frame, offsets, _ = _fixed_model()
+    draws = posterior_draws(model, 8)
+    expected = list(posterior_parameters(model, frame, draws, offsets=offsets))
+    if legacy:
+        object.__delattr__(model.fit_state.result, "fit_id")
+    artifact = serialize_distributional_model(model)
+    restored = deserialize_distributional_model(artifact)
+    if legacy:
+        draws = posterior_draws(restored, 8)
+        independent = deserialize_distributional_model(artifact)
+        with pytest.raises(ValueError, match="different fit or revision"):
+            list(posterior_parameters(independent, frame, draws, offsets=offsets))
+    before = list(posterior_parameters(restored, frame, draws, offsets=offsets))
+    if not legacy:
+        np.testing.assert_array_equal(expected[0][1], before[0][1])
+    again = deserialize_distributional_model(serialize_distributional_model(restored))
+    after = list(posterior_parameters(again, frame, draws, offsets=offsets))
+    np.testing.assert_array_equal(before[0][1], after[0][1])
+
+
 def _generalized_gamma_model(*, retain_rows: bool = True):
     frame = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 12)})
     response = np.array([0.7, 1.0, 1.4, 2.1, 1.8, 2.6, 3.2, 2.9, 3.8, 4.5, 4.0, 5.1])
