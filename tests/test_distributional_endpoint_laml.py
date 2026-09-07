@@ -1175,10 +1175,10 @@ def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolutio
         face,
         initial,
         config,
-    ) = _resolution_limited_face_problem(3.0e6)
-    response = np.array([0.0, 2.0], dtype=np.float64)
-    for _ in range(19):
-        response[1] = np.nextafter(response[1], np.inf)
+    ) = _resolution_limited_face_problem(2.0**22)
+    # Force an ordinary small-step stop before the mean, not a rounding accident.
+    config = replace(config, max_predictor_step=2.0**-50)
+    response = np.array([0.0, 2.0 + 2.0**-40], dtype=np.float64)
     likelihood_plan = family.bind_likelihood(
         response,
         likelihood_plan.weights,
@@ -1211,10 +1211,10 @@ def test_endpoint_authority_routes_an_ordinary_plateau_through_private_resolutio
     assert ordinary.convergence_reason == "objective_and_step"
     assert efs_module._endpoint_retained_kkt_relative(ordinary) > config.tolerance
     assert result.converged is True
-    assert result.convergence_reason == "resolution_limited_stationarity"
+    assert result.convergence_reason == "score"
     assert result.coefficient_face is face
     assert result.history == ()
-    assert efs_module._endpoint_retained_kkt_relative(result) > config.tolerance
+    assert efs_module._endpoint_retained_kkt_relative(result) <= config.tolerance
     assert efs_module._endpoint_retained_kkt_relative(result) < (
         efs_module._endpoint_retained_kkt_relative(ordinary)
     )
@@ -1288,7 +1288,8 @@ def test_resolution_limited_newton_decrement_is_invariant_to_coefficient_rescali
     gains: list[float] = []
     coefficient_ulp_mutant_verdicts: list[bool] = []
 
-    for coefficient_scale in (1.0, 1.0e16):
+    # Powers of two preserve the initial predictor exactly in both coordinates.
+    for coefficient_scale in (1.0, 2.0**54):
         (
             family,
             layout,

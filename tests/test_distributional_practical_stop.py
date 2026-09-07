@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,47 @@ from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional import fit_diagnostics as diagnostics_module
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.distributional.result import DistributionalEFSConfig
+from superglm.distributional.smoothing.objective import _stable_isolated_gfs_update
 from superglm.features import RandomEffect, Spline
+from superglm.reml.efs_update import EFSComponentState, wood_fasiolo_update
+from superglm.types import LambdaPolicy
+
+
+def test_saturated_update_checks_inverse_products_before_cancellation() -> None:
+    factor = np.array([1.0, math.sqrt(2.0)])
+    penalty = np.outer(factor, factor)
+    eigenvalue = float(factor @ factor)
+    projector = penalty / eigenvalue
+    null_projector = np.eye(2) - projector
+    lam = 1.0e10
+    # H = I + λS: its two eigenspaces have eigenvalues 1 and 1 + λ||factor||².
+    inverse = null_projector + projector / (1.0 + eigenvalue * lam)
+    beta = np.array([factor[1], -factor[0]]) + 2.0**-40 * factor
+    component = EFSComponentState("smooth", slice(0, 2), penalty, 1.0, lam, LambdaPolicy.estimate())
+    fit = SimpleNamespace(
+        coefficients=beta,
+        coefficient_face=None,
+        terminal_rank=SimpleNamespace(rank=2),
+        terminal_data_curvature=np.eye(2),
+        terminal_penalized_curvature=np.eye(2) + lam * penalty,
+    )
+    config = DistributionalEFSConfig()
+    raw = wood_fasiolo_update((component,), beta, inverse, inverse_scale=1.0)
+    stable, names = _stable_isolated_gfs_update((component,), fit, inverse, raw, config)
+
+    assert names == {"smooth"}
+    # The exact multiplier is 1 / ((1 + 3λ) λ 9·2^-80), safely above one.
+    assert stable.raw_log_steps["smooth"] > math.log(100.0)
+    projection_bound = (
+        64.0 * beta.size * np.finfo(float).eps * np.linalg.norm(factor) * np.linalg.norm(beta)
+    )
+    assert (
+        abs(math.sqrt(stable.quadratic_forms["smooth"]) - abs(float(factor @ beta)))
+        <= projection_bound
+    )
+
+    _, refused = _stable_isolated_gfs_update((component,), fit, 2.0 * inverse, raw, config)
+    assert refused == frozenset()
 
 
 @pytest.mark.parametrize(

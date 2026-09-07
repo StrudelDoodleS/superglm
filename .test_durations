@@ -9114,6 +9114,7 @@
     "tests/test_distributional_practical_stop.py::test_residual_severity_bands[0.9-warning]": 0.0002628597430884838,
     "tests/test_distributional_practical_stop.py::test_residual_severity_bands[1.5-error]": 0.0002730344422161579,
     "tests/test_distributional_practical_stop.py::test_residual_severity_bands[5e-07-info]": 0.00042472267523407936,
+    "tests/test_distributional_practical_stop.py::test_saturated_update_checks_inverse_products_before_cancellation": 0.001,
     "tests/test_distributional_practical_stop.py::test_scaled_proposal_lands_exactly_on_the_maximum[0.001]": 0.00028792815282940865,
     "tests/test_distributional_practical_stop.py::test_scaled_proposal_lands_exactly_on_the_maximum[0.125]": 0.00024422118440270424,
     "tests/test_distributional_practical_stop.py::test_scaled_proposal_lands_exactly_on_the_maximum[1000000000.0]": 0.000263881403952837,
