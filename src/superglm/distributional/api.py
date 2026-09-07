@@ -1716,6 +1716,11 @@ class SuperLSS:
                     )
                 continue
             selections[name] = selected
+        if asked is not None:
+            available = {term for selected in selections.values() for term in selected}
+            unknown = tuple(term for term in asked if term not in available)
+            if unknown:
+                raise ValueError(f"unknown plot terms in the selected parameter scope: {unknown}")
         if not selections:
             raise ValueError("no parameter has a term with a one-dimensional effect grid")
 

@@ -338,9 +338,15 @@ class DenseDistributionalModel:
         eta = self.predict_eta(X, offsets=offsets)
         theta = np.empty_like(eta)
         for parameter_index, state in enumerate(self.layout.predictors):
-            values = np.asarray(state.link.inverse(eta[:, parameter_index]), dtype=np.float64)
+            # Overflow is refused by the support check immediately below.
+            with np.errstate(over="ignore", invalid="ignore"):
+                values = np.asarray(state.link.inverse(eta[:, parameter_index]), dtype=np.float64)
             if values.shape != (len(eta),):
                 raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
+            if not np.all(self.family.parameters[parameter_index].support.contains(values)):
+                raise ValueError(
+                    f"prediction parameter {state.name!r} is outside its finite support"
+                )
             theta[:, parameter_index] = values
         return _readonly(theta)
 

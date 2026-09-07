@@ -29,6 +29,18 @@ from superglm.diagnostics.discretize import DiscretizationResult, discretization
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
+from superglm.distributional import (
+    GammaLS,
+    GaussianLS,
+    GeneralizedGammaLSS,
+    GeneralizedParetoLSS,
+    LogNormalLS,
+    NegativeBinomialLS,
+    Predictor,
+    TweedieLSS,
+    TwoPieceLogNormalLSS,
+    TwoPieceNormalLSS,
+)
 from superglm.distributional.api import SuperLSS
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
@@ -144,6 +156,16 @@ __all__ = [
     "warmup",
     "SuperGLM",
     "SuperLSS",
+    "GaussianLS",
+    "GammaLS",
+    "GeneralizedGammaLSS",
+    "GeneralizedParetoLSS",
+    "LogNormalLS",
+    "NegativeBinomialLS",
+    "TweedieLSS",
+    "TwoPieceLogNormalLSS",
+    "TwoPieceNormalLSS",
+    "Predictor",
     "PathResult",
     "PublicationModeError",
     "DiscretizationResult",

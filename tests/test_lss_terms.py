@@ -41,6 +41,31 @@ SUMMARY_COLUMNS = (
 )
 
 
+def test_review_ordered_special_reporting_uses_block_wald(specials_case, monkeypatch):
+    fitted, frame = specials_case
+    original = terms_module.wood_test_smooth
+    block_slice = fitted.layout.term_slices["location:band:special"]
+    special_beta = np.asarray(fitted.coefficients)[block_slice]
+
+    def refuse_special_smooth(beta, *args, **kwargs):
+        if np.array_equal(beta, special_beta):
+            raise AssertionError("a free special-level block must use Wald inference")
+        return original(beta, *args, **kwargs)
+
+    monkeypatch.setattr(terms_module, "wood_test_smooth", refuse_special_smooth)
+    outcome = term_test(fitted, frame, "location", "band:special")
+    beta = np.asarray(fitted.coefficients)[block_slice]
+    covariance = np.asarray(fitted.inference.covariance)[block_slice, block_slice]
+    expected = float(beta @ np.linalg.solve(covariance, beta))
+    assert outcome.rank == 1.0
+    assert outcome.statistic == pytest.approx(expected)
+    assert outcome.p_value == pytest.approx(stats.chi2.sf(expected, 1))
+    table = summary_table(fitted, frame)
+    row = table[(table.parameter == "location") & (table.term == "band (special level)")].iloc[0]
+    assert row["rank"] == 1.0
+    assert row.p_value == pytest.approx(outcome.p_value)
+
+
 def _simulated(n: int = 1200, seed: int = 20260903) -> tuple[pd.DataFrame, np.ndarray]:
     rng = np.random.default_rng(seed)
     x = rng.uniform(-1.0, 1.0, n)

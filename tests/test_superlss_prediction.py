@@ -9,6 +9,70 @@ from superglm.distributional import GaussianLS, Predictor
 from superglm.features import Numeric
 
 
+@pytest.mark.parametrize("shift", [-1000.0, 1000.0])
+def test_review_prediction_refuses_excluded_scale_floor_and_overflow_without_warning(shift):
+    import warnings
+
+    frame, response, _ = _fixture()
+    model = SuperLSS(family=GaussianLS(scale_floor=0.03), predictors=_predictors()).fit(
+        frame, response
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        with pytest.raises(ValueError, match="scale.*support"):
+            model.predict_parameters(frame, offsets={"scale": np.full(len(frame), shift)})
+
+
+@pytest.mark.parametrize("family_name", ["GaussianLS", "GammaLS"])
+def test_review_public_quantile_preserves_nonfinite_refusal(family_name):
+    from superglm import distributional
+
+    family = getattr(distributional, family_name)()
+    frame, response, _ = _fixture()
+    response = response if family_name == "GaussianLS" else np.exp(response)
+    predictors = (Predictor(family.parameters[0].name, {"x": Numeric()}), Predictor("scale", {}))
+    model = SuperLSS(family=family, predictors=predictors).fit(frame, response)
+    with pytest.raises(ValueError):
+        model.predict_quantile(frame, np.nan)
+
+
+def test_review_plot_terms_resolve_across_selected_predictors():
+    import matplotlib.pyplot as plt
+
+    frame, response, _ = _fixture()
+    model = SuperLSS(family=GaussianLS(), predictors=_predictors()).fit(frame, response)
+    figures = model.plot(terms=["x", "z"], n_sim=32)
+    assert set(figures) == {"location", "scale"}
+    for figure in figures.values():
+        plt.close(figure)
+    for parameter, terms, missing in [
+        (None, ["x", "typo"], "typo"),
+        ("location", ["x", "z"], "z"),
+        (None, ["typo"], "typo"),
+    ]:
+        with pytest.raises(ValueError, match=f"unknown.*{missing}"):
+            model.plot(parameter=parameter, terms=terms, n_sim=32)
+
+
+def test_review_explicit_plot_interaction_still_refuses():
+    from superglm import NumericInteraction
+
+    frame, response, _ = _fixture()
+    model = SuperLSS(
+        family=GaussianLS(),
+        predictors=(
+            Predictor(
+                "location",
+                {"x": Numeric(), "z": Numeric()},
+                interaction_specs={"x:z": NumericInteraction("x", "z")},
+            ),
+            Predictor("scale", {}),
+        ),
+    ).fit(frame, response)
+    with pytest.raises(NotImplementedError, match="interaction.*one-dimensional"):
+        model.plot(terms=["x", "x:z"], n_sim=32)
+
+
 def _fixture(n: int = 84) -> tuple[pd.DataFrame, np.ndarray, dict[str, np.ndarray]]:
     rng = np.random.default_rng(1701)
     x = np.linspace(-1.0, 1.0, n)

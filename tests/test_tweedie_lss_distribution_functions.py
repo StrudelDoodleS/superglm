@@ -39,6 +39,34 @@ _TWEEDIE_ROWS = (
 )
 
 
+@pytest.mark.parametrize(
+    "family,theta",
+    [
+        (GaussianLS(), [[0.0, 1.0], [1.0, 2.0]]),
+        (GammaLS(), [[1.0, 0.5], [2.0, 0.7]]),
+        (TweedieLSS(), [[1.0, 1.0, 1.5], [2.0, 1.0, 1.5]]),
+    ],
+)
+@pytest.mark.parametrize("weighted", [False, True])
+@pytest.mark.parametrize("probability", [np.nan, np.inf, -np.inf, 0.0, 1.0])
+def test_review_direct_quantile_refuses_nonfinite_and_endpoints(
+    family, theta, weighted, probability
+):
+    values = np.asarray(theta)
+    p = np.array([0.5, probability])
+    with pytest.raises(ValueError, match="probabilit"):
+        if weighted:
+            family.quantile_prior_weighted(p, values, np.array([0.5, 2.0]))
+        else:
+            family.quantile(p, values)
+
+
+def test_review_tweedie_public_quantile_refuses_nan(burn_cost_fit):
+    model, frame, _, _ = burn_cost_fit
+    with pytest.raises(ValueError, match="probabilit"):
+        model.predict_quantile(frame.head(2), np.array([0.5, np.nan]))
+
+
 def _tweedie_theta() -> NDArray[np.float64]:
     return np.array([row[:3] for row in _TWEEDIE_ROWS], dtype=np.float64)
 

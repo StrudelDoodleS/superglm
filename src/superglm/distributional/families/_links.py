@@ -21,8 +21,6 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import expit
 
-_PROBE = 20.0
-
 
 def _finite_wall(value: object, *, name: str) -> float:
     if isinstance(value, bool):
@@ -38,7 +36,13 @@ def _finite_wall(value: object, *, name: str) -> float:
 
 @dataclass(frozen=True)
 class BoundedLogitLink:
-    """Logit between two configured walls: ``value = lower + (upper - lower) expit(eta)``."""
+    """Logit between two configured walls: ``value = lower + (upper - lower) expit(eta)``.
+
+    The represented inverse is clipped to the nearest interior floats. Inverse
+    derivatives describe the underlying smooth logistic map, evaluated in
+    float64, not the rounded/clipped output. Saturation and underflow can still
+    make those analytic derivatives numerically zero.
+    """
 
     lower: float = 0.0
     upper: float = 1.0
@@ -48,10 +52,11 @@ class BoundedLogitLink:
         upper = _finite_wall(self.upper, name="upper")
         if not lower < upper:
             raise ValueError("bounded logit walls must be strictly ordered")
+        if not math.isfinite(upper - lower):
+            raise ValueError("bounded logit walls must have a finite span")
         object.__setattr__(self, "lower", lower)
         object.__setattr__(self, "upper", upper)
-        edges = self.inverse(np.array([-_PROBE, _PROBE]))
-        if not (edges[0] > lower and edges[1] < upper):
+        if np.nextafter(lower, upper) > np.nextafter(upper, lower):
             raise ValueError(
                 "bounded logit walls are too close together for the inverse to stay strictly "
                 "inside them in float64"
@@ -80,7 +85,11 @@ class BoundedLogitLink:
 
     def inverse(self, eta: NDArray) -> NDArray[np.float64]:
         probability = expit(np.asarray(eta, dtype=np.float64))
-        return self.lower + self._span * probability
+        return np.clip(
+            self.lower + self._span * probability,
+            np.nextafter(self.lower, self.upper),
+            np.nextafter(self.upper, self.lower),
+        )
 
     def deriv(self, mu: NDArray) -> NDArray[np.float64]:
         values = self._interior(mu, name="derivative")

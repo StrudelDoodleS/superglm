@@ -13,6 +13,56 @@ from superglm.links import Link
 _WALLS = [(0.0, 1.0), (0.2, 0.3), (-0.9, 0.9), (0.0, 0.5), (0.5, 1.0)]
 
 
+@pytest.mark.parametrize(("lower", "upper"), _WALLS)
+def test_review_extreme_finite_inverse_is_representably_interior(lower, upper):
+    eta = np.array([-1000.0, -40.0, -20.0, 0.0, 20.0, 40.0, 1000.0])
+    values = BoundedLogitLink(lower, upper).inverse(eta)
+    assert values.shape == eta.shape
+    assert np.all(np.isfinite(values))
+    assert np.all((lower < values) & (values < upper))
+    assert np.all(np.diff(values) >= 0)
+    assert values[0] == np.nextafter(lower, upper)
+    assert values[-1] == np.nextafter(upper, lower)
+
+
+def test_review_one_representable_interior_retains_analytic_derivatives():
+    lower = 0.5
+    middle = np.nextafter(lower, np.inf)
+    upper = np.nextafter(middle, np.inf)
+    link = BoundedLogitLink(lower, upper)
+    np.testing.assert_array_equal(
+        link.inverse(np.array([-1000.0, -2.0, 0.0, 2.0, 1000.0])), np.full(5, middle)
+    )
+    assert link.deriv_inverse(np.array([0.0]))[0] == 2.0**-54
+    assert link.deriv2_inverse(np.array([0.0]))[0] == 0.0
+    assert link.deriv3_inverse(np.array([0.0]))[0] == -(2.0**-55)
+
+
+def test_review_clipped_inverse_keeps_smooth_derivative_convention():
+    mp = pytest.importorskip("mpmath")
+    link = BoundedLogitLink(0.2, 0.3)
+    eta = np.array([-40.0])
+    assert link.inverse(eta)[0] == np.nextafter(0.2, 0.3)
+    with mp.workdps(80):
+
+        def smooth(t):
+            return mp.mpf(0.2) + (mp.mpf(0.3) - mp.mpf(0.2)) / (1 + mp.exp(-t))
+
+        expected = [float(mp.diff(smooth, -40, n)) for n in (1, 2, 3)]
+    actual = [
+        method(eta)[0] for method in (link.deriv_inverse, link.deriv2_inverse, link.deriv3_inverse)
+    ]
+    np.testing.assert_allclose(actual, expected, rtol=32 * np.finfo(float).eps, atol=0)
+    assert np.all(np.asarray(actual) > 0)
+
+
+def test_review_overflow_width_is_deliberately_refused():
+    wall = np.finfo(float).max
+    with np.errstate(over="raise", invalid="raise"):
+        with pytest.raises(ValueError, match="wall"):
+            BoundedLogitLink(-wall, wall)
+
+
 def _rel(a, b):
     return abs(a - b) / (1.0 + abs(b))
 

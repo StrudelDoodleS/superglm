@@ -72,6 +72,25 @@ SPINE = to_rgba("#8c959f")
 BAND_ALPHA = 0.13
 
 
+def test_review_diagnostics_labels_are_generic_for_gamma():
+    from superglm.distributional import GammaLS
+
+    rng = np.random.default_rng(593)
+    frame = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 100)})
+    y = rng.gamma(4.0, 0.25, len(frame))
+    model = SuperLSS(
+        family=GammaLS(), predictors=[Predictor("mean", {}), Predictor("scale", {})]
+    ).fit(frame, y)
+    figure = model.plot_diagnostics(frame, y, n_sim=4)
+    try:
+        assert figure.axes[4].get_xlabel() == "η₁"
+        assert figure.axes[5].get_xlabel() == "η₂"
+        assert "location" not in figure.axes[4].get_title()
+        assert "scale" not in figure.axes[5].get_title()
+    finally:
+        plt.close(figure)
+
+
 # --------------------------------------------------------------------------- #
 # Fixtures: one small Gaussian location-scale fit and its payloads
 # --------------------------------------------------------------------------- #
