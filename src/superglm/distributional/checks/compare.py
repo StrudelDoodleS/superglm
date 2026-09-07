@@ -160,14 +160,38 @@ def _paired_summary(
     )
     if mass.shape != values.shape:
         raise ValueError("aggregation mass must give one value per score difference")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("paired score differences must be finite and representable")
     count = int(np.sum(mass, dtype=np.float64))
-    mean = float(np.dot(mass, values) / count) if count else float("nan")
+    probability = mass / count if count else mass
+    with np.errstate(over="ignore", invalid="ignore"):
+        mean = float(np.dot(probability, values)) if count else float("nan")
+    if count and not np.isfinite(mean):
+        raise ValueError("paired mean must be finite and representable")
     if count < 2:
         # One row carries no within-sample spread, so it certifies no difference.
         return {"mean_diff": mean, "se": float("nan"), "t": float("nan"), "n": count}
-    squared_error = float(np.dot(mass, (values - mean) ** 2) / (count * (count - 1)))
-    error = float(np.sqrt(squared_error))
+    if np.all(values == values[0]):
+        # Preserve exact zero spread even if normalizing unequal counts rounds.
+        return {"mean_diff": float(values[0]), "se": 0.0, "t": float("nan"), "n": count}
+    # Scale the centered norm before squaring, and divide out the replication
+    # count before restoring units. Even the subtraction can overflow for
+    # opposite extreme scores, in which case center in scaled units instead.
+    with np.errstate(over="ignore", invalid="ignore"):
+        centered = values - mean
+    if np.all(np.isfinite(centered)):
+        scale = float(np.max(np.abs(centered)))
+        centered = centered / scale if scale else centered
+    else:
+        scale = float(np.max(np.abs(values)))
+        centered = values / scale - mean / scale
+    with np.errstate(over="ignore", invalid="ignore"):
+        error = float(
+            scale * (np.linalg.norm(np.sqrt(probability) * centered) / np.sqrt(count - 1))
+        )
     ratio = mean / error if error > 0.0 else float("nan")
+    if not np.isfinite(error) or (error > 0.0 and not np.isfinite(ratio)):
+        raise ValueError("paired standard error and t must be finite and representable")
     return {"mean_diff": mean, "se": error, "t": float(ratio), "n": count}
 
 

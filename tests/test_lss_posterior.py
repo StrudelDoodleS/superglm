@@ -99,6 +99,49 @@ def test_task7_predictive_finite_additive_control(fit_case):
     np.testing.assert_array_equal(actual, [5, 5, 5])
 
 
+@pytest.mark.parametrize("shape", [(1, 1), (3, 1, 1), (), (2,)])
+def test_task10_predictive_rejects_malformed_reducer(fit_case, shape):
+    fitted, X, _ = fit_case
+    with pytest.raises(ValueError, match="one row per posterior draw"):
+        posterior_predictive(
+            fitted,
+            X.head(5),
+            n_draws=3,
+            parameter_uncertainty=False,
+            chunk_rows=2,
+            reduce=lambda block: np.ones(shape),
+        )
+
+
+def test_task10_predictive_concatenates_valid_reducer_chunks(fit_case):
+    fitted, X, _ = fit_case
+    actual = posterior_predictive(
+        fitted,
+        X.head(5),
+        n_draws=3,
+        parameter_uncertainty=False,
+        chunk_rows=2,
+        reduce=lambda block: np.full((len(block), 1), block.shape[1]),
+    )
+    np.testing.assert_array_equal(actual, [[2, 2, 1]] * 3)
+
+
+@pytest.mark.parametrize("error", [-1.0, np.nan, np.inf, -np.inf])
+def test_task10_simultaneous_rejects_invalid_standard_errors(error):
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        simultaneous_critical_value(
+            np.eye(2), slice(None), np.zeros((4, 2)), np.zeros(2), np.array([1.0, error])
+        )
+
+
+@pytest.mark.parametrize("error", [0.0, 1.0])
+def test_task10_simultaneous_zero_and_positive_errors_preserve_normal_floor(error):
+    actual = simultaneous_critical_value(
+        np.eye(2), slice(None), np.zeros((4, 2)), np.zeros(2), np.full(2, error)
+    )
+    assert actual == pytest.approx(stats.norm.isf(0.025))
+
+
 @pytest.fixture(scope="module")
 def fit_case() -> tuple[DenseDistributionalModel, pd.DataFrame, np.ndarray]:
     X, y = _simulated()
@@ -853,7 +896,7 @@ def test_quantity_and_reduce_contracts_are_enforced(fit_case) -> None:
 
     with pytest.raises(ValueError, match="n_draws"):
         posterior_predictive(fitted, head, 0)
-    with pytest.raises(ValueError, match="additive across row chunks"):
+    with pytest.raises(ValueError, match="one row per posterior draw"):
         posterior_predictive(
             fitted, head, 4, parameter_uncertainty=False, reduce=lambda block: block.sum(axis=0)
         )

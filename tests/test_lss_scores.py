@@ -21,6 +21,7 @@ from superglm.distributional import Predictor
 from superglm.distributional.checks.compare import (
     Comparison,
     MurphyPayload,
+    _paired_summary,
     _replicated_quantiles,
     compare_models,
     murphy_diagram,
@@ -45,6 +46,54 @@ from superglm.distributional.weights import (
 )
 
 _GRID = 96
+
+
+@pytest.mark.parametrize(
+    "values, expected_mean, expected_se",
+    [
+        ([1e300, 1e300], 1e300, 0.0),
+        ([1e300, 3e300], 2e300, 1e300 / np.sqrt(999_999_999)),
+        ([-1e308, 1e308], 0.0, 1e308 / np.sqrt(999_999_999)),
+    ],
+)
+def test_task10_paired_summary_large_representable(values, expected_mean, expected_se):
+    result = _paired_summary(np.array(values), np.full(2, 500_000_000.0))
+    assert result["n"] == 1_000_000_000
+    assert result["mean_diff"] == pytest.approx(expected_mean, rel=8 * np.finfo(float).eps)
+    assert result["se"] == pytest.approx(expected_se, rel=8 * np.finfo(float).eps)
+    if expected_se == 0:
+        assert np.isnan(result["t"])
+    else:
+        assert result["t"] == pytest.approx(expected_mean / expected_se)
+
+
+def test_task10_paired_summary_literal_replication_and_undefined_t():
+    values = np.array([-2.0, 1.0, 5.0])
+    mass = np.array([2, 3, 4])
+    repeated = np.repeat(values, mass)
+    result = _paired_summary(values, mass)
+    assert result["mean_diff"] == pytest.approx(np.mean(repeated))
+    assert result["se"] == pytest.approx(np.std(repeated, ddof=1) / np.sqrt(len(repeated)))
+    for data in ([3.0], [3.0, 3.0]):
+        assert np.isnan(_paired_summary(np.array(data))["t"])
+
+
+def test_task10_paired_summary_rejects_unrepresentable_scores():
+    with pytest.raises(ValueError, match="paired.*representable"):
+        _paired_summary(np.array([np.inf, 1.0]))
+
+
+def test_task10_paired_summary_constant_unequal_replication():
+    result = _paired_summary(np.full(3, 1e300), np.array([1.0, 2.0, 4.0]))
+    assert result["mean_diff"] == 1e300
+    assert result["se"] == 0.0
+    assert np.isnan(result["t"])
+
+
+def test_task10_paired_summary_overflowing_centered_difference():
+    result = _paired_summary(np.array([-1e308, 1.6e308]), np.array([250_000_000, 750_000_000]))
+    assert result["mean_diff"] == pytest.approx(9.5e307)
+    assert result["se"] == pytest.approx(1e308 * (0.65 * np.sqrt(3) / np.sqrt(999_999_999)))
 
 
 @pytest.mark.parametrize(

@@ -1589,9 +1589,10 @@ def plotly_portfolio(payload: Any) -> go.Figure:
     if segments is not None:
         labels = [str(name) for name in segments["segment"]]
         mean = segments["mean_total"].to_numpy(dtype=np.float64)
-        columns = [f"q{value:g}" for value in payload.quantiles]
+        columns = [f"q{value:g}" for value in sorted(payload.quantiles)]
         low = segments[columns[0]].to_numpy(dtype=np.float64)
         high = segments[columns[-1]].to_numpy(dtype=np.float64)
+        midpoint = 0.5 * low + 0.5 * high
         counts = segments["n"].to_numpy(dtype=np.float64)
         fig.add_trace(
             go.Bar(
@@ -1610,11 +1611,11 @@ def plotly_portfolio(payload: Any) -> go.Figure:
         fig.add_trace(
             go.Scatter(
                 x=labels,
-                y=mean,
+                y=midpoint,
                 mode="markers",
                 marker=_point_marker(),
                 selected=_selection(),
-                error_y=_whisker(high - mean, mean - low),
+                error_y=_whisker(high - midpoint, midpoint - low),
                 name=f"{columns[0]} to {columns[-1]}",
                 customdata=np.column_stack([low, high]),
                 hovertemplate=(
