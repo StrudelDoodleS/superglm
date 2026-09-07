@@ -107,6 +107,42 @@ def test_variance_avoids_intermediate_range_loss(q, parametrisation):
     assert actual == pytest.approx(expected, rel=8192 * np.finfo(float).eps, abs=0)
 
 
+@pytest.mark.parametrize("sigma", [1e8, np.nextafter(1e8, np.inf)])
+@pytest.mark.parametrize("q", [0.0, 1e-9])
+def test_location_variance_final_cancellation_is_accurate_or_refused(sigma, q):
+    mp = pytest.importorskip("mpmath")
+    with mp.workdps(100):
+        s, shape = mp.mpf(sigma), mp.mpf(q)
+
+        def loading(order):
+            if q == 0:
+                return (order * s) ** 2 / 2
+            k = 1 / shape**2
+            return (
+                order * s / shape * mp.log(shape**2)
+                + mp.loggamma(k + order * s / shape)
+                - mp.loggamma(k)
+            )
+
+        first_loading, second_loading = loading(1), loading(2)
+        # Choose a represented location with a moderate true variance. The
+        # reference uses that exact binary64 location, including its rounding.
+        mu = float(-second_loading / 2)
+        logvariance = (
+            2 * mp.mpf(mu) + second_loading + mp.log1p(-mp.exp(2 * first_loading - second_loading))
+        )
+        expected = float(mp.exp(logvariance))
+    if q != 0:
+        assert sigma * q / (1 + sigma * q) < 0.125  # centered route
+    family = GeneralizedGammaLSS(parametrisation="location", scale_floor=0)
+    try:
+        actual = family.variance(np.array([[mu, sigma, q]]))[0]
+    except gg.GeneralizedGammaDomainError as error:
+        assert "variance" in str(error) and "numerical" in str(error)
+    else:
+        assert actual == pytest.approx(expected, rel=8192 * np.finfo(float).eps, abs=0)
+
+
 @pytest.mark.parametrize("mean,sigma", [(1e300, 1.0), (1e-300, 1e-100)])
 def test_finite_variance_outside_float_range_is_a_numerical_refusal(mean, sigma):
     family = GeneralizedGammaLSS(scale_floor=0)
