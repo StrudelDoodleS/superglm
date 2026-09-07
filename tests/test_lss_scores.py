@@ -860,5 +860,141 @@ def test_a_non_finite_score_is_named_rather_than_averaged(fit_case, misfit_case)
     misfitted, _, _ = misfit_case
     broken = np.array(y, dtype=float)
     broken[0] = np.inf
-    with pytest.raises(ValueError, match="non-finite"):
+    with pytest.raises(ValueError, match="finite"):
         compare_models(fitted, misfitted, X, broken, which="crps")
+
+
+@pytest.mark.parametrize("entry", [crps_closed_form, crps_numeric])
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_direct_crps_rejects_nonfinite_response(entry, bad) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        entry(GaussianLS(), np.array([bad]), np.array([[0.0, 1.0]]))
+
+
+@pytest.mark.parametrize("entry", ["crps", "tail", "table"])
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_model_crps_validates_only_retained_responses(frequency_case, entry, bad) -> None:
+    fitted, X, y = frequency_case
+    frame = X.iloc[:3]
+    response = np.array(y[:3], copy=True)
+    response[1] = bad
+
+    def score(weights):
+        kwargs = {"sample_weight": weights}
+        if entry == "crps":
+            return crps(fitted, frame, response, **kwargs)
+        if entry == "tail":
+            return threshold_weighted_crps(fitted, frame, response, 0.5, **kwargs)
+        return score_table(fitted, frame, response, which=("crps",), **kwargs).to_numpy()[:, 0]
+
+    with pytest.raises(ValueError, match="finite"):
+        score(np.ones(3))
+    actual = score(np.array([1, 0, 1]))
+    assert np.isnan(actual[1])
+    assert np.all(np.isfinite(actual[[0, 2]]))
+
+
+def test_direct_tail_crps_rejects_nan_threshold() -> None:
+    with pytest.raises(ValueError, match="threshold.*NaN"):
+        crps_numeric(GaussianLS(), np.zeros(2), np.array([[0.0, 1.0]] * 2), threshold=np.nan)
+
+
+@pytest.mark.parametrize("entry", ["tail", "table", "comparison"])
+def test_model_tail_diagnostics_reject_nan_threshold(fit_case, entry) -> None:
+    fitted, X, y = fit_case
+    with pytest.raises(ValueError, match="threshold.*NaN"):
+        if entry == "tail":
+            threshold_weighted_crps(fitted, X.iloc[:3], y[:3], np.nan)
+        elif entry == "table":
+            score_table(fitted, X.iloc[:3], y[:3], thresholds=(np.nan,))
+        else:
+            compare_models(
+                fitted,
+                fitted,
+                X.iloc[:3],
+                y[:3],
+                murphy_quantile=0.5,
+                thresholds=np.array([0.0, np.nan]),
+            )
+
+
+def test_murphy_rejects_nan_threshold() -> None:
+    with pytest.raises(ValueError, match="threshold.*NaN"):
+        murphy_diagram(
+            np.zeros(2), np.ones(2), np.zeros(2), level=0.5, thresholds=np.array([np.nan])
+        )
+
+
+def test_infinite_tail_thresholds_preserve_their_limits(fit_case) -> None:
+    fitted, X, y = fit_case
+    frame, response = X.iloc[:3], y[:3]
+    np.testing.assert_array_equal(
+        threshold_weighted_crps(fitted, frame, response, -np.inf),
+        crps(fitted, frame, response, method="numeric"),
+    )
+    np.testing.assert_array_equal(threshold_weighted_crps(fitted, frame, response, np.inf), 0.0)
+    payload = murphy_diagram(
+        np.zeros(2), np.ones(2), np.zeros(2), level=0.5, thresholds=np.array([-np.inf, np.inf])
+    )
+    np.testing.assert_array_equal(payload.a, 0.0)
+    np.testing.assert_array_equal(payload.b, 0.0)
+
+
+@pytest.mark.parametrize("missing", [None, np.nan, pd.NA])
+@pytest.mark.parametrize("all_missing", [False, True])
+def test_comparison_rejects_missing_retained_segments(fit_case, missing, all_missing) -> None:
+    fitted, X, y = fit_case
+    labels = np.array([missing] * 3 if all_missing else ["a", missing, "b"], dtype=object)
+    with pytest.raises(ValueError, match="segment.*missing"):
+        compare_models(fitted, fitted, X.iloc[:3], y[:3], which="crps", by=labels)
+
+
+def test_comparison_ignores_missing_excluded_segments(frequency_case) -> None:
+    fitted, X, y = frequency_case
+    result = compare_models(
+        fitted,
+        fitted,
+        X.iloc[:3],
+        y[:3],
+        which="crps",
+        by=np.array(["a", None, "a"]),
+        sample_weight=np.array([1, 0, 1]),
+    )
+    assert list(result.by_segment.index) == ["a"]
+    assert result.by_segment.loc["a", "n"] == 2
+
+
+def test_score_table_rejects_rendered_threshold_collisions(fit_case) -> None:
+    fitted, X, y = fit_case
+    with pytest.raises(ValueError, match="duplicate score column names"):
+        score_table(fitted, X.iloc[:3], y[:3], thresholds=(0.5, 0.5000000001))
+
+
+@pytest.mark.parametrize("response", [-1.0, 0.0])
+def test_gamma_crps_below_support_matches_exponential_identity(response) -> None:
+    actual = crps_closed_form(GammaLS(), np.array([response]), np.array([[1.0, 1.0]]))
+    np.testing.assert_allclose(actual, 0.5 - response, rtol=8 * np.finfo(float).eps)
+
+
+@pytest.mark.parametrize("parametrisation", ["mean", "location"])
+@pytest.mark.parametrize("response", [-1.0, 0.0])
+def test_log_normal_crps_below_support_matches_cdf_integral(parametrisation, response) -> None:
+    # Below zero the CDF integral contributes exactly -y; the remaining
+    # survival-square integral is independent of the closed-form helper.
+    distribution = stats.lognorm(s=0.7, scale=np.exp(0.2))
+    integral, error = integrate.quad(
+        lambda z: distribution.sf(z) ** 2, 0.0, np.inf, epsabs=1e-11, epsrel=1e-11
+    )
+    first = np.exp(0.2 + 0.7**2 / 2) if parametrisation == "mean" else 0.2
+    with np.errstate(divide="raise", invalid="raise"):
+        actual = crps_closed_form(
+            LogNormalLS(parametrisation=parametrisation),
+            np.array([response]),
+            np.array([[first, 0.7]]),
+        )
+    np.testing.assert_allclose(
+        actual,
+        integral - response,
+        rtol=0,
+        atol=8 * (error + np.finfo(float).eps * abs(integral - response)),
+    )

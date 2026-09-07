@@ -243,6 +243,8 @@ def _murphy_diagram(
     grid = np.asarray(thresholds, dtype=np.float64)
     if grid.ndim != 1 or len(grid) < 1:
         raise ValueError("the Murphy diagram needs at least one threshold")
+    if np.any(np.isnan(grid)):
+        raise ValueError("thresholds must not contain NaN")
 
     curves = [np.empty(len(grid), dtype=np.float64) for _ in range(2)]
     difference = np.empty(len(grid), dtype=np.float64)
@@ -505,6 +507,8 @@ def compare_models(
     segments = None
     if by is not None:
         labels = _segment_labels(by, frame, n_observations)[rows[0].positions]
+        if np.any(pd.isna(labels)):
+            raise ValueError("segment labels must not be missing")
         segments = _segment_table(labels, differences, aggregation_mass)
     murphy = None
     if murphy_quantile is not None:
