@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -90,7 +90,10 @@ class ResidualSet:
     frequency one -- so a builder that has to simulate or invert the row's
     distribution can hand them straight to the posterior primitive.  Rows whose
     weight is zero are not here at all -- they leave the diagnostics the way
-    they leave the likelihood.
+    they leave the likelihood. ``pit_lower`` and ``pit_upper``, when present,
+    own the unclipped physical-row bounds F(y-) and F(y). They let diagnostic
+    samples randomise replicated atom occurrences independently. Stored values,
+    row counts and JSON arrays always describe physical rows.
     """
 
     pit: NDArray[np.float64]
@@ -103,6 +106,8 @@ class ResidualSet:
     clipped_rows: int
     randomised_rows: int
     weight_semantics: str
+    pit_lower: NDArray[np.float64] | None = None
+    pit_upper: NDArray[np.float64] | None = None
 
     def __post_init__(self) -> None:
         pit = _readonly(self.pit)
@@ -136,6 +141,22 @@ class ResidualSet:
             object.__setattr__(self, name, count)
         if self.weight_semantics not in ("prior", "frequency"):
             raise ValueError("weight_semantics must be 'prior' or 'frequency'")
+        if (self.pit_lower is None) != (self.pit_upper is None):
+            raise ValueError("pit_lower and pit_upper must be supplied together")
+        if self.pit_lower is not None:
+            lower, upper = _readonly(self.pit_lower), _readonly(self.pit_upper)
+            if (
+                lower.shape != (n_rows,)
+                or upper.shape != (n_rows,)
+                or not np.all(np.isfinite(lower))
+                or not np.all(np.isfinite(upper))
+                or np.any(lower < 0.0)
+                or np.any(upper > 1.0)
+                or np.any(lower > upper)
+            ):
+                raise ValueError("CDF intervals must give finite ordered bounds in [0, 1] per row")
+            object.__setattr__(self, "pit_lower", lower)
+            object.__setattr__(self, "pit_upper", upper)
         object.__setattr__(self, "pit", pit)
 
     @property
@@ -162,6 +183,8 @@ class ResidualSet:
             "clipped_rows": int(self.clipped_rows),
             "randomised_rows": int(self.randomised_rows),
             "weight_semantics": str(self.weight_semantics),
+            "pit_lower": None if self.pit_lower is None else _json_values(self.pit_lower),
+            "pit_upper": None if self.pit_upper is None else _json_values(self.pit_upper),
         }
 
 
@@ -191,6 +214,46 @@ def compute_residuals(
     inverting the unit-weight distribution.
     """
     _validated_kind(kind)
+    evaluation = _evaluate_residuals(fitted, X, y, sample_weight=sample_weight, offsets=offsets)
+    lower, upper = evaluation.pit_lower, evaluation.pit_upper
+    atoms = lower < upper
+    u = np.where(atoms, _residual_rng(seed, 0).uniform(lower, upper), upper)
+    clipped_rows = int(np.count_nonzero((u < _PROBABILITY_FLOOR) | (u > _PROBABILITY_CEILING)))
+    u = np.clip(u, _PROBABILITY_FLOOR, _PROBABILITY_CEILING)
+    return ResidualSet(
+        pit=u,
+        quantile=special.ndtri(u),
+        clipped_rows=clipped_rows,
+        randomised_rows=int(np.count_nonzero(atoms)),
+        **evaluation._asdict(),
+    )
+
+
+class _ResidualEvaluation(NamedTuple):
+    y: NDArray
+    eta: NDArray
+    theta: NDArray
+    weights: NDArray
+    prior_weights: NDArray
+    weight_semantics: str
+    pit_lower: NDArray
+    pit_upper: NDArray
+
+
+def _evaluate_residuals(
+    fitted: Any,
+    X: FrameLike | EagerFrame,
+    y: NDArray,
+    *,
+    sample_weight: NDArray | None = None,
+    offsets: Mapping[str, NDArray] | None = None,
+) -> _ResidualEvaluation:
+    """Evaluate the retained row law without randomization or retained designs.
+
+    Held-out responses must be finite after zero-weight selection. Frequency
+    diagnostics otherwise use the CDF's scoring support; prior laws retain the
+    family's likelihood-binding validation and refusals.
+    """
     family = fitted.family
     if not isinstance(family, DistributionFunctionFamily):
         raise NotImplementedError(
@@ -216,6 +279,8 @@ def compute_residuals(
             positions,
         )
     values = np.asarray(response, dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise ValueError("retained residual responses must be finite")
 
     prior = contract.semantics == "prior"
     resolved_weights = np.asarray(resolved.values, dtype=np.float64)
@@ -247,8 +312,7 @@ def compute_residuals(
             )
         upper = np.asarray(family.cdf_prior_weighted(values, theta, prior_law), dtype=np.float64)
 
-    randomised_rows = 0
-    u = upper
+    lower = upper
     if isinstance(family, AtomFamily):
         # A point mass makes F discontinuous at y, and only a uniform draw
         # across the jump keeps the transform uniform (Dunn and Smyth 1996).
@@ -256,24 +320,95 @@ def compute_residuals(
             family.cdf_left_limit(values, theta, weights=prior_law),
             dtype=np.float64,
         )
-        atoms = lower < upper
-        randomised_rows = int(np.count_nonzero(atoms))
-        u = np.where(atoms, np.random.default_rng(seed).uniform(lower, upper), upper)
-
-    clipped_rows = int(np.count_nonzero((u < _PROBABILITY_FLOOR) | (u > _PROBABILITY_CEILING)))
-    u = np.clip(u, _PROBABILITY_FLOOR, _PROBABILITY_CEILING)
-    return ResidualSet(
-        pit=u,
-        quantile=special.ndtri(u),
+    return _ResidualEvaluation(
         theta=theta,
         eta=eta,
         y=values,
         weights=weights,
         prior_weights=prior_weights,
-        clipped_rows=clipped_rows,
-        randomised_rows=randomised_rows,
         weight_semantics=contract.semantics,
+        pit_lower=lower,
+        pit_upper=upper,
     )
+
+
+def _validate_residual_evaluation(
+    residuals: ResidualSet,
+    fitted: Any,
+    X: FrameLike | EagerFrame,
+    y: NDArray,
+    *,
+    sample_weight: NDArray | None = None,
+    offsets: Mapping[str, NDArray] | None = None,
+) -> None:
+    """Allow reuse of an equivalent deterministic evaluation, independent of seed.
+
+    This checks the residual transform, not covariance or design identity.
+    """
+    current = _evaluate_residuals(fitted, X, y, sample_weight=sample_weight, offsets=offsets)
+    for name, expected in current._asdict().items():
+        stored = getattr(residuals, name)
+        # Legacy continuous payloads do not carry intervals. Their transform
+        # is still checked below against the current deterministic CDF.
+        if stored is None and name in ("pit_lower", "pit_upper"):
+            continue
+        if not np.array_equal(stored, expected):
+            raise ValueError("residuals must come from the same rows and deterministic evaluation")
+    lower = np.clip(current.pit_lower, _PROBABILITY_FLOOR, _PROBABILITY_CEILING)
+    upper = np.clip(current.pit_upper, _PROBABILITY_FLOOR, _PROBABILITY_CEILING)
+    if (
+        not np.all((residuals.pit >= lower) & (residuals.pit <= upper))
+        or not np.array_equal(residuals.quantile, special.ndtri(residuals.pit))
+        or residuals.randomised_rows != np.count_nonzero(current.pit_lower < current.pit_upper)
+    ):
+        raise ValueError("residuals must come from the same rows and deterministic evaluation")
+
+
+def _residual_rng(seed: int, domain: int) -> np.random.Generator:
+    """Independent streams: physical atoms, sample atoms, QQ selection/envelope,
+    binned bootstrap and reliability bootstrap use domains 0 through 5.
+    The legacy replication selection retains the unmodified seed stream.
+    """
+    return np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(domain,)))
+
+
+class _ResidualSample(NamedTuple):
+    rows: NDArray[np.intp]
+    pit: NDArray[np.float64]
+    quantile: NDArray[np.float64]
+
+
+def _sample_residuals(
+    residuals: ResidualSet,
+    *,
+    max_rows: int = _MAX_REPLICATION_ROWS,
+    seed: int = 42,
+) -> _ResidualSample:
+    """Return aligned physical rows and occurrence PIT/quantile values.
+
+    Integer frequency counts below the cap have the law of literal expansion.
+    Above it (or for legacy fractional counts), selection is a weighted row
+    mixture with fresh atom draws, not resampling one already-randomized book.
+    Prior/all-unit and continuous observations preserve their stored transforms.
+    Construction seed controls physical atoms; this seed controls selection and
+    sampled atoms on independent streams. Storage is O(physical rows + cap).
+    """
+    rows = replication_sample(residuals, max_rows=max_rows, seed=seed)
+    pit, quantile = residuals.pit[rows], residuals.quantile[rows]
+    if residuals.weight_semantics == "frequency" and np.any(residuals.weights != 1.0):
+        if residuals.pit_lower is None:
+            if residuals.randomised_rows:
+                raise ValueError("frequency atom replication needs retained CDF intervals")
+        else:
+            lower, upper = residuals.pit_lower[rows], residuals.pit_upper[rows]
+            atoms = lower < upper
+            pit[atoms] = np.clip(
+                _residual_rng(seed, 1).uniform(lower[atoms], upper[atoms]),
+                _PROBABILITY_FLOOR,
+                _PROBABILITY_CEILING,
+            )
+            quantile[atoms] = special.ndtri(pit[atoms])
+    return _ResidualSample(rows, pit, quantile)
 
 
 def residual_values(

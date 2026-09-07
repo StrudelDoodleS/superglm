@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,9 +13,11 @@ from scipy import special, stats
 
 from superglm import Spline, SuperLSS
 from superglm.distributional import Predictor
+from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.residuals import (
     ResidualSet,
+    _sample_residuals,
     compute_residuals,
     replication_sample,
     residual_values,
@@ -154,6 +157,172 @@ def _residual_kwargs(n: int = 4, k: int = 2) -> dict:
         "randomised_rows": 0,
         "weight_semantics": "prior",
     }
+
+
+@pytest.mark.parametrize("case", ["frequency_case", "fit_case"])
+@pytest.mark.parametrize("invalid", [np.nan, np.inf, -np.inf])
+def test_retained_nonfinite_response_refuses_after_selection(request, case, invalid):
+    fitted, X, y, *weights = request.getfixturevalue(case)
+    counts = weights[0] if weights else np.ones(len(y))
+    bad = y.copy()
+    bad[0] = invalid
+    with pytest.raises(ValueError, match="finite"):
+        compute_residuals(fitted, X, bad, sample_weight=counts)
+    counts = counts.copy()
+    counts[0] = 0
+    assert np.all(np.isfinite(compute_residuals(fitted, X, bad, sample_weight=counts).pit))
+
+
+def test_frequency_atom_occurrences_are_independent(frequency_case):
+    from superglm.distributional import residuals as module
+
+    fitted, X, _, _ = frequency_case
+    atom = _shim(fitted, _ZeroAtomFamily(fitted.family.parameters))
+    residuals = compute_residuals(atom, X.iloc[:1], np.zeros(1), sample_weight=np.array([5000.0]))
+    sample = module._sample_residuals(residuals, seed=7)
+    assert len(np.unique(sample.pit)) == 5000
+    assert np.all(sample.rows == 0)
+    assert np.array_equal(sample.quantile, special.ndtri(sample.pit))
+    assert np.all((sample.pit >= 0) & (sample.pit <= 0.3))
+    # Hoeffding bound at failure probability 1e-8 for the bounded mean.
+    bound = np.sqrt(np.log(2e8) / (2 * len(sample.pit)))
+    assert abs(np.mean(sample.pit / 0.3) - 0.5) < bound
+    assert np.array_equal(sample.pit, module._sample_residuals(residuals, seed=7).pit)
+    assert not np.array_equal(sample.pit, module._sample_residuals(residuals, seed=8).pit)
+
+
+def _interval_payload(counts):
+    kwargs = _residual_kwargs(n=2)
+    kwargs.update(
+        weights=np.asarray(counts, dtype=float),
+        weight_semantics="frequency",
+        pit=np.array([0.1, 0.7]),
+        quantile=special.ndtri([0.1, 0.7]),
+        pit_lower=np.array([0.0, 0.4]),
+        pit_upper=np.array([0.2, 1.0]),
+        randomised_rows=2,
+        eta=np.array([[10.0], [20.0]]),
+        theta=np.array([[100.0], [200.0]]),
+    )
+    return ResidualSet(**kwargs)
+
+
+def test_capped_atom_mixture_has_conditional_uniform_draws_and_alignment():
+    residuals = _interval_payload([200000, 800000])
+    sample = _sample_residuals(residuals, max_rows=20000, seed=19)
+    assert len(sample.rows) == 20000
+    np.testing.assert_array_equal(
+        sample.rows, replication_sample(residuals, max_rows=20000, seed=19)
+    )
+    np.testing.assert_array_equal(residuals.eta[sample.rows, 0], 10 * (1 + sample.rows))
+    np.testing.assert_array_equal(residuals.theta[sample.rows, 0], 100 * (1 + sample.rows))
+    normalized = (sample.pit - residuals.pit_lower[sample.rows]) / (
+        residuals.pit_upper[sample.rows] - residuals.pit_lower[sample.rows]
+    )
+    # Ten conditional bin indicators plus two bounded conditional means;
+    # Hoeffding with a union bound gives failure probability at most 1e-8.
+    for row in range(2):
+        values = normalized[sample.rows == row]
+        bound = np.sqrt(np.log(24e8) / (2 * len(values)))
+        assert abs(values.mean() - 0.5) < bound
+        assert np.all(
+            np.abs(np.histogram(values, bins=5, range=(0, 1))[0] / len(values) - 0.2) < bound
+        )
+    # Changing the stored physical random draws cannot alter occurrence draws.
+    changed = replace(residuals, pit=np.array([0.15, 0.8]), quantile=special.ndtri([0.15, 0.8]))
+    np.testing.assert_array_equal(
+        _sample_residuals(changed, max_rows=20000, seed=19).pit, sample.pit
+    )
+
+
+def test_conditional_uniformity_regression_detects_restarted_selection_stream(monkeypatch):
+    from superglm.distributional import residuals as module
+
+    monkeypatch.setattr(module, "_residual_rng", lambda seed, domain: np.random.default_rng(seed))
+    with pytest.raises(AssertionError):
+        test_capped_atom_mixture_has_conditional_uniform_draws_and_alignment()
+
+
+def test_integer_atom_sampling_matches_literal_expansion_in_distribution(frequency_case):
+    fitted, X, _, _ = frequency_case
+    atom = _shim(fitted, _ZeroAtomFamily(fitted.family.parameters))
+    X = X.iloc[:2]
+    counts = np.array([30.0, 70.0])
+    index = np.repeat(np.arange(2), counts.astype(int))
+    compressed = compute_residuals(atom, X, np.zeros(2), sample_weight=counts)
+    rates = [[], []]
+    for seed in range(100):
+        expanded = compute_residuals(atom, X.iloc[index], np.zeros(100), seed=seed)
+        sample = _sample_residuals(compressed, seed=seed)
+        np.testing.assert_array_equal(sample.rows, index)
+        rates[0].append(np.mean(sample.pit < 0.15))
+        rates[1].append(np.mean(expanded.pit < 0.15))
+    # The count is Binomial(100, .5): variance of the rate is .0025.
+    # The variance estimator bound uses its exact fourth central moment.
+    expected_variance = 0.25 / 100
+    fourth_moment = 3 * expected_variance**2 - 0.125 / 100**3
+    variance_se = np.sqrt((fourth_moment - 97 / 99 * expected_variance**2) / 100)
+    for values in rates:
+        assert abs(np.mean(values) - 0.5) < 6 * np.sqrt(expected_variance / 100)
+        assert abs(np.var(values, ddof=1) - expected_variance) < 6 * variance_se
+
+
+def test_sampler_preserves_continuous_unit_and_prior_values(frequency_case, fit_case):
+    fitted, X, y, counts = frequency_case
+    continuous = compute_residuals(fitted, X, y, sample_weight=counts)
+    sample = _sample_residuals(continuous)
+    np.testing.assert_array_equal(sample.pit, continuous.pit[sample.rows])
+    np.testing.assert_array_equal(sample.quantile, continuous.quantile[sample.rows])
+    for case in (frequency_case, fit_case):
+        fitted, X, *_ = case
+        atom = _shim(fitted, _ZeroAtomFamily(fitted.family.parameters))
+        unit = compute_residuals(atom, X, np.zeros(len(X)), seed=9)
+        sample = _sample_residuals(unit, max_rows=20, seed=7)
+        np.testing.assert_array_equal(sample.pit, unit.pit[sample.rows])
+    manual = ResidualSet(**_residual_kwargs())
+    assert len(_sample_residuals(manual).rows) == 4
+    missing = replace(_interval_payload([2, 3]), pit_lower=None, pit_upper=None)
+    with pytest.raises(ValueError, match="CDF intervals"):
+        _sample_residuals(missing)
+
+
+@pytest.mark.parametrize(
+    "lower,upper",
+    [
+        (None, [1, 1]),
+        ([0], [1, 1]),
+        ([0, np.nan], [1, 1]),
+        ([0, 0], [1, np.inf]),
+        ([-0.1, 0], [1, 1]),
+        ([0, 0], [1.1, 1]),
+        ([0.5, 0], [0.1, 1]),
+    ],
+)
+def test_residual_intervals_validate_paired_finite_ordered_shapes(lower, upper):
+    with pytest.raises(ValueError, match="together|CDF intervals"):
+        replace(_interval_payload([2, 3]), pit_lower=lower, pit_upper=upper)
+
+
+def test_intervals_are_owned_physical_arrays():
+    lower, upper = np.zeros(2), np.ones(2)
+    residuals = replace(_interval_payload([2, 3]), pit_lower=lower, pit_upper=upper)
+    lower[:] = 0.25
+    upper[:] = 0.75
+    np.testing.assert_array_equal(residuals.pit_lower, [0, 0])
+    np.testing.assert_array_equal(residuals.pit_upper, [1, 1])
+    assert not residuals.pit_lower.flags.writeable
+    assert not residuals.pit_upper.flags.writeable
+    assert len(residuals.to_json()["pit_lower"]) == 2
+
+
+def test_frequency_below_support_response_remains_a_scoring_input(frequency_case):
+    fitted, X, *_ = frequency_case
+    stub = _shim(fitted, GammaLS())
+    stub.predict_eta = lambda frame, offsets=None: np.zeros((len(frame), 2))
+    stub.predict_parameters = lambda frame, offsets=None: np.ones((len(frame), 2))
+    residuals = compute_residuals(stub, X.iloc[:1], np.array([-1.0]))
+    assert residuals.pit[0] == 1e-12
+    assert residuals.clipped_rows == 1
 
 
 def test_the_true_model_gives_a_uniform_unclipped_pit(fit_case) -> None:

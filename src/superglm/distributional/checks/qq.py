@@ -54,7 +54,12 @@ from superglm.distributional.model import (
     _unvalidated_offset_shapes,
 )
 from superglm.distributional.posterior import posterior_predictive
-from superglm.distributional.residuals import ResidualSet, replication_sample
+from superglm.distributional.residuals import (
+    ResidualSet,
+    _residual_rng,
+    _sample_residuals,
+    _validate_residual_evaluation,
+)
 
 #: Pointwise 95 % envelope percentiles per order statistic.
 _LOWER_PERCENTILE = 2.5
@@ -241,15 +246,30 @@ def qq_payload(
             "residual set)"
         )
 
-    rows = replication_sample(residuals, seed=seed)
+    if residuals.weight_semantics != fitted.fit_state.weight_contract.semantics:
+        raise ValueError("residuals must come from the same rows and deterministic evaluation")
+    _validate_residual_evaluation(
+        residuals,
+        fitted,
+        frame,
+        residuals.y,
+        sample_weight=(
+            residuals.weights
+            if residuals.weight_semantics == "frequency"
+            else residuals.prior_weights
+        ),
+        offsets=offsets,
+    )
+    sample = _sample_residuals(residuals, seed=seed)
+    rows = sample.rows
     n_rows = len(rows)
-    observed = np.sort(residuals.quantile[rows])
+    observed = np.sort(sample.quantile)
     theoretical = order_statistic_grid(n_rows)
 
     subsampled = n_rows > cap
     envelope_rows = rows
     if subsampled:
-        chosen = np.random.default_rng(seed).choice(n_rows, size=cap, replace=False)
+        chosen = _residual_rng(seed, 2).choice(n_rows, size=cap, replace=False)
         envelope_rows = rows[np.sort(chosen)]
         grid = order_statistic_grid(cap)
         observed = np.interp(grid, theoretical, observed)
@@ -262,7 +282,7 @@ def qq_payload(
         envelope_rows,
         n_sim=simulations,
         parameter_uncertainty=bool(parameter_uncertainty),
-        seed=int(seed),
+        seed=int(_residual_rng(seed, 3).integers(0, 2**63)),
         offsets=offsets,
     )
     return QQPayload(

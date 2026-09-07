@@ -40,7 +40,7 @@ from numpy.typing import NDArray
 from scipy import special, stats
 
 from superglm.distributional.checks.qq import order_statistic_grid
-from superglm.distributional.residuals import ResidualSet, replication_sample
+from superglm.distributional.residuals import ResidualSet, _sample_residuals
 
 #: Pointwise band multiplier: the two-sided 95 % normal critical value.
 _BAND_CRITICAL_VALUE = 1.96
@@ -210,6 +210,8 @@ def q_statistics(residual_quantiles: NDArray, groups: NDArray) -> pd.DataFrame:
     labels = np.asarray(groups)
     if labels.shape != values.shape:
         raise ValueError("q_statistics needs one group label per residual")
+    if np.any(pd.isna(labels)):
+        raise ValueError("group labels must not be missing")
 
     codes, uniques = pd.factorize(labels, sort=False)
     records = [_moment_row(label, values[codes == index]) for index, label in enumerate(uniques)]
@@ -249,6 +251,11 @@ def _covariate_groups(
     series = covariate if isinstance(covariate, pd.Series) else pd.Series(covariate)
     if len(series) != n_rows:
         raise ValueError("covariate must give one value per row of the residuals")
+    if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
+        if not np.all(np.isfinite(series.to_numpy(dtype=np.float64))):
+            raise ValueError("a numeric covariate must be finite")
+    elif series.isna().any():
+        raise ValueError("covariate group labels must not be missing")
     selected = series.iloc[rows]
     if pd.api.types.is_numeric_dtype(selected) and not pd.api.types.is_bool_dtype(selected):
         codes, labels, bounds = _interval_codes(selected.to_numpy(dtype=np.float64), n_intervals)
@@ -284,8 +291,8 @@ def worm_payload(
     if points < 2:
         raise ValueError("n_points must place at least two points on the band grid")
 
-    rows = replication_sample(residuals, seed=_REPLICATION_SEED)
-    values = residuals.quantile[rows]
+    sample = _sample_residuals(residuals, seed=_REPLICATION_SEED)
+    rows, values = sample.rows, sample.quantile
     if covariate is None:
         codes = np.zeros(len(rows), dtype=np.intp)
         labels: list[str] = [_OVERALL_LABEL]

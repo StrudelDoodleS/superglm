@@ -33,7 +33,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy import stats
 
-from superglm.distributional.residuals import ResidualSet, replication_sample
+from superglm.distributional.residuals import ResidualSet, _residual_rng, _sample_residuals
 
 # One JSON convention and one schema version for every payload in the suite;
 # restating them here is how two payloads drift into two encodings.
@@ -201,8 +201,8 @@ def _replicated(residuals: Any, covariates: tuple[NDArray, ...]) -> tuple[NDArra
         array = np.asarray(values)
         if array.ndim != 1 or len(array) != rows:
             raise ValueError("a binned check needs one value per residual row")
-    index = replication_sample(residuals)
-    return (residuals.quantile[index], *(np.asarray(v)[index] for v in covariates))
+    sample = _sample_residuals(residuals)
+    return (sample.quantile, *(np.asarray(v)[sample.rows] for v in covariates))
 
 
 def binned_check(
@@ -231,7 +231,7 @@ def binned_check(
     counts = np.zeros(width, dtype=np.int64)
     moments = {key: np.full(width, np.nan) for key in ("mean", "sd", "skew")}
     bands = {key: np.full((width, 2), np.nan) for key in ("mean", "sd", "skew")}
-    generator = np.random.default_rng(seed)
+    generator = _residual_rng(seed, 4)
     for index in range(width):
         rows = np.flatnonzero(binning.codes == index)
         counts[index] = len(rows)

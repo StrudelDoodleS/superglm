@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -25,7 +26,7 @@ from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.model import fit_dense_distributional
-from superglm.distributional.residuals import ResidualSet, compute_residuals
+from superglm.distributional.residuals import ResidualSet, _sample_residuals, compute_residuals
 from superglm.distributional.result import DenseSolverConfig
 from superglm.distributional.weights import WeightContract
 
@@ -181,6 +182,131 @@ def _stub_residuals(n: int = 8) -> ResidualSet:
         randomised_rows=0,
         weight_semantics="prior",
     )
+
+
+@pytest.mark.parametrize("labels", [[None] * 8, ["a"] * 7 + [None]])
+def test_worm_and_q_statistics_refuse_missing_groups(labels):
+    residuals = _stub_residuals()
+    with pytest.raises(ValueError, match="missing"):
+        worm_payload(residuals, covariate=pd.Series(labels, dtype=object))
+    with pytest.raises(ValueError, match="missing"):
+        q_statistics(residuals.quantile, np.array(labels, dtype=object))
+
+
+@pytest.mark.parametrize("change", ["X", "offset", "fit"])
+def test_qq_reuse_checks_current_evaluation(gaussian_case, misspecified_case, change):
+    fitted, X, y, residuals = gaussian_case
+    offsets = None
+    if change == "X":
+        X = X.iloc[::-1].reset_index(drop=True)
+    elif change == "offset":
+        offsets = {"location": np.full(len(y), 0.25)}
+    else:
+        fitted = misspecified_case[0]
+    with pytest.raises(ValueError, match="same.*evaluation"):
+        qq_payload(fitted, residuals, X=X, offsets=offsets, n_sim=2, max_points=10)
+
+
+def test_qq_accepts_same_evaluation_and_checks_manual_transforms(gaussian_case):
+    fitted, X, y, residuals = gaussian_case
+    qq_payload(
+        fitted, compute_residuals(fitted, X, y, seed=7), X=X.copy(), seed=42, n_sim=2, max_points=10
+    )
+    for changed in (
+        replace(residuals, pit=residuals.pit * 0.9),
+        replace(residuals, quantile=residuals.quantile + 0.1),
+        replace(residuals, weight_semantics="frequency"),
+    ):
+        with pytest.raises(ValueError, match="same.*evaluation"):
+            qq_payload(fitted, changed, X=X, n_sim=2, max_points=10)
+
+
+@pytest.mark.parametrize("counts,cap", [([200, 800], 1000), ([200000, 800000], 17)])
+def test_atom_distribution_checks_use_aligned_occurrences(frequency_case, monkeypatch, counts, cap):
+    fitted, X, *_ = frequency_case
+
+    class Atom:
+        parameters = fitted.family.parameters
+
+        def cdf(self, y, theta):
+            return np.where(np.asarray(y) < 0.0, 0.0, 1.0)
+
+        def cdf_left_limit(self, y, theta, weights=None):
+            return np.where(np.asarray(y) <= 0.0, 0.0, 1.0)
+
+        def quantile(self, p, theta):
+            return np.zeros(len(p))
+
+    stub = SimpleNamespace(
+        family=Atom(),
+        fit_state=fitted.fit_state,
+        layout=fitted.layout,
+        predict_eta=fitted.predict_eta,
+        predict_parameters=fitted.predict_parameters,
+    )
+    X = X.iloc[:2]
+    offsets = {"location": np.array([0.1, 0.2])}
+    residuals = compute_residuals(
+        stub, X, np.zeros(2), sample_weight=np.array(counts, dtype=float), offsets=offsets
+    )
+    sample = _sample_residuals(residuals)
+    pit = pit_payload(residuals, n_bins=10)
+    np.testing.assert_array_equal(pit.counts, np.histogram(sample.pit, bins=10, range=(0, 1))[0])
+    assert np.count_nonzero(pit.counts) == 10
+    worm = worm_payload(residuals, covariate=np.array(["a", "b"]))
+    assert sum(panel.n for panel in worm.panels) == len(sample.rows)
+    for row, panel in enumerate(worm.panels):
+        expected_quantiles = np.sort(sample.quantile[sample.rows == row])
+        roundoff = (
+            4 * np.finfo(float).eps * (np.max(np.abs(panel.z)) + np.max(np.abs(expected_quantiles)))
+        )
+        np.testing.assert_allclose(
+            panel.deviation + panel.z,
+            expected_quantiles,
+            rtol=0,
+            atol=roundoff,
+        )
+
+    real_envelope = qq_module._simulated_envelope
+    real_predictive = qq_module.posterior_predictive
+    envelope_rows = []
+
+    def predictive(fit, frame, n_sim, **kwargs):
+        rows = envelope_rows[-1]
+        np.testing.assert_array_equal(frame.column_array("x"), X.x.to_numpy()[rows])
+        np.testing.assert_array_equal(kwargs["offsets"]["location"], offsets["location"][rows])
+        np.testing.assert_array_equal(kwargs["weights"], residuals.prior_weights[rows])
+        np.testing.assert_array_equal(
+            fit.predict_parameters(frame, offsets=kwargs["offsets"]), residuals.theta[rows]
+        )
+        return real_predictive(fit, frame, n_sim, **kwargs)
+
+    def envelope(fit, frame, carried, rows, **kwargs):
+        # The chosen occurrence positions map back to the correct physical
+        # design/offset/law rows even after both sample caps are applied.
+        assert len(rows) == cap
+        eta = fit.predict_eta(frame, offsets=kwargs["offsets"])
+        np.testing.assert_array_equal(eta[rows], carried.eta[rows])
+        np.testing.assert_array_equal(carried.prior_weights[rows], np.ones(cap))
+        assert len(np.unique(rows)) == 2
+        envelope_rows.append(rows)
+        return real_envelope(fit, frame, carried, rows, **kwargs)
+
+    monkeypatch.setattr(qq_module, "_simulated_envelope", envelope)
+    monkeypatch.setattr(qq_module, "posterior_predictive", predictive)
+    qq = qq_payload(stub, residuals, X=X, offsets=offsets, max_points=cap, n_sim=2)
+    expected = np.sort(sample.quantile)
+    if cap < len(sample.rows):
+        expected = np.interp(
+            _order_statistic_grid(cap), _order_statistic_grid(len(sample.rows)), expected
+        )
+    np.testing.assert_array_equal(qq.observed, expected)
+
+
+@pytest.mark.parametrize("labels", [[None] * 8, ["a"] * 7 + [None]])
+def test_direct_q_statistics_refuses_missing_groups(labels):
+    with pytest.raises(ValueError, match="missing"):
+        q_statistics(np.arange(8.0), np.array(labels, dtype=object))
 
 
 # --------------------------------------------------------------------------- Q-Q

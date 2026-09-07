@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -46,7 +47,7 @@ from superglm.distributional.model import (
     DenseDistributionalModel,
     fit_dense_distributional,
 )
-from superglm.distributional.residuals import ResidualSet, compute_residuals
+from superglm.distributional.residuals import ResidualSet, _sample_residuals, compute_residuals
 from superglm.distributional.result import DenseSolverConfig
 from superglm.distributional.weights import WeightContract
 
@@ -627,6 +628,164 @@ def test_actual_expected_simulates_when_the_family_has_no_closed_form_variance()
     assert unit.variance_law == "draws"
     assert weighted.variance_law == "prior_weighted_draws"
     assert np.all(unit.ratio_se > 0.0) and np.all(weighted.ratio_se > 0.0)
+
+
+def test_simulated_variance_requires_two_draws_but_analytic_does_not():
+    X = pd.DataFrame({"mu": [2.0, 3.0, 4.0], "var": [1.0, 1.0, 1.0]})
+    for family in (_NormalLikeFamily(), _WeightedNormalLikeFamily()):
+        with pytest.raises(ValueError, match="n_draws.*at least two"):
+            actual_expected_check(
+                _StubFitted(family),
+                X,
+                X.mu.to_numpy(),
+                np.arange(3.0),
+                name="x",
+                n_bins=1,
+                n_draws=1,
+            )
+    result = actual_expected_check(
+        _StubFitted(_MeanVarianceFamily()),
+        X,
+        X.mu.to_numpy(),
+        np.arange(3.0),
+        name="x",
+        n_bins=1,
+        n_draws=1,
+    )
+    assert np.all(np.isfinite(result.ratio_se))
+
+
+@pytest.mark.parametrize("change", ["X", "offset", "weights", "fit"])
+def test_calibration_reuse_checks_current_evaluation(
+    gaussian_case, gaussian_residuals, missing_effect_case, change
+):
+    fitted, X, y = gaussian_case
+    kwargs = {}
+    if change == "X":
+        X = X.iloc[::-1].reset_index(drop=True)
+    elif change == "offset":
+        kwargs["offsets"] = {"location": np.full(len(y), 0.25)}
+    elif change == "weights":
+        kwargs["sample_weight"] = np.full(len(y), 2.0)
+    else:
+        fitted = missing_effect_case[0]
+    with pytest.raises(ValueError, match="same.*evaluation"):
+        calibration_payload(fitted, X, y, residuals=gaussian_residuals, **kwargs)
+
+
+@pytest.mark.parametrize("count", [5000, 200000])
+def test_frequency_atom_calibration_uses_occurrences_and_cap(count):
+    class Atom(_NormalLikeFamily):
+        parameters = (SimpleNamespace(name="mu"), SimpleNamespace(name="var"))
+
+        def cdf(self, y, theta):
+            return np.ones(len(y))
+
+        def cdf_left_limit(self, y, theta, weights=None):
+            return np.zeros(len(y))
+
+    fitted = _StubFitted(Atom(), "frequency")
+    fitted.predict_eta = fitted.predict_parameters
+    X = pd.DataFrame({"mu": [2.0], "var": [1.0]})
+    residuals = compute_residuals(
+        fitted, X, np.zeros(1), sample_weight=np.array([float(count)]), seed=7
+    )
+    payload = calibration_payload(
+        fitted,
+        X.copy(),
+        np.zeros(1),
+        sample_weight=np.array([float(count)]),
+        residuals=residuals,
+        levels=(0.5, 0.9),
+        quantile_grid=(0.25, 0.75),
+        thresholds=(1.0,),
+    )
+    sample_n = min(count, 100000)
+    overall = payload.coverage[payload.coverage.group == "all"]
+    assert payload.n_rows == 1
+    assert np.all(overall.n == sample_n)
+    assert np.all(payload.quantiles.weight == sample_n)
+    bound = np.sqrt(np.log(8e8) / (2 * sample_n))  # four indicators, familywise alpha 1e-8
+    assert np.all(np.abs(overall.realised - [0.5, 0.9]) < bound)
+    assert np.all(np.abs(payload.quantiles.realised_exceedance - [0.75, 0.25]) < bound)
+    np.testing.assert_allclose(
+        payload.coverage.se,
+        np.sqrt(payload.coverage.realised * (1 - payload.coverage.realised) / payload.coverage.n),
+    )
+    assert payload.tails.weight.iloc[0] == count
+    sample = _sample_residuals(residuals)
+    # Each parameter has ten deciles of the same occurrence sample. Their
+    # weighted rates reconstruct the overall nested coverage events.
+    for parameter in ("mu", "var"):
+        for level in (0.5, 0.9):
+            deciles = payload.coverage[
+                (payload.coverage.level == level)
+                & payload.coverage.group.str.startswith(parameter + ":")
+            ]
+            assert deciles.n.sum() == sample_n
+            margin = (1 - level) / 2
+            expected = np.count_nonzero((sample.pit >= margin) & (sample.pit <= 1 - margin))
+            assert np.sum(deciles.realised * deciles.n) == pytest.approx(expected)
+
+
+def test_atom_binned_checks_keep_values_and_both_covariates_aligned():
+    residuals = replace(
+        _residual_set(
+            np.array([-1.0, 1.0]), weights=np.array([200.0, 800.0]), semantics="frequency"
+        ),
+        pit_lower=np.array([0.0, 0.5]),
+        pit_upper=np.array([0.5, 1.0]),
+        randomised_rows=2,
+    )
+    sample = _sample_residuals(residuals)
+    first = np.array([10.0, 20.0])
+    second = np.array([200.0, 100.0])
+    check = binned_check(residuals, first, name="first", n_bins=2, n_boot=10)
+    expanded = _residual_set(sample.quantile)
+    expected = binned_check(expanded, first[sample.rows], name="first", n_bins=2, n_boot=10)
+    np.testing.assert_array_equal(check.mean, expected.mean)
+    np.testing.assert_array_equal(check.sd_lower, expected.sd_lower)
+    assert np.all(check.sd > 0)
+    grid = binned_check_2d(residuals, first, second, names=("first", "second"), n_bins=(2, 2))
+    expanded_grid = binned_check_2d(
+        expanded, first[sample.rows], second[sample.rows], names=("first", "second"), n_bins=(2, 2)
+    )
+    np.testing.assert_array_equal(grid.count, expanded_grid.count)
+    np.testing.assert_array_equal(grid.mean, expanded_grid.mean)
+
+
+def test_calibration_reuse_accepts_equivalent_seed_and_refuses_weight_and_law_changes(
+    gaussian_case,
+):
+    fitted, X, y = gaussian_case
+    frequency = SimpleNamespace(
+        family=fitted.family,
+        fit_state=SimpleNamespace(weight_contract=WeightContract("frequency")),
+        predict_eta=fitted.predict_eta,
+        predict_parameters=fitted.predict_parameters,
+    )
+    counts = np.full(len(y), 2.0)
+    residuals = compute_residuals(frequency, X, y, sample_weight=counts, seed=7)
+    calibration_payload(
+        frequency, X.copy(), y.copy(), sample_weight=counts.copy(), residuals=residuals, seed=42
+    )
+    for changed_counts in (counts + 1, np.r_[0.0, counts[1:]]):
+        with pytest.raises(ValueError, match="same.*evaluation"):
+            calibration_payload(frequency, X, y, sample_weight=changed_counts, residuals=residuals)
+    with pytest.raises(ValueError, match="same.*evaluation"):
+        calibration_payload(fitted, X, y, residuals=residuals)
+    changed_law = SimpleNamespace(**vars(frequency))
+
+    class ShiftedCDF:
+        parameters = fitted.family.parameters
+        quantile = fitted.family.quantile
+
+        def cdf(self, response, theta):
+            return fitted.family.cdf(response - 0.5, theta)
+
+    changed_law.family = ShiftedCDF()
+    with pytest.raises(ValueError, match="same.*evaluation"):
+        calibration_payload(changed_law, X, y, sample_weight=counts, residuals=residuals)
 
 
 def test_variance_family_protocol_recognises_only_a_family_with_variance() -> None:
