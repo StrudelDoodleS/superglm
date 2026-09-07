@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -152,3 +153,50 @@ def test_background_profile_keeps_deliberate_validation_message(security_widget)
 
     assert completed["status"] == "error"
     assert "parameter must be" in completed["error"]
+
+
+@pytest.mark.parametrize("mode", ["synchronous", "complete", "error"])
+def test_profile_trace_backend_messages_stay_private(security_widget, monkeypatch, caplog, mode):
+    caplog.set_level("DEBUG", logger="superglm.editor.widget")
+    message = "synthetic optimizer failure /internal/model.bin"
+    fallback = "synthetic fallback failure /internal/cache.bin"
+    numerical = {"step": 0, "p": 1.5, "phi": 0.2, "nll": 0.1, "phi_converged": False}
+    row = {**numerical, "phi_message": message, "phi_fallback_reason": fallback}
+    result = SimpleNamespace(search_trace=[row])
+
+    def profile(_parameter, **options):
+        if "trace_callback" in options:
+            options["trace_callback"](row)
+        if mode == "error":
+            raise RuntimeError("synthetic profile stopped")
+        return result
+
+    monkeypatch.setattr(security_widget.session, "reprofile_distribution", profile)
+    if mode == "synchronous":
+        status, body = request_json(
+            security_widget, "/profile_distribution", {"parameter": "tweedie_p"}
+        )
+        assert body["profile_trace"] == [numerical]
+    else:
+        status, started = request_json(
+            security_widget, "/profile_distribution/start", {"parameter": "tweedie_p"}
+        )
+        assert status == 200
+        status, body = request_json(
+            security_widget, f"/profile_distribution/status/{started['job_id']}?wait=true"
+        )
+        assert body["status"] == mode
+        assert body["trace"] == [numerical]
+        if mode == "complete":
+            assert body["result"]["profile_trace"] == [numerical]
+        else:
+            assert body["error"] == "internal editor error"
+
+    assert status == 200
+    assert message not in json.dumps(body)
+    assert fallback not in json.dumps(body)
+    assert message in caplog.text
+    assert fallback in caplog.text
+    assert result.search_trace == [row]
+    assert row["phi_message"] == message
+    assert row["phi_fallback_reason"] == fallback
