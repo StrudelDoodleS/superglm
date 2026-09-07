@@ -192,6 +192,8 @@ def _stable_isolated_gfs_update(
     epsilon = np.finfo(np.float64).eps
     stable_raw_steps: dict[str, float] = {}
     stable_quadratics: dict[str, float] = {}
+    stable_traces: dict[str, float] = {}
+    stable_stationarity: dict[str, float] = {}
     for component in components:
         name = component.name
         if update.proposal_kinds[name] == "inactive":
@@ -203,7 +205,12 @@ def _stable_isolated_gfs_update(
         # nearly the whole effective rank; changing formulas earlier would
         # perturb ordinary EFS trajectories for no numerical benefit.
         saturation = component.lambda_value * float(update.trace_terms[name]) / component.rank
-        if saturation < 1.0 - math.sqrt(epsilon):
+        block = component.coefficient_slice
+        trace_scale = float(np.sum(np.abs(inverse[block, block]) * np.abs(component.penalty.T)))
+        trace_error = (2 * len(component.penalty) + 4) * epsilon
+        trace_bound = trace_error * trace_scale / (1.0 - trace_error)
+        saturation_bound = component.lambda_value * trace_bound / component.rank
+        if saturation + saturation_bound < 1.0 - math.sqrt(epsilon):
             continue
         if any(
             other.name != name
@@ -236,7 +243,6 @@ def _stable_isolated_gfs_update(
         if numerical_rank == 0 or abs(component.rank - numerical_rank) > rank_tolerance:
             continue
         projector = vectors[:, active] @ vectors[:, active].T
-        block = component.coefficient_slice
 
         # Authenticate the projector identity before using its non-cancelling
         # form.  A truncated inverse or unresolved solve is not silently
@@ -255,12 +261,17 @@ def _stable_isolated_gfs_update(
                 identity_scale,
             )
         )
-        if abs(identity_trace - component.rank) > identity_bound:
+        if (
+            not math.isfinite(identity_trace)
+            or not math.isfinite(identity_bound)
+            or abs(identity_trace - component.rank) > identity_bound
+        ):
             continue
 
         residual_product = inverse[block, :] @ data_curvature[:, block]
         numerator = float(np.trace(projector @ residual_product))
-        numerator_scale = float(np.sum(np.abs(projector) * np.abs(residual_product.T)))
+        absolute_data_product = np.abs(inverse[block, :]) @ np.abs(data_curvature[:, block])
+        numerator_scale = float(np.sum(np.abs(projector) * absolute_data_product.T))
         numerator_bound = (
             1024.0
             * max(len(fit.coefficients), 1)
@@ -273,12 +284,23 @@ def _stable_isolated_gfs_update(
         # Squaring in the penalty range avoids cancellation against its null space.
         range_beta = vectors[:, active].T @ fit.coefficients[block]
         quadratic = float(np.dot(values[active], range_beta * range_beta))
-        if numerator <= numerator_bound or quadratic <= 0.0:
+        if (
+            not math.isfinite(numerator_bound)
+            or numerator <= numerator_bound
+            or numerator >= component.rank
+            or quadratic <= 0.0
+        ):
+            continue
+        delta = (numerator - component.lambda_value * quadratic) / component.rank
+        if not math.isfinite(delta) or delta >= 1.0:
             continue
         raw_step = math.log(numerator) - math.log(quadratic) - math.log(component.lambda_value)
-        if math.isfinite(raw_step):
+        trace = (component.rank - numerator) / component.lambda_value
+        if math.isfinite(raw_step) and math.isfinite(trace):
             stable_raw_steps[name] = raw_step
             stable_quadratics[name] = quadratic
+            stable_traces[name] = trace
+            stable_stationarity[name] = -math.log1p(-delta)
 
     if not stable_raw_steps:
         return update, frozenset()
@@ -287,17 +309,13 @@ def _stable_isolated_gfs_update(
     raw_steps.update(stable_raw_steps)
     quadratics = dict(update.quadratic_forms)
     quadratics.update(stable_quadratics)
+    traces = dict(update.trace_terms)
+    traces.update(stable_traces)
     proposal_kinds = dict(update.proposal_kinds)
     stationarity_residuals = dict(update.stationarity_log_residuals)
-    for component in components:
-        name = component.name
-        if name in stable_raw_steps:
-            proposal_kinds[name] = "gfs"
-            stationarity_residuals[name] = (
-                math.log(component.rank)
-                - math.log(quadratics[name] + update.trace_terms[name])
-                - math.log(component.lambda_value)
-            )
+    stationarity_residuals.update(stable_stationarity)
+    for name in stable_raw_steps:
+        proposal_kinds[name] = "gfs"
     bounded_steps = {
         name: float(np.clip(raw_steps[name], -config.max_log_step, config.max_log_step))
         for name in raw_steps
@@ -316,6 +334,7 @@ def _stable_isolated_gfs_update(
             log_steps=log_steps,
             raw_log_steps=raw_steps,
             quadratic_forms=quadratics,
+            trace_terms=traces,
             proposal_kinds=proposal_kinds,
             stationarity_log_residuals=stationarity_residuals,
         ),

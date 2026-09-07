@@ -1852,13 +1852,13 @@ def test_gamma_efs_selects_an_exact_irrelevant_face_and_keeps_a_finite_smooth(
     assert np.linalg.norm(constrained_covariance, ord=2) <= covariance_bound
 
 
-def test_gamma_endpoint_polish_refusal_publishes_honest_nonstationarity(
+def test_gamma_endpoint_polish_reversal_never_certifies_a_nonstationary_fit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refused endpoint polish must publish honest nonstationarity."""
+    """Reject a bad correction without forbidding an independently stationary refit."""
 
     real_solve_terminal = DenseSolverResult.solve_terminal
-    reversed_faces: list[tuple[str, ...]] = []
+    reversed_fits: list[DenseSolverResult] = []
 
     def reverse_endpoint_newton_direction(
         result: DenseSolverResult,
@@ -1871,9 +1871,7 @@ def test_gamma_endpoint_polish_refusal_publishes_honest_nonstationarity(
             and np.array_equal(rhs, result.terminal_score)
             and efs_module._endpoint_retained_kkt_relative(result) > result.config.tolerance
         ):
-            reversed_faces.append(
-                () if result.coefficient_face is None else result.coefficient_face.component_names
-            )
+            reversed_fits.append(result)
             return -correction
         return correction
 
@@ -1913,13 +1911,29 @@ def test_gamma_endpoint_polish_refusal_publishes_honest_nonstationarity(
 
     smoothing = model.smoothing
     assert smoothing is not None
-    assert smoothing.converged is False
-    assert smoothing.convergence_reason == "lambda_cap_unresolved"
     assert smoothing.matched_certified is False
+    assert reversed_fits
+    for item in smoothing.history:
+        if item.activated_face_components or item.revalidated_face_components:
+            assert item.accepted_fit_index is not None
+            endpoint = smoothing.coefficient_fits[item.accepted_fit_index]
+            tolerance = item.coefficient_tolerances[
+                item.coefficient_fit_indices.index(item.accepted_fit_index)
+            ]
+            assert all(endpoint is not rejected for rejected in reversed_fits)
+            assert efs_module._assessment_is_numerically_stationary(endpoint, tolerance)
+    if smoothing.converged:
+        # The endpoint's ordinary fit can reach its mode without needing polish.
+        terminal = smoothing.terminal_fit
+        assert terminal.coefficient_face is not None
+        assert terminal.coefficient_face.component_names == ("scale:group#wiggle",)
+        assert smoothing.terminal_raw_max_log_step <= smoothing.config.tolerance
+        assert efs_module._assessment_is_numerically_stationary(terminal, terminal.config.tolerance)
+        return
+
+    assert smoothing.convergence_reason == "lambda_cap_unresolved"
     assert smoothing.terminal_fit.coefficient_face is None
     assert smoothing.terminal_endpoint_directions == {}
-    assert all(not item.activated_face_components for item in smoothing.history)
-    assert reversed_faces == [(), ("scale:group#wiggle",)]
     refusals = tuple(
         item
         for item in smoothing.history
