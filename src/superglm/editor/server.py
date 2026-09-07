@@ -16,10 +16,10 @@ from fastapi.responses import Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from superglm.editor.assets import app_asset_content_type, read_app_asset
+from superglm.editor.errors import EditorClientError, EditorValueError
 from superglm.editor.io import jsonable
 
 _LOGGER = logging.getLogger(__name__)
-_CLIENT_ERROR_TYPES = (KeyError, ValueError, TypeError, IndexError, FileNotFoundError)
 
 
 def create_editor_app(widget: Any) -> FastAPI:
@@ -36,12 +36,14 @@ def create_editor_app(widget: Any) -> FastAPI:
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception(_request: Request, exc: StarletteHTTPException) -> Response:
-        message = "not found" if exc.status_code == 404 else str(exc.detail)
+        message = {404: "not found", 405: "method not allowed"}.get(
+            exc.status_code, "HTTP request failed"
+        )
         return _json_response({"error": message}, status_code=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception(_request: Request, exc: RequestValidationError) -> Response:
-        return _json_response({"error": str(exc)}, status_code=400)
+    async def validation_exception(_request: Request, _exc: RequestValidationError) -> Response:
+        return _json_response({"error": "Invalid request body or parameters."}, status_code=400)
 
     @app.get("/", include_in_schema=False)
     def index() -> Response:
@@ -57,7 +59,7 @@ def create_editor_app(widget: Any) -> FastAPI:
 
     @app.get("/state")
     def state() -> Response:
-        return _json_response(widget._state())
+        return _guarded_json(widget._state)
 
     @app.get("/health")
     def health() -> Response:
@@ -65,14 +67,14 @@ def create_editor_app(widget: Any) -> FastAPI:
 
     @app.post("/term")
     def set_term(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(lambda: widget._set_term(str(payload["term"])))
+        return _guarded_json(lambda: widget._set_term(str(_required(payload, "term"))))
 
     @app.post("/select")
     def select(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
             lambda: widget._select(
-                str(payload["term"]),
-                [int(v) for v in payload.get("indices", [])],
+                str(_required(payload, "term")),
+                _number_list(payload, "indices", _int),
             )
         )
 
@@ -80,7 +82,7 @@ def create_editor_app(widget: Any) -> FastAPI:
     def operate(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
             lambda: widget._operate(
-                str(payload["operation"]),
+                str(_required(payload, "operation")),
                 None if "term" not in payload else str(payload["term"]),
             )
         )
@@ -89,10 +91,10 @@ def create_editor_app(widget: Any) -> FastAPI:
     def drag(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
             lambda: widget._drag(
-                str(payload["term"]),
-                [int(v) for v in payload.get("indices", [])],
-                float(payload.get("delta", 0.0)),
-                None if "values" not in payload else [float(v) for v in payload.get("values", [])],
+                str(_required(payload, "term")),
+                _number_list(payload, "indices", _int),
+                _float(payload.get("delta", 0.0), "delta"),
+                None if "values" not in payload else _number_list(payload, "values", _float),
             )
         )
 
@@ -100,10 +102,12 @@ def create_editor_app(widget: Any) -> FastAPI:
     def control(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
             lambda: widget._control(
-                str(payload["term"]),
-                int(payload["handle_index"]),
-                float(payload["value"]),
-                None if "handle_count" not in payload else int(payload["handle_count"]),
+                str(_required(payload, "term")),
+                _int(_required(payload, "handle_index"), "handle_index"),
+                _float(_required(payload, "value"), "value"),
+                None
+                if "handle_count" not in payload
+                else _int(payload["handle_count"], "handle_count"),
             )
         )
 
@@ -111,8 +115,8 @@ def create_editor_app(widget: Any) -> FastAPI:
     def control_count(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
             lambda: widget._set_control_count(
-                str(payload["term"]),
-                int(payload["count"]),
+                str(_required(payload, "term")),
+                _int(_required(payload, "count"), "count"),
             )
         )
 
@@ -123,8 +127,8 @@ def create_editor_app(widget: Any) -> FastAPI:
                 str(payload.get("metric", "deviance")),
                 None if "source" not in payload else str(payload["source"]),
                 dataset=None if "dataset" not in payload else str(payload["dataset"]),
-                model_revision=_optional_int(payload.get("model_revision")),
-                request_sequence=_optional_int(payload.get("request_sequence")),
+                model_revision=_optional_int(payload.get("model_revision"), "model_revision"),
+                request_sequence=_optional_int(payload.get("request_sequence"), "request_sequence"),
             ),
             response_metadata=_evidence_metadata(payload),
         )
@@ -134,9 +138,9 @@ def create_editor_app(widget: Any) -> FastAPI:
         return _guarded_json(
             lambda: widget._summary(
                 str(payload.get("source", "original")),
-                level_display=str(payload.get("level_display", "expanded")),
-                model_revision=_optional_int(payload.get("model_revision")),
-                request_sequence=_optional_int(payload.get("request_sequence")),
+                level_display=_level_display(payload),
+                model_revision=_optional_int(payload.get("model_revision"), "model_revision"),
+                request_sequence=_optional_int(payload.get("request_sequence"), "request_sequence"),
             ),
             response_metadata=_evidence_metadata(payload),
         )
@@ -146,8 +150,8 @@ def create_editor_app(widget: Any) -> FastAPI:
         return _guarded_json(
             lambda: widget._report(
                 str(payload.get("report", "validation")),
-                model_revision=_optional_int(payload.get("model_revision")),
-                request_sequence=_optional_int(payload.get("request_sequence")),
+                model_revision=_optional_int(payload.get("model_revision"), "model_revision"),
+                request_sequence=_optional_int(payload.get("request_sequence"), "request_sequence"),
             ),
             response_metadata=_evidence_metadata(payload),
         )
@@ -211,7 +215,7 @@ def create_editor_app(widget: Any) -> FastAPI:
         return _guarded_json(
             lambda: widget._refit_offset(
                 str(payload.get("method", "auto")),
-                level_display=str(payload.get("level_display", "expanded")),
+                level_display=_level_display(payload),
             )
         )
 
@@ -220,7 +224,7 @@ def create_editor_app(widget: Any) -> FastAPI:
         return _guarded_json(
             lambda: widget._profile_distribution(
                 str(payload.get("parameter", "")),
-                level_display=str(payload.get("level_display", "expanded")),
+                level_display=_level_display(payload),
                 **_profile_options(payload),
             )
         )
@@ -232,7 +236,7 @@ def create_editor_app(widget: Any) -> FastAPI:
         return _guarded_json(
             lambda: widget._start_profile_distribution_job(
                 str(payload.get("parameter", "")),
-                level_display=str(payload.get("level_display", "expanded")),
+                level_display=_level_display(payload),
                 **_profile_options(payload),
             )
         )
@@ -247,7 +251,7 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._collapse_levels(
                 None if "term" not in payload else str(payload["term"]),
                 str(payload.get("method", "auto")),
-                level_display=str(payload.get("level_display", "expanded")),
+                level_display=_level_display(payload),
             )
         )
 
@@ -257,7 +261,7 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._ungroup_levels(
                 None if "term" not in payload else str(payload["term"]),
                 str(payload.get("method", "auto")),
-                level_display=str(payload.get("level_display", "expanded")),
+                level_display=_level_display(payload),
             )
         )
 
@@ -266,7 +270,7 @@ def create_editor_app(widget: Any) -> FastAPI:
         return _guarded_json(
             lambda: widget._reorder_levels(
                 None if "term" not in payload else str(payload["term"]),
-                int(payload.get("target_index", 0)),
+                _int(payload.get("target_index", 0), "target_index"),
             )
         )
 
@@ -274,7 +278,7 @@ def create_editor_app(widget: Any) -> FastAPI:
     def uncollapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
             lambda: widget._uncollapse_levels(
-                level_display=str(payload.get("level_display", "expanded")),
+                level_display=_level_display(payload),
             )
         )
 
@@ -411,9 +415,9 @@ def _guarded_json(
     metadata = {} if response_metadata is None else dict(response_metadata)
     try:
         return _json_response(factory())
-    except _CLIENT_ERROR_TYPES as exc:
+    except EditorClientError as exc:
         return _json_response(
-            {**metadata, "error": _client_error_message(exc)},
+            {**metadata, "error": exc.public_message},
             status_code=400,
         )
     except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
@@ -428,8 +432,8 @@ def _guarded_export_download(factory: Callable[[], Any], *, log_message: str) ->
     """Return export bytes with the same guarded error policy as JSON routes."""
     try:
         result = factory()
-    except _CLIENT_ERROR_TYPES as exc:
-        return _json_response({"error": _client_error_message(exc)}, status_code=400)
+    except EditorClientError as exc:
+        return _json_response({"error": exc.public_message}, status_code=400)
     except Exception:  # pragma: no cover - surfaced to browser/tests as JSON
         _LOGGER.exception(log_message)
         return _json_response({"error": "internal editor error"}, status_code=500)
@@ -460,8 +464,44 @@ def _attachment_content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
 
 
-def _optional_int(value: Any) -> int | None:
-    return None if value is None else int(value)
+def _required(payload: dict[str, Any], name: str) -> Any:
+    if name not in payload:
+        raise EditorValueError(f"Missing required field: {name}.")
+    return payload[name]
+
+
+def _int(value: Any, name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise EditorValueError(f"{name} must be an integer.") from None
+
+
+def _float(value: Any, name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise EditorValueError(f"{name} must be a number.") from None
+
+
+def _optional_int(value: Any, name: str) -> int | None:
+    return None if value is None else _int(value, name)
+
+
+def _number_list[T](
+    payload: dict[str, Any], name: str, convert: Callable[[Any, str], T]
+) -> list[T]:
+    values = payload.get(name, [])
+    if not isinstance(values, list):
+        raise EditorValueError(f"{name} must be a list of numbers.")
+    return [convert(value, name) for value in values]
+
+
+def _level_display(payload: dict[str, Any]) -> str:
+    value = str(payload.get("level_display", "expanded"))
+    if value not in {"expanded", "grouped"}:
+        raise EditorValueError("level_display must be 'expanded' or 'grouped'.")
+    return value
 
 
 def _evidence_metadata(payload: dict[str, Any]) -> dict[str, Any]:
@@ -469,12 +509,6 @@ def _evidence_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         "model_revision": payload.get("model_revision"),
         "request_sequence": payload.get("request_sequence"),
     }
-
-
-def _client_error_message(exc: BaseException) -> str:
-    if isinstance(exc, KeyError) and exc.args:
-        return str(exc.args[0])
-    return str(exc)
 
 
 def _json_response(payload: dict[str, Any], *, status_code: int = 200) -> Response:

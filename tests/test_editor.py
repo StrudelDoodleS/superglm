@@ -5313,11 +5313,11 @@ def test_http_evidence_failure_echoes_revision_and_sequence(editor_model, monkey
             urllib.request.urlopen(request, timeout=5)
         payload = json.loads(exc_info.value.read().decode("utf-8"))
 
-        assert exc_info.value.code == 400
+        assert exc_info.value.code == 500
         assert payload == {
             "model_revision": session.model_revision,
             "request_sequence": 123,
-            "error": "metric failure",
+            "error": "internal editor error",
         }
     finally:
         widget.close()

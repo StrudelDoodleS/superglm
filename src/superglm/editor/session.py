@@ -18,6 +18,12 @@ from superglm.editor.collapse import (
 )
 from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES, control_curve_after_move
 from superglm.editor.controls import control_points as _control_points
+from superglm.editor.errors import (
+    EditorIndexError,
+    EditorKeyError,
+    EditorTypeError,
+    EditorValueError,
+)
 from superglm.editor.evaluation import coerce_evaluation_data, default_metrics_dataset
 from superglm.editor.evaluation_cache import EditMaterializationRequest
 from superglm.editor.level_order import (
@@ -136,9 +142,9 @@ class EditorSession:
         editable: dict[str, EditableTerm] = {}
         for name in names:
             if name in model._interaction_specs:
-                raise ValueError(f"Interactions are not editable in v1: {name!r}")
+                raise EditorValueError(f"Interactions are not editable in v1: {name!r}")
             if name not in model._specs:
-                raise KeyError(f"Term not found: {name!r}")
+                raise EditorKeyError(f"Term not found: {name!r}")
             ti = model.term_inference(
                 name,
                 with_se=with_se,
@@ -222,7 +228,7 @@ class EditorSession:
         editable = self._require_term(term)
         idx = np.asarray(indices, dtype=np.intp).ravel()
         if idx.size and (idx.min() < 0 or idx.max() >= editable.size):
-            raise IndexError(f"Selection indices out of range for term {term!r}.")
+            raise EditorIndexError(f"Selection indices out of range for term {term!r}.")
         self._selection[term] = np.unique(idx)
         return self
 
@@ -230,7 +236,7 @@ class EditorSession:
         """Select grid points whose x values fall inside [start, stop]."""
         editable = self._require_term(term)
         if editable.x is None:
-            raise TypeError(f"Term {term!r} does not have a numeric x grid.")
+            raise EditorTypeError(f"Term {term!r} does not have a numeric x grid.")
         lo, hi = sorted((float(start), float(stop)))
         idx = np.flatnonzero((editable.x >= lo) & (editable.x <= hi)).astype(np.intp)
         self._selection[term] = idx
@@ -240,11 +246,11 @@ class EditorSession:
         """Select categorical or ordered-categorical levels by label."""
         editable = self._require_term(term)
         if editable.levels is None:
-            raise TypeError(f"Term {term!r} does not have levels.")
+            raise EditorTypeError(f"Term {term!r} does not have levels.")
         level_to_idx = {level: i for i, level in enumerate(editable.levels)}
         missing = [level for level in levels if level not in level_to_idx]
         if missing:
-            raise KeyError(f"Unknown level(s) for term {term!r}: {missing}")
+            raise EditorKeyError(f"Unknown level(s) for term {term!r}: {missing}")
         self._selection[term] = np.array([level_to_idx[level] for level in levels], dtype=np.intp)
         return self
 
@@ -300,10 +306,12 @@ class EditorSession:
         editable = self._require_term(term)
         idx = np.asarray(indices, dtype=np.intp).ravel()
         if idx.size and (idx.min() < 0 or idx.max() >= editable.size):
-            raise IndexError(f"Edit indices out of range for term {term!r}.")
+            raise EditorIndexError(f"Edit indices out of range for term {term!r}.")
         after = np.asarray(values, dtype=np.float64).ravel()
         if after.size != idx.size:
-            raise ValueError(f"Expected {idx.size} values for term {term!r}, got {after.size}.")
+            raise EditorValueError(
+                f"Expected {idx.size} values for term {term!r}, got {after.size}."
+            )
         assignment_positions: dict[int, int] = {}
         unique_indices: list[int] = []
         unique_values: list[float] = []
@@ -316,7 +324,7 @@ class EditorSession:
                 unique_indices.append(index)
                 unique_values.append(value)
             elif unique_values[position] != value:
-                raise ValueError(
+                raise EditorValueError(
                     f"Conflicting values were supplied for edit index {index} in term {term!r}."
                 )
         idx = np.asarray(unique_indices, dtype=np.intp)
@@ -344,7 +352,7 @@ class EditorSession:
     def linear_interpolate(self, term: str, strength: float = 1.0) -> EditorSession:
         """Move selected values toward a line between selected endpoints."""
         if not 0.0 <= strength <= 1.0:
-            raise ValueError(f"strength must be between 0 and 1, got {strength!r}")
+            raise EditorValueError(f"strength must be between 0 and 1, got {strength!r}")
         idx = self._require_edit_selection(term)
         if idx.size < 2:
             return self
@@ -390,9 +398,9 @@ class EditorSession:
         """Move selected categorical levels in display order."""
         editable = self._require_term(term)
         if editable.levels is None:
-            raise TypeError(f"Term {term!r} does not have levels.")
+            raise EditorTypeError(f"Term {term!r} does not have levels.")
         if self._is_ordered_level_term(term):
-            raise TypeError(f"Ordered categorical term {term!r} cannot be display-reordered.")
+            raise EditorTypeError(f"Ordered categorical term {term!r} cannot be display-reordered.")
         idx = self._selection[term]
         if idx.size == 0:
             return self
@@ -409,7 +417,7 @@ class EditorSession:
         """Reset a categorical term's display order to the fitted model order."""
         editable = self._require_term(term)
         if editable.levels is None:
-            raise TypeError(f"Term {term!r} does not have levels.")
+            raise EditorTypeError(f"Term {term!r} does not have levels.")
         if self._is_ordered_level_term(term):
             self._level_orders.pop(term, None)
             return self
@@ -438,7 +446,9 @@ class EditorSession:
         points are selected, the operation applies to the whole term.
         """
         if direction not in ("increasing", "decreasing"):
-            raise ValueError(f"direction must be 'increasing' or 'decreasing', got {direction!r}")
+            raise EditorValueError(
+                f"direction must be 'increasing' or 'decreasing', got {direction!r}"
+            )
         editable = self._require_term(term)
         idx = self._edit_selection_or_all(term)
         before = editable.edited_log_effect[idx].copy()
@@ -462,7 +472,7 @@ class EditorSession:
         points are selected, the operation applies to the whole term.
         """
         if not 0.0 <= strength <= 1.0:
-            raise ValueError(f"strength must be between 0 and 1, got {strength!r}")
+            raise EditorValueError(f"strength must be between 0 and 1, got {strength!r}")
         editable = self._require_term(term)
         idx = self._edit_selection_or_all(term)
         before = editable.edited_log_effect[idx].copy()
@@ -657,7 +667,7 @@ class EditorSession:
         frame = as_eager_frame(X_ref)
         for name in names:
             if name not in frame.columns:
-                raise KeyError(f"Offset data is missing column {name!r}.")
+                raise EditorKeyError(f"Offset data is missing column {name!r}.")
         n = len(frame)
         offset = np.zeros(n, dtype=np.float64)
         for name in names:
@@ -795,7 +805,7 @@ class EditorSession:
                 **profile_kwargs,
             )
         else:
-            raise ValueError("parameter must be 'tweedie_p' or 'nb2_theta'.")
+            raise EditorValueError("parameter must be 'tweedie_p' or 'nb2_theta'.")
 
         self.replace_in_force_model(profile_model)
         self.collapse_history.clear()
@@ -1059,7 +1069,7 @@ class EditorSession:
         if terms is None:
             names = self.edited_terms()
             if not names:
-                raise ValueError("No edited terms are available to convert into an offset.")
+                raise EditorValueError("No edited terms are available to convert into an offset.")
             return names
         names = [terms] if isinstance(terms, str) else list(terms)
         for name in names:
@@ -1077,7 +1087,7 @@ class EditorSession:
         detail = "; ".join(
             f"{term!r}: {', '.join(interactions)}" for term, interactions in blocked.items()
         )
-        raise ValueError(
+        raise EditorValueError(
             f"Cannot run {operation} for term(s) used by interaction(s): {detail}. "
             "Refit a model without those interactions first."
         )
@@ -1102,7 +1112,7 @@ class EditorSession:
 
     def _resolve_refit_data(self, X, y, sample_weight, offset):
         if (X is None) != (y is None):
-            raise ValueError("Explicit refit data requires both X and y.")
+            raise EditorValueError("Explicit refit data requires both X and y.")
         train = self._evaluation_data.get("train")
         explicit_refit_data = X is not None and y is not None
         X_ref = (
@@ -1137,13 +1147,13 @@ class EditorSession:
         try:
             return self.terms[term]
         except KeyError as exc:
-            raise KeyError(f"Unknown editable term: {term!r}") from exc
+            raise EditorKeyError(f"Unknown editable term: {term!r}") from exc
 
     def _require_selection(self, term: str) -> NDArray[np.intp]:
         self._require_term(term)
         idx = self._selection[term]
         if idx.size == 0:
-            raise ValueError(f"No points selected for term {term!r}.")
+            raise EditorValueError(f"No points selected for term {term!r}.")
         return idx
 
     def _require_edit_selection(self, term: str) -> NDArray[np.intp]:
@@ -1191,7 +1201,7 @@ class EditorSession:
                     rtol=0.0,
                     atol=1e-12,
                 ):
-                    raise ValueError(
+                    raise EditorValueError(
                         f"Conflicting values were supplied for collapsed level group "
                         f"in term {term!r}."
                     )
@@ -1226,9 +1236,9 @@ class EditorSession:
     def _require_control_term(self, term: str) -> EditableTerm:
         editable = self._require_term(term)
         if editable.x is None or editable.levels is not None:
-            raise TypeError(f"Term {term!r} does not expose spline control handles.")
+            raise EditorTypeError(f"Term {term!r} does not expose spline control handles.")
         if str(editable.metadata.get("term_type", editable.kind)) not in CONTROL_HANDLE_TERM_TYPES:
-            raise TypeError(f"Term {term!r} does not expose spline control handles.")
+            raise EditorTypeError(f"Term {term!r} does not expose spline control handles.")
         return editable
 
     def _apply_level_order(

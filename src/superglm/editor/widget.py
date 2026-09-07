@@ -9,6 +9,7 @@ from __future__ import annotations
 import atexit
 import html
 import io
+import logging
 import secrets
 import threading
 import time
@@ -21,6 +22,7 @@ import numpy as np
 from superglm.editor import metrics as metrics_module
 from superglm.editor import persistence
 from superglm.editor.apply import materialize_edit_request
+from superglm.editor.errors import EditorClientError, EditorKeyError, EditorValueError
 from superglm.editor.evaluation import (
     default_metrics_dataset,
     evaluation_datasets,
@@ -45,6 +47,7 @@ from superglm.inference.summary_levels import validate_level_display
 from superglm.profiling._reporting import cached_tweedie_profile_ci
 
 _LIVE_WIDGETS: set[EditorWidget] = set()
+_LOGGER = logging.getLogger(__name__)
 
 _EXPORT_MEDIA_TYPES = {
     "joblib": "application/octet-stream",
@@ -74,20 +77,20 @@ def _normalise_export_format(format: str) -> str:
         return "joblib"
     if normalized in {"xlsx", "excel"}:
         return "xlsx"
-    raise ValueError(f"Unsupported export format: {format!r}")
+    raise EditorValueError(f"Unsupported export format: {format!r}")
 
 
 def _safe_export_filename(format: str, filename: str | None) -> str:
     """Return a basename with the canonical suffix for ``format``."""
     name = filename or _EXPORT_DEFAULT_FILENAMES[format]
     if not name or Path(name).name != name or "/" in name or "\\" in name:
-        raise ValueError("filename must not contain directory separators")
+        raise EditorValueError("filename must not contain directory separators")
     if any(ord(character) < 32 or ord(character) == 127 for character in name):
-        raise ValueError("filename must not contain control characters")
+        raise EditorValueError("filename must not contain control characters")
     suffix = Path(name).suffix.lower()
     expected = f".{format}"
     if suffix and suffix != expected:
-        raise ValueError(f"filename extension must be {expected} for {format} exports")
+        raise EditorValueError(f"filename extension must be {expected} for {format} exports")
     if not suffix:
         name = f"{name}{expected}"
     return name
@@ -184,7 +187,7 @@ class EditorWidget:
 
     def _select_term(self, term: str) -> None:
         if term not in self.session.terms:
-            raise KeyError(f"Unknown editable term: {term!r}")
+            raise EditorKeyError(f"Unknown editable term: {term!r}")
         self.selected_term = term
 
     def _set_term(self, term: str) -> dict[str, Any]:
@@ -237,7 +240,7 @@ class EditorWidget:
             elif operation == "redo":
                 self.session.redo(target)
             else:
-                raise ValueError(f"Unknown editor operation: {operation!r}")
+                raise EditorValueError(f"Unknown editor operation: {operation!r}")
             # A fixed-offset refit is conditional on the current edited factors,
             # so any value-changing edit invalidates the stored refit result.
             if operation not in {"select_all", "reset_order"}:
@@ -300,7 +303,7 @@ class EditorWidget:
         # expectations for leveling factors better than averaging log effects.
         idx = self.session.selection(term)
         if idx.size == 0:
-            raise ValueError(f"No points selected for term {term!r}.")
+            raise EditorValueError(f"No points selected for term {term!r}.")
         idx = self.session._expand_collapsed_level_indices(term, idx)
         editable = self.session.terms[term]
         weights = np.ones(idx.size, dtype=np.float64)
@@ -633,7 +636,7 @@ class EditorWidget:
         else:
             dataset = training_export_dataset(self.session)
             if dataset is None:
-                raise ValueError(
+                raise EditorValueError(
                     "Excel export requires train_data or retained fit data; "
                     "validation/test data are not substituted."
                 )
@@ -718,7 +721,7 @@ class EditorWidget:
         target = Path(path).expanduser() if path else Path.cwd()
         resolved = target.resolve()
         if not resolved.exists():
-            raise ValueError(f"Directory does not exist: {resolved}")
+            raise EditorValueError("The selected directory does not exist.")
         if not resolved.is_dir():
             resolved = resolved.parent
         entries: list[dict[str, str]] = []
@@ -838,7 +841,7 @@ class EditorWidget:
         with self._profile_condition:
             job = self._profile_jobs.get(str(job_id))
             if job is None:
-                raise KeyError(f"Unknown profile job: {job_id!r}")
+                raise EditorKeyError(f"Unknown profile job: {job_id!r}")
             if wait:
                 deadline = time.monotonic() + 30.0
                 while job["status"] == "running":
@@ -881,11 +884,16 @@ class EditorWidget:
                 **options,
             )
         except BaseException as exc:
+            if isinstance(exc, EditorClientError):
+                message = exc.public_message
+            else:
+                _LOGGER.exception("Unhandled SuperGLM editor profile error.")
+                message = "internal editor error"
             with self._profile_condition:
                 job = self._profile_jobs[job_id]
                 job["status"] = "error"
                 job["phase"] = "error"
-                job["error"] = str(exc)
+                job["error"] = message
                 job["finished_at"] = time.time()
                 self._profile_condition.notify_all()
             return

@@ -7,6 +7,8 @@ from collections.abc import Sequence
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.editor.errors import EditorValueError
+
 
 def level_order_for_target(
     size: int,
@@ -29,7 +31,7 @@ def level_order_for_direction(
 ) -> list[int]:
     """Return an order that nudges selected levels one slot left or right."""
     if direction not in {"left", "right"}:
-        raise ValueError(f"direction must be 'left' or 'right', got {direction!r}")
+        raise EditorValueError(f"direction must be 'left' or 'right', got {direction!r}")
     selected = set(int(i) for i in selected_indices)
     order = list(range(size))
     if direction == "left":
