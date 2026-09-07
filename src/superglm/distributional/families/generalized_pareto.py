@@ -346,14 +346,16 @@ class GeneralizedParetoLSS:
         scale, shape = values.T
         finite = shape < 0.5
         result = np.full(len(values), np.inf)
+        refusal = "generalized Pareto finite variance is unresolved in the numerical range"
         with np.errstate(over="ignore", under="ignore"):
-            result[finite] = (scale[finite] / (1.0 - shape[finite])) ** 2 / (
-                1.0 - 2.0 * shape[finite]
-            )
+            squared_mean = (scale[finite] / (1.0 - shape[finite])) ** 2
+            # A subnormal square loses precision that the later division
+            # can magnify even when the final variance would be normal.
+            if np.any(squared_mean < np.finfo(np.float64).tiny):
+                raise GeneralizedParetoDomainError(refusal)
+            result[finite] = squared_mean / (1.0 - 2.0 * shape[finite])
         if np.any(~np.isfinite(result[finite]) | (result[finite] <= 0.0)):
-            raise GeneralizedParetoDomainError(
-                "generalized Pareto finite variance is unresolved in the numerical range"
-            )
+            raise GeneralizedParetoDomainError(refusal)
         return readonly(result)
 
     def cdf(self, y, theta) -> NDArray[np.float64]:

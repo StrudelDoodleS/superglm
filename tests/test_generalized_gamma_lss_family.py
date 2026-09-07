@@ -150,6 +150,13 @@ def test_finite_variance_outside_float_range_is_a_numerical_refusal(mean, sigma)
         family.variance(np.array([[mean, sigma, 0.0]]))
 
 
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_location_variance_budget_overflow_raises_numerical_domain_error():
+    family = GeneralizedGammaLSS(parametrisation="location")
+    with pytest.raises(gg.GeneralizedGammaDomainError, match="variance.*numerical range"):
+        family.variance(np.array([[1e308, 1.0, 0.0]]))
+
+
 def _bind(family, y, values, semantics):
     return family.bind_likelihood(y, _weights(values, semantics), COMPLETE_OBSERVATION)
 
