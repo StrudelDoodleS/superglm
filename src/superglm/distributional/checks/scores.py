@@ -90,6 +90,8 @@ def _validated_scoring_inputs(
         response = np.full(parameters.shape[0], float(response), dtype=np.float64)
     if response.shape != (parameters.shape[0],):
         raise ValueError("a score needs one response value per row of theta")
+    if not np.all(np.isfinite(response)):
+        raise ValueError("scoring responses must be finite")
     return response, parameters
 
 
@@ -119,7 +121,7 @@ def _gamma_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
     squared_cv = parameters[:, 1] * parameters[:, 1]
     shape = 1.0 / squared_cv
     scale = parameters[:, 0] * squared_cv
-    ratio = response / scale
+    ratio = np.maximum(response, 0.0) / scale
     return (
         response * (2.0 * special.gammainc(shape, ratio) - 1.0)
         - shape * scale * (2.0 * special.gammainc(shape + 1.0, ratio) - 1.0)
@@ -141,7 +143,9 @@ def _log_normal_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.floa
         if family.parametrisation == "mean"
         else parameters[:, 0]
     )
-    z = (np.log(response) - location) / sigma
+    z = np.full(response.shape, -np.inf)
+    positive = response > 0.0
+    z[positive] = (np.log(response[positive]) - location[positive]) / sigma[positive]
     return response * (2.0 * special.ndtr(z) - 1.0) - 2.0 * np.exp(
         location + 0.5 * sigma * sigma
     ) * (special.ndtr(z - sigma) + special.ndtr(sigma / np.sqrt(2.0)) - 1.0)
@@ -227,6 +231,8 @@ def crps_numeric(
     response, parameters = _validated_scoring_inputs(y, theta)
     n_observations = parameters.shape[0]
 
+    if threshold is not None and np.isnan(threshold):
+        raise ValueError("threshold must not be NaN")
     interior = [_panel_boundary(family, response, parameters)]
     if threshold is not None and np.isfinite(threshold):
         interior.append(
@@ -322,6 +328,8 @@ def _scoring_rows(
     positions = np.asarray(resolved.input_positions, dtype=np.intp)
     retained_frame = as_eager_frame(frame.take_rows(positions))
     retained_response = np.array(response[positions], copy=True)
+    if not np.all(np.isfinite(retained_response)):
+        raise ValueError("scoring responses must be finite")
     predictor_names = tuple(state.name for state in fitted.layout.predictors)
     retained_offsets = _prediction_offsets(
         _take_unvalidated_offsets(shaped_offsets, positions),
@@ -571,6 +579,10 @@ def score_table(
     unknown = tuple(name for name in names if name not in ("log", "crps"))
     if unknown:
         raise ValueError(f"unknown score name: {', '.join(unknown)}")
+    thresholds = tuple(float(value) for value in thresholds)
+    threshold_names = [f"twcrps_{value:g}" for value in thresholds]
+    if len(threshold_names) != len(set(threshold_names)):
+        raise ValueError("thresholds produce duplicate score column names")
 
     rows = _scoring_rows(
         fitted,
