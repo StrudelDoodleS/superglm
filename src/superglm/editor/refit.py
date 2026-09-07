@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from superglm.editor.errors import EditorValueError
 from superglm.editor.terms import resolve_refit_method
 
 
@@ -38,5 +39,5 @@ def fit_refit_model(
             **kwargs,
         )
     else:
-        raise ValueError("method must be 'auto', 'fit', or 'fit_reml'.")
+        raise EditorValueError("method must be 'auto', 'fit', or 'fit_reml'.")
     return resolved_method

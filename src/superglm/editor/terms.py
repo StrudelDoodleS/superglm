@@ -7,6 +7,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
+from superglm.editor.errors import EditorKeyError, EditorValueError
 
 
 def term_from_inference(ti) -> EditableTerm:
@@ -176,7 +177,9 @@ def term_offset_values(term: EditableTerm, values) -> NDArray:
         raw = [str(v) for v in np.asarray(values, dtype=object).ravel()]
         missing = sorted({v for v in raw if v not in mapping})
         if missing:
-            raise KeyError(f"Offset data contains unseen level(s) for {term.name!r}: {missing}")
+            raise EditorKeyError(
+                f"Offset data contains unseen level(s) for {term.name!r}: {missing}"
+            )
         return np.asarray([mapping[v] for v in raw], dtype=np.float64)
 
     x_values = np.asarray(values, dtype=np.float64).ravel()
@@ -198,7 +201,7 @@ def term_offset_values(term: EditableTerm, values) -> NDArray:
         scale = max(1.0, abs(lo), abs(hi), abs(hi - lo))
         tol = 1e-12 * scale
         if np.any(x_values < lo - tol) or np.any(x_values > hi + tol):
-            raise ValueError(
+            raise EditorValueError(
                 f"Term {term.name!r} received values outside the rated range "
                 f"[{lo:.6g}, {hi:.6g}] with extrapolation='error'."
             )

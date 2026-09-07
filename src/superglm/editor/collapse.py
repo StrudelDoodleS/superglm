@@ -11,6 +11,7 @@ import numpy as np
 
 from superglm._frame import as_eager_frame
 from superglm.editor._types import EditableTerm
+from superglm.editor.errors import EditorIndexError, EditorTypeError, EditorValueError
 from superglm.features.categorical import Categorical
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.ordered_categorical import (
@@ -31,13 +32,13 @@ def collapsed_feature_spec(
 ) -> tuple[Any, dict[str, Any]]:
     """Return a replacement feature spec that collapses selected levels."""
     if term.levels is None:
-        raise TypeError(f"Term {term.name!r} does not expose categorical levels.")
+        raise EditorTypeError(f"Term {term.name!r} does not expose categorical levels.")
     if selected_indices.size < 2:
-        raise ValueError(f"Select at least two levels to collapse term {term.name!r}.")
+        raise EditorValueError(f"Select at least two levels to collapse term {term.name!r}.")
 
     spec = model._specs[term.name]
     if not isinstance(spec, Categorical | OrderedCategorical):
-        raise TypeError(
+        raise EditorTypeError(
             f"Collapse levels is only available for categorical terms, got {term.name!r}."
         )
     _require_not_interaction_parent(model, term.name, operation="collapse levels")
@@ -47,7 +48,7 @@ def collapsed_feature_spec(
 
     idx = np.unique(np.asarray(selected_indices, dtype=np.intp))
     if idx.min() < 0 or idx.max() >= len(term.levels):
-        raise IndexError(f"Selection indices out of range for term {term.name!r}.")
+        raise EditorIndexError(f"Selection indices out of range for term {term.name!r}.")
     selected_levels = [str(term.levels[i]) for i in idx]
 
     existing = getattr(spec, "_grouping", None)
@@ -62,7 +63,7 @@ def collapsed_feature_spec(
             selected_originals,
             _original_level_order(spec, term, existing),
         ):
-            raise ValueError(
+            raise EditorValueError(
                 f"Ordered categorical collapse for {term.name!r} must be contiguous "
                 "in fitted order."
             )
@@ -123,11 +124,11 @@ def ungrouped_feature_spec(
 ) -> tuple[Any, dict[str, Any]]:
     """Return a replacement feature spec that removes selected levels from groups."""
     if term.levels is None:
-        raise TypeError(f"Term {term.name!r} does not expose categorical levels.")
+        raise EditorTypeError(f"Term {term.name!r} does not expose categorical levels.")
 
     spec = model._specs[term.name]
     if not isinstance(spec, Categorical | OrderedCategorical):
-        raise TypeError(
+        raise EditorTypeError(
             f"Ungroup levels is only available for categorical terms, got {term.name!r}."
         )
     _require_not_interaction_parent(model, term.name, operation="ungroup levels")
@@ -136,13 +137,13 @@ def ungrouped_feature_spec(
     values = frame.column_array(term.name)
     existing = getattr(spec, "_grouping", None)
     if existing is None:
-        raise ValueError(f"Term {term.name!r} does not have collapsed levels.")
+        raise EditorValueError(f"Term {term.name!r} does not have collapsed levels.")
 
     idx = np.unique(np.asarray(selected_indices, dtype=np.intp))
     if idx.size == 0:
-        raise ValueError(f"Select at least one grouped level to ungroup term {term.name!r}.")
+        raise EditorValueError(f"Select at least one grouped level to ungroup term {term.name!r}.")
     if idx.min() < 0 or idx.max() >= len(term.levels):
-        raise IndexError(f"Selection indices out of range for term {term.name!r}.")
+        raise EditorIndexError(f"Selection indices out of range for term {term.name!r}.")
     selected_levels = [str(term.levels[i]) for i in idx]
     grouping = _ungroup_grouping(
         spec,
@@ -192,7 +193,7 @@ def _require_not_interaction_parent(model, term: str, *, operation: str) -> None
             interactions.append(str(name))
     if interactions:
         joined = ", ".join(interactions)
-        raise ValueError(
+        raise EditorValueError(
             f"Cannot {operation} for term {term!r} because it is used by interaction(s): "
             f"{joined}. Refit a model without those interactions first."
         )
@@ -304,7 +305,7 @@ def _ungroup_grouping(
             if isinstance(spec, OrderedCategorical) and not _members_are_contiguous(
                 remaining, original_order
             ):
-                raise ValueError(
+                raise EditorValueError(
                     "Ungrouping selected levels would leave a non-contiguous ordered group."
                 )
             groups[new_label] = remaining
@@ -313,7 +314,7 @@ def _ungroup_grouping(
         len(existing.group_to_originals.get(existing.original_to_group.get(level, level), [])) > 1
         for level in selected
     ):
-        raise ValueError("Selected levels are not part of a collapsed group.")
+        raise EditorValueError("Selected levels are not part of a collapsed group.")
 
     return collapse_levels(
         data,
@@ -496,7 +497,9 @@ def _is_identity_grouping(grouping: LevelGrouping) -> bool:
 
 def _require_contiguous(indices: np.ndarray, term_name: str) -> None:
     if indices.size and np.any(np.diff(np.sort(indices)) != 1):
-        raise ValueError(f"Ordered categorical collapse for {term_name!r} must be contiguous.")
+        raise EditorValueError(
+            f"Ordered categorical collapse for {term_name!r} must be contiguous."
+        )
 
 
 def _members_are_contiguous(members: list[str], order: list[str]) -> bool:
@@ -522,7 +525,7 @@ def _require_no_special_members(
     if not selected:
         return
     joined = ", ".join(repr(member) for member in selected)
-    raise ValueError(
+    raise EditorValueError(
         f"Ordered categorical collapse for {term_name!r} cannot include free level(s) "
         f"{joined}: specials are fitted outside the smooth and cannot be grouped."
     )

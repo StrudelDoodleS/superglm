@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.editor.errors import EditorValueError
 from superglm.editor.terms import native_log_effect_values
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
@@ -290,7 +291,7 @@ def _apply_ordered_spline_term(
     pinned_display = {str(level) for level in getattr(spec, "_pinned_specials", ())}
     pinned = [level for level in specials if level in pinned_display]
     if pinned:
-        raise ValueError(
+        raise EditorValueError(
             f"Editable term {term.name!r} cannot be edited: special level(s) {pinned} "
             "had no effective training rows in this fit and are pinned to zero "
             "contribution, so they have no fitted coefficient to edit. Refit on data "
@@ -334,7 +335,7 @@ def _apply_categorical_term(
     # pickled before pinning existed pins nothing.
     pinned = list(getattr(spec, "_pinned_levels", ()))
     if pinned:
-        raise ValueError(
+        raise EditorValueError(
             f"Editable term {term.name!r} cannot be edited: level(s) "
             f"{sorted(pinned, key=str)} had no effective training rows in this fit and "
             f"are pinned to the base level, so they have no fitted coefficient in this "
@@ -522,7 +523,7 @@ def _refresh_fit_statistics(
     from superglm.model.input_validation import validate_fit_input
 
     if (X is None) != (y is None):
-        raise ValueError("Explicit scoring data requires both X and y.")
+        raise EditorValueError("Explicit scoring data requires both X and y.")
 
     retained_X_ref = getattr(model, "_fit_X_ref", None)
     retained_y_ref = getattr(model, "_fit_y_ref", None)

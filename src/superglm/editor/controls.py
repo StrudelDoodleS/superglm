@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.editor._types import EditableTerm
+from superglm.editor.errors import EditorIndexError, EditorTypeError
 
 # Term types whose control handles are recovered from a fitted basis rather than
 # drawn as a display-only fallback.  Kept here, where the recovery lives, so the
@@ -59,7 +60,7 @@ def control_curve_after_move(
     if raw is not None:
         basis, basis_indices, x_ctrl, coeff = raw
         if handle_index < 0 or handle_index >= x_ctrl.size:
-            raise IndexError(f"Control handle index out of range for term {term.name!r}.")
+            raise EditorIndexError(f"Control handle index out of range for term {term.name!r}.")
         basis_index = int(basis_indices[handle_index])
         coeff[basis_index] = float(log_effect)
         return np.asarray(basis @ coeff, dtype=np.float64), {
@@ -73,7 +74,7 @@ def control_curve_after_move(
     # original fitted spline basis.
     x_ctrl = fallback_control_x(term, n_handles=n_handles)
     if handle_index < 0 or handle_index >= x_ctrl.size:
-        raise IndexError(f"Control handle index out of range for term {term.name!r}.")
+        raise EditorIndexError(f"Control handle index out of range for term {term.name!r}.")
     target = interp_log_effect(term, x_ctrl)
     target[handle_index] = float(log_effect)
     return pchip_control_curve(term, x_ctrl, target), {"x": float(x_ctrl[handle_index])}
@@ -132,7 +133,7 @@ def fallback_control_x(term: EditableTerm, n_handles: int | None = None) -> NDAr
             return values
 
     if term.x is None:
-        raise TypeError(f"Term {term.name!r} does not expose an x grid.")
+        raise EditorTypeError(f"Term {term.name!r} does not expose an x grid.")
     spline_meta = term.metadata.get("spline", {})
     n_basis = int(spline_meta.get("n_basis", 9)) if isinstance(spline_meta, dict) else 9
     min_handles, max_handles = fallback_control_handle_limits(term)
