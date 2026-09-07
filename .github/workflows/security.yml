@@ -68,6 +68,14 @@ jobs:
       - name: Audit project dependency metadata
         run: uvx --from 'pip-audit==2.9.0' pip-audit . --strict --progress-spinner off
 
+      - name: Audit locked dependencies (all extras and groups)
+        run: |
+          uv export --locked --all-extras --all-groups --no-emit-project \
+            --format requirements.txt --output-file "$RUNNER_TEMP/audit-requirements.txt" --quiet
+          uvx --from 'pip-audit==2.9.0' pip-audit \
+            --requirement "$RUNNER_TEMP/audit-requirements.txt" \
+            --require-hashes --disable-pip --strict --progress-spinner off
+
   package-audit:
     name: Build and inspect package
     runs-on: ubuntu-latest
