@@ -1102,6 +1102,16 @@ def _close_live_widgets() -> None:
         widget.close()
 
 
+def _profile_trace_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep optimizer exception text local, without changing the profile result."""
+    payload = dict(row)
+    for field in ("phi_message", "phi_fallback_reason"):
+        detail = payload.pop(field, None)
+        if detail:
+            _LOGGER.debug("Editor profile diagnostic %s: %s", field, detail)
+    return jsonable(payload)
+
+
 def _profile_trace_rows(result: Any) -> list[dict[str, Any]]:
     trace = getattr(result, "search_trace", None)
     if trace is None:
@@ -1116,7 +1126,7 @@ def _profile_trace_rows(result: Any) -> list[dict[str, Any]]:
         rows = trace.to_dict("records")
     else:
         rows = list(trace)
-    return [jsonable(row) for row in rows]
+    return [_profile_trace_payload(row) for row in rows]
 
 
 def _profile_estimate_payload(result: Any, parameter: str) -> dict[str, Any]:
@@ -1193,7 +1203,7 @@ def _merge_profile_trace_rows(job: dict[str, Any], rows: list[dict[str, Any]]) -
     trace = job.setdefault("trace", [])
     seen = {_profile_trace_key(row) for row in trace}
     for row in rows:
-        payload = jsonable(dict(row))
+        payload = _profile_trace_payload(row)
         key = _profile_trace_key(payload)
         if key in seen:
             continue
