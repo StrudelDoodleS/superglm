@@ -724,7 +724,8 @@ def _prepare_term_test(
     beta = np.asarray(fitted.coefficients, dtype=np.float64)[term_slice]
     edf = float(fitted.inference.term_edf[qualified])
 
-    spec = _compiled_spec(fitted, parameter, term)
+    parent = term.removesuffix(_SPECIAL_SUFFIX)
+    spec = _compiled_spec(fitted, parameter, parent)
     level_term = spec is not None and _level_domain(spec) is not None
     design: NDArray[np.float64] | None = None
     if not level_term:

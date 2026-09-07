@@ -16,6 +16,28 @@ from superglm.distributional.result import DistributionalEFSConfig
 from superglm.features import RandomEffect
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "GaussianLS",
+        "GammaLS",
+        "GeneralizedGammaLSS",
+        "GeneralizedParetoLSS",
+        "LogNormalLS",
+        "NegativeBinomialLS",
+        "TweedieLSS",
+        "TwoPieceLogNormalLSS",
+        "TwoPieceNormalLSS",
+        "Predictor",
+    ],
+)
+def test_review_supported_constructors_import_from_root(name):
+    import superglm
+
+    assert getattr(superglm, name) is getattr(distributional, name)
+    assert name in superglm.__all__
+
+
 def test_negative_binomial_lss_is_exported_from_both_public_family_namespaces() -> None:
     """Kills omitting either supported public import path for the NB2 family."""
     assert distributional.NegativeBinomialLS is NegativeBinomialLS

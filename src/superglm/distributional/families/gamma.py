@@ -397,7 +397,11 @@ class GammaLS:
             theta, n_observations=None, parameters=self.parameters, family_name="GammaLS"
         )
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
-        if np.any(probabilities <= 0.0) or np.any(probabilities >= 1.0):
+        if (
+            np.any(~np.isfinite(probabilities))
+            or np.any(probabilities <= 0.0)
+            or np.any(probabilities >= 1.0)
+        ):
             raise ValueError("quantile probabilities must lie strictly inside (0, 1)")
         cv2 = values[:, 1] * values[:, 1]
         return readonly(values[:, 0] * cv2 * special.gammaincinv(1.0 / cv2, probabilities))
@@ -460,7 +464,11 @@ class GammaLS:
         )
         prior = _prior_weight_vector(weights, len(values))
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
-        if np.any(probabilities <= 0.0) or np.any(probabilities >= 1.0):
+        if (
+            np.any(~np.isfinite(probabilities))
+            or np.any(probabilities <= 0.0)
+            or np.any(probabilities >= 1.0)
+        ):
             raise ValueError("quantile probabilities must lie strictly inside (0, 1)")
         cv2 = values[:, 1] * values[:, 1]
         return readonly(

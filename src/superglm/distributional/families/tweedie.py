@@ -478,7 +478,11 @@ def _block_quantile(block: _SeriesBlock, target: NDArray[np.float64]) -> NDArray
 
 def _validated_probabilities(p: NDArray, n_observations: int) -> NDArray[np.float64]:
     probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (n_observations,))
-    if np.any(probabilities <= 0.0) or np.any(probabilities >= 1.0):
+    if (
+        np.any(~np.isfinite(probabilities))
+        or np.any(probabilities <= 0.0)
+        or np.any(probabilities >= 1.0)
+    ):
         raise ValueError("quantile probabilities must lie strictly inside (0, 1)")
     return probabilities
 

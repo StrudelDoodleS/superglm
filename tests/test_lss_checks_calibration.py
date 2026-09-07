@@ -56,6 +56,27 @@ from superglm.distributional.weights import WeightContract
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_review_actual_expected_retained_response_guard_preserved(gaussian_case, bad):
+    fitted, frame, response = gaussian_case
+    frame = frame.head(12)
+    response = response[:12].copy()
+    response[0] = bad
+    groups = np.full(12, "all")
+    with pytest.raises(ValueError, match="retained.*finite"):
+        actual_expected_check(fitted, frame, response, groups, name="group")
+    weights = np.ones(12)
+    weights[0] = 0.0
+    excluded = actual_expected_check(
+        fitted, frame, response, groups, name="group", sample_weight=weights
+    )
+    retained = actual_expected_check(fitted, frame.iloc[1:], response[1:], groups[1:], name="group")
+    np.testing.assert_array_equal(excluded.actual, retained.actual)
+    np.testing.assert_array_equal(excluded.expected, retained.expected)
+    assert np.all(np.isfinite(excluded.actual))
+    assert np.all(np.isfinite(excluded.expected))
+
+
 def _gaussian_sample(n: int = 1500, seed: int = 20260903) -> tuple[pd.DataFrame, NDArray]:
     rng = np.random.default_rng(seed)
     x = rng.uniform(-1.0, 1.0, n)

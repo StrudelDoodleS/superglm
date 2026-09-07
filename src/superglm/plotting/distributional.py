@@ -1043,7 +1043,7 @@ def plot_diagnostics_figure(
     values = sample.quantile
     eta = np.asarray(residuals.eta, dtype=np.float64)[sample.rows]
     scale_eta = eta[:, 1] if eta.shape[1] >= 2 else eta[:, 0]
-    scale_name = "scale" if eta.shape[1] >= 2 else "location"
+    scale_name = "η₂" if eta.shape[1] >= 2 else "η₁"
     with matplotlib_context():
         fig, axes = _panel_grid(None, 6, 2)
         _draw_qq(axes[0], qq)
@@ -1053,11 +1053,11 @@ def plot_diagnostics_figure(
         _draw_pit(axes[2], pit)
         _draw_residual_density(axes[3], values)
         _draw_residuals_against(axes[4], eta[:, 0], values, max_points)
-        axes[4].set_title("quantile residuals against the location eta")
-        axes[4].set_xlabel("location eta")
+        axes[4].set_title("quantile residuals against η₁")
+        axes[4].set_xlabel("η₁")
         axes[4].set_ylabel("quantile residual")
         bins = _draw_residual_sd(axes[5], scale_eta, values)
-        axes[5].set_title(f"residual sd in {bins} bins of the {scale_name} eta")
-        axes[5].set_xlabel(f"{scale_name} eta")
+        axes[5].set_title(f"residual sd in {bins} bins of {scale_name}")
+        axes[5].set_xlabel(scale_name)
         axes[5].set_ylabel("residual sd")
         return _finish(fig, axes)
