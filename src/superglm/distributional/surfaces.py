@@ -31,13 +31,16 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
-from superglm.distributional.checks._aggregate import grouped_ratio
+from superglm.distributional.checks._aggregate import _replicated_quantiles, grouped_ratio
 from superglm.distributional.family import (
+    AtomFamily,
     DefaultPredictionFamily,
     DistributionFunctionFamily,
 )
+from superglm.distributional.model import _take_unvalidated_offsets, _unvalidated_offset_shapes
 from superglm.distributional.posterior import (
     CovarianceKind,
+    _prior_weight_law,
     posterior_bounds,
     posterior_draws,
     posterior_predictive,
@@ -48,6 +51,12 @@ from superglm.distributional.posterior import (
 # needs; a sweep frame that restated the rule would drift from the design it is
 # built to feed.
 from superglm.distributional.prediction_design import _required_columns
+from superglm.distributional.weights import (
+    LikelihoodWeightError,
+    ResolvedLikelihoodWeights,
+    WeightContract,
+    resolve_likelihood_weights,
+)
 
 #: Payload schema version shared by the surface serializers.
 SCHEMA_VERSION = 1
@@ -275,7 +284,11 @@ def _covariate_grid(
         grid = np.linspace(float(values.min()), float(values.max()), points)
         return grid, None, grid
     declared = frame.column_declared_categories(covariate)
-    observed = declared if declared is not None else np.unique(frame.column_array(covariate))
+    observed = (
+        declared
+        if declared is not None
+        else pd.factorize(frame.column_array(covariate), sort=True)[1]
+    )
     labels = list(observed)
     return (
         np.array(labels, dtype=object),
@@ -289,7 +302,10 @@ def _default_value(frame: EagerFrame, name: str) -> Any:
     values = frame.column_array(name)
     if frame.column_kind(name) == "numeric":
         return float(np.median(np.asarray(values, dtype=float)))
-    labels, counts = np.unique(values, return_counts=True)
+    codes, labels = pd.factorize(values, sort=True)
+    if np.any(codes < 0):
+        raise ValueError(f"reference column {name!r} has missing category labels")
+    counts = np.bincount(codes, minlength=len(labels))
     return labels[int(np.argmax(counts))]
 
 
@@ -437,6 +453,10 @@ def risk_curves(
 def _clipped_density(values: NDArray) -> NDArray[np.float64]:
     """Clip differencing round-off to zero and refuse a real negative density."""
     density = np.asarray(values, dtype=np.float64)
+    if not np.all(np.isfinite(density)):
+        raise ValueError(
+            "the response grid did not produce a finite density; use a resolvable grid"
+        )
     scale = float(np.max(np.abs(density))) if density.size else 0.0
     tolerance = _DENSITY_NEGATIVE_TOLERANCE * max(scale, 1.0)
     if np.any(density < -tolerance):
@@ -456,16 +476,23 @@ def density_fan(
     n_points: int = 60,
     n_y: int = 200,
     offsets: Mapping[str, NDArray] | None = None,
+    weights: NDArray | None = None,
     quantiles: tuple[float, ...] | None = (0.5, 0.9, 0.99),
 ) -> DensityFan:
-    """The conditional density along one covariate sweep.
+    """The conditional density of a continuous family along one covariate sweep.
 
     The response grid spans the union of the plug-in 0.001 and 0.999 quantiles
     over the sweep, and the density is the central difference of the family's
     distribution function on that grid.  ``offsets`` are offsets of the sweep,
     carrying one row per swept point exactly as :func:`risk_curves` reads them.
+    ``weights`` are positive prior-law weights per swept point, defaulting to
+    the unit law. Families with atoms are unsupported by this density payload.
     """
     family = fitted.family
+    if isinstance(family, AtomFamily):
+        raise NotImplementedError(
+            "density fans support continuous families only; this family has atoms"
+        )
     if not isinstance(family, DistributionFunctionFamily):
         raise NotImplementedError(
             "a density fan needs a family with a cdf and a quantile; this one has neither"
@@ -477,24 +504,31 @@ def density_fan(
     sweep, levels, positions, resolved = _sweep(fitted, X_train, reference, covariate, n_points)
     theta = np.asarray(fitted.predict_parameters(sweep, offsets=offsets), dtype=np.float64)
     rows = len(theta)
-    lower = np.asarray(family.quantile(np.full(rows, _DENSITY_TAIL), theta), dtype=np.float64)
-    upper = np.asarray(family.quantile(np.full(rows, 1.0 - _DENSITY_TAIL), theta), dtype=np.float64)
-    y_grid = np.linspace(float(lower.min()), float(upper.max()), grid_points)
+    prior = _prior_weight_law(weights, rows)
+    lower = resolve_quantity(family, ("quantile", _DENSITY_TAIL), weights=prior)(theta)
+    upper = resolve_quantity(family, ("quantile", 1.0 - _DENSITY_TAIL), weights=prior)(theta)
+    if not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper)):
+        raise ValueError("the density response grid needs finite quantile endpoints")
+    if not float(lower.min()) < float(upper.max()):
+        raise ValueError("the density response grid must have distinct increasing endpoints")
+    with np.errstate(over="ignore", invalid="ignore"):
+        y_grid = np.linspace(float(lower.min()), float(upper.max()), grid_points)
+        spacing = np.diff(y_grid)
+    if not np.all(np.isfinite(y_grid)) or not np.all(np.isfinite(spacing)) or np.any(spacing <= 0):
+        raise ValueError("the density response grid must be finite and strictly increasing")
 
     cdf = np.column_stack(
-        [
-            np.asarray(family.cdf(np.full(rows, float(value)), theta), dtype=np.float64)
-            for value in y_grid
-        ]
+        [resolve_quantity(family, ("cdf", float(value)), weights=prior)(theta) for value in y_grid]
     )
-    density = _clipped_density(np.gradient(cdf, y_grid, axis=1))
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        density = _clipped_density(np.gradient(cdf, y_grid, axis=1))
 
     quantile_levels = None if quantiles is None else tuple(float(level) for level in quantiles)
     quantile_curves = None
     if quantile_levels:
         quantile_curves = np.vstack(
             [
-                np.asarray(family.quantile(np.full(rows, level), theta), dtype=np.float64)
+                resolve_quantity(family, ("quantile", level), weights=prior)(theta)
                 for level in quantile_levels
             ]
         )
@@ -515,22 +549,27 @@ def density_fan(
 # --------------------------------------------------------------------------- #
 
 
-def _histogram(values: NDArray) -> Histogram:
-    counts, edges = np.histogram(np.asarray(values, dtype=np.float64), bins=_HISTOGRAM_BINS)
+def _histogram(values: NDArray, counts: NDArray | None = None) -> Histogram:
+    counts, edges = np.histogram(
+        np.asarray(values, dtype=np.float64), bins=_HISTOGRAM_BINS, weights=counts
+    )
     return Histogram(edges=_readonly(edges), counts=_readonly(counts.astype(np.int64)))
 
 
 def _resolved_weights(
-    sample_weight: NDArray | None, rows: int, *, name: str = "sample_weight"
-) -> NDArray[np.float64]:
-    if sample_weight is None:
-        return np.ones(rows, dtype=np.float64)
-    weights = np.asarray(sample_weight, dtype=np.float64)
-    if weights.shape != (rows,):
+    sample_weight: NDArray | None,
+    rows: int,
+    *,
+    contract: WeightContract,
+    name: str = "sample_weight",
+) -> ResolvedLikelihoodWeights:
+    """Use the shared weight contract, retaining the surfaces' ValueError boundary."""
+    if sample_weight is not None and np.asarray(sample_weight).shape != (rows,):
         raise ValueError(f"{name} must give one weight per row of X")
-    if not np.all(np.isfinite(weights)) or np.any(weights < 0.0):
-        raise ValueError(f"{name} must be finite and non-negative")
-    return weights
+    try:
+        return resolve_likelihood_weights(sample_weight, n_observations=rows, contract=contract)
+    except LikelihoodWeightError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _equal_count_bins(values: NDArray, n_bins: int) -> tuple[NDArray[np.intp], list[NDArray]]:
@@ -543,6 +582,34 @@ def _equal_count_bins(values: NDArray, n_bins: int) -> tuple[NDArray[np.intp], l
     return codes, groups
 
 
+def _frequency_bin_fragments(
+    values: NDArray, counts: NDArray, n_bins: int
+) -> tuple[NDArray, NDArray, NDArray]:
+    """Stable literal-replication bins in at most rows + bins - 1 fragments."""
+    order = np.argsort(values, kind="stable")
+    quotient, remainder = divmod(int(np.sum(counts, dtype=np.int64)), n_bins)
+    source, codes, mass = [], [], []
+    cursor = 0
+    available = int(counts[order[cursor]])
+    for code in range(n_bins):
+        remaining = quotient + (code < remainder)
+        while remaining:
+            take = min(available, remaining)
+            source.append(order[cursor])
+            codes.append(code)
+            mass.append(take)
+            remaining -= take
+            available -= take
+            if not available and cursor + 1 < len(order):
+                cursor += 1
+                available = int(counts[order[cursor]])
+    return (
+        np.asarray(source, dtype=np.intp),
+        np.asarray(codes, dtype=np.intp),
+        np.asarray(mass, dtype=np.int64),
+    )
+
+
 def parameter_spread(
     fitted: Any,
     X: FrameLike | EagerFrame,
@@ -553,6 +620,7 @@ def parameter_spread(
     by: str = "mean",
     sample_weight: NDArray | None = None,
     weights: NDArray | None = None,
+    offsets: Mapping[str, NDArray] | None = None,
 ) -> Spread:
     """Sharpness of the fitted parameters and spread among identical prices.
 
@@ -563,8 +631,11 @@ def parameter_spread(
     percentiles of the exceedance probability ``P(Y > threshold)`` with their
     ratio: rows a model prices alike can still differ many-fold in tail risk.
 
-    ``sample_weight`` weighs the ratio of sums the table reports; ``weights``
-    are the rows' *prior* weights, which are part of each row's own law, so the
+    Under frequency semantics, ``sample_weight`` gives literal replication
+    counts for bins, percentiles and histograms as well as weighted means.
+    Under prior semantics it weighs the ratio of sums with physical-row bins.
+    Zero-weight rows are omitted before prediction. ``offsets`` belong to X.
+    ``weights`` are the rows' *prior* weights, part of each row's own law, so the
     tail quantile and the exceedance probability are read from the
     prior-weighted law of the row rather than from the unit-weight one.  The
     prices the table bins by do not move with it: a prior weight leaves the
@@ -590,34 +661,65 @@ def parameter_spread(
     if not 0.0 < tail < 1.0:
         raise ValueError("tail_p must lie strictly inside (0, 1)")
 
-    theta = np.asarray(fitted.predict_parameters(X), dtype=np.float64)
+    frame = as_eager_frame(X)
+    shaped_offsets = _unvalidated_offset_shapes(offsets, len(frame))
+    resolved = _resolved_weights(
+        sample_weight, len(frame), contract=fitted.fit_state.weight_contract
+    )
+    positions = resolved.input_positions
+    prior = None
+    if weights is not None:
+        supplied = np.asarray(weights)
+        if supplied.shape != (len(frame),):
+            raise ValueError("weights must give one weight per row of X")
+        prior = _prior_weight_law(supplied[positions], len(positions))
+    frame = as_eager_frame(frame.take_rows(positions))
+    offsets = _take_unvalidated_offsets(shaped_offsets, positions)
+    theta = np.asarray(fitted.predict_parameters(frame, offsets=offsets), dtype=np.float64)
     rows = len(theta)
-    if rows < bins:
-        raise ValueError(f"X has fewer rows than bins: {rows} rows for {bins} equal-count bins")
+    frequency = resolved.provenance.contract.semantics == "frequency"
+    count = resolved.likelihood_count if frequency else rows
+    if count < bins:
+        raise ValueError(f"X has fewer rows than bins: {count} rows for {bins} equal-count bins")
     # The two weight vectors mean different things and must not share a name:
     # ``aggregation`` weighs the ratio of sums, ``prior`` is part of the law.
-    aggregation = _resolved_weights(sample_weight, rows)
-    prior = None if weights is None else _resolved_weights(weights, rows, name="weights")
+    aggregation = resolved.values
     mean = np.asarray(family.default_prediction(theta), dtype=np.float64)
     tail_values = resolve_quantity(family, ("quantile", tail), weights=prior)(theta)
     exceedance = resolve_quantity(family, ("exceedance", float(threshold)), weights=prior)(theta)
 
-    codes, groups = _equal_count_bins(mean, bins)
+    histogram_counts = aggregation.astype(np.int64) if frequency else None
+    if frequency:
+        source, codes, aggregation = _frequency_bin_fragments(mean, histogram_counts, bins)
+        groups = np.split(np.arange(len(source)), np.flatnonzero(np.diff(codes)) + 1)
+        bin_counts = np.array([aggregation[group].sum() for group in groups], dtype=np.int64)
+        percentiles = np.array(
+            [
+                _replicated_quantiles(
+                    exceedance[source[group]], aggregation[group], np.asarray(_SPREAD_PERCENTILES)
+                )
+                for group in groups
+            ]
+        )
+    else:
+        source = np.arange(rows)
+        codes, groups = _equal_count_bins(mean, bins)
+        bin_counts = np.bincount(codes, minlength=bins).astype(np.int64)
+        percentiles = np.array(
+            [np.quantile(exceedance[group], _SPREAD_PERCENTILES) for group in groups]
+        )
     _, exposure, weighted_mean = grouped_ratio(
-        aggregation * mean, aggregation, codes, n_groups=bins
+        aggregation * mean[source], aggregation, codes, n_groups=bins
     )
-    low = np.array([float(mean[rows_in_bin].min()) for rows_in_bin in groups])
-    high = np.array([float(mean[rows_in_bin].max()) for rows_in_bin in groups])
-    percentiles = np.array(
-        [np.quantile(exceedance[rows_in_bin], _SPREAD_PERCENTILES) for rows_in_bin in groups]
-    )
+    low = np.array([float(mean[source[group]].min()) for group in groups])
+    high = np.array([float(mean[source[group]].max()) for group in groups])
     spread_ratio = np.full(bins, np.nan)
     np.divide(percentiles[:, 1], percentiles[:, 0], out=spread_ratio, where=percentiles[:, 0] > 0.0)
 
     table = pd.DataFrame(
         {
             "bin": np.arange(bins, dtype=np.int64),
-            "n": np.bincount(codes, minlength=bins).astype(np.int64),
+            "n": bin_counts,
             "weight": exposure,
             "mean_lo": low,
             "mean_hi": high,
@@ -628,11 +730,12 @@ def parameter_spread(
         }
     )
     parameters = {
-        spec.name: _histogram(theta[:, index]) for index, spec in enumerate(family.parameters)
+        spec.name: _histogram(theta[:, index], histogram_counts)
+        for index, spec in enumerate(family.parameters)
     }
     return Spread(
         parameters=MappingProxyType(parameters),
-        tail_quantile=_histogram(tail_values),
+        tail_quantile=_histogram(tail_values, histogram_counts),
         tail_p=tail,
         identically_priced=table,
         threshold=float(threshold),
@@ -764,6 +867,7 @@ def portfolio(
     return_draws: bool = False,
     chunk_rows: int | None = None,
     weights: NDArray | None = None,
+    offsets: Mapping[str, NDArray] | None = None,
 ) -> Portfolio:
     """Summarise the simulated total loss of a book of rows.
 
@@ -779,6 +883,8 @@ def portfolio(
     each row is simulated on its own prior-weighted law, and what the book pays
     is ``sum_i w_i y_i``, the rate times the exposure that bought it, overall
     and within every segment.
+    Zero-weight rows are omitted before simulation. ``offsets`` give one
+    predictor-keyed offset per input row and are sliced with those rows.
     """
     asked = _asked_quantiles(quantiles, what="a portfolio payload")
     columns = [f"q{value:g}" for value in asked]
@@ -789,8 +895,20 @@ def portfolio(
         raise ValueError("n_draws must be at least two to summarise a total")
 
     frame = as_eager_frame(X)
+    shaped_offsets = _unvalidated_offset_shapes(offsets, len(frame))
+    resolved = _resolved_weights(
+        weights, len(frame), contract=WeightContract("prior"), name="weights"
+    )
+    positions = resolved.input_positions
+    if by is not None and not isinstance(by, str):
+        labels = np.asarray(by)
+        if labels.shape != (len(frame),):
+            raise ValueError("by must give one segment label per row of X")
+        by = labels[positions]
+    frame = as_eager_frame(frame.take_rows(positions))
+    offsets = _take_unvalidated_offsets(shaped_offsets, positions)
     segmentation = _resolved_segments(frame, by, len(frame))
-    exposure = None if weights is None else _resolved_weights(weights, len(frame), name="weights")
+    exposure = None if weights is None else resolved.values
     segment_totals = None if segmentation is None else _SegmentTotals(segmentation, draws, exposure)
     accumulator: Any = segment_totals
     if segment_totals is None and exposure is not None:
@@ -805,6 +923,7 @@ def portfolio(
             seed=seed,
             chunk_rows=chunk_rows,
             weights=exposure,
+            offsets=offsets,
         ),
         dtype=np.float64,
     )

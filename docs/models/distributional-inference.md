@@ -228,6 +228,11 @@ effect = model.term_inference("scale", "x")
 covariate held at its training centre, and reports the effect on that
 predictor's own link scale.
 
+The model keeps an owned copy of the positive-weight training rows for these
+defaults. Excluded outliers and later edits to the caller's training frame do
+not change the term range or reference values. An explicit `X_train=` still
+uses the supplied post-fit frame, including its row index.
+
 !!! note "How to read a term panel"
     The curve is the term's contribution to its parameter's linear predictor;
     the filled band is the Bayesian pointwise interval of Marra and Wood
@@ -297,6 +302,19 @@ curves = model.risk_curves(reference, "x", quantiles=(0.5, 0.9, 0.99))
 fan = model.density_fan(reference, "x")
 ```
 
+Density fans support continuous families. A family declaring atoms raises
+`NotImplementedError`: the CDF's left limit alone cannot enumerate a complete
+atom payload. The response grid must be finite and strictly increasing; a
+numerically unresolvable grid or nonfinite differenced density raises
+`ValueError`.
+
+Both surfaces accept predictor-keyed `offsets=` and positive `weights=` per
+**swept point**, after the numeric grid or categorical levels determine its
+length. These weights select each point's prior-weighted response law, as in
+`risk_curves`; they default to the unit law and are not training-row counts.
+A family without the required weighted CDF/quantile methods refuses non-unit
+weights.
+
 !!! note "How to read the risk curves and the density fan"
     The curves are predicted quantiles of the **response** along one covariate,
     with everything else held at a reference row, each with a posterior band
@@ -312,6 +330,16 @@ fan = model.density_fan(reference, "x")
 spread = model.parameter_spread(frame, threshold=25.0, sample_weight=exposure)
 spread.identically_priced      # per price bin: n, the mean price, and the tail-risk spread
 ```
+
+With frequency semantics, the spread matches literal replication: stable
+predicted-mean order, equal-count bins (including splitting a row's copies
+across bins), linear-interpolated percentiles, and integer histogram counts.
+Large counts stay compact. With prior semantics the bins, percentiles, and
+histogram counts use retained physical rows, while mean prices are weighted.
+`parameter_spread` and `portfolio` accept `offsets=` aligned to the input book.
+Zero-weight rows are removed before prediction or simulation, together with
+their offsets and external segment labels; call-time weights belong to this
+book, independently of the original training rows.
 
 !!! note "How to read the spread"
     Rows are binned by predicted mean, so every row in a bin is priced alike.
@@ -440,7 +468,7 @@ Which slot a `sample_weight` reaches depends on the model's declared
 | `residuals`, `check`, `check_2d`, `actual_expected`, `calibration` | inside each row's own law, and as the aggregation weight of the tables | replication: the row counts `w` times |
 | `scores`, `compare` | every requested score that the family supports reads the prior-weighted row law; comparisons give each retained physical row one observation | every requested score that the family supports reads the unit law and uses `w` as literal replication mass, including tail scores, Murphy diagrams, paired standard errors and default thresholds; unsupported score or quantile requests refuse |
 | `posterior_bounds`, `posterior_predictive`, `portfolio` | inside each row's own law — a policy at a fifth of a year's exposure is simulated on its own law | refused: a replication count is not part of a row's law, so expand the rows or declare prior semantics |
-| `parameter_spread` | both: it weighs the ratio of sums *and* it is part of the law | the aggregation weight only |
+| `parameter_spread` | both: it weighs the ratio of sums *and* it is part of the law; retained physical rows determine bins, percentiles and histogram counts | literal replication for bins, counts, percentiles, histograms and weighted means; each copy keeps the unit row law |
 
 A family that cannot express its weighted law refuses rather than quietly
 inverting the unit-weight one. A comparison between candidates with different
@@ -449,6 +477,12 @@ one. Zero-weight rows are omitted from every calculation; input-aligned score
 tables mark their positions as `NaN`, while comparison summaries remove them.
 They also leave the fit and residual payload, and a covariate passed beside `X`
 is cut with them.
+
+For comparisons, `a_offsets=` and `b_offsets=` supply each candidate's own
+predictor-keyed offsets, including when predictor names differ. `offsets=`
+remains shared shorthand; mixing it with either candidate-specific mapping
+raises `ValueError`. Both candidates remove the same zero-weight rows before
+validating retained offset values and computing scores or Murphy forecasts.
 
 ## Payloads without figures
 

@@ -665,6 +665,51 @@ def test_diagnostics_figure_has_six_panels(case) -> None:
     assert fig.axes[3].patches  # the residual density histogram
 
 
+def test_review_actual_expected_zero_total_renders():
+    payload = _level_totals(3)
+    payload = replace(
+        payload,
+        expected=np.zeros_like(payload.expected),
+        ratio=np.full_like(payload.ratio, np.nan),
+        ratio_se=np.full_like(payload.ratio_se, np.nan),
+    )
+    fig = plot_actual_expected(payload)
+    fig.canvas.draw()
+    assert "undefined" in fig.axes[0].get_title()
+
+
+@pytest.mark.parametrize("copies", [3, 251])
+def test_review_diagnostics_uses_aligned_atom_occurrences(case, monkeypatch, copies):
+    import superglm.plotting.distributional as renderer
+    from superglm.distributional.residuals import _sample_residuals
+
+    fitted, frame, _, physical = case
+    qq = qq_payload(fitted, physical, n_sim=2, X=frame)
+    residuals = replace(
+        physical,
+        weights=np.full(physical.n_rows, float(copies)),
+        weight_semantics="frequency",
+        randomised_rows=physical.n_rows,
+        pit_lower=np.zeros(physical.n_rows),
+        pit_upper=np.ones(physical.n_rows),
+    )
+    expected = _sample_residuals(residuals)
+    seen = {}
+    monkeypatch.setattr(renderer, "_draw_residual_density", lambda ax, y: seen.update(density=y))
+    monkeypatch.setattr(
+        renderer, "_draw_residual_sd", lambda ax, x, y: seen.update(sd=(x, y)) or 20
+    )
+    fig = plot_diagnostics_figure(
+        qq, worm_payload(residuals), pit_payload(residuals), residuals, max_points=100_001
+    )
+    points = fig.axes[4].collections[0].get_offsets()
+    np.testing.assert_array_equal(points[:, 0], residuals.eta[expected.rows, 0])
+    np.testing.assert_array_equal(points[:, 1], expected.quantile)
+    np.testing.assert_array_equal(seen["density"], expected.quantile)
+    np.testing.assert_array_equal(seen["sd"][0], residuals.eta[expected.rows, 1])
+    np.testing.assert_array_equal(seen["sd"][1], expected.quantile)
+
+
 def test_diagnostics_worm_annotation_sits_in_a_halo_box(case) -> None:
     fitted, frame, _, residuals = case
     qq = qq_payload(fitted, residuals, n_sim=20, X=frame, seed=3)
