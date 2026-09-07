@@ -813,10 +813,13 @@ class _SegmentTotals:
             raise RuntimeError("the predictive reduce was handed more rows than X has")
         paid = _paid(block, self.weights, self.cursor)
         self.cursor += width
-        for index in range(block.shape[0]):
-            self.totals[index] += np.bincount(
-                codes, weights=paid[index], minlength=self.totals.shape[1]
-            )
+        with np.errstate(over="ignore", invalid="ignore"):
+            for index in range(block.shape[0]):
+                self.totals[index] += np.bincount(
+                    codes, weights=paid[index], minlength=self.totals.shape[1]
+                )
+        if not np.all(np.isfinite(self.totals)):
+            raise ValueError("Portfolio segment accumulation produced non-finite values")
         return paid.sum(axis=1)
 
     def table(self, columns: list[str], quantiles: tuple[float, ...], *, rows: int) -> pd.DataFrame:
@@ -824,13 +827,18 @@ class _SegmentTotals:
         if self.cursor != int(rows):
             raise RuntimeError("the predictive reduce did not see every row of X")
         labels = self.segmentation.labels
+        with np.errstate(over="ignore", invalid="ignore"):
+            mean_total = self.totals.mean(axis=0)
+            total_quantiles = np.quantile(self.totals, quantiles, axis=0)
+        if not np.all(np.isfinite(mean_total)) or not np.all(np.isfinite(total_quantiles)):
+            raise ValueError("Portfolio segment summary produced non-finite values")
         data: dict[str, Any] = {
             "segment": list(labels),
             "n": np.bincount(self.segmentation.codes, minlength=len(labels)).astype(np.int64),
-            "mean_total": self.totals.mean(axis=0),
+            "mean_total": mean_total,
         }
-        for column, value in zip(columns, quantiles, strict=True):
-            data[column] = np.quantile(self.totals, value, axis=0)
+        for column, values in zip(columns, total_quantiles, strict=True):
+            data[column] = values
         return pd.DataFrame(data)
 
 
@@ -877,6 +885,8 @@ def portfolio(
     to the book mean because every row lands in exactly one segment.
     ``chunk_rows`` is the memory knob of the primitive; a predictive total is not
     chunk-invariant, since the uniforms are drawn per chunk.
+    Nonfinite totals or summary arithmetic raise rather than publishing an
+    unrepresentable payload.
 
     ``weights`` are the rows' prior weights -- an exposure on a burn-cost
     model.  They enter twice, because they mean the same thing in both places:
@@ -932,13 +942,20 @@ def portfolio(
         None if segment_totals is None else segment_totals.table(columns, asked, rows=len(frame))
     )
 
+    with np.errstate(over="ignore", invalid="ignore"):
+        total_quantiles = np.quantile(totals, asked)
+        total_mean = float(totals.mean())
+        total_sd = float(totals.std(ddof=1))
+    if not np.all(np.isfinite(total_quantiles)) or not np.all(np.isfinite([total_mean, total_sd])):
+        raise ValueError("Portfolio summary produced non-finite values")
+
     return Portfolio(
         quantiles=asked,
         total_quantiles=MappingProxyType(
-            {value: float(np.quantile(totals, value)) for value in asked}
+            {value: float(result) for value, result in zip(asked, total_quantiles, strict=True)}
         ),
-        total_mean=float(totals.mean()),
-        total_sd=float(totals.std(ddof=1)),
+        total_mean=total_mean,
+        total_sd=total_sd,
         total_draws=_readonly(totals) if return_draws else None,
         by_segment=table,
         by=None if segmentation is None else segmentation.name,

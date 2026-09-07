@@ -47,6 +47,91 @@ from superglm.distributional.weights import (
 _GRID = 96
 
 
+@pytest.mark.parametrize(
+    "theta",
+    [
+        [[0, -1]],
+        [[0]],
+        [[0, 1, 2]],
+        [[0, 0.5]],
+        [[np.nan, 1]],
+        [[np.inf, 1]],
+        [[-np.inf, 1]],
+        [[0, np.nan]],
+        [[0, np.inf]],
+        [[0, -np.inf]],
+    ],
+)
+def test_task7_closed_crps_validates_raw_parameters(theta):
+    with pytest.raises(ValueError, match="shape|support"):
+        crps_closed_form(GaussianLS(scale_floor=0.5), np.array([0.0]), np.array(theta))
+
+
+@pytest.mark.parametrize(
+    "family,theta",
+    [
+        (GammaLS(), [[0, 1]]),
+        (GammaLS(), [[1, 0]]),
+        (LogNormalLS(), [[0, 1]]),
+        (LogNormalLS(scale_floor=0.5), [[1, 0.5]]),
+    ],
+)
+def test_task7_closed_crps_enforces_other_family_support(family, theta):
+    with pytest.raises(ValueError, match="support"):
+        crps_closed_form(family, np.array([0.0]), np.array(theta))
+
+
+def test_task7_closed_crps_accepts_negative_locations_and_scalar_response():
+    theta = np.array([[-2.0, 1.0], [-1.0, 0.75]])
+    for family in (GaussianLS(), LogNormalLS(parametrisation="location")):
+        scores = crps_closed_form(family, -1.0, theta)
+        assert scores.shape == (2,)
+        assert np.all(np.isfinite(scores))
+        assert np.all(scores >= 0)
+
+
+@pytest.mark.parametrize("field", ["y", "a", "b"])
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_task7_murphy_rejects_nonfinite_rows(field, value):
+    arrays = {name: np.zeros(2) for name in ("y", "a", "b")}
+    arrays[field][0] = value
+    with pytest.raises(ValueError, match="response" if field == "y" else "forecast"):
+        murphy_diagram(arrays["a"], arrays["b"], arrays["y"], level=0.5, thresholds=np.array([0.0]))
+
+
+@pytest.mark.parametrize("method", ["auto", "closed"])
+def test_task7_prior_crps_allows_effective_scale_below_floor(fit_case, method):
+    fitted, X, _ = fit_case
+    # Reuse the fitted predictors with a stricter raw scale floor.
+    model = DenseDistributionalModel(GaussianLS(scale_floor=0.1), fitted.fit_state)
+    frame = X.head(3)
+    theta = model.predict_parameters(frame)
+    assert np.all(theta[:, 1] > 0.1)
+    weights = np.full(3, 1e4)
+    effective = theta[:, 1] / np.sqrt(weights)
+    assert np.all(effective < 0.1)
+    expected = effective * (np.sqrt(2) - 1) / np.sqrt(np.pi)
+    np.testing.assert_allclose(
+        crps(model, frame, theta[:, 0], sample_weight=weights, method=method), expected
+    )
+
+
+def test_task7_murphy_excludes_zero_weight_response(frequency_case):
+    fitted, X, y = frequency_case
+    response = y[:3].copy()
+    response[1] = np.nan
+    result = compare_models(
+        fitted,
+        fitted,
+        X.head(3),
+        response,
+        sample_weight=np.array([1, 0, 1]),
+        murphy_quantile=0.5,
+        thresholds=np.array([0.0]),
+    )
+    assert result.murphy.n_observations == 2
+
+
 def _simulated(n: int = 1200, seed: int = 20260903) -> tuple[pd.DataFrame, np.ndarray]:
     rng = np.random.default_rng(seed)
     x = rng.uniform(-1.0, 1.0, n)
@@ -304,7 +389,7 @@ def test_numeric_crps_validates_its_arguments(fit_case) -> None:
         crps_numeric(_QuantileFreeFamily(), y, theta)
     with pytest.raises(ValueError, match="one response value per row"):
         crps_numeric(fitted.family, y[:3], theta)
-    with pytest.raises(ValueError, match=r"\(rows, parameters\) matrix"):
+    with pytest.raises(ValueError, match="shape"):
         crps_closed_form(fitted.family, y, theta[:, 0])
     with pytest.raises(ValueError, match="method"):
         crps(fitted, X, y, method="bogus")

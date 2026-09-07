@@ -578,9 +578,12 @@ def posterior_parameters(
             local = design.local[state.name][start:stop]
             eta = local @ coefficients[:, state.coefficient_slice].T
             eta += resolved_offsets[state.name][start:stop, None]
-            values = np.asarray(state.link.inverse(eta.T.reshape(-1)), dtype=np.float64)
+            with np.errstate(over="ignore", invalid="ignore"):
+                values = np.asarray(state.link.inverse(eta.T.reshape(-1)), dtype=np.float64)
             if values.shape != (eta.size,):
                 raise ValueError(f"inverse link for {state.name!r} returned an invalid shape")
+            if not np.all(fitted.family.parameters[index].support.contains(values)):
+                raise ValueError(f"Posterior draws put {state.name} outside its supported range")
             block[:, :, index] = values.reshape(draws.n_draws, width)
         yield slice(start, stop), block
 
@@ -862,7 +865,8 @@ def posterior_predictive(
     over all rows: it must be **additive across row chunks** -- sums and counts
     qualify, means do not -- and ``reduce="sum"`` is the named convenience.  A
     reduce returning ``(draws,)`` is summed across chunks; one returning
-    ``(draws, columns)`` is concatenated along the column axis.
+    ``(draws, columns)`` is concatenated along the column axis. Callable reducers
+    must return finite, representable values, as must combined additive totals.
 
     ``weights`` are one prior weight per row of ``X``.  A prior weight is part
     of the row's own law, so where they are not all one the responses are drawn
@@ -919,14 +923,22 @@ def posterior_predictive(
         simulated = np.asarray(drawn, dtype=np.float64).reshape(count, width)
         if not np.all(np.isfinite(simulated)):
             raise ValueError("non-finite predictive draws cannot be represented or reduced")
-        pieces.append(simulated if combine is None else np.asarray(combine(simulated)))
+        with np.errstate(over="ignore", invalid="ignore"):
+            piece = simulated if combine is None else np.asarray(combine(simulated))
+        if not np.all(np.isfinite(piece)):
+            raise ValueError("Predictive reduction produced non-finite values")
+        pieces.append(piece)
 
     if not pieces:
         if combine is not None:
             raise ValueError("reduce needs at least one row to reduce")
         return np.empty((count, 0), dtype=np.float64)
     if combine is not None and all(piece.shape == (count,) for piece in pieces):
-        return np.sum(pieces, axis=0, dtype=np.float64)
+        with np.errstate(over="ignore", invalid="ignore"):
+            total = np.sum(pieces, axis=0, dtype=np.float64)
+        if not np.all(np.isfinite(total)):
+            raise ValueError("Predictive reduction produced non-finite values")
+        return total
     if any(piece.ndim < 2 for piece in pieces):
         raise ValueError(
             "reduce must return a (draws,) summary that is additive across row chunks "
