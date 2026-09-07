@@ -9,6 +9,7 @@ representations of the CRPS, so agreement is evidence and not a tautology.
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from types import SimpleNamespace
 
 import numpy as np
@@ -37,6 +38,8 @@ from superglm.distributional.checks.scores import (
 )
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
+from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.families.log_normal import LogNormalLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.model import DenseDistributionalModel
@@ -46,6 +49,355 @@ from superglm.distributional.weights import (
 )
 
 _GRID = 96
+
+
+class _UniformDistribution:
+    """A genuine bounded law, deliberately outside the score catalogue."""
+
+    def cdf(self, y, theta):
+        return np.clip(np.broadcast_to(y, (len(theta),)), 0.0, 1.0)
+
+    def quantile(self, p, theta):
+        return np.broadcast_to(p, (len(theta),))
+
+
+class _UniformWithVariance(_UniformDistribution):
+    def variance(self, theta):
+        return np.full(len(theta), 1.0 / 12.0)
+
+
+@pytest.mark.parametrize(
+    "response,expected", [(-1, 1 / 24), (0.25, 1 / 24), (0.5, 1 / 24), (0.75, 5 / 48), (1, 7 / 24)]
+)
+def test_task11_threshold_uniform_cdf_integral(response, expected):
+    # Independent polynomial integrals: int_t^y z² dz + int_y^1 (1-z)² dz.
+    actual = crps_numeric(_UniformWithVariance(), response, np.zeros((1, 1)), threshold=0.5)
+    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=0)
+
+
+def test_task11_threshold_below_support_still_clamps_response():
+    family, theta = _UniformWithVariance(), np.zeros((1, 1))
+    assert crps_numeric(family, -1, theta, threshold=-0.5)[0] == pytest.approx(5 / 6)
+    assert crps_numeric(family, -1, theta)[0] == pytest.approx(4 / 3)
+
+
+@pytest.mark.parametrize("sigma", [1.0, 1.5, 1.9])
+@pytest.mark.parametrize("scale", [1e-8, 1.0, 1e8])
+def test_task11_frechet_finite_crps_without_finite_mean(sigma, scale):
+    # F(x)=exp(-x^(-1/sigma)); integration by parts gives this finite oracle.
+    expected = (
+        2 * np.log(2)
+        if sigma == 1
+        else 2 * special.gamma(2 - sigma) * np.expm1((sigma - 1) * np.log(2)) / (sigma - 1)
+    )
+    actual = crps_numeric(
+        GeneralizedGammaLSS(parametrisation="location"),
+        0.0,
+        np.array([[np.log(scale), sigma, -1.0]]),
+    )
+    np.testing.assert_allclose(actual, scale * expected, rtol=2e-8, atol=0)
+
+
+@pytest.mark.parametrize("threshold", [None, -1.0, 1.0])
+@pytest.mark.parametrize("response", [0.0, 3.0])
+def test_task11_generalized_gamma_divergent_crps(response, threshold):
+    theta = np.array([[0.0, 2.0, -1.0], [0.0, 2.5, -1.0]])
+    actual = crps_numeric(
+        GeneralizedGammaLSS(parametrisation="location"), response, theta, threshold=threshold
+    )
+    assert np.all(np.isposinf(actual))
+
+
+def test_task11_generalized_gamma_mixed_finite_and_divergent_rows():
+    theta = np.array([[0.0, s, -1.0] for s in [1.0, 2.0, 1.5, 2.5]])
+    family = GeneralizedGammaLSS(parametrisation="location")
+    actual = crps_numeric(family, 0.0, theta)
+    np.testing.assert_allclose(
+        actual[[0, 2]], [2 * np.log(2), 4 * np.sqrt(np.pi) * (np.sqrt(2) - 1)], rtol=2e-8, atol=0
+    )
+    assert np.all(np.isposinf(actual[[1, 3]]))
+    np.testing.assert_array_equal(crps_numeric(family, 0.0, theta, threshold=np.inf), 0)
+
+
+def test_task11_generalized_gamma_mixed_tail_routes_and_mean_coordinates():
+    theta = np.array(
+        [[0.0, 0.3, -1.0], [0.0, 1.5, -1.0], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0], [0.0, 2.0, -1.0]]
+    )
+
+    def frechet(s):
+        return 2 * special.gamma(2 - s) * np.expm1((s - 1) * np.log(2)) / (s - 1)
+
+    expected = [
+        frechet(0.3),
+        frechet(1.5),
+        2 * np.exp(0.5) * special.ndtr(-1 / np.sqrt(2)),
+        0.5,
+        np.inf,
+    ]
+    np.testing.assert_allclose(
+        crps_numeric(GeneralizedGammaLSS(parametrisation="location"), 0.0, theta),
+        expected,
+        rtol=2e-8,
+        atol=0,
+    )
+    # E[X]=Gamma(1-sigma) for Q=-1, mu=0. This is the same law in mean coordinates.
+    mean_theta = np.array([[special.gamma(0.25), 0.75, -1.0]])
+    np.testing.assert_allclose(
+        crps_numeric(GeneralizedGammaLSS(parametrisation="mean"), 0.0, mean_theta),
+        frechet(0.75),
+        rtol=2e-8,
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("scale", [1e-8, 1.0, 1e8])
+@pytest.mark.parametrize("threshold", [None, 0.0, 2.0, 1e8])
+def test_task11_public_gpd_exact_squared_tail(scale, threshold):
+    # y<=t gives precisely int_t^infinity S(z)^2 dz, even beyond the panel endpoint.
+    psi, xi = 2 * scale, 0.75
+    t = None if threshold is None else threshold * scale
+    expected = psi / (2 - xi) * (1 + xi * (0 if t is None else t) / psi) ** (1 - 2 / xi)
+    actual = crps_numeric(GeneralizedParetoLSS(), 0.0, np.array([[psi, xi]]), threshold=t)
+    np.testing.assert_allclose(actual, expected, rtol=2e-8, atol=0)
+
+
+def test_task11_public_gpd_near_exponential_tail_stays_representable():
+    theta = np.array([[2.0, 1e-308]])
+    # The public open shape domain admits this positive xi. At y=0, the
+    # independent CDF integral is psi/(2-xi), well inside the float range.
+    np.testing.assert_allclose(
+        crps_numeric(GeneralizedParetoLSS(), 0.0, theta), 1.0, rtol=2e-8, atol=0
+    )
+
+
+def test_task11_numeric_requires_an_established_tail_bound():
+    with pytest.raises(NotImplementedError, match="tail|variance"):
+        crps_numeric(_UniformDistribution(), 0.5, np.zeros((1, 1)))
+
+
+def test_task11_generalized_gamma_near_zero_shape_refuses_unresolved_tail():
+    with pytest.raises(ValueError, match="numerical|unresolved"):
+        crps_numeric(
+            GeneralizedGammaLSS(parametrisation="location"), 0.0, np.array([[0.0, 1e8, -1e-9]])
+        )
+
+
+@pytest.mark.parametrize("q,divergent", [(1.1, True), (1.5, False)])
+def test_task11_tail_wall_uses_exact_represented_product(q, divergent):
+    sigma = 2 / q
+    product = Fraction(sigma) * Fraction(q)
+    assert sigma * q == 2.0  # Rounded products conceal opposite sides of the wall.
+    assert (product >= 2) is divergent
+    actual = crps_numeric(
+        GeneralizedGammaLSS(parametrisation="location"), 0.0, np.array([[0.0, sigma, -q]])
+    )[0]
+    if divergent:
+        assert np.isposinf(actual)
+    else:
+        # As alpha descends to 1/2, the independent power-tail residue dominates;
+        # all bounded-endpoint terms are O(1) against this O(1/epsilon) score.
+        k = 1 / q**2
+        residue = k ** (2 * k) / special.gamma(k + 1) ** 2
+        expected = residue * float(product / (2 - product))
+        assert np.isfinite(actual)
+        assert actual == pytest.approx(expected, rel=2e-8)
+
+
+@pytest.mark.parametrize("sigma", [1.0, 1.5, 1.9])
+def test_task11_generalized_gamma_threshold_beyond_endpoint(sigma):
+    threshold = 1e10
+    z = threshold ** (-1 / sigma)
+    # Independent CDF integral after u=x^(-1/sigma), with its known algebraic
+    # singularity handled on [0,1]. The upper tail is present in this oracle.
+    integral = integrate.quad(
+        lambda v: 1.0 if v == 0 else (np.expm1(-z * v) / (z * v)) ** 2,
+        0,
+        1,
+        weight="alg",
+        wvar=(1 - sigma, 0),
+        epsabs=1e-12,
+        epsrel=1e-12,
+    )[0]
+    expected = sigma * z ** (2 - sigma) * integral
+    actual = crps_numeric(
+        GeneralizedGammaLSS(parametrisation="location"),
+        0.0,
+        np.array([[0.0, sigma, -1.0]]),
+        threshold=threshold,
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-8, atol=0)
+
+
+def test_task11_generalized_gamma_response_and_threshold_endpoint_terms():
+    sigma, response, threshold = 1.9, 3.0, 1.0
+    score_at_zero = 2 * special.gamma(2 - sigma) * np.expm1((sigma - 1) * np.log(2)) / (sigma - 1)
+
+    def cdf(x):
+        return 0 if x == 0 else np.exp(-(x ** (-1 / sigma)))
+
+    expected = (
+        score_at_zero
+        - response
+        + 2 * integrate.quad(cdf, 0, response)[0]
+        - integrate.quad(lambda x: cdf(x) ** 2, 0, threshold)[0]
+    )
+    actual = crps_numeric(
+        GeneralizedGammaLSS(parametrisation="location"),
+        response,
+        np.array([[0.0, sigma, -1.0]]),
+        threshold=threshold,
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-8, atol=0)
+
+
+@pytest.mark.parametrize("scale", [1e-30, 1.0, 1e30])
+def test_task11_finite_variance_response_outside_panels(scale):
+    family = GaussianLS(scale_floor=0.0)
+    y = scale * np.array([-1e8, 1e8])
+    theta = np.array([[0.0, scale], [0.0, scale]])
+    expected = scale * (1e8 - 1 / np.sqrt(np.pi))
+    np.testing.assert_allclose(crps_numeric(family, y, theta), expected, rtol=1e-8, atol=0)
+
+
+@pytest.mark.parametrize(
+    "family,theta",
+    [
+        (GeneralizedParetoLSS(), [[2.0, 0.75]]),
+        (GeneralizedGammaLSS(parametrisation="location"), [[0.0, 1.5, -1.0]]),
+    ],
+)
+def test_task11_known_tail_refuses_unhandled_response_beyond_endpoint(family, theta):
+    with pytest.raises(ValueError, match="unresolved|numerical"):
+        crps_numeric(family, 1e15, np.array(theta))
+
+
+def test_task11_infinite_variance_alone_does_not_prove_divergent_crps():
+    class UniformWithoutFiniteVarianceBound(_UniformDistribution):
+        def variance(self, theta):
+            return np.full(len(theta), np.inf)
+
+    with pytest.raises(NotImplementedError, match="tail|variance"):
+        crps_numeric(UniformWithoutFiniteVarianceBound(), 0.5, np.zeros((1, 1)))
+
+
+@pytest.mark.parametrize("threshold", [None, np.inf])
+@pytest.mark.parametrize(
+    "family,theta",
+    [
+        (GaussianLS(), [[0.0, 0.0]]),
+        (GeneralizedGammaLSS(parametrisation="mean"), [[1.0, 1.5, -1.0]]),
+        (GeneralizedParetoLSS(), [[2.0, 1.0]]),
+    ],
+)
+def test_task11_tail_paths_preserve_natural_parameter_domains(family, theta, threshold):
+    with pytest.raises(ValueError):
+        crps_numeric(family, 0.0, np.array(theta), threshold=threshold)
+
+
+def test_task11_finite_panel_nonconvergence_refuses():
+    with pytest.raises(ValueError, match="quadrature|refinement"):
+        crps_numeric(GaussianLS(), 0.25, np.array([[0.0, 1.0]]), n_nodes=1)
+
+
+@pytest.mark.parametrize("scale", [1e-8, 1.0, 1e8])
+def test_task11_unresolved_variance_bound_has_no_absolute_unit_floor(scale):
+    with pytest.raises(ValueError, match="tail.*unresolved|numerical"):
+        crps_numeric(LogNormalLS(parametrisation="location"), 0.0, np.array([[np.log(scale), 5.0]]))
+
+
+@pytest.mark.parametrize(
+    "family,theta,threshold",
+    [
+        (GeneralizedGammaLSS(parametrisation="location"), [[710.0, 1.5, -1.0]], None),
+        (GeneralizedParetoLSS(), [[2.0, 0.75]], 1e308),
+    ],
+)
+def test_task11_unrepresentable_finite_tail_refuses_instead_of_infinity(family, theta, threshold):
+    with pytest.raises(ValueError, match="numerical|representable"):
+        crps_numeric(family, 0.0, np.array(theta), threshold=threshold)
+
+
+@pytest.mark.parametrize(
+    "fault", ["cdf_shape", "quantile_shape", "quantile_nonfinite", "variance_shape"]
+)
+def test_task11_numeric_checks_row_function_outputs(fault):
+    class BrokenUniform(_UniformWithVariance):
+        def cdf(self, y, theta):
+            return np.zeros((len(theta), 1)) if fault == "cdf_shape" else super().cdf(y, theta)
+
+        def quantile(self, p, theta):
+            if fault == "quantile_shape":
+                return np.zeros((len(theta), 1))
+            if fault == "quantile_nonfinite":
+                return np.full(len(theta), np.nan)
+            return super().quantile(p, theta)
+
+        def variance(self, theta):
+            return (
+                np.zeros((len(theta), 1)) if fault == "variance_shape" else super().variance(theta)
+            )
+
+    with pytest.raises(ValueError, match="numerical|unresolved|row-shaped"):
+        crps_numeric(BrokenUniform(), 0.5, np.zeros((2, 1)))
+
+
+def test_task11_prior_variance_bound_uses_retained_weights(fit_case):
+    fitted, X, _ = fit_case
+    frame = X.iloc[[7, 1, 4]]
+    theta = fitted.predict_parameters(frame)
+    weights = np.array([1e16, 0.0, 4e16])
+    y = theta[:, 0].copy()
+    y[1] = np.nan
+    expected = theta[[0, 2], 1] / np.sqrt(weights[[0, 2]]) * (np.sqrt(2) - 1) / np.sqrt(np.pi)
+    # Substituting the unit variance makes its tail bound exceed the score's
+    # response-scaled budget. Correct prior variance permits this finite score.
+    actual = crps(fitted, frame, y, sample_weight=weights, method="numeric")
+    assert np.isnan(actual[1])
+    np.testing.assert_allclose(actual[[0, 2]], expected, rtol=2e-8, atol=0)
+
+
+def _gaussian_threshold_cdf_oracle(y, location, scale, threshold):
+    """Integrate in standard-normal coordinates; no production score is reused."""
+    a, b = (threshold - location) / scale, (y - location) / scale
+    left = (
+        0.0
+        if b <= a
+        else integrate.quad(lambda z: special.ndtr(z) ** 2, a, b, epsabs=1e-12, epsrel=1e-12)[0]
+    )
+    right = integrate.quad(
+        lambda z: special.ndtr(-z) ** 2, max(a, b), np.inf, epsabs=1e-12, epsrel=1e-12
+    )[0]
+    return scale * (left + right)
+
+
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+def test_task11_model_threshold_selected_rows_match_cdf_oracle(fit_case, frequency_case, semantics):
+    fitted, X, _ = fit_case if semantics == "prior" else frequency_case
+    frame = X.iloc[[9, 2, 5, 0]]
+    weights = np.array([0.25, 0.0, 4.0, 1.0]) if semantics == "prior" else np.array([2, 0, 4, 1])
+    offset = np.array([0.2, np.nan, -0.1, 0.0])
+    retained = np.array([0, 2, 3])
+    theta = fitted.predict_parameters(frame.iloc[retained], offsets={"location": offset[retained]})
+    response = np.array([-0.5, np.nan, 0.25, 1.0])
+    threshold = 0.1
+    scale = theta[:, 1] / np.sqrt(weights[retained]) if semantics == "prior" else theta[:, 1]
+    expected = np.array(
+        [
+            _gaussian_threshold_cdf_oracle(y, mu, sd, threshold)
+            for y, mu, sd in zip(response[retained], theta[:, 0], scale, strict=True)
+        ]
+    )
+    direct = crps_numeric(
+        GaussianLS(), response[retained], np.column_stack((theta[:, 0], scale)), threshold=threshold
+    )
+    np.testing.assert_allclose(direct, expected, rtol=2e-8, atol=0)
+    actual = threshold_weighted_crps(
+        fitted, frame, response, threshold, sample_weight=weights, offsets={"location": offset}
+    )
+    if semantics == "frequency":
+        expected *= weights[retained]
+    assert np.isnan(actual[1])
+    np.testing.assert_allclose(actual[retained], expected, rtol=2e-8, atol=0)
 
 
 @pytest.mark.parametrize(
@@ -396,8 +748,11 @@ def test_prior_weighted_gaussian_crps_uses_sigma_over_sqrt_weight(fit_case) -> N
     )
 
     threshold = float(np.median(response))
-    expected_tail = crps_numeric(
-        GaussianLS(), response, prior_theta, threshold=threshold, n_nodes=64
+    expected_tail = np.array(
+        [
+            _gaussian_threshold_cdf_oracle(y, mu, sd, threshold)
+            for y, (mu, sd) in zip(response, prior_theta, strict=True)
+        ]
     )
     assert np.allclose(
         threshold_weighted_crps(

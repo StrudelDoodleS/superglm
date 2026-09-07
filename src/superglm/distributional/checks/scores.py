@@ -18,10 +18,10 @@ Sciences* 11(4), 1267-1277,
 
     CRPS = 2 * integral_0^1 (1{y < Q(p)} - p) (Q(p) - y) dp,
 
-which asks a family for nothing but its quantile function.  Restricting the
-integrand to ``Q(p) > t`` gives the threshold-weighted CRPS of Gneiting and
-Ranjan (2011), *Journal of Business and Economic Statistics* 29(3), 411-422, with
-the indicator weight -- the tail-story score, chosen before looking at the data.
+with an established bound or correction for the omitted tails. Clamping both
+``y`` and ``Q(p)`` to ``t`` gives the threshold-weighted CRPS with indicator
+weight, ``integral_t^infinity (F(z) - 1{y <= z})^2 dz`` (Gneiting and Ranjan,
+2011; Allen, Ginsbourger and Ziegel, 2023, Proposition 1).
 
 The closed forms live here rather than on the families: a family owns its
 likelihood and its distribution functions, and a score catalogue keyed by family
@@ -39,11 +39,18 @@ from numpy.typing import NDArray
 from scipy import special
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     DistributionFunctionFamily,
     PriorWeightedDistributionFunctionFamily,
+    PriorWeightedVarianceFamily,
+    VarianceFamily,
     validated_parameter_matrix,
+)
+from superglm.distributional.kernels.generalized_gamma import (
+    location_of_mean as generalized_gamma_location_of_mean,
 )
 from superglm.distributional.kernels.log_normal import location_of_mean
 
@@ -64,11 +71,12 @@ from superglm.distributional.weights import (
 
 CrpsMethod = Literal["auto", "closed", "numeric"]
 
-#: The quantile-score integral is mapped to ``t`` by ``p = Phi(t)`` and truncated
-#: here.  Measured against the closed forms on 400 seeded rows per family, the
-#: truncation costs 1e-10 relative at 5.0 and 1e-14 at 6.0, so 6.0 is the point
-#: where the tail stops mattering and the node budget starts to.
+#: Finite-variance rows bound the omitted tails at this probit endpoint.
+#: Known heavy tails use 4 on the right plus an analytic correction, avoiding
+#: the loss of relative precision in probabilities very close to one.
 _TAIL_LIMIT = 6.0
+_CORRECTED_TAIL_LIMIT = 4.0
+_NUMERIC_RTOL = float(np.sqrt(np.finfo(np.float64).eps))
 #: Probabilities are pulled inside ``(0, 1)`` by this margin before the probit.
 _PROBABILITY_MARGIN = 1.0e-15
 _INVERSE_SQRT_PI = float(1.0 / np.sqrt(np.pi))
@@ -153,7 +161,7 @@ def _log_normal_crps(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.floa
 
 
 #: Closed-form CRPS by family class name.  A family absent from the catalogue is
-#: scored by the quantile-score integral, which needs only its quantile function.
+#: scored numerically when an established tail bound or correction is available.
 _CLOSED_FORMS: Mapping[str, Callable[[Any, NDArray, NDArray], NDArray[np.float64]]] = {
     "GaussianLS": _gaussian_crps,
     "GammaLS": _gamma_crps,
@@ -191,15 +199,151 @@ def crps_closed_form(family: Any, y: NDArray, theta: NDArray) -> NDArray[np.floa
 
 
 def _panel_boundary(
-    family: Any, points: NDArray[np.float64], theta: NDArray[np.float64]
+    probability: NDArray[np.float64], upper: NDArray[np.float64]
 ) -> NDArray[np.float64]:
-    """Return ``t = Phi^-1(F(points))`` clipped into the truncated ``t`` range."""
-    probability = np.clip(
-        np.asarray(family.cdf(points, theta), dtype=np.float64),
-        _PROBABILITY_MARGIN,
-        1.0 - _PROBABILITY_MARGIN,
-    )
-    return np.clip(special.ndtri(probability), -_TAIL_LIMIT, _TAIL_LIMIT)
+    """Return the probit CDF edge clipped to this row's finite panels."""
+    probability = np.clip(probability, _PROBABILITY_MARGIN, 1.0 - _PROBABILITY_MARGIN)
+    return np.clip(special.ndtri(probability), -_TAIL_LIMIT, upper)
+
+
+def _score_values(values: Any, n: int, name: str) -> NDArray[np.float64]:
+    result = np.asarray(values, dtype=np.float64)
+    if result.shape != (n,) or not np.all(np.isfinite(result)):
+        raise ValueError(
+            f"numeric CRPS needs finite row-shaped {name}; numerical evaluation unresolved"
+        )
+    if name == "CDF" and np.any((result < 0.0) | (result > 1.0)):
+        raise ValueError("numeric CRPS CDF values must lie in [0, 1]")
+    return result
+
+
+def _variance_for_score(family: Any, theta: NDArray) -> NDArray[np.float64]:
+    """Read the variance of the same predictive law as the quantile panels."""
+    if isinstance(family, _PriorWeightedRowLaw):
+        if not isinstance(family._family, PriorWeightedVarianceFamily):
+            raise NotImplementedError("numeric CRPS needs an established prior-law tail bound")
+        variance = family._family.variance_prior_weighted(theta, family._weights)
+    elif isinstance(family, VarianceFamily):
+        variance = family.variance(theta)
+    else:
+        raise NotImplementedError(
+            "numeric CRPS needs finite variance or a known-law tail correction"
+        )
+    values = np.asarray(variance, dtype=np.float64)
+    if values.shape != (len(theta),) or np.any(np.isnan(values) | (values < 0)):
+        raise ValueError("numeric CRPS variance bound is numerically unresolved")
+    if not np.all(np.isfinite(values)):
+        raise NotImplementedError(
+            "numeric CRPS has no established tail bound for infinite variance"
+        )
+    return values
+
+
+def _generalized_gamma_tail_gap(theta: NDArray) -> NDArray[np.float64]:
+    """Return 2 - sigma*abs(Q), with exact represented-product classification.
+
+    Integer ratios also preserve the small positive denominator of a finite
+    tail when the rounded floating product would equal two.
+    """
+    gap = np.full(len(theta), 2.0)
+    for row in np.flatnonzero(theta[:, 2] < 0):
+        sn, sd = float(theta[row, 1]).as_integer_ratio()
+        qn, qd = float(-theta[row, 2]).as_integer_ratio()
+        denominator = sd * qd
+        numerator = 2 * denominator - sn * qn
+        gap[row] = numerator / denominator if numerator > 0 else 0.0
+    return gap
+
+
+def _positive_score_tail(
+    family: Any, theta: NDArray, endpoint: NDArray, gap: NDArray
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Squared-survival integral R(B) and a bounded series/rounding allowance.
+
+    For negative-Q generalized gamma, S(x)=P(k,z(x)), k=Q^-2. Writing
+    H=Gamma(k+1) P(k,z)/z^k gives c_j=(-1)^j k/((k+j) j!). Integrating
+    H_16^2 termwise weights each coefficient pair by h/(h+i+j), h=k*gap.
+    For z<=1 the alternating remainder is at most z^17/17!, so the tail
+    error is bounded by U*(2*r+r*r), plus a floating arithmetic allowance.
+    This is a local tail formula, not a certificate for black-box quadrature.
+    """
+    eps = np.finfo(np.float64).eps
+    if type(family) is GeneralizedParetoLSS:
+        psi, xi = theta.T
+        log_base = np.log1p(xi * endpoint / psi)
+        # Divide the small log1p first: 2/xi can overflow near the exponential
+        # limit even though the log tail and score remain representable.
+        log_tail = np.log(psi) - np.log(2.0 - xi) + (xi - 2.0) * (log_base / xi)
+        value = np.exp(log_tail)
+        error = value * (32 * eps * (1.0 + np.abs(log_tail) + np.abs(np.log(psi))))
+    else:
+        location = (
+            generalized_gamma_location_of_mean(theta[:, 0], theta[:, 1], theta[:, 2])
+            if family.parametrisation == "mean"
+            else theta[:, 0]
+        )
+        value, error = np.empty(len(theta)), np.empty(len(theta))
+        for row, (mu, sigma, q) in enumerate(zip(location, theta[:, 1], theta[:, 2], strict=True)):
+            k = 1.0 / (q * q)
+            log_b = np.log(endpoint[row])
+            log_z = np.log(k) + abs(q) / sigma * (mu - log_b)
+            z = np.exp(log_z)
+            if not np.isfinite(z) or z > 1.0:
+                raise ValueError(
+                    "numeric CRPS generalized-gamma tail is unresolved (requires z<=1)"
+                )
+            h = k * gap[row]
+            log_denominator = np.log(gap[row]) - np.log(sigma) - np.log(abs(q))
+            log_u = log_b + 2.0 * k * log_z - log_denominator - 2.0 * special.gammaln(k + 1.0)
+            u = np.exp(log_u)
+            terms = np.ones(17)
+            for j in range(1, len(terms)):
+                terms[j] = -terms[j - 1] * z / j * ((k + j - 1) / (k + j))
+            degrees = np.arange(len(terms))
+            summands = np.outer(terms, terms) * (h / (h + degrees[:, None] + degrees[None, :]))
+            remainder = z**17 / float(special.factorial(17, exact=True))
+            arithmetic = (
+                128
+                * eps
+                * (
+                    1.0
+                    + abs(log_b)
+                    + abs(2 * k * log_z)
+                    + abs(log_denominator)
+                    + abs(2 * special.gammaln(k + 1))
+                )
+            )
+            value[row] = u * np.sum(summands)
+            error[row] = u * (2 * remainder + remainder**2 + arithmetic * np.sum(np.abs(summands)))
+    if np.any(~np.isfinite(value) | (value <= 0) | ~np.isfinite(error)):
+        raise ValueError("numeric CRPS finite tail is outside the representable numerical range")
+    return value, error
+
+
+def _quantile_panels(
+    family: Any,
+    response: NDArray,
+    theta: NDArray,
+    edges: NDArray,
+    order: int,
+    threshold: float | None,
+) -> NDArray[np.float64]:
+    nodes, node_weights = np.polynomial.legendre.leggauss(order)
+    total = np.zeros(len(theta), dtype=np.float64)
+    for panel in range(edges.shape[1] - 1):
+        half = 0.5 * (edges[:, panel + 1] - edges[:, panel])
+        centre = 0.5 * (edges[:, panel + 1] + edges[:, panel])
+        for node, node_weight in zip(nodes, node_weights, strict=True):
+            abscissa = centre + half * node
+            probability = special.ndtr(abscissa)
+            quantile = _score_values(family.quantile(probability, theta), len(theta), "quantiles")
+            if threshold is not None:
+                quantile = np.maximum(quantile, threshold)
+            # Evaluate 1-Phi(t) without cancellation in the upper panels.
+            residual = np.where(response < quantile, special.ndtr(-abscissa), -probability)
+            integrand = residual * (quantile - response) * _standard_normal_pdf(abscissa)
+            total += (2.0 * half * node_weight) * integrand
+    return _score_values(total, len(theta), "panel integrals")
 
 
 def crps_numeric(
@@ -210,20 +354,22 @@ def crps_numeric(
     n_nodes: int = 64,
     threshold: float | None = None,
 ) -> NDArray[np.float64]:
-    """Integrate the quantile score, optionally weighted by ``1{Q(p) > threshold}``.
+    """Integrate CRPS, optionally with CDF weight ``1{z > threshold}``.
 
-    The substitution ``p = Phi(t)`` on ``t`` in ``[-6, 6]`` turns the integral
-    into a Gaussian-weighted one that Gauss-Legendre handles well, *except* at
-    the kink where ``Q(p)`` crosses ``y``: the indicator turns over there and a
-    single panel converges only algebraically (measured on the Gaussian: 8e-2
-    relative at 32 nodes, still 4e-4 at 512).  Splitting the range at
-    ``t* = Phi^-1(F(y))`` per row puts the kink on a panel edge and the same 32
-    nodes reach 2e-15.  A finite ``threshold`` adds its own edge at
-    ``Phi^-1(F(threshold))``, the point where the weight turns over, so the
-    weighted integrand is smooth inside every panel as well.
+    Both response and quantiles are clamped to a finite threshold. Minus
+    infinity is exactly the unweighted path; plus infinity scores zero.
+    Finite probit panels split at F(y) and F(threshold), with up to three
+    doublings of ``n_nodes``. Successive estimates are a convergence diagnostic,
+    not a rigorous quadrature enclosure. Independent omitted-tail bounds use
+    finite predictive variance, or explicit GPD/negative-Q generalized-gamma
+    formulas. Tail and panel budgets are respectively 1/4 and 1/2 of sqrt(eps)
+    times max(IQR, distance from the clamped median, current score).
 
-    ``threshold=-inf`` restores the unweighted CRPS exactly: the extra edge is
-    not added and the mask passes every node through unchanged.
+    A law without an established tail bound raises NotImplementedError; an
+    unresolved finite numerical evaluation raises ValueError. Negative-Q
+    generalized gamma has infinite CRPS exactly when sigma*abs(Q)>=2, even
+    though its mean already diverges at one. Extreme finite rows outside the
+    compact tail evaluator's domain can refuse explicitly.
     """
     if not isinstance(family, DistributionFunctionFamily):
         raise NotImplementedError(
@@ -233,43 +379,142 @@ def crps_numeric(
     if order < 1:
         raise ValueError("n_nodes must be a positive Gauss-Legendre order")
     response, parameters = _validated_scoring_inputs(y, theta)
-    n_observations = parameters.shape[0]
-
     if threshold is not None and np.isnan(threshold):
         raise ValueError("threshold must not be NaN")
-    interior = [_panel_boundary(family, response, parameters)]
-    if threshold is not None and np.isfinite(threshold):
-        interior.append(
-            _panel_boundary(
-                family, np.full(n_observations, float(threshold), dtype=np.float64), parameters
-            )
-        )
-    edges = np.column_stack(
-        (
-            np.full(n_observations, -_TAIL_LIMIT),
-            np.sort(np.column_stack(interior), axis=1),
-            np.full(n_observations, _TAIL_LIMIT),
-        )
-    )
+    if threshold == -np.inf:
+        threshold = None
+    n = len(parameters)
+    # Calling the actual law validates natural parameters (and the mean-form
+    # GG domain), including for +infinity thresholds. Responses outside the
+    # predictive support are legitimate here; likelihood validation is not.
+    cdf_y = _score_values(family.cdf(response, parameters), n, "CDF")
+    if threshold == np.inf:
+        return np.zeros(n)
 
-    nodes, node_weights = np.polynomial.legendre.leggauss(order)
-    total = np.zeros(n_observations, dtype=np.float64)
-    for panel in range(edges.shape[1] - 1):
-        half = 0.5 * (edges[:, panel + 1] - edges[:, panel])
-        centre = 0.5 * (edges[:, panel + 1] + edges[:, panel])
-        for node, node_weight in zip(nodes, node_weights, strict=True):
-            abscissa = centre + half * node
-            probability = special.ndtr(abscissa)
-            quantile = np.asarray(family.quantile(probability, parameters), dtype=np.float64)
-            integrand = (
-                (np.where(response < quantile, 1.0, 0.0) - probability)
-                * (quantile - response)
-                * _standard_normal_pdf(abscissa)
+    gap = np.full(n, 2.0)
+    corrected = np.full(n, type(family) is GeneralizedParetoLSS)
+    if type(family) is GeneralizedGammaLSS:
+        q = parameters[:, 2]
+        if np.any((q != 0) & (np.abs(q) < 1e-8)):
+            raise ValueError("numeric CRPS tail is unresolved for the near-zero-Q approximation")
+        gap = _generalized_gamma_tail_gap(parameters)
+        divergent = gap <= 0
+        if np.any(divergent):
+            scores = np.full(n, np.inf)
+            if np.any(~divergent):
+                scores[~divergent] = crps_numeric(
+                    family,
+                    response[~divergent],
+                    parameters[~divergent],
+                    n_nodes=order,
+                    threshold=threshold,
+                )
+            return scores
+        corrected = (q < 0) & (gap <= 1.5)  # infinite second moment, not infinite CRPS
+
+    # Numeric overflow is an explicit refusal, never a replacement infinity.
+    with np.errstate(over="raise", divide="raise", invalid="raise"):
+        try:
+            return _finite_crps_numeric(
+                family, response, parameters, cdf_y, corrected, gap, order, threshold
             )
-            if threshold is not None:
-                integrand = np.where(quantile > threshold, integrand, 0.0)
-            total += (half * node_weight) * integrand
-    return 2.0 * total
+        except FloatingPointError as exc:
+            raise ValueError(
+                "numeric CRPS finite evaluation is unresolved in the numerical range"
+            ) from exc
+
+
+def _finite_crps_numeric(
+    family: Any,
+    response: NDArray,
+    parameters: NDArray,
+    cdf_y: NDArray,
+    corrected: NDArray,
+    gap: NDArray,
+    order: int,
+    threshold: float | None,
+) -> NDArray[np.float64]:
+    n = len(parameters)
+    upper = np.where(corrected, _CORRECTED_TAIL_LIMIT, _TAIL_LIMIT)
+    delta_l = float(special.ndtr(-_TAIL_LIMIT))
+    delta_u = 1.0 - special.ndtr(upper)
+    quantiles = [
+        _score_values(family.quantile(np.full(n, p), parameters), n, "quantiles")
+        for p in (0.25, 0.5, 0.75, delta_l)
+    ]
+    q25, median, q75, a = quantiles
+    b = _score_values(family.quantile(1.0 - delta_u, parameters), n, "quantiles")
+    if np.any((a > q25) | (q25 > median) | (median > q75) | (q75 > b)):
+        raise ValueError("numeric CRPS quantiles are not ordered; numerical evaluation unresolved")
+    response_scale = q75 - q25
+    interior = [_panel_boundary(cdf_y, upper)]
+    lower_cdf_bound = np.zeros(n)
+    upper_cdf_bound = np.zeros(n)
+    ordinary = ~corrected
+    if np.any(ordinary):
+        # Wrappers retain all row weights, so never slice their theta here.
+        variance = _variance_for_score(
+            family, parameters if np.all(ordinary) else parameters[ordinary]
+        )
+        root_variance = np.sqrt(variance)
+        lower_cdf_bound[ordinary] = root_variance * np.sqrt(delta_l**3 / (1.0 - delta_l))
+        upper_cdf_bound[ordinary] = root_variance * np.sqrt(
+            delta_u[ordinary] ** 3 / (1.0 - delta_u[ordinary])
+        )
+    lower_cdf_bound[corrected] = np.maximum(a[corrected], 0.0) * delta_l**2
+    if threshold is not None:
+        cdf_t = _score_values(family.cdf(np.full(n, threshold), parameters), n, "CDF")
+        interior.append(_panel_boundary(cdf_t, upper))
+        lower_cdf_bound[a <= threshold] = 0.0
+        a, b = np.maximum(a, threshold), np.maximum(b, threshold)
+        response, median = np.maximum(response, threshold), np.maximum(median, threshold)
+    edges = np.column_stack(
+        (np.full(n, -_TAIL_LIMIT), np.sort(np.column_stack(interior), axis=1), upper)
+    )
+    correction = np.zeros(n)
+    # These omission bounds remain valid when y lies outside [A,B], including
+    # below-support responses and endpoints at the clamp's atom.
+    tail_error = (
+        lower_cdf_bound
+        + delta_l**2 * np.abs(response - a)
+        + 2 * delta_l * np.maximum(a - response, 0)
+    )
+    tail_error[ordinary] += (
+        upper_cdf_bound[ordinary]
+        + delta_u[ordinary] ** 2 * np.abs(b[ordinary] - response[ordinary])
+        + 2 * delta_u[ordinary] * np.maximum(response[ordinary] - b[ordinary], 0)
+    )
+    if np.any(corrected):
+        if np.any(response[corrected] > b[corrected]):
+            raise ValueError(
+                "numeric CRPS tail is unresolved for a response beyond the upper endpoint"
+            )
+        tail, error = _positive_score_tail(
+            family, parameters[corrected], b[corrected], gap[corrected]
+        )
+        # R(B) alone is NOT the omitted quantile integral. This endpoint term
+        # is essential even when the mean is infinite. Clamped B=t is an atom;
+        # y<=t then makes the endpoint term zero and R(t) is the entire score.
+        correction[corrected] = tail + delta_u[corrected] ** 2 * (
+            b[corrected] - response[corrected]
+        )
+        tail_error[corrected] += error
+
+    previous = _quantile_panels(family, response, parameters, edges, order, threshold)
+    for _ in range(3):
+        order *= 2
+        current = _quantile_panels(family, response, parameters, edges, order, threshold)
+        total = current + correction
+        scale = np.maximum.reduce((response_scale, np.abs(response - median), total))
+        target = _NUMERIC_RTOL * scale
+        if not np.all(np.isfinite(total)) or np.any(tail_error > 0.25 * target):
+            raise ValueError(
+                "numeric CRPS omitted-tail bound is unresolved at the numerical tolerance"
+            )
+        if np.all(np.abs(current - previous) <= 0.5 * target):
+            return total
+        previous = current
+    raise ValueError("numeric CRPS finite-panel quadrature is unresolved after bounded refinement")
 
 
 # --------------------------------------------------------------------------
