@@ -416,8 +416,16 @@ comparison.by_segment  # the same per segment
 
 The continuous ranked probability score is available in closed form for the
 Gaussian, gamma and log-normal families (the catalogue of Jordan, Krüger and
-Lerch 2019) and by quantile-score integration for other families implementing
-`DistributionFunctionFamily`. A family without a CDF and quantile, including
+Lerch 2019) and by quantile-score integration for other supported families.
+Numeric integration requires `DistributionFunctionFamily` plus an established
+bound or correction for its omitted tails. Finite `VarianceFamily` values give
+such a bound; prior-weighted rows require the corresponding
+`variance_prior_weighted` value for their retained weights. The scorer also
+implements explicit tail corrections for `GeneralizedParetoLSS` and negative-Q
+`GeneralizedGammaLSS`. Infinite variance alone does not imply infinite CRPS.
+A CDF/quantile-only law without an applicable tail bound raises
+`NotImplementedError`: a finite grid cannot determine the existence or size of
+an unseen tail. A family without a CDF and quantile, including
 `NegativeBinomialLS`, supports log score only. Every available score follows the
 fitted weight contract. Under prior semantics the weight changes the row's
 predictive law and comparisons aggregate the retained physical rows. Under
@@ -426,6 +434,27 @@ literal replication mass. This replication rule covers CRPS, threshold-weighted
 CRPS, Murphy curves, paired standard errors and the quantiles that choose the
 default Murphy threshold grid, not only the log score.
 
+The numeric scorer integrates finite quantile panels split at the response and
+threshold, and includes or bounds the omitted **quantile-score** tails (including
+their endpoint/response terms). Separate tail and finite-panel budgets use
+`sqrt(float64 epsilon)` scaled by the predictive IQR, distance of the clamped
+response from the clamped median, and current score, without a one-unit absolute
+floor. Starting at `n_nodes`, at most three doublings check panel convergence.
+Agreement between successive panel estimates is a numerical diagnostic, not a
+rigorous quadrature error enclosure; the analytic omitted-tail bounds have a
+separate justification. A supported finite score whose tail bounds, quadrature,
+or required numbers cannot be resolved raises `ValueError`.
+
+For generalized gamma in location coordinates, negative `Q` gives finite CRPS
+exactly when `sigma * abs(Q) < 2`; the mean already diverges at one. Divergent
+rows return `+inf` for finite responses and finite thresholds, mixed correctly
+with finite rows. Mean parametrisation retains its existing finite-mean domain.
+The compact heavy-tail evaluator uses an incomplete-gamma series where its
+argument is at most one and may refuse extreme finite responses beyond its
+upper integration endpoint. It also refuses nonzero `abs(Q) < 1e-8`, where the
+family uses a log-normal approximation, and unrepresentable finite tails.
+These are explicit numerical limits, not a claim that the finite score diverges.
+
 When the decision is about the tail, score the tail:
 
 ```python
@@ -433,7 +462,15 @@ tail = model.scores(frame, y, which=("crps",), thresholds=(25.0,))
 ```
 
 which is the threshold-weighted CRPS of Gneiting and Ranjan (2011). Choose the
-threshold before looking at the data; it is a weight function, not a knob.
+threshold before looking at the data; it is a weight function, not a knob. For
+threshold `t` the score is `integral_t^infinity (F(z) - 1{y <= z})^2 dz`, computed
+by clamping **both** the response and predictive quantiles to `t` (the
+transformation identity of [Allen, Ginsbourger and Ziegel, Proposition 1](https://arxiv.org/pdf/2202.12732)).
+Responses at or below `t` therefore have the same score. `t=-inf` follows the
+unweighted numeric path exactly, while `t=+inf` scores zero on a valid scoring
+call, including for a divergent heavy tail. NaN thresholds and nonfinite
+retained responses still refuse; finite responses below predictive support
+remain valid scoring inputs.
 
 !!! note "How to read the Murphy diagram"
     Ask for it with `murphy_quantile=`. Every consistent scoring rule for a
