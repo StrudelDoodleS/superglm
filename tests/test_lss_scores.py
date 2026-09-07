@@ -90,6 +90,27 @@ def test_task10_paired_summary_constant_unequal_replication():
     assert np.isnan(result["t"])
 
 
+@pytest.mark.parametrize("value", [np.finfo(float).max, -np.finfo(float).max])
+def test_task10_review_constant_extreme_scores(value):
+    result = _paired_summary(np.full(3, value), np.array([1, 2, 2]))
+    assert result["mean_diff"] == value
+    assert result["se"] == 0.0
+    assert np.isnan(result["t"])
+    assert result["n"] == 5
+
+
+@pytest.mark.parametrize("values", [[], [np.finfo(float).max]])
+def test_task10_review_constant_guard_preserves_insufficient_count(values):
+    result = _paired_summary(np.array(values))
+    assert result["n"] == len(values)
+    assert np.isnan(result["se"])
+    assert np.isnan(result["t"])
+    if values:
+        assert result["mean_diff"] == values[0]
+    else:
+        assert np.isnan(result["mean_diff"])
+
+
 def test_task10_paired_summary_overflowing_centered_difference():
     result = _paired_summary(np.array([-1e308, 1.6e308]), np.array([250_000_000, 750_000_000]))
     assert result["mean_diff"] == pytest.approx(9.5e307)

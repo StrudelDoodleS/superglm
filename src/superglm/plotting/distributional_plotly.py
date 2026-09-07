@@ -1592,7 +1592,8 @@ def plotly_portfolio(payload: Any) -> go.Figure:
         columns = [f"q{value:g}" for value in sorted(payload.quantiles)]
         low = segments[columns[0]].to_numpy(dtype=np.float64)
         high = segments[columns[-1]].to_numpy(dtype=np.float64)
-        midpoint = 0.5 * low + 0.5 * high
+        # Halving subnormal endpoints can round outside their interval.
+        midpoint = np.clip(0.5 * low + 0.5 * high, low, high)
         counts = segments["n"].to_numpy(dtype=np.float64)
         fig.add_trace(
             go.Bar(

@@ -163,6 +163,9 @@ def _paired_summary(
     if not np.all(np.isfinite(values)):
         raise ValueError("paired score differences must be finite and representable")
     count = int(np.sum(mass, dtype=np.float64))
+    if count >= 2 and np.all(values == values[0]):
+        # Preserve constant inputs before normalization can round or overflow.
+        return {"mean_diff": float(values[0]), "se": 0.0, "t": float("nan"), "n": count}
     probability = mass / count if count else mass
     with np.errstate(over="ignore", invalid="ignore"):
         mean = float(np.dot(probability, values)) if count else float("nan")
@@ -171,9 +174,6 @@ def _paired_summary(
     if count < 2:
         # One row carries no within-sample spread, so it certifies no difference.
         return {"mean_diff": mean, "se": float("nan"), "t": float("nan"), "n": count}
-    if np.all(values == values[0]):
-        # Preserve exact zero spread even if normalizing unequal counts rounds.
-        return {"mean_diff": float(values[0]), "se": 0.0, "t": float("nan"), "n": count}
     # Scale the centered norm before squaring, and divide out the replication
     # count before restoring units. Even the subtraction can overflow for
     # opposite extreme scores, in which case center in scaled units instead.

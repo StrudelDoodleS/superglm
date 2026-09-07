@@ -31,6 +31,7 @@ from superglm.distributional.checks.worm import worm_payload
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.residuals import compute_residuals
 from superglm.distributional.surfaces import (
+    Portfolio,
     density_fan,
     parameter_spread,
     portfolio,
@@ -728,6 +729,47 @@ def test_task10_portfolio_quantile_interval_independent_of_mean(case, quantiles,
     np.testing.assert_allclose(np.asarray(interval.y) - interval.error_y.arrayminus, lower)
     np.testing.assert_allclose(np.asarray(interval.y) + interval.error_y.array, upper)
     np.testing.assert_array_equal(np.asarray(interval.customdata), np.column_stack([lower, upper]))
+
+
+@pytest.mark.parametrize(
+    "low, high",
+    [
+        (np.nextafter(0.0, 1.0), np.nextafter(0.0, 1.0)),
+        (-np.nextafter(0.0, 1.0), -np.nextafter(0.0, 1.0)),
+        (np.nextafter(0.0, 1.0), 3 * np.nextafter(0.0, 1.0)),
+        (-3 * np.nextafter(0.0, 1.0), -np.nextafter(0.0, 1.0)),
+        (-np.finfo(float).max, np.finfo(float).max),
+        (np.finfo(float).max / 2, np.finfo(float).max),
+        (-np.finfo(float).max, -np.finfo(float).max / 2),
+    ],
+)
+def test_task10_review_portfolio_finite_endpoint_intervals(low, high):
+    payload = Portfolio(
+        quantiles=(0.9, 0.99),
+        total_quantiles={0.9: low, 0.99: high},
+        total_mean=0.0,
+        total_sd=0.0,
+        total_draws=None,
+        by_segment=pd.DataFrame(
+            {"segment": ["a"], "mean_total": [0.0], "n": [1], "q0.9": [low], "q0.99": [high]}
+        ),
+        by="segment",
+        n_draws=2,
+        seed=42,
+        parameter_uncertainty=False,
+    )
+    interval = dp.plotly_portfolio(payload).data[-1]
+    center = np.asarray(interval.y)
+    above = np.asarray(interval.error_y.array)
+    below = np.asarray(interval.error_y.arrayminus)
+    assert np.all(np.isfinite(above)) and np.all(above >= 0)
+    assert np.all(np.isfinite(below)) and np.all(below >= 0)
+    np.testing.assert_array_equal(center - below, [low])
+    np.testing.assert_array_equal(center + above, [high])
+    np.testing.assert_array_equal(interval.customdata, [[low, high]])
+    if low == high:
+        np.testing.assert_array_equal(above, [0.0])
+        np.testing.assert_array_equal(below, [0.0])
 
 
 def test_portfolio_without_draws_or_segments_plots_the_quantiles(book_total_only) -> None:
