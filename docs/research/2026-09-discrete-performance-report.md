@@ -793,3 +793,70 @@ current-production profile attributes remaining LSS geometry work. Capture
 `SuperLSS.diagnose()` after fit clocks/RSS, alongside kernel evidence; scalar
 uses `training_telemetry()`/`reml_diagnostics()` instead. No threading default
 has been changed on the strength of this screening experiment.
+
+## Scalar policy control and remaining LSS cost
+
+Four fresh public Poisson spline/category controls at `16b01adb` (unchanged
+production `5c1ce17e`) use 100,000 rows and 79 coefficients. Native NumPy/SciPy
+BLAS limits are explicitly four before/after each fit, with non-BLAS pools at
+one. The automatic policy is observed inside fitting and the actual optimizer.
+
+| Scalar arm | Fit wall (s) | Fit CPU (s) | Fit-end highwater (MiB) |
+|---|---:|---:|---:|
+| Exact, forced one | 5.118 | 5.109 | 587.3 |
+| Exact, forced four | 5.395 | 20.607 | 630.9 |
+| Exact, auto | 5.120 | 5.114 | 587.1 |
+| Discrete, auto | 0.648 | 0.647 | 510.7 |
+
+Both auto arms configure one BLAS thread and restore four. All four execute
+direct REML, including discrete; its gain on this fixture is not an optimizer
+switch. Four BLAS threads offer no observed scalar time advantage, independent
+of CPU cost. These are single samples on this fixture, not a universal scalar
+thread-policy validation or a discrete scalar one/four comparison.
+
+Exact forced-one/auto saved outputs and stored representations are identical.
+Across exact one/four, raw arrays match but four transforms change hashes;
+maximum coefficient/holdout differences are 7.47e-8/9.64e-14, lambda norm-relative
+difference 6.79e-11 and REML-objective absolute difference 5.30e-6. Observable
+prediction agreement is retained separately from coefficient forward error.
+Exact/discrete holdout difference is 0.001585 maximum and 0.0001796 norm-relative,
+with EDF difference 0.0528 and nine versus ten REML iterations. All fits converge.
+Scalar telemetry is captured after fit clocks/RSS, with its own timing/highwater.
+The initial worker failed before fitting on an absent optional NumExpr import;
+the helper now records absence and checks its pool only when installed. Failure
+receipts and the original helper remain preserved; no dependency was installed.
+
+The separate LSS profile runs the same 1m/P102 default as the production timing
+receipt. Its stored design, ten saved numerical arrays and result scalars match
+the reference exactly. Source/helper/native-signature and activity checks pass.
+The diagnostic wall time is 37.747 s because cProfile and aggregate native/product
+clocks are enabled; it must not replace the uninstrumented 29.321 s observation.
+
+Geometry's 21.485 diagnostic seconds divide into 12.693 s of global accumulation,
+8.591 s producing likelihood chunks, and about 0.20 s of remaining geometry
+setup/finalization. These are owning intervals. Within chunk production, predictor
+snapshots and prediction consume 4.049 s (including 1.430 s of matrix-vector
+products), child likelihood-plan creation
+1.241 s, family evaluation 1.619 s and chain-rule transformation 1.010 s.
+Within global accumulation, histogram and directional native calls take
+4.474/2.206 s, vector updates 0.606 s, finite guards 0.436 s and categorical
+packing 0.551 s. Global preparation/validation/packing owns 2.872 s and includes
+some of those native intervals. Ordinary curvature and score products take
+1.055/0.169 s; final support products take about 0.048 s. Parent and child
+intervals must not be summed together.
+
+Live `diagnose()` is captured after profiling, fit clocks/RSS and ordinary
+outputs. It confirms eight coefficient fits, 16 inner iterations, seven outer
+updates and zero outer rejections/backtracks. The fit reaches the existing
+practical plateau. Its finding that one scale component accounts for 73.2% of
+accepted smoothing movement is not a runtime attribution. Its nonoverlapping
+phase report and the kernel profile answer different questions.
+
+The 8.591 s chunk-production figure therefore covers 17 geometry evaluations
+and much more than the family kernel. Chunking is an execution/memory choice;
+discretization preserves observations while reducing spline support resolution.
+Scalar fitting keeps full-row likelihood vectors. The user's next chosen test
+applies that arrangement to the same binned LSS model: compare current chunks,
+larger geometry chunks, whole-data geometry and full-pass row execution, with
+explicit memory allowances and actual peak RSS. This takes precedence over a
+parallel-accumulator implementation. The C1 latency gate remains open.

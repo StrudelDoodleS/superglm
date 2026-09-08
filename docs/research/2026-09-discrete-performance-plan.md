@@ -5,8 +5,9 @@ Fifteen timed fits and five separate witnesses establish faster discrete
 execution on the measured mixed layouts through one million rows. C1 performance
 work remains active: the user considers the 8% one-thread time advantage over
 exact at one million rows insufficient. A completed eight-fit BLAS/shape screen
-shows the remaining comparison against threaded dense execution. Next work
-attributes the production fit cost and checks scalar thread-policy behavior.
+shows the remaining comparison against threaded dense execution. The production
+profile and scalar policy controls are complete. Next, compare full-pass
+likelihood execution with the current small chunks on the same binned design.
 Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
@@ -658,3 +659,64 @@ Do not move to another roadmap capability or present this as task completion.
 Keep source `5c1ce17e` and the completed benchmark windows as the new comparison
 checkpoint. Documentation-only commits may update HEAD while preserving the
 production-tree hash; subsequent experiments must pin both explicitly.
+
+### Full-pass binned execution takes precedence
+
+The scalar policy control is complete at documentation checkpoint `16b01adb`
+(production unchanged from `5c1ce17e`). Exact forced1/forced4/auto samples take
+5.118/5.395/5.120 s; discrete auto takes 0.648 s. All four execute direct REML;
+the discrete gain here is not attributable to a cached-W optimizer switch.
+Both auto arms select one BLAS thread from a known native-four configuration
+and restore four on return. The initial helper's absent optional NumExpr import
+failed before any fitting; the corrected four-worker campaign and initial
+failure remain separately preserved. No dependency change was made.
+
+One current-production 1m/P102 profile is also complete, with stored design,
+all ten saved numerical arrays and result scalars identical to the existing
+uninstrumented reference. Its diagnostic 37.747 s wall time is not a timing
+estimate. Geometry owns 21.485 s: global add 12.693 s, chunk production 8.591 s,
+and remaining geometry setup/finalization about 0.20 s. Within chunk production,
+predictor snapshots and prediction consume 4.049 s (including 1.430 s of
+matrix-vector products), child likelihood-plan creation
+1.241 s, family evaluation 1.619 s and chain rules 1.010 s. Native histograms
+and directional moments consume 4.474/2.206 s; ordinary curvature products
+1.055 s. These intervals overlap their owning phases and must not be added
+again. Live `diagnose()` confirms eight coefficient fits, zero outer rejections
+or backtracks, and the existing practical plateau.
+
+The user explicitly requests the scalar-style separation: binned support
+representation with full-row likelihood evaluation, and chunking as an optional
+additional memory tradeoff. Binning does not discard observations. The LSS
+row budget remained conservative after global moments removed expanded smooth
+panels, so its current default is not an established latency optimum.
+
+Before implementing parallel moments, compare four unchanged-model executions:
+
+1. Current 8,065-row chunks throughout, 64 MiB global-plan allowance.
+2. Geometry chunks of 65,536; other row passes stay 8,065, 64 MiB allowance.
+3. Whole-data geometry; other row passes stay 8,065, explicit 1 GiB allowance.
+4. Whole-data geometry and all likelihood/value/step/endpoint row passes,
+   explicit 1 GiB allowance.
+
+Use the same public 1m/P102 binned fixture, optimizer and numerical rules. The
+public facade currently has no chunk-size argument; any ignored execution
+wrapper must record its resolver/geometry override explicitly. A silent grouped
+fallback invalidates the experimental arm. Estimated global-plan peaks are
+30,312,128 / 58,357,976 / 538,081,496 bytes for the three geometry sizes;
+these exclude caller-owned chunk arrays and are not whole-fit memory bounds.
+Measure actual fit-end and later output RSS, complete-fit clocks, numerical
+outputs, iterations and actual batch/global dispatch. Separate witnesses from
+timing and retain post-fit diagnosis. Repeat a promising condition before
+promoting a production/default change.
+
+Parallel independent moment updates remain a subsequent measured option.
+Moving every categorical column into support tables is lower priority: it can
+reduce ordinary width but increases histogram pairs 45 to 153. The measured
+ordinary-product cost limits its immediate payoff. Do not remove intermediate
+terminal row arrays: they support exact endpoint replay, practical-convergence
+certification and public immutable result contracts. The eight materializations
+are the initial coefficient fit plus seven smoothing proposals, not a redundant
+final-model refit. Family-aware joint-observation aggregation is a separate
+potential reduction, requiring evidence of shared predictor states and valid
+sufficient statistics; the current six continuous numeric scale columns prevent
+assuming it applies to this fixture.

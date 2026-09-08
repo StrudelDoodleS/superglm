@@ -1,5 +1,2411 @@
 {
   "schema": "superglm-public-discrete-performance-evidence-v1",
+  "scalar_thread_policy_control": {
+    "background_policy": "Retain all observed external PID/start identities, excluding only own controller/worker descendants. No host isolation assumption.",
+    "checks": {
+      "all4_returncodes_zero": true,
+      "all_coefficient_and_reml_converged": true,
+      "all_preflight_and_endpoint_audits_passed": true,
+      "all_raw_artifact_hashes_reverified": true,
+      "source_and_helper_guards_passed": true
+    },
+    "comparisons": [
+      {
+        "arrays": {
+          "coefficients": {
+            "difference_norm": 7.473072562801294e-8,
+            "max_absolute_difference": 7.470616238125505e-8,
+            "norm_relative_difference": 2.989107742708664e-8,
+            "reference_norm": 2.5001014369690666,
+            "shape": [
+              79
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "deviance": {
+            "difference_norm": 0,
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0,
+            "reference_norm": 114330.2384919975,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "effective_df": {
+            "difference_norm": 2.8421709430404007e-13,
+            "max_absolute_difference": 2.8421709430404007e-13,
+            "norm_relative_difference": 1.99708796221037e-14,
+            "reference_norm": 14.231576158992494,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "holdout_predictions": {
+            "difference_norm": 3.2107649872159527e-13,
+            "max_absolute_difference": 9.636735853746359e-14,
+            "norm_relative_difference": 4.01081300848513e-15,
+            "reference_norm": 80.05272198986528,
+            "shape": [
+              2000
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "intercept": {
+            "difference_norm": 2.220446049250313e-16,
+            "max_absolute_difference": 2.220446049250313e-16,
+            "norm_relative_difference": 3.4222470183189556e-16,
+            "reference_norm": 0.6488269366192684,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "lambdas": {
+            "difference_norm": 0.0005605673085588915,
+            "max_absolute_difference": 0.0005605658516287804,
+            "norm_relative_difference": 6.785999372245179e-11,
+            "reference_norm": 8260644.863181372,
+            "shape": [
+              4
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "predictions": {
+            "difference_norm": 2.2325008353472254e-12,
+            "max_absolute_difference": 1.509903313490213e-13,
+            "norm_relative_difference": 3.926937464572884e-15,
+            "reference_norm": 568.5093932582001,
+            "shape": [
+              100000
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          }
+        },
+        "input_fingerprints_identical": true,
+        "kind": "exact_thread_sensitivity",
+        "lambda_names_identical": true,
+        "left": "exact-forced1",
+        "reml_objective_absolute_difference": 0.000005303852958604693,
+        "right": "exact-forced4",
+        "statuses": [
+          {
+            "actual_p": 79,
+            "coefficient_count": 79,
+            "converged": true,
+            "deviance": 114330.2384919975,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+            "effective_df": 14.231576158992494,
+            "inner_iteration_history": null,
+            "pirls_iterations": 1,
+            "reml_converged": true,
+            "reml_iterations": 9,
+            "reml_objective": 57218.98738824633,
+            "reml_termination_reason": "score_objective_tolerance",
+            "termination_reason": "converged"
+          },
+          {
+            "actual_p": 79,
+            "coefficient_count": 79,
+            "converged": true,
+            "deviance": 114330.2384919975,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+            "effective_df": 14.231576158992779,
+            "inner_iteration_history": null,
+            "pirls_iterations": 1,
+            "reml_converged": true,
+            "reml_iterations": 9,
+            "reml_objective": 57218.987382942476,
+            "reml_termination_reason": "score_objective_tolerance",
+            "termination_reason": "converged"
+          }
+        ],
+        "stored_representation_identical": false,
+        "transform_hash_note": "Descriptive only: construction/compilation also uses the requested solver BLAS scope."
+      },
+      {
+        "arrays": {
+          "coefficients": {
+            "difference_norm": 0,
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0,
+            "reference_norm": 2.5001014369690666,
+            "shape": [
+              79
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "deviance": {
+            "difference_norm": 0,
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0,
+            "reference_norm": 114330.2384919975,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "effective_df": {
+            "difference_norm": 0,
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0,
+            "reference_norm": 14.231576158992494,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "holdout_predictions": {
+            "difference_norm": 0,
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0,
+            "reference_norm": 80.05272198986528,
+            "shape": [
+              2000
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "intercept": {
+            "difference_norm": 0,
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0,
+            "reference_norm": 0.6488269366192684,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "lambdas": {
+            "difference_norm": 0,
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0,
+            "reference_norm": 8260644.863181372,
+            "shape": [
+              4
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "predictions": {
+            "difference_norm": 0,
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0,
+            "reference_norm": 568.5093932582001,
+            "shape": [
+              100000
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          }
+        },
+        "input_fingerprints_identical": true,
+        "kind": "automatic_cap_control",
+        "lambda_names_identical": true,
+        "left": "exact-forced1",
+        "reml_objective_absolute_difference": 0,
+        "right": "exact-auto",
+        "statuses": [
+          {
+            "actual_p": 79,
+            "coefficient_count": 79,
+            "converged": true,
+            "deviance": 114330.2384919975,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+            "effective_df": 14.231576158992494,
+            "inner_iteration_history": null,
+            "pirls_iterations": 1,
+            "reml_converged": true,
+            "reml_iterations": 9,
+            "reml_objective": 57218.98738824633,
+            "reml_termination_reason": "score_objective_tolerance",
+            "termination_reason": "converged"
+          },
+          {
+            "actual_p": 79,
+            "coefficient_count": 79,
+            "converged": true,
+            "deviance": 114330.2384919975,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+            "effective_df": 14.231576158992494,
+            "inner_iteration_history": null,
+            "pirls_iterations": 1,
+            "reml_converged": true,
+            "reml_iterations": 9,
+            "reml_objective": 57218.98738824633,
+            "reml_termination_reason": "score_objective_tolerance",
+            "termination_reason": "converged"
+          }
+        ],
+        "stored_representation_identical": true,
+        "transform_hash_note": "Descriptive only: construction/compilation also uses the requested solver BLAS scope."
+      },
+      {
+        "arrays": {
+          "coefficients": {
+            "difference_norm": 0.057727253609006164,
+            "max_absolute_difference": 0.03567948219420522,
+            "norm_relative_difference": 0.0230899645731936,
+            "reference_norm": 2.5001014369690666,
+            "shape": [
+              79
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "deviance": {
+            "difference_norm": 0.703100611368427,
+            "max_absolute_difference": 0.703100611368427,
+            "norm_relative_difference": 0.000006149734494060732,
+            "reference_norm": 114330.2384919975,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "effective_df": {
+            "difference_norm": 0.05278704684905833,
+            "max_absolute_difference": 0.05278704684905833,
+            "norm_relative_difference": 0.003709149728697044,
+            "reference_norm": 14.231576158992494,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "holdout_predictions": {
+            "difference_norm": 0.014377473475007643,
+            "max_absolute_difference": 0.0015850176161853469,
+            "norm_relative_difference": 0.00017960005753243268,
+            "reference_norm": 80.05272198986528,
+            "shape": [
+              2000
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "intercept": {
+            "difference_norm": 0.0000032373257434770153,
+            "max_absolute_difference": 0.0000032373257434770153,
+            "norm_relative_difference": 0.000004989505769204335,
+            "reference_norm": 0.6488269366192684,
+            "shape": [
+              1
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "lambdas": {
+            "difference_norm": 656882.1974880294,
+            "max_absolute_difference": 656763.9109307416,
+            "norm_relative_difference": 0.0795194816346394,
+            "reference_norm": 8260644.863181372,
+            "shape": [
+              4
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "predictions": {
+            "difference_norm": 0.10142105684039135,
+            "max_absolute_difference": 0.0016013155976919435,
+            "norm_relative_difference": 0.00017839820773960177,
+            "reference_norm": 568.5093932582001,
+            "shape": [
+              100000
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          }
+        },
+        "input_fingerprints_identical": true,
+        "kind": "representation_comparison",
+        "lambda_names_identical": true,
+        "left": "exact-auto",
+        "reml_objective_absolute_difference": 0.2339671590088983,
+        "right": "discrete-auto",
+        "statuses": [
+          {
+            "actual_p": 79,
+            "coefficient_count": 79,
+            "converged": true,
+            "deviance": 114330.2384919975,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+            "effective_df": 14.231576158992494,
+            "inner_iteration_history": null,
+            "pirls_iterations": 1,
+            "reml_converged": true,
+            "reml_iterations": 9,
+            "reml_objective": 57218.98738824633,
+            "reml_termination_reason": "score_objective_tolerance",
+            "termination_reason": "converged"
+          },
+          {
+            "actual_p": 79,
+            "coefficient_count": 79,
+            "converged": true,
+            "deviance": 114329.53539138613,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+            "effective_df": 14.284363205841553,
+            "inner_iteration_history": null,
+            "pirls_iterations": 1,
+            "reml_converged": true,
+            "reml_iterations": 10,
+            "reml_objective": 57218.75342108732,
+            "reml_termination_reason": "score_objective_tolerance",
+            "termination_reason": "converged"
+          }
+        ],
+        "stored_representation_identical": false,
+        "transform_hash_note": "Descriptive only: construction/compilation also uses the requested solver BLAS scope."
+      }
+    ],
+    "cpu_caveat": "Endpoint accounting is a lower bound: CPU used after a process's last observation before exit, and by processes born and exited between snapshots, is unavailable. Newly observed processes contribute all observed lifetime ticks; PID reuse is distinguished by start ticks. Descendants that reparent between snapshots may not be identifiable. This is a screening check, not proof that the machine stayed quiet throughout a fit.",
+    "external_cpu_limit_cores": 0.25,
+    "helper_pins": {
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/final-default-public/controller.py": "9d3f00c5ae6161821fb37cb392866b77d1cdb9693f5aa4ce7130d0595303f7e1",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/probe_geometry.py": "749b796f2966db2b13e179316b23a3efeb88d6d16d4512aed76628ef8eea069a",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar_thread_validation.py": "7ebd7fba8554d50c3f9dbbf1284af8fb7f5d99bf41e39339d91a71f3a49a3eed",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/benchmark_spline_cat_cr_cost.py": "4d694de9c6216e30126bf9d29aa24ec0f4c6d4cd1e8bac340bbeba2a2525ce3e",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+    },
+    "interpretation": [
+      "Single-fit wall time is the user objective; CPU consumption is explanatory, not a rejection criterion for a faster fit.",
+      "Both NumPy and SciPy pools are configured at four before/after fitting; exact forced1 and both auto fits observe one inside existing fit and optimizer scopes. These are configured limits, not measured BLAS-worker participation.",
+      "All four actual optimizer witnesses are optimize_direct_reml, including the stored-discrete arm; no cached-W optimizer dispatch is observed in this screen.",
+      "This public scalar screen adds no evidence about global-moment LSS speed, no discrete forced1/4 sensitivity, and no universal threading policy. C1 performance work remains active.",
+      "Exact forced1 and exact-auto outputs and stored representation hashes match exactly. Exact forced1/4 output differences are quantitative descriptive comparisons; exact/discrete differences include basis discretization and changed REML iteration counts.",
+      "Fit-end RSS is process highwater including imports, fixture and warmup, captured before telemetry/prediction/NPZ. Telemetry extraction/file output is separately timed after fit RSS; highwater increase is not total diagnostic allocation."
+    ],
+    "manifest": {
+      "bytes": 1198713,
+      "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-16b01adb-optional-numexpr/manifest.json",
+      "sha256": "cb51af7daaa9407f2a32d8ee78045cfd0b70e8338845b6b6ca708a9c37140d82"
+    },
+    "plan": {
+      "bytes": 5594,
+      "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-plan.md",
+      "sha256": "d0c4a234ebce30e13deffd3d3bfab2c842e7ce547a7e4c5dcf42432ec9da0367"
+    },
+    "preflight_seconds": 10,
+    "previous_failed_attempt": {
+      "correction": "Only optional NumExpr import/count handling changed; no dependencies installed. Absent is recorded, installed requires one thread.",
+      "failure": "Unconditional import of uninstalled optional NumExpr before fixture, warmup or fit. No fit result from that attempt.",
+      "manifest": {
+        "bytes": 48761,
+        "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-16b01adb/manifest.json",
+        "sha256": "76384d7947ba110de1ec5a73d51175877713800074008a76f6d4b1d190244e6d"
+      },
+      "original_helper": {
+        "bytes": 21903,
+        "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar_thread_validation.before_optional_numexpr.py",
+        "sha256": "95f5418cd830015a184a0277d9ed5ea9c40144f87d1d77bc5a27afcfd703223a"
+      },
+      "worker_log": {
+        "bytes": 616,
+        "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-16b01adb/exact-forced1.log",
+        "sha256": "22a6315e92b54abea6127b523e871c6a9ad9b5786fba00d1eccda149348444c6"
+      }
+    },
+    "runs": [
+      {
+        "arm": "exact-forced1",
+        "basis_entries": 3497704,
+        "basis_megabytes": 42.67202,
+        "diagnostics": {
+          "api_calls": {
+            "reml_diagnostics": 1,
+            "training_telemetry": 1
+          },
+          "highwater_after_bytes": 628613120,
+          "highwater_before_bytes": 615944192,
+          "measurement_scope": "Both public API calls, strict-JSON conversion and diagnostic-file write, after fit clocks/fit-end RSS. Highwater increase is not total diagnostic allocation. Training telemetry embeds its own REML extraction; each public method is invoked once.",
+          "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-16b01adb-optional-numexpr/exact-forced1.diagnostics.json",
+          "process_cpu_seconds": 0.4083079180000002,
+          "process_highwater_increase_bytes": 12668928,
+          "sha256": "0f318a767602152986cb97fb0f6fbf49da57899a7a5037aed80de35481198774",
+          "status": "complete",
+          "wall_seconds": 0.065155379998032
+        },
+        "dispatch": [
+          {
+            "actual_p": 79,
+            "group_classes": [
+              "SparseSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix"
+            ],
+            "optimizer": "optimize_direct_reml"
+          }
+        ],
+        "endpoint_external_cpu_cores_lower_bound": 0.09915535916875666,
+        "fit_process_cpu_seconds": 5.109063715,
+        "fit_seconds": 5.117777488994761,
+        "fixture": {
+          "discrete": false,
+          "family": "poisson",
+          "fingerprints": {
+            "holdout_frame": "f5c95f8529520891333f0bff33ca8a654b56e0b47dc2476187fec72438d11f9a",
+            "response": "24c0d5e1d4f27b2b968db246dd5fb4286e319f5c75580c6378564e1fe4e32225",
+            "train_frame": "bf9ba6e6faa7865f2c8fdf23fbd21766002cd848b01103c6d0dc035220b36b2d"
+          },
+          "holdout_n": 2000,
+          "holdout_seed": 7007,
+          "k": 20,
+          "levels": 4,
+          "n": 100000,
+          "seed": 7,
+          "source": "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/benchmark_spline_cat_cr_cost.py",
+          "spline_kind": "cr"
+        },
+        "highwater_after_outputs_bytes": 637476864,
+        "inherited_numba_environment": {
+          "NUMBA_NUM_THREADS": "1"
+        },
+        "memory_policy": "Fit-end process highwater includes imports, fixture and warmup. Captured before predictions, NPZ and representation; output highwater recorded separately.",
+        "peak_fit_process_rss_bytes": 615813120,
+        "pool_observations": [
+          {
+            "boundary": "native_before_warmup",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "native_after_warmup_before_fit",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "inside_public_fit_reml_scope",
+            "expected_blas": 1,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "inside_optimize_direct_reml",
+            "expected_blas": 1,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "native_after_public_fit_return",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          }
+        ],
+        "preflight_external_cpu_cores_lower_bound": 0.10392772450327145,
+        "result": {
+          "actual_p": 79,
+          "coefficient_count": 79,
+          "converged": true,
+          "deviance": 114330.2384919975,
+          "direct_backend": "gram",
+          "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+          "effective_df": 14.231576158992494,
+          "inner_iteration_history": null,
+          "pirls_iterations": 1,
+          "reml_converged": true,
+          "reml_iterations": 9,
+          "reml_objective": 57218.98738824633,
+          "reml_termination_reason": "score_objective_tolerance",
+          "termination_reason": "converged"
+        },
+        "stored_representation_sha256": "90a0449fc44c14fc39afaf5b973fd0aea2c02778c79b2df8e2ba16d72bf666f0",
+        "thread_environment": {
+          "BLIS_NUM_THREADS": "4",
+          "MKL_NUM_THREADS": "4",
+          "NUMBA_NUM_THREADS": "1",
+          "NUMEXPR_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "OPENBLAS_NUM_THREADS": "4",
+          "SUPERGLM_BLAS_THREADS": "1",
+          "VECLIB_MAXIMUM_THREADS": "4"
+        },
+        "timing_policy": "One public warmup before fit clocks; construct the same public model before timer; design construction/compilation in fit_reml is timed. Identical light fit/optimizer-entry hooks in all arms; no profiler, native wrappers or per-call clocks.",
+        "warmup_calls": 1,
+        "warmup_seconds": 0.35599887699936517
+      },
+      {
+        "arm": "exact-forced4",
+        "basis_entries": 3497704,
+        "basis_megabytes": 42.67202,
+        "diagnostics": {
+          "api_calls": {
+            "reml_diagnostics": 1,
+            "training_telemetry": 1
+          },
+          "highwater_after_bytes": 661704704,
+          "highwater_before_bytes": 661704704,
+          "measurement_scope": "Both public API calls, strict-JSON conversion and diagnostic-file write, after fit clocks/fit-end RSS. Highwater increase is not total diagnostic allocation. Training telemetry embeds its own REML extraction; each public method is invoked once.",
+          "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-16b01adb-optional-numexpr/exact-forced4.diagnostics.json",
+          "process_cpu_seconds": 0.5002280689999985,
+          "process_highwater_increase_bytes": 0,
+          "sha256": "a83972bda78b8bd087ec52289a9f6a99a539f525cc44a773589d6e596cdcac77",
+          "status": "complete",
+          "wall_seconds": 0.07591328200214775
+        },
+        "dispatch": [
+          {
+            "actual_p": 79,
+            "group_classes": [
+              "SparseSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix"
+            ],
+            "optimizer": "optimize_direct_reml"
+          }
+        ],
+        "endpoint_external_cpu_cores_lower_bound": 0.14505993971758896,
+        "fit_process_cpu_seconds": 20.607402924,
+        "fit_seconds": 5.394509860001563,
+        "fixture": {
+          "discrete": false,
+          "family": "poisson",
+          "fingerprints": {
+            "holdout_frame": "f5c95f8529520891333f0bff33ca8a654b56e0b47dc2476187fec72438d11f9a",
+            "response": "24c0d5e1d4f27b2b968db246dd5fb4286e319f5c75580c6378564e1fe4e32225",
+            "train_frame": "bf9ba6e6faa7865f2c8fdf23fbd21766002cd848b01103c6d0dc035220b36b2d"
+          },
+          "holdout_n": 2000,
+          "holdout_seed": 7007,
+          "k": 20,
+          "levels": 4,
+          "n": 100000,
+          "seed": 7,
+          "source": "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/benchmark_spline_cat_cr_cost.py",
+          "spline_kind": "cr"
+        },
+        "highwater_after_outputs_bytes": 662228992,
+        "inherited_numba_environment": {
+          "NUMBA_NUM_THREADS": "1"
+        },
+        "memory_policy": "Fit-end process highwater includes imports, fixture and warmup. Captured before predictions, NPZ and representation; output highwater recorded separately.",
+        "peak_fit_process_rss_bytes": 661573632,
+        "pool_observations": [
+          {
+            "boundary": "native_before_warmup",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "native_after_warmup_before_fit",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "inside_public_fit_reml_scope",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "inside_optimize_direct_reml",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "native_after_public_fit_return",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          }
+        ],
+        "preflight_external_cpu_cores_lower_bound": 0.12790901283187603,
+        "result": {
+          "actual_p": 79,
+          "coefficient_count": 79,
+          "converged": true,
+          "deviance": 114330.2384919975,
+          "direct_backend": "gram",
+          "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+          "effective_df": 14.231576158992779,
+          "inner_iteration_history": null,
+          "pirls_iterations": 1,
+          "reml_converged": true,
+          "reml_iterations": 9,
+          "reml_objective": 57218.987382942476,
+          "reml_termination_reason": "score_objective_tolerance",
+          "termination_reason": "converged"
+        },
+        "stored_representation_sha256": "2f6df9a08d8932cc433d10f1e7acba0cd5f3232b118cfd3509cf95854de1d357",
+        "thread_environment": {
+          "BLIS_NUM_THREADS": "4",
+          "MKL_NUM_THREADS": "4",
+          "NUMBA_NUM_THREADS": "1",
+          "NUMEXPR_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "OPENBLAS_NUM_THREADS": "4",
+          "SUPERGLM_BLAS_THREADS": "4",
+          "VECLIB_MAXIMUM_THREADS": "4"
+        },
+        "timing_policy": "One public warmup before fit clocks; construct the same public model before timer; design construction/compilation in fit_reml is timed. Identical light fit/optimizer-entry hooks in all arms; no profiler, native wrappers or per-call clocks.",
+        "warmup_calls": 1,
+        "warmup_seconds": 0.5744070560031105
+      },
+      {
+        "arm": "exact-auto",
+        "basis_entries": 3497704,
+        "basis_megabytes": 42.67202,
+        "diagnostics": {
+          "api_calls": {
+            "reml_diagnostics": 1,
+            "training_telemetry": 1
+          },
+          "highwater_after_bytes": 628600832,
+          "highwater_before_bytes": 615759872,
+          "measurement_scope": "Both public API calls, strict-JSON conversion and diagnostic-file write, after fit clocks/fit-end RSS. Highwater increase is not total diagnostic allocation. Training telemetry embeds its own REML extraction; each public method is invoked once.",
+          "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-16b01adb-optional-numexpr/exact-auto.diagnostics.json",
+          "process_cpu_seconds": 0.43980803,
+          "process_highwater_increase_bytes": 12840960,
+          "sha256": "0fca360021161b1535015aaefffb150088b8d2bc4262cf083fde67d3b336f024",
+          "status": "complete",
+          "wall_seconds": 0.07021415100462036
+        },
+        "dispatch": [
+          {
+            "actual_p": 79,
+            "group_classes": [
+              "SparseSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix",
+              "SplineCategoricalGroupMatrix"
+            ],
+            "optimizer": "optimize_direct_reml"
+          }
+        ],
+        "endpoint_external_cpu_cores_lower_bound": 0.1359405062993697,
+        "fit_process_cpu_seconds": 5.113926039000001,
+        "fit_seconds": 5.119641038996633,
+        "fixture": {
+          "discrete": false,
+          "family": "poisson",
+          "fingerprints": {
+            "holdout_frame": "f5c95f8529520891333f0bff33ca8a654b56e0b47dc2476187fec72438d11f9a",
+            "response": "24c0d5e1d4f27b2b968db246dd5fb4286e319f5c75580c6378564e1fe4e32225",
+            "train_frame": "bf9ba6e6faa7865f2c8fdf23fbd21766002cd848b01103c6d0dc035220b36b2d"
+          },
+          "holdout_n": 2000,
+          "holdout_seed": 7007,
+          "k": 20,
+          "levels": 4,
+          "n": 100000,
+          "seed": 7,
+          "source": "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/benchmark_spline_cat_cr_cost.py",
+          "spline_kind": "cr"
+        },
+        "highwater_after_outputs_bytes": 637603840,
+        "inherited_numba_environment": {
+          "NUMBA_NUM_THREADS": "1"
+        },
+        "memory_policy": "Fit-end process highwater includes imports, fixture and warmup. Captured before predictions, NPZ and representation; output highwater recorded separately.",
+        "peak_fit_process_rss_bytes": 615628800,
+        "pool_observations": [
+          {
+            "boundary": "native_before_warmup",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "native_after_warmup_before_fit",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "inside_public_fit_reml_scope",
+            "expected_blas": 1,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "inside_optimize_direct_reml",
+            "expected_blas": 1,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "native_after_public_fit_return",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          }
+        ],
+        "preflight_external_cpu_cores_lower_bound": 0.13589815668470726,
+        "result": {
+          "actual_p": 79,
+          "coefficient_count": 79,
+          "converged": true,
+          "deviance": 114330.2384919975,
+          "direct_backend": "gram",
+          "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+          "effective_df": 14.231576158992494,
+          "inner_iteration_history": null,
+          "pirls_iterations": 1,
+          "reml_converged": true,
+          "reml_iterations": 9,
+          "reml_objective": 57218.98738824633,
+          "reml_termination_reason": "score_objective_tolerance",
+          "termination_reason": "converged"
+        },
+        "stored_representation_sha256": "90a0449fc44c14fc39afaf5b973fd0aea2c02778c79b2df8e2ba16d72bf666f0",
+        "thread_environment": {
+          "BLIS_NUM_THREADS": "4",
+          "MKL_NUM_THREADS": "4",
+          "NUMBA_NUM_THREADS": "1",
+          "NUMEXPR_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "OPENBLAS_NUM_THREADS": "4",
+          "SUPERGLM_BLAS_THREADS": "auto",
+          "VECLIB_MAXIMUM_THREADS": "4"
+        },
+        "timing_policy": "One public warmup before fit clocks; construct the same public model before timer; design construction/compilation in fit_reml is timed. Identical light fit/optimizer-entry hooks in all arms; no profiler, native wrappers or per-call clocks.",
+        "warmup_calls": 1,
+        "warmup_seconds": 0.3831456259940751
+      },
+      {
+        "arm": "discrete-auto",
+        "basis_entries": 5120,
+        "basis_megabytes": 0.04096,
+        "diagnostics": {
+          "api_calls": {
+            "reml_diagnostics": 1,
+            "training_telemetry": 1
+          },
+          "highwater_after_bytes": 535547904,
+          "highwater_before_bytes": 535547904,
+          "measurement_scope": "Both public API calls, strict-JSON conversion and diagnostic-file write, after fit clocks/fit-end RSS. Highwater increase is not total diagnostic allocation. Training telemetry embeds its own REML extraction; each public method is invoked once.",
+          "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-16b01adb-optional-numexpr/discrete-auto.diagnostics.json",
+          "process_cpu_seconds": 0.07495859200000021,
+          "process_highwater_increase_bytes": 0,
+          "sha256": "6704dbb180743ecf58c40fb152ca13dc7fa046aa6b18a2a36df2247d8860dff7",
+          "status": "complete",
+          "wall_seconds": 0.014209221997589339
+        },
+        "dispatch": [
+          {
+            "actual_p": 79,
+            "group_classes": [
+              "DiscretizedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "DiscretizedSplineCategoricalGroupMatrix",
+              "DiscretizedSplineCategoricalGroupMatrix",
+              "DiscretizedSplineCategoricalGroupMatrix"
+            ],
+            "optimizer": "optimize_direct_reml"
+          }
+        ],
+        "endpoint_external_cpu_cores_lower_bound": 0.16005228527591198,
+        "fit_process_cpu_seconds": 0.6473626070000003,
+        "fit_seconds": 0.6479514910024591,
+        "fixture": {
+          "discrete": true,
+          "family": "poisson",
+          "fingerprints": {
+            "holdout_frame": "f5c95f8529520891333f0bff33ca8a654b56e0b47dc2476187fec72438d11f9a",
+            "response": "24c0d5e1d4f27b2b968db246dd5fb4286e319f5c75580c6378564e1fe4e32225",
+            "train_frame": "bf9ba6e6faa7865f2c8fdf23fbd21766002cd848b01103c6d0dc035220b36b2d"
+          },
+          "holdout_n": 2000,
+          "holdout_seed": 7007,
+          "k": 20,
+          "levels": 4,
+          "n": 100000,
+          "seed": 7,
+          "source": "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/benchmark_spline_cat_cr_cost.py",
+          "spline_kind": "cr"
+        },
+        "highwater_after_outputs_bytes": 552480768,
+        "inherited_numba_environment": {
+          "NUMBA_NUM_THREADS": "1"
+        },
+        "memory_policy": "Fit-end process highwater includes imports, fixture and warmup. Captured before predictions, NPZ and representation; output highwater recorded separately.",
+        "peak_fit_process_rss_bytes": 535547904,
+        "pool_observations": [
+          {
+            "boundary": "native_before_warmup",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "native_after_warmup_before_fit",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "inside_public_fit_reml_scope",
+            "expected_blas": 1,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "inside_optimize_direct_reml",
+            "expected_blas": 1,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          },
+          {
+            "boundary": "native_after_public_fit_return",
+            "expected_blas": 4,
+            "numba_threads": 1,
+            "numexpr_available": false,
+            "numexpr_threads": null,
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "prefix": "libscipy_openblas",
+                "num_threads": 4
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "prefix": "libgomp",
+                "num_threads": 1
+              }
+            ]
+          }
+        ],
+        "preflight_external_cpu_cores_lower_bound": 0.09492606300081886,
+        "result": {
+          "actual_p": 79,
+          "coefficient_count": 79,
+          "converged": true,
+          "deviance": 114329.53539138613,
+          "direct_backend": "gram",
+          "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+          "effective_df": 14.284363205841553,
+          "inner_iteration_history": null,
+          "pirls_iterations": 1,
+          "reml_converged": true,
+          "reml_iterations": 10,
+          "reml_objective": 57218.75342108732,
+          "reml_termination_reason": "score_objective_tolerance",
+          "termination_reason": "converged"
+        },
+        "stored_representation_sha256": "b84ef480768c25e02b6b3dbd2649a22286e8870cb0b9d5c0d629c379b010f41b",
+        "thread_environment": {
+          "BLIS_NUM_THREADS": "4",
+          "MKL_NUM_THREADS": "4",
+          "NUMBA_NUM_THREADS": "1",
+          "NUMEXPR_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "OPENBLAS_NUM_THREADS": "4",
+          "SUPERGLM_BLAS_THREADS": "auto",
+          "VECLIB_MAXIMUM_THREADS": "4"
+        },
+        "timing_policy": "One public warmup before fit clocks; construct the same public model before timer; design construction/compilation in fit_reml is timed. Identical light fit/optimizer-entry hooks in all arms; no profiler, native wrappers or per-call clocks.",
+        "warmup_calls": 1,
+        "warmup_seconds": 0.44155147599667544
+      }
+    ],
+    "schema": "public-scalar-thread-screen-v1",
+    "scope_limits": "One sample per arm on one public scalar Poisson/CR spline-category shape. Tests exact BLAS1/4 and automatic-cap behavior from known native4. Does not measure discrete BLAS1/4 sensitivity, a shape sweep, uncertainty, or a universal best thread count; no package policy changes.",
+    "source": {
+      "root": "/home/max/projects/superglm/.worktrees/discrete-performance",
+      "sha": "16b01adba617ae43707432db451e470b22d89945",
+      "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
+      "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "status": "complete_screening",
+    "raw_receipt": {
+      "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/scalar-thread-16b01adb-optional-numexpr/public-scalar-receipt.json",
+      "sha256": "8884033cb44bf83db896814e196dac778d9b0539c12290d62e4e8e6cf55d2b1a"
+    }
+  },
+  "streamed_global_moment_remaining_cost_profile": {
+    "status": "complete",
+    "source_sha": "16b01adba617ae43707432db451e470b22d89945",
+    "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
+    "helper_sha256": "3e94786fe8139af6854ba5bb5cf155cc8e5e874452444df73a5ad3d00c19c714",
+    "manifest": {
+      "path": ".benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile-one-current-d/manifest.json",
+      "sha256": "f10cfa8f6d744b65fd0b7e60e29cec1467c9016e9b40852ffeba2d077bfa6418"
+    },
+    "profile": {
+      "path": ".benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile-one-current-d/current-discrete.prof",
+      "sha256": "70babd98ed48f73859620e1f27570e097f40e53f02d43d3f13bb510c8986ec89"
+    },
+    "analysis": {
+      "path": ".benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile-one-current-d/analysis.json",
+      "sha256": "74a745fc969fd9d1413255781ffc59b568ae203f56cc32cc3ea53bd09f443b55"
+    },
+    "profile_detail": {
+      "path": ".benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile-one-current-d/current-discrete.profile.json",
+      "sha256": "7b1b5929c81c313fdb3aafb8e03429f2028b8e36995111b7b4c73041621cf9b6"
+    },
+    "diagnose": {
+      "path": ".benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile-one-current-d/current-discrete.diagnose.json",
+      "sha256": "8b65dae7db627ffb65c25b37d8e46e4e7649127399c9261e27798e8027073f96"
+    },
+    "reference_comparison": {
+      "arrays": {
+        "coefficients": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 1.7338786850498709,
+          "shape": [
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "covariance": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 0.005337535160880327,
+          "shape": [
+            102,
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "edf": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 90.72691502018908,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "holdout_parameters": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 57.2985273929743,
+          "shape": [
+            2000,
+            2
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "log_likelihood": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 1168908.7726277818,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "objective": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 1169341.9658859293,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "smoothing_parameters": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 1776.5943179142248,
+          "shape": [
+            10
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "terminal_penalized_curvature": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 9918081.81233437,
+          "shape": [
+            102,
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "terminal_score": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 0.029716141830343695,
+          "shape": [
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "train_parameters": {
+          "difference_norm": 0,
+          "max_absolute_difference": 0,
+          "norm_relative_difference": 0,
+          "reference_norm": 1331.681017191398,
+          "shape": [
+            1048576,
+            2
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        }
+      },
+      "reference_path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/production-timing-5c1ce17e/fragmented1m-r1-candidate-discrete.json",
+      "reference_sha256": "6f542cc24d475a6e0b331f271e16648f8c66c2433564e011fa178ca236a49d12",
+      "result_scalars_identical": true,
+      "stored_design_identical": true
+    },
+    "native_signatures_stable": true,
+    "actual_global_geometry_count": 17,
+    "endpoint_audit": {
+      "caveat": "Endpoint accounting is a lower bound: CPU used after a process's last observation before exit, and by processes born and exited between snapshots, is unavailable. Newly observed processes contribute all observed lifetime ticks; PID reuse is distinguished by start ticks. Descendants that reparent between snapshots may not be identifiable. This is a screening check, not proof that the machine stayed quiet throughout a fit.",
+      "disappeared_external_identities": [
+        "558380:4818907",
+        "569116:4914635",
+        "569888:4925320",
+        "569982:4926126"
+      ],
+      "elapsed_monotonic_seconds": 61.789513124,
+      "endpoint_audit_flagged": false,
+      "excluded_identities": [
+        "577194:4986642",
+        "577326:4987662"
+      ],
+      "external_active_processes": [
+        {
+          "comm": "codex",
+          "cpu_ticks": 114391,
+          "delta_ticks": 234,
+          "identity": "61788:455670",
+          "newly_observed": false,
+          "pid": 61788,
+          "ppid": 1,
+          "start_ticks": 455670,
+          "state": "S",
+          "system_ticks": 34690,
+          "user_ticks": 79701
+        },
+        {
+          "comm": "codex",
+          "cpu_ticks": 55607,
+          "delta_ticks": 185,
+          "identity": "351465:2657706",
+          "newly_observed": false,
+          "pid": 351465,
+          "ppid": 3417,
+          "start_ticks": 2657706,
+          "state": "S",
+          "system_ticks": 12779,
+          "user_ticks": 42828
+        },
+        {
+          "comm": "claude",
+          "cpu_ticks": 3892,
+          "delta_ticks": 163,
+          "identity": "567813:4902549",
+          "newly_observed": false,
+          "pid": 567813,
+          "ppid": 147144,
+          "start_ticks": 4902549,
+          "state": "S",
+          "system_ticks": 495,
+          "user_ticks": 3397
+        },
+        {
+          "comm": "tmux: server",
+          "cpu_ticks": 112603,
+          "delta_ticks": 125,
+          "identity": "3416:3095",
+          "newly_observed": false,
+          "pid": 3416,
+          "ppid": 1,
+          "start_ticks": 3095,
+          "state": "S",
+          "system_ticks": 34959,
+          "user_ticks": 77644
+        },
+        {
+          "comm": "btop",
+          "cpu_ticks": 25793,
+          "delta_ticks": 72,
+          "identity": "359301:2721122",
+          "newly_observed": false,
+          "pid": 359301,
+          "ppid": 3733,
+          "start_ticks": 2721122,
+          "state": "S",
+          "system_ticks": 17760,
+          "user_ticks": 8033
+        },
+        {
+          "comm": "sshd-session",
+          "cpu_ticks": 23436,
+          "delta_ticks": 12,
+          "identity": "2999:1579",
+          "newly_observed": false,
+          "pid": 2999,
+          "ppid": 2976,
+          "start_ticks": 1579,
+          "state": "S",
+          "system_ticks": 14204,
+          "user_ticks": 9232
+        },
+        {
+          "comm": "codex-code-mode",
+          "cpu_ticks": 1540,
+          "delta_ticks": 8,
+          "identity": "349748:2640342",
+          "newly_observed": false,
+          "pid": 349748,
+          "ppid": 61788,
+          "start_ticks": 2640342,
+          "state": "S",
+          "system_ticks": 748,
+          "user_ticks": 792
+        },
+        {
+          "comm": "kworker/u77:1-events_unbound",
+          "cpu_ticks": 7,
+          "delta_ticks": 7,
+          "identity": "575450:4968258",
+          "newly_observed": false,
+          "pid": 575450,
+          "ppid": 2,
+          "start_ticks": 4968258,
+          "state": "I",
+          "system_ticks": 7,
+          "user_ticks": 0
+        },
+        {
+          "comm": "kworker/2:1-mm_percpu_wq",
+          "cpu_ticks": 238,
+          "delta_ticks": 6,
+          "identity": "453078:3667723",
+          "newly_observed": false,
+          "pid": 453078,
+          "ppid": 2,
+          "start_ticks": 3667723,
+          "state": "I",
+          "system_ticks": 238,
+          "user_ticks": 0
+        },
+        {
+          "comm": "rcu_preempt",
+          "cpu_ticks": 2853,
+          "delta_ticks": 4,
+          "identity": "18:18",
+          "newly_observed": false,
+          "pid": 18,
+          "ppid": 2,
+          "start_ticks": 18,
+          "state": "I",
+          "system_ticks": 2688,
+          "user_ticks": 165
+        },
+        {
+          "comm": "codex",
+          "cpu_ticks": 2573,
+          "delta_ticks": 3,
+          "identity": "348871:2638016",
+          "newly_observed": false,
+          "pid": 348871,
+          "ppid": 130369,
+          "start_ticks": 2638016,
+          "state": "S",
+          "system_ticks": 583,
+          "user_ticks": 1990
+        },
+        {
+          "comm": "kworker/1:2-events",
+          "cpu_ticks": 144,
+          "delta_ticks": 3,
+          "identity": "521215:4441678",
+          "newly_observed": false,
+          "pid": 521215,
+          "ppid": 2,
+          "start_ticks": 4441678,
+          "state": "I",
+          "system_ticks": 143,
+          "user_ticks": 1
+        },
+        {
+          "comm": "kworker/9:2-mm_percpu_wq",
+          "cpu_ticks": 49,
+          "delta_ticks": 2,
+          "identity": "556424:4795490",
+          "newly_observed": false,
+          "pid": 556424,
+          "ppid": 2,
+          "start_ticks": 4795490,
+          "state": "I",
+          "system_ticks": 49,
+          "user_ticks": 0
+        },
+        {
+          "comm": "systemd",
+          "cpu_ticks": 169,
+          "delta_ticks": 1,
+          "identity": "1:18",
+          "newly_observed": false,
+          "pid": 1,
+          "ppid": 0,
+          "start_ticks": 18,
+          "state": "S",
+          "system_ticks": 86,
+          "user_ticks": 83
+        },
+        {
+          "comm": "ksoftirqd/5",
+          "cpu_ticks": 28,
+          "delta_ticks": 1,
+          "identity": "51:18",
+          "newly_observed": false,
+          "pid": 51,
+          "ppid": 2,
+          "start_ticks": 18,
+          "state": "S",
+          "system_ticks": 23,
+          "user_ticks": 5
+        },
+        {
+          "comm": "kcompactd0",
+          "cpu_ticks": 566,
+          "delta_ticks": 1,
+          "identity": "163:32",
+          "newly_observed": false,
+          "pid": 163,
+          "ppid": 2,
+          "start_ticks": 32,
+          "state": "S",
+          "system_ticks": 430,
+          "user_ticks": 136
+        },
+        {
+          "comm": "sshd-session",
+          "cpu_ticks": 529,
+          "delta_ticks": 1,
+          "identity": "415044:3286356",
+          "newly_observed": false,
+          "pid": 415044,
+          "ppid": 415034,
+          "start_ticks": 3286356,
+          "state": "S",
+          "system_ticks": 300,
+          "user_ticks": 229
+        },
+        {
+          "comm": "codex",
+          "cpu_ticks": 821,
+          "delta_ticks": 1,
+          "identity": "415045:3286359",
+          "newly_observed": false,
+          "pid": 415045,
+          "ppid": 415044,
+          "start_ticks": 3286359,
+          "state": "S",
+          "system_ticks": 481,
+          "user_ticks": 340
+        },
+        {
+          "comm": "kworker/u68:0-kvfree_rcu_reclaim",
+          "cpu_ticks": 13,
+          "delta_ticks": 1,
+          "identity": "554884:4778332",
+          "newly_observed": false,
+          "pid": 554884,
+          "ppid": 2,
+          "start_ticks": 4778332,
+          "state": "I",
+          "system_ticks": 13,
+          "user_ticks": 0
+        },
+        {
+          "comm": "kworker/10:0-events",
+          "cpu_ticks": 17,
+          "delta_ticks": 1,
+          "identity": "569180:4915414",
+          "newly_observed": false,
+          "pid": 569180,
+          "ppid": 2,
+          "start_ticks": 4915414,
+          "state": "I",
+          "system_ticks": 15,
+          "user_ticks": 2
+        }
+      ],
+      "external_cpu_cores_lower_bound": 0.13448884090287916,
+      "external_cpu_limit_cores": 0.25,
+      "external_cpu_ticks_lower_bound": 831,
+      "new_external_identities": [
+        "577826:4992251",
+        "577957:4993013",
+        "577958:4993013",
+        "577986:4993461"
+      ],
+      "passes_activity_screen": true
+    },
+    "aggregate_native_and_matmul_seconds": {
+      "matmul:add_chunk:738:panel.T @ score_eta[:, a]": 0.16940601111127762,
+      "matmul:add_chunk:749:panels[a].T @ weighted": 1.0551641597412527,
+      "matmul:finish:797:support.solver_support.T @ self._support_scores[g]": 0.0009890300643746741,
+      "matmul:finish:808:table.T @ (accumulator[:, None] * table)": 0.0005557049589697272,
+      "matmul:finish:813:left.solver_support.T @ accumulator": 0.04150391493749339,
+      "matmul:finish:813:left.solver_support.T @ accumulator @ right.solver_support": 0.00277703699975973,
+      "matmul:finish:818:support.solver_support.T @ accumulator": 0.0016858149829204194,
+      "matmul:finish:821:self._penalty @ self._coefficients": 0.00022240998805500567,
+      "native:_accumulate_directional": 2.2061112517039874,
+      "native:_accumulate_histogram": 4.474112943127693,
+      "native:_accumulate_vector": 0.6064752630190924,
+      "native:_finite_bounded_2d": 0.43580576177919284,
+      "native:_pack_categorical": 0.5508096358171315
+    },
+    "calls": {
+      "_predictor_chunk:caller=iter_likelihood_chunks": 2227,
+      "_predictor_values:caller=_reuse_observed_initial_result": 917,
+      "_predictor_values:caller=evaluate_chunked_log_likelihood": 2358,
+      "_predictor_values:caller=materialize_terminal_predictions": 1048,
+      "_predictor_values:caller=maximum_chunked_predictor_change": 2096,
+      "matmul:add_chunk:738:panel.T @ score_eta[:, a]": 4454,
+      "matmul:add_chunk:749:panels[a].T @ weighted": 6681,
+      "matmul:finish:797:support.solver_support.T @ self._support_scores[g]": 170,
+      "matmul:finish:808:table.T @ (accumulator[:, None] * table)": 170,
+      "matmul:finish:813:left.solver_support.T @ accumulator": 765,
+      "matmul:finish:813:left.solver_support.T @ accumulator @ right.solver_support": 765,
+      "matmul:finish:818:support.solver_support.T @ accumulator": 340,
+      "matmul:finish:821:self._penalty @ self._coefficients": 17,
+      "native:_accumulate_directional": 44540,
+      "native:_accumulate_histogram": 100215,
+      "native:_accumulate_vector": 44540,
+      "native:_finite_bounded_2d": 31348,
+      "native:_pack_categorical": 17816
+    },
+    "work": {
+      "_predictor_chunk:caller=iter_likelihood_chunks:rows": 17825792,
+      "_predictor_values:caller=_reuse_observed_initial_result:rows": 7340032,
+      "_predictor_values:caller=evaluate_chunked_log_likelihood:rows": 18874368,
+      "_predictor_values:caller=materialize_terminal_predictions:rows": 8388608,
+      "_predictor_values:caller=maximum_chunked_predictor_change:rows": 16777216
+    },
+    "diagnostic_wall_seconds": 37.746983529003046,
+    "diagnostic_cpu_seconds": 37.678976942999995,
+    "memory": {
+      "fit_end_rss_highwater_bytes": 1961209856,
+      "after_output_and_representation_rss_highwater_bytes": 1983873024,
+      "after_diagnostics_rss_highwater_bytes": 1983873024
+    },
+    "owner_partitions": [
+      {
+        "calls": 17,
+        "cumulative_seconds": 21.465261570000003,
+        "function": [
+          "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/chunks.py",
+          552,
+          "_try_global_geometry"
+        ],
+        "immediate_children": [
+          {
+            "calls": 2227,
+            "cumulative_seconds": 12.692698290000001,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+              730,
+              "add_chunk"
+            ],
+            "self_seconds": 1.103208055
+          },
+          {
+            "calls": 2244,
+            "cumulative_seconds": 8.59140762,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/chunks.py",
+              359,
+              "iter_likelihood_chunks"
+            ],
+            "self_seconds": 0.21685289000000002
+          },
+          {
+            "calls": 17,
+            "cumulative_seconds": 0.117939783,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile_remaining.py",
+              287,
+              "finish"
+            ],
+            "self_seconds": 0.000174684
+          },
+          {
+            "calls": 17,
+            "cumulative_seconds": 0.030956598000000002,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+              622,
+              "reset"
+            ],
+            "self_seconds": 0.000983747
+          },
+          {
+            "calls": 17,
+            "cumulative_seconds": 0.0013467910000000002,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+              838,
+              "close"
+            ],
+            "self_seconds": 0.0013467910000000002
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 0.00048228400000000003,
+            "function": [
+              "~",
+              0,
+              "<built-in method builtins.len>"
+            ],
+            "self_seconds": 0.00048228400000000003
+          },
+          {
+            "calls": 17,
+            "cumulative_seconds": 0.000026933,
+            "function": [
+              "~",
+              0,
+              "<built-in method builtins.getattr>"
+            ],
+            "self_seconds": 0.000026933
+          },
+          {
+            "calls": 17,
+            "cumulative_seconds": 0.000010719,
+            "function": [
+              "~",
+              0,
+              "<method 'close' of 'generator' objects>"
+            ],
+            "self_seconds": 0.000010719
+          }
+        ],
+        "partition_residual_seconds": 3.552713678800501e-15,
+        "self_seconds": 0.030392552000000003
+      },
+      {
+        "calls": 2244,
+        "cumulative_seconds": 8.59140762,
+        "function": [
+          "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/chunks.py",
+          359,
+          "iter_likelihood_chunks"
+        ],
+        "immediate_children": [
+          {
+            "calls": 2227,
+            "cumulative_seconds": 4.085595467,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile_remaining.py",
+              296,
+              "prediction"
+            ],
+            "self_seconds": 0.033779973000000005
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 1.619315652,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/families/gaussian.py",
+              345,
+              "evaluate_natural"
+            ],
+            "self_seconds": 0.045874094000000004
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 1.2414369280000002,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/families/gaussian.py",
+              230,
+              "take"
+            ],
+            "self_seconds": 0.021122481000000002
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 1.0096806230000002,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/derivatives.py",
+              122,
+              "transform_natural_derivatives"
+            ],
+            "self_seconds": 0.31966029500000004
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 0.273751083,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/chunks.py",
+              313,
+              "_theta_chunk"
+            ],
+            "self_seconds": 0.08792026500000001
+          },
+          {
+            "calls": 2244,
+            "cumulative_seconds": 0.116801449,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/chunks.py",
+              161,
+              "iter_row_chunks"
+            ],
+            "self_seconds": 0.041848494
+          },
+          {
+            "calls": 17,
+            "cumulative_seconds": 0.012131888,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/chunks.py",
+              326,
+              "_validate_chunk_inputs"
+            ],
+            "self_seconds": 0.00922631
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 0.005919757,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.venv/lib/python3.13/site-packages/numpy/_core/fromnumeric.py",
+              2586,
+              "all"
+            ],
+            "self_seconds": 0.0012927750000000001
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 0.001240309,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/family.py",
+              326,
+              "derivative_order"
+            ],
+            "self_seconds": 0.001240309
+          },
+          {
+            "calls": 4488,
+            "cumulative_seconds": 0.0009972470000000002,
+            "function": [
+              "~",
+              0,
+              "<built-in method builtins.len>"
+            ],
+            "self_seconds": 0.0009972470000000002
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 0.000271429,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.venv/lib/python3.13/site-packages/numpy/_core/fromnumeric.py",
+              2581,
+              "_all_dispatcher"
+            ],
+            "self_seconds": 0.000271429
+          },
+          {
+            "calls": 51,
+            "cumulative_seconds": 0.00002871,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/chunks.py",
+              381,
+              "<genexpr>"
+            ],
+            "self_seconds": 0.00002871
+          }
+        ],
+        "partition_residual_seconds": 0.007384187999999625,
+        "self_seconds": 0.21685289000000002
+      },
+      {
+        "calls": 2227,
+        "cumulative_seconds": 2.872229747,
+        "function": [
+          "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+          645,
+          "_prepare_chunk"
+        ],
+        "immediate_children": [
+          {
+            "calls": 48994,
+            "cumulative_seconds": 1.0503088870000001,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile_remaining.py",
+              261,
+              "native"
+            ],
+            "self_seconds": 1.033054308
+          },
+          {
+            "calls": 48994,
+            "cumulative_seconds": 0.431060779,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+              186,
+              "_index_values"
+            ],
+            "self_seconds": 0.086672945
+          },
+          {
+            "calls": 44540,
+            "cumulative_seconds": 0.26204053,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.venv/lib/python3.13/site-packages/numpy/_core/numeric.py",
+              2471,
+              "array_equal"
+            ],
+            "self_seconds": 0.164876782
+          },
+          {
+            "calls": 13362,
+            "cumulative_seconds": 0.24833844400000002,
+            "function": [
+              "~",
+              0,
+              "<method 'fill' of 'numpy.ndarray' objects>"
+            ],
+            "self_seconds": 0.24833844400000002
+          },
+          {
+            "calls": 8908,
+            "cumulative_seconds": 0.043146759,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.venv/lib/python3.13/site-packages/numpy/_core/fromnumeric.py",
+              2474,
+              "any"
+            ],
+            "self_seconds": 0.010448903
+          },
+          {
+            "calls": 75718,
+            "cumulative_seconds": 0.042964367,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+              175,
+              "_array"
+            ],
+            "self_seconds": 0.042964367
+          },
+          {
+            "calls": 44540,
+            "cumulative_seconds": 0.009880791,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+              161,
+              "n_bins"
+            ],
+            "self_seconds": 0.009880791
+          },
+          {
+            "calls": 40086,
+            "cumulative_seconds": 0.007212556,
+            "function": [
+              "~",
+              0,
+              "<built-in method builtins.len>"
+            ],
+            "self_seconds": 0.007212556
+          },
+          {
+            "calls": 44540,
+            "cumulative_seconds": 0.005633112,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.venv/lib/python3.13/site-packages/numpy/_core/numeric.py",
+              2452,
+              "_array_equal_dispatcher"
+            ],
+            "self_seconds": 0.005633112
+          },
+          {
+            "calls": 4454,
+            "cumulative_seconds": 0.0047684400000000005,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/predictor.py",
+              150,
+              "width"
+            ],
+            "self_seconds": 0.0047684400000000005
+          },
+          {
+            "calls": 8908,
+            "cumulative_seconds": 0.001549204,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.venv/lib/python3.13/site-packages/numpy/_core/fromnumeric.py",
+              2469,
+              "_any_dispatcher"
+            ],
+            "self_seconds": 0.001549204
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 0.00057465,
+            "function": [
+              "~",
+              0,
+              "<built-in method builtins.isinstance>"
+            ],
+            "self_seconds": 0.00057465
+          }
+        ],
+        "partition_residual_seconds": -4.440892098500626e-16,
+        "self_seconds": 0.7647512280000001
+      },
+      {
+        "calls": 17,
+        "cumulative_seconds": 0.11763022100000001,
+        "function": [
+          "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+          775,
+          "finish"
+        ],
+        "immediate_children": [
+          {
+            "calls": 2227,
+            "cumulative_seconds": 0.052026625,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile_remaining.py",
+              196,
+              "timed_matmul"
+            ],
+            "self_seconds": 0.051282711
+          },
+          {
+            "calls": 1326,
+            "cumulative_seconds": 0.027150949,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+              785,
+              "put"
+            ],
+            "self_seconds": 0.007723750000000001
+          },
+          {
+            "calls": 1530,
+            "cumulative_seconds": 0.004291476000000001,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.venv/lib/python3.13/site-packages/numpy/_core/fromnumeric.py",
+              2586,
+              "all"
+            ],
+            "self_seconds": 0.0008387290000000001
+          },
+          {
+            "calls": 17,
+            "cumulative_seconds": 0.001083678,
+            "function": [
+              "~",
+              0,
+              "<built-in method builtins.all>"
+            ],
+            "self_seconds": 0.000083188
+          },
+          {
+            "calls": 34,
+            "cumulative_seconds": 0.00021041600000000003,
+            "function": [
+              "~",
+              0,
+              "<built-in method numpy.zeros>"
+            ],
+            "self_seconds": 0.00021041600000000003
+          },
+          {
+            "calls": 1530,
+            "cumulative_seconds": 0.00016511800000000001,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.venv/lib/python3.13/site-packages/numpy/_core/fromnumeric.py",
+              2581,
+              "_all_dispatcher"
+            ],
+            "self_seconds": 0.00016511800000000001
+          }
+        ],
+        "partition_residual_seconds": 0.002506124999999998,
+        "self_seconds": 0.030195834
+      },
+      {
+        "calls": 2227,
+        "cumulative_seconds": 12.692698290000001,
+        "function": [
+          "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+          730,
+          "add_chunk"
+        ],
+        "immediate_children": [
+          {
+            "calls": 189295,
+            "cumulative_seconds": 7.424870132000001,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile_remaining.py",
+              261,
+              "native"
+            ],
+            "self_seconds": 7.373457307000001
+          },
+          {
+            "calls": 2227,
+            "cumulative_seconds": 2.872229747,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/src/superglm/distributional/solver/_global_moments.py",
+              645,
+              "_prepare_chunk"
+            ],
+            "self_seconds": 0.7647512280000001
+          },
+          {
+            "calls": 11135,
+            "cumulative_seconds": 1.292390356,
+            "function": [
+              "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/remaining-cost-5c1ce17e/profile_remaining.py",
+              196,
+              "timed_matmul"
+            ],
+            "self_seconds": 1.288075161
+          }
+        ],
+        "partition_residual_seconds": 0,
+        "self_seconds": 1.103208055
+      }
+    ],
+    "interpretation": "One instrumented diagnostic fit, not a fit-time estimate. Native/matmul intervals are subsets of cProfile owners, never additional phases. diagnose captured after profiling, fit clocks/RSS and ordinary outputs. User prioritizes wall time."
+  },
   "streamed_global_moment_production_benchmark": {
     "schema": 1,
     "status": "complete",

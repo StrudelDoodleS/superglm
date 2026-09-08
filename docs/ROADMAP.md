@@ -182,8 +182,21 @@ At the wider million-row shape, exact/discrete one-thread samples are
 75.795/46.956 s, and four-thread samples 46.844/44.732 s. These are single
 observations at two coupled N/P shapes, not a full crossover study.
 
-Next: profile the remaining production geometry and repeated row passes, and
-check the scalar thread policy under known native settings. The shared BLAS
+The production profile and scalar policy control are complete. Scalar exact
+forced1/forced4/auto samples take 5.118/5.395/5.120 s; discrete auto takes
+0.648 s, all using direct REML. Auto correctly selects one thread for that
+79-coefficient fixture. This does not establish a universal scalar policy.
+LSS geometry's diagnostic 21.485 s divides mainly into 12.693 s accumulating
+global moments and 8.591 s producing chunks; only 1.619 s of chunk production
+is family evaluation. These instrumented intervals are not fit-time estimates.
+
+Next, the user explicitly chooses full-pass binned LSS before a parallel rewrite:
+keep the compressed supports and compare full-row likelihood execution against
+small chunks, treating chunking as an additional memory option. Measure current
+chunks, larger geometry chunks, whole-data geometry and whole-data row passes
+with explicit workspace allowances, unchanged representations and complete-fit
+time/RSS/dispatch evidence. A full-pass global plan is estimated near 513 MiB,
+separate from caller-owned arrays and whole-process memory. The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,
 backend or timing input; `-1` disables intervention rather than selecting an
 optimal count. It does not parallelize native moment loops. Use live
