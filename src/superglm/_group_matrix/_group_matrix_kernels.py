@@ -7,6 +7,29 @@ from numba import njit  # type: ignore[import-untyped]
 
 
 @njit(cache=True)
+def _tensor_operand_in_reassociation_range(values):
+    """Check exponent headroom without allocating absolute-value/mask arrays."""
+    for row in range(values.shape[0]):
+        for col in range(values.shape[1]):
+            value = values[row, col]
+            if value != 0.0 and not 2.0**-128 <= abs(value) <= 2.0**128:
+                return False
+    return True
+
+
+@njit(cache=True)
+def _indexed_row_dot(left, right, left_idx, right_idx):
+    """Row dot products gathered from two support tables, without row panels."""
+    result = np.empty(len(left_idx), dtype=np.float64)
+    for row in range(len(left_idx)):
+        value = 0.0
+        for col in range(left.shape[1]):
+            value += left[left_idx[row], col] * right[right_idx[row], col]
+        result[row] = value
+    return result
+
+
+@njit(cache=True)
 def _csr_weighted_gram(data, indices, indptr, W, p):
     """B.T @ diag(W) @ B exploiting CSR sparsity (symmetric accumulation)."""
     result = np.zeros((p, p))

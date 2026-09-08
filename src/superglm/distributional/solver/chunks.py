@@ -226,6 +226,37 @@ def _validated_coefficients(
     return values
 
 
+def _predictor_values(
+    layout: StackedLayout,
+    coefficients: NDArray[np.float64],
+    rows: RowChunk,
+    *,
+    include_offsets: bool,
+) -> NDArray[np.float64]:
+    """Evaluate a chunk without preparing coefficient-space geometry.
+
+    Each group subset is consumed immediately. In particular, value-only
+    line searches and convergence checks need neither a chunk DesignMatrix
+    (and its execution metadata) nor retained PredictorExecutionPlans.
+    """
+    eta = np.empty((len(rows.indices), len(layout.predictors)), dtype=np.float64)
+    for state in layout.predictors:
+        intercept = state.intercept_index is not None
+        local = coefficients[state.coefficient_slice]
+        values = np.full(len(rows.indices), local[0] if intercept else 0.0, dtype=np.float64)
+        column = int(intercept)
+        for group in state.design.group_matrices:
+            width = group.shape[1]
+            values += group.row_subset(rows.indices).matvec(local[column : column + width])
+            column += width
+        if include_offsets:
+            values += state.offset[rows.start : rows.stop]
+        eta[:, state.parameter_index] = values
+    if not np.all(np.isfinite(eta)):
+        raise ValueError("chunk predictor evaluation produced non-finite values")
+    return eta
+
+
 def _predictor_chunk(
     layout: StackedLayout,
     coefficients: NDArray[np.float64],
@@ -400,7 +431,7 @@ def evaluate_chunked_log_likelihood(
         k_parameters=len(layout.predictors),
         p_coefficients=layout.n_coefficients,
     ):
-        eta, _plans = _predictor_chunk(
+        eta = _predictor_values(
             layout,
             coefficient_values,
             rows,
@@ -482,7 +513,7 @@ def maximum_chunked_predictor_change(
         k_parameters=len(layout.predictors),
         p_coefficients=layout.n_coefficients,
     ):
-        change, _plans = _predictor_chunk(
+        change = _predictor_values(
             layout,
             step,
             rows,
@@ -510,7 +541,7 @@ def materialize_terminal_predictions(
         k_parameters=k_parameters,
         p_coefficients=layout.n_coefficients,
     ):
-        eta_chunk, _plans = _predictor_chunk(
+        eta_chunk = _predictor_values(
             layout,
             coefficient_values,
             rows,

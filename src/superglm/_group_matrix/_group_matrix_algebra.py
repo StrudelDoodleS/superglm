@@ -721,6 +721,10 @@ def _expand_support_rows(B_unique: NDArray, bin_idx: NDArray) -> NDArray:
     Named so the chunking above it can be pinned by row count in a test rather
     than asserted about.
     """
+    # take avoids fancy-index row overhead for contiguous supports. On a
+    # strided support it first copies the entire input, violating panel bounds.
+    if B_unique.flags.c_contiguous:
+        return np.take(B_unique, bin_idx, axis=0)
     return B_unique[bin_idx]
 
 
@@ -1264,63 +1268,48 @@ def _cross_gram(
         _profile_elapsed(profile, "block_cross_tensor_main_s", t0)
         return result
 
-    if isinstance(gm_i, DiscretizedSCOPGroupMatrix) and isinstance(
-        gm_j, DiscretizedSCOPGroupMatrix
-    ):
-        n_joint = gm_i.n_bins * gm_j.n_bins
-        if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
-            t0 = perf_counter() if profile is not None else 0.0
-            W_2d = (
-                _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
-                if cache is None
-                else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
-            )
-            result = gm_i.B_scop_unique.T @ W_2d @ gm_j.B_scop_unique
+    DiscTypes = (DiscretizedSSPGroupMatrix, DiscretizedSCOPGroupMatrix)
+    if isinstance(gm_i, DiscTypes) and isinstance(gm_j, DiscTypes):
+        t0 = perf_counter() if profile is not None else 0.0
+        B_i = gm_i.B_unique if isinstance(gm_i, DiscretizedSSPGroupMatrix) else gm_i.B_scop_unique
+        B_j = gm_j.B_unique if isinstance(gm_j, DiscretizedSSPGroupMatrix) else gm_j.B_scop_unique
+        n_i, p_i = B_i.shape
+        n_j, p_j = B_j.shape
+        n_joint = n_i * n_j
+        # Histogram contraction is efficient BLAS on the bin grid; row panels
+        # also pay NumPy setup, indexed gathering, and weighting costs. Generic
+        # support-grid probes put those overheads at about 128k fixed and 512
+        # per-row multiply-add equivalents. Require a 25% estimated advantage
+        # to change routes; retain histogram reuse near the crossover. Maps are
+        # common to both routes, and the cell ceiling remains a hard limit.
+        hist_work = n_joint * (1 + p_i) + n_j * p_i * p_j
+        row_work = 128_000 + len(W) * (512 + p_i + p_j + p_i * p_j)
+        # The row helper weights a panel in place with a float64 byte budget.
+        # Keep other support dtypes on their established histogram/fallback
+        # routes so integer casting and float32 accumulation do not change.
+        use_rows = (
+            B_i.dtype == np.float64
+            and B_j.dtype == np.float64
+            and (n_joint > _MAX_DISC_DISC_HIST_CELLS or 4 * row_work < 3 * hist_work)
+        )
+        if use_rows or n_joint <= _MAX_DISC_DISC_HIST_CELLS:
+            if use_rows:
+                raw = _support_support_raw_cross(B_i, gm_i.bin_idx, B_j, gm_j.bin_idx, W)
+                _profile_count(profile, "block_cross_disc_disc_rows_calls")
+            else:
+                W_2d = (
+                    _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, n_i, n_j)
+                    if cache is None
+                    else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, n_i, n_j)
+                )
+                raw = B_i.T @ W_2d @ B_j
+                _profile_count(profile, "block_cross_disc_disc_hist_calls")
+            if isinstance(gm_i, DiscretizedSSPGroupMatrix):
+                raw = gm_i.R_inv.T @ raw
+            if isinstance(gm_j, DiscretizedSSPGroupMatrix):
+                raw = raw @ gm_j.R_inv
             _profile_elapsed(profile, "block_cross_disc_disc_s", t0)
-            return result
-
-    if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSCOPGroupMatrix):
-        n_joint = gm_i.n_bins * gm_j.n_bins
-        if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
-            t0 = perf_counter() if profile is not None else 0.0
-            W_2d = (
-                _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
-                if cache is None
-                else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
-            )
-            BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_scop_unique
-            result = gm_i.R_inv.T @ BtWB
-            _profile_elapsed(profile, "block_cross_disc_disc_s", t0)
-            return result
-
-    if isinstance(gm_i, DiscretizedSCOPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
-        n_joint = gm_i.n_bins * gm_j.n_bins
-        if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
-            t0 = perf_counter() if profile is not None else 0.0
-            W_2d = (
-                _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
-                if cache is None
-                else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
-            )
-            BtWB = gm_i.B_scop_unique.T @ W_2d @ gm_j.B_unique
-            result = BtWB @ gm_j.R_inv
-            _profile_elapsed(profile, "block_cross_disc_disc_s", t0)
-            return result
-
-    if isinstance(gm_i, DiscretizedSSPGroupMatrix) and isinstance(gm_j, DiscretizedSSPGroupMatrix):
-        n_joint = gm_i.n_bins * gm_j.n_bins
-        if n_joint <= _MAX_DISC_DISC_HIST_CELLS:
-            # Fused 2D histogram: single O(n) pass, no (n,) temp allocations.
-            t0 = perf_counter() if profile is not None else 0.0
-            W_2d = (
-                _disc_disc_2d_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
-                if cache is None
-                else cache.disc_disc_hist(gm_i.bin_idx, gm_j.bin_idx, W, gm_i.n_bins, gm_j.n_bins)
-            )
-            BtWB = gm_i.B_unique.T @ W_2d @ gm_j.B_unique
-            result = gm_i.R_inv.T @ BtWB @ gm_j.R_inv
-            _profile_elapsed(profile, "block_cross_disc_disc_s", t0)
-            return result
+            return raw
 
     if isinstance(gm_i, DiscretizedSCOPGroupMatrix):
         t0 = perf_counter() if profile is not None else 0.0

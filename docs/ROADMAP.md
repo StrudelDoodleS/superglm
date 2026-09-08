@@ -112,6 +112,14 @@ validation passed 11,546 tests with 174 skips and mandatory real-data availabili
 
 ## Next
 
+**Immediate execution gate: discrete performance.** Before starting another
+capability, investigate and improve discrete complete-fit execution. The
+[implementation plan](research/2026-09-discrete-performance-plan.md) covers
+cost-aware histogram dispatch and avoidable chunk preparation, with signed
+stored-design equivalence, bounded memory and complete-fit evidence required.
+Compact storage alone does not demonstrate faster fitting. The capabilities
+below remain the subsequent priority order until this gate is resolved.
+
 In current priority order:
 
 **1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing

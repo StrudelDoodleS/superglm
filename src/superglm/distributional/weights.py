@@ -293,7 +293,10 @@ def _take_map(indices: np.ndarray, length: int) -> np.ndarray:
         raise LikelihoodWeightError("take indices must retain at least one row")
     if np.any(take_map < 0) or np.any(take_map >= length):
         raise LikelihoodWeightError("take indices are out of range")
-    if len(np.unique(take_map)) != len(take_map):
+    # Chunk selections are increasing: adjacent comparisons certify uniqueness
+    # without sorting. Compare directly to avoid integer-difference overflow.
+    increasing = np.all(take_map[1:] > take_map[:-1])
+    if not increasing and len(np.unique(take_map)) != len(take_map):
         raise LikelihoodWeightError("take indices must not contain duplicates")
     return _readonly_array(take_map, dtype=np.intp)
 

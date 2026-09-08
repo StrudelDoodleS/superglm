@@ -257,32 +257,93 @@ def data_fixture(args):
 
 
 class CallRecorder:
-    """Separate profile run: counts actual Python dispatch without replacing it."""
+    """Separate profile run: Python calls plus transparent native-kernel witnesses."""
 
     def __init__(self):
         self.calls, self.shapes = Counter(), Counter()
+        self.kernel_calls, self.kernel_results, self.gram_branches = Counter(), Counter(), Counter()
+        self.kernel_attributes_missing = []
+        self._kernel_originals = []
+
+    def install_kernel_witnesses(self):
+        # Patch the caller's imported attributes: sys.setprofile cannot reliably
+        # observe calls through an already compiled Numba dispatcher.
+        module_name = "superglm._group_matrix._group_matrix_discretized"
+        module = sys.modules.get(module_name)
+        for name in ("_indexed_row_dot", "_tensor_operand_in_reassociation_range"):
+            key = f"{module_name}.{name}"
+            original = getattr(module, name, None)
+            if not callable(original):
+                self.kernel_attributes_missing.append(key)
+                continue
+
+            def witness(original=original, key=key, name=name):
+                def invoke(*args, **kwargs):
+                    self.kernel_calls[key] += 1
+                    try:
+                        result = original(*args, **kwargs)
+                    except BaseException:
+                        self.kernel_results[f"{key}:raised"] += 1
+                        raise
+                    if name == "_tensor_operand_in_reassociation_range":
+                        outcome = "accepted" if bool(result) else "refused"
+                        self.kernel_results[f"{key}:{outcome}"] += 1
+                    else:
+                        self.kernel_results[f"{key}:returned"] += 1
+                    return result
+
+                return invoke
+
+            self._kernel_originals.append((module, name, original))
+            setattr(module, name, witness())
+
+    def restore_kernel_witnesses(self):
+        for module, name, original in reversed(self._kernel_originals):
+            setattr(module, name, original)
+        self._kernel_originals.clear()
 
     def __call__(self, frame, event, arg):
+        name, module = frame.f_code.co_name, frame.f_globals.get("__name__", "")
+        if event == "return" and name == "_factored_gram_raw" and module.startswith("superglm"):
+            if arg is None:
+                branch = "exception_or_no_result"
+            elif "reassociate" not in frame.f_locals:
+                branch = "legacy_no_reassociation_branch"
+            else:
+                branch = "reassociated" if frame.f_locals["reassociate"] else "fallback"
+            self.gram_branches[f"{module}.{name}:{branch}"] += 1
         if event != "call":
             return
-        name, module = frame.f_code.co_name, frame.f_globals.get("__name__", "")
         selected = (
-            module.startswith("superglm")
-            and name
-            in (
-                "toarray",
-                "row_subset",
-                "assemble_chunked_geometry",
-                "evaluate_chunked_log_likelihood",
-                "materialize_terminal_predictions",
-                "_predictor_chunk",
-                "fit_dense",
-                "_run_iterations",
-                "_evaluate_state_unmeasured",
-                "_geometry",
-                "_evaluate_joint_laml",
+            (
+                module.startswith("superglm")
+                and name
+                in (
+                    "toarray",
+                    "row_subset",
+                    "assemble_chunked_geometry",
+                    "evaluate_chunked_log_likelihood",
+                    "materialize_terminal_predictions",
+                    "_predictor_chunk",
+                    "_predictor_values",
+                    "_disc_disc_2d_hist",
+                    "_support_support_raw_cross",
+                    "_factored_gram_raw",
+                    "maximum_chunked_predictor_change",
+                    "fit_dense",
+                    "_run_iterations",
+                    "_evaluate_state_unmeasured",
+                    "_geometry",
+                    "_evaluate_joint_laml",
+                )
             )
-        ) or (module.startswith("numpy") and name == "argsort")
+            or (module.startswith("numpy") and name == "argsort")
+            or (
+                module.startswith("superglm")
+                and name == "__init__"
+                and type(frame.f_locals.get("self")).__name__ == "PredictorExecutionPlan"
+            )
+        )
         if selected:
             owner = frame.f_locals.get("self")
             key = f"{module}.{type(owner).__name__ + '.' if owner is not None else ''}{name}"
@@ -326,6 +387,7 @@ def worker(args):
                 "NUMBA_NUM_THREADS",
                 "VECLIB_MAXIMUM_THREADS",
                 "BLIS_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
             )
         },
         "environment_before": environment_snapshot(),
@@ -368,6 +430,7 @@ def worker(args):
                 )
             recorder = CallRecorder()
             if args.instrument:
+                recorder.install_kernel_witnesses()
                 sys.setprofile(recorder)
             start = time.perf_counter()
             try:
@@ -388,6 +451,8 @@ def worker(args):
             finally:
                 elapsed = time.perf_counter() - start
                 sys.setprofile(None)
+                if args.instrument:
+                    recorder.restore_kernel_witnesses()
                 report["peak_fit_process_rss_bytes"] = (
                     resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
                 )
@@ -396,6 +461,10 @@ def worker(args):
                     "enabled": args.instrument,
                     "calls": recorder.calls,
                     "shape_counts": recorder.shapes,
+                    "native_kernel_calls": recorder.kernel_calls,
+                    "native_kernel_results": recorder.kernel_results,
+                    "tensor_gram_branches": recorder.gram_branches,
+                    "kernel_attributes_missing": recorder.kernel_attributes_missing,
                 }
             if args.measure_time and os.getloadavg()[0] <= 2 * len(os.sched_getaffinity(0)):
                 report.update(
@@ -594,6 +663,7 @@ def main():
         "NUMBA_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
         "BLIS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
     ):
         env[key] = str(args.threads)
     for repeat in range(args.repeat):
