@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
+from superglm.distributional._panel_policy import automatic_small_group_panel_budget
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -486,18 +487,25 @@ def assemble_chunked_geometry(
     penalty: NDArray,
     chunk_size: ChunkSize,
     curvature_source: CurvatureSource,
-    small_group_panel_byte_budget: int | None = None,
+    small_group_panel_byte_budget: int | Literal["auto"] | None = "auto",
 ) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
 
-    The optional panel byte budget is an internal execution experiment. The
-    default retains grouped dispatch until complete-fit evidence establishes
-    which layouts benefit from bounded panels.
+    Automatic panels admit a narrow mixed ordinary layout with an additional
+    64 MiB workspace allowance. The row chunk policy is unchanged. Explicit
+    ``None`` disables panels; an integer requests the existing budgeted builder
+    directly. Builder/channel refusals retain grouped contraction. Neither
+    execution choice changes the stored design or the chunked backend identity.
     """
     accumulator = GroupedGeometryAccumulator(
         layout,
         penalty=penalty,
         coefficients=coefficients,
+    )
+    panel_byte_budget = (
+        automatic_small_group_panel_budget(layout)
+        if type(small_group_panel_byte_budget) is str and small_group_panel_byte_budget == "auto"
+        else small_group_panel_byte_budget
     )
     for chunk in iter_likelihood_chunks(
         family,
@@ -509,11 +517,11 @@ def assemble_chunked_geometry(
         curvature_source=curvature_source,
     ):
         workspace = None
-        if small_group_panel_byte_budget is not None:
+        if panel_byte_budget is not None:
             workspace = build_small_group_panels(
                 chunk.plans,
                 slice(0, chunk.plans[0].design.n),
-                byte_budget=small_group_panel_byte_budget,
+                byte_budget=panel_byte_budget,
             ).workspace
         try:
             accumulator.add_score(chunk.plans, chunk.score_eta)

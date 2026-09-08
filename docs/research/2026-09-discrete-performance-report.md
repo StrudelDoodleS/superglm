@@ -1,15 +1,17 @@
 # Discrete execution performance
 
 Discrete execution improvements reduce complete-fit time on several public
-fixtures, but the C1 performance gate remains open. On a fragmented Gaussian
-design, current automatic chunking remains slower than exact dense fitting from
-65,536 to 1,048,576 rows. Optional panels help locally; an experimental dense
-execution override is faster but uses more memory. Neither experiment establishes
-a new automatic policy.
+fixtures, but the C1 performance gate remains open. The fragmented Gaussian
+size sweep at `ed84669a` finds automatic chunking slower than exact dense fitting
+from 65,536 to 1,048,576 rows. Subsequent range and renderer changes improve
+complete fits at 262,144 rows. Those measurements support automatic bounded
+panels for a narrow mixed ordinary layout. An experimental dense execution
+override is faster but uses more memory; automatic dense selection is deferred.
 
-This interim report covers evidence through
-`ed84669a9e81b7eb5eedd5372a2cd02262caf17b`. Further implementation and final
-integration validation remain in progress. The
+The latest complete-fit measurements cover
+`56d9507a8cb4f505092175624012a68b6d0021d1`. The subsequent automatic panel policy
+has passed focused tests and independent review; final integration and default
+route validation remain in progress. The
 performance baseline is the frozen post-C3 source
 `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`; the plan checkpoint `0a15736e`
 has the same production source. This is distinct from published v0.31.0 at
@@ -39,8 +41,16 @@ not be presented as measurements against that release.
   guarded signed reduction route for factor-smooth/dense products with multiple
   right-hand sides. `50b5e8bb` compiles the panels' arithmetic-range checks and
   warms supported writable/readonly layouts. `ed84669a` adds the categorical
-  subset improvement. Automatic panel admission remains disabled; the internal
-  panel budget defaults to `None`. The automatic chunk-size policy is unchanged.
+  subset improvement. Subsequent range and renderer changes are measured below.
+  The automatic chunk-size policy is unchanged.
+- Automatic panels now admit exact built-in mixed layouts containing numeric,
+  categorical, stored spline and spline-by-category groups in every predictor
+  with slopes. Each group has at most 32 columns; intercept-only companions are
+  allowed. This is an initial tested scope, not a measured speed crossover.
+  The additional panel workspace allowance is 64 MiB, separate from the existing
+  8 MiB row chunk selector; neither bounds whole-process RSS. Explicit off and
+  integer-budget overrides, numerical refusal and grouped fallback remain.
+  Specialized, custom and unsupported layouts keep their existing routes.
 
 ## Representations and workloads
 
@@ -197,6 +207,55 @@ matrix assembly. These findings support investigating repeated rendering,
 row selection and range scans while preserving bounded workspace and numeric
 refusals. They do not establish the performance of a proposed replacement.
 
+## Range and renderer complete fits
+
+Three fresh fits per arm compare frozen `ed84669a` with `56d9507a` on the
+262,144-row fragmented workload. The five-arm order is forward, reverse, then
+forward. Times are complete-fit medians in seconds; RSS is the process
+high-water mark captured at fit completion, in MiB.
+
+| Route | Old wall | New wall | Old CPU | New CPU | Old RSS | New RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| Ordinary automatic chunks | 22.648 | 17.906 | 22.618 | 17.889 | 771.46 | 777.34 |
+| Explicit bounded panels | 17.172 | 12.207 | 17.158 | 12.196 | 769.29 | 777.30 |
+| Stored discrete basis, dense control | — | 7.801 | — | 7.778 | — | 1100.81 |
+
+Ordinary chunks improve by 20.9% and panels by 28.9% in this window. Old/new
+wall ranges are 20.280–23.920 / 14.996–18.371 s for ordinary chunks, and
+15.243–18.423 / 10.586–14.066 s for panels. The ranges do not overlap. Dense
+controls span 7.626–8.041 s and retain the faster, higher-memory tradeoff.
+The first old automatic fit has a 936.43 MiB high-water mark and a 19.50 s
+warmup, versus 0.26–0.67 s warmup for the other workers. Warmup lies outside
+fit timing; all observations, including this memory outlier, are retained.
+
+All 15 stored representation hashes and iteration counts agree. Each fit has
+18 coefficient iterations, seven smoothing iterations and 19 geometry builds.
+Old/new same-route saved arrays agree exactly on this fixture; the largest
+cross-route holdout difference is 1.11e-15. This is fixture evidence, not a
+general bitwise-equivalence promise. Every new range call is accepted;
+panel fits accept 627 builds and 1,881 curvature products, with a maximum
+estimated workspace of 21,993,536 bytes. Timings retain disclosed integer-only
+dispatch witnesses, with no call profiler or per-call clocks. Source, helper,
+thread-pool and CPU-activity checks pass throughout.
+
+## Raw-basis tabmat comparison
+
+A separate prototype tests chunk-owned raw-basis tabmat matrices on the same
+262,144-row book, with 8,065-row chunks and one numerical thread. Construction,
+conversion, channel copies, coefficient transforms and all geometry outputs
+are included. Three repeated complete geometry passes within each of three
+fresh workers give median wall times of 0.791 s for grouped execution, 0.535 s
+for panels and 1.467 s for raw-basis tabmat; corresponding process peaks are
+517.74, 517.97 and 517.77 MiB. These are geometry-only diagnostics, not fits.
+
+The prototype uses the actual stored support, including four nonzeros per
+eight-column basis row in this fixture, and exercises native tabmat kernels.
+Signed curvature and score results agree with norm-relative differences of
+3.33e-16 and 2.62e-16. Representation, source and activity checks pass. This
+constructor-inclusive result does not justify a full-fit adaptation. The
+prototype and unfavorable receipts remain preserved outside production code;
+they do not rule out other tabmat designs or workloads.
+
 ## Measurement and validation limits
 
 Timed workers run serially in fresh interpreters with numerical threads fixed
@@ -232,15 +291,19 @@ authority permits two-bound searches and releases obsolete backing storage on
 refusal. Geometry retains owned chunk snapshots. Bounded support tables and
 checked writers reduce repeated transformation and scanning work; public warmup
 covers their compiled signatures. Independent reviews found no remaining
-blocking issues. These changes still need complete-fit measurements.
+blocking issues. Their complete-fit comparison is recorded above; final default
+policy and full-suite validation remain pending.
+
+The automatic panel policy passes 172 focused tests, including 44 new dispatch,
+override, refusal and lifetime regressions. Its default-dispatch regression
+fails on the prior implementation. Independent review reports no remaining
+findings. Final full-suite and actual-default complete-fit checks remain.
 
 The execution reviews found that tabmat supports signed weights, but a bounded
 LSS route needs chunk-owned matrices, constructor/native-workspace accounting
-and a strategy for rectangular curvature products. A raw-basis prototype is a
-separate comparison candidate. A private structural executor could consolidate
-range and rendering work while preserving the existing optimizer and signed
-matrix products. Neither is a selected replacement. The next decision requires
-construction-inclusive evidence, repeated complete fits on the final source,
-favorable support/tensor controls, actual dispatch and full-process memory.
+and a strategy for rectangular curvature products. The constructor-inclusive
+raw-basis comparison above does not support replacing the current kernel.
+Further structural consolidation is deferred while the selected changes receive
+final default-route, favorable support/tensor, dispatch and memory validation.
 The [plan](2026-09-discrete-performance-plan.md) and
 [roadmap](../ROADMAP.md) should continue to show an open performance gate.

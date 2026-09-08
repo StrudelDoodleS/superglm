@@ -323,3 +323,28 @@ owned arrays. The support-table reserve and checked-writer coverage are reviewed
 including public warmup and isolated allocation tests. Automatic policy remains
 unchanged. Compare this checkpoint against frozen `ed84669a` and evaluate the
 separate raw-basis tabmat prototype before selecting further integration.
+
+The three-repeat complete-fit comparison against `ed84669a` now records
+ordinary chunk medians of 22.648 to 17.906 s and panel medians of 17.172 to
+12.207 s, with nonoverlapping old/new ranges in this window. Saved same-route
+arrays and stored representation hashes agree on the fixture. The raw-basis
+tabmat prototype loses its constructor-inclusive geometry comparison (1.467 s
+versus panels at 0.535 s), so it will not receive a full-fit adaptation.
+
+Promote the bounded panel kernel automatically only within an explicit initial
+ordinary mixed-layout envelope, preserving specialized and unsupported routes,
+explicit off/budget overrides and per-chunk refusal. Keep existing row bounds
+and requested/resolved backend metadata. A group-width envelope is a tested
+scope limit, not a fitted speed crossover. Automatic dense execution remains
+deferred; its memory tradeoff is documented separately. Validate the actual
+default route and specialized controls, then complete final production suites.
+
+Automatic panel integration is implemented and independently reviewed. It reads
+only exact built-in types and dimensions, requiring the stated mixed layout in
+every predictor with slopes, allowing intercept-only companions and widths up
+to 32. It resolves the additional 64 MiB allowance once per geometry assembly.
+The builder remains the numerical and actual-storage authority. The 172 focused
+checks pass, including 44 new regressions for default dispatch, explicit
+overrides, signed channels, refusal and cleanup. The original default-dispatch
+case fails before the change. Source is frozen for full-suite and actual-default
+complete-fit validation; automatic dense execution remains deferred.
