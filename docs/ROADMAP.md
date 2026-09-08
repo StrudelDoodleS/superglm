@@ -1,6 +1,7 @@
 # Roadmap
 
-Last strategic review: **2026-09-08**, against `origin/master` at `8962c452` (published v0.31.0).
+Last strategic review: **2026-09-08**. Starting baseline: `origin/master` at
+`8962c452` (published v0.31.0); C3/C1 implementation through `9277baef`.
 
 This is **directional project state, not an implementation specification**,
 delivery commitment, or authorization to start a capability. Scope implementation
@@ -31,73 +32,74 @@ the scalar engine's existing performance and interpretability.
   1.08 GiB whole-process peak RSS. This is an earlier single-pair receipt ending
   at `practical_plateau`, not a current-head certified benchmark or an assembly
   timing. Scalar and LSS timings describe different workloads.
-- **C3 and C12 are partly delivered:** [smoothing](models/distributional.md#how-smoothing-parameters-are-chosen)
+- **Existing smoothing and inference:** [smoothing](models/distributional.md#how-smoothing-parameters-are-chosen)
   has safeguarded EFS, optional Newton/BFGS, stationarity evidence, and exact
   infinity-face decisions. [Inference](models/distributional-inference.md)
   already includes callable posterior bounds, supported tail functionals,
   smoothing-uncertainty correction, proper scores, and portfolio simulation.
-- **Real gaps remain:** public `discrete=True` refuses; LSS shape constraints
-  warn and fit unconstrained; cross-predictor penalties are unsupported.
-  [Grouped assembly] and [rectangular cross-products] already exist internally,
-  with [tests against materializing discrete slopes]. They are a starting point,
-  not evidence of a production discrete LSS route.
+- **Production grouped LSS is implemented:** public `discrete=True` supports
+  observed-curvature families, including Tweedie and NB2, with actual backend
+  telemetry. Smoothing and posterior derivative replay use bounded design
+  blocks; categorical spline chunks reuse row lookups. Existing [grouped
+  assembly][Grouped assembly] and [rectangular cross-products] remain the
+  underlying architecture.
+- **Real gaps remain:** LSS shape constraints warn and fit unconstrained;
+  cross-predictor penalties are unsupported. Dense coefficient factors, family
+  derivative arrays and retained coefficient histories still limit size. Some
+  smoothing fits, including the tested large real-book NB2 configuration, remain
+  uncertified.
 
-## Active scoped work: C3 + C1
+## Completed scoped work: C3 + C1
 
-The user explicitly selected completion of C3 and C1 on 2026-09-08. This takes
-precedence over the previous C5-before-C1 ordering. The
-[staged implementation plan](superpowers/plans/2026-09-08-c3-c1-completion.md)
-and [design](superpowers/specs/2026-09-08-c3-c1-completion-design.md) track the audit,
-implementation and acceptance evidence. Copies of the uncommitted strategy
-inputs are preserved; their originals remain in `.worktrees/roadmap-dossier`.
+The user explicitly selected C3 and C1 on 2026-09-08, overriding the previous
+C5-before-C1 ordering. The [implementation plan](superpowers/plans/2026-09-08-c3-c1-completion.md),
+[design](superpowers/specs/2026-09-08-c3-c1-completion-design.md) and
+[completion evidence](research/2026-09-c3-c1-completion-evidence.md) record the
+bounded scope and validation. Original uncommitted strategy inputs remain
+unchanged in `.worktrees/roadmap-dossier`.
 
-The current audit confirms that safeguarded Newton/EFS, stationarity evidence,
-exact penalty faces, grouped assembly and signed rectangular cross-products
-already exist. Remaining C1 work is public observed-chunk support, bounded
-smoothing/certification design access, and repeated row-subset costs. Retained
-coefficient-fit histories still store row parameters and remain a memory limit.
+**C3 follow-through:** the original correlated Tweedie and GPD EFS failures
+reproduce on v0.31.0. Existing strict EFS plus Newton controls reach endpoints
+passing the current stationarity checks from three smoothing starts on both
+baseline and implementation. [Source-bound stress receipts](research/2026-09-c3-stress-evidence.md)
+retain the failures, terminal checks, independent reference results and measured
+prediction/conditional-SE sensitivity. No new optimizer, shape penalty, relaxed
+tolerance or acceptance rule was needed. These checks establish the existing
+first-order numerical contract, not a rigorous enclosure of every derivative
+error or a local/global minimum guarantee. Unresolved reference probes remain
+visible.
 
-## Now
+**C1 production route:** public observed chunking, bounded derivative replay and
+cached categorical row extraction are implemented and regression tested.
+Complete smoothing fits cover signed geometry, weight semantics, interactions,
+prediction/covariance and serialization. The insurance evidence shows a memory
+benefit on 449,000 synthetic rows formed by repeating 22,450 real severity
+policies; the smaller real book does not save RSS. The large real-book NB2 comparison
+reproduces an uncertified smoothing stop in both versions, so its lower RSS is
+not a claim of reliable converged fitting.
 
-**1. Close the remaining LSS convergence questions and establish a reproducible
-complete-fit baseline (remaining C3).** The correlated Tweedie interaction and
-GPD smoothing-cap stress fits remain non-convergent in [PR #376]. Reproduce and
-classify them using the existing optimizer before selecting a remedy. A GPD
-shape penalty changes the statistical model; a smoothing cap does not diagnose
-an unbounded likelihood.
-
-**Exit gate:** each case has a justified converged result or a reproducible,
-explained limitation, checked against independent references and stable
-predictions/uncertainty across starts. Record practical versus certified stops,
-complete-fit work, memory, timing, and dispatch on representative real and
-synthetic books. Target derivative or kernel work only where that evidence
-identifies the bottleneck. This is bounded follow-through, not an optimizer
-rewrite or a promise to make every stress case converge.
-
-**2. Scalable LSS through the existing grouped/discrete machinery (C1).** Address
-measured dense memory and assembly limits, then promote supported families and
-layouts, preserving #1's certification contract. This can proceed independently
-of shape constraints. The internal chunk route currently requires expected information;
-Tweedie and NB2 lack it. Their observed-curvature route needs explicit coverage.
-**Gate:** complete smoothing fits, signed cross-block geometry, covariance and
-prediction agreement, bounded allocation, actual backend dispatch, and a
-repeatable end-to-end benefit. Separate exact assembly parity on a fixed binned
-design from discretization error against the unbinned fit. Grid refinement tests
-stable observables and uncertainty, not byte equality or a universal error rate.
+Exact compiled-design checks and continuous-grid sensitivity are separate
+evidence. Continuous Gaussian grids of 64, 256 and 1,024 bins reduce held-out
+prediction differences in this fixture; they do not establish a universal
+approximation rate. Whole-process RSS, actual dispatch, complete-fit work and
+the timing audit are recorded in the completion report. This closes the chosen
+C1 scope without claiming constant memory, universal speedups or 10⁷–10⁸-row
+capability.
 
 ## Next
 
 In current priority order:
 
-**3. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing
+**1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing
 constraints and distributional fits, starting with demanded monotone effects.
 Reuse scalar experience; settle the [SCOP acceptance/termination question]
 before transplanting its rules. **Gate:** demonstrated modelling need, joint
 likelihood/constraint correctness, and defensible inference at active boundaries.
 Constrained predictor shape must be distinguished from shape of a derived risk
-quantity. Depends on the relevant convergence evidence from #1.
+quantity. Use the relevant C3 convergence evidence above; constrained boundaries still
+need their own acceptance and inference contracts.
 
-**4. Extend functional inference for actuarial decisions (C12).** Build on
+**2. Extend functional inference for actuarial decisions (C12).** Build on
 `posterior_bounds` and family-owned functionals for loss layers, risk contrasts,
 and feature effects; add derivative-based uncertainty only where it is useful
 and justified. **Gate:** a concrete quantity not adequately served today, checked
@@ -150,20 +152,25 @@ another predictor count. Reopen only with a concrete use case and validating evi
 
 ## What changes the order
 
-- If the two stress cases no longer reproduce, close #1 and finish the explicitly selected C1 scope before C5. New
-  demonstrated wrong-answer or uncertainty failures take precedence over expansion.
-- Promote C1 above C5 if a representative book exceeds its memory/latency budget
-  and profiles identify assembly/storage as the limiting cost. If likelihood or
-  derivative evaluation dominates, prioritize that measured work instead. Bin
-  sensitivity or covariance disagreement blocks public promotion even after a speed win.
+- New demonstrated wrong-answer or uncertainty failures take precedence over
+  expansion. Reopen C3 for a scoped unsupported endpoint or a reproduced
+  convergence failure that blocks an intended model; the observed NB2 stop is
+  an explicit candidate, not a hidden passing result.
+- Reopen C1 when an intended book exceeds its memory or latency budget. Profile
+  family derivatives, retained history and coefficient factors before adding
+  another assembler. Bin sensitivity or covariance disagreement blocks a
+  representation change even if it improves speed.
 - Promote C12/C11 for a blocked layer/capital decision, C10 for a demonstrated
-  coverage gap, or C9 for repeatable held-out predictive gains. Compare log/tail
-  scores, calibration, and total cost on multiple books; novelty claims do not
-  establish predictive value. Revalidate the dossier's dated competitor claims.
-- Use [cost and timing policy](development/cost-and-timing.md): record exact
-  revision/data/configuration, stopping status, work/allocation and dispatch;
-  measure wall time on a quiet machine. Historical scalar timings and one dense
-  LSS receipt cannot justify 10⁷–10⁸-row or sub-second LSS promises.
+  coverage gap, and C9 for repeatable held-out predictive gains. Compare
+  log/tail scores, calibration and total cost on multiple books; novelty claims
+  do not establish predictive value. Revalidate the dossier's dated competitor
+  claims.
+- Follow the [cost and timing policy](development/cost-and-timing.md): record
+  exact revision/data/configuration, stopping status, work/allocation and
+  dispatch. Headroom/Kompress passthrough makes transformed tool output and
+  proxy clocks unsuitable evidence; use raw worker artifacts and audit activity
+  during a timing run. Historical scalar timings and one dense LSS receipt
+  cannot justify 10⁷–10⁸-row or sub-second LSS promises.
 
 ## Dossier corrections to retain
 

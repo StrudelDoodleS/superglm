@@ -165,9 +165,9 @@ Use this for heteroskedastic continuous outcomes, such as transformed claim
 severity. Raw claim frequency still requires a Poisson or negative-binomial
 model; Gaussian LS is not a count likelihood. See
 [distributional location–scale models](docs/models/distributional.md) for inference,
-diagnostics, and known limits. Discrete fitting remains available for scalar
-`SuperGLM` models, but `SuperLSS` currently refuses `discrete=True` until its
-multi-parameter route is complete.
+diagnostics, and known limits. `SuperLSS(discrete=True)` uses grouped marginal designs with bounded row chunks
+for fitting and smoothing validation. See the [discrete fitting contract](docs/models/distributional.md#discrete-fitting)
+for supported execution, memory limits, and grid sensitivity.
 
 `GammaLS` models a strictly positive response:
 
@@ -230,11 +230,12 @@ tweedie_lss = SuperLSS(
 )
 ```
 
-The public Tweedie route is dense and uses observed coefficient curvature.
+The public Tweedie route uses observed coefficient curvature, with dense or
+grouped discrete execution.
 Prior weights remain the default precision contract; explicit integer
 `weight_semantics="frequency"` means literal row replication. CDF and quantile
 calculations and quantile-based predictive simulation are available; Fisher
-fallback and `discrete=True` are not.
+fallback is unavailable.
 
 ## Validation And Model Comparison
 

@@ -74,3 +74,25 @@ Run focused mathematical regressions with demonstrated baseline failure or a
 mutation, then ordinary repository checks and data-required suites. Record
 pre-existing failures independently. Keep the plan, roadmap and final evidence
 report synchronized with what was actually established.
+
+## Established results
+
+The implemented route retains the architecture selected above. Existing strict
+EFS plus Newton resolves both named C3 trajectories under the existing
+stationarity contract; no production C3 solver change was justified. Public
+observed chunking, bounded derivative/posterior design replay and cached
+categorical row lookup are covered by focused mathematical and mutation checks.
+
+The [completion report](../../research/2026-09-c3-c1-completion-evidence.md)
+separates the real freMTPL2 book, synthetic replication for scaling, recovered
+synthetic stress fixtures, exact representation checks and continuous-grid
+approximation. The positive memory result uses 449,000 replicated severity rows;
+the smaller real book saves no RSS, and both versions refuse certification of
+the tested large real-book NB2 smoothing fit.
+
+The existing finite-difference refinement indicator is not a rigorous bound on
+all coefficient-mode, linear-solve, truncation and roundoff error. Passing the
+existing objective-scaled first-order stationarity checks does not certify a
+local or global minimum. The [C3 evidence](../../research/2026-09-c3-stress-evidence.md)
+records terminal authority, independent reference checks, sensitivity across
+starts and unresolved probes without strengthening that contract.

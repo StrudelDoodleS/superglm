@@ -79,6 +79,7 @@ docs/notebooks/spline_diagnostics/
 
 # Superpowers skill artifacts
 docs/superpowers/
+.benchmark-artifacts/
 docs/reml_freml_paper_checklist.md
 
 # Agentic harness artifacts

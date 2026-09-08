@@ -6,7 +6,7 @@ when a continuous response is reasonably Gaussian after any documented
 transformation but its spread changes with risk characteristics. The
 distributional surface also includes `GammaLS`, with predictors for conditional
 mean and coefficient of variation, for strictly positive responses. `TweedieLSS`
-adds a dense three-predictor model for nonnegative responses with a zero atom.
+adds a three-predictor model for nonnegative responses with a zero atom.
 `NegativeBinomialLS` jointly models the mean and NB2 size of count data.
 
 Do not use `GaussianLS` for raw claim counts. Use `NegativeBinomialLS` when both
@@ -210,9 +210,8 @@ likelihood exact: aggregate identical rows and fit them with
 `weight_semantics="frequency"`, or move exposure into an offset so that the
 counts themselves stay small.
 
-The supported route is dense fixed-smoothing or dense EFS with observed
-curvature. Public `SuperLSS` currently refuses `discrete=True` for every
-family. This family is not zero-inflated and does not claim an exact Poisson
+Fixed-smoothing and EFS fits support dense or grouped discrete execution with
+observed curvature. `NegativeBinomialLS` does not supply Fisher information. This family is not zero-inflated and does not claim an exact Poisson
 active face, CDF or quantile methods, random generation, or complete-fit speed.
 
 ## Generalized gamma mean–scale–shape model
@@ -500,10 +499,9 @@ the conditional mean. The configured power walls are part of the fitted family
 and artifact. They must satisfy `1 < power_lower < power_upper < 2`, and the
 power link keeps fitted values strictly inside those walls.
 
-The supported fitting route is dense with observed coefficient curvature for
-both fixed smoothing parameters and automatic EFS smoothing. There is no Fisher
-fallback for `TweedieLSS`. Public `SuperLSS` currently refuses `discrete=True`
-for every family.
+Both fixed smoothing parameters and automatic smoothing support dense or grouped
+discrete execution with observed coefficient curvature. There is no Fisher
+fallback for `TweedieLSS`.
 
 The example sets the outer iteration policy explicitly for reproducibility.
 Always inspect reported convergence, the terminal residual, and curvature
@@ -641,7 +639,7 @@ backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
    its start while its steps are large. It hands over once its largest accepted
    step falls to 0.5 in log λ, or after ten iterations, whichever comes first.
    In this opt-in mode, `practical_reml=True` only shortens the warm-up.
-2. **Endgame.** Newton on the exact gradient and Hessian of the LAML in log λ,
+2. **Endgame.** Newton using the full LAML gradient and Hessian formulas in log λ,
    the construction of Wood, Pya and Säfken (2016): the implicit derivative of
    the coefficient mode through the observed penalised Hessian, the derivative
    of `log|H|` through the third derivatives of the row log-likelihood
@@ -654,7 +652,22 @@ backtracking. Set `outer="efs+newton"` to opt into a two-stage search:
    instead. The search stops at a stationary point of the box-constrained
    problem: the largest projected gradient component below
    `reml_tol * (1 + |LAML|)`, the objective change below the same bar, and the
-   Newton step it would still take below `reml_tol` in log λ.
+   estimated remaining quadratic improvement below the same bar.
+
+Here, `smoothing_certified_` reports the existing numerical stationarity
+contract in log smoothing parameters, together with converged coefficient fits
+and accepted curvature authority. For differenced derivatives, the reported
+certificates propagate refinement indicators; they are not complete error
+enclosures for the exact profiled gradient, coefficient-mode error and linear
+solves. Passing these checks is not a proof of a local or global LAML minimum
+or a bound on coefficient error. The objective-scaled stopping bar depends on
+the objective convention: adding a constant changes that bar without changing
+the gradient or optimum.
+
+The [C3 stress evidence](../research/2026-09-c3-stress-evidence.md) reproduces
+the original correlated Tweedie and GPD failures, records the strict Newton
+settings that pass these checks, and reports across-start sensitivity and the
+limits of independent references.
 
 With the default `outer="efs"`, `practical_reml=True` permits a sustained
 objective-and-parameter plateau to stop the fit. `smoothing_convergence_reason_`
@@ -934,15 +947,50 @@ preregistered confirmatory result.
 
 ## Discrete fitting
 
-Discrete fitting is not currently available through `SuperLSS`.
-Constructing `SuperLSS(..., discrete=True)` raises `NotImplementedError`. The
-internal multi-parameter prototype remains for development, but it is neither a
-public correctness nor performance claim. Scalar `SuperGLM` discrete fitting
-is unchanged and remains available.
+Set `SuperLSS(discrete=True, n_bins=256)` to compile marginal spline designs
+and use bounded row chunks for joint fitting. This route assembles the coupled
+observed Hessian, including signed cross-predictor blocks, through the existing
+grouped design machinery. It supports observed-only `TweedieLSS` and
+`NegativeBinomialLS`; requesting Fisher curvature still requires the family's
+expected-information capability.
+
+```python
+model = SuperLSS(
+    family=GaussianLS(),
+    predictors=predictors,
+    discrete=True,
+    n_bins=256,
+)
+model.fit_reml(train_df, y_train, outer="efs+newton")
+print(model.training_telemetry().execution_backend_identifier)
+print(model.smoothing_convergence_reason_)
+```
+
+The automatic chunk size limits row scratch space. Smoothing gradients,
+Hessians, stationarity checks and smoothing-uncertainty replay expand bounded
+row blocks instead of retaining full observation-by-coefficient designs.
+Conditional inference still uses the joint coefficient covariance. Prediction
+on new data evaluates the learned spline functions at the supplied covariates.
+
+Two comparisons answer different questions. Expanding the same compiled
+discrete design and comparing its algebra with grouped execution tests exact
+representation equivalence, subject to floating-point error. When a covariate
+has more unique values than `n_bins`, bin centers change its training design.
+Compare held-out predictions and uncertainty with a finer grid and with the
+continuous fit to assess that approximation. This grid sensitivity is not
+bounded by a machine-epsilon coefficient tolerance.
+
+Discrete execution retains row likelihood work and dense coefficient-space
+factors; it is not an out-of-core or sparse-factor solver. Smoothing receipts
+also retain parameter arrays from coefficient fits, so memory still grows with
+row count, predictor count and the number of retained fits. Report complete-fit
+memory and actual backend dispatch for the intended model. Practical plateaus,
+strict stationarity, unresolved caps and curvature refusals retain the same
+meaning on both execution routes.
 
 ## Curvature choice
 
-The dense coefficient solve is Newton's method on the observed Hessian for
+The coefficient solve is Newton's method on the observed Hessian for
 every family. `SuperLSS(coefficient_curvature="fisher")` asks for Fisher
 scoring instead and is accepted only for a family that supplies expected
 information. Every current built-in except `NegativeBinomialLS` and
@@ -1103,19 +1151,21 @@ and the artifact schema is unchanged.
 
 ## Current limits
 
-- `TweedieLSS` is dense and observed-curvature only; Fisher fallback and
-  discrete execution are unavailable.
-- `NegativeBinomialLS` is dense and observed-curvature only. It has no
-  zero-inflation component, discrete execution, or exact Poisson active face.
+- `TweedieLSS` and `NegativeBinomialLS` support dense and chunked observed
+  curvature, including discrete designs. Neither provides Fisher fallback;
+  an unresolved indefinite terminal observed curvature is refused.
+- `NegativeBinomialLS` has no zero-inflation component or exact Poisson active
+  face. Some large real-book smoothing fits can still stop uncertified; see the
+  [C3/C1 benchmark evidence](../research/2026-09-c3-c1-completion-evidence.md).
 - `GeneralizedGammaLSS`, `GeneralizedParetoLSS`, `TwoPieceLogNormalLSS` and
-  `TwoPieceNormalLSS` are dense-path only and are certified through the generic
+  `TwoPieceNormalLSS` are certified through the generic
   finite-difference endpoint authority, so a certified face is converged but
   not `matched_certified`.
 - Shape constraints (`Constraint.fit.*` and `Constraint.postfit.*` on a
   feature) are not applied on the distributional path: the smooth is fitted
   unconstrained and `ShapeConstraintIgnoredWarning` is emitted at compile time.
   Constrained smooths on this path are a planned feature with their own design.
-- `LogNormalLS` is dense-path only and is certified through the generic
+- `LogNormalLS` is certified through the generic
   finite-difference endpoint authority, so a certified face is converged but
   not `matched_certified`.
 - Cross-predictor penalties are not supported.
