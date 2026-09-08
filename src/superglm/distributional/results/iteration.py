@@ -235,7 +235,7 @@ class DistributionalEFSIteration:
     # exact LAML gradient (with its finite-difference certificate) that
     # produced their step, the largest Hessian certificate on the active set
     # (``None`` on a pass that formed no exact Hessian: a quasi-Newton step
-    # from the reused memory, a halved step or a bracket step), the
+    # from the reused memory or a bracket step), the
     # projected-gradient norm judged for convergence, and the ridge that
     # made the active Hessian positive definite (``None`` for a BFGS or
     # bracket step).  A convergence check that makes no trial fit is not an

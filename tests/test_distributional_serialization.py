@@ -2068,6 +2068,7 @@ def test_manifest_key_set_is_pinned_to_the_current_major(
         "objective",
         "raw_fallback_count",
         "terminal_fit_index",
+        "terminal_raw_log_steps",
         "terminal_raw_max_log_step",
         "unresolved_upper_bound",
     }
@@ -2138,7 +2139,7 @@ def test_manifest_key_set_is_pinned_to_the_current_major(
     joint_smoothing_manifest = distributional_manifest(joint_model)["smoothing"]
     assert joint_smoothing_manifest is not None
     assert set(joint_smoothing_manifest) == {
-        *set(smoothing_manifest),
+        *(set(smoothing_manifest) - {"terminal_raw_log_steps"}),
         "terminal_endpoint_directions",
     }
     joint_iteration = joint_smoothing_manifest["history"][-1]

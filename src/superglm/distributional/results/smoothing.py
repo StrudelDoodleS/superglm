@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -36,6 +36,86 @@ from superglm.distributional.results.solver import (
     _frozen_endpoint_mapping,
     _frozen_float_mapping,
 )
+
+
+def _practical_outward_window(
+    *,
+    history: Sequence[DistributionalEFSIteration],
+    coefficient_fits: Sequence[DenseSolverResult],
+    terminal_raw_log_steps: Mapping[str, float] | None,
+    config: DistributionalEFSConfig,
+) -> bool:
+    """Replay substantial outward probes on a stable finite profile.
+
+    Increasing log steps and upper-bound pressure can be practically harmless
+    only after actual accepted movement has tested a factor-e penalty increase
+    in every such coordinate. This is a finite-fit stability policy, not an
+    assertion about the sign of a derivative at the infinite-penalty endpoint.
+    """
+    if not config.practical_convergence or not terminal_raw_log_steps:
+        return False
+    window_size = config.plateau_iterations
+    window = history[-window_size:]
+    if len(window) != window_size:
+        return False
+    for item in window:
+        if (
+            item.stage != "efs"
+            or not item.accepted
+            or item.activated_face_components
+            or item.deactivated_face_components
+            or item.revalidated_face_components
+            or item.refused_face_components
+            or item.objective_relative_change > config.plateau_tolerance
+        ):
+            return False
+        assert item.accepted_fit_index is not None
+        if (
+            _maximum_relative_natural_parameter_change(
+                coefficient_fits[item.source_fit_index].theta,
+                coefficient_fits[item.accepted_fit_index].theta,
+            )
+            > config.practical_parameter_tolerance
+        ):
+            return False
+    first, last = window[0], window[-1]
+    if tuple(terminal_raw_log_steps) != tuple(last.lambdas_after):
+        return False
+    assert last.accepted_fit_index is not None
+    if (
+        abs(last.objective_after - first.objective_before) / (1.0 + abs(first.objective_before))
+        > config.plateau_tolerance
+        or _maximum_relative_natural_parameter_change(
+            coefficient_fits[first.source_fit_index].theta,
+            coefficient_fits[last.accepted_fit_index].theta,
+        )
+        > config.practical_parameter_tolerance
+    ):
+        return False
+    exempted = False
+    for name, raw_step in terminal_raw_log_steps.items():
+        terminal_lambda = last.lambdas_after[name]
+        if raw_step == 0.0 and all(
+            item.lambdas_after[name] == item.lambdas_before[name] for item in window
+        ):
+            # Fixed penalties have no raw pressure, including fixed zero and
+            # cap-valued penalties. They neither supply nor obstruct a probe.
+            continue
+        if terminal_lambda == config.minimum_lambda and raw_step < -config.tolerance:
+            return False
+        # Reconstruct movement from accepted penalties, never from proposed or
+        # clipped raw steps. A duplicate or reversal cannot count as a probe.
+        steps = [math.log(item.lambdas_after[name] / item.lambdas_before[name]) for item in window]
+        shrinking = all(abs(after) <= abs(before) for before, after in zip(steps, steps[1:]))
+        at_upper = terminal_lambda == config.maximum_lambda
+        if not at_upper and (shrinking or abs(raw_step) <= config.tolerance):
+            continue
+        if raw_step <= 0.0 or any(step <= 0.0 for step in steps):
+            return False
+        if math.log(terminal_lambda / first.lambdas_before[name]) < 1.0:
+            return False
+        exempted = True
+    return exempted
 
 
 def _revalidated_endpoint_directions(
@@ -90,6 +170,7 @@ class DistributionalEFSResult:
     )
     terminal_gradient: Mapping[str, float] | None = None
     terminal_gradient_certificate: Mapping[str, float] | None = None
+    terminal_raw_log_steps: Mapping[str, float] | None = None
     terminal_projected_gradient_norm: float | None = None
     smoothing_hessian: NDArray | None = None
     smoothing_hessian_certificate: NDArray | None = None
@@ -182,7 +263,11 @@ class DistributionalEFSResult:
             raise ValueError(
                 "unresolved upper pressure requires positive fresh convergence evidence"
             )
-        if self.converged and unresolved_upper_bound:
+        if (
+            self.converged
+            and unresolved_upper_bound
+            and self.convergence_reason != "practical_plateau"
+        ):
             raise ValueError("converged EFS results require an empty unresolved upper bound")
         if (
             self.converged
@@ -206,6 +291,9 @@ class DistributionalEFSResult:
             "max_iterations",
             "objective_rejected",
             "gradient_unresolved",
+            # A practical stop is allowed only after the complete outward
+            # window is replayed below against the accepted coefficient fits.
+            "practical_plateau",
         }:
             raise ValueError("unresolved upper pressure must control the terminal reason")
         if not fits or any(not isinstance(fit, DenseSolverResult) for fit in fits):
@@ -889,7 +977,28 @@ class DistributionalEFSResult:
             raise ValueError("terminal_fit_index does not match the accepted EFS history")
         if dict(expected_lambdas) != dict(terminal) or expected_objective != self.objective:
             raise ValueError("terminal EFS state does not match the smoothing history")
+        raw_steps = None
+        if self.terminal_raw_log_steps is not None:
+            raw_steps = _frozen_float_mapping(
+                self.terminal_raw_log_steps, name="terminal_raw_log_steps"
+            )
+            if tuple(raw_steps) != tuple(terminal):
+                raise ValueError("terminal raw log steps must cover all terminal lambdas in order")
         if self.convergence_reason == "practical_plateau":
+            outward_practical = _practical_outward_window(
+                history=history,
+                coefficient_fits=fits,
+                terminal_raw_log_steps=raw_steps,
+                config=self.config,
+            )
+            if unresolved_upper_bound and (
+                not outward_practical
+                or raw_steps is None
+                or any(name not in raw_steps for name in unresolved_upper_bound)
+            ):
+                raise ValueError(
+                    "practical_plateau unresolved upper pressure requires outward probes"
+                )
             if not self.config.practical_convergence:
                 raise ValueError("practical_plateau requires practical convergence to be enabled")
             if terminal_raw_max_log_step <= self.config.tolerance:
@@ -917,7 +1026,9 @@ class DistributionalEFSResult:
                         "practical_plateau fitted parameters exceed the configured tolerance"
                     )
             accepted_steps = [item.max_accepted_log_step for item in practical_tail]
-            if any(later > earlier for earlier, later in zip(accepted_steps, accepted_steps[1:])):
+            if not outward_practical and any(
+                later > earlier for earlier, later in zip(accepted_steps, accepted_steps[1:])
+            ):
                 raise ValueError("practical_plateau history does not satisfy its plateau gate")
         terminal_face = fits[self.terminal_fit_index].coefficient_face
         if self.convergence_reason == "practical_plateau" and terminal_face is not None:
@@ -959,6 +1070,7 @@ class DistributionalEFSResult:
         object.__setattr__(self, "history", history)
         object.__setattr__(self, "coefficient_fits", fits)
         object.__setattr__(self, "terminal_endpoint_directions", endpoint_directions)
+        object.__setattr__(self, "terminal_raw_log_steps", raw_steps)
 
     def _validate_endgame_fields(self, terminal: Mapping[str, float]) -> None:
         """Validate the Newton endgame's terminal record against the reason."""
