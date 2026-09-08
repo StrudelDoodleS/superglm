@@ -106,3 +106,40 @@ No new capability is promoted merely because a microbenchmark improves.
 - Retain timing ranges: guest process CPU audits cannot establish exclusive
   access to the physical host. Subsequent timed workers also record their own
   fit CPU time alongside wall time to expose scheduling-related variation.
+- The insurance execution gate remains open. On freMTPL2 Gamma severity with
+  four copies of the training partition, discrete median time is 12.010 s
+  versus 12.490 s at baseline and 11.077 s for candidate exact fitting.
+  Saved outputs and the 7 smoothing / 18 inner iteration counts are identical.
+- Profile comparison identifies six extra initial derivative evaluations in
+  chunked smoothing: existing observed endpoint reuse accepts only dense
+  execution. Extend reuse to aggregated chunked score/curvature at a certified
+  unchanged point, rebuilding penalty-dependent quantities for each lambda.
+  Retain terminal retry and certification rules. Check fixed inputs with a
+  bounded-memory digest; unsupported representations conservatively recompute.
+- A separate Gamma profile identifies repeated scalar origin-series work in
+  initialization. Compile the bounded batch calculation with independently
+  checked truncation/rounding behavior; preserve general-domain fallbacks.
+  This is an execution improvement within the current scope, not a new family.
+
+### Follow-up implementation checkpoint
+
+- Gamma's four small-shape series now execute in compiled batches. A stronger
+  geometric tail bound preserves the existing EPS/8 error budget; a regression
+  demonstrates the old derivative-tail underestimate. Initialization evaluates
+  exactly identical shapes once and retains `math.fsum` over the same row terms.
+  The 22 new tests, 123 Gamma family tests and 274 shared-consumer tests pass;
+  the latter run includes the optional high-precision dependency.
+- Chunked smoothing reuses the raw likelihood score and observed curvature at
+  a certified unchanged endpoint, rebuilding penalty-dependent quantities for
+  the next lambda. The certificate checks live responses, prepared likelihood
+  arrays, weights and semantics, offsets, design, links and family configuration.
+  It covers all nine built-in families, retains only O(p²) numeric state plus
+  a bounded-memory digest, and conservatively refreshes unsupported extensions.
+  Fresh terminal evaluation and convergence certification are unchanged.
+- The 147 focused solver/chunk tests pass, including changed-input refusals,
+  cancellation and lifetime checks, and a three-parameter Tweedie comparison
+  against a fresh solve after changing lambda. Independent mathematical and
+  certificate reviews report no unresolved material findings.
+- Repeat complete-fit comparisons from this new source checkpoint before
+  closing the insurance gate. Earlier timing receipts remain historical evidence;
+  kernel diagnostics alone do not establish a complete-fit improvement.

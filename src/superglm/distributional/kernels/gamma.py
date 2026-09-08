@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from numba import njit  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 from scipy import special
 
@@ -28,6 +29,70 @@ _LOG_TWO = math.log(2.0)
 _EULER = float(np.euler_gamma)
 _INITIAL_RHO_RTOL = math.sqrt(_EPS)
 _TAIL_INVERSE_RTOL = 64.0 * math.sqrt(_EPS)
+
+# These are mathematical constants, independent of rows and likelihood weights.
+# The compiled caller lives in this module so Numba's disk-cache invalidation
+# covers both the series implementation and its coefficients.
+_ORIGIN_ZETA = readonly(special.zeta(np.arange(2.0, 82.0), 1.0))
+
+
+@njit(cache=True, fastmath=False)
+def _small_shape_series(values: NDArray, channel: int) -> NDArray[np.float64]:
+    """Evaluate one origin combination in bounded, serial float64 arithmetic.
+
+    Channels are A, J, dJ/dlog(a), and the log normalizer, respectively.
+    The multiplication and summation order matches the scalar references.
+    For 0 < a < 1/4, every zeta coefficient is below zeta(2) < 2. Bounding
+    the remaining absolute series geometrically gives the four tails below;
+    the polynomial factors for J and its derivative come from differentiating
+    the geometric sum. The factor 2 also bounds the rounded coefficients.
+    At most 80 terms are retained, with constant working storage per row.
+    """
+    result = np.empty_like(values)
+    for row in range(len(values)):
+        a = values[row]
+        sign = 1.0
+        if channel == 0:
+            total = -1.0 - a * (_EULER + math.log(a))
+            stop = 81
+        elif channel == 1:
+            total = 1.0 - a
+            stop = 82
+        elif channel == 2:
+            total = -a
+            stop = 82
+        else:
+            total = (a + 1.0) * math.log(a) + (_EULER - 1.0) * a
+            sign = -1.0
+            stop = 80
+        power = a * a
+        for order in range(2, stop):
+            coefficient = _ORIGIN_ZETA[order - 2]
+            if channel == 0:
+                term = sign * coefficient * power
+            elif channel == 1:
+                term = sign * (order - 1.0) * coefficient * power
+            elif channel == 2:
+                term = sign * (order - 1.0) * order * coefficient * power
+            else:
+                term = sign * coefficient * power / order
+            total += term
+            power *= a
+            sign = -sign
+            if channel == 0:
+                tail = 2.0 * abs(power) / (1.0 - a)
+            elif channel == 1:
+                tail = 2.0 * order * abs(power) / (1.0 - a) ** 2
+            elif channel == 2:
+                tail = 2.0 * order * (order + 1.0) * abs(power) / (1.0 - a) ** 3
+            else:
+                tail = 2.0 * abs(power) / ((order + 1.0) * (1.0 - a))
+            if tail <= _EPS * max(1.0, abs(total)) / 8.0:
+                result[row] = total
+                break
+        else:
+            raise ValueError("small-shape Gamma series did not reach float64 accuracy")
+    return result
 
 
 class GammaInitializationError(ValueError):
@@ -90,8 +155,8 @@ def _small_a_residual(a: float) -> float:
         total += term
         power *= a
         sign = -sign
-        # zeta decreases to one, so this bounds the remaining geometric tail.
-        if abs(power) / (1.0 - a) <= _EPS * max(1.0, abs(total)) / 8.0:
+        # Every remaining zeta coefficient is below zeta(2) < 2.
+        if 2.0 * abs(power) / (1.0 - a) <= _EPS * max(1.0, abs(total)) / 8.0:
             return total
     raise ValueError("small-shape digamma series did not reach float64 accuracy")
 
@@ -107,7 +172,7 @@ def _small_j_residual(a: float) -> float:
         total += term
         power *= a
         sign = -sign
-        tail = (n + 2.0) * abs(power) / (1.0 - a) ** 2
+        tail = 2.0 * (n + 2.0) * abs(power) / (1.0 - a) ** 2
         if tail <= _EPS * max(1.0, abs(total)) / 8.0:
             return total
     raise ValueError("small-shape trigamma series did not reach float64 accuracy")
@@ -123,7 +188,7 @@ def _small_j_log_derivative(a: float) -> float:
         total += sign * (n + 1.0) * (n + 2.0) * float(special.zeta(n + 2, 1.0)) * power
         power *= a
         sign = -sign
-        tail = (n + 2.0) * (n + 3.0) * abs(power) / (1.0 - a) ** 3
+        tail = 2.0 * (n + 2.0) * (n + 3.0) * abs(power) / (1.0 - a) ** 3
         if tail <= _EPS * max(1.0, abs(total)) / 8.0:
             return total
     raise ValueError("small-shape tetragamma combination did not reach float64 accuracy")
@@ -140,7 +205,7 @@ def _small_log_normalizer(a: float) -> float:
         total += term
         power *= a
         sign = -sign
-        tail = abs(power) / ((n + 1.0) * (1.0 - a))
+        tail = 2.0 * abs(power) / ((n + 1.0) * (1.0 - a))
         if tail <= _EPS * max(1.0, abs(total)) / 8.0:
             return total
     raise ValueError("small-shape log-normalizer series did not reach float64 accuracy")
@@ -209,8 +274,8 @@ def _scaled_digamma_residual(shape: NDArray) -> NDArray[np.float64]:
     values = _as_positive_vector(shape, name="shape")
     result = np.empty_like(values)
     small = values < 0.25
-    for index in np.flatnonzero(small):
-        result[index] = _small_a_residual(float(values[index]))
+    if np.any(small):
+        result[small] = _small_shape_series(values[small], 0)
     large = values >= 16.0
     inverse = np.zeros_like(values)
     inverse[large] = 1.0 / values[large]
@@ -228,8 +293,8 @@ def _scaled_trigamma_residual(shape: NDArray) -> NDArray[np.float64]:
     values = _as_positive_vector(shape, name="shape")
     result = np.empty_like(values)
     small = values < 0.25
-    for index in np.flatnonzero(small):
-        result[index] = _small_j_residual(float(values[index]))
+    if np.any(small):
+        result[small] = _small_shape_series(values[small], 1)
     large = values >= 16.0
     inverse = np.zeros_like(values)
     inverse[large] = 1.0 / values[large]
@@ -249,8 +314,8 @@ def _scaled_trigamma_log_derivative(shape: NDArray) -> NDArray[np.float64]:
     values = _as_positive_vector(shape, name="shape")
     result = np.empty_like(values)
     small = values < 0.25
-    for index in np.flatnonzero(small):
-        result[index] = _small_j_log_derivative(float(values[index]))
+    if np.any(small):
+        result[small] = _small_shape_series(values[small], 2)
     large = values >= 32.0
     result[large] = _large_j_log_derivative(values[large])
     direct = ~(small | large)
@@ -270,8 +335,8 @@ def _gamma_log_normalizer(shape: NDArray) -> NDArray[np.float64]:
     values = _as_positive_vector(shape, name="shape")
     result = np.empty_like(values)
     small = values < 0.25
-    for index in np.flatnonzero(small):
-        result[index] = _small_log_normalizer(float(values[index]))
+    if np.any(small):
+        result[small] = _small_shape_series(values[small], 3)
     large = values >= 16.0
     inverse = np.zeros_like(values)
     inverse[large] = 1.0 / values[large]
@@ -898,13 +963,18 @@ def _gamma_initial_target(
             shape = weights * k if semantics == "prior" else np.full(len(response), k)
         if not np.all(np.isfinite(shape)) or np.any(shape <= 0.0):
             return None
-        a_residual = _scaled_digamma_residual(shape)
+        # Frequency weights do not enter shape. Equal prior shapes likewise
+        # have an identical residual; retain the original row summands below.
+        if semantics == "frequency" or np.all(shape == shape[:1]):
+            a_residual = _scaled_digamma_residual(shape[:1])[0]
+        else:
+            a_residual = _scaled_digamma_residual(shape)
         location = np.full(len(response), mean)
         _, _, a_deviance = _scaled_ratio_terms(response, location, shape, derivative_order=0)
         multiplier = np.ones(len(response), dtype=_FLOAT) if semantics == "prior" else weights
         with np.errstate(over="raise", invalid="raise"):
             terms = multiplier * (a_residual + a_deviance)
-        target = math.fsum(float(term) for term in terms)
+        target = math.fsum(terms)
     except (FloatingPointError, OverflowError, ValueError):
         return None
     return target if math.isfinite(target) else None

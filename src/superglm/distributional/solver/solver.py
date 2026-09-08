@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import weakref
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -111,10 +114,11 @@ class _DenseObservedReuseOwner:
 
 
 class _DenseObservedReuseSession:
-    """Recognize dense observed results produced inside one fit session."""
+    """Recognize certified observed results produced inside one fit session."""
 
     def __init__(self) -> None:
         self._results: dict[int, tuple[DenseSolverResult, _DenseObservedReuseOwner]] = {}
+        self._chunk_results: dict[int, _ChunkObservedReuseRecord] = {}
         self._dense: dict[int, tuple[StackedLayout, tuple[NDArray[np.float64], ...]]] = {}
 
     def dense_matrices(
@@ -148,6 +152,9 @@ class _DenseObservedReuseSession:
         self,
         result: DenseSolverResult,
         owner: _DenseObservedReuseOwner,
+        *,
+        context: _SolverContext | None = None,
+        score_data: NDArray[np.float64] | None = None,
     ) -> None:
         curvature = result.terminal_curvature
         if (
@@ -165,6 +172,194 @@ class _DenseObservedReuseSession:
             and curvature.fallback_count == 0
         ):
             self._results[id(result)] = (result, owner)
+        elif (
+            context is not None
+            and score_data is not None
+            and context.chunk_size is not None
+            and owner.chunk_size is not None
+            and owner.coefficient_face is None
+            and owner.stop_policy == "ordinary"
+            and owner.config.coefficient_curvature == "observed"
+            and result.config == owner.config
+            and result.resolved_chunk_size == context.chunk_size
+            and result.execution_backend_identifier == CHUNKED_EXECUTION_BACKEND_IDENTIFIER
+            and result.coefficient_face is None
+            and result.converged
+            and curvature.requested_source == "observed"
+            and curvature.actual_source == "observed"
+            and curvature.fallback_count == 0
+        ):
+            certificate = _chunk_reuse_data_certificate(context)
+            if certificate is not None:
+                key = id(result)
+                self._chunk_results[key] = _ChunkObservedReuseRecord(
+                    source=weakref.ref(result, lambda _ref: self._chunk_results.pop(key, None)),
+                    owner=owner,
+                    coefficients=_readonly(result.coefficients),
+                    score_data=_readonly(score_data),
+                    data_curvature=_readonly(result.terminal_data_curvature),
+                    certificate=certificate,
+                )
+
+
+@dataclass(frozen=True)
+class _ChunkObservedReuseRecord:
+    """Fit-owned aggregates; the source's row predictions are weakly referenced."""
+
+    source: weakref.ReferenceType[DenseSolverResult]
+    owner: _DenseObservedReuseOwner
+    coefficients: NDArray[np.float64]
+    score_data: NDArray[np.float64]
+    data_curvature: NDArray[np.float64]
+    certificate: str
+
+
+def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
+    """Certify supported fixed designs without materializing observation rows.
+
+    Public design arrays can be mutable. Identity and equal predictors alone do
+    not certify curvature: a design edit can leave the current predictor fixed.
+    Unknown representations conservatively retain fresh likelihood evaluation.
+    """
+    from superglm.distributional.families._links import BoundedLogitLink
+    from superglm.distributional.families.gamma import GammaLikelihoodPlan, GammaLS
+    from superglm.distributional.families.gaussian import (
+        GaussianLikelihoodPlan,
+        GaussianLS,
+        LowerBoundedLogLink,
+    )
+    from superglm.distributional.families.generalized_gamma import (
+        GeneralizedGammaLikelihoodPlan,
+        GeneralizedGammaLSS,
+    )
+    from superglm.distributional.families.generalized_pareto import (
+        GeneralizedParetoLikelihoodPlan,
+        GeneralizedParetoLSS,
+    )
+    from superglm.distributional.families.log_normal import LogNormalLikelihoodPlan, LogNormalLS
+    from superglm.distributional.families.negative_binomial import (
+        NegativeBinomialLikelihoodPlan,
+        NegativeBinomialLS,
+    )
+    from superglm.distributional.families.tweedie import (
+        BoundedPowerLink,
+        TweedieLikelihoodPlan,
+        TweedieLSS,
+    )
+    from superglm.distributional.families.two_piece import (
+        TwoPieceLikelihoodPlan,
+        TwoPieceLogNormalLSS,
+        TwoPieceNormalLSS,
+    )
+    from superglm.distributional.weights import ResolvedLikelihoodWeights
+    from superglm.group_matrix import (
+        DenseGroupMatrix,
+        DiscretizedSCOPGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+    from superglm.links import IdentityLink, LogLink
+
+    plan_types = {
+        GaussianLS: GaussianLikelihoodPlan,
+        GammaLS: GammaLikelihoodPlan,
+        NegativeBinomialLS: NegativeBinomialLikelihoodPlan,
+        LogNormalLS: LogNormalLikelihoodPlan,
+        GeneralizedGammaLSS: GeneralizedGammaLikelihoodPlan,
+        GeneralizedParetoLSS: GeneralizedParetoLikelihoodPlan,
+        TwoPieceLogNormalLSS: TwoPieceLikelihoodPlan,
+        TwoPieceNormalLSS: TwoPieceLikelihoodPlan,
+        TweedieLSS: TweedieLikelihoodPlan,
+    }
+    weights = context.likelihood_plan.weights
+    if (
+        type(context.likelihood_plan) is not plan_types.get(type(context.family))
+        or type(weights) is not ResolvedLikelihoodWeights
+    ):
+        return None
+    digest = hashlib.sha256()
+
+    def field(value: object) -> None:
+        encoded = repr(value).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+
+    def array(values: NDArray) -> None:
+        values = np.asarray(values)
+        field((values.dtype.str, values.shape))
+        # nditer bounds copies even for a non-contiguous dense design.
+        for block in np.nditer(
+            values,
+            flags=["external_loop", "buffered", "zerosize_ok"],
+            op_flags=["readonly"],
+            order="C",
+            buffersize=8192,
+        ):
+            digest.update(memoryview(np.ascontiguousarray(block)).cast("B"))
+
+    field(json.dumps(context.family.to_config(), sort_keys=True))
+    field(context.likelihood_plan.plan_identifier)
+    # Some built-in identifiers contain stored weight digests. The evaluator
+    # consumes the live contract, so certify it independently of those digests.
+    field(weights.provenance.contract.semantics)
+    field((context.chunk_size, context.layout.n_coefficients))
+    array(context.response)
+    if type(context.likelihood_plan) is not TweedieLikelihoodPlan:
+        array(context.likelihood_plan.parameter_independent_carrier)
+    if type(context.likelihood_plan) not in (GaussianLikelihoodPlan, TweedieLikelihoodPlan):
+        array(context.likelihood_plan.exact_response)
+    if type(context.likelihood_plan) is NegativeBinomialLikelihoodPlan:
+        array(context.likelihood_plan.exact_count)
+    for name in ("values", "geometry_values", "root_take_map", "input_positions"):
+        array(getattr(weights, name))
+    for state in context.layout.predictors:
+        if type(state.link) not in (
+            IdentityLink,
+            LogLink,
+            LowerBoundedLogLink,
+            BoundedPowerLink,
+            BoundedLogitLink,
+        ):
+            return None
+        field((type(state.link).__name__, vars(state.link)))
+        field(
+            (
+                state.name,
+                state.parameter_index,
+                state.coefficient_slice,
+                state.intercept_index,
+                state.design.shape,
+            )
+        )
+        array(state.offset)
+        for group in state.design.group_matrices:
+            kind = type(group)
+            field((kind.__name__, group.shape))
+            if kind is DenseGroupMatrix:
+                names = ("M",)
+            elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
+                names = ("B_unique", "R_inv", "bin_idx")
+                field(group.n_bins)
+            elif kind is DiscretizedSCOPGroupMatrix:
+                names = ("B_scop_unique", "bin_idx")
+                field(group.n_bins)
+            elif kind is DiscretizedTensorGroupMatrix:
+                names = (
+                    "B_unique",
+                    "R_inv",
+                    "bin_idx",
+                    "B1_unique_t",
+                    "B2_unique_t",
+                    "idx1",
+                    "idx2",
+                )
+                field((group.tensor_id, group.n_bins, group.n_bins1, group.n_bins2))
+            else:
+                return None
+            for name in names:
+                array(getattr(group, name))
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -973,37 +1168,61 @@ def _reuse_observed_initial_result(
     source: DenseSolverResult,
     owner: _DenseObservedReuseOwner,
 ) -> tuple[_AcceptedState, DenseJointGeometry] | None:
-    """Re-penalize a same-session dense endpoint without reevaluating rows."""
+    """Re-penalize a certified same-session endpoint without likelihood refresh."""
     optimizing = source.optimizing_log_likelihood
     if (
-        not session.remembers(source, owner)
-        or context.chunk_size is not None
-        or context.coefficient_face is not None
+        context.coefficient_face is not None
         or context.coefficient_curvature != "observed"
         or source.family_likelihood_plan_identifier != context.likelihood_plan.plan_identifier
         or optimizing is None
         or not np.array_equal(coefficients, source.coefficients)
-        or context.dense_matrices is None
     ):
         return None
 
-    eta = _evaluate_predictors_from_matrices(
-        context.layout,
-        coefficients,
-        context.dense_matrices,
-    )
-    if not np.array_equal(eta, source.eta):
-        return None
-    theta = _theta_from_eta(context, eta)
-    if not np.array_equal(theta, source.theta):
-        return None
+    if context.chunk_size is None:
+        if not session.remembers(source, owner) or context.dense_matrices is None:
+            return None
+        eta = _evaluate_predictors_from_matrices(
+            context.layout,
+            coefficients,
+            context.dense_matrices,
+        )
+        if not np.array_equal(eta, source.eta):
+            return None
+        theta = _theta_from_eta(context, eta)
+        if not np.array_equal(theta, source.theta):
+            return None
+
+        score_data = source.terminal_score + source.penalty @ coefficients
+        data_curvature = np.asarray(source.terminal_data_curvature, dtype=np.float64)
+    else:
+        record = session._chunk_results.get(id(source))
+        if (
+            record is None
+            or record.source() is not source
+            or not record.owner.matches(owner)
+            or source.resolved_chunk_size != context.chunk_size
+            or source.execution_backend_identifier != CHUNKED_EXECUTION_BACKEND_IDENTIFIER
+            or not np.array_equal(coefficients, record.coefficients)
+            or _chunk_reuse_data_certificate(context) != record.certificate
+        ):
+            return None
+        for rows in chunking.iter_row_chunks(len(context.response), context.chunk_size):
+            eta = chunking._predictor_values(
+                context.layout, coefficients, rows, include_offsets=True
+            )
+            theta = chunking._theta_chunk(context.layout, eta)
+            if not np.array_equal(eta, source.eta[rows.start : rows.stop]) or not np.array_equal(
+                theta, source.theta[rows.start : rows.stop]
+            ):
+                return None
+        score_data = record.score_data
+        data_curvature = record.data_curvature
 
     penalty_value = 0.5 * float(coefficients @ context.penalty @ coefficients)
     penalized_optimizing = float(optimizing - penalty_value)
     penalized_reported = float(source.log_likelihood - penalty_value)
-    score_data = source.terminal_score + source.penalty @ coefficients
     score_penalized = score_data - context.penalty @ coefficients
-    data_curvature = np.asarray(source.terminal_data_curvature, dtype=np.float64)
     penalized_curvature = data_curvature + context.penalty
     if not (
         np.isfinite(penalized_optimizing)
@@ -1015,8 +1234,8 @@ def _reuse_observed_initial_result(
 
     state = _AcceptedState(
         coefficients=source.coefficients,
-        eta=source.eta,
-        theta=source.theta,
+        eta=source.eta if context.chunk_size is None else None,
+        theta=source.theta if context.chunk_size is None else None,
         derivatives=None,
         fisher_curvature_packed=None,
         optimizing_log_likelihood=float(optimizing),
@@ -1355,7 +1574,9 @@ def _fit_dense_fixed_lambda_core(
             terminal_reduced_rank=terminal_reduced_rank,
         )
         if _reuse_session is not None:
-            _reuse_session.remember(result, reuse_owner)
+            _reuse_session.remember(
+                result, reuse_owner, context=context, score_data=terminal_score_geometry.score_data
+            )
         return result
 
 

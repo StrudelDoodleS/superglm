@@ -262,15 +262,24 @@ class CallRecorder:
     def __init__(self):
         self.calls, self.shapes = Counter(), Counter()
         self.kernel_calls, self.kernel_results, self.gram_branches = Counter(), Counter(), Counter()
+        self.endpoint_reuse_results = Counter()
         self.kernel_attributes_missing = []
         self._kernel_originals = []
 
     def install_kernel_witnesses(self):
         # Patch the caller's imported attributes: sys.setprofile cannot reliably
         # observe calls through an already compiled Numba dispatcher.
-        module_name = "superglm._group_matrix._group_matrix_discretized"
-        module = sys.modules.get(module_name)
-        for name in ("_indexed_row_dot", "_tensor_operand_in_reassociation_range"):
+        targets = (
+            ("superglm._group_matrix._group_matrix_discretized", "_indexed_row_dot"),
+            (
+                "superglm._group_matrix._group_matrix_discretized",
+                "_tensor_operand_in_reassociation_range",
+            ),
+            ("superglm.distributional.kernels.gamma", "_small_shape_series"),
+            ("superglm.distributional.solver.solver", "_reuse_observed_initial_result"),
+        )
+        for module_name, name in targets:
+            module = sys.modules.get(module_name)
             key = f"{module_name}.{name}"
             original = getattr(module, name, None)
             if not callable(original):
@@ -279,13 +288,28 @@ class CallRecorder:
 
             def witness(original=original, key=key, name=name):
                 def invoke(*args, **kwargs):
-                    self.kernel_calls[key] += 1
+                    reuse_mode = None
+                    if name == "_reuse_observed_initial_result":
+                        context = args[0] if args else kwargs["context"]
+                        reuse_mode = "dense" if context.chunk_size is None else "chunked"
+                        self.endpoint_reuse_results[f"{reuse_mode}:invoked"] += 1
+                    else:
+                        self.kernel_calls[key] += 1
+                        if name == "_small_shape_series":
+                            channel = args[1] if len(args) > 1 else kwargs["channel"]
+                            self.kernel_calls[f"{key}:channel_{channel}"] += 1
                     try:
                         result = original(*args, **kwargs)
                     except BaseException:
-                        self.kernel_results[f"{key}:raised"] += 1
+                        if reuse_mode is not None:
+                            self.endpoint_reuse_results[f"{reuse_mode}:raised"] += 1
+                        else:
+                            self.kernel_results[f"{key}:raised"] += 1
                         raise
-                    if name == "_tensor_operand_in_reassociation_range":
+                    if reuse_mode is not None:
+                        outcome = "refused" if result is None else "accepted"
+                        self.endpoint_reuse_results[f"{reuse_mode}:{outcome}"] += 1
+                    elif name == "_tensor_operand_in_reassociation_range":
                         outcome = "accepted" if bool(result) else "refused"
                         self.kernel_results[f"{key}:{outcome}"] += 1
                     else:
@@ -469,6 +493,7 @@ def worker(args):
                     "native_kernel_calls": recorder.kernel_calls,
                     "native_kernel_results": recorder.kernel_results,
                     "tensor_gram_branches": recorder.gram_branches,
+                    "endpoint_reuse_results": recorder.endpoint_reuse_results,
                     "kernel_attributes_missing": recorder.kernel_attributes_missing,
                 }
             if args.measure_time and os.getloadavg()[0] <= 2 * len(os.sched_getaffinity(0)):
