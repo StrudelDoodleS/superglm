@@ -176,3 +176,30 @@ No new capability is promoted merely because a microbenchmark improves.
   row caches. Unknown matrix formats and custom subclasses still refresh.
   The 94 reuse regressions and 22 Gamma execution tests pass at this checkpoint;
   the existing architecture policy remains intact.
+
+### Remaining ordinary-group execution stage
+
+A further code audit found that ordinary grouped curvature still visits each
+group pair separately. Column fallbacks and bin aggregation can therefore scan
+the same observations many times in a fragmented design. Tensor factorization
+does not address these routes. The independent `gaussian-fragmented` benchmark
+adds small numeric, categorical, spline and supported grouped-curve terms to
+exercise this behavior; its generated data and specifications are public.
+
+1. Extend certified endpoint reuse to the built-in factor-smooth representation,
+   covering its actual basis, transformations, row assignments and nested CSR
+   state. Keep unsupported spline-by-category cache configurations conservative.
+   The 215 focused checks pass, including 41 additional reuse regressions.
+2. Implement and test a bounded row-panel workspace for small ordinary groups,
+   using the existing stored-design row renderer and signed rectangular matrix
+   multiplication. Count all simultaneously live panels, weighted scratch and
+   rendering temporaries. Retain panels only for one likelihood chunk, preserve
+   specialized tensor/sparse routes, and require fallback when the byte budget
+   or numerical-domain conditions do not permit batching.
+3. Establish a dispatch rule from the independent fragmented fixture and
+   existing tensor/support controls. Validate reconstruction, signed moments,
+   backward error and workspace lifetime before enabling the selected route.
+   Avoid a general aggregate-result cache without demonstrated repeated keys.
+4. Repeat complete-fit timing, peak memory, numerical comparisons and actual
+   dispatch from the resulting source. Keep the discrete execution gate open
+   until the remaining performance evidence is satisfactory.

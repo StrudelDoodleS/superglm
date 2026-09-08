@@ -107,6 +107,74 @@ def source_receipt(source):
     }
 
 
+def gaussian_fragmented_fixture(n, knots):
+    """Independent public synthetic design with many small feature groups."""
+    import numpy as np
+    import pandas as pd
+
+    from superglm import SuperLSS
+    from superglm.distributional import GaussianLS, Predictor
+    from superglm.features import Categorical, Numeric, Spline
+
+    seed, holdout_seed = 28109, 28110
+
+    def sample(size, rng):
+        columns = {f"linear{i}": rng.uniform(-1, 1, size) for i in range(6)}
+        columns.update({f"smooth{i}": rng.uniform(-1, 1, size) for i in range(2)})
+        columns["curve"] = rng.uniform(-1, 1, size)
+        for name, levels in (("category0", 3), ("category1", 3), ("category2", 4), ("group", 3)):
+            columns[name] = np.asarray([f"level{j}" for j in rng.integers(levels, size=size)])
+        return pd.DataFrame(columns)
+
+    rng = np.random.default_rng(seed)
+    frame = sample(n, rng)
+    holdout = sample(2000, np.random.default_rng(holdout_seed))
+    linear = sum((0.12 + i * 0.035) * frame[f"linear{i}"].to_numpy() for i in range(6))
+    categorical = sum(
+        frame[f"category{i}"].map({f"level{j}": (j - 1) * 0.15 for j in range(4)}).to_numpy()
+        for i in range(3)
+    )
+    group = frame["group"].map({"level0": -1.0, "level1": 0.0, "level2": 1.0}).to_numpy()
+    curve = frame["curve"].to_numpy()
+    smooth0, smooth1 = (frame[f"smooth{i}"].to_numpy() for i in range(2))
+    group_curve = (0.7 + 0.25 * group) * np.sin(2.5 * curve) + 0.2 * group * curve
+    mean = 0.4 + linear + categorical + 0.6 * np.sin(2.7 * smooth0) + 0.4 * smooth1**2 + group_curve
+    log_sigma = (
+        -0.45
+        + 0.2 * linear
+        + 0.3 * categorical
+        + 0.18 * np.cos(2.4 * smooth0)
+        + 0.15 * np.sin(2.2 * smooth1)
+        + 0.18 * (1 + 0.25 * group) * np.cos(2.1 * curve)
+        + 0.08 * group
+    )
+    y = mean + np.exp(log_sigma) * rng.normal(size=n)
+    predictors = []
+    for parameter in GaussianLS().parameters:
+        features = {f"linear{i}": Numeric() for i in range(6)}
+        features.update({f"category{i}": Categorical() for i in range(3)})
+        features.update({f"smooth{i}": Spline(n_knots=knots) for i in range(2)})
+        # Predictor accepts named interactions, not FactorSmooth specifications.
+        features.update(curve=Spline(n_knots=knots), group=Categorical())
+        predictors.append(
+            Predictor(
+                parameter.name,
+                features,
+                interactions=[("curve", "group")],
+            )
+        )
+    provenance = {
+        "seed": seed,
+        "holdout_seed": holdout_seed,
+        "construction": "Independent synthetic Gaussian location-scale with small feature groups",
+        "numeric_terms": 6,
+        "categorical_levels": [3, 3, 4],
+        "spline_terms": 2,
+        "grouped_curve": {"basis": "spline-by-categorical", "levels": 3},
+    }
+    return SuperLSS(family=GaussianLS(), predictors=predictors), frame, y, holdout, provenance
+
+
 def data_fixture(args):
     import numpy as np
     import pandas as pd
@@ -129,6 +197,7 @@ def data_fixture(args):
             "nb2": 100000,
             "factor-smooth": 10000,
             "gaussian": 1000,
+            "gaussian-fragmented": 65536,
         }[args.fixture]
     )
     knots = args.knots if args.knots is not None else (3 if args.fixture == "gpd-tail" else 4)
@@ -146,6 +215,9 @@ def data_fixture(args):
         x = rng.uniform(size=2000)
         holdout = pd.DataFrame({"x": x, "z": mix * x + (1 - mix) * rng.uniform(size=2000)})
         provenance.update(seed=5915, holdout_seed=5916, mix=mix)
+    elif args.fixture == "gaussian-fragmented":
+        model, frame, y, holdout, provenance = gaussian_fragmented_fixture(n, knots)
+        weight = None
     elif args.fixture == "gpd-tail":
         book = marked_book(n, tail=True)
         mask = (book["policy"] < n) & (book["losses"] > 1000)
@@ -630,6 +702,7 @@ def parser():
             "tweedie-friendly",
             "gpd-tail",
             "gaussian",
+            "gaussian-fragmented",
             "severity-gaussian",
             "severity-gamma",
             "nb2",

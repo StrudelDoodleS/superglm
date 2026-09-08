@@ -231,6 +231,7 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
         DiscretizedSCOPGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
+        FactorSmoothGroupMatrix,
         RandomEffectGroupMatrix,
         SparseGroupMatrix,
         SupportCompressedSSPGroupMatrix,
@@ -310,8 +311,53 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
                     )
                 )
                 for values in (matrix.data, matrix.indices, matrix.indptr):
+                    if type(values) is not np.ndarray:
+                        return None
                     array(values)
                 continue
+            elif kind is FactorSmoothGroupMatrix:
+                field(
+                    (
+                        group.n_levels,
+                        group.coefficient_levels,
+                        group.block_size,
+                        group.raw_width,
+                        group.factor_basis,
+                        group.is_discrete,
+                    )
+                )
+                # Row subsetting reconstructs the group from B, while exact
+                # matvec and moments read the separately stored CSR buffers.
+                # Certify both: public attributes can be replaced independently.
+                if group.is_discrete:
+                    if any(
+                        value is not None
+                        for value in (group.B, group._data, group._indices, group._indptr)
+                    ):
+                        return None
+                    names = ("codes", "natural_map", "B_unique", "bin_idx")
+                else:
+                    matrix = group.B
+                    if (
+                        type(matrix) is not csr_matrix
+                        or group.B_unique is not None
+                        or group.bin_idx is not None
+                    ):
+                        return None
+                    field((matrix.shape, matrix.dtype.str))
+                    field(
+                        (
+                            getattr(matrix, "_has_sorted_indices", None),
+                            getattr(matrix, "_has_canonical_format", None),
+                        )
+                    )
+                    for values in (matrix.data, matrix.indices, matrix.indptr):
+                        if type(values) is not np.ndarray:
+                            return None
+                        array(values)
+                    names = ("codes", "natural_map", "_data", "_indices", "_indptr")
+                if any(type(getattr(group, name)) is not np.ndarray for name in names):
+                    return None
             elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
                 names = ("B_unique", "R_inv", "bin_idx")
                 field(group.n_bins)

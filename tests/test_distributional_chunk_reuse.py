@@ -34,6 +34,7 @@ from superglm.group_matrix import (
     DiscretizedSCOPGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    FactorSmoothGroupMatrix,
     RandomEffectGroupMatrix,
     SparseGroupMatrix,
     SupportCompressedSSPGroupMatrix,
@@ -236,6 +237,226 @@ def test_chunked_reuse_does_not_keep_terminal_row_buffers_alive():
     gc.collect()
     assert all(reference() is None for reference in references)
     assert not session._chunk_results
+
+
+def _factor_smooth_problem(discrete, factor_basis="fs"):
+    n = 108
+    bins = np.arange(n, dtype=np.intp) % 9
+    codes = (np.arange(n, dtype=np.intp) // 9) % 3
+    x = np.linspace(-1.0, 1.0, 9)
+    support = np.column_stack((x, x * x - np.mean(x * x)))
+    width = 6 if factor_basis == "fs" else 4
+    frame = pd.DataFrame({f"x{i}": np.roll(support[bins, 0], i) for i in range(width)})
+    family = GaussianLS()
+    weights = resolved_prior(np.ones(n))
+    layout = build_stacked_layout(
+        compile_predictors(
+            as_eager_frame(frame),
+            weights,
+            family.parameters,
+            (
+                Predictor("location", {name: Numeric() for name in frame.columns}),
+                Predictor("scale", {}),
+            ),
+            offsets={"location": np.zeros(n), "scale": np.zeros(n)},
+        )
+    )
+    group = FactorSmoothGroupMatrix(
+        support if discrete else sp.csr_matrix(support[bins]),
+        codes,
+        3,
+        natural_map=np.array([[1.0, 0.2], [0.0, 0.8]]),
+        levels=("a", "b", "c"),
+        repeated_penalty_components=(),
+        factor_basis=factor_basis,
+        bin_idx=bins if discrete else None,
+    )
+    location = replace(
+        layout.predictors[0],
+        design=DesignMatrix([group], n=n, p=width),
+        groups=(replace(layout.predictors[0].groups[0], start=0, end=width),),
+    )
+    layout = replace(layout, predictors=(location, layout.predictors[1]))
+    y = 0.2 + 0.3 * support[bins, 0] + 0.2 * codes
+    y += np.random.default_rng(518).normal(size=n)
+    plan = family.bind_likelihood(y, weights, COMPLETE_OBSERVATION)
+    penalty = np.eye(layout.n_coefficients) * 0.6
+    for state in layout.predictors:
+        penalty[state.intercept_index, state.intercept_index] = 0.0
+    config = DenseSolverConfig(coefficient_curvature="observed", tolerance=1e-9)
+    return family, layout, y, plan, penalty, config
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize("factor_basis", ["fs", "sz"])
+def test_factor_smooth_reuse_skips_refresh_and_matches_new_penalty(
+    discrete, factor_basis, monkeypatch
+):
+    problem = _factor_smooth_problem(discrete, factor_basis)
+
+    def forbid_expansion(*args, **kwargs):
+        raise AssertionError("factor-smooth reuse expanded the observation design")
+
+    monkeypatch.setattr(FactorSmoothGroupMatrix, "toarray", forbid_expansion)
+    session = solver._DenseObservedReuseSession()
+    source = _fit(problem, session=session)
+    assert source.converged
+
+    record = session._chunk_results[id(source)]
+    p = problem[1].n_coefficients
+    assert record.coefficients.nbytes + record.score_data.nbytes + record.data_curvature.nbytes == (
+        8 * (2 * p + p * p)
+    )
+
+    def forbid_refresh(*args, **kwargs):
+        raise AssertionError("factor-smooth endpoint refreshed likelihood derivatives")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(GaussianLS, "evaluate_natural", forbid_refresh)
+        same = _fit(problem, session=session, source=source)
+    assert same.iterations == 0
+    next_problem = (*problem[:4], problem[4] * 1.7, problem[5])
+    reused = _fit(next_problem, session=session, source=source)
+    fresh = _fit(next_problem, initial=source.coefficients)
+    assert reused.converged and fresh.converged
+    np.testing.assert_array_equal(reused.coefficients, fresh.coefficients)
+    np.testing.assert_array_equal(reused.terminal_data_curvature, fresh.terminal_data_curvature)
+    np.testing.assert_array_equal(reused.terminal_score, fresh.terminal_score)
+    assert reused.log_likelihood == fresh.log_likelihood
+
+
+@pytest.mark.parametrize(
+    "discrete,field",
+    [(True, name) for name in ("codes", "natural_map", "B_unique", "bin_idx")]
+    + [(False, name) for name in ("codes", "natural_map", "_data", "_indices", "_indptr")]
+    + [(False, "B." + name) for name in ("data", "indices", "indptr")],
+)
+def test_factor_smooth_mutations_refuse_reuse_at_zero_coefficients(discrete, field, monkeypatch):
+    family, layout, y, plan, penalty, config = _factor_smooth_problem(discrete)
+    problem = (family, layout, y, plan, penalty, replace(config, tolerance=1e20))
+    session = solver._DenseObservedReuseSession()
+    source = _fit(problem, session=session, initial=np.zeros(layout.n_coefficients))
+    assert id(source) in session._chunk_results
+    group = layout.predictors[0].design.group_matrices[0]
+    before = group.matvec(np.zeros(group.shape[1]))
+    owner, name = (group.B, field[2:]) if field.startswith("B.") else (group, field)
+    values = getattr(owner, name).copy()
+    if name == "codes":
+        values[0] = (values[0] + 1) % group.n_levels
+    elif name == "bin_idx":
+        values[0] = (values[0] + 1) % len(group.B_unique)
+    elif name in ("indices", "_indices"):
+        values[0] = (values[0] + 1) % group.raw_width
+    elif name in ("indptr", "_indptr"):
+        values[1] = values[2]
+    else:
+        values.flat[0] += 0.125
+    setattr(owner, name, values)
+    np.testing.assert_array_equal(group.matvec(np.zeros(group.shape[1])), before)
+    calls = 0
+    original = GaussianLS.evaluate_natural
+
+    def count_refresh(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(GaussianLS, "evaluate_natural", count_refresh)
+    _fit(problem, session=session, source=source)
+    assert calls > 0
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "n_levels",
+        "coefficient_levels",
+        "block_size",
+        "raw_width",
+        "factor_basis",
+        "shape",
+        "is_discrete",
+    ],
+)
+def test_factor_smooth_certificate_covers_structural_dimensions(discrete, field):
+    problem = _factor_smooth_problem(discrete)
+    context = solver._validated_context(
+        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    )
+    before = solver._chunk_reuse_data_certificate(context)
+    assert before is not None
+    group = context.layout.predictors[0].design.group_matrices[0]
+    value = getattr(group, field)
+    if field == "is_discrete":
+        changed = not value
+    elif field == "factor_basis":
+        changed = "sz"
+    elif field == "shape":
+        changed = (value[0], value[1] + 1)
+    else:
+        changed = value + 1
+    setattr(group, field, changed)
+    assert solver._chunk_reuse_data_certificate(context) != before
+
+
+@pytest.mark.parametrize("replacement", ["csc", "csr_array", "subclass"])
+def test_factor_smooth_certificate_refuses_unknown_nested_sparse_semantics(replacement):
+    problem = _factor_smooth_problem(False)
+    context = solver._validated_context(
+        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    )
+    group = context.layout.predictors[0].design.group_matrices[0]
+    if replacement == "csc":
+        group.B = group.B.tocsc()
+    elif replacement == "csr_array":
+        group.B = sp.csr_array(group.B)
+    else:
+
+        class CustomCSR(sp.csr_matrix):
+            pass
+
+        group.B = CustomCSR(group.B)
+    assert solver._chunk_reuse_data_certificate(context) is None
+
+
+@pytest.mark.parametrize("flag", ["_has_sorted_indices", "_has_canonical_format"])
+def test_factor_smooth_certificate_covers_raw_csr_flags(flag):
+    problem = _factor_smooth_problem(False)
+    context = solver._validated_context(
+        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    )
+    matrix = context.layout.predictors[0].design.group_matrices[0].B
+    before = solver._chunk_reuse_data_certificate(context)
+    assert before is not None
+    setattr(matrix, flag, not getattr(matrix, flag, False))
+    assert solver._chunk_reuse_data_certificate(context) != before
+
+
+@pytest.mark.parametrize("name", ["data", "indices", "indptr"])
+@pytest.mark.parametrize("factor_smooth", [False, True])
+def test_certificate_refuses_custom_nested_csr_buffers(name, factor_smooth):
+    problem = (
+        _factor_smooth_problem(False) if factor_smooth else _categorical_problem(SparseGroupMatrix)
+    )
+    context = solver._validated_context(
+        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    )
+    group = context.layout.predictors[0].design.group_matrices[0]
+    matrix = group.B if factor_smooth else group.M
+
+    class CustomBuffer(np.ndarray):
+        def astype(self, *args, **kwargs):
+            result = super().astype(*args, **kwargs)
+            result.flat[0] += 1
+            return result
+
+    original = getattr(matrix, name)
+    custom = original.view(CustomBuffer)
+    np.testing.assert_array_equal(custom, original)
+    assert custom.astype(original.dtype).flat[0] != original.flat[0]
+    setattr(matrix, name, custom)
+    assert solver._chunk_reuse_data_certificate(context) is None
 
 
 def _compressed_problem(kind):
