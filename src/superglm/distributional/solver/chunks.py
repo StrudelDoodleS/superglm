@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
+from superglm.distributional._global_moment_policy import automatic_global_moment_budget
 from superglm.distributional._panel_policy import automatic_small_group_panel_budget
 from superglm.distributional.family import (
     DistributionalFamily,
@@ -19,6 +20,10 @@ from superglm.distributional.family import (
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
+from superglm.distributional.solver._global_moments import (
+    GlobalMomentRefusalError,
+    build_global_moment_plan,
+)
 from superglm.distributional.solver._small_group_panels import build_small_group_panels
 from superglm.distributional.solver.assembly import DenseJointGeometry, GroupedGeometryAccumulator
 from superglm.distributional.solver.derivatives import (
@@ -491,21 +496,136 @@ def assemble_chunked_geometry(
 ) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
 
-    Automatic panels admit a narrow mixed ordinary layout with an additional
-    64 MiB workspace allowance. The row chunk policy is unchanged. Explicit
-    ``None`` disables panels; an integer requests the existing budgeted builder
-    directly. Builder/channel refusals retain grouped contraction. Neither
-    execution choice changes the stored design or the chunked backend identity.
+    Automatic execution may accumulate support moments across chunks in the
+    admitted large mixed-layout scope, otherwise using bounded panels. Both
+    have an additional 64 MiB allowance; the row chunk policy is unchanged.
+    Explicit ``None`` requests grouped contraction; an integer requests the
+    existing panel builder. Recoverable global numerical refusal releases the
+    partial state before replaying the complete ordinary chunk stream.
     """
+    automatic = (
+        type(small_group_panel_byte_budget) is str and small_group_panel_byte_budget == "auto"
+    )
+    panel_byte_budget = (
+        automatic_small_group_panel_budget(layout) if automatic else small_group_panel_byte_budget
+    )
+    if automatic:
+        global_budget = automatic_global_moment_budget(family, likelihood_plan, layout)
+        if global_budget is not None:
+            built = build_global_moment_plan(
+                layout,
+                byte_budget=global_budget,
+                chunk_size=resolve_chunk_size(
+                    layout.predictors[0].design.n,
+                    len(layout.predictors),
+                    chunk_size,
+                    p_coefficients=layout.n_coefficients,
+                ),
+            )
+            if built.plan is not None:
+                result = _try_global_geometry(
+                    built.plan,
+                    family,
+                    layout,
+                    y,
+                    likelihood_plan,
+                    coefficients,
+                    penalty=penalty,
+                    chunk_size=chunk_size,
+                    curvature_source=curvature_source,
+                )
+                if result is not None:
+                    return result
+    return _assemble_grouped_chunk_geometry(
+        family,
+        layout,
+        y,
+        likelihood_plan,
+        coefficients,
+        penalty=penalty,
+        chunk_size=chunk_size,
+        curvature_source=curvature_source,
+        panel_byte_budget=panel_byte_budget,
+    )
+
+
+def _try_global_geometry(
+    plan,
+    family,
+    layout,
+    y,
+    likelihood_plan,
+    coefficients,
+    *,
+    penalty,
+    chunk_size,
+    curvature_source,
+) -> DenseJointGeometry | None:
+    """Own one attempt; no exception/stream frame survives into fallback."""
+    iterator = None
+    chunk = None
+    try:
+        plan.reset(coefficients=coefficients, penalty=penalty)
+        iterator = iter_likelihood_chunks(
+            family,
+            layout,
+            y,
+            likelihood_plan,
+            coefficients,
+            chunk_size=chunk_size,
+            curvature_source=curvature_source,
+        )
+        expected_start = 0
+        n = layout.predictors[0].design.n
+        for chunk in iterator:
+            # The built-in iterator supplies contiguous positional ranges. Do
+            # not accept a repeated, skipped or malformed stream as a numerical
+            # refusal that could hide a source/iterator contract violation.
+            rows = chunk.rows
+            if (
+                type(rows) is not RowChunk
+                or rows.start != expected_start
+                or not rows.start < rows.stop <= n
+                or rows.stop - rows.start != len(chunk.score_eta)
+            ):
+                raise ValueError("global moment stream has inconsistent row ranges")
+            plan.add_chunk(chunk.plans, chunk.score_eta, chunk.curvature_packed)
+            expected_start = rows.stop
+            chunk = None
+        if expected_start != n:
+            raise ValueError("global moment stream does not cover all observations")
+        return plan.finish()
+    except GlobalMomentRefusalError as exc:
+        if not exc.recoverable:
+            raise
+        return None
+    finally:
+        try:
+            if iterator is not None:
+                close = getattr(iterator, "close", None)
+                if close is not None:
+                    close()
+        finally:
+            chunk = None
+            plan.close()
+
+
+def _assemble_grouped_chunk_geometry(
+    family,
+    layout,
+    y,
+    likelihood_plan,
+    coefficients,
+    *,
+    penalty,
+    chunk_size,
+    curvature_source,
+    panel_byte_budget,
+) -> DenseJointGeometry:
     accumulator = GroupedGeometryAccumulator(
         layout,
         penalty=penalty,
         coefficients=coefficients,
-    )
-    panel_byte_budget = (
-        automatic_small_group_panel_budget(layout)
-        if type(small_group_panel_byte_budget) is str and small_group_panel_byte_budget == "auto"
-        else small_group_panel_byte_budget
     )
     for chunk in iter_likelihood_chunks(
         family,

@@ -58,6 +58,7 @@ class _LikelihoodReuseContract:
     plan_type: type
     prepared_array_fields: tuple[str, ...]
     link_types: tuple[type, ...]
+    deterministic_chunk_replay: bool = False
 
 
 _LIKELIHOOD_REUSE_CONTRACTS: dict[type, _LikelihoodReuseContract] = {}
@@ -69,6 +70,7 @@ def _register_likelihood_reuse_contract(
     *,
     prepared_array_fields: tuple[str, ...],
     link_types: tuple[type, ...] = (),
+    deterministic_chunk_replay: bool = False,
 ) -> None:
     """Register an audited adapter after its exact family/plan types exist.
 
@@ -76,7 +78,12 @@ def _register_likelihood_reuse_contract(
     adapter-to-contract edge, including when an adapter is imported directly.
     Subclasses receive no inherited eligibility.
     """
-    contract = _LikelihoodReuseContract(plan_type, tuple(prepared_array_fields), tuple(link_types))
+    contract = _LikelihoodReuseContract(
+        plan_type,
+        tuple(prepared_array_fields),
+        tuple(link_types),
+        deterministic_chunk_replay,
+    )
     previous = _LIKELIHOOD_REUSE_CONTRACTS.get(family_type)
     if previous is not None and previous != contract:
         raise ValueError("a family already has a different likelihood reuse contract")

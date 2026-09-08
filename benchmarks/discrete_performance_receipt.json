@@ -1,5 +1,852 @@
 {
   "schema": "superglm-public-discrete-performance-evidence-v1",
+  "streamed_global_moment_production_validation": {
+    "python": "3.13.14 (main, Jul 23 2026, 14:44:45) [Clang 22.1.3 ]",
+    "runs": [
+      {
+        "name": "production-tests",
+        "suites": [
+          {
+            "name": "pytest",
+            "errors": "15",
+            "failures": "0",
+            "skipped": "405",
+            "tests": "12554",
+            "time": "1180.064",
+            "timestamp": "2026-09-08T23:18:57.343683+02:00",
+            "hostname": "v2202607388523489980"
+          }
+        ]
+      },
+      {
+        "name": "production-affected-tests",
+        "suites": [
+          {
+            "name": "pytest",
+            "errors": "0",
+            "failures": "0",
+            "skipped": "0",
+            "tests": "556",
+            "time": "26.891",
+            "timestamp": "2026-09-08T23:43:02.981259+02:00",
+            "hostname": "v2202607388523489980"
+          }
+        ]
+      },
+      {
+        "name": "production-final-integration",
+        "suites": [
+          {
+            "name": "pytest",
+            "errors": "0",
+            "failures": "0",
+            "skipped": "0",
+            "tests": "50",
+            "time": "3.083",
+            "timestamp": "2026-09-08T23:45:25.574867+02:00",
+            "hostname": "v2202607388523489980"
+          }
+        ]
+      }
+    ],
+    "unique_latest_outcomes": {
+      "skipped": 109,
+      "passed": 12449
+    },
+    "required_real_data_outcomes": {
+      "passed": 84
+    },
+    "raw_receipts": [
+      {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/production-tests.xml",
+        "sha256": "60b9bd0e9c9ce5e016d5be6ef87eb7802aafe704b52e7245806f5f52acbf330d",
+        "bytes": 1937181
+      },
+      {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/production-tests.log",
+        "sha256": "003c3b301975ba147dccf208b605a4a5833ee131546b44a29e52e0a28d8d48ab",
+        "bytes": 98413
+      },
+      {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/production-affected-tests.xml",
+        "sha256": "f8728f28e6d934ce4a97fa8620d8288ce78687acc9f04880a3f1f5af936f5206",
+        "bytes": 83503
+      },
+      {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/production-affected-tests.log",
+        "sha256": "4c2867c2e978335ed503546d17429cf2904bdddb33cedab97dfa3d7f57b6ba87",
+        "bytes": 4133
+      },
+      {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/production-final-integration.xml",
+        "sha256": "f644c464d958dbac13c6e768b9adb03e9400334dbfcdcd79765f68dc37b993a8",
+        "bytes": 8711
+      },
+      {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/production-final-integration.log",
+        "sha256": "571e16b546baa1638835a9cd60abbc276241979771821dff3cb7cb8e29a0c246",
+        "bytes": 730
+      },
+      {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/production-smoke.log",
+        "sha256": "be730b9662683cba47a4646874847861d3792b16b9c175d761ff427f484f04ac",
+        "bytes": 340
+      }
+    ],
+    "status": "complete_with_documented_targeted_followups",
+    "full_suite_source_tree_sha256": "1ad3538e4190dc7ed8f39d35bbe9017e1e8331f7f67cb5e31919ed711f8b4f03",
+    "final_source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
+    "production_delta_after_full_suite": {
+      "files": [
+        "src/superglm/distributional/_global_moment_policy.py"
+      ],
+      "scope": "Reviewed exact ResolvedLikelihoodWeights admission guard; custom subclasses retain baseline. Four regressions demonstrated before fix; final integration rerun passes."
+    },
+    "initial_setup_and_skip_recovery": {
+      "severity": "Default lookup had frequency but not severity data. Corrected parity run explicitly sets SUPERGLM_DATA_DIR to the existing public data directory and retains SUPERGLM_REQUIRE_DATA=1.",
+      "mpmath": "Installed optional mpmath 1.3.0 in the development environment only and reran seven affected modules. No repository dependency/version changes.",
+      "other_skips": "109 optional or expected skips remain; all 84 mandatory real-data cases have passing latest outcomes."
+    },
+    "outcome_policy": "Deduplicate testcase classname/name in chronological run order. These totals combine the broad run and documented targeted followups; they are not a claim of one successful whole-suite run on the final source.",
+    "checks": {
+      "ruff_check": "passed",
+      "ruff_format": "693 files formatted",
+      "uv_lock_check": "passed, no lockfile change",
+      "uv_pip_check": "67 compatible installed packages",
+      "smoke": "exit 0; END-TO-END COMPLETE",
+      "diff_check": "passed"
+    }
+  },
+  "streamed_global_moment_prototype": {
+    "schema": 1,
+    "scope": "PUBLIC ignored global-support-moment prototype; evidence for production investigation, not production-default validation",
+    "source": {
+      "sha": "299ab249b6247e0f343dfdfabc0a666efcadd074",
+      "source_tree_sha256": "cab9f7bf2369e6de9f43fd739d680f0bb007852e69f260604543b11616707adb",
+      "diff_sha256": "3cc7a4dd7fb531f8fc776d3765728465999e50f23f0afaa34fb75c2c3b9bb8f1"
+    },
+    "prototype_sha256": "1028b157975eacb33efe879ac170b7081fb4194f313ce3a6e368a9a3ee27fa4d",
+    "oracle_helper_sha256": "1a13f80be169de2d67efa6365519a17e6734004a67d7048c6108c60b577b54ec",
+    "evidence_pins": {
+      "oracle": {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/oracle_findings.json",
+        "sha256": "0cd9f9dff75468d97b6a274e32ce12258297bdb70735a6dd4f6b05ceb1dd3755"
+      },
+      "geometry_manifest": {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249-alias-fixed/manifest.json",
+        "sha256": "1157875d843102165c28a856a9cfbe0d44aab41cac7163265dc85217df707013"
+      },
+      "geometry_summary": {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249-alias-fixed/summary.json",
+        "sha256": "a4d010557d6484d1146b972a11b97bdd38856a888ddfca4d38d2eefdca6fc54d"
+      },
+      "complete_fit_manifest": {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/manifest.json",
+        "sha256": "6e1b490e2d81ffc7540817e5b97c0dfc9bb287fc3fc648afb376a8f5ee9c6dda"
+      },
+      "complete_fit_summary": {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/summary.json",
+        "sha256": "2e810db492c4a465e80e81c0c30333e30d4c7b7c2246f962e7d01068a71804ba"
+      },
+      "preserved_loader_failure": {
+        "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249/manifest.json",
+        "sha256": "6e4e089fce1e68efdb1f0f68bab8cadba7afa5cdca7a377d8db89369763b1603"
+      }
+    },
+    "helper_pins": {
+      ".benchmark-artifacts/discrete-performance/final-default-public/controller.py": "9d3f00c5ae6161821fb37cb392866b77d1cdb9693f5aa4ce7130d0595303f7e1",
+      ".benchmark-artifacts/discrete-performance/global-moments-299ab249/complete_fit.py": "1febf7967de13a46d24f4f369742dc1deab7d21179dd8033bd0cb9f017f6a752",
+      ".benchmark-artifacts/discrete-performance/global-moments-299ab249/global_moments.py": "1028b157975eacb33efe879ac170b7081fb4194f313ce3a6e368a9a3ee27fa4d",
+      ".benchmark-artifacts/discrete-performance/global-moments-299ab249/oracle_checks.py": "1a13f80be169de2d67efa6365519a17e6734004a67d7048c6108c60b577b54ec",
+      ".benchmark-artifacts/discrete-performance/global-moments-299ab249/oracle_findings.json": "0cd9f9dff75468d97b6a274e32ce12258297bdb70735a6dd4f6b05ceb1dd3755",
+      ".benchmark-artifacts/discrete-performance/global-moments-299ab249/probe_geometry.py": "749b796f2966db2b13e179316b23a3efeb88d6d16d4512aed76628ef8eea069a",
+      "benchmarks/_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+      "benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+    },
+    "fixture": {
+      "name": "gaussian-fragmented",
+      "n": 262144,
+      "knots": 4,
+      "n_bins": 256,
+      "q": 102,
+      "chunk_size": 8065,
+      "prototype_byte_budget": 67108864
+    },
+    "oracle": {
+      "status": "passed",
+      "case_count": 12,
+      "all_zero_channels_passed": true,
+      "mutations": {
+        "absolute_signed_curvature_detected": true,
+        "removed_activity_masks_detected": true
+      },
+      "covered": [
+        "signed and cancellation channels",
+        "rectangular layouts with optional intercepts",
+        "reset after complete geometry",
+        "activity masks and missing categories",
+        "live raw-basis/map authority changes and partial-result refusal",
+        "exact group-type refusal",
+        "byte-budget boundary and allocation accounting"
+      ]
+    },
+    "geometry": {
+      "status": "complete",
+      "warmup_passes_per_worker": 1,
+      "within_worker_repetitions": 3,
+      "constructor_inclusive": true,
+      "all_geometry_and_intercept_bounds_passed": true,
+      "stored_representation_identical": true,
+      "arms": {
+        "automatic-panels": {
+          "wall_seconds_median": 0.447526888,
+          "wall_seconds_range": [
+            0.433550293,
+            0.559352551
+          ],
+          "cpu_seconds_median": 0.446808538,
+          "peak_rss_bytes_before_oracle_and_outputs": 543580160,
+          "raw_receipt": {
+            "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249-alias-fixed/automatic-panels.json",
+            "sha256": "2974fcc6c50dbd4e6d151eb43984806498ec5e5100bd53ea42d9862e508b5056"
+          },
+          "raw_arrays": {
+            "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249-alias-fixed/automatic-panels.npz",
+            "sha256": "c2892015da17c30a62e293dd027225d4f669356737d75a4caa3bd9122d1e28ae"
+          },
+          "actual_routes_warmup": {
+            "PredictorExecutionPlan.score": 66,
+            "SmallGroupPanelWorkspace.cross_moment": 99,
+            "superglm.distributional.solver.chunks.automatic_small_group_panel_budget": 1,
+            "superglm.distributional.solver.chunks.automatic_small_group_panel_budget:return=67108864": 1,
+            "superglm.distributional.solver.chunks.build_small_group_panels": 33,
+            "superglm.distributional.solver.chunks.build_small_group_panels:accepted": 33
+          },
+          "workspace": {
+            "panel_estimated_peak_bytes": 21993536,
+            "panel_retained_bytes": 9872376
+          },
+          "prototype_stats": {}
+        },
+        "global-moments": {
+          "wall_seconds_median": 0.272891169,
+          "wall_seconds_range": [
+            0.271636802,
+            0.312443969
+          ],
+          "cpu_seconds_median": 0.272715121,
+          "peak_rss_bytes_before_oracle_and_outputs": 547631104,
+          "raw_receipt": {
+            "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249-alias-fixed/global-moments.json",
+            "sha256": "e9d2d5dd51b6a8fc99cabf0f1025e6000d11ec4f19e51238c393ca3a29be42c7"
+          },
+          "raw_arrays": {
+            "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249-alias-fixed/global-moments.npz",
+            "sha256": "17316adfb4ad29fc772945365f17b9990ec09273ca5b42e55f715fa24693a951"
+          },
+          "actual_routes_warmup": {},
+          "workspace": {},
+          "prototype_stats": {
+            "build_reason": null,
+            "estimated_peak_bytes": 30211944,
+            "stats": {
+              "accumulator_bytes": 24295680,
+              "byte_budget": 67108864,
+              "chunk_size": 8065,
+              "chunks": 33,
+              "coefficient_state_bytes": 84048,
+              "constructor_count": 1,
+              "current_geometry_rows": 262144,
+              "diagonal_count": 10,
+              "diagonal_finalizations": 10,
+              "diagonal_mass_bytes": 20480,
+              "directional_bytes": 655360,
+              "directional_count": 20,
+              "directional_finalizations": 20,
+              "directional_row_width_work": 61492992,
+              "directional_update_calls": 660,
+              "estimated_peak_bytes": 30211944,
+              "finalization_scratch_bytes": 171912,
+              "finish_count": 1,
+              "global_zeroed_bytes": 24295680,
+              "histogram_active_updates": 6199308,
+              "histogram_bytes": 23592960,
+              "histogram_count": 45,
+              "histogram_row_visits": 11796480,
+              "histogram_update_calls": 1485,
+              "histogram_zeroings": 45,
+              "layout_index_bytes": 816,
+              "mass_update_calls": 330,
+              "metadata_reserve_bytes": 544768,
+              "ordinary_curvature_bytes": 6144,
+              "ordinary_curvature_products": 99,
+              "ordinary_score_products": 66,
+              "ordinary_widths": [
+                16,
+                16
+              ],
+              "output_reserve_bytes": 1008576,
+              "persistent_allocated_bytes": 28291024,
+              "persistent_array_count": 128,
+              "published_output_bytes": 251328,
+              "refusal_count": 0,
+              "reset_count": 1,
+              "row_scratch_bytes": 3742160,
+              "rows": 262144,
+              "score_accumulator_bytes": 20736,
+              "score_update_calls": 330,
+              "state": "finished",
+              "support_authority_bytes": 168320,
+              "support_authority_checks": 330,
+              "support_count": 10,
+              "support_pair_finalizations": 45,
+              "validation_reserve_bytes": 195664
+            }
+          }
+        },
+        "grouped-global": {
+          "wall_seconds_median": 0.510400191,
+          "wall_seconds_range": [
+            0.499073899,
+            0.598476241
+          ],
+          "cpu_seconds_median": 0.510032601,
+          "peak_rss_bytes_before_oracle_and_outputs": 543105024,
+          "raw_receipt": {
+            "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249-alias-fixed/grouped-global.json",
+            "sha256": "a93783aa4a90985a9f33d74f55a383b55d6ab10cc1792b00c8bff7fb3c91b9d5"
+          },
+          "raw_arrays": {
+            "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/geometry-299ab249-alias-fixed/grouped-global.npz",
+            "sha256": "2b71dbc689c59fb0b7bf7ac2b8e4a2ff2bce5370dc0a7f2612b6f59bc6529dcc"
+          },
+          "actual_routes_warmup": {
+            "PredictorExecutionPlan.cross_moment": 1,
+            "PredictorExecutionPlan.diagonal_moment": 2,
+            "PredictorExecutionPlan.score": 2
+          },
+          "workspace": {},
+          "prototype_stats": {
+            "full_channel_arrays_bytes": 10485760
+          }
+        }
+      },
+      "native_dispatch_warmup": {
+        "_accumulate_directional": {
+          "calls_returned": 660,
+          "nopython_signatures": [
+            "(Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'A', True, aligned=True)) -> int64"
+          ]
+        },
+        "_accumulate_histogram": {
+          "calls_returned": 1485,
+          "nopython_signatures": [
+            "(Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'A', True, aligned=True)) -> int64"
+          ]
+        },
+        "_accumulate_vector": {
+          "calls_returned": 660,
+          "nopython_signatures": [
+            "(Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'A', True, aligned=True)) -> int64"
+          ]
+        },
+        "_finite_bounded_1d": {
+          "calls_returned": 0,
+          "nopython_signatures": []
+        },
+        "_finite_bounded_2d": {
+          "calls_returned": 462,
+          "nopython_signatures": [
+            "(Array(float64, 2, 'C', True, aligned=True),) -> bool",
+            "(Array(float64, 2, 'C', False, aligned=True),) -> bool"
+          ]
+        },
+        "_pack_categorical": {
+          "calls_returned": 264,
+          "nopython_signatures": [
+            "(Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, int64) -> none"
+          ]
+        }
+      }
+    },
+    "complete_fit": {
+      "status": "complete",
+      "fresh_workers": 6,
+      "repetitions_per_arm": 2,
+      "order": [
+        "r1-exact",
+        "r1-default-discrete",
+        "r1-prototype-discrete",
+        "r2-prototype-discrete",
+        "r2-default-discrete",
+        "r2-exact"
+      ],
+      "arms": {
+        "default-discrete": {
+          "metrics": {
+            "fit_process_cpu_seconds": {
+              "max": 11.009313681999998,
+              "median": 10.809671519999998,
+              "min": 10.610029358,
+              "values": [
+                10.610029358,
+                11.009313681999998
+              ]
+            },
+            "fit_seconds": {
+              "max": 11.019465653997031,
+              "median": 10.821466590499767,
+              "min": 10.623467527002504,
+              "values": [
+                10.623467527002504,
+                11.019465653997031
+              ]
+            },
+            "peak_fit_process_rss_bytes": {
+              "max": 818491392,
+              "median": 816173056,
+              "min": 813854720,
+              "values": [
+                813854720,
+                818491392
+              ]
+            }
+          },
+          "runs": [
+            {
+              "id": "r1-default-discrete",
+              "result": {
+                "coefficient_converged": true,
+                "converged": true,
+                "n_inner_iter": 18,
+                "n_smoothing_iter": 7,
+                "smoothing_certified": false,
+                "smoothing_converged": true,
+                "smoothing_reason": "practical_plateau"
+              },
+              "backend": "distributional-chunked-v1",
+              "chunk_size": 8065,
+              "native_signatures_stable": true,
+              "dispatch": {},
+              "dispatch_totals": {},
+              "workspace_max": {},
+              "after_output_rss_bytes": 822951936,
+              "raw_receipt": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r1-default-discrete.json",
+                "sha256": "f651483c5e607616e9510ea7d893e86eab1ad1e5f78eb8f282c946778384ceea"
+              },
+              "raw_arrays": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r1-default-discrete.npz",
+                "sha256": "6c0eaf4d700ebd429b4c28a656d64097828887eecf8c29c1d73555e97d523f91"
+              }
+            },
+            {
+              "id": "r2-default-discrete",
+              "result": {
+                "coefficient_converged": true,
+                "converged": true,
+                "n_inner_iter": 18,
+                "n_smoothing_iter": 7,
+                "smoothing_certified": false,
+                "smoothing_converged": true,
+                "smoothing_reason": "practical_plateau"
+              },
+              "backend": "distributional-chunked-v1",
+              "chunk_size": 8065,
+              "native_signatures_stable": true,
+              "dispatch": {},
+              "dispatch_totals": {},
+              "workspace_max": {},
+              "after_output_rss_bytes": 820916224,
+              "raw_receipt": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r2-default-discrete.json",
+                "sha256": "6abd647e4cc0e7ad00afbf6cc748c14bf0bbfd577ccde94d36632b8db128349f"
+              },
+              "raw_arrays": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r2-default-discrete.npz",
+                "sha256": "6c0eaf4d700ebd429b4c28a656d64097828887eecf8c29c1d73555e97d523f91"
+              }
+            }
+          ]
+        },
+        "exact": {
+          "metrics": {
+            "fit_process_cpu_seconds": {
+              "max": 7.645323058,
+              "median": 7.6215044364999995,
+              "min": 7.597685814999999,
+              "values": [
+                7.645323058,
+                7.597685814999999
+              ]
+            },
+            "fit_seconds": {
+              "max": 7.662061789997097,
+              "median": 7.639123853499768,
+              "min": 7.61618591700244,
+              "values": [
+                7.662061789997097,
+                7.61618591700244
+              ]
+            },
+            "peak_fit_process_rss_bytes": {
+              "max": 1346244608,
+              "median": 1343094784,
+              "min": 1339944960,
+              "values": [
+                1346244608,
+                1339944960
+              ]
+            }
+          },
+          "runs": [
+            {
+              "id": "r1-exact",
+              "result": {
+                "coefficient_converged": true,
+                "converged": true,
+                "n_inner_iter": 18,
+                "n_smoothing_iter": 7,
+                "smoothing_certified": false,
+                "smoothing_converged": true,
+                "smoothing_reason": "practical_plateau"
+              },
+              "backend": "distributional-dense-v1",
+              "chunk_size": null,
+              "native_signatures_stable": true,
+              "dispatch": {},
+              "dispatch_totals": {},
+              "workspace_max": {},
+              "after_output_rss_bytes": 1346244608,
+              "raw_receipt": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r1-exact.json",
+                "sha256": "674a039af03680b144b57b7901fe7a8a3e287cccdf95924942dfae5dc77f548e"
+              },
+              "raw_arrays": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r1-exact.npz",
+                "sha256": "2f406111fc87c5fcb15efe30bf072b048f0505304396897891a2469e1aa967d2"
+              }
+            },
+            {
+              "id": "r2-exact",
+              "result": {
+                "coefficient_converged": true,
+                "converged": true,
+                "n_inner_iter": 18,
+                "n_smoothing_iter": 7,
+                "smoothing_certified": false,
+                "smoothing_converged": true,
+                "smoothing_reason": "practical_plateau"
+              },
+              "backend": "distributional-dense-v1",
+              "chunk_size": null,
+              "native_signatures_stable": true,
+              "dispatch": {},
+              "dispatch_totals": {},
+              "workspace_max": {},
+              "after_output_rss_bytes": 1339944960,
+              "raw_receipt": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r2-exact.json",
+                "sha256": "778f215ca9c3d14f3011f7a1c819bda497fdea01438446324eaca65c4f86c408"
+              },
+              "raw_arrays": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r2-exact.npz",
+                "sha256": "2f406111fc87c5fcb15efe30bf072b048f0505304396897891a2469e1aa967d2"
+              }
+            }
+          ]
+        },
+        "prototype-discrete": {
+          "metrics": {
+            "fit_process_cpu_seconds": {
+              "max": 7.950080671,
+              "median": 7.767874786,
+              "min": 7.585668901000001,
+              "values": [
+                7.585668901000001,
+                7.950080671
+              ]
+            },
+            "fit_seconds": {
+              "max": 7.963569402003486,
+              "median": 7.780849654503982,
+              "min": 7.598129907004477,
+              "values": [
+                7.598129907004477,
+                7.963569402003486
+              ]
+            },
+            "peak_fit_process_rss_bytes": {
+              "max": 823271424,
+              "median": 822173696,
+              "min": 821075968,
+              "values": [
+                821075968,
+                823271424
+              ]
+            }
+          },
+          "runs": [
+            {
+              "id": "r1-prototype-discrete",
+              "result": {
+                "coefficient_converged": true,
+                "converged": true,
+                "n_inner_iter": 18,
+                "n_smoothing_iter": 7,
+                "smoothing_certified": false,
+                "smoothing_converged": true,
+                "smoothing_reason": "practical_plateau"
+              },
+              "backend": "distributional-chunked-v1",
+              "chunk_size": 8065,
+              "native_signatures_stable": true,
+              "dispatch": {
+                "assembly_calls": 19,
+                "build_calls": 19,
+                "close_calls": 19,
+                "completed_geometry": 19
+              },
+              "dispatch_totals": {
+                "chunks": 627,
+                "constructor_count": 19,
+                "diagonal_count": 190,
+                "diagonal_finalizations": 190,
+                "directional_count": 380,
+                "directional_finalizations": 380,
+                "directional_update_calls": 12540,
+                "finish_count": 19,
+                "histogram_count": 855,
+                "histogram_update_calls": 28215,
+                "histogram_zeroings": 855,
+                "mass_update_calls": 6270,
+                "persistent_array_count": 2432,
+                "refusal_count": 0,
+                "reset_count": 19,
+                "rows": 4980736,
+                "score_update_calls": 6270,
+                "support_authority_checks": 6270,
+                "support_count": 190,
+                "support_pair_finalizations": 855
+              },
+              "workspace_max": {
+                "estimated_peak_bytes": 30211944,
+                "persistent_allocated_bytes": 28291024,
+                "row_scratch_bytes": 3742160
+              },
+              "after_output_rss_bytes": 830095360,
+              "raw_receipt": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r1-prototype-discrete.json",
+                "sha256": "4f9fb2ca3de325f85faac2a27499f0824c78963ed3001b8878c508e55ec4be1e"
+              },
+              "raw_arrays": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r1-prototype-discrete.npz",
+                "sha256": "5b04055c808d92cc8c1413888cbecadc27e03b9da2d1b609b7ee50b84dbf9de5"
+              }
+            },
+            {
+              "id": "r2-prototype-discrete",
+              "result": {
+                "coefficient_converged": true,
+                "converged": true,
+                "n_inner_iter": 18,
+                "n_smoothing_iter": 7,
+                "smoothing_certified": false,
+                "smoothing_converged": true,
+                "smoothing_reason": "practical_plateau"
+              },
+              "backend": "distributional-chunked-v1",
+              "chunk_size": 8065,
+              "native_signatures_stable": true,
+              "dispatch": {
+                "assembly_calls": 19,
+                "build_calls": 19,
+                "close_calls": 19,
+                "completed_geometry": 19
+              },
+              "dispatch_totals": {
+                "chunks": 627,
+                "constructor_count": 19,
+                "diagonal_count": 190,
+                "diagonal_finalizations": 190,
+                "directional_count": 380,
+                "directional_finalizations": 380,
+                "directional_update_calls": 12540,
+                "finish_count": 19,
+                "histogram_count": 855,
+                "histogram_update_calls": 28215,
+                "histogram_zeroings": 855,
+                "mass_update_calls": 6270,
+                "persistent_array_count": 2432,
+                "refusal_count": 0,
+                "reset_count": 19,
+                "rows": 4980736,
+                "score_update_calls": 6270,
+                "support_authority_checks": 6270,
+                "support_count": 190,
+                "support_pair_finalizations": 855
+              },
+              "workspace_max": {
+                "estimated_peak_bytes": 30211944,
+                "persistent_allocated_bytes": 28291024,
+                "row_scratch_bytes": 3742160
+              },
+              "after_output_rss_bytes": 829538304,
+              "raw_receipt": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r2-prototype-discrete.json",
+                "sha256": "7d51bcc0017e43ba2cd52d53db2b277aba42d9cc0581a1da8403e22182a228bb"
+              },
+              "raw_arrays": {
+                "path": "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/global-moments-299ab249/complete-fit-299ab249/r2-prototype-discrete.npz",
+                "sha256": "5b04055c808d92cc8c1413888cbecadc27e03b9da2d1b609b7ee50b84dbf9de5"
+              }
+            }
+          ]
+        }
+      },
+      "comparisons": [
+        {
+          "kind": "same_stored_discrete_representation",
+          "reference": "default-discrete",
+          "other": "prototype-discrete",
+          "input_fingerprints_identical": true,
+          "stored_representation_identical": true,
+          "array_errors": {
+            "coefficients": {
+              "max_absolute_difference": 2.220446049250313e-16,
+              "difference_norm": 6.32366937578931e-16,
+              "norm_relative_difference": 3.902872553679213e-16
+            },
+            "covariance": {
+              "max_absolute_difference": 2.233456475320139e-16,
+              "difference_norm": 6.711573234714147e-16,
+              "norm_relative_difference": 6.584616302716642e-14
+            },
+            "edf": {
+              "max_absolute_difference": 2.4158453015843406e-13,
+              "difference_norm": 2.4158453015843406e-13,
+              "norm_relative_difference": 2.8370430154188215e-15
+            },
+            "holdout_parameters": {
+              "max_absolute_difference": 8.881784197001252e-16,
+              "difference_norm": 8.985453673590438e-15,
+              "norm_relative_difference": 1.5674831984538944e-16
+            },
+            "log_likelihood": {
+              "max_absolute_difference": 0,
+              "difference_norm": 0,
+              "norm_relative_difference": 0
+            },
+            "objective": {
+              "max_absolute_difference": 0,
+              "difference_norm": 0,
+              "norm_relative_difference": 0
+            },
+            "smoothing_parameters": {
+              "max_absolute_difference": 7.958078640513122e-13,
+              "difference_norm": 1.2422642972901259e-12,
+              "norm_relative_difference": 1.1814148447693577e-15
+            },
+            "terminal_penalized_curvature": {
+              "max_absolute_difference": 1.3801582099404186e-10,
+              "difference_norm": 1.0050006600843461e-9,
+              "norm_relative_difference": 4.057188078845525e-16
+            },
+            "terminal_score": {
+              "max_absolute_difference": 2.8329338874755194e-11,
+              "difference_norm": 5.983565734706582e-11,
+              "norm_relative_difference": 8.778568897035284e-7
+            },
+            "train_parameters": {
+              "max_absolute_difference": 1.5543122344752192e-15,
+              "difference_norm": 1.071232165175403e-13,
+              "norm_relative_difference": 1.6089902655416353e-16
+            }
+          },
+          "same_differences_observed_both_repetitions": true
+        },
+        {
+          "kind": "exact_discrete_representation_comparison",
+          "reference": "exact",
+          "other": "prototype-discrete",
+          "input_fingerprints_identical": true,
+          "stored_representation_identical": false,
+          "array_errors": {
+            "coefficients": {
+              "max_absolute_difference": 0.0021994750125070156,
+              "difference_norm": 0.005640581709578995,
+              "norm_relative_difference": 0.0034812884089806912
+            },
+            "covariance": {
+              "max_absolute_difference": 0.000015156060508287727,
+              "difference_norm": 0.0000362519521531509,
+              "norm_relative_difference": 0.0035606966924394885
+            },
+            "edf": {
+              "max_absolute_difference": 0.018872613185550335,
+              "difference_norm": 0.018872613185550335,
+              "norm_relative_difference": 0.00022158103998450848
+            },
+            "holdout_parameters": {
+              "max_absolute_difference": 0.0007360709791150999,
+              "difference_norm": 0.006679758443281066,
+              "norm_relative_difference": 0.00011652583521087189
+            },
+            "log_likelihood": {
+              "max_absolute_difference": 2.446712258271873,
+              "difference_norm": 2.446712258271873,
+              "norm_relative_difference": 0.000008371850507851402
+            },
+            "objective": {
+              "max_absolute_difference": 2.3769537657499313,
+              "difference_norm": 2.3769537657499313,
+              "norm_relative_difference": 0.000008122835673208593
+            },
+            "smoothing_parameters": {
+              "max_absolute_difference": 4.005834620009637,
+              "difference_norm": 4.976812238844281,
+              "norm_relative_difference": 0.004736803070199363
+            },
+            "terminal_penalized_curvature": {
+              "max_absolute_difference": 46.82867049332708,
+              "difference_norm": 401.16616245454736,
+              "norm_relative_difference": 0.0001619455249044152
+            },
+            "terminal_score": {
+              "max_absolute_difference": 0.00000288806754433768,
+              "difference_norm": 0.00000622229641870975,
+              "norm_relative_difference": 0.08602523297516436
+            },
+            "train_parameters": {
+              "max_absolute_difference": 0.0009904808256123165,
+              "difference_norm": 0.07559257820417208,
+              "norm_relative_difference": 0.00011353978357208037
+            }
+          },
+          "same_differences_observed_both_repetitions": true
+        }
+      ]
+    },
+    "controls": {
+      "all_thread_controls_one": true,
+      "preflight_seconds": 10,
+      "external_cpu_limit_cores": 0.25,
+      "all_endpoint_audits_passed": true,
+      "all_source_helper_freezes_verified": true,
+      "warmup": "Existing public warmup plus identical four-row native signature calls in all arms, outside fit clocks. No additional fitting/model compilation. Retain inherited caches and both frozen prototype module aliases.",
+      "process_status": "User subsequently clarified Headroom and Kompress were uninstalled/not running. Presence is not inferred from historical operator prose; raw process snapshots record observations. No special process exemptions.",
+      "cpu_caveat": "Endpoint accounting is a lower bound: CPU used after a process's last observation before exit, and by processes born and exited between snapshots, is unavailable. Newly observed processes contribute all observed lifetime ticks; PID reuse is distinguished by start ticks. Descendants that reparent between snapshots may not be identifiable. This is a screening check, not proof that the machine stayed quiet throughout a fit."
+    },
+    "limitations": [
+      "Prototype arithmetic is frozen at1028b157; production owned transformed-support integration is separate and requires new validation.",
+      "Two fresh fit repetitions per arm; geometry repeats share one worker after warmup. Ratios are local observations, not universal crossovers.",
+      "Current default discrete and prototype use identical stored basis hashes; exact-versus-discrete comparisons separately include continuous binning differences. Small output discrepancies alone do not prove exact equivalence.",
+      "Fit-end process RSS includes imports/preparation/warmup/fit and is captured before prediction/covariance/NPZ/representation output. Geometry oracle envelopes run after geometry RSS capture. Workspace estimates are not allocator measurements.",
+      "All fits reach practical_plateau with smoothing_certified=false; no optimizer certification claim.",
+      "An initial geometry warmup failed on a retained Numba-cache module alias. Aborted evidence retained; corrected window registers two aliases to one frozen module, without deleting caches or changing arithmetic."
+    ]
+  },
   "current_source_complexity_diagnostics": {
     "source_sha": "748c8596899e698d7c7759a9d5fc5f378ec89f5b",
     "purpose": "Current-source diagnosis of repeated row expansion and support contraction; no production changes or uninstrumented speed estimate.",
@@ -89,7 +936,8 @@
       "numerical_threads": 1,
       "preflight_seconds": 10,
       "external_cpu_limit_cores": 0.25,
-      "headroom_kompress_included": true,
+      "all_observed_external_processes_included": true,
+      "runtime_status_note": "User reports Headroom and Kompress uninstalled. Inclusion in an activity-audit policy does not establish service presence; raw process observations remain authoritative.",
       "execution": "Six fresh serial workers; cProfile plus integer dispatch witnesses, public warmup outside fit, existing caches retained.",
       "rss": "Process highwater captured at fit completion before representation and saved-output collection.",
       "activity_limit": "Endpoint screening cannot establish exclusive host access."
@@ -1083,7 +1931,7 @@
     "warmup_for_fit_windows": "Fresh serial interpreters call public superglm.warmup() before the fit timer, retaining existing caches; additional JIT/cache misses may occur within a fit.",
     "thread_environment": "OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS, BLIS_NUM_THREADS, VECLIB_MAXIMUM_THREADS, NUMEXPR_NUM_THREADS and NUMBA_NUM_THREADS are one; only the explicit BLAS-thread diagnostic changes the solver BLAS scope.",
     "instrumentation": "Complete-fit windows retain disclosed lightweight execution/dispatch witnesses; no call-stack profiler or per-call clocks. Geometry timing is a separate diagnostic.",
-    "activity": "Other numerical work stopped; Headroom remains active. Guest CPU endpoint screens do not prove exclusive physical-host access.",
+    "activity": "Other numerical work stopped; all observed external processes remain in the activity audit. User reports Headroom and Kompress uninstalled. Guest CPU endpoint screens do not prove exclusive physical-host access.",
     "numerical_differences": "Saved-array comparisons are descriptive differences, not certified error bounds or a bitwise-equivalence promise.",
     "policy": "Dense override is an internal experiment on the stored discrete basis, not an automatic dense-policy or public API/serialization change. Panel workspace budgets do not bound whole-process RSS."
   },

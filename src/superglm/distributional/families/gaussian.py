@@ -524,4 +524,5 @@ _register_likelihood_reuse_contract(
     GaussianLikelihoodPlan,
     prepared_array_fields=("parameter_independent_carrier",),
     link_types=(LowerBoundedLogLink,),
+    deterministic_chunk_replay=True,
 )

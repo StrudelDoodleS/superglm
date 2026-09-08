@@ -1,8 +1,9 @@
 # Discrete execution performance plan
 
-Status: previous implementation/validation and current-source profiling are
-complete. A bounded global moment accumulator with a combined ordinary block is
-the next prototype within the open C1 mixed-layout performance gate.
+Status: a bounded global moment prototype passes independent mathematical checks
+and reduces complete-fit time by 28% in the controlled mixed-layout comparison.
+Production integration is implemented and independently reviewed; final
+validation and actual-default benchmarks remain within C1.
 Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
@@ -54,7 +55,7 @@ compression and cases where histogram setup dominates.
 
 Use fresh serial subprocesses with numerical thread counts fixed to one.
 Retain raw receipts and disclose compilation/cache policy, order, repetitions
-and background activity. Headroom/Kompress tool timings are not fit timings.
+and background activity. Tool completion timings are not fit timings.
 Pause other numerical work during timing windows and distinguish noisy
 measurements from supported improvements.
 
@@ -396,7 +397,7 @@ indices where the term representation permits it.
    default discrete execution and the identical stored discrete basis through
    the existing dense backend. Separate disjoint call owners, iteration counts,
    row rendering, weighted products and memory traffic. Use the original
-   controlled activity protocol, with Headroom/Kompress still included.
+   controlled activity protocol, including all observed external processes.
 2. Falsify the repeated-contraction hypothesis with three diagnostic complete
    fits: panels disabled and only the geometry batch changed from 8,065 to
    64,520 to all 262,144 rows. Preserve other pass sizes, family, optimizer and
@@ -441,4 +442,167 @@ N-by-p spline panels. Batch the ordinary columns to remove the existing
 singleton pair scans, preserving interaction masks and rectangular channels.
 Use explicit state/scratch budgets, fit-local ownership and the existing
 numerical/unsupported-layout fallback; full-design mutation authority cannot be
-inferred from matching hashes on this fixture. This prototype remains unmeasured.
+inferred from matching hashes on this fixture. The measurements below now test
+this design directly.
+
+The prototype now has an explicit evaluation contract. Construction validates
+the layout and owns the small support bases/maps; each geometry owns fresh
+accumulator state. Reset initializes scores, curvature and penalties. Existing
+likelihood chunks provide observation-specific signed channels and owned local
+row maps. Accumulation verifies their support authority, retains moments across
+chunks, and finalization transforms each support block once. Unsupported
+layouts, invalid numeric state and budget excess refuse explicitly. Ordinary
+row panels remain bounded by the existing chunk size. No predictor equality or
+full-N copied map is required.
+
+An independent oracle compares distinct rectangular predictors against directly
+materialized stored designs, including masks, categorical baseline codes,
+signed channels, reset behavior and live-input mismatch. Its sign/mask mutation
+checks must demonstrate sensitivity to wrong accumulation. Memory/dispatch
+checks are separate from mathematical comparisons.
+
+The initial performance gate uses three fresh public workers: current panels,
+existing global grouped moments and the prototype. Every whole-geometry timing
+includes construction, validation, reset, current family/predictor evaluation,
+accumulation, support transformations and final outputs. One whole-pass warmup
+precedes three within-worker repetitions. The global reference collects the
+same chunk-produced channels before grouped contraction, charging collection
+and allocation; this is distinct from the earlier C=N likelihood-batch probe.
+Only a favorable and numerically correct result advances to a small repeated
+complete-fit comparison under the existing serial activity protocol.
+
+The frozen prototype `1028b157` passes the independent oracle, including 12
+distinct-layout/chunk/cancellation cases with two reset geometries each, zero
+channels, executable sign/mask mutations, live-input refusal and separate
+workspace/dispatch checks. Its corrected loader comparison records median
+whole-geometry wall times of 0.273 s for global moments, 0.448 s for current
+panels and 0.510 s for existing global grouped assembly. The three within-worker
+ranges are disjoint between the prototype and either reference; all geometry
+and intercept comparisons pass on identical stored bases. This is a favorable
+geometry diagnostic, not a complete-fit speed estimate.
+
+Proceed with six fresh complete-fit workers: current exact, current default
+discrete and prototype discrete, twice each with reversed second-repeat order.
+Preserve the existing public model, optimizer, bins and tolerances. Construct
+fresh prototype state for every geometry; any refusal fails that experimental
+arm rather than silently timing fallback. All arms receive the same public
+warmup and a declared tiny native-signature warmup. Record complete-fit clocks,
+fit-end RSS before saved outputs, work/status, numerical outputs, representation
+hashes and native execution. Keep the prototype outside production until this
+evidence and the code review support promotion.
+
+Environment correction: the user reports that Headroom and Kompress have been
+uninstalled. Current comparisons do not assume their presence or depend on
+their tools. Serial workers, fixed numerical thread counts, process activity
+screens and raw worker wall/CPU/RSS evidence remain unchanged. Historical raw
+receipts are preserved; inclusion in a process-audit policy does not establish
+that a particular service was running.
+
+The six-worker comparison is complete. Median wall times are 7.639 s exact,
+10.821 s current discrete and 7.781 s prototype discrete; the prototype and
+exact ranges overlap. Median fit-end process peaks are 1,280.88 / 778.36 /
+784.09 MiB respectively. Both prototype fits execute 19 fresh geometry plans,
+627 chunks and 855 support-pair finalizations without refusal. Inputs and stored
+discrete designs match; maximum holdout difference versus current discrete is
+8.88e-16. All fits retain 18 inner and seven smoothing iterations and the same
+practical-plateau status. The exact/discrete holdout difference of 7.36e-4
+remains a resolution effect, separate from the accumulator comparison.
+
+### Production integration stages
+
+1. Add independent stored-row mathematical regressions and observe the missing
+   production capability. Cover signed rectangular channels, masks, cancellation,
+   reset/cleanup, budget boundaries and executable sign/mask mutations. Keep
+   dispatch/workspace assertions separate from numerical comparisons.
+2. Implement the bounded accumulator in `solver/_global_moments.py`. Own the
+   small solver-support tables `T = B @ R` once per geometry and contract the
+   global moments with those tables. Keep original B/R copies for live authority
+   checks. Require exact ndarray authority before accessing caller arrays and
+   certify nonzero T, ordinary values and derivative channels within the existing
+   broad exponent envelope. Zeros, signs and cancellation remain valid. This
+   closes the prototype's raw-contraction underflow and ndarray-subclass gaps
+   without changing the solver, likelihood or stored representation.
+3. Integrate a narrow automatic selection into chunked assembly. Preserve
+   explicit panel overrides and the existing row budget. Refusal discards partial
+   state and replays the entire geometry through the existing fallback; arbitrary
+   exceptions still propagate after cleanup. Establish an evidence-based size
+   envelope before extending automatic dispatch to small models.
+4. Independently review implementation and run focused mathematical, integration,
+   endpoint-reuse and warmup regressions. Run the required broader checks once the
+   production source is stable. Existing extreme-scale fallback behavior is not
+   upgraded by refusing the new route.
+5. Compare actual production defaults against the frozen starting implementation,
+   including complete fits, fit-end RSS, saved outputs and actual dispatch. Use
+   bounded size controls to assess selection and retain the public insurance and
+   favorable-support controls. Update this plan, report and roadmap with the
+   validated capability and any remaining crossover limitation.
+
+Ownership and interface review: the mathematical tests consume the accumulator
+API; the implementation owns that API and its explicit refusal; integration owns
+selection and whole-stream replay; the benchmark consumes actual default dispatch.
+No two implementers own the same production file. The original prototype and its
+receipts remain frozen as evidence. The production plan adopts solver-support
+tables because their one-time construction is small and avoids delayed map
+rescaling; this choice requires new numerical and performance validation.
+
+Stage 1 observed the missing assembler and eager fallback allocation before
+implementation. The production core at SHA256 `838e9519f42674e065965ca8cc590470fe3c95d26b272dc9a991f054481d7c66`
+now passes 45 independent behavioral tests, including both executable mutations,
+signed cancellation, solver-support scaling, exact array authority, workspace
+and state recovery. Static checks pass. Independent core review and integration
+validation are in progress; this is not the final production source freeze.
+
+The initial automatic admission is deliberately restricted to the measured
+mixed layout, exact Gaussian/Gamma family and likelihood-plan contracts, at
+least 262,144 observations, and histogram initialization no larger than one
+quarter of the corresponding histogram row updates. This is an initial scope
+rule rather than an established speed crossover. Explicit panel controls retain
+their existing semantics. A private registry flag admits deterministic replay;
+custom family or likelihood-plan types stay on their existing routes.
+
+The planned production comparison has 15 timed workers: two repeats of the
+262,144-row exact/discrete baseline and new discrete default, discrete baseline
+and candidate pairs at 65,536 and 1,048,576 rows, and pairs for the existing
+support-32 and public Gamma-severity controls. One exact control at 1,048,576
+rows also directly checks the large-N time/memory frontier. Five candidate witnesses
+check actual default selection/native dispatch. All timed arms receive the same
+tiny global-kernel warmup, with module/source provenance recorded. The untouched
+starting implementation is retained in `.worktrees/discrete-global-baseline` at
+`299ab249`; benchmark helpers must not replace its assembly routines.
+
+Independent core review found two admission issues: an early numerical refusal
+could conceal a later same-chunk source error, and oversized live activity
+indices could allocate an unbounded validation temporary. Three regressions
+reproduce these failures against `838e9519`. The revised core at SHA256
+`e7628669a4ed0a77c33115820dcf0c8f7144518701a0edb8552673a55d6785e2`
+defers numerical refusal until the same structural pass completes and checks
+activity length before comparison. Scoped re-review clears both findings with
+no additional important issue. Integration review also requires exact certified
+link types before replay admission; custom links retain baseline dispatch.
+
+The link guard is implemented, with eight regressions demonstrated against the
+unfixed policy. Final composition review also identified overridable slicing
+on resolved-weight subclasses. Four Gaussian/Gamma regressions reproduce that
+admission gap; exact resolved-weight authority now joins the exact family,
+plan and link checks. Both policy changes pass scoped re-review. The final
+48 assembler tests and 193 integration/reuse/architecture/warmup checks pass.
+
+The first broad non-browser run on source tree `1ad3538e4190dc7ed8f39d35bbe9017e1e8331f7f67cb5e31919ed711f8b4f03`
+records 12,134 passes, no assertion failures, 405 skips and 15 setup errors.
+The setup errors are the required severity-data guard: the default cache has
+frequency data but lacks severity. Of the skips, 296 require the absent optional
+`mpmath` oracle. Restore that environment-only dependency and rerun its seven
+affected modules plus real-data parity with the explicit existing public data
+directory. The only production delta after the broad run is the reviewed
+resolved-weight admission guard, covered by the focused checks above. Preserve
+the initial receipts and report the combined latest outcomes without presenting
+the broad run as a single successful check on the final source.
+
+The corrected affected-suite run passes all 556 cases without skips; the final
+50-case integration run and smoke check pass. Combined latest outcomes are
+12,449 passes and 109 remaining expected/optional skips, including all 84
+required real-data cases passing. Source-tree comparison confirms the policy
+guard is the only production change after the broad run. Final source tree
+`0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea`
+passes static/dependency checks, and all independent review findings are closed.
+Proceed to actual-default timing and witnesses with this implementation frozen.

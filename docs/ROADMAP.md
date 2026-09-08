@@ -140,10 +140,10 @@ separate dispatch witnesses. Discrete medians improve by 58.5% for fragmented
 Gaussian, 49.4% for support-32, and 76.6% for Gamma severity against the frozen
 post-C3 source; severity exact/discrete timing ranges overlap.
 
-The remaining mixed-layout gap keeps this gate open: discrete fitting takes
-44.5% longer than exact fitting while using 499.5 MiB less fit high-water RSS.
-The implemented stages are validated, but universal speed parity is not
-established. Further bounded execution work remains ahead of another roadmap
+The earlier mixed-layout comparison found discrete fitting taking 44.5% longer
+than exact while using 499.5 MiB less fit high-water RSS. The implemented stages
+are validated; the subsequent prototype below addresses that remaining gap.
+Production integration remains ahead of another roadmap
 capability; see the [performance report](research/2026-09-discrete-performance-report.md).
 Scalar SuperGLM's cached-weight discrete REML optimizer remains a separate
 approximation contract.
@@ -155,11 +155,19 @@ expansion in mixed panels. A three-condition geometry-batch ablation confirms
 lost support-contraction amortization, but using one whole-book batch still does
 not beat the current panels in those diagnostics. Remaining mixed pair work
 includes repeated weighted-column scans and spline-by-category expansion.
-Prototype a bounded global moment accumulator with the small ordinary block
-processed together; preserve observation-level likelihood semantics and the
-distributional optimizer. Neither increasing N nor lifting the chunk limit alone
-is an evidenced solution. The proposed accumulator has no measured speed claim
-yet.
+A bounded global moment prototype now processes the small ordinary block
+together while preserving observation-level likelihood semantics and the
+distributional optimizer. Independent signed/masked rectangular oracles pass.
+Six controlled complete fits yield medians of 10.821 s for current discrete,
+7.781 s for the prototype and 7.639 s for exact; prototype/exact timing ranges
+overlap, while the prototype uses 496.79 MiB less median fit-end RSS. The stored
+discrete basis is identical and holdout differences are below 9e-16. This
+supports production integration with numerical guards, fallback and explicit
+size-selection evidence. That implementation now passes independent review and
+12,449 distinct latest tests across the broad run and documented followups,
+including all 84 required real-data cases. Actual-default benchmarks, including
+a million-row exact/discrete comparison, remain before closing this performance
+gate. The initial admission scope does not establish universal speed parity.
 
 In current priority order:
 
@@ -243,9 +251,10 @@ another predictor count. Reopen only with a concrete use case and validating evi
   claims.
 - Follow the [cost and timing policy](development/cost-and-timing.md): record
   exact revision/data/configuration, stopping status, work/allocation and
-  dispatch. Headroom/Kompress passthrough makes transformed tool output and
-  proxy clocks unsuitable evidence; use raw worker artifacts and audit activity
-  during a timing run. Historical scalar timings and one dense LSS receipt
+  dispatch. Use raw worker clocks and artifacts, with an activity audit during
+  each timing run; tool completion clocks are not fit timings. Current work
+  follows the user's correction that Headroom and Kompress are uninstalled.
+  Historical scalar timings and one dense LSS receipt
   cannot justify 10⁷–10⁸-row or sub-second LSS promises.
 
 ## Dossier corrections to retain

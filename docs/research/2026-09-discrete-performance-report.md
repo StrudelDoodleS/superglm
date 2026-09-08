@@ -334,10 +334,17 @@ Timed workers run serially in fresh interpreters with numerical threads fixed
 to one except for the explicit BLAS-thread diagnostic, and public
 `superglm.warmup()` before timing, retaining existing caches.
 Additional JIT/cache misses may still occur during a fit. Arm order varies;
-other numerical work is stopped and Headroom remains active. Worker wall time,
-process CPU time and RSS receipts are primary; Headroom/Kompress tool wall time
-is not benchmark time. Fit RSS includes runtime and compilation state and is
-distinct from the later process peak during output collection.
+other numerical work is stopped and all observed external processes are covered
+by the activity audit. Worker wall time, process CPU time and RSS receipts are
+primary; tool completion time is not benchmark time. Fit RSS includes runtime
+and compilation state and is distinct from the later process peak during output
+collection.
+
+The user reports that Headroom and Kompress are now uninstalled. Current
+comparisons do not assume either is running. Earlier policy wording naming
+those services meant that no observed external process was excluded; it is
+not evidence of service presence in every window. Historical raw receipts and
+their process observations remain unchanged.
 
 All size-sweep fit endpoint activity screens passed and source/wrapper stability
 checks passed. The first window stopped on a failed two-second preflight before
@@ -465,7 +472,7 @@ predictions by at most 1.33e-15; terminal-curvature relative differences are at
 most 3.37e-15. Exact-versus-binned representation differences are retained
 separately. All runs reach the existing practical plateau, without strict
 smoothing certification. Source, wrapper, pool and activity checks pass;
-Headroom/Kompress remains included in the activity protocol.
+All observed external processes are included in the activity protocol.
 
 The default geometry call-stack owner partitions into 3.486 s of curvature
 channel calls, 2.969 s of panel building, 2.398 s of likelihood-chunk iteration,
@@ -520,3 +527,127 @@ has five smooth groups. No equal-predictor sharing is assumed. Two ordinary
 pins the explicit pair enumeration and accounting. This is a design estimate,
 not an implemented peak-memory bound: source maps, derivative scratch,
 coefficient outputs, metadata and numerical fallback need separate accounting.
+
+## Streamed global moment prototype
+
+An ignored prototype at SHA256 `1028b157975eacb33efe879ac170b7081fb4194f313ce3a6e368a9a3ee27fa4d`
+implements that schedule: persistent signed support-pair, marginal and
+directional moments, with one batched ordinary panel per predictor/chunk and
+one final support contraction. It constructs fresh owned support authority for
+each geometry, validates each chunk against it, and explicitly refuses invalid
+inputs or excess estimated workspace. The experimental envelope is one or two
+predictors with exact built-in ordinary/stored-spline types, at most 64 groups
+per predictor and bounded support/group dimensions. Existing production source
+is unchanged.
+
+The independent small synthetic oracle passes 12 unequal-layout/intercept/chunk
+and cancellation cases, two reset geometries per case, zero channels, executable
+signed-weight and activity-mask mutations, and separate budget/dispatch/live
+authority checks. Maximum curvature discrepancy is 8.35e-15; the largest error
+is 0.000123 of its dimension/epsilon/absolute-product bound. These checks compare
+directly materialized stored rows; they do not compare different resolutions.
+
+The public fragmented fixture then supplies three fresh geometry workers, each
+with one full warmup and three within-worker repetitions. Timings include
+construction, validation, reset, unchanged predictor/family derivatives,
+accumulation, masks, coefficient maps, all geometry outputs and cleanup. The
+global grouped reference collects the same chunk-produced channels inside its
+timer, including their allocation. Compilation of the common fixture is outside
+all three geometry timers.
+
+| Geometry route | Median wall (s) | Median CPU (s) | Wall range (s) | Measured process peak (MiB) |
+|---|---:|---:|---:|---:|
+| Current automatic panels | 0.4475 | 0.4468 | 0.4336–0.5594 | 518.40 |
+| Streamed global moments | 0.2729 | 0.2727 | 0.2716–0.3124 | 522.26 |
+| Existing global grouped | 0.5104 | 0.5100 | 0.4991–0.5985 | 517.95 |
+
+The prototype reduces median geometry wall time by about 39% relative to panels
+in this window. These are geometry diagnostics, not a complete-fit result or a
+precise universal speed estimate. All five geometry fields and intercept views
+pass the independent absolute-product bounds. Prototype/grouped score and
+curvature norm-relative differences are 4.63e-15 and 4.37e-15; stored
+representation hashes match. The native accumulator calls have compiled
+nopython signatures. Per geometry, construction/reset/finish each occur once,
+33 chunks update 45 persistent histograms, and 45 support-pair finalizations
+occur. The prototype accepts without refusal, owns 26.98 MiB of numeric arrays,
+and estimates 28.81 MiB peak additional workspace. Caller-owned likelihood
+chunks, source designs and runtime/compiler state are outside that estimate.
+
+Process peaks are captured before independent envelope/output validation, whose
+later peak is separate. The original activity gates, numerical pools of one,
+and accounting for all observed external processes remain in force. An earlier window stopped
+on a Numba-cache module-name mismatch during untimed prototype warmup. Its
+successful panel observation and failure receipts remain preserved. Registering
+the two loader aliases to the same frozen module corrected only the harness;
+no cache was deleted and no arithmetic changed. The table uses a new complete
+three-worker window with one consistent corrected worker hash.
+
+Six subsequent fresh complete-fit workers compare exact, current default
+discrete and prototype discrete, then reverse that order. The public fixture,
+bins, optimizer and stopping rules are unchanged. All arms receive identical
+public warmup and four-row native-signature warmup outside the fit clocks.
+Construction, validation, accumulation, finalization and cleanup remain inside
+each prototype geometry's fit cost; there is no hidden fallback or profiler.
+
+| Complete-fit route | Median wall (s) | Median CPU (s) | Wall range (s) | Median fit-end peak (MiB) |
+|---|---:|---:|---:|---:|
+| Exact | 7.6391 | 7.6215 | 7.6162–7.6621 | 1,280.88 |
+| Current default discrete | 10.8215 | 10.8097 | 10.6235–11.0195 | 778.36 |
+| Prototype discrete | 7.7808 | 7.7679 | 7.5981–7.9636 | 784.09 |
+
+The prototype reduces median discrete fit time by 28.1%. Its range overlaps
+exact's, with 496.79 MiB less median fit-end RSS. Two repetitions per arm support
+this local improvement, not a universal crossover or precise speed estimate.
+All runs pass source/helper freezes, actual one-thread pool checks and process
+activity screens. Each prototype fit uses 19 fresh plans and 627 chunks, with
+855 support-pair finalizations, no refusal and stable compiled signatures.
+
+The stored discrete representation and input hashes match. Against current
+discrete, maximum coefficient and holdout differences are 2.22e-16 and 8.88e-16;
+covariance norm-relative difference is 6.58e-14. Objective and log likelihood
+are identical. All fits retain 18 inner/seven smoothing iterations and practical
+plateau convergence, without claiming strict smoothing stationarity. The
+7.36e-4 maximum exact/discrete holdout difference is a separate binning effect.
+
+This evidence supports production integration. Review requires exact ndarray
+authority and a broader exponent guard before native writes. Production will
+form small owned solver-support tables once, preserving the global accumulation
+algorithm while avoiding the prototype's delayed-map underflow case. The
+production implementation and validation are described below; its default
+performance remains to be measured.
+
+## Production implementation and validation
+
+The production assembler retains signed moments across likelihood chunks,
+packs only the ordinary columns, and contracts each smooth support pair once.
+It owns small solver-support tables `T = B @ R` and original B/R authority
+copies. It never expands smooth terms into full observation panels. The
+64 MiB additional workspace allowance includes its owned arrays and bounded
+scratch, separately from complete-process memory and the existing row budget.
+
+Automatic selection initially covers large mixed Gaussian/Gamma layouts with
+at most two predictors, exact supported group types and small group widths.
+At least 262,144 rows and a conservative histogram-initialization ratio are
+required; these are scope limits, not a measured general crossover. Exact
+family, plan, resolved-weight and link types certify deterministic replay.
+Unsupported/custom contracts keep their existing route. Explicit panel budgets
+and the chunked backend identity retain their existing behavior.
+
+Numerical-range refusal discards partial state before one complete fallback
+pass. Structural/source errors propagate. Review regressions verify error
+precedence, bounded activity-index validation and custom link/weight dispatch.
+The moderate operand envelope permits signed cancellation; it does not claim
+forward accuracy for ill-conditioned coefficients or repair extreme-scale
+arithmetic in the inherited fallback.
+
+Validation combines a full non-browser run and documented targeted followups:
+12,449 distinct latest passes and 109 optional/expected skips, with all 84
+mandatory real-data cases passing. The initial run's 15 setup errors came from
+the default cache lacking severity data; 296 additional skips lacked the
+optional mpmath oracle. An explicit public data path and environment-only
+mpmath installation restore those checks. The affected suites pass all 556
+cases; the final integration file passes 50 cases. The sole production change
+after the broad run is the reviewed resolved-weight admission guard. Raw
+receipts retain the initial results and source hashes, rather than describing
+one successful whole-suite run on the final source. Ruff, lock/dependency,
+smoke and independent review checks pass.

@@ -493,4 +493,5 @@ _register_likelihood_reuse_contract(
     GammaLS,
     GammaLikelihoodPlan,
     prepared_array_fields=("exact_response", "parameter_independent_carrier"),
+    deterministic_chunk_replay=True,
 )
