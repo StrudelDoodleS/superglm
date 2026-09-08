@@ -91,7 +91,7 @@ No new capability is promoted merely because a microbenchmark improves.
   tensor and row-selection improvements first. Do not persistently cache
   marginal outer products while the underlying support tables remain mutable.
 - The reviewed candidate `aef4ee7e` improves the same public Gaussian case:
-  within the final window, median discrete time is 1.522 s versus 2.342 s at
+  within the final window, median discrete time is 1.521 s versus 2.342 s at
   baseline (35% lower). Iterations remain 9 smoothing / 26 inner; the largest
   saved training-parameter difference is 2.1e-15. Candidate discrete repeats
   span 1.167–1.562 s, so retain the raw variation and do not infer a precise
@@ -231,8 +231,8 @@ The optional panel implementation, signed factor-smooth dispatch and expanded
 reuse certificates pass 395 focused checks together with existing chunk-reuse
 and family-layering tests. Independent review resolved stored-buffer coherence,
 subclass dispatch and mixed-CSR-index allocation issues. Automatic panel dispatch
-is still disabled while a frozen-source public off/on pilot evaluates the
-complete-fit tradeoff.
+remained disabled for that checkpoint's frozen-source public off/on pilot of
+the complete-fit tradeoff.
 
 The first off/on pilot at `e23cd41c` does not support automatic admission:
 one discrete fit takes 6.068 s with panels disabled and 6.423 s with panels
@@ -287,7 +287,7 @@ agree within floating-point error, but the receipts do not quantify the
 transformation-array differences. Do not claim identical stored representation
 hashes across those settings.
 
-Current-source call-stack profiles identify repeated row preparation and panel
+Call-stack profiles at `ed84669a` identify repeated row preparation and panel
 rendering as substantial remaining costs. The panel matrix products are already
 efficient; the range predicates are compiled, so their remaining scan cost is
 not the earlier Python-loop defect. Profile cumulative times nest and are not
@@ -300,7 +300,7 @@ distributional observed-curvature/EFS algorithm. Reusing scalar execution
 techniques and adopting its optimizer are distinct changes; signed coupled
 curvature needs its own valid contractions.
 
-The next implementation stages are:
+Those findings established these subsequent implementation stages:
 
 1. Improve the existing bounded panel renderer with explicitly budgeted,
    chunk-local small support transformations and checked writes. Preserve
@@ -320,9 +320,9 @@ four inapplicable exact-category permutation cases skipped. Independent review
 resolved obsolete lookup-buffer retention on same-object storage replacement;
 range authority is cleared on mismatch. Geometry snapshots retain bounded
 owned arrays. The support-table reserve and checked-writer coverage are reviewed,
-including public warmup and isolated allocation tests. Automatic policy remains
-unchanged. Compare this checkpoint against frozen `ed84669a` and evaluate the
-separate raw-basis tabmat prototype before selecting further integration.
+including public warmup and isolated allocation tests. Automatic policy was
+unchanged at that checkpoint. Its comparison against frozen `ed84669a` and the
+separate raw-basis tabmat evaluation are recorded below.
 
 The three-repeat complete-fit comparison against `ed84669a` now records
 ordinary chunk medians of 22.648 to 17.906 s and panel medians of 17.172 to
@@ -348,3 +348,10 @@ checks pass, including 44 new regressions for default dispatch, explicit
 overrides, signed channels, refusal and cleanup. The original default-dispatch
 case fails before the change. Source is frozen for full-suite and actual-default
 complete-fit validation; automatic dense execution remains deferred.
+
+Production source `9f0e196c` completes full non-browser validation with 12,350
+passed and 109 skipped unique cases, including 84 required real-data checks with
+no skips. The only initial failure was duration-manifest coverage; 1,078 missing
+entries were filled from this run's JUnit durations without changing previous
+values, and all eight CI contract checks pass on rerun. Lint, formatting,
+dependency and smoke checks pass. Final default-route complete fits are next.

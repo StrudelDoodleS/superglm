@@ -121,15 +121,24 @@ stored-design equivalence, bounded memory and complete-fit evidence required.
 Compact storage alone does not demonstrate faster fitting. The capabilities
 below remain the subsequent priority order until this gate is resolved.
 
-The fixed-layout size sweep through one million rows preserves a memory/time
-tradeoff: chunked discrete execution uses substantially less memory, while the
-same stored discrete basis runs faster through the existing dense backend.
-Controlled BLAS threading improves that dense route but provides no clear
-chunked speedup. Current profiles therefore direct the next work toward bounded
-row preparation and reuse across predictor, score and signed curvature
-calculations. Compare existing tabmat operations and a private distributional
-execution plan before changing automatic backend policy. Scalar SuperGLM's
-cached-weight discrete REML optimizer is a separate approximation contract.
+The fixed-layout size sweep at `ed84669a` through one million rows preserves a
+memory/time tradeoff: chunked discrete execution uses substantially less memory,
+while the same stored discrete basis runs faster through the existing dense
+backend. Controlled BLAS threading improves that dense route but provides no
+clear chunked speedup. Profiles identified repeated row preparation and rendering;
+the resulting bounded range and renderer changes reduce complete-fit medians by
+21% for ordinary chunks and 29% for explicit panels on the 262,144-row fixture.
+The constructor-inclusive raw-basis tabmat pilot is slower than those panels,
+so the existing signed matrix-product architecture is retained.
+
+Automatic panels now admit a narrow mixed ordinary layout supported by those
+measurements, with a separate 64 MiB workspace allowance and existing numerical
+refusal. Automatic dense selection remains deferred. Full non-browser validation
+passes 12,350 tests, with required real-data checks running and 109 other skips.
+Final actual-default complete-fit validation is pending; see the
+[performance report](research/2026-09-discrete-performance-report.md).
+Scalar SuperGLM's cached-weight discrete REML optimizer remains a separate
+approximation contract.
 
 In current priority order:
 

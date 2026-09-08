@@ -1,0 +1,823 @@
+{
+  "schema": "superglm-public-discrete-performance-evidence-v1",
+  "status": "Selected completed historical windows; final automatic-panel policy campaign is not included yet.",
+  "scope": "Public synthetic fixtures only. Source files and raw numeric receipt summaries were read without running fits or importing numerical libraries to create this consolidation.",
+  "source_checkpoints": {
+    "old": {
+      "sha": "ed84669a9e81b7eb5eedd5372a2cd02262caf17b",
+      "source_tree_sha256": "7e2bf646d767bcdd6410d66b0ac60c19cd4eeab87c07a49036461f2508bd9901"
+    },
+    "preparation_candidate": {
+      "sha": "56d9507a8cb4f505092175624012a68b6d0021d1",
+      "source_tree_sha256": "96dfbd45626b5f02d7977df0bcbbbb6008163e5d996dc097b135a7fdadf783ff"
+    }
+  },
+  "public_fixture": {
+    "name": "gaussian-fragmented",
+    "construction": "Independent synthetic Gaussian location-scale with small feature groups",
+    "generator_source": "benchmarks/_c3_c1_fixtures.py",
+    "seed": 28109,
+    "holdout_seed": 28110,
+    "holdout_rows": 2000,
+    "knots": 4,
+    "n_bins": 256,
+    "coefficient_count": 102,
+    "predictor_count": 2,
+    "per_predictor": {
+      "group_count": 15,
+      "dense_singletons": 6,
+      "categorical_groups": 4,
+      "stored_spline_groups": 3,
+      "spline_by_categorical_groups": 2,
+      "slope_columns": 50,
+      "intercept_columns": 1
+    },
+    "factor_smooth_api_exercised": false,
+    "training_representation": "Continuous covariates are binned. Discrete execution arms use the same stored basis; exact controls compile a separate exact feature basis.",
+    "fingerprints_at_262144_rows": {
+      "holdout_frame": "0a6d80c6af90809b7801dae9e3aa64fe13a4f2942da479f7ae342c0063d4ddfb",
+      "train_frame": "be6e05863042147cacb0eb1f7db83a2c7494abf6cc682bb0b47c8abe1c32db6a",
+      "y": "1c26751f7bfa18c605cbacb3742a2161850e2a4ffb4d4e0094bdaba203dc53d2"
+    }
+  },
+  "measurement_contract": {
+    "fit_clock": "Worker complete-fit wall and process CPU clocks; tool wall time is not benchmark time.",
+    "fit_rss": "Process high-water RSS captured at fit completion, including imports, fixture construction and prior public warmup. This is not incremental fit allocation.",
+    "later_rss": "After-output high-water marks are separate and include subsequent output/representation collection.",
+    "warmup_for_fit_windows": "Fresh serial interpreters call public superglm.warmup() before the fit timer, retaining existing caches; additional JIT/cache misses may occur within a fit.",
+    "thread_environment": "OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS, BLIS_NUM_THREADS, VECLIB_MAXIMUM_THREADS, NUMEXPR_NUM_THREADS and NUMBA_NUM_THREADS are one; only the explicit BLAS-thread diagnostic changes the solver BLAS scope.",
+    "instrumentation": "Complete-fit windows retain disclosed lightweight execution/dispatch witnesses; no call-stack profiler or per-call clocks. Geometry timing is a separate diagnostic.",
+    "activity": "Other numerical work stopped; Headroom remains active. Guest CPU endpoint screens do not prove exclusive physical-host access.",
+    "numerical_differences": "Saved-array comparisons are descriptive differences, not certified error bounds or a bitwise-equivalence promise.",
+    "policy": "Dense override is an internal experiment on the stored discrete basis, not an automatic dense-policy or public API/serialization change. Panel workspace budgets do not bound whole-process RSS."
+  },
+  "size_sweep": {
+    "raw_summary": {
+      "path": ".benchmark-artifacts/discrete-performance/size-sweep/fragmented-ed846-exploratory-summary.json",
+      "sha256": "cc6420ca0506e1b17a24e0251be3c6e5961e949853f35d7928045eb5ed4495dc",
+      "storage": "Ignored local public benchmark artifact; selected evidence is preserved in this receipt."
+    },
+    "source_sha": "ed84669a9e81b7eb5eedd5372a2cd02262caf17b",
+    "design": "One sample per size/arm; rotated order, identical fixed specification and established generator. No automatic policy decision or universal ratio. Training prefixes not asserted nested.",
+    "numerical_threads": 1,
+    "order": "Runs below are in execution order, including the million-row continuation.",
+    "panel_budget_bytes": 67108864,
+    "chunk_rows": 8065,
+    "runs": [
+      {
+        "n": 65536,
+        "arm": "exact",
+        "fit_wall_seconds": 2.7342866779981705,
+        "fit_cpu_seconds": 2.7317615930000008,
+        "fit_process_highwater_rss_mib": 625.02734375,
+        "resolved_backend": "distributional-dense-v1"
+      },
+      {
+        "n": 65536,
+        "arm": "discrete-auto",
+        "fit_wall_seconds": 7.728210175999266,
+        "fit_cpu_seconds": 7.715475775,
+        "fit_process_highwater_rss_mib": 503.546875,
+        "resolved_backend": "distributional-chunked-v1"
+      },
+      {
+        "n": 65536,
+        "arm": "discrete-panel",
+        "fit_wall_seconds": 5.755039313000452,
+        "fit_cpu_seconds": 5.744111837999999,
+        "fit_process_highwater_rss_mib": 502.1875,
+        "resolved_backend": "distributional-chunked-v1"
+      },
+      {
+        "n": 65536,
+        "arm": "discrete-dense",
+        "fit_wall_seconds": 2.1840485819993773,
+        "fit_cpu_seconds": 2.181713851,
+        "fit_process_highwater_rss_mib": 582.3828125,
+        "resolved_backend": "distributional-dense-v1"
+      },
+      {
+        "n": 262144,
+        "arm": "discrete-auto",
+        "fit_wall_seconds": 19.708563358999527,
+        "fit_cpu_seconds": 19.677938695,
+        "fit_process_highwater_rss_mib": 768.2421875,
+        "resolved_backend": "distributional-chunked-v1"
+      },
+      {
+        "n": 262144,
+        "arm": "discrete-panel",
+        "fit_wall_seconds": 17.441967275000934,
+        "fit_cpu_seconds": 17.415762552,
+        "fit_process_highwater_rss_mib": 770.41015625,
+        "resolved_backend": "distributional-chunked-v1"
+      },
+      {
+        "n": 262144,
+        "arm": "discrete-dense",
+        "fit_wall_seconds": 8.023630288997083,
+        "fit_cpu_seconds": 7.978079412,
+        "fit_process_highwater_rss_mib": 1094.359375,
+        "resolved_backend": "distributional-dense-v1"
+      },
+      {
+        "n": 262144,
+        "arm": "exact",
+        "fit_wall_seconds": 8.608805052997923,
+        "fit_cpu_seconds": 8.565980626,
+        "fit_process_highwater_rss_mib": 1268.9453125,
+        "resolved_backend": "distributional-dense-v1"
+      },
+      {
+        "n": 1048576,
+        "arm": "discrete-panel",
+        "fit_wall_seconds": 62.74743614700128,
+        "fit_cpu_seconds": 62.64715557700001,
+        "fit_process_highwater_rss_mib": 1832.49609375,
+        "resolved_backend": "distributional-chunked-v1"
+      },
+      {
+        "n": 1048576,
+        "arm": "discrete-dense",
+        "fit_wall_seconds": 26.748040980997757,
+        "fit_cpu_seconds": 26.603607631000003,
+        "fit_process_highwater_rss_mib": 3177.70703125,
+        "resolved_backend": "distributional-dense-v1"
+      },
+      {
+        "n": 1048576,
+        "arm": "exact",
+        "fit_wall_seconds": 30.014183767998475,
+        "fit_cpu_seconds": 29.855926398999998,
+        "fit_process_highwater_rss_mib": 3883.265625,
+        "resolved_backend": "distributional-dense-v1"
+      },
+      {
+        "n": 1048576,
+        "arm": "discrete-auto",
+        "fit_wall_seconds": 70.09264758499921,
+        "fit_cpu_seconds": 69.979718662,
+        "fit_process_highwater_rss_mib": 1831.5859375,
+        "resolved_backend": "distributional-chunked-v1"
+      }
+    ],
+    "work_counts_equal_within_each_size": [
+      {
+        "n": 65536,
+        "inner_iterations": 22,
+        "smoothing_iterations": 9,
+        "geometry_builds": 23,
+        "smoothing_reason": "practical_plateau",
+        "smoothing_certified": false
+      },
+      {
+        "n": 262144,
+        "inner_iterations": 18,
+        "smoothing_iterations": 7,
+        "geometry_builds": 19,
+        "smoothing_reason": "practical_plateau",
+        "smoothing_certified": false
+      },
+      {
+        "n": 1048576,
+        "inner_iterations": 16,
+        "smoothing_iterations": 7,
+        "geometry_builds": 17,
+        "smoothing_reason": "practical_plateau",
+        "smoothing_certified": false
+      }
+    ],
+    "selected_numerical_comparisons": [
+      {
+        "n": 65536,
+        "reference": "exact",
+        "other": "discrete-auto",
+        "train_parameters_max_absolute_difference": 0.0016017115325301923,
+        "holdout_parameters_max_absolute_difference": 0.001212699321765598
+      },
+      {
+        "n": 65536,
+        "reference": "discrete-auto",
+        "other": "discrete-panel",
+        "train_parameters_max_absolute_difference": 1.3322676295501878e-15,
+        "holdout_parameters_max_absolute_difference": 8.881784197001252e-16
+      },
+      {
+        "n": 65536,
+        "reference": "discrete-auto",
+        "other": "discrete-dense",
+        "train_parameters_max_absolute_difference": 4.440892098500626e-15,
+        "holdout_parameters_max_absolute_difference": 2.886579864025407e-15
+      },
+      {
+        "n": 262144,
+        "reference": "exact",
+        "other": "discrete-auto",
+        "train_parameters_max_absolute_difference": 0.000990480825612261,
+        "holdout_parameters_max_absolute_difference": 0.0007360709791148778
+      },
+      {
+        "n": 262144,
+        "reference": "discrete-auto",
+        "other": "discrete-panel",
+        "train_parameters_max_absolute_difference": 1.3322676295501878e-15,
+        "holdout_parameters_max_absolute_difference": 6.661338147750939e-16
+      },
+      {
+        "n": 262144,
+        "reference": "discrete-auto",
+        "other": "discrete-dense",
+        "train_parameters_max_absolute_difference": 1.887379141862766e-15,
+        "holdout_parameters_max_absolute_difference": 1.1102230246251565e-15
+      },
+      {
+        "n": 1048576,
+        "reference": "exact",
+        "other": "discrete-auto",
+        "train_parameters_max_absolute_difference": 0.0005071597336527844,
+        "holdout_parameters_max_absolute_difference": 0.0003232676972407811
+      },
+      {
+        "n": 1048576,
+        "reference": "discrete-auto",
+        "other": "discrete-panel",
+        "train_parameters_max_absolute_difference": 1.7763568394002505e-15,
+        "holdout_parameters_max_absolute_difference": 1.3322676295501878e-15
+      },
+      {
+        "n": 1048576,
+        "reference": "discrete-auto",
+        "other": "discrete-dense",
+        "train_parameters_max_absolute_difference": 3.552713678800501e-15,
+        "holdout_parameters_max_absolute_difference": 2.6645352591003757e-15
+      }
+    ],
+    "checks": {
+      "all_discrete_representation_hashes_match_per_size": true,
+      "all_execution_wrappers_stable": true,
+      "all_fit_endpoint_audits_passed": true,
+      "all_worker_sources_stable": true
+    },
+    "windows": [
+      {
+        "status": "aborted_preflight",
+        "preflight_seconds": 2,
+        "source_freeze_verified": null
+      },
+      {
+        "status": "complete",
+        "preflight_seconds": 10.0,
+        "source_freeze_verified": true
+      }
+    ],
+    "limits": "One fit per size/arm, not a median or crossover estimate. Model specification and generator are fixed; training prefixes are not asserted nested. Work counts differ between sizes. The initial two-second preflight failed before million-row fits; continuation used ten-second preflights."
+  },
+  "blas_thread_diagnostic": {
+    "raw_summary": {
+      "path": ".benchmark-artifacts/discrete-performance/blas-thread-pilot/thread-diagnostic-ed846-summary.json",
+      "sha256": "2835fd66b33cb5227e54a329d694c40ec75bcd493803064cd0140862b355e201",
+      "storage": "Ignored local public benchmark artifact; selected evidence is preserved in this receipt."
+    },
+    "source_sha": "ed84669a9e81b7eb5eedd5372a2cd02262caf17b",
+    "n": 262144,
+    "design": "Two repeats of three stored-discrete execution arms x BLAS1/4. Forward six-condition order, then reverse; diagnostic, no universal ratio.",
+    "chunk_rows": 8065,
+    "panel_budget_bytes": 67108864,
+    "solver_blas_threads": [1, 4],
+    "other_numerical_threads": 1,
+    "order": ["r0-n262144-discrete-auto-blas1", "r0-n262144-discrete-panel-blas1", "r0-n262144-discrete-dense-blas1", "r0-n262144-discrete-auto-blas4", "r0-n262144-discrete-panel-blas4", "r0-n262144-discrete-dense-blas4", "r1-n262144-discrete-dense-blas4", "r1-n262144-discrete-panel-blas4", "r1-n262144-discrete-auto-blas4", "r1-n262144-discrete-dense-blas1", "r1-n262144-discrete-panel-blas1", "r1-n262144-discrete-auto-blas1"],
+    "aggregates": [
+      {
+        "arm": "discrete-auto",
+        "blas_threads": 1,
+        "repetitions": 2,
+        "fit_wall_seconds": {
+          "max": 18.77733230800004,
+          "median": 18.241473902000507,
+          "min": 17.705615496000974,
+          "values": [18.77733230800004, 17.705615496000974]
+        },
+        "fit_cpu_seconds": {
+          "max": 18.760383733999998,
+          "median": 18.221734538999996,
+          "min": 17.683085344,
+          "values": [18.760383733999998, 17.683085344]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 771.56640625,
+          "median": 769.78125,
+          "min": 767.99609375,
+          "values": [767.99609375, 771.56640625]
+        }
+      },
+      {
+        "arm": "discrete-auto",
+        "blas_threads": 4,
+        "repetitions": 2,
+        "fit_wall_seconds": {
+          "max": 18.908210125999176,
+          "median": 18.12061662349879,
+          "min": 17.333023120998405,
+          "values": [18.908210125999176, 17.333023120998405]
+        },
+        "fit_cpu_seconds": {
+          "max": 37.478078812999996,
+          "median": 36.518206092499994,
+          "min": 35.558333372,
+          "values": [37.478078812999996, 35.558333372]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 783.0,
+          "median": 782.935546875,
+          "min": 782.87109375,
+          "values": [782.87109375, 783.0]
+        }
+      },
+      {
+        "arm": "discrete-panel",
+        "blas_threads": 1,
+        "repetitions": 2,
+        "fit_wall_seconds": {
+          "max": 16.591872393000813,
+          "median": 16.39417900149965,
+          "min": 16.19648560999849,
+          "values": [16.591872393000813, 16.19648560999849]
+        },
+        "fit_cpu_seconds": {
+          "max": 16.560134813999998,
+          "median": 16.370051181,
+          "min": 16.179967548,
+          "values": [16.560134813999998, 16.179967548]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 767.0,
+          "median": 766.642578125,
+          "min": 766.28515625,
+          "values": [766.28515625, 767.0]
+        }
+      },
+      {
+        "arm": "discrete-panel",
+        "blas_threads": 4,
+        "repetitions": 2,
+        "fit_wall_seconds": {
+          "max": 16.307803735999187,
+          "median": 15.932894683000995,
+          "min": 15.557985630002804,
+          "values": [16.307803735999187, 15.557985630002804]
+        },
+        "fit_cpu_seconds": {
+          "max": 65.608209887,
+          "median": 64.401531714,
+          "min": 63.19485354100001,
+          "values": [65.608209887, 63.19485354100001]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 785.72265625,
+          "median": 784.86328125,
+          "min": 784.00390625,
+          "values": [784.00390625, 785.72265625]
+        }
+      },
+      {
+        "arm": "discrete-dense",
+        "blas_threads": 1,
+        "repetitions": 2,
+        "fit_wall_seconds": {
+          "max": 7.785145891000866,
+          "median": 7.631070491999708,
+          "min": 7.47699509299855,
+          "values": [7.47699509299855, 7.785145891000866]
+        },
+        "fit_cpu_seconds": {
+          "max": 7.761527337,
+          "median": 7.607983781,
+          "min": 7.454440225,
+          "values": [7.454440225, 7.761527337]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 1094.3125,
+          "median": 1094.248046875,
+          "min": 1094.18359375,
+          "values": [1094.3125, 1094.18359375]
+        }
+      },
+      {
+        "arm": "discrete-dense",
+        "blas_threads": 4,
+        "repetitions": 2,
+        "fit_wall_seconds": {
+          "max": 6.168321026001649,
+          "median": 5.720917894001104,
+          "min": 5.273514762000559,
+          "values": [5.273514762000559, 6.168321026001649]
+        },
+        "fit_cpu_seconds": {
+          "max": 26.690458067,
+          "median": 24.9479907275,
+          "min": 23.205523388,
+          "values": [23.205523388, 26.690458067]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 1094.5234375,
+          "median": 1094.392578125,
+          "min": 1094.26171875,
+          "values": [1094.26171875, 1094.5234375]
+        }
+      }
+    ],
+    "work_counts": {
+      "inner_iterations": 18,
+      "smoothing_iterations": 7,
+      "geometry_builds": 19,
+      "smoothing_reason": "practical_plateau",
+      "smoothing_certified": false
+    },
+    "representation_sha256_by_thread_setting": {
+      "1": "aa0b07ee07c3c7f5cc22a9ddb92d849c5e78a705c64605738ec45dc9d79370e7",
+      "4": "0e26507132195eb323215c9b07159875b534ce3f2c828a0f02f7282620ad89e5"
+    },
+    "within_setting_all_execution_arm_hashes_match": true,
+    "max_absolute_differences_against_saved_blas1_reference": {
+      "coefficients": 6.619704784327496e-15,
+      "covariance": 9.0053832446646e-16,
+      "edf": 2.984279490192421e-13,
+      "holdout_parameters": 1.3322676295501878e-15,
+      "log_likelihood": 0.0,
+      "objective": 0.0,
+      "smoothing_parameters": 7.73070496506989e-12,
+      "terminal_penalized_curvature": 1.1496013030409813e-09,
+      "terminal_score": 3.941025283893396e-11,
+      "train_parameters": 1.887379141862766e-15
+    },
+    "checks": {
+      "all_endpoint_audits_passed": true,
+      "all_representations_identical": false,
+      "all_sources_stable": true,
+      "all_wrappers_stable": true,
+      "runtime_pools_verified_all_boundaries": true,
+      "source_freeze_verified": true
+    },
+    "limits": "The BLAS scope includes compilation. Stored representations match within each thread setting but not between settings; hash differences alone do not quantify transform differences. Two repetitions do not establish a universal thread recommendation. CPU cost increases under four threads."
+  },
+  "preparation_complete_fit": {
+    "raw_summary": {
+      "path": ".benchmark-artifacts/discrete-performance/preparation-complete-fit/ed846-vs-56d9507/summary.json",
+      "sha256": "bafc4e7e914a7f8d73551b15329162c5064ce29fee31a1f8eda5cbba79288a81",
+      "storage": "Ignored local public benchmark artifact; selected evidence is preserved in this receipt."
+    },
+    "source_shas": {
+      "old": "ed84669a9e81b7eb5eedd5372a2cd02262caf17b",
+      "new": "56d9507a8cb4f505092175624012a68b6d0021d1"
+    },
+    "n": 262144,
+    "design": "Three fresh-process repetitions of old auto/panel and new auto/panel/dense. Five-arm forward/reverse/forward order; same public fixture and complete-fit clocks.",
+    "numerical_threads": 1,
+    "chunk_rows": 8065,
+    "panel_budget_bytes": 67108864,
+    "order": ["r0-old-discrete-auto", "r0-old-discrete-panel", "r0-new-discrete-auto", "r0-new-discrete-panel", "r0-new-discrete-dense", "r1-new-discrete-dense", "r1-new-discrete-panel", "r1-new-discrete-auto", "r1-old-discrete-panel", "r1-old-discrete-auto", "r2-old-discrete-auto", "r2-old-discrete-panel", "r2-new-discrete-auto", "r2-new-discrete-panel", "r2-new-discrete-dense"],
+    "warmup_policy": "Existing worker warmup before fit timer; caches retained. Worker process peak includes imports, fixture, warmup and fit; representation hashes after captured peak.",
+    "warmup_seconds_in_execution_order": [19.499900401999184, 0.3594965329975821, 0.6679248240034212, 0.3941741020025802, 0.4057884619978722, 0.43716450200008694, 0.3555885000023409, 0.3420912900037365, 0.25830367999878945, 0.37074235299951397, 0.3119977899987134, 0.3619258600010653, 0.40458075299829943, 0.5132534180011135, 0.3965623650001362],
+    "aggregates": [
+      {
+        "source_label": "old",
+        "arm": "discrete-auto",
+        "count": 3,
+        "fit_wall_seconds": {
+          "max": 23.91978265599755,
+          "median": 22.64756284000032,
+          "min": 20.279513954999857,
+          "values": [23.91978265599755, 22.64756284000032, 20.279513954999857]
+        },
+        "fit_cpu_seconds": {
+          "max": 23.891148285,
+          "median": 22.617846952,
+          "min": 20.257878894,
+          "values": [23.891148285, 22.617846952, 20.257878894]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 936.43359375,
+          "median": 771.45703125,
+          "min": 770.45703125,
+          "values": [936.43359375, 770.45703125, 771.45703125]
+        },
+        "after_output_process_highwater_rss_mib": {
+          "max": 940.11328125,
+          "median": 778.9296875,
+          "min": 775.37109375,
+          "values": [940.11328125, 778.9296875, 775.37109375]
+        }
+      },
+      {
+        "source_label": "old",
+        "arm": "discrete-panel",
+        "count": 3,
+        "fit_wall_seconds": {
+          "max": 18.423052343001473,
+          "median": 17.172486248004134,
+          "min": 15.243373529003293,
+          "values": [17.172486248004134, 15.243373529003293, 18.423052343001473]
+        },
+        "fit_cpu_seconds": {
+          "max": 18.405387483000002,
+          "median": 17.157843178,
+          "min": 15.225914645,
+          "values": [17.157843178, 15.225914645, 18.405387483000002]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 771.453125,
+          "median": 769.28515625,
+          "min": 767.94140625,
+          "values": [767.94140625, 769.28515625, 771.453125]
+        },
+        "after_output_process_highwater_rss_mib": {
+          "max": 777.90234375,
+          "median": 775.69140625,
+          "min": 771.75,
+          "values": [775.69140625, 771.75, 777.90234375]
+        }
+      },
+      {
+        "source_label": "new",
+        "arm": "discrete-auto",
+        "count": 3,
+        "fit_wall_seconds": {
+          "max": 18.370913815000677,
+          "median": 17.905545972003893,
+          "min": 14.996400586001982,
+          "values": [18.370913815000677, 14.996400586001982, 17.905545972003893]
+        },
+        "fit_cpu_seconds": {
+          "max": 18.341118467,
+          "median": 17.889315737,
+          "min": 14.982535834,
+          "values": [18.341118467, 14.982535834, 17.889315737]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 779.71875,
+          "median": 777.34375,
+          "min": 773.94140625,
+          "values": [779.71875, 777.34375, 773.94140625]
+        },
+        "after_output_process_highwater_rss_mib": {
+          "max": 781.046875,
+          "median": 779.37109375,
+          "min": 778.08203125,
+          "values": [781.046875, 779.37109375, 778.08203125]
+        }
+      },
+      {
+        "source_label": "new",
+        "arm": "discrete-panel",
+        "count": 3,
+        "fit_wall_seconds": {
+          "max": 14.065630834003969,
+          "median": 12.207416008997825,
+          "min": 10.586298383997928,
+          "values": [14.065630834003969, 10.586298383997928, 12.207416008997825]
+        },
+        "fit_cpu_seconds": {
+          "max": 14.049916838999998,
+          "median": 12.196146169000002,
+          "min": 10.571864649999998,
+          "values": [14.049916838999998, 10.571864649999998, 12.196146169000002]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 779.765625,
+          "median": 777.296875,
+          "min": 776.5859375,
+          "values": [777.296875, 776.5859375, 779.765625]
+        },
+        "after_output_process_highwater_rss_mib": {
+          "max": 782.3515625,
+          "median": 781.3203125,
+          "min": 778.546875,
+          "values": [781.3203125, 778.546875, 782.3515625]
+        }
+      },
+      {
+        "source_label": "new",
+        "arm": "discrete-dense",
+        "count": 3,
+        "fit_wall_seconds": {
+          "max": 8.040830450001522,
+          "median": 7.801425263998681,
+          "min": 7.626396917003149,
+          "values": [7.801425263998681, 8.040830450001522, 7.626396917003149]
+        },
+        "fit_cpu_seconds": {
+          "max": 8.012018157,
+          "median": 7.778060409000001,
+          "min": 7.601297087999999,
+          "values": [7.778060409000001, 8.012018157, 7.601297087999999]
+        },
+        "fit_process_highwater_rss_mib": {
+          "max": 1101.00390625,
+          "median": 1100.80859375,
+          "min": 1100.76171875,
+          "values": [1100.80859375, 1100.76171875, 1101.00390625]
+        },
+        "after_output_process_highwater_rss_mib": {
+          "max": 1101.00390625,
+          "median": 1100.80859375,
+          "min": 1100.76171875,
+          "values": [1100.80859375, 1100.76171875, 1101.00390625]
+        }
+      }
+    ],
+    "work_counts": {
+      "inner_iterations": 18,
+      "smoothing_iterations": 7,
+      "geometry_builds": 19,
+      "smoothing_reason": "practical_plateau",
+      "smoothing_certified": false
+    },
+    "same_route_max_absolute_difference_by_array": {
+      "coefficients": 0.0,
+      "covariance": 0.0,
+      "edf": 0.0,
+      "holdout_parameters": 0.0,
+      "log_likelihood": 0.0,
+      "objective": 0.0,
+      "smoothing_parameters": 0.0,
+      "terminal_penalized_curvature": 0.0,
+      "terminal_score": 0.0,
+      "train_parameters": 0.0
+    },
+    "common_reference_max_absolute_difference_by_array": {
+      "coefficients": 5.440092820663267e-15,
+      "covariance": 5.54081520248717e-16,
+      "edf": 2.4158453015843406e-13,
+      "holdout_parameters": 1.1102230246251565e-15,
+      "log_likelihood": 0.0,
+      "objective": 0.0,
+      "smoothing_parameters": 7.73070496506989e-12,
+      "terminal_penalized_curvature": 3.4924596548080444e-10,
+      "terminal_score": 3.941025283893396e-11,
+      "train_parameters": 1.887379141862766e-15
+    },
+    "new_panel_dispatch_per_fit": {
+      "geometry_calls": 19,
+      "panel_build_accepted": 627,
+      "panel_build_calls": 627,
+      "panel_cross_returned": 1881,
+      "panel_max_estimated_bytes": 21993536
+    },
+    "new_range_dispatch": [
+      {
+        "run_id": "r0-new-discrete-auto",
+        "value_range_calls_and_acceptances": 51480,
+        "geometry_range_calls_and_acceptances": 18810
+      },
+      {
+        "run_id": "r0-new-discrete-panel",
+        "value_range_calls_and_acceptances": 51480,
+        "geometry_range_calls_and_acceptances": 18810
+      },
+      {
+        "run_id": "r1-new-discrete-panel",
+        "value_range_calls_and_acceptances": 51480,
+        "geometry_range_calls_and_acceptances": 18810
+      },
+      {
+        "run_id": "r1-new-discrete-auto",
+        "value_range_calls_and_acceptances": 51480,
+        "geometry_range_calls_and_acceptances": 18810
+      },
+      {
+        "run_id": "r2-new-discrete-auto",
+        "value_range_calls_and_acceptances": 51480,
+        "geometry_range_calls_and_acceptances": 18810
+      },
+      {
+        "run_id": "r2-new-discrete-panel",
+        "value_range_calls_and_acceptances": 51480,
+        "geometry_range_calls_and_acceptances": 18810
+      }
+    ],
+    "checks": {
+      "all_endpoint_audits_passed": true,
+      "all_pools_one": true,
+      "all_representations_identical": true,
+      "all_worker_sources_stable": true,
+      "all_wrappers_stable": true,
+      "source_freeze_verified": true
+    },
+    "limits": ["All15 successful samples included, including first old-auto high RSS936.43MiB and fit23.92s. The retained-cache/public-warmup policy allows uncaptured JIT/cache misses during fits; no cause of individual variation established.", "This public fixture/source/window comparison does not establish a universal performance ratio or host isolation.", "Integer-only route witnesses are enabled and disclosed. No per-call clocks or profiling hooks were active.", "Dense control is the existing internal execution override, not a production API/default/serialization policy change."]
+  },
+  "tabmat_geometry": {
+    "raw_summary": {
+      "path": ".benchmark-artifacts/discrete-performance/tabmat-geometry-pilot/geometry-56d9507/summary.json",
+      "sha256": "dd2411df860ea5b87d07fdf766e3da5260b4ce646303ed14fc21a83d2ff5e991",
+      "storage": "Ignored local public benchmark artifact; selected evidence is preserved in this receipt."
+    },
+    "source_sha": "56d9507a8cb4f505092175624012a68b6d0021d1",
+    "n": 262144,
+    "chunk_rows": 8065,
+    "numerical_threads": 1,
+    "design": "One fresh process per method; one whole-geometry warmup and three within-process repetitions. Geometry diagnostic only, not independent complete-fit repetitions or a complete-fit speed claim.",
+    "timed_scope": "Worker encloses geometry construction, eta, likelihood derivatives, score, curvature channels and owned output creation; raw packing, CSR/CSC conversion and writable channel copies included. Common fixture/compilation outside geometry clocks; total-process RSS includes imports, fixture, warmup and repetitions.",
+    "methods_in_execution_order": [
+      {
+        "method": "grouped",
+        "wall_seconds": {
+          "max": 0.806692257,
+          "median": 0.790550574,
+          "min": 0.746455069,
+          "values": [0.746455069, 0.790550574, 0.806692257]
+        },
+        "cpu_seconds": {
+          "median": 0.78997122,
+          "values": [0.745938322, 0.78997122, 0.806028994]
+        },
+        "process_peak_rss_mib": 517.73828125,
+        "actual_native_dispatch": {},
+        "actual_grouped_panel_dispatch": {
+          "PredictorExecutionPlan.cross_moment": 33,
+          "PredictorExecutionPlan.diagonal_moment": 66,
+          "PredictorExecutionPlan.score": 66
+        },
+        "allocation_estimate": null
+      },
+      {
+        "method": "panels",
+        "wall_seconds": {
+          "max": 0.596133026,
+          "median": 0.535315803,
+          "min": 0.440198766,
+          "values": [0.440198766, 0.596133026, 0.535315803]
+        },
+        "cpu_seconds": {
+          "median": 0.534588595,
+          "values": [0.439916767, 0.595565778, 0.534588595]
+        },
+        "process_peak_rss_mib": 517.96875,
+        "actual_native_dispatch": {},
+        "actual_grouped_panel_dispatch": {
+          "PredictorExecutionPlan.score": 66,
+          "SmallGroupPanelWorkspace.cross_moment": 99,
+          "superglm.distributional.solver.chunks.build_small_group_panels": 33,
+          "superglm.distributional.solver.chunks.build_small_group_panels.accepted": 33
+        },
+        "allocation_estimate": null
+      },
+      {
+        "method": "raw",
+        "wall_seconds": {
+          "max": 1.727627921,
+          "median": 1.466640342,
+          "min": 1.456756875,
+          "values": [1.456756875, 1.727627921, 1.466640342]
+        },
+        "cpu_seconds": {
+          "median": 1.460285373,
+          "values": [1.454709468, 1.721456653, 1.460285373]
+        },
+        "process_peak_rss_mib": 517.76953125,
+        "actual_native_dispatch": {
+          "tabmat.dense_matrix.dense_matvec": 66,
+          "tabmat.dense_matrix.dense_rmatvec": 66,
+          "tabmat.dense_matrix.dense_sandwich": 99,
+          "tabmat.sparse_matrix.csc_rmatvec": 66,
+          "tabmat.sparse_matrix.csr_dense_sandwich": 99,
+          "tabmat.sparse_matrix.csr_matvec": 66,
+          "tabmat.sparse_matrix.sparse_sandwich": 99
+        },
+        "actual_grouped_panel_dispatch": {},
+        "allocation_estimate": {
+          "constructor_array_peak_upper_estimate": 17476520,
+          "contraction_array_peak_upper_estimate": 12099868,
+          "dense_shape": [8065, 14],
+          "native_omp_threads": 1,
+          "native_scratch_allowance_bytes": 2621440,
+          "overall_array_peak_upper_estimate": 17476520,
+          "raw_shape": [8065, 112],
+          "retained_chunk_owned_array_bytes": 7803388,
+          "sparse_chunk_nnz": 281514,
+          "sparse_shape": [8065, 98]
+        }
+      }
+    ],
+    "comparisons": [
+      {
+        "reference": "grouped",
+        "other": "panels",
+        "data_curvature_norm_relative_difference": 1.8555392702058345e-16,
+        "score_data_norm_relative_difference": 0.0
+      },
+      {
+        "reference": "grouped",
+        "other": "raw",
+        "data_curvature_norm_relative_difference": 3.3270330337190805e-16,
+        "score_data_norm_relative_difference": 2.6210778079608015e-16
+      }
+    ],
+    "checks": {
+      "all_endpoint_audits_passed": true,
+      "all_representations_identical": true,
+      "source_freeze_verified": true
+    },
+    "interpretation": "Raw constructor-inclusive whole-geometry runs were slower than both grouped and panels in this bounded diagnostic. No individual constructor subphase timings were collected, so no attribution of the loss to an individual packing/conversion step is established. No full-fit adaptation or complete-fit speed claim follows.",
+    "limits": "One fresh worker per method, with one whole-geometry warmup and three within-process repetitions. Fixture compilation, solver iterations, line search and terminal inference are outside geometry clocks. Array estimates exclude Python allocator and common family arrays. No complete-fit speed claim or full-fit tabmat adaptation follows."
+  }
+}

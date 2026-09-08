@@ -18,6 +18,10 @@ has the same production source. This is distinct from published v0.31.0 at
 `8962c452`, the earlier C3/C1 release comparison base. Improvements below must
 not be presented as measurements against that release.
 
+The tracked [performance receipt](../../benchmarks/discrete_performance_receipt.json)
+consolidates the size, thread, preparation and tabmat windows with raw-summary
+hashes, source pins, ranges and qualifications.
+
 ## Execution changes at this checkpoint
 
 - Discrete cross-products select support histograms or bounded row contractions
@@ -181,7 +185,7 @@ fitted-output comparisons remain at roundoff scale, with maximum training
 parameter difference 1.9e-15 and coefficient difference 6.7e-15. This is not a
 bit-identical compiled-basis comparison across thread settings.
 
-## What the current profiles locate
+## What the historical profiles located
 
 Separate one-thread cProfiles at `ed84669a` use the same 262,144-row public
 fixture. Their seconds are diagnostic attribution, not uninstrumented fit-time
@@ -198,9 +202,9 @@ owner's 11.120 seconds divide into panel construction through its wrapper
 and 0.062 for the remaining direct work. These are disjoint parts within each
 owner, not additional costs on top of its total.
 
-Panel construction still spends 3.557 profiled seconds in row rendering.
+At this checkpoint, panel construction spends 3.557 profiled seconds in row rendering.
 Across the entire panel profile, `_in_range` accounts for 1.469 self seconds
-in the current compiled range predicate. That is native checking cost, not the
+in the compiled range predicate. That is native checking cost, not the
 old Python-loop defect corrected at `50b5e8bb`; it also overlaps the owner
 partitions above. Dense geometry instead concentrates 4.152 self seconds in
 matrix assembly. These findings support investigating repeated rendering,
@@ -240,11 +244,12 @@ thread-pool and CPU-activity checks pass throughout.
 
 ## Raw-basis tabmat comparison
 
-A separate prototype tests chunk-owned raw-basis tabmat matrices on the same
-262,144-row book, with 8,065-row chunks and one numerical thread. Construction,
+A separate prototype at `56d9507a` tests chunk-owned raw-basis tabmat matrices
+on the same 262,144-row book, with 8,065-row chunks and one numerical thread. Construction,
 conversion, channel copies, coefficient transforms and all geometry outputs
-are included. Three repeated complete geometry passes within each of three
-fresh workers give median wall times of 0.791 s for grouped execution, 0.535 s
+are included. Each method uses one fresh worker, one whole-geometry warmup and
+three within-process repetitions: three workers in total. These give median
+wall times of 0.791 s for grouped execution, 0.535 s
 for panels and 1.467 s for raw-basis tabmat; corresponding process peaks are
 517.74, 517.97 and 517.77 MiB. These are geometry-only diagnostics, not fits.
 
@@ -276,12 +281,15 @@ shared execution wrappers; expensive call-stack profiles are separate and their
 costs are not complete-fit timings. Historical synthetic receipts predate fit
 CPU recording; severity and the current sweep include it.
 
-Historical full-suite evidence is 11,779 passed and 174 skipped at `4521cab5`.
-Subsequent focused checkpoints record 395 checks at `e23cd41c`, 101 at
-`50b5e8bb` and 128 at `ed84669a`. Those runs do not establish full-suite success
-at the current or final source. Final-source full/data-backed suites, architecture
-checks, lint/format, dependency checks, smoke testing and review remain to be
-consolidated after implementation ends.
+Full non-browser validation of production source `9f0e196c` records 12,350
+passed and 109 skipped unique cases on Python 3.13, with `mpmath` and `pyarrow`
+available. The four shards initially had one CI metadata failure: the test
+duration manifest covered too few of the expanded suite. Adding 1,078 missing
+entries from those measured JUnit durations, preserving existing entries, fixes
+it; all eight CI contract tests pass on rerun. The counts use the latest outcome
+per case and count repeated module-collection skips once. The three required
+real-data suites contribute 84 passes and no skips. Ruff, formatting, dependency
+and smoke checks pass; browser tests are outside this solver validation.
 
 The subsequent range and panel-rendering checkpoint passes 602 combined focused
 checks, with four inapplicable exact-category permutation cases skipped.
@@ -291,13 +299,13 @@ authority permits two-bound searches and releases obsolete backing storage on
 refusal. Geometry retains owned chunk snapshots. Bounded support tables and
 checked writers reduce repeated transformation and scanning work; public warmup
 covers their compiled signatures. Independent reviews found no remaining
-blocking issues. Their complete-fit comparison is recorded above; final default
-policy and full-suite validation remain pending.
+blocking issues. Their complete-fit comparison is recorded above; final actual
+default complete-fit validation remains pending.
 
 The automatic panel policy passes 172 focused tests, including 44 new dispatch,
 override, refusal and lifetime regressions. Its default-dispatch regression
 fails on the prior implementation. Independent review reports no remaining
-findings. Final full-suite and actual-default complete-fit checks remain.
+findings. Final actual-default complete-fit checks remain.
 
 The execution reviews found that tabmat supports signed weights, but a bounded
 LSS route needs chunk-owned matrices, constructor/native-workspace accounting
