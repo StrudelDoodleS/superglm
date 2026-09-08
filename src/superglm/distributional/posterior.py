@@ -32,6 +32,7 @@ from numpy.typing import NDArray
 from scipy import stats
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
+from superglm.distributional._row_design import bounded_predictor_matrices
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     DefaultPredictionFamily,
@@ -320,7 +321,13 @@ def _replayed_smoothing_hessian(
             "corrected covariance replay produced a different likelihood plan identifier"
         )
     try:
-        matrices = dense_predictor_matrices(fitted.layout)
+        matrices = (
+            bounded_predictor_matrices(
+                fitted.layout, chunk_size=min(terminal.resolved_chunk_size, 4096)
+            )
+            if terminal.resolved_chunk_size is not None
+            else dense_predictor_matrices(fitted.layout)
+        )
         derivatives = laml_derivatives(
             fitted.family,
             fitted.layout,

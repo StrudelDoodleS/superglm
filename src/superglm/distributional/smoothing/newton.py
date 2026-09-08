@@ -21,6 +21,7 @@ from numpy.typing import NDArray
 from scipy.linalg import cho_solve
 from scipy.optimize import brentq
 
+from superglm.distributional._row_design import bounded_predictor_matrices
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.result import (
@@ -707,7 +708,11 @@ def run_newton_endgame(
         phase_recorder=phase_recorder,
         reuse_session=reuse_session,
     )
-    dense = reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)
+    dense = (
+        bounded_predictor_matrices(layout, chunk_size=min(state.fit.resolved_chunk_size, 4096))
+        if state.fit.resolved_chunk_size is not None
+        else reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)
+    )
     current = state
     previous: LamlDerivatives | None = None
     previous_rho: NDArray[np.float64] | None = None
@@ -1269,7 +1274,11 @@ def bracket_refused_component(
         phase_recorder=phase_recorder,
         reuse_session=reuse_session,
     )
-    dense = reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)
+    dense = (
+        bounded_predictor_matrices(layout, chunk_size=min(state.fit.resolved_chunk_size, 4096))
+        if state.fit.resolved_chunk_size is not None
+        else reuse_session.dense_matrices(layout, phase_recorder=phase_recorder)
+    )
     made: list[tuple[float, DenseSolverResult, dict[str, float], float]] = []
 
     def evaluate(u: float) -> float:
