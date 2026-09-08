@@ -422,6 +422,13 @@ def _warmup_group_matrix_kernels() -> None:
     matrix = np.eye(2, dtype=np.float64)
     frozen_matrix = matrix.copy()
     frozen_matrix.setflags(write=False)
+    frozen_codes = codes.copy()
+    frozen_codes.setflags(write=False)
+    _tensor_operand_in_reassociation_range(matrix)
+    _tensor_operand_in_reassociation_range(frozen_matrix)
+    for support in (matrix, frozen_matrix):
+        for indices in (codes, frozen_codes):
+            _indexed_row_dot(matrix, support, indices, indices)
     row_patterns = np.array([0, 1], dtype=np.int32)
     unique_codes = np.array([[0, 0], [1, 1]], dtype=np.int32)
     marginal_offsets = np.array([0, 2, 4], dtype=np.intp)
