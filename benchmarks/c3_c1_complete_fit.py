@@ -335,6 +335,8 @@ class CallRecorder:
         self.calls, self.shapes = Counter(), Counter()
         self.kernel_calls, self.kernel_results, self.gram_branches = Counter(), Counter(), Counter()
         self.endpoint_reuse_results = Counter()
+        self.panel_results = Counter()
+        self.panel_max_estimated_peak_bytes = 0
         self.kernel_attributes_missing = []
         self._kernel_originals = []
 
@@ -400,6 +402,22 @@ class CallRecorder:
 
     def __call__(self, frame, event, arg):
         name, module = frame.f_code.co_name, frame.f_globals.get("__name__", "")
+        if event == "return" and module == "superglm.distributional.solver._small_group_panels":
+            if name == "build_small_group_panels":
+                if arg is None:
+                    outcome = "exception_or_no_result"
+                elif arg.workspace is None:
+                    outcome = f"refused:{arg.reason}"
+                else:
+                    outcome = "accepted"
+                self.panel_results[f"build:{outcome}"] += 1
+                self.panel_max_estimated_peak_bytes = max(
+                    self.panel_max_estimated_peak_bytes,
+                    getattr(arg, "estimated_peak_bytes", 0),
+                )
+            elif name == "cross_moment":
+                outcome = "refused_or_exception" if arg is None else "returned"
+                self.panel_results[f"cross:{outcome}"] += 1
         if event == "return" and name == "_factored_gram_raw" and module.startswith("superglm"):
             if arg is None:
                 branch = "exception_or_no_result"
@@ -566,6 +584,10 @@ def worker(args):
                     "native_kernel_results": recorder.kernel_results,
                     "tensor_gram_branches": recorder.gram_branches,
                     "endpoint_reuse_results": recorder.endpoint_reuse_results,
+                    "small_group_panel_results": recorder.panel_results,
+                    "small_group_panel_max_estimated_peak_bytes": (
+                        recorder.panel_max_estimated_peak_bytes
+                    ),
                     "kernel_attributes_missing": recorder.kernel_attributes_missing,
                 }
             if args.measure_time and os.getloadavg()[0] <= 2 * len(os.sched_getaffinity(0)):

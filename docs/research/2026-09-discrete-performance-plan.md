@@ -191,8 +191,10 @@ exercise this behavior; its generated data and specifications are public.
    state. Keep unsupported spline-by-category cache configurations conservative.
    The 215 focused checks pass, including 41 additional reuse regressions.
 2. Implement and test a bounded row-panel workspace for small ordinary groups,
-   using the existing stored-design row renderer and signed rectangular matrix
-   multiplication. Count all simultaneously live panels, weighted scratch and
+   using typed stored-design row rendering and signed rectangular matrix
+   multiplication. The existing row renderer calls compressed `toarray()`;
+   reusing it would violate the bounded cross-product contract. Count all
+   simultaneously live panels, weighted scratch and
    rendering temporaries. Retain panels only for one likelihood chunk, preserve
    specialized tensor/sparse routes, and require fallback when the byte budget
    or numerical-domain conditions do not permit batching.
@@ -203,3 +205,31 @@ exercise this behavior; its generated data and specifications are public.
 4. Repeat complete-fit timing, peak memory, numerical comparisons and actual
    dispatch from the resulting source. Keep the discrete execution gate open
    until the remaining performance evidence is satisfactory.
+
+### Independent call-stack review
+
+The public fragmented profile separates two causes: 32 chunked geometry
+evaluations versus 23 dense evaluations, and repeated ordinary group-pair work
+within each evaluation. Extend the spline-by-categorical endpoint certificate
+using its live basis, row-alignment and lazy-cache state so the extra evaluations
+do not confound the batching comparison. This preserves the existing endpoint
+acceptance rules; it adds representation coverage.
+
+The generic factor-smooth/dense cross-product route also bypasses an existing
+signed reduction kernel. Evaluate a narrow dispatch to that kernel with the
+correct sum-to-zero adjoint, a bound on raw intermediate storage, and arithmetic
+range guards. Singleton dense columns already need one factor scan and retain
+their current path. Validate this route separately from the panel workspace.
+
+Start panel integration with an internal opt-in byte budget. Select an automatic
+route only after comparing complete fits on the independent fragmented fixture
+and existing tensor/support controls. Interpret likelihood and geometry costs
+together: derivative evaluation is charged to different phases by dense and
+chunked execution. No additional roadmap capability starts during this work.
+
+The optional panel implementation, signed factor-smooth dispatch and expanded
+reuse certificates pass 395 focused checks together with existing chunk-reuse
+and family-layering tests. Independent review resolved stored-buffer coherence,
+subclass dispatch and mixed-CSR-index allocation issues. Automatic panel dispatch
+is still disabled while a frozen-source public off/on pilot evaluates the
+complete-fit tradeoff.

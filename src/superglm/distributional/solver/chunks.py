@@ -17,6 +17,7 @@ from superglm.distributional.family import (
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
+from superglm.distributional.solver._small_group_panels import build_small_group_panels
 from superglm.distributional.solver.assembly import DenseJointGeometry, GroupedGeometryAccumulator
 from superglm.distributional.solver.derivatives import (
     transform_natural_derivatives,
@@ -471,8 +472,14 @@ def assemble_chunked_geometry(
     penalty: NDArray,
     chunk_size: ChunkSize,
     curvature_source: CurvatureSource,
+    small_group_panel_byte_budget: int | None = None,
 ) -> DenseJointGeometry:
-    """Stream likelihood chunks into one coefficient-space geometry."""
+    """Stream likelihood chunks into one coefficient-space geometry.
+
+    The optional panel byte budget is an internal execution experiment. The
+    default retains grouped dispatch until complete-fit evidence establishes
+    which layouts benefit from bounded panels.
+    """
     accumulator = GroupedGeometryAccumulator(
         layout,
         penalty=penalty,
@@ -487,13 +494,27 @@ def assemble_chunked_geometry(
         chunk_size=chunk_size,
         curvature_source=curvature_source,
     ):
-        accumulator.add_score(chunk.plans, chunk.score_eta)
-        for channel_index in range(chunk.curvature_packed.shape[1]):
-            accumulator.add_curvature_channel(
+        workspace = None
+        if small_group_panel_byte_budget is not None:
+            workspace = build_small_group_panels(
                 chunk.plans,
-                channel_index,
-                chunk.curvature_packed[:, channel_index],
-            )
+                slice(0, chunk.plans[0].design.n),
+                byte_budget=small_group_panel_byte_budget,
+            ).workspace
+        try:
+            accumulator.add_score(chunk.plans, chunk.score_eta)
+            for channel_index in range(chunk.curvature_packed.shape[1]):
+                accumulator.add_curvature_channel(
+                    chunk.plans,
+                    channel_index,
+                    chunk.curvature_packed[:, channel_index],
+                    panel_workspace=workspace,
+                )
+        finally:
+            # Release before requesting another likelihood chunk, including when
+            # score assembly or a later curvature channel raises.
+            if workspace is not None:
+                workspace.close()
     return accumulator.finish()
 
 

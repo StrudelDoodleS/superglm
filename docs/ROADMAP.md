@@ -51,7 +51,7 @@ the scalar engine's existing performance and interpretability.
   NB2 configuration now reaches configured stationarity after a finite-NB2
   numerical-range fix.
 
-## Completed scoped work: C3 + C1
+## Implemented foundation: C3 + C1
 
 The user explicitly selected C3 and C1 on 2026-09-08, overriding the previous
 C5-before-C1 ordering. The [implementation plan](superpowers/plans/2026-09-08-c3-c1-completion.md),
@@ -97,8 +97,9 @@ evidence. Continuous Gaussian grids of 64, 256 and 1,024 bins reduce held-out
 prediction differences in this fixture; they do not establish a universal
 approximation rate. Whole-process RSS, actual dispatch, complete-fit work and
 the timing audit are recorded in the completion report. This closes the chosen
-C1 scope without claiming constant memory, universal speedups or 10⁷–10⁸-row
-capability.
+C1 implementation foundation without claiming constant memory, universal
+speedups or 10⁷–10⁸-row capability. The subsequently requested discrete
+performance gate below remains open within C1.
 
 The final-source [performance receipt](../benchmarks/c3_pragmatic_performance_receipt.json)
 records three serial runs per arm on the replicated 449,000-row severity

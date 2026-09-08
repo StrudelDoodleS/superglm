@@ -229,11 +229,14 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
         CategoricalGroupMatrix,
         DenseGroupMatrix,
         DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
         FactorSmoothGroupMatrix,
         RandomEffectGroupMatrix,
         SparseGroupMatrix,
+        SplineCategoricalGroupMatrix,
+        SupportCompressedSplineCategoricalGroupMatrix,
         SupportCompressedSSPGroupMatrix,
     )
     from superglm.links import IdentityLink, LogLink
@@ -265,6 +268,35 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
             buffersize=8192,
         ):
             digest.update(memoryview(np.ascontiguousarray(block)).cast("B"))
+
+    def builtin_array(values: object) -> bool:
+        # An ndarray subclass can change arithmetic at identical bytes. Limit
+        # this schema to ordinary real buffers, with at most 64 KiB per digest
+        # block under array()'s 8192-element iterator.
+        return bool(
+            type(values) is np.ndarray
+            and values.dtype.kind in "biuf"
+            and values.dtype.itemsize <= 8
+        )
+
+    def splinecat_csr(matrix: object) -> bool:
+        if type(matrix) is not csr_matrix:
+            return False
+        buffers = (matrix.data, matrix.indices, matrix.indptr)
+        if not all(builtin_array(values) for values in buffers):
+            return False
+        # Read raw flags: the public properties can populate caches. Their
+        # values affect SciPy dispatch even when the CSR bytes are unchanged.
+        flags = (
+            getattr(matrix, "_has_sorted_indices", None),
+            getattr(matrix, "_has_canonical_format", None),
+        )
+        if any(value is not None and type(value) not in (bool, np.bool_) for value in flags):
+            return False
+        field((matrix.shape, matrix.dtype.str, flags))
+        for values in buffers:
+            array(values)
+        return True
 
     field(json.dumps(context.family.to_config(), sort_keys=True))
     field(context.likelihood_plan.plan_identifier)
@@ -357,6 +389,54 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
                         array(values)
                     names = ("codes", "natural_map", "_data", "_indices", "_indptr")
                 if any(type(getattr(group, name)) is not np.ndarray for name in names):
+                    return None
+            elif kind in (
+                SplineCategoricalGroupMatrix,
+                DiscretizedSplineCategoricalGroupMatrix,
+                SupportCompressedSplineCategoricalGroupMatrix,
+            ):
+                if (
+                    type(group.n_rows) is not int
+                    or type(group._p_b) is not int
+                    or (
+                        group.spline_cat_feature is not None
+                        and type(group.spline_cat_feature) is not str
+                    )
+                ):
+                    return None
+                # The feature selects a same-parent cross-Gram route.
+                field((group.n_rows, group._p_b, group.spline_cat_feature))
+                names = ("R_inv", "row_idx")
+                if kind is SplineCategoricalGroupMatrix:
+                    # Subsetting reads full B; matvec reads B_level; sparse
+                    # moments read independent buffers. A saturated Gram can
+                    # instead read its lazy dense copy. All remain live.
+                    if not splinecat_csr(group.B) or not splinecat_csr(group.B_level):
+                        return None
+                    names += ("_data", "_indices", "_indptr")
+                    dense = group._dense_level
+                    if dense is None or dense is False:
+                        field(("_dense_level", dense))
+                    elif builtin_array(dense):
+                        names += ("_dense_level",)
+                    else:
+                        return None
+                    cache_names = ("_sorted_rows",)
+                else:
+                    if type(group.n_bins) is not int:
+                        return None
+                    field(group.n_bins)
+                    names += ("B_unique", "bin_idx_level")
+                    cache_names = ("_row_order", "_sorted_rows")
+                # Do not sort, materialize, or populate a lookup to certify it.
+                # Cache creation, replacement and mutation each change the
+                # certificate, including independently replaced alignment maps.
+                for name in cache_names:
+                    value = getattr(group, name)
+                    field((name, value is None))
+                    if value is not None:
+                        names += (name,)
+                if any(not builtin_array(getattr(group, name)) for name in names):
                     return None
             elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
                 names = ("B_unique", "R_inv", "bin_idx")

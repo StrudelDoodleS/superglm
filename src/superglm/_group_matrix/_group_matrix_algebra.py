@@ -15,13 +15,16 @@ from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
     _disc_disc_2d_hist_channels,
     _fused_2d_bincount_2,
+    _tensor_operand_in_reassociation_range,
     _weighted_bincount_2d,
 )
 
 if TYPE_CHECKING:
     from ..group_matrix import (
+        DenseGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
+        FactorSmoothGroupMatrix,
         GroupMatrix,
         RandomEffectGroupMatrix,
     )
@@ -1110,6 +1113,54 @@ def _support_support_cross_gram(
     return gm_disc.R_inv.T @ raw @ gm_spline_cat.R_inv
 
 
+def _cross_gram_factor_smooth_dense(
+    factor: FactorSmoothGroupMatrix, dense: DenseGroupMatrix, W: NDArray
+) -> NDArray | None:
+    """Batch a narrow dense partner, retaining the legacy route outside its envelope."""
+    from ..factor_smooth_geometry import adjoint_sum_to_zero_blocks
+
+    q = dense.shape[1]
+    # A singleton already scans the factor once; a wider partner should keep
+    # the fallback's smaller-width loop. No observation design is expanded.
+    if not 2 <= q < factor.shape[1]:
+        return None
+    raw_cells = factor.n_levels * factor.raw_width * q
+    mapped_cells = factor.n_levels * factor.block_size * q
+    # Include einsum's possible raw-layout copy and public-coordinate/reshape
+    # copies, in addition to its raw and mapped outputs. Decline before any of
+    # those cross-shaped allocations; a level-by-support grid is never needed.
+    if 8 * (2 * raw_cells + 3 * mapped_cells) > _MAX_CROSS_EXPANSION_BYTES:
+        return None
+    basis = factor.B_unique if factor.is_discrete else factor._data
+    if (
+        type(W) is not np.ndarray
+        or W.shape != (factor.shape[0],)
+        or dense.shape[0] != factor.shape[0]
+        or any(
+            type(value) is not np.ndarray or value.dtype != np.float64
+            for value in (W, dense.M, basis, factor.natural_map)
+        )
+    ):
+        return None
+    # Check the raw source before indexing: an ndarray subclass can override
+    # view creation and return an ordinary array with changed values.
+    if not factor.is_discrete:
+        basis = basis[:, None]
+    # The native scan computes (W*basis)*dense, while the legacy transpose
+    # product computes basis*(W*dense). Four factors and two reductions fit
+    # comfortably in float64's exponent range under this existing guard.
+    # Recheck mutable operands each time, including the raw natural map.
+    if not all(
+        _tensor_operand_in_reassociation_range(value)
+        for value in (W[:, None], dense.M, basis, factor.natural_map)
+    ):
+        return None
+    blocks = factor.factor_smooth_dense_cross_gram(W, dense.M)
+    if factor.factor_basis == "sz":
+        blocks = adjoint_sum_to_zero_blocks(blocks)
+    return blocks.reshape(factor.shape[1], q)
+
+
 def _cross_gram_by_columns(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     """Form a cross-product one generated column at a time.
 
@@ -1162,7 +1213,7 @@ def _cross_gram(
         _SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
-    from ..group_matrix import FactorSmoothGroupMatrix
+    from ..group_matrix import DenseGroupMatrix, FactorSmoothGroupMatrix
 
     SplineCatTypes = (SplineCategoricalGroupMatrix, DiscretizedSplineCategoricalGroupMatrix)
 
@@ -1368,6 +1419,19 @@ def _cross_gram(
         result = _cat_cat_weighted_crosstab(gm_i.codes, gm_j.codes, W, gm_i.n_levels, gm_j.n_levels)
         _profile_elapsed(profile, "block_cross_cat_cat_s", t0)
         return result
+
+    # Restrict to the concrete built-ins: subclasses may override their public
+    # matvec/rmatvec semantics independently of the stored matrix arrays.
+    factor_dense = type(gm_i) is FactorSmoothGroupMatrix and type(gm_j) is DenseGroupMatrix
+    dense_factor = type(gm_j) is FactorSmoothGroupMatrix and type(gm_i) is DenseGroupMatrix
+    if factor_dense or dense_factor:
+        t0 = perf_counter() if profile is not None else 0.0
+        factor, dense = (gm_i, gm_j) if factor_dense else (gm_j, gm_i)
+        result = _cross_gram_factor_smooth_dense(factor, dense, W)
+        if result is not None:
+            _profile_count(profile, "block_cross_factor_smooth_dense_calls")
+            _profile_elapsed(profile, "block_cross_factor_smooth_dense_s", t0)
+            return result if factor_dense else result.T
 
     # Factored support-space groups must never be selected for the generic
     # observation-matrix materialization below. Generate the narrower side a

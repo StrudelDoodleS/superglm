@@ -21,6 +21,11 @@ mix zero. `gpd-tail` preserves `marked_book(10000, tail=True)`, seed 9506, thres
 1000 and three knots: 1,401 training excesses and q=98. The recovered generator
 retains its exact random draw order, including the Gaussian draw preceding
 Tweedie sampling. `gaussian` is a smaller smooth/tensor smoke fixture.
+`gaussian-fragmented` independently generates small numeric, categorical,
+spline and spline-by-categorical terms in both Gaussian predictors. It exercises
+ordinary group-pair assembly, with 65,536 training rows by default and seeds
+28109/28110 for training/holdout. It uses the supported grouped-curve API;
+it does not exercise factor-smooth interactions through the public predictor API.
 
 `--fixture severity-gaussian` fits log aggregate policy claim amount, joined by
 IDpol from verified freMTPL2 Parquet files in `--data`. `severity-gamma` fits the
