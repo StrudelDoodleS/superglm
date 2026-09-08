@@ -134,9 +134,17 @@ so the existing signed matrix-product architecture is retained.
 Automatic panels now admit a narrow mixed ordinary layout supported by those
 measurements, with a separate 64 MiB workspace allowance and existing numerical
 refusal. Automatic dense selection remains deferred. Full non-browser validation
-passes 12,350 tests, with required real-data checks running and 109 other skips.
-Final actual-default complete-fit validation is pending; see the
-[performance report](research/2026-09-discrete-performance-report.md).
+passes 12,350 tests, including all 84 required real-data checks, with 109 other
+skips. Final actual-default validation completes 28 timed public fits and three
+separate dispatch witnesses. Discrete medians improve by 58.5% for fragmented
+Gaussian, 49.4% for support-32, and 76.6% for Gamma severity against the frozen
+post-C3 source; severity exact/discrete timing ranges overlap.
+
+The remaining mixed-layout gap keeps this gate open: discrete fitting takes
+44.5% longer than exact fitting while using 499.5 MiB less fit high-water RSS.
+The implemented stages are validated, but universal speed parity is not
+established. Further bounded execution work remains ahead of another roadmap
+capability; see the [performance report](research/2026-09-discrete-performance-report.md).
 Scalar SuperGLM's cached-weight discrete REML optimizer remains a separate
 approximation contract.
 

@@ -1,17 +1,15 @@
 # Discrete execution performance
 
-Discrete execution improvements reduce complete-fit time on several public
-fixtures, but the C1 performance gate remains open. The fragmented Gaussian
-size sweep at `ed84669a` finds automatic chunking slower than exact dense fitting
-from 65,536 to 1,048,576 rows. Subsequent range and renderer changes improve
-complete fits at 262,144 rows. Those measurements support automatic bounded
-panels for a narrow mixed ordinary layout. An experimental dense execution
-override is faster but uses more memory; automatic dense selection is deferred.
+The final default route reduces discrete complete-fit medians by 58.5% on the
+fragmented Gaussian fixture, 49.4% on a finite-support fixture, and 76.6% on
+public insurance severity. Implementation, full-suite validation and the final
+public benchmark window are complete. Discrete and exact severity timing ranges
+overlap. Fragmented discrete fitting remains 44.5% slower than exact fitting,
+with 39.1% less fit high-water RSS. That remaining mixed-layout tradeoff keeps
+the C1 performance gate open before another roadmap capability starts.
 
-The latest complete-fit measurements cover
-`56d9507a8cb4f505092175624012a68b6d0021d1`. The subsequent automatic panel policy
-has passed focused tests and independent review; final integration and default
-route validation remain in progress. The
+The final complete-fit source is `74ce13f3c42be7f415f90366c3979f5df9b148db`,
+with production code unchanged from tested `9f0e196c`. The
 performance baseline is the frozen post-C3 source
 `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`; the plan checkpoint `0a15736e`
 has the same production source. This is distinct from published v0.31.0 at
@@ -19,8 +17,9 @@ has the same production source. This is distinct from published v0.31.0 at
 not be presented as measurements against that release.
 
 The tracked [performance receipt](../../benchmarks/discrete_performance_receipt.json)
-consolidates the size, thread, preparation and tabmat windows with raw-summary
-hashes, source pins, ranges and qualifications.
+consolidates the size, thread, preparation, tabmat and final default windows
+with raw-summary hashes, source pins, ranges and qualifications. Earlier
+checkpoints below are historical evidence, not measurements of the final source.
 
 ## Execution changes at this checkpoint
 
@@ -261,6 +260,74 @@ constructor-inclusive result does not justify a full-fit adaptation. The
 prototype and unfavorable receipts remain preserved outside production code;
 they do not rule out other tabmat designs or workloads.
 
+## Final default complete fits
+
+The final public window compares frozen post-C3 baseline `5f994c8f` with
+`74ce13f3`, whose production source matches tested `9f0e196c`. It contains
+28 fresh, serial, uninstrumented fits and three separate instrumented dispatch
+witnesses. Fragmented models have three repetitions per arm; the support and
+insurance controls have two. Arm order reverses between repetitions. Times below
+are complete-fit medians in seconds; RSS is the process high-water mark captured
+at fit completion, in MiB. All individual values and ranges are in the tracked
+[receipt](../../benchmarks/discrete_performance_receipt.json).
+
+| Fixture | Source and representation | Wall | CPU | Fit RSS |
+|---|---|---:|---:|---:|
+| Fragmented, 262,144 rows | Baseline exact | 9.023 | 9.007 | 1268.29 |
+| | Baseline discrete | 31.530 | 31.478 | 766.75 |
+| | Current exact | 9.045 | 9.026 | 1276.33 |
+| | Current discrete | 13.074 | 13.043 | 776.82 |
+| Support-32, 100,000 rows | Baseline exact | 4.170 | 4.162 | 694.78 |
+| | Baseline discrete | 3.684 | 3.678 | 482.15 |
+| | Current exact | 4.365 | 4.355 | 704.24 |
+| | Current discrete | 1.864 | 1.862 | 490.85 |
+| Gamma severity, 89,800 rows | Baseline exact | 11.018 | 10.996 | 647.3 |
+| | Baseline discrete | 12.601 | 12.586 | 612.2 |
+| | Current exact | 2.915 | 2.904 | 656.7 |
+| | Current discrete | 2.950 | 2.945 | 619.6 |
+
+Discrete median wall time falls by 58.5%, 49.4% and 76.6% respectively.
+Current discrete ranges are 11.446–14.107, 1.800–1.927 and 2.928–2.972 s;
+each lies below its baseline-discrete range. The two-repeat controls are local
+observations, not precise universal speed estimates. Exact-route ranges overlap
+between sources for the fragmented and support fixtures. Gamma arithmetic
+improvements also substantially improve exact severity fitting.
+
+Fragmented discrete fitting still takes 44.5% longer than current exact fitting,
+with 499.5 MiB (39.1%) less fit high-water RSS. Support-32 discrete fitting is
+faster than exact fitting. Severity exact/discrete timing ranges overlap.
+Current discrete RSS is slightly higher than baseline discrete RSS in all three
+cases; the source change demonstrates speed improvement, not an additional RSS
+reduction. The substantial mixed-layout memory saving compares discrete with
+exact representation/execution. The severity training book contains four copies
+of 22,450 independent training policies, with 2,494 policies held out before
+replication.
+
+Input and stored-representation hashes match between sources separately for
+exact and discrete. All exact saved arrays and the severity discrete arrays
+agree exactly numerically. The largest source-to-source discrete holdout
+difference is 6.66e-16 for both Gaussian fixtures. These are same-representation
+execution comparisons. Current exact/discrete holdout differences are separately
+7.36e-4 maximum (1.17e-4 relative norm) for fragmented Gaussian, 3.25e-15 for
+support-32, and 2.28e-10 maximum (5.52e-15 relative norm) for severity. The
+fragmented comparison includes continuous binning error; small output differences
+alone do not prove representation equivalence.
+
+All arms have matching iteration counts: 18 inner / seven smoothing iterations
+for fragmented and severity, and 20 / seven for support-32. All report successful
+coefficient and practical smoothing convergence, with `practical_plateau` and
+`smoothing_certified=false`. This is operational convergence under the existing
+practical rule, not strict stationarity certification or a global-optimum claim.
+
+The separate default-route witnesses confirm 19 automatic budget selections,
+627 accepted panel builds and 1,881 curvature products for the fragmented model,
+with maximum estimated panel workspace 21,993,536 bytes. Support-32 and severity
+decline automatic panels; their existing tensor and Gamma kernels are observed.
+All discrete fits resolve to chunked execution and all exact fits to dense
+execution. Runtime pools are one, all workers exit successfully, and source,
+helper and activity checks pass. Timed fits have no tracing hooks or execution
+overrides; witness times do not enter the timing aggregates.
+
 ## Measurement and validation limits
 
 Timed workers run serially in fresh interpreters with numerical threads fixed
@@ -299,19 +366,28 @@ authority permits two-bound searches and releases obsolete backing storage on
 refusal. Geometry retains owned chunk snapshots. Bounded support tables and
 checked writers reduce repeated transformation and scanning work; public warmup
 covers their compiled signatures. Independent reviews found no remaining
-blocking issues. Their complete-fit comparison is recorded above; final actual
-default complete-fit validation remains pending.
+blocking issues. Their complete-fit comparison and final default validation are
+recorded above.
 
 The automatic panel policy passes 172 focused tests, including 44 new dispatch,
 override, refusal and lifetime regressions. Its default-dispatch regression
 fails on the prior implementation. Independent review reports no remaining
-findings. Final actual-default complete-fit checks remain.
+findings. The final default-route witnesses and complete fits pass.
 
 The execution reviews found that tabmat supports signed weights, but a bounded
 LSS route needs chunk-owned matrices, constructor/native-workspace accounting
 and a strategy for rectangular curvature products. The constructor-inclusive
 raw-basis comparison above does not support replacing the current kernel.
-Further structural consolidation is deferred while the selected changes receive
-final default-route, favorable support/tensor, dispatch and memory validation.
-The [plan](2026-09-discrete-performance-plan.md) and
-[roadmap](../ROADMAP.md) should continue to show an open performance gate.
+The selected changes now have final default-route, favorable support/tensor,
+dispatch and memory evidence. The panel selector remains a narrow engineering
+envelope; unsupported layouts retain grouped contraction. Automatic dense
+selection is deferred because its additional memory changes the execution
+tradeoff. The coefficient factors and covariance remain dense, and row scratch
+bounds are not whole-fit memory bounds. The million-row sweep measured an earlier
+checkpoint; the final automatic policy has complete-fit evidence at 262,144 rows.
+
+Further consolidation of bounded row preparation remains a possible next C1
+step, preserving the optimizer and signed matrix products. No replacement or
+universal discrete-speed claim follows from these measurements. The
+[plan](2026-09-discrete-performance-plan.md) and [roadmap](../ROADMAP.md) retain
+the unresolved mixed-layout performance gate.

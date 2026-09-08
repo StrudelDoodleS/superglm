@@ -1,6 +1,8 @@
 # Discrete execution performance plan
 
-Status: implementation in progress. Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
+Status: current implementation and validation stages complete; the measured
+mixed-layout discrete-versus-exact speed gap remains open within C1.
+Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
 The immediate priority is efficient discrete execution before additional roadmap
@@ -346,12 +348,36 @@ to 32. It resolves the additional 64 MiB allowance once per geometry assembly.
 The builder remains the numerical and actual-storage authority. The 172 focused
 checks pass, including 44 new regressions for default dispatch, explicit
 overrides, signed channels, refusal and cleanup. The original default-dispatch
-case fails before the change. Source is frozen for full-suite and actual-default
-complete-fit validation; automatic dense execution remains deferred.
+case fails before the change. Source was then frozen for full-suite and
+actual-default complete-fit validation; automatic dense execution remains deferred.
 
 Production source `9f0e196c` completes full non-browser validation with 12,350
 passed and 109 skipped unique cases, including 84 required real-data checks with
 no skips. The only initial failure was duration-manifest coverage; 1,078 missing
 entries were filled from this run's JUnit durations without changing previous
 values, and all eight CI contract checks pass on rerun. Lint, formatting,
-dependency and smoke checks pass. Final default-route complete fits are next.
+dependency and smoke checks pass. This completed the production suite before
+the final default-route complete fits below.
+
+Final default-route validation at `74ce13f3` completes 28 uninstrumented fits and
+three separate dispatch witnesses against frozen post-C3 `5f994c8f`. Discrete
+median wall times fall from 31.530 to 13.074 s for fragmented Gaussian, 3.684 to
+1.864 s for support-32, and 12.601 to 2.950 s for public Gamma severity. All
+before/after discrete ranges are disjoint in this window; the two-repeat
+controls remain local evidence. Stored representations agree between sources
+within each mode, and saved outputs agree exactly or at roundoff scale.
+Representation effects are recorded separately. All fits report successful
+practical convergence, without claiming strict smoothing certification.
+
+Automatic panels are observed only in the intended mixed-layout fixture;
+support/tensor and severity controls retain their existing routes. Source,
+helper, thread and activity checks pass. The [report](2026-09-discrete-performance-report.md)
+and [tracked receipt](../../benchmarks/discrete_performance_receipt.json) retain
+complete-fit CPU, process RSS, ranges, numerical comparisons and actual dispatch.
+
+The remaining public mixed-layout gap is explicit: current discrete fitting is
+44.5% slower than exact fitting, with 499.5 MiB less fit high-water RSS. Automatic
+dense selection remains deferred and the raw-basis tabmat prototype remains
+unselected. The current implementation stages are validated; this residual C1
+execution issue remains ahead of other roadmap capabilities. Cross-predictor
+penalties stay deferred under the chosen scope.
