@@ -184,19 +184,26 @@ observations at two coupled N/P shapes, not a full crossover study.
 
 The production profile and scalar policy control are complete. Scalar exact
 forced1/forced4/auto samples take 5.118/5.395/5.120 s; discrete auto takes
-0.648 s, all using direct REML. Auto correctly selects one thread for that
-79-coefficient fixture. This does not establish a universal scalar policy.
+0.648 s. A subsequent source audit corrects the optimizer interpretation:
+the discrete arm enters the direct-REML wrapper and delegates to cached-W;
+the witness missed the imported inner-function alias. Auto correctly selects
+one thread for that 79-coefficient fixture, but its exact/discrete speed ratio
+does not isolate representation cost or establish a universal scalar policy.
 LSS geometry's diagnostic 21.485 s divides mainly into 12.693 s accumulating
 global moments and 8.591 s producing chunks; only 1.619 s of chunk production
 is family evaluation. These instrumented intervals are not fit-time estimates.
 
-Next, the user explicitly chooses full-pass binned LSS before a parallel rewrite:
-keep the compressed supports and compare full-row likelihood execution against
-small chunks, treating chunking as an additional memory option. Measure current
-chunks, larger geometry chunks, whole-data geometry and whole-data row passes
-with explicit workspace allowances, unchanged representations and complete-fit
-time/RSS/dispatch evidence. A full-pass global plan is estimated near 513 MiB,
-separate from caller-owned arrays and whole-process memory. The shared BLAS
+The four-condition full-pass comparison is complete with separate witnesses.
+Current / 65,536-row geometry / full geometry / all full-row passes take
+27.104 / 24.794 / 29.413 / 26.978 s, with fit highwaters
+1,869.01 / 1,894.90 / 2,460.33 / 2,461.75 MiB. Stored designs match,
+iterations remain unchanged and output differences are at rounding scale.
+These are single samples; full-row execution still constructs copied state.
+No default changed. The user now emphasizes reductions in row-dependent
+complexity, so further batching/threading work is held while auditing scalar
+cached-W reuse and exact/approximate joint-row aggregation. Distinguish marginal
+binning from fewer likelihood records; the intended approximation tradeoff is
+being clarified. The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,
 backend or timing input; `-1` disables intervention rather than selecting an
 optimal count. It does not parallelize native moment loops. Use live
@@ -207,7 +214,7 @@ scope limit, without universal speed parity or a novelty claim. Wood's 2020
 review described the multiple-predictor large-data extension as not yet usable,
 not mathematically infeasible; references and complexity are in the report.
 
-In current priority order:
+After the active C1 performance gate, the candidate priority order is:
 
 **1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing
 constraints and distributional fits, starting with demanded monotone effects.

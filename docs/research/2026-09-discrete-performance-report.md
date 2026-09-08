@@ -808,9 +808,16 @@ one. The automatic policy is observed inside fitting and the actual optimizer.
 | Exact, auto | 5.120 | 5.114 | 587.1 |
 | Discrete, auto | 0.648 | 0.647 | 510.7 |
 
-Both auto arms configure one BLAS thread and restore four. All four execute
-direct REML, including discrete; its gain on this fixture is not an optimizer
-switch. Four BLAS threads offer no observed scalar time advantage, independent
+Both auto arms configure one BLAS thread and restore four. The initial claim
+that all four use the same inner direct-REML optimizer was wrong. The witness
+captures the direct wrapper, but `reml/direct.py` delegates its discrete branch
+to an imported `optimize_discrete_reml_cached_w` alias. The helper patched the
+defining module and missed that alias. The preserved scalar diagnostics also
+record the analytical iterations and line-search fits of cached-W. Thus the
+exact/discrete ratio includes a different smoothing execution strategy and
+cannot isolate compressed matrix computation. A corrected call witness is
+being prepared; the original raw captures and their hashes remain unchanged.
+Four BLAS threads offer no observed scalar time advantage, independent
 of CPU cost. These are single samples on this fixture, not a universal scalar
 thread-policy validation or a discrete scalar one/four comparison.
 
@@ -855,8 +862,48 @@ phase report and the kernel profile answer different questions.
 The 8.591 s chunk-production figure therefore covers 17 geometry evaluations
 and much more than the family kernel. Chunking is an execution/memory choice;
 discretization preserves observations while reducing spline support resolution.
-Scalar fitting keeps full-row likelihood vectors. The user's next chosen test
-applies that arrangement to the same binned LSS model: compare current chunks,
-larger geometry chunks, whole-data geometry and full-pass row execution, with
-explicit memory allowances and actual peak RSS. This takes precedence over a
-parallel-accumulator implementation. The C1 latency gate remains open.
+Scalar fitting keeps full-row likelihood vectors. The completed comparison
+applies different row partitions to the same binned LSS model. Its four timing
+workers and four separate witnesses use source `21f7d3fc`, with production code
+unchanged from `5c1ce17e`, and all numerical pools fixed to one.
+
+| Execution | Fit wall (s) | Fit CPU (s) | Fit-end highwater (MiB) |
+|---|---:|---:|---:|
+| Current 8,065-row passes | 27.104 | 27.043 | 1,869.01 |
+| Geometry 65,536; other passes 8,065 | 24.794 | 24.757 | 1,894.90 |
+| Full geometry; other passes 8,065 | 29.413 | 29.305 | 2,460.33 |
+| Full geometry and main row passes | 26.978 | 26.856 | 2,461.75 |
+
+One sample per condition does not establish a new default. Larger geometry
+batches reduce this sample's wall time by 8.52%, adding 25.89 MiB; the full-row
+variant is effectively tied with current and adds 592.74 MiB. Both full-row
+conditions still construct owned group snapshots and copied child likelihood
+plans, so this is a partitioning test rather than a no-copy implementation.
+
+All eight fits retain the same input/stored-design hashes, 16 inner iterations,
+seven smoothing updates and 17 geometry evaluations. Likelihood and objective
+are identical; maximum held-out difference is 8.88e-16, covariance norm-relative
+difference is at most 1.17e-13 and EDF difference at most 2.28e-13. Terminal
+score differences reach 1.33e-10; its small reference norm inflates the relative
+ratio. The existing practical plateau remains accepted, with stationarity
+residual about 4.93e-6 against the strict 1e-6 threshold. Each separate witness
+matches its timed partner exactly in all saved arrays and result scalars.
+
+Witnesses confirm 131 / 16 / 1 chunks per geometry, declared global workspace
+bounds, no fallback and unchanged native signatures. Live diagnosis localizes
+the larger-batch reduction mainly to geometry, but cannot identify a native
+cache effect. Same-geometry and compilation timings also vary between samples;
+the whole difference between the two full-row arms cannot be assigned solely
+to value-pass partitioning. Fit clocks/RSS precede outputs and diagnosis.
+Raw receipt SHA256 is
+`3d1afda315b49ee4e6fd789dbb3c66885e38084689323117873e58f95e17c2dd`;
+the tracked receipt pins it and both complete manifests.
+
+The user now emphasizes reducing row-dependent time and memory complexity.
+An all-pass 65,536-row helper is prepared but unexecuted; further batching and
+parallel prototypes are held. The next audit separates scalar cached-W reuse,
+which still evaluates N likelihood records, from exact aggregation of joint
+predictor states and additional approximation by coarsening those states.
+The marginal-binning versus fewer-records target is being clarified. A smaller
+likelihood dataset requires valid family-specific statistics and a measured
+group-count/accuracy tradeoff. C1 remains active.

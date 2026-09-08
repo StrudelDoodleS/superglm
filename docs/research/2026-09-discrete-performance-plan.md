@@ -6,8 +6,12 @@ execution on the measured mixed layouts through one million rows. C1 performance
 work remains active: the user considers the 8% one-thread time advantage over
 exact at one million rows insufficient. A completed eight-fit BLAS/shape screen
 shows the remaining comparison against threaded dense execution. The production
-profile and scalar policy controls are complete. Next, compare full-pass
-likelihood execution with the current small chunks on the same binned design.
+profile, scalar policy controls and four-condition full-pass comparison are
+complete. The scalar optimizer witness missed an imported cached-W alias;
+its earlier same-inner-optimizer interpretation is withdrawn. Next, audit
+which row-dependent work scalar reuse avoids and what joint-row aggregation
+could preserve exactly or approximate with measured error. Further batching
+and parallel prototypes are held pending that complexity audit.
 Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
@@ -664,8 +668,10 @@ production-tree hash; subsequent experiments must pin both explicitly.
 
 The scalar policy control is complete at documentation checkpoint `16b01adb`
 (production unchanged from `5c1ce17e`). Exact forced1/forced4/auto samples take
-5.118/5.395/5.120 s; discrete auto takes 0.648 s. All four execute direct REML;
-the discrete gain here is not attributable to a cached-W optimizer switch.
+5.118/5.395/5.120 s; discrete auto takes 0.648 s. Correction: the direct-REML
+wrapper delegates discrete execution to cached-W through an imported alias
+missed by the original helper. Its claim of the same inner optimizer was
+wrong; the scalar speed ratio includes a smoothing-strategy difference.
 Both auto arms select one BLAS thread from a known native-four configuration
 and restore four on return. The initial helper's absent optional NumExpr import
 failed before any fitting; the corrected four-worker campaign and initial
@@ -720,3 +726,31 @@ final-model refit. Family-aware joint-observation aggregation is a separate
 potential reduction, requiring evidence of shared predictor states and valid
 sufficient statistics; the current six continuous numeric scale columns prevent
 assuming it applies to this fixture.
+
+### Completed partition test and complexity audit
+
+The four timing conditions and four separate witnesses are complete on
+`21f7d3fc` with unchanged production code. Current / larger geometry / full
+geometry / all-full samples take 27.104 / 24.794 / 29.413 / 26.978 s and
+1,869.01 / 1,894.90 / 2,460.33 / 2,461.75 MiB fit highwater. All retain
+16 inner iterations, seven smoothing updates and matching stored designs;
+observable differences are at rounding scale. Witnesses confirm actual
+131 / 16 / 1 geometry chunks with no fallback. Full-row variants retain owned
+copies. These observations establish neither a default change nor a cache
+causal claim. The report and tracked receipt retain the complete evidence.
+
+The user's next priority is row-dependent complexity, with memoization and
+native caching treated as supporting implementation. Pause the prepared
+all-pass 65,536-row follow-up and parallel-accumulator work. Audit:
+
+1. The actual scalar discrete optimizer and which N-dependent work it avoids.
+   The original helper missed the direct module's imported cached-W alias;
+   correct the same-inner-optimizer claim and preserve its raw captures.
+2. Marginal support compression versus exact aggregation of shared joint
+   predictor states. Derive sufficient statistics for supported families,
+   including both predictors, offsets and frequency/prior-weight semantics.
+3. Group counts and preprocessing/per-iteration/retained-memory costs, with
+   approximation error stated separately from exact post-binning algebra.
+   Clarify the intended aggregation tradeoff before changing a statistical
+   target. Do not infer that a scalar cached-W implementation transfers
+   unchanged to coupled signed LSS curvature or smoothing certification.

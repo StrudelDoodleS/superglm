@@ -1,5 +1,660 @@
 {
   "schema": "superglm-public-discrete-performance-evidence-v1",
+  "chunk_partition_ablation": {
+    "source_sha": "21f7d3fcc4e7fa48966005f51c2c1079afd8d838",
+    "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
+    "helper": {
+      "path": ".benchmark-artifacts/discrete-performance/chunk-size-16b01adb/probe_chunks.py",
+      "sha256": "805dfdfc6408e0b9cc7c98d4128351830e16eed679cacd34cb76e62f4da72c1e"
+    },
+    "protocol": "Four fresh timed workers followed by four separate dispatch witnesses; public Gaussian fragmented N1048576 P102, bins256, all numerical pools1. All observations, stored supports, optimizer, curvature and stopping rules preserved. Ten-second preflights and0.25-core external activity screens include every observed external process. Raw clocks and fit-end process highwater precede ordinary outputs and diagnose. No production edits.",
+    "raw_manifests": {
+      "timing": {
+        "path": ".benchmark-artifacts/discrete-performance/chunk-size-16b01adb/timing-21f7d3fc/manifest.json",
+        "sha256": "8dfb09455b63cfbe14a822d214f4ad4db36e5ecfb81f18f26f8008104b61a64f"
+      },
+      "witness": {
+        "path": ".benchmark-artifacts/discrete-performance/chunk-size-16b01adb/witness-21f7d3fc/manifest.json",
+        "sha256": "ffbc68850f85ed095a254e3329e25c95006dfec1f97368912a422e494e6b3b8a"
+      }
+    },
+    "verification": {
+      "all_declared_workspace_bounds_held": true,
+      "all_global_dispatch_counts_verified": true,
+      "all_raw_file_hashes_verified": true,
+      "all_same_input_and_stored_hashes": true,
+      "all_timing_witness_arrays_bit_identical": true,
+      "numerical_scope": "Observed fitted parameters, EDF, covariance, likelihood/objective and retained stationarity; not a forward-error theorem for arbitrary nonlinear fits.",
+      "same_total_processed_rows_all_passes": true
+    },
+    "raw_receipt": {
+      "path": ".benchmark-artifacts/discrete-performance/chunk-size-16b01adb/public-receipt-21f7d3fc.json",
+      "sha256": "3d1afda315b49ee4e6fd789dbb3c66885e38084689323117873e58f95e17c2dd"
+    },
+    "scope": "Single sample per partition, four separate witnesses; no production/default change. Marginal design compression still retains N likelihood records. Further batching held for scalar-reuse and aggregation audit.",
+    "arms": {
+      "all_full": {
+        "fit_wall_seconds": 26.978042312999605,
+        "fit_cpu_seconds": 26.855786019,
+        "fit_end_peak_rss_mib": 2461.75,
+        "configuration": {
+          "all_passes": true,
+          "byte_budget": 1073741824,
+          "geometry_chunk_size": 1048576
+        },
+        "result_status": {
+          "coefficient_converged": true,
+          "converged": true,
+          "n_inner_iter": 16,
+          "n_smoothing_iter": 7,
+          "smoothing_certified": false,
+          "smoothing_converged": true,
+          "smoothing_reason": "practical_plateau"
+        },
+        "witness": {
+          "actual_native_calls": {
+            "_accumulate_directional": 340,
+            "_accumulate_histogram": 765,
+            "_accumulate_vector": 340,
+            "_finite_bounded_2d": 408,
+            "_pack_categorical": 136
+          },
+          "maximum_workspace_estimate": 538081496,
+          "native_signatures_stable": true,
+          "pass_calls": {
+            "_predictor_chunk:caller=iter_likelihood_chunks": 17,
+            "_predictor_values:caller=_reuse_observed_initial_result": 7,
+            "_predictor_values:caller=evaluate_chunked_log_likelihood": 18,
+            "_predictor_values:caller=materialize_terminal_predictions": 8,
+            "_predictor_values:caller=maximum_chunked_predictor_change": 16
+          },
+          "pass_rows": {
+            "_predictor_chunk:caller=iter_likelihood_chunks": 17825792,
+            "_predictor_values:caller=_reuse_observed_initial_result": 7340032,
+            "_predictor_values:caller=evaluate_chunked_log_likelihood": 18874368,
+            "_predictor_values:caller=materialize_terminal_predictions": 8388608,
+            "_predictor_values:caller=maximum_chunked_predictor_change": 16777216
+          }
+        },
+        "diagnose": {
+          "inner_iterations": 16,
+          "outer_iterations": 7,
+          "coefficient_fits": 8,
+          "terminal_evidence": {
+            "curvature_fallback_count": 0,
+            "curvature_source_mismatch_fits": 0,
+            "matched_certified": false,
+            "terminal_reason": "practical_plateau",
+            "terminal_stationarity_evidence": 0.00000493013189473146
+          },
+          "leaf_phases": [
+            {
+              "calls": 1,
+              "fit_share": 0.0000013149050327747524,
+              "name": "frame_normalization",
+              "seconds": 0.00003544600622262806
+            },
+            {
+              "calls": 1,
+              "fit_share": 0.09547450283410645,
+              "name": "predictor_compilation",
+              "seconds": 2.573714250997
+            },
+            {
+              "calls": 9,
+              "fit_share": 0.00003934954436004247,
+              "name": "layout_penalty_assembly",
+              "seconds": 0.0010607489966787398
+            },
+            {
+              "calls": 42,
+              "fit_share": 0.1403961516902461,
+              "name": "likelihood_evaluation",
+              "seconds": 3.784670940032811
+            },
+            {
+              "calls": 17,
+              "fit_share": 0.5829092568547767,
+              "name": "curvature_gradient_assembly",
+              "seconds": 15.713534156988317
+            },
+            {
+              "calls": 16,
+              "fit_share": 0.001378362294292744,
+              "name": "coefficient_decomposition_solve",
+              "seconds": 0.03715662899048766
+            },
+            {
+              "calls": 30,
+              "fit_share": 0.0006817510594222185,
+              "name": "efs_update_backtracking",
+              "seconds": 0.018378020991804078
+            },
+            {
+              "calls": 1,
+              "fit_share": 0.00618960078277704,
+              "name": "terminal_inference_and_null_fit",
+              "seconds": 0.16685359200346284
+            },
+            {
+              "calls": 0,
+              "fit_share": 0.1729297100349859,
+              "name": "orchestration_and_unmeasured",
+              "seconds": 4.661680824996438
+            }
+          ]
+        },
+        "input_and_stored_design_identical": true,
+        "differences_from_fresh_current": {
+          "coefficients": {
+            "max_absolute_difference": 1.942890293094024e-16,
+            "norm_relative_difference": 3.3297857113543546e-16
+          },
+          "covariance": {
+            "max_absolute_difference": 1.2598429244281562e-16,
+            "norm_relative_difference": 1.164962955690697e-13
+          },
+          "edf": {
+            "max_absolute_difference": 1.1368683772161603e-13,
+            "norm_relative_difference": 1.2530662780313623e-15
+          },
+          "holdout_parameters": {
+            "max_absolute_difference": 8.881784197001252e-16,
+            "norm_relative_difference": 1.7619391513294658e-16
+          },
+          "log_likelihood": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "objective": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "smoothing_parameters": {
+            "max_absolute_difference": 9.094947017729282e-13,
+            "norm_relative_difference": 6.963471855820998e-16
+          },
+          "terminal_penalized_curvature": {
+            "max_absolute_difference": 2.2118911147117615e-9,
+            "norm_relative_difference": 1.014727036544786e-15
+          },
+          "terminal_score": {
+            "max_absolute_difference": 4.8824499998545434e-11,
+            "norm_relative_difference": 4.517241893199291e-9
+          },
+          "train_parameters": {
+            "max_absolute_difference": 1.7763568394002505e-15,
+            "norm_relative_difference": 1.7855931751244202e-16
+          }
+        }
+      },
+      "current": {
+        "fit_wall_seconds": 27.104405253994628,
+        "fit_cpu_seconds": 27.042768947,
+        "fit_end_peak_rss_mib": 1869.01171875,
+        "configuration": {
+          "all_passes": false,
+          "byte_budget": 67108864,
+          "geometry_chunk_size": 8065
+        },
+        "result_status": {
+          "coefficient_converged": true,
+          "converged": true,
+          "n_inner_iter": 16,
+          "n_smoothing_iter": 7,
+          "smoothing_certified": false,
+          "smoothing_converged": true,
+          "smoothing_reason": "practical_plateau"
+        },
+        "witness": {
+          "actual_native_calls": {
+            "_accumulate_directional": 44540,
+            "_accumulate_histogram": 100215,
+            "_accumulate_vector": 44540,
+            "_finite_bounded_2d": 31348,
+            "_pack_categorical": 17816
+          },
+          "maximum_workspace_estimate": 30312128,
+          "native_signatures_stable": true,
+          "pass_calls": {
+            "_predictor_chunk:caller=iter_likelihood_chunks": 2227,
+            "_predictor_values:caller=_reuse_observed_initial_result": 917,
+            "_predictor_values:caller=evaluate_chunked_log_likelihood": 2358,
+            "_predictor_values:caller=materialize_terminal_predictions": 1048,
+            "_predictor_values:caller=maximum_chunked_predictor_change": 2096
+          },
+          "pass_rows": {
+            "_predictor_chunk:caller=iter_likelihood_chunks": 17825792,
+            "_predictor_values:caller=_reuse_observed_initial_result": 7340032,
+            "_predictor_values:caller=evaluate_chunked_log_likelihood": 18874368,
+            "_predictor_values:caller=materialize_terminal_predictions": 8388608,
+            "_predictor_values:caller=maximum_chunked_predictor_change": 16777216
+          }
+        },
+        "diagnose": {
+          "inner_iterations": 16,
+          "outer_iterations": 7,
+          "coefficient_fits": 8,
+          "terminal_evidence": {
+            "curvature_fallback_count": 0,
+            "curvature_source_mismatch_fits": 0,
+            "matched_certified": false,
+            "terminal_reason": "practical_plateau",
+            "terminal_stationarity_evidence": 0.0000049301318938432814
+          },
+          "leaf_phases": [
+            {
+              "calls": 1,
+              "fit_share": 0.0000011053262266005344,
+              "name": "frame_normalization",
+              "seconds": 0.000029937000363133848
+            },
+            {
+              "calls": 1,
+              "fit_share": 0.09158007586251778,
+              "name": "predictor_compilation",
+              "seconds": 2.480383345995506
+            },
+            {
+              "calls": 9,
+              "fit_share": 0.000035495492996405145,
+              "name": "layout_penalty_assembly",
+              "seconds": 0.0009613710062694736
+            },
+            {
+              "calls": 42,
+              "fit_share": 0.17248977984373,
+              "name": "likelihood_evaluation",
+              "seconds": 4.67176701099379
+            },
+            {
+              "calls": 17,
+              "fit_share": 0.5436055376551848,
+              "name": "curvature_gradient_assembly",
+              "seconds": 14.723181976994965
+            },
+            {
+              "calls": 16,
+              "fit_share": 0.0013822667535249899,
+              "name": "coefficient_decomposition_solve",
+              "seconds": 0.03743774399481481
+            },
+            {
+              "calls": 30,
+              "fit_share": 0.0006139687056002957,
+              "name": "efs_update_backtracking",
+              "seconds": 0.016628919969662093
+            },
+            {
+              "calls": 1,
+              "fit_share": 0.011542908906275424,
+              "name": "terminal_inference_and_null_fit",
+              "seconds": 0.31263174599735066
+            },
+            {
+              "calls": 0,
+              "fit_share": 0.17874886145394364,
+              "name": "orchestration_and_unmeasured",
+              "seconds": 4.841289930045605
+            }
+          ]
+        },
+        "input_and_stored_design_identical": true,
+        "differences_from_fresh_current": {
+          "coefficients": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "covariance": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "edf": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "holdout_parameters": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "log_likelihood": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "objective": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "smoothing_parameters": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "terminal_penalized_curvature": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "terminal_score": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "train_parameters": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          }
+        }
+      },
+      "geometry65536": {
+        "fit_wall_seconds": 24.79423223699996,
+        "fit_cpu_seconds": 24.756640671,
+        "fit_end_peak_rss_mib": 1894.90234375,
+        "configuration": {
+          "all_passes": false,
+          "byte_budget": 67108864,
+          "geometry_chunk_size": 65536
+        },
+        "result_status": {
+          "coefficient_converged": true,
+          "converged": true,
+          "n_inner_iter": 16,
+          "n_smoothing_iter": 7,
+          "smoothing_certified": false,
+          "smoothing_converged": true,
+          "smoothing_reason": "practical_plateau"
+        },
+        "witness": {
+          "actual_native_calls": {
+            "_accumulate_directional": 5440,
+            "_accumulate_histogram": 12240,
+            "_accumulate_vector": 5440,
+            "_finite_bounded_2d": 3978,
+            "_pack_categorical": 2176
+          },
+          "maximum_workspace_estimate": 58357976,
+          "native_signatures_stable": true,
+          "pass_calls": {
+            "_predictor_chunk:caller=iter_likelihood_chunks": 272,
+            "_predictor_values:caller=_reuse_observed_initial_result": 917,
+            "_predictor_values:caller=evaluate_chunked_log_likelihood": 2358,
+            "_predictor_values:caller=materialize_terminal_predictions": 1048,
+            "_predictor_values:caller=maximum_chunked_predictor_change": 2096
+          },
+          "pass_rows": {
+            "_predictor_chunk:caller=iter_likelihood_chunks": 17825792,
+            "_predictor_values:caller=_reuse_observed_initial_result": 7340032,
+            "_predictor_values:caller=evaluate_chunked_log_likelihood": 18874368,
+            "_predictor_values:caller=materialize_terminal_predictions": 8388608,
+            "_predictor_values:caller=maximum_chunked_predictor_change": 16777216
+          }
+        },
+        "diagnose": {
+          "inner_iterations": 16,
+          "outer_iterations": 7,
+          "coefficient_fits": 8,
+          "terminal_evidence": {
+            "curvature_fallback_count": 0,
+            "curvature_source_mismatch_fits": 0,
+            "matched_certified": false,
+            "terminal_reason": "practical_plateau",
+            "terminal_stationarity_evidence": 0.000004930131895619638
+          },
+          "leaf_phases": [
+            {
+              "calls": 1,
+              "fit_share": 0.0000012229172798842851,
+              "name": "frame_normalization",
+              "seconds": 0.000030297000193968415
+            },
+            {
+              "calls": 1,
+              "fit_share": 0.09879570746296071,
+              "name": "predictor_compilation",
+              "seconds": 2.447601009000209
+            },
+            {
+              "calls": 9,
+              "fit_share": 0.00004586462507166268,
+              "name": "layout_penalty_assembly",
+              "seconds": 0.0011362670047674328
+            },
+            {
+              "calls": 42,
+              "fit_share": 0.1740802484384812,
+              "name": "likelihood_evaluation",
+              "seconds": 4.3127277759995195
+            },
+            {
+              "calls": 17,
+              "fit_share": 0.519973182538402,
+              "name": "curvature_gradient_assembly",
+              "seconds": 12.882005897990894
+            },
+            {
+              "calls": 16,
+              "fit_share": 0.001332024282232217,
+              "name": "coefficient_decomposition_solve",
+              "seconds": 0.033000056995661
+            },
+            {
+              "calls": 30,
+              "fit_share": 0.0006339756204962199,
+              "name": "efs_update_backtracking",
+              "seconds": 0.015706344012869522
+            },
+            {
+              "calls": 1,
+              "fit_share": 0.011927319465566924,
+              "name": "terminal_inference_and_null_fit",
+              "seconds": 0.2954917770039174
+            },
+            {
+              "calls": 0,
+              "fit_share": 0.1932104546495092,
+              "name": "orchestration_and_unmeasured",
+              "seconds": 4.7866665049878065
+            }
+          ]
+        },
+        "input_and_stored_design_identical": true,
+        "differences_from_fresh_current": {
+          "coefficients": {
+            "max_absolute_difference": 1.5265566588595902e-16,
+            "norm_relative_difference": 3.061945041309977e-16
+          },
+          "covariance": {
+            "max_absolute_difference": 1.235990476633475e-16,
+            "norm_relative_difference": 1.0478875016672829e-13
+          },
+          "edf": {
+            "max_absolute_difference": 2.2737367544323206e-13,
+            "norm_relative_difference": 2.5061325560627245e-15
+          },
+          "holdout_parameters": {
+            "max_absolute_difference": 8.881784197001252e-16,
+            "norm_relative_difference": 1.6450118819430347e-16
+          },
+          "log_likelihood": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "objective": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "smoothing_parameters": {
+            "max_absolute_difference": 6.821210263296962e-13,
+            "norm_relative_difference": 6.004271194178127e-16
+          },
+          "terminal_penalized_curvature": {
+            "max_absolute_difference": 1.3969838619232178e-9,
+            "norm_relative_difference": 3.4492639173476974e-16
+          },
+          "terminal_score": {
+            "max_absolute_difference": 1.3275602839257772e-10,
+            "norm_relative_difference": 8.541441595628827e-9
+          },
+          "train_parameters": {
+            "max_absolute_difference": 1.7763568394002505e-15,
+            "norm_relative_difference": 1.62318386923721e-16
+          }
+        }
+      },
+      "geometry_full": {
+        "fit_wall_seconds": 29.413093080002,
+        "fit_cpu_seconds": 29.30499036,
+        "fit_end_peak_rss_mib": 2460.328125,
+        "configuration": {
+          "all_passes": false,
+          "byte_budget": 1073741824,
+          "geometry_chunk_size": 1048576
+        },
+        "result_status": {
+          "coefficient_converged": true,
+          "converged": true,
+          "n_inner_iter": 16,
+          "n_smoothing_iter": 7,
+          "smoothing_certified": false,
+          "smoothing_converged": true,
+          "smoothing_reason": "practical_plateau"
+        },
+        "witness": {
+          "actual_native_calls": {
+            "_accumulate_directional": 340,
+            "_accumulate_histogram": 765,
+            "_accumulate_vector": 340,
+            "_finite_bounded_2d": 408,
+            "_pack_categorical": 136
+          },
+          "maximum_workspace_estimate": 538081496,
+          "native_signatures_stable": true,
+          "pass_calls": {
+            "_predictor_chunk:caller=iter_likelihood_chunks": 17,
+            "_predictor_values:caller=_reuse_observed_initial_result": 917,
+            "_predictor_values:caller=evaluate_chunked_log_likelihood": 2358,
+            "_predictor_values:caller=materialize_terminal_predictions": 1048,
+            "_predictor_values:caller=maximum_chunked_predictor_change": 2096
+          },
+          "pass_rows": {
+            "_predictor_chunk:caller=iter_likelihood_chunks": 17825792,
+            "_predictor_values:caller=_reuse_observed_initial_result": 7340032,
+            "_predictor_values:caller=evaluate_chunked_log_likelihood": 18874368,
+            "_predictor_values:caller=materialize_terminal_predictions": 8388608,
+            "_predictor_values:caller=maximum_chunked_predictor_change": 16777216
+          }
+        },
+        "diagnose": {
+          "inner_iterations": 16,
+          "outer_iterations": 7,
+          "coefficient_fits": 8,
+          "terminal_evidence": {
+            "curvature_fallback_count": 0,
+            "curvature_source_mismatch_fits": 0,
+            "matched_certified": false,
+            "terminal_reason": "practical_plateau",
+            "terminal_stationarity_evidence": 0.00000493013189473146
+          },
+          "leaf_phases": [
+            {
+              "calls": 1,
+              "fit_share": 0.0000011664675978349838,
+              "name": "frame_normalization",
+              "seconds": 0.00003428500349400565
+            },
+            {
+              "calls": 1,
+              "fit_share": 0.09979328219887969,
+              "name": "predictor_compilation",
+              "seconds": 2.9331402219977463
+            },
+            {
+              "calls": 9,
+              "fit_share": 0.000037745982174259754,
+              "name": "layout_penalty_assembly",
+              "seconds": 0.0011094359870185144
+            },
+            {
+              "calls": 42,
+              "fit_share": 0.16271269094504087,
+              "name": "likelihood_evaluation",
+              "seconds": 4.782477616972756
+            },
+            {
+              "calls": 17,
+              "fit_share": 0.5629850724622337,
+              "name": "curvature_gradient_assembly",
+              "seconds": 16.547347917992738
+            },
+            {
+              "calls": 16,
+              "fit_share": 0.0013179542641784025,
+              "name": "coefficient_decomposition_solve",
+              "seconds": 0.0387375239879475
+            },
+            {
+              "calls": 30,
+              "fit_share": 0.0005561252188861932,
+              "name": "efs_update_backtracking",
+              "seconds": 0.0163457219969132
+            },
+            {
+              "calls": 1,
+              "fit_share": 0.005926747805797418,
+              "name": "terminal_inference_and_null_fit",
+              "seconds": 0.17419992600480327
+            },
+            {
+              "calls": 0,
+              "fit_share": 0.16666921465521162,
+              "name": "orchestration_and_unmeasured",
+              "seconds": 4.89876839905628
+            }
+          ]
+        },
+        "input_and_stored_design_identical": true,
+        "differences_from_fresh_current": {
+          "coefficients": {
+            "max_absolute_difference": 1.942890293094024e-16,
+            "norm_relative_difference": 3.3297857113543546e-16
+          },
+          "covariance": {
+            "max_absolute_difference": 1.2598429244281562e-16,
+            "norm_relative_difference": 1.164962955690697e-13
+          },
+          "edf": {
+            "max_absolute_difference": 1.1368683772161603e-13,
+            "norm_relative_difference": 1.2530662780313623e-15
+          },
+          "holdout_parameters": {
+            "max_absolute_difference": 8.881784197001252e-16,
+            "norm_relative_difference": 1.7619391513294658e-16
+          },
+          "log_likelihood": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "objective": {
+            "max_absolute_difference": 0,
+            "norm_relative_difference": 0
+          },
+          "smoothing_parameters": {
+            "max_absolute_difference": 9.094947017729282e-13,
+            "norm_relative_difference": 6.963471855820998e-16
+          },
+          "terminal_penalized_curvature": {
+            "max_absolute_difference": 2.2118911147117615e-9,
+            "norm_relative_difference": 1.014727036544786e-15
+          },
+          "terminal_score": {
+            "max_absolute_difference": 4.8824499998545434e-11,
+            "norm_relative_difference": 4.517241893199291e-9
+          },
+          "train_parameters": {
+            "max_absolute_difference": 1.7763568394002505e-15,
+            "norm_relative_difference": 1.7855931751244202e-16
+          }
+        }
+      }
+    }
+  },
   "scalar_thread_policy_control": {
     "background_policy": "Retain all observed external PID/start identities, excluding only own controller/worker descendants. No host isolation assumption.",
     "checks": {
@@ -393,7 +1048,7 @@
     "interpretation": [
       "Single-fit wall time is the user objective; CPU consumption is explanatory, not a rejection criterion for a faster fit.",
       "Both NumPy and SciPy pools are configured at four before/after fitting; exact forced1 and both auto fits observe one inside existing fit and optimizer scopes. These are configured limits, not measured BLAS-worker participation.",
-      "All four actual optimizer witnesses are optimize_direct_reml, including the stored-discrete arm; no cached-W optimizer dispatch is observed in this screen.",
+      "Correction: all four captured calls enter optimize_direct_reml, but these are wrapper observations. Its discrete branch delegates to an imported optimize_discrete_reml_cached_w alias that the helper did not patch. Source audit and preserved cached-W diagnostics establish that the scalar exact/discrete comparison changes smoothing execution strategy. The original no-cached-W interpretation is withdrawn; raw captures remain unchanged.",
       "This public scalar screen adds no evidence about global-moment LSS speed, no discrete forced1/4 sensitivity, and no universal threading policy. C1 performance work remains active.",
       "Exact forced1 and exact-auto outputs and stored representation hashes match exactly. Exact forced1/4 output differences are quantitative descriptive comparisons; exact/discrete differences include basis discretization and changed REML iteration counts.",
       "Fit-end RSS is process highwater including imports, fixture and warmup, captured before telemetry/prediction/NPZ. Telemetry extraction/file output is separately timed after fit RSS; highwater increase is not total diagnostic allocation."
