@@ -127,10 +127,8 @@ class CategoricalGroupMatrix:
         return out
 
     def row_subset(self, idx: NDArray) -> CategoricalGroupMatrix:
-        # Must pass original -1-coded form to __init__ for re-remapping
-        c = self.codes[idx].copy()
-        c[c == self.n_levels] = -1
-        return CategoricalGroupMatrix(c, self.n_levels)
+        # The constructor accepts sink codes and owns a fresh array, even for slices.
+        return CategoricalGroupMatrix(self.codes[idx], self.n_levels)
 
 
 class RandomEffectGroupMatrix(CategoricalGroupMatrix):

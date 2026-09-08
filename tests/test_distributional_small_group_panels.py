@@ -105,6 +105,15 @@ def _build(*args, **kwargs):
     return build_small_group_panels(*args, **kwargs)
 
 
+def _warm_panel_range_kernel():
+    from superglm.distributional.solver._small_group_panels import _in_range
+
+    # These memory fixtures use writable C-layout float64 predicate inputs.
+    # Exclude one-time Numba compilation/cache loading from workspace tracing;
+    # all panel construction, renderer and contraction allocations stay traced.
+    assert _in_range(np.ones((2, 2), dtype=np.float64))
+
+
 def _assert_cross(actual, left, right, weights):
     expected = left.T @ (weights[:, None] * right)
     scale = np.max(np.abs(left).T @ (np.abs(weights)[:, None] * np.abs(right)), initial=0)
@@ -217,6 +226,7 @@ def test_workspace_refuses_budget_before_rendering_and_releases_arrays(monkeypat
 
 
 def test_peak_and_retained_workspace_follow_tile_size_not_source_rows():
+    _warm_panel_range_kernel()
     retained = []
     for n in (500, 50_000):
         x = np.linspace(-0.8, 0.9, n)
@@ -397,6 +407,7 @@ def test_selected_ordinary_groups_can_exclude_specialized_groups():
 
 @pytest.mark.parametrize("factor_basis", ["fs", "sz"])
 def test_mixed_renderer_peak_is_covered_for_small_and_large_sources(factor_basis):
+    _warm_panel_range_kernel()
     retained = []
     for source_rows in (500, 50_000):
         plans, _ = _problem(source_rows, factor_basis=factor_basis, discrete_factor=False)

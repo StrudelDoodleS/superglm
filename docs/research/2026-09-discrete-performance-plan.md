@@ -244,3 +244,20 @@ compiled predicate, preserving the same bounds and refusals. Warm writable and
 readonly C, Fortran and strided layouts before repeating uninstrumented fits.
 The 101 focused panel, integration and public warmup checks pass; keep this
 unfavorable pilot and its profile receipts alongside the next comparison.
+
+Three repetitions at `50b5e8bb` support a local panel benefit: discrete median
+fit time falls from 6.847 to 5.475 s, with comparable process RSS and unchanged
+iterations and numerical outputs. Exact controls take about 2.4 s. The remaining
+gap therefore needs further execution evidence. A shared categorical subset
+path now avoids redundant copying and sink-code reversal while retaining the
+existing constructor's validation and owned storage; 128 focused checks pass.
+Memory tests explicitly warm the compiled predicate before measuring workspace
+allocations, so isolated tests exclude one-time compiler initialization.
+
+Audit also found that the facade always couples `discrete=True` to chunked
+execution. The existing lower-level dense backend can evaluate the identical
+stored discrete basis. Compare this explicit execution override before changing
+automatic policy. Include dense materialization, temporary allocations and
+complete-process RSS; an additional workspace estimate is not a total-fit memory
+cap. Preserve requested versus resolved execution metadata and specialized
+support/tensor routes in any subsequently justified policy change.
