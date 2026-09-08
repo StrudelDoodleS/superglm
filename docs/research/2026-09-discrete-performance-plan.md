@@ -1,9 +1,12 @@
 # Discrete execution performance plan
 
-Status: a bounded global moment prototype passes independent mathematical checks
-and reduces complete-fit time by 28% in the controlled mixed-layout comparison.
-Production integration is implemented and independently reviewed; final
-validation and actual-default benchmarks remain within C1.
+Status: production streamed moments are implemented, reviewed and validated.
+Fifteen timed fits and five separate witnesses establish faster discrete
+execution on the measured mixed layouts through one million rows. C1 performance
+work remains active: the user considers the 8% one-thread time advantage over
+exact at one million rows insufficient. A completed eight-fit BLAS/shape screen
+shows the remaining comparison against threaded dense execution. Next work
+attributes the production fit cost and checks scalar thread-policy behavior.
 Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
@@ -606,3 +609,52 @@ guard is the only production change after the broad run. Final source tree
 `0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea`
 passes static/dependency checks, and all independent review findings are closed.
 Proceed to actual-default timing and witnesses with this implementation frozen.
+
+The production campaign at `5c1ce17e` is complete: the 262k discrete median
+falls 12.036 to 7.884 s, and the 1m/P102 sample falls 39.439 to 29.321 s versus
+31.956 s exact. The latter uses 1,869.37 MiB fit-end highwater versus 3,893.99
+MiB exact. All same-discrete inputs/stored representations match; held-out
+differences are at most 8.88e-16. Five separate witnesses confirm 19/17 global
+plan lifecycles at 262k/1m without refusal, and existing-route bypass on all
+three smaller controls. Raw receipts preserve the first 262k exact cold-warmup
+highwater and separately label output memory. Full evidence and qualifications
+are in the report and tracked performance receipt.
+
+### Further latency work selected on 2026-09-09
+
+The user explicitly requests more fitting-time reduction and prioritizes
+single-fit wall time; higher CPU usage is acceptable when it saves time.
+Therefore the modest million-row time advantage does not close the C1 gate.
+Do not move to another roadmap capability or present this as task completion.
+
+1. Completed: eight fresh forced-BLAS1/4 fits on 262k/P102 and 1m/P182. Exact
+   wall times improve 8.179 to 6.296 s and 75.795 to 46.844 s respectively;
+   discrete changes 8.085 to 8.078 s and 46.956 to 44.732 s. Inputs/raw supports
+   agree across thread settings; transform roundoff and binning effects remain
+   separately reported. These two coupled N/P shapes provide a targeted screen,
+   not a full crossover study or a direct automatic-policy observation.
+2. Audit complete: shared scalar/LSS threading is a fixed width-only cap at
+   1,500 coefficients, with no row/backend or measured timing input. `-1`
+   disables intervention and leaves native settings. Prepare a four-worker
+   public scalar control of exact forced1/4/auto and discrete auto under known
+   native BLAS4, capturing actual scopes and restored settings. This control
+   does not establish discrete scalar 1/4 sensitivity.
+3. Profile one unchanged production 1m/P102 discrete fit. Existing phase data
+   places about 16.0 of 29.3 s in inclusive geometry and only 0.04 s in
+   coefficient solves. Obtain disjoint attribution for predictor/preparation,
+   family derivatives, validation/packing, native moments and final products
+   before selecting another optimization. Preserve numerical/ownership/replay
+   contracts; do not equate data-work counts with measured time.
+4. Capture live `SuperLSS.diagnose()` after fit clocks, profiling and fit-end RSS.
+   It reports retained phase/iteration/backtracking evidence but not kernel
+   dispatch. Scalar controls use `training_telemetry()` and `reml_diagnostics()`.
+   Keep diagnosis/output cost separate from fit timing.
+5. Select the next bounded change from the new evidence, with focused
+   mathematical regressions and before/after complete fits. Unknown iteration
+   count does not prevent per-operation thread decisions, but calibration cost,
+   actual backend and nested/concurrent pool behavior require evidence. Existing
+   BLAS control does not parallelize the native moment loops.
+
+Keep source `5c1ce17e` and the completed benchmark windows as the new comparison
+checkpoint. Documentation-only commits may update HEAD while preserving the
+production-tree hash; subsequent experiments must pin both explicitly.

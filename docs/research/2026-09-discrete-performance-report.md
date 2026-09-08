@@ -1,15 +1,26 @@
 # Discrete execution performance
 
-The final default route reduces discrete complete-fit medians by 58.5% on the
-fragmented Gaussian fixture, 49.4% on a finite-support fixture, and 76.6% on
-public insurance severity. Implementation, full-suite validation and the final
-public benchmark window are complete. Discrete and exact severity timing ranges
-overlap. Fragmented discrete fitting remains 44.5% slower than exact fitting,
-with 39.1% less fit high-water RSS. That remaining mixed-layout tradeoff keeps
-the C1 performance gate open before another roadmap capability starts.
+Production streamed moments at `5c1ce17e` reduce the 262,144-row discrete fit
+median from 12.036 to 7.884 s against the immediately preceding implementation.
+At 1,048,576 rows and 102 coefficients, the single discrete sample takes
+29.321 s versus 31.956 s exact, with 2,024.62 MiB less fit-end process highwater.
+The algorithm now contracts accumulated support moments once per geometry.
+Production validation and the 15-fit/five-witness campaign are complete.
 
-The final complete-fit source is `74ce13f3c42be7f415f90366c3979f5df9b148db`,
-with production code unchanged from tested `9f0e196c`. The
+The C1 performance gate remains active. On 2026-09-09 the user judged the 8%
+one-thread time advantage over exact insufficient and requested further fitting
+time reductions. Single-fit wall time is the objective; higher CPU consumption
+is acceptable when it saves time. The subsequent thread/shape screen confirms
+that four BLAS threads substantially help dense fits but offer little benefit
+to the new discrete route. Its numerical work and remaining repeated passes
+are the next profiling target. See the production evidence at the end of this
+report; earlier checkpoints below remain historical observations.
+
+The preceding automatic-panel complete-fit source was
+`74ce13f3c42be7f415f90366c3979f5df9b148db`, with production code unchanged from
+tested `9f0e196c`. That stage reduced discrete medians by 58.5% on fragmented
+Gaussian, 49.4% on finite support and 76.6% on public severity, but retained a
+44.5% mixed-layout time gap relative to exact. Its
 performance baseline is the frozen post-C3 source
 `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`; the plan checkpoint `0a15736e`
 has the same production source. This is distinct from published v0.31.0 at
@@ -651,3 +662,134 @@ after the broad run is the reviewed resolved-weight admission guard. Raw
 receipts retain the initial results and source hashes, rather than describing
 one successful whole-suite run on the final source. Ruff, lock/dependency,
 smoke and independent review checks pass.
+
+## Production complete-fit evidence
+
+The source is `5c1ce17e1100bf57d7e52975c10e5cc7cfa77b13`, production-tree
+SHA256 `0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea`.
+The immediate baseline is `299ab249b6247e0f343dfdfabc0a666efcadd074`;
+this increment is separate from the earlier post-C3 comparison. Fifteen fresh
+serial timed workers use actual assembly defaults, all numerical pools limited
+to one, identical tiny warmup and unchanged models/optimizers. Five additional
+workers witness dispatch without contributing to the timing estimates.
+
+| Rows / coefficients | Route | Fit wall (s) | Fit CPU (s) | Fit-end highwater (MiB) |
+|---|---|---:|---:|---:|
+| 262,144 / 102, median of two | Baseline exact | 8.524 | 8.501 | 1,382.24 |
+| | Baseline discrete | 12.036 | 12.019 | 790.37 |
+| | New discrete | 7.884 | 7.877 | 789.51 |
+| 1,048,576 / 102, one sample | Baseline exact | 31.956 | 31.751 | 3,893.99 |
+| | Baseline discrete | 39.439 | 39.384 | 1,845.48 |
+| | New discrete | 29.321 | 29.281 | 1,869.37 |
+
+The 262k discrete wall-time ranges are 11.367–12.704 s before and 7.596–8.173 s
+after; exact spans 7.864–9.185 s. The new median is 34.5% below the previous
+discrete route. The million-row sample is 25.7% below previous discrete and
+8.2% below exact. These are local observations, not a general crossover curve.
+The first 262k exact worker incurred 27.56 s of cold kernel warmup outside the
+fit clock, contributing to its 1,484.34 MiB process highwater; the second exact
+highwater is 1,280.15 MiB. Both are retained. Process highwater includes imports,
+fixture preparation and warmup, so the direct million-row observations provide
+the clearer memory comparison. Prediction/covariance/output highwater is
+captured separately after fit-end RSS.
+
+The 262k/1m witnesses respectively execute 19/17 fresh complete global-plan
+lifecycles, 627/2,227 chunks and 855/765 support-pair finalizations, with no
+refusal or panel construction. Estimated additional workspace is 30,312,128
+bytes in both layouts. Compiled native dispatch, source/import/helper guards,
+configured pools and activity screens pass. The 65k, support-32 and public
+Gamma controls retain their existing routes; single-pair timing differences
+there are not attributed to global moments.
+
+Input and stored-discrete representation hashes match before/after. Maximum
+holdout differences are 8.88e-16, covariance norm-relative differences at most
+4.13e-13, and objectives match. Per-case iterations and practical-plateau
+convergence are unchanged: 18 inner/seven smoothing at 262k and 16/seven at
+1m. This is operational convergence under the existing rule, with strict
+smoothing certification still false. Separate exact/discrete holdout maxima
+are 7.36e-4 at 262k and 3.23e-4 at 1m; these describe binning effects.
+
+## What changes in computational scaling
+
+Write a stored support group as `X_g = J_g T_g`, where `J_g` selects a support
+row or zero for inactivity. Coupled curvature can be regrouped as
+`X_g.T @ diag(w_gh) @ X_h = T_g.T @ H_gh @ T_h`, with
+`H_gh = J_g.T @ diag(w_gh) @ J_h`. Signed observation-specific derivative
+channels are accumulated without averaging responses, offsets or likelihoods.
+This is algebraic equivalence for the stored design; choosing a finite
+covariate resolution is a separate approximation.
+
+For one smooth of width `p` with `m` support rows, curvature work changes from
+`O(N p^2)` to `O(N + m p^2)`. With `S` support groups, total ordinary width `q`
+and `k` predictors, repeated observation work is
+`O(N [S^2 + S q + q^2 + k^2])`, plus support contractions and source validation.
+Current authority checks also scan support-sized state per chunk. Fixed model
+dimensions and resolution leave both routes linear in `N`; the gain removes
+smooth-basis width products from repeated observation work. Increasing `N`
+alone need not produce an ever-growing speed ratio. Likelihood/prediction passes
+still visit observations, and dense coefficient factorization remains `O(P^3)`.
+
+Wood's 2020 review calls the big-data methods "not yet usable" for its
+multiple-predictor/general-likelihood extensions; the former explicitly includes
+Gaussian location-scale. This states their scope at publication, not a
+mathematical impossibility result. Current mgcv documentation still restricts
+`general.family`, including `gaulss` and `gammals`, to `gam`.
+[Wood 2020, sections 3.4 and 5.4](https://link.springer.com/article/10.1007/s11749-020-00711-5);
+[mgcv families](https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/family.mgcv.html).
+The block-Hessian form and support regrouping provide the basis for our signed
+extension; the signed identity follows by linearity.
+[Wood, Pya and Saefken 2016, section 3.2](https://research-information.bris.ac.uk/ws/files/99637003/Smoothing_Parameter_and_Model_Selection_for_General_Smooth_Models.pdf);
+[Li and Wood 2020, section 2](https://link.springer.com/article/10.1007/s11222-019-09864-2).
+These results establish a bounded Gaussian/Gamma implementation, without a
+priority claim or coverage of every general likelihood.
+
+## Production BLAS and shape screen
+
+Eight fresh workers on the same production source compare two shapes and
+configured BLAS limits of one/four. Other numerical pools stay at one; the
+actual solver entry inventories both BLAS libraries. This is a targeted screen
+with one sample per condition, not a Cartesian row-count/width/thread sweep.
+Rows and width vary together between shapes, and order reverses across shapes.
+Configured pool limits do not prove worker participation in each operation.
+
+| Rows / coefficients | Route | BLAS limit | Fit wall (s) | Fit CPU (s) | Fit-end highwater (MiB) |
+|---|---|---:|---:|---:|---:|
+| 262,144 / 102 | Exact | 1 | 8.179 | 8.151 | 1,279.8 |
+| | Exact | 4 | 6.296 | 25.374 | 1,279.9 |
+| | Discrete | 1 | 8.085 | 8.067 | 789.8 |
+| | Discrete | 4 | 8.078 | 25.132 | 794.5 |
+| 1,048,576 / 182 | Exact | 1 | 75.795 | 75.475 | 5,474.8 |
+| | Exact | 4 | 46.844 | 162.502 | 5,475.0 |
+| | Discrete | 1 | 46.956 | 46.889 | 1,947.4 |
+| | Discrete | 4 | 44.732 | 81.899 | 1,943.3 |
+
+Four threads reduce dense wall time substantially. They barely change the
+narrow discrete sample and reduce the wider discrete sample by 4.7%. The wider
+discrete one-thread fit is 38.0% faster than exact on one thread, while the
+fastest measured exact/discrete times remain close. CPU is measured to explain
+execution; under the user's chosen latency objective, increased consumption
+does not disqualify a time saving. More BLAS threads alone do not address the
+serial native moment accumulators.
+
+At 262k all arms retain 18 inner/seven smoothing iterations. At 1m/P182,
+discrete uses 23 inner/nine smoothing versus exact's 24/nine; all reach the
+practical plateau. Across thread settings, raw support/basis/bin/category
+arrays match. At P102 ten transform hashes differ because compilation is inside
+the BLAS scope; at P182 the full representation hashes match. Maximum
+within-representation holdout difference is 1.61e-15, covariance norm-relative
+difference 2.93e-13, and objectives match. Exact/discrete holdout differences
+remain separate: maxima 7.36e-4 and 6.47e-4 for the two shapes. Source, helper,
+native-signature and activity checks pass. Warmups span 0.407–0.590 s; fit-end
+and later output highwaters remain separate in the receipt.
+
+Static audit finds the shared scalar/LSS BLAS controller is a binary width
+cap: one thread below 1,500 coefficients, then restoration of the pre-entry
+native setting. It sees no row count, backend, chunk/support dimensions or
+timing. Nonpositive `SUPERGLM_BLAS_THREADS` values, including `-1`, disable
+intervention; they do not select an optimal count or necessarily all cores.
+The forced-thread screen does not directly observe automatic policy decisions.
+The next controls observe scalar auto with known native settings, while a
+current-production profile attributes remaining LSS geometry work. Capture
+`SuperLSS.diagnose()` after fit clocks/RSS, alongside kernel evidence; scalar
+uses `training_telemetry()`/`reml_diagnostics()` instead. No threading default
+has been changed on the strength of this screening experiment.

@@ -1,6 +1,6 @@
 # Roadmap
 
-Last strategic review: **2026-09-08**. Starting baseline: `origin/master` at
+Last strategic review: **2026-09-09**. Starting baseline: `origin/master` at
 `8962c452` (published v0.31.0); C3/C1 implementation through `1a8952a4`, with convergence follow-through at
 `5f994c8f`.
 
@@ -141,17 +141,17 @@ Gaussian, 49.4% for support-32, and 76.6% for Gamma severity against the frozen
 post-C3 source; severity exact/discrete timing ranges overlap.
 
 The earlier mixed-layout comparison found discrete fitting taking 44.5% longer
-than exact while using 499.5 MiB less fit high-water RSS. The implemented stages
-are validated; the subsequent prototype below addresses that remaining gap.
-Production integration remains ahead of another roadmap
-capability; see the [performance report](research/2026-09-discrete-performance-report.md).
+than exact while using 499.5 MiB less fit high-water RSS. The subsequent global
+moment implementation addresses that gap, with further latency work still
+required before another roadmap capability;
+see the [performance report](research/2026-09-discrete-performance-report.md).
 Scalar SuperGLM's cached-weight discrete REML optimizer remains a separate
 approximation contract.
 
-The next execution target is computation on marginal supports at the chosen
+The implemented execution change computes on marginal supports at the chosen
 resolution: aggregate changing row scores and signed curvature weights before
-contracting the support bases. Current-source profiles confirm repeated row
-expansion in mixed panels. A three-condition geometry-batch ablation confirms
+contracting the support bases. Earlier profiles confirmed repeated row
+expansion in mixed panels. A three-condition geometry-batch ablation confirmed
 lost support-contraction amortization, but using one whole-book batch still does
 not beat the current panels in those diagnostics. Remaining mixed pair work
 includes repeated weighted-column scans and spline-by-category expansion.
@@ -165,9 +165,34 @@ discrete basis is identical and holdout differences are below 9e-16. This
 supports production integration with numerical guards, fallback and explicit
 size-selection evidence. That implementation now passes independent review and
 12,449 distinct latest tests across the broad run and documented followups,
-including all 84 required real-data cases. Actual-default benchmarks, including
-a million-row exact/discrete comparison, remain before closing this performance
-gate. The initial admission scope does not establish universal speed parity.
+including all 84 required real-data cases. Fifteen actual-default timed fits and
+five separate witnesses now validate production `5c1ce17e`: the 262k discrete
+median falls 12.036 to 7.884 s, and the million-row/P102 sample falls 39.439 to
+29.321 s versus 31.956 s exact. The latter uses 1,869.37 MiB fit-end highwater
+versus 3,893.99 MiB exact. Same-discrete outputs agree at roundoff scale;
+discretization error remains separately measured. Global moments execute without
+refusal on the two large mixed cases; smaller controls retain existing routes.
+
+The user judged the 8% one-thread time advantage over exact insufficient and
+explicitly selected further latency reduction on 2026-09-09. Single-fit wall
+time is the objective; using more CPU is acceptable when it saves time. The C1
+gate stays active. An eight-fit screen on 262k/P102 and 1m/P182 shows that four
+BLAS threads substantially help dense execution but offer little discrete gain.
+At the wider million-row shape, exact/discrete one-thread samples are
+75.795/46.956 s, and four-thread samples 46.844/44.732 s. These are single
+observations at two coupled N/P shapes, not a full crossover study.
+
+Next: profile the remaining production geometry and repeated row passes, and
+check the scalar thread policy under known native settings. The shared BLAS
+controller currently sees only a 1,500-coefficient threshold, with no row-count,
+backend or timing input; `-1` disables intervention rather than selecting an
+optimal count. It does not parallelize native moment loops. Use live
+`SuperLSS.diagnose()` alongside kernel profiles, captured after fit clocks/RSS.
+Any new threading/accumulator decision must preserve coupled signed curvature,
+numerical certification and bounded ownership. Initial admission remains a
+scope limit, without universal speed parity or a novelty claim. Wood's 2020
+review described the multiple-predictor large-data extension as not yet usable,
+not mathematically infeasible; references and complexity are in the report.
 
 In current priority order:
 
