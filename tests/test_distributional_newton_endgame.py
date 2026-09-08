@@ -397,3 +397,108 @@ def test_stationary_handoff_never_forms_a_hessian(monkeypatch) -> None:
     assert calls == [False]
     assert handed.newton_iterations == 0 and handed.smoothing_hessian is None
     assert all(it.stage == "efs" for it in handed.history)
+
+
+@pytest.mark.parametrize("failed_gradient_pass", [1, 2])
+@pytest.mark.parametrize("efs_budget", [3, 250])
+@pytest.mark.parametrize("newton_budget", [1, 4])
+def test_unavailable_newton_gradient_resumes_efs_from_accepted_fit(
+    monkeypatch, failed_gradient_pass: int, efs_budget: int, newton_budget: int
+) -> None:
+    """An unavailable gradient preserves the accepted fit and spends only EFS budget.
+
+    The second-pass case reproduces the former opposite half-step recovery on a
+    real Gaussian fit: its stale source gradient and premature objective refusal
+    prevented EFS from continuing from the accepted Newton point.
+    """
+    from superglm.distributional.smoothing import loop as loop_module
+    from superglm.distributional.smoothing import newton as newton_module
+    from superglm.distributional.smoothing.derivatives import LamlDerivativeError
+
+    real_derivatives = newton_module.laml_derivatives
+    real_endgame = loop_module.run_newton_endgame
+    gradient_fits = []
+    gradient_lambdas = []
+    outcomes = []
+
+    def unavailable_gradient(*args, **kwargs):
+        if not kwargs.get("want_hessian", True):
+            gradient_fits.append(kwargs["fit"])
+            gradient_lambdas.append(dict(kwargs["lambdas"]))
+            if len(gradient_fits) >= failed_gradient_pass:
+                raise LamlDerivativeError("injected unavailable gradient at accepted fit")
+        return real_derivatives(*args, **kwargs)
+
+    def record_endgame(*args, **kwargs):
+        outcome = real_endgame(*args, **kwargs)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(newton_module, "laml_derivatives", unavailable_gradient)
+    monkeypatch.setattr(loop_module, "run_newton_endgame", record_endgame)
+    result = _newton_stop(
+        "gaussian",
+        max_iterations=efs_budget,
+        max_newton_iterations=newton_budget,
+        handoff_iterations=1,
+    )
+
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    resumed = [
+        item
+        for item in result.history
+        if item.stage == "efs" and item.source_fit_index == outcome.state.terminal_fit_index
+    ]
+    assert resumed, "EFS must resume from the last accepted fit, including an accepted Newton step"
+    assert outcome.kind == "derivative_unavailable"
+    assert outcome.derivatives is None and outcome.projected_gradient_norm is None
+    assert len(gradient_fits) == failed_gradient_pass
+    assert outcome.state.fit is gradient_fits[-1]
+    assert dict(outcome.state.lambdas) == gradient_lambdas[-1]
+    if failed_gradient_pass == 2:
+        assert gradient_lambdas[0] != gradient_lambdas[1]
+        assert gradient_fits[0] is not gradient_fits[1]
+        assert any(item.stage == "newton" and item.accepted for item in result.history)
+
+    assert dict(resumed[0].lambdas_before) == dict(outcome.state.lambdas)
+    assert resumed[0].objective_before == outcome.state.objective
+    accepted_objectives = [result.initial_objective] + [
+        item.objective_after for item in result.history if item.accepted
+    ]
+    for before, after in zip(accepted_objectives, accepted_objectives[1:]):
+        assert after <= before + result.config.objective_tolerance * (1.0 + abs(before))
+    assert result.objective < outcome.state.objective
+    assert result.terminal_gradient is None
+    assert result.terminal_gradient_certificate is None
+    assert result.terminal_projected_gradient_norm is None
+    assert result.smoothing_hessian is None
+    assert result.smoothing_hessian_certificate is None
+    assert result.newton_iterations <= result.config.max_newton_iterations
+    assert len(result.history) <= efs_budget
+    if efs_budget == 3:
+        assert not result.converged and result.convergence_reason == "max_iterations"
+    else:
+        assert result.converged and result.matched_certified
+        assert result.convergence_reason in {"lambda_change", "objective_plateau"}
+
+
+def test_unavailable_hessian_keeps_gradient_based_bfgs_fallback(monkeypatch) -> None:
+    """A missing Hessian still permits steps with the fresh certified gradient."""
+    from superglm.distributional.smoothing import newton as newton_module
+    from superglm.distributional.smoothing.derivatives import LamlDerivativeError
+
+    real_derivatives = newton_module.laml_derivatives
+
+    def unavailable_hessian(*args, **kwargs):
+        if kwargs.get("want_hessian", True):
+            raise LamlDerivativeError("injected unavailable Hessian")
+        return real_derivatives(*args, **kwargs)
+
+    monkeypatch.setattr(newton_module, "laml_derivatives", unavailable_hessian)
+    result = _newton_stop("gaussian")
+    assert result.converged and result.convergence_reason == "stationary"
+    assert any(item.accepted and item.step_source == "bfgs" for item in result.history)
+    assert result.terminal_gradient is not None
+    assert result.terminal_projected_gradient_norm <= result.stationarity_bar
+    assert result.smoothing_hessian is None

@@ -424,7 +424,12 @@ def bracket_beyond_cap(
 # --------------------------------------------------------------------------
 
 EndgameKind = Literal[
-    "stationary", "cap_pressure", "gradient_unresolved", "max_iterations", "objective_rejected"
+    "stationary",
+    "cap_pressure",
+    "gradient_unresolved",
+    "derivative_unavailable",
+    "max_iterations",
+    "objective_rejected",
 ]
 ARMIJO_CONSTANT = 1.0e-4
 #: Outer-loop derivative and bookkeeping work is booked under the EFS phase;
@@ -744,11 +749,6 @@ def run_newton_endgame(
     last_exact_positive_definite: bool | None = None
     newton_count = 0
     bfgs_count = 0
-    last_step: (
-        tuple[EndgameState, NDArray[np.float64], tuple[str, ...], LamlDerivatives, float, str]
-        | None
-    ) = None
-    halved = False
 
     def finish(
         kind: EndgameKind,
@@ -789,72 +789,10 @@ def run_newton_endgame(
         try:
             derivatives = derivative_pass(False, workspace)
         except LamlDerivativeError:
-            if last_step is None or halved or remaining <= 0:
-                return finish("objective_rejected", previous, None)
-            # Halve the step that led here: one warm trial from the previous point.
-            halved = True
-            source, step_vector, step_names, source_derivatives, source_norm, source_kind = (
-                last_step
-            )
-            source_rho = np.array([math.log(source.lambdas[name]) for name in step_names])
-            halved_lambdas = dict(current.lambdas)
-            for k, name in enumerate(step_names):
-                upper_log = math.log(upper_lambda(name))
-                value = float(np.clip(source_rho[k] + 0.5 * step_vector[k], lower_log, upper_log))
-                halved_lambdas[name] = _lambda_from_log(
-                    name,
-                    value,
-                    lower_log=lower_log,
-                    upper_log=upper_log,
-                    upper_lambda=upper_lambda(name),
-                    config=config,
-                )
-            trial_fit, trial_objective = fitter.fit(
-                halved_lambdas, initial=current.fit.coefficients, reuse_source=current.fit
-            )
-            coefficient_fits.append(trial_fit)
-            index = len(coefficient_fits) - 1
-            newton_count += 1
-            remaining -= 1
-            accepted = trial_objective is not None and trial_objective <= current.objective + (
-                config.objective_tolerance * (1.0 + abs(current.objective))
-            )
-            evidence = (
-                _fresh_raw_evidence(layout, halved_lambdas, trial_fit, config, face=current.face)
-                if accepted
-                else current.evidence
-            )
-            history.append(
-                newton_iteration_record(
-                    iteration=len(history) + 1,
-                    state=current,
-                    proposed_lambdas=halved_lambdas,
-                    lambdas_after=halved_lambdas if accepted else current.lambdas,
-                    objective_after=trial_objective if accepted else current.objective,
-                    evidence=evidence,
-                    fit_indices=(index,),
-                    tolerances=(fitter.tolerance,),
-                    accepted_fit=trial_fit if accepted else None,
-                    step_source=source_kind,  # type: ignore[arg-type]
-                    derivatives=source_derivatives,
-                    projected_gradient_norm=source_norm,
-                    hessian_certificate=None,
-                    ridge=None,
-                    estimated_names=step_names,
-                )
-            )
-            if not accepted:
-                return finish("objective_rejected", previous, None)
-            assert trial_objective is not None
-            current = EndgameState(
-                lambdas=halved_lambdas,
-                fit=trial_fit,
-                objective=trial_objective,
-                face=current.face,
-                evidence=evidence,
-                terminal_fit_index=index,
-            )
-            continue
+            # The accepted fit remains valid when its derivative evaluation
+            # fails. Let the outer loop resume EFS from it; a gradient from the
+            # preceding point cannot certify or step from this state.
+            return finish("derivative_unavailable", None, None)
 
         names = derivatives.names
         count = len(names)
@@ -1194,8 +1132,6 @@ def run_newton_endgame(
         previous_gradient = gradient
         previous_objective = objective
         accepted_count += 1
-        halved = False
-        last_step = (current, step, names, recorded, norm, step_source)
         current = EndgameState(
             lambdas=accepted_lambdas,
             fit=accepted_fit,

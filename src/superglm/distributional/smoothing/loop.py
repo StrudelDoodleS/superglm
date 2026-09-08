@@ -282,6 +282,8 @@ def fit_distributional_efs(
         """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
         nonlocal current_lambdas, current_fit, current_objective, terminal_fit_index
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
+        nonlocal plateau_run, practical_run, plateau_qualified
+        nonlocal previous_accepted_step, saturated_run
         if newton_budget <= 0:
             return _result(converged=False, reason="max_iterations")
         outcome = run_newton_endgame(
@@ -308,6 +310,27 @@ def fit_distributional_efs(
         current_objective = state.objective
         terminal_fit_index = state.terminal_fit_index
         terminal_evidence = state.evidence
+        if outcome.kind == "derivative_unavailable":
+            # Preserve the accepted coefficient fit, but abandon derivatives
+            # and acceleration memory that cannot describe the next EFS step.
+            # Disabling handoff makes recovery bounded by the ordinary outer
+            # budget even if derivatives remain unavailable on every call.
+            endgame_outcome = None
+            endgame_stationary = False
+            pending_cap = None
+            newton_budget = 0
+            if beyond_cap:
+                # EFS proposals use the original finite box and cannot safely
+                # continue from a component released above that box.
+                return _result(converged=False, reason="gradient_unresolved")
+            plateau_run = 0
+            practical_run = 0
+            plateau_qualified = False
+            previous_accepted_step = math.inf
+            saturated_run = dict.fromkeys(estimated_names, 0)
+            if accelerator is not None:
+                accelerator.reset()
+            return None
         if outcome.kind == "stationary":
             # The exact gradient is the authority now: no component is at the cap
             # with an outward gradient, so a Fellner--Schall nomination is void.
