@@ -106,12 +106,16 @@ def _build(*args, **kwargs):
 
 
 def _warm_panel_range_kernel():
-    from superglm.distributional.solver._small_group_panels import _in_range
+    from superglm.distributional.solver._small_group_panels import (
+        _in_range,
+        _warmup_small_group_panels,
+    )
 
-    # These memory fixtures use writable C-layout float64 predicate inputs.
-    # Exclude one-time Numba compilation/cache loading from workspace tracing;
-    # all panel construction, renderer and contraction allocations stay traced.
+    # Exclude one-time predicate/writer compilation and cache loading from
+    # workspace tracing. All panel construction, optional support tables,
+    # renderer buffers and contraction allocations remain inside the trace.
     assert _in_range(np.ones((2, 2), dtype=np.float64))
+    _warmup_small_group_panels()
 
 
 def _assert_cross(actual, left, right, weights):
@@ -613,3 +617,408 @@ def test_in_range_empty_and_generic_rank_semantics(shape):
     if values.size:
         values[...] = np.inf
         assert not _in_range(values)
+
+
+def test_small_support_transform_dispatch_is_bounded_and_optional(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    plans, literal = _problem(n=43)
+    seen = []
+    original = panels._support_transform
+
+    def observed(basis, transform):
+        seen.append(basis.shape[0])
+        return original(basis, transform)
+
+    monkeypatch.setattr(panels, "_support_transform", observed)
+    cap = panels._SUPPORT_TABLE_MAX_CELLS
+    monkeypatch.setattr(panels, "_SUPPORT_TABLE_MAX_CELLS", 0)
+    fallback = _build(plans, slice(0, 43), byte_budget=2**20)
+    assert fallback.workspace is not None
+    baseline_estimate = fallback.estimated_peak_bytes
+    with fallback.workspace as workspace:
+        for actual, expected in zip(workspace.panels, literal, strict=True):
+            _assert_reconstruction(actual, expected)
+    assert 43 in seen
+    seen.clear()
+    monkeypatch.setattr(panels, "_SUPPORT_TABLE_MAX_CELLS", cap)
+    optimized = _build(plans, slice(0, 43), byte_budget=2**20)
+    assert optimized.workspace is not None
+    assert optimized.estimated_peak_bytes > baseline_estimate
+    with optimized.workspace as workspace:
+        for actual, expected in zip(workspace.panels, literal, strict=True):
+            _assert_reconstruction(actual, expected)
+    assert seen == [7, 7, 7]
+    seen.clear()
+    tight = _build(plans, slice(0, 43), byte_budget=baseline_estimate)
+    assert tight.workspace is not None
+    assert tight.estimated_peak_bytes == baseline_estimate
+    tight.workspace.close()
+    assert 43 in seen
+
+
+def test_unsafe_unused_support_falls_back_without_refusing_selected_rows(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    basis = np.array([[0.25, 0.5], [np.nan, 1e200]])
+    transform = np.eye(2)
+    bins = np.zeros(11, dtype=np.intp)
+    seen = []
+    original = panels._support_transform
+
+    def observed(values, mapping):
+        seen.append(values.shape[0])
+        return original(values, mapping)
+
+    monkeypatch.setattr(panels, "_support_transform", observed)
+    plans = (
+        _plan(
+            [DenseGroupMatrix(np.ones((11, 1))), DiscretizedSSPGroupMatrix(basis, transform, bins)]
+        ),
+    )
+    result = _build(plans, slice(0, 11), byte_budget=2**20)
+    assert result.workspace is not None
+    result.workspace.close()
+    assert seen == [11]
+
+
+def test_unused_transformed_support_does_not_broaden_output_domain_refusal():
+    basis = np.array([[0.25], [2.0**128]])
+    plans = (
+        _plan(
+            [
+                DenseGroupMatrix(np.ones((11, 1))),
+                DiscretizedSSPGroupMatrix(basis, np.array([[2.0]]), np.zeros(11, dtype=np.intp)),
+            ]
+        ),
+    )
+    result = _build(plans, slice(0, 11), byte_budget=2**20)
+    assert result.workspace is not None
+    with result.workspace as workspace:
+        np.testing.assert_array_equal(workspace.panels[0][:, -1], np.full(11, 0.5))
+
+
+def test_every_renderer_certifies_output_without_a_full_panel_postpass(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    plans, literal = _problem(n=43, factor_basis="sz", discrete_factor=False)
+    full_shapes = {matrix.shape for matrix in literal}
+    original = panels._require_range
+
+    def no_postpass(values):
+        assert values.shape not in full_shapes, "redundant full-panel range pass"
+        return original(values)
+
+    monkeypatch.setattr(panels, "_require_range", no_postpass)
+    result = _build(plans, slice(0, 43), byte_budget=2**20)
+    assert result.workspace is not None
+    with result.workspace as workspace:
+        for actual, expected in zip(workspace.panels, literal, strict=True):
+            _assert_reconstruction(actual, expected)
+
+
+@pytest.mark.parametrize("writer", ["copy", "gather", "scatter", "factor"])
+@pytest.mark.parametrize("layout", ["C", "F", "A"])
+@pytest.mark.parametrize("readonly", [False, True])
+def test_checked_writers_preserve_range_predicate_and_strided_outputs(writer, layout, readonly):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    edges = [
+        0.0,
+        -0.0,
+        2.0**-128,
+        -(2.0**-128),
+        2.0**128,
+        -(2.0**128),
+        np.nextafter(2.0**-128, 0.0),
+        np.nextafter(2.0**128, np.inf),
+        np.nextafter(0.0, 1.0),
+        np.nan,
+        np.inf,
+        -np.inf,
+    ]
+    for edge in edges:
+        if layout == "A":
+            values = np.full((4, 6), 0.25)[:, ::2]
+        else:
+            values = np.full((4, 3), 0.25, order=layout)
+        values[2, 1] = edge
+        values.flags.writeable = not readonly
+        out = np.full((6, 12), np.nan)[:, ::2]
+        expected_valid = edge == 0 or 2.0**-128 <= abs(edge) <= 2.0**128
+        if writer == "copy":
+            target = out[:4, :3]
+            valid = panels._checked_copy(values, target)
+            expected = values
+        elif writer == "gather":
+            target = out[:4, :3]
+            rows = np.array([2, 0, 2, 3], dtype=np.intp)
+            valid = panels._checked_gather(values, rows, target)
+            expected = values[rows]
+        elif writer == "scatter":
+            target = out[:, :3]
+            target.fill(0)
+            rows = np.array([5, 1, 3, 0], dtype=np.intp)
+            valid = panels._checked_scatter(values, rows, target)
+            expected = np.zeros((6, 3))
+            expected[rows] = values
+        else:
+            target = out[:4]
+            codes = np.array([0, 1, 2, 1], dtype=np.intp)
+            valid = panels._checked_factor_scatter(values, codes, target, 3, 2, True)
+            expected = np.zeros((4, 6))
+            for row, code in enumerate(codes):
+                if code < 2:
+                    expected[row, code * 3 : code * 3 + 3] = values[row]
+                else:
+                    expected[row] = np.tile(-values[row], 2)
+        assert bool(valid) == bool(expected_valid)
+        if valid:
+            np.testing.assert_array_equal(target, expected)
+            np.testing.assert_array_equal(np.signbit(target), np.signbit(expected))
+
+
+def test_failed_checked_write_does_not_publish_or_retain_partial_panel(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    references = []
+
+    def failed(values, rows, out):
+        out[0, 0] = 0.25
+        references.append(weakref.ref(out.base))
+        return False
+
+    monkeypatch.setattr(panels, "_checked_gather", failed)
+    plans, _ = _problem()
+    result = _build(plans, slice(0, 7), byte_budget=2**20)
+    assert result.workspace is None
+    assert result.reason == "numerical-domain"
+    gc.collect()
+    assert all(reference() is None for reference in references)
+
+
+@pytest.mark.parametrize("factor_basis", ["fs", "sz"])
+def test_all_panel_cells_are_initialized_before_publication(monkeypatch, factor_basis):
+    plans, literal = _problem(factor_basis=factor_basis)
+    original = np.empty
+
+    def poisoned(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if result.dtype == np.float64:
+            result.fill(np.nan)
+        return result
+
+    monkeypatch.setattr(np, "empty", poisoned)
+    result = _build(plans, slice(0, 43), byte_budget=2**20)
+    assert result.workspace is not None
+    with result.workspace as workspace:
+        for actual, expected in zip(workspace.panels, literal, strict=True):
+            _assert_reconstruction(actual, expected)
+
+
+def test_support_tables_are_released_before_the_next_group_render(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    references = []
+    original = panels._support_transform
+
+    def observed(basis, transform):
+        assert all(reference() is None for reference in references)
+        result = original(basis, transform)
+        references.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(panels, "_support_transform", observed)
+    plans, _ = _problem()
+    result = _build(plans, slice(0, 43), byte_budget=2**20)
+    assert result.workspace is not None
+    assert len(references) == 3
+    assert all(reference() is None for reference in references)
+    result.workspace.close()
+
+
+@pytest.mark.parametrize("table_enabled", [False, True])
+def test_support_indices_preserve_numpy_negative_index_semantics(monkeypatch, table_enabled):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    if not table_enabled:
+        monkeypatch.setattr(panels, "_SUPPORT_TABLE_MAX_CELLS", 0)
+    basis = np.arange(8, dtype=float).reshape(4, 2) / 8
+    bins = np.array([-1, -4, 2, -1, 0, 3, -2], dtype=np.intp)
+    plans = (
+        _plan(
+            [DenseGroupMatrix(np.ones((7, 1))), DiscretizedSSPGroupMatrix(basis, np.eye(2), bins)]
+        ),
+    )
+    result = _build(plans, slice(0, 7), byte_budget=2**20)
+    assert result.workspace is not None
+    with result.workspace as workspace:
+        np.testing.assert_array_equal(workspace.panels[0][:, -2:], basis[bins])
+
+
+@pytest.mark.parametrize("index", [-5, 4, np.iinfo(np.intp).max])
+def test_invalid_support_index_is_rejected_before_unchecked_writer(monkeypatch, index):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    def forbidden(*args):
+        raise AssertionError("invalid support index reached unchecked writer")
+
+    monkeypatch.setattr(panels, "_checked_gather", forbidden)
+    with pytest.raises(IndexError, match="outside"):
+        panels._support_product(
+            np.ones((4, 2)),
+            np.array([index], dtype=np.intp),
+            np.eye(2),
+            table_byte_allowance=2**20,
+            out=np.empty((1, 2)),
+        )
+
+
+def test_large_support_is_not_scanned_when_the_table_size_gate_fails(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    basis = np.ones((5000, 2))
+    original = panels._in_range
+
+    def bounded(values):
+        assert values is not basis, "large support was scanned before the size gate"
+        return original(values)
+
+    monkeypatch.setattr(panels, "_in_range", bounded)
+    plans = (
+        _plan(
+            [
+                DenseGroupMatrix(np.ones((17, 1))),
+                DiscretizedSSPGroupMatrix(basis, np.eye(2), np.zeros(17, dtype=np.intp)),
+            ]
+        ),
+    )
+    result = _build(plans, slice(0, 17), byte_budget=2**20)
+    assert result.workspace is not None
+    result.workspace.close()
+
+
+def test_table_reassociation_has_a_raw_product_backward_error_bound():
+    rng = np.random.default_rng(894)
+    basis = 1 + rng.normal(scale=1e-12, size=(7, 8))
+    transform = np.tile(np.array([1.0, -1.0])[:, None], (4, 3)) * 1e4
+    bins = rng.integers(7, size=103)
+    plans = (
+        _plan(
+            [DenseGroupMatrix(np.ones((103, 1))), DiscretizedSSPGroupMatrix(basis, transform, bins)]
+        ),
+    )
+    expected = basis[bins].astype(np.longdouble) @ transform.astype(np.longdouble)
+    scale = np.abs(basis[bins]) @ np.abs(transform)
+    bound = 16 * np.finfo(float).eps * basis.shape[1] * np.max(scale)
+    result = _build(plans, slice(0, 103), byte_budget=2**20)
+    assert result.workspace is not None
+    with result.workspace as workspace:
+        np.testing.assert_allclose(workspace.panels[0][:, -3:], expected, rtol=0, atol=bound)
+
+
+def test_failed_support_table_write_releases_its_owned_table(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    references = []
+    original = panels._checked_gather
+
+    def failed_table(values, rows, out):
+        if values.shape[0] == 7:
+            references.append(weakref.ref(values))
+            out[0, 0] = 0.5
+            return False
+        return original(values, rows, out)
+
+    monkeypatch.setattr(panels, "_checked_gather", failed_table)
+    plans, _ = _problem()
+    result = _build(plans, slice(0, 43), byte_budget=2**20)
+    assert result.workspace is None
+    assert result.reason == "numerical-domain"
+    assert references
+    gc.collect()
+    assert all(reference() is None for reference in references)
+
+
+def test_support_table_rebuilds_after_source_and_assignment_changes():
+    basis = np.array([[0.25, 0.5], [0.5, 0.75]])
+    transform = np.eye(2)
+    bins = np.zeros(11, dtype=np.intp)
+    group = DiscretizedSSPGroupMatrix(basis, transform, bins)
+    plans = (_plan([DenseGroupMatrix(np.ones((11, 1))), group]),)
+    first = _build(plans, slice(0, 11), byte_budget=2**20)
+    assert first.workspace is not None
+    first.workspace.close()
+    basis *= 2
+    transform *= 0.5
+    bins[:] = 1
+    second = _build(plans, slice(0, 11), byte_budget=2**20)
+    assert second.workspace is not None
+    with second.workspace as workspace:
+        np.testing.assert_array_equal(workspace.panels[0][:, -2:], basis[bins] @ transform)
+
+
+@pytest.mark.parametrize("value, transform", [(2.0**128, 2.0), (2.0**-128, 0.5)])
+@pytest.mark.parametrize("table_enabled", [False, True])
+def test_checked_support_output_keeps_the_original_domain(
+    monkeypatch, value, transform, table_enabled
+):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    if not table_enabled:
+        monkeypatch.setattr(panels, "_SUPPORT_TABLE_MAX_CELLS", 0)
+    plans = (
+        _plan(
+            [
+                DenseGroupMatrix(np.ones((11, 1))),
+                DiscretizedSSPGroupMatrix(
+                    np.array([[value]]), np.array([[transform]]), np.zeros(11, dtype=np.intp)
+                ),
+            ]
+        ),
+    )
+    result = _build(plans, slice(0, 11), byte_budget=2**20)
+    assert result.workspace is None
+    assert result.reason == "numerical-domain"
+
+
+def test_zero_and_one_only_columns_have_complete_coverage():
+    n = 5
+    groups = [
+        CategoricalGroupMatrix(np.full(n, -1), 2),
+        SplineCategoricalGroupMatrix(
+            sp.csr_matrix(np.ones((n, 2))), np.eye(2), np.empty(0, dtype=np.intp)
+        ),
+    ]
+    plans = (_plan(groups), PredictorExecutionPlan(DesignMatrix([], n=n, p=0), True))
+    for rows in (slice(0, n), slice(0, 0)):
+        result = _build(plans, rows, byte_budget=2**20)
+        assert result.workspace is not None
+        with result.workspace as workspace:
+            expected_rows = n if rows.stop else 0
+            np.testing.assert_array_equal(
+                workspace.panels[0],
+                np.column_stack([np.ones(expected_rows), np.zeros((expected_rows, 4))]),
+            )
+            np.testing.assert_array_equal(workspace.panels[1], np.ones((expected_rows, 1)))
+
+
+def test_poison_oracle_detects_missing_factor_writes(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    plans, literal = _problem()
+    original = np.empty
+
+    def poisoned(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if result.dtype == np.float64:
+            result.fill(np.nan)
+        return result
+
+    monkeypatch.setattr(np, "empty", poisoned)
+    monkeypatch.setattr(panels, "_checked_factor_scatter", lambda *args: True)
+    result = _build(plans, slice(0, 43), byte_budget=2**20)
+    assert result.workspace is not None
+    with result.workspace as workspace:
+        with pytest.raises(AssertionError):
+            _assert_reconstruction(workspace.panels[0], literal[0])

@@ -121,6 +121,16 @@ stored-design equivalence, bounded memory and complete-fit evidence required.
 Compact storage alone does not demonstrate faster fitting. The capabilities
 below remain the subsequent priority order until this gate is resolved.
 
+The fixed-layout size sweep through one million rows preserves a memory/time
+tradeoff: chunked discrete execution uses substantially less memory, while the
+same stored discrete basis runs faster through the existing dense backend.
+Controlled BLAS threading improves that dense route but provides no clear
+chunked speedup. Current profiles therefore direct the next work toward bounded
+row preparation and reuse across predictor, score and signed curvature
+calculations. Compare existing tabmat operations and a private distributional
+execution plan before changing automatic backend policy. Scalar SuperGLM's
+cached-weight discrete REML optimizer is a separate approximation contract.
+
 In current priority order:
 
 **1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing

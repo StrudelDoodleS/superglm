@@ -1,7 +1,8 @@
 """Optional chunk-local panels for small ordinary grouped designs.
 
-The caller chooses the row bound and byte budget. No full-design conversion,
-support-wide transformed table, or persistent row cache is constructed here.
+The caller chooses the row bound and byte budget. No full-design conversion
+or persistent row cache is constructed here. Small transformed support tables
+are optional, explicitly budgeted, and released after each group render.
 Refusal leaves the existing grouped contraction available to the caller.
 """
 
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import scipy.sparse as sp
+from numba import njit
 
 from superglm._group_matrix._group_matrix_kernels import _tensor_operand_in_reassociation_range
 from superglm.group_matrix import (
@@ -41,9 +43,137 @@ _SUPPORTED = {
     SupportCompressedSplineCategoricalGroupMatrix,
 }
 
+_SUPPORT_TABLE_MAX_CELLS = 65536
+
+
+def _support_table_bytes(basis, transform, row_count):
+    if type(basis) is not np.ndarray or type(transform) is not np.ndarray:
+        return 0
+    support_rows, raw_width = basis.shape
+    width = transform.shape[1]
+    cells = support_rows * (raw_width + width)
+    if not 0 < support_rows <= min(row_count, 4096) or cells > _SUPPORT_TABLE_MAX_CELLS:
+        return 0
+    # Owned transformed table plus conservative operand packing allowance.
+    return 8 * (cells + raw_width * width)
+
 
 class _PanelRefusalError(Exception):
     pass
+
+
+@njit(cache=True)
+def _checked_copy(values, out):
+    if values.shape != out.shape:
+        return False
+    for row in range(values.shape[0]):
+        for col in range(values.shape[1]):
+            value = values[row, col]
+            if value != 0.0 and not 2.0**-128 <= abs(value) <= 2.0**128:
+                return False
+            out[row, col] = value
+    return True
+
+
+@njit(cache=True)
+def _checked_gather(values, rows, out):
+    if len(rows) != out.shape[0] or values.shape[1] != out.shape[1]:
+        return False
+    for row in range(len(rows)):
+        if rows[row] < 0 or rows[row] >= values.shape[0]:
+            return False
+        for col in range(values.shape[1]):
+            value = values[rows[row], col]
+            if value != 0.0 and not 2.0**-128 <= abs(value) <= 2.0**128:
+                return False
+            out[row, col] = value
+    return True
+
+
+@njit(cache=True)
+def _checked_scatter(values, rows, out):
+    if len(rows) != values.shape[0] or values.shape[1] != out.shape[1]:
+        return False
+    for row in range(len(rows)):
+        if rows[row] < 0 or rows[row] >= out.shape[0]:
+            return False
+        for col in range(values.shape[1]):
+            value = values[row, col]
+            if value != 0.0 and not 2.0**-128 <= abs(value) <= 2.0**128:
+                return False
+            out[rows[row], col] = value
+    return True
+
+
+@njit(cache=True)
+def _checked_factor_scatter(natural, codes, out, block_size, coefficient_levels, is_sz):
+    if (
+        natural.shape[1] != block_size
+        or natural.shape[0] != len(codes)
+        or out.shape[0] != len(codes)
+        or out.shape[1] != block_size * coefficient_levels
+    ):
+        return False
+    for row in range(natural.shape[0]):
+        if codes[row] < 0 or codes[row] >= coefficient_levels + int(is_sz):
+            return False
+        for col in range(out.shape[1]):
+            out[row, col] = 0.0
+        for col in range(block_size):
+            value = natural[row, col]
+            if value != 0.0 and not 2.0**-128 <= abs(value) <= 2.0**128:
+                return False
+            if codes[row] < coefficient_levels:
+                out[row, codes[row] * block_size + col] = value
+            elif is_sz:
+                for level in range(coefficient_levels):
+                    out[row, level * block_size + col] = -value
+    return True
+
+
+def _require_written(valid):
+    if not valid:
+        raise _PanelRefusalError("numerical-domain")
+
+
+def _require_writer_source(values):
+    # Do not dispatch extra Numba dtypes or run custom array hooks. Range
+    # checking itself belongs to the writer, fused with its complete copy.
+    if type(values) is not np.ndarray or values.dtype != np.float64 or values.ndim != 2:
+        raise _PanelRefusalError("numerical-domain")
+
+
+def _support_indices(bins, size):
+    if bins.ndim != 1 or bins.dtype.kind not in "iu":
+        raise IndexError("support indices must be a one-dimensional integer array")
+    if bins.size and (int(bins.min()) < -size or int(bins.max()) >= size):
+        raise IndexError("support index is outside the stored support")
+    # Preserve NumPy negative-index semantics before entering unchecked Numba
+    # indexing. The owned integer vector is bounded by the current row tile.
+    normalized = np.array(bins, dtype=np.intp, copy=True)
+    normalized[normalized < 0] += size
+    return normalized
+
+
+def _warmup_small_group_panels():
+    """Compile writer signatures without building plans or retaining panels."""
+    rows = np.array([2, 0, 1], dtype=np.intp)
+    codes = np.array([0, 1, 2], dtype=np.intp)
+    for layout in ("C", "F", "A"):
+        for readonly in (False, True):
+            if layout == "A":
+                values = np.ones((3, 4), dtype=np.float64)[:, ::2]
+            else:
+                values = np.ones((3, 2), dtype=np.float64, order=layout)
+            values.flags.writeable = not readonly
+            for strided in (False, True):
+                step = 2 if strided else 1
+                out = np.empty((3, 2 * step), dtype=np.float64)[:, ::step]
+                factors = np.empty((3, 4 * step), dtype=np.float64)[:, ::step]
+                _checked_copy(values, out)
+                _checked_gather(values, rows, out)
+                _checked_scatter(values, rows, out)
+                _checked_factor_scatter(values, codes, factors, 2, 2, True)
 
 
 def _in_range(values):
@@ -137,15 +267,34 @@ def _csr_product(basis, rows, transform, cached):
     return selected @ transform
 
 
-def _support_product(basis, bins, transform):
+def _support_transform(basis, transform):
+    return basis @ transform
+
+
+def _support_product(basis, bins, transform, *, table_byte_allowance=0, out=None):
     if any(type(array) is not np.ndarray for array in (basis, bins, transform)):
         raise _PanelRefusalError("unsupported-group")
+    bins = _support_indices(bins, basis.shape[0])
+    table_bytes = _support_table_bytes(basis, transform, len(bins))
+    if table_bytes and table_bytes <= table_byte_allowance and _in_range(basis):
+        _require_range(transform)
+        table = _support_transform(basis, transform)
+        if out is not None:
+            _require_written(_checked_gather(table, bins, out))
+            return None
+        return table[bins]
+    # An unsafe unused support value must not change selected-row eligibility.
     selected = _require_range(basis[bins])
     _require_range(transform)
-    return selected @ transform
+    product = _support_transform(selected, transform)
+    if out is not None:
+        _require_writer_source(product)
+        _require_written(_checked_copy(product, out))
+        return None
+    return product
 
 
-def _render_group(group, rows, out):
+def _render_group(group, rows, out, *, table_byte_allowance=0):
     """Render directly into one panel's column view from stored coordinates."""
     kind = type(group)
     # Check borrowed arrays before gathering: an ndarray subclass may replace
@@ -164,7 +313,8 @@ def _render_group(group, rows, out):
         if array is not None and type(array) is not np.ndarray:
             raise _PanelRefusalError("unsupported-group")
     if kind is DenseGroupMatrix:
-        out[:] = _require_range(group.M[rows])
+        _require_writer_source(group.M)
+        _require_written(_checked_gather(group.M, rows, out))
     elif kind in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
         codes = group.codes[rows]
         if np.any((codes < 0) | (codes > group.n_levels)):
@@ -173,11 +323,19 @@ def _render_group(group, rows, out):
         active = np.flatnonzero(codes < group.n_levels)
         out[active, codes[active]] = 1
     elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
-        out[:] = _support_product(group.B_unique, group.bin_idx[rows], group.R_inv)
+        _support_product(
+            group.B_unique,
+            group.bin_idx[rows],
+            group.R_inv,
+            table_byte_allowance=table_byte_allowance,
+            out=out,
+        )
     elif kind is SparseSSPGroupMatrix:
-        out[:] = _csr_product(
+        product = _csr_product(
             group.B, rows, group.R_inv, (group._data, group._indices, group._indptr)
         )
+        _require_writer_source(product)
+        _require_written(_checked_copy(product, out))
     elif kind in (
         SplineCategoricalGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
@@ -197,32 +355,49 @@ def _render_group(group, rows, out):
             # data. Fresh chunk subsets have no such cache.
             if group._dense_level is not False and group._dense_level is not None:
                 raise _PanelRefusalError("unsupported-group")
-            out[active] = _csr_product(
+            product = _csr_product(
                 group.B_level, level_rows, group.R_inv, (group._data, group._indices, group._indptr)
             )
         else:
-            out[active] = _support_product(
-                group.B_unique, group.bin_idx_level[level_rows], group.R_inv
+            product = _support_product(
+                group.B_unique,
+                group.bin_idx_level[level_rows],
+                group.R_inv,
+                table_byte_allowance=table_byte_allowance,
             )
+        _require_writer_source(product)
+        _require_written(_checked_scatter(product, active, out))
     elif kind is FactorSmoothGroupMatrix:
         if group.factor_basis not in ("fs", "sz"):
             raise _PanelRefusalError("unsupported-group")
         if group.is_discrete:
-            natural = _support_product(group.B_unique, group.bin_idx[rows], group.natural_map)
+            natural = _support_product(
+                group.B_unique,
+                group.bin_idx[rows],
+                group.natural_map,
+                table_byte_allowance=table_byte_allowance,
+            )
         else:
             natural = _csr_product(
                 group.B, rows, group.natural_map, (group._data, group._indices, group._indptr)
             )
         codes = group.codes[rows]
+        if codes.dtype.kind not in "iu":
+            raise _PanelRefusalError("unsupported-group")
         if np.any((codes < 0) | (codes >= group.n_levels)):
             raise _PanelRefusalError("unsupported-group")
-        out.fill(0)
-        blocks = out.reshape(len(rows), group.coefficient_levels, group.block_size)
-        active = np.flatnonzero(codes < group.coefficient_levels)
-        blocks[active, codes[active], :] = natural[active]
-        if group.factor_basis == "sz":
-            final = np.flatnonzero(codes == group.coefficient_levels)
-            blocks[final, :, :] = -natural[final, None, :]
+        codes = codes.astype(np.intp, copy=False)
+        _require_writer_source(natural)
+        _require_written(
+            _checked_factor_scatter(
+                natural,
+                codes,
+                out,
+                group.block_size,
+                group.coefficient_levels,
+                group.factor_basis == "sz",
+            )
+        )
     else:  # Explicit type dispatch prevents custom subclass semantic changes.
         raise _PanelRefusalError("unsupported-group")
 
@@ -352,6 +527,17 @@ def build_small_group_panels(plans, rows, *, byte_budget, group_indices=None):
         return SmallGroupPanelBuild(None, "byte-budget", estimate)
     if max(row_count, maximum, max_raw, max_group) > 2**20:
         return SmallGroupPanelBuild(None, "numerical-domain", estimate)
+    # Tables are optional: retain the existing selected-row route whenever
+    # the extra reservation would exceed the caller's budget. Only one table
+    # is live at a time because each renderer owns and releases its products.
+    table_allowance = 0
+    for group in flat:
+        basis = getattr(group, "B_unique", None)
+        transform = getattr(group, "R_inv", getattr(group, "natural_map", None))
+        candidate = _support_table_bytes(basis, transform, row_count)
+        if candidate <= byte_budget - estimate:
+            table_allowance = max(table_allowance, candidate)
+    estimate += table_allowance
     row_indices = (
         np.arange(start, stop, step, dtype=np.intp)
         if isinstance(rows, slice)
@@ -373,9 +559,16 @@ def build_small_group_panels(plans, rows, *, byte_budget, group_indices=None):
                     column_values.extend(range(global_offset, global_offset + group.shape[1]))
                 global_offset += group.shape[1]
             for group in selection:
-                _render_group(group, row_indices, panel[:, offset : offset + group.shape[1]])
+                _render_group(
+                    group,
+                    row_indices,
+                    panel[:, offset : offset + group.shape[1]],
+                    table_byte_allowance=table_allowance,
+                )
                 offset += group.shape[1]
-            _require_range(panel)
+            # Each renderer completely initializes its column span and
+            # certifies all nontrivial values while writing. Intercepts and
+            # inactive categorical cells are known exact ones/zeros.
             panel.flags.writeable = False
             column = np.asarray(column_values, dtype=np.intp)
             column.flags.writeable = False

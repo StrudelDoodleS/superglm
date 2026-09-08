@@ -89,6 +89,8 @@ def test_value_only_passes_do_not_prepare_geometry(monkeypatch, operation):
 
 @pytest.mark.parametrize("operation", ["likelihood", "change", "terminal"])
 def test_value_only_group_subsets_are_bounded_and_not_retained(monkeypatch, operation):
+    # Refused range evaluation must retain the bounded generic path.
+    monkeypatch.setattr(chunking, "group_range_matvec", lambda *args: None, raising=False)
     problem = _problem()
     references = []
     largest_subset = 0
@@ -115,6 +117,46 @@ def test_value_only_group_subsets_are_bounded_and_not_retained(monkeypatch, oper
     assert largest_subset == 7
     assert most_live <= 2
     assert all(ref() is None for ref in references)
+
+
+@pytest.mark.parametrize("operation", ["likelihood", "change", "terminal"])
+def test_value_only_ordinary_ranges_do_not_construct_group_subsets(monkeypatch, operation):
+    problem = _problem()
+
+    def forbidden_subset(*args):
+        pytest.fail("ordinary contiguous values rebuilt a group subset")
+
+    for group_type in {
+        type(group) for state in problem[1].predictors for group in state.design.group_matrices
+    }:
+        monkeypatch.setattr(group_type, "row_subset", forbidden_subset)
+    _evaluate(operation, problem, 7)
+
+
+@pytest.mark.parametrize("include_offsets", [False, True])
+def test_geometry_ranges_preserve_stored_values_without_generic_subsets(
+    monkeypatch, include_offsets
+):
+    _, layout, _, _, coefficients = _problem()
+    rows = next(chunking.iter_row_chunks(23, 7))
+    expected, _ = chunking._predictor_chunk(
+        layout, coefficients, rows, include_offsets=include_offsets
+    )
+
+    def forbidden_subset(*args):
+        pytest.fail("ordinary contiguous geometry used generic row indexing")
+
+    monkeypatch.setattr(DesignMatrix, "row_subset", forbidden_subset)
+    for group_type in {
+        type(group) for state in layout.predictors for group in state.design.group_matrices
+    }:
+        monkeypatch.setattr(group_type, "row_subset", forbidden_subset)
+    actual, plans = chunking._predictor_chunk(
+        layout, coefficients, rows, include_offsets=include_offsets
+    )
+    tolerance = 16 * layout.n_coefficients * np.finfo(float).eps
+    np.testing.assert_allclose(actual, expected, rtol=tolerance, atol=tolerance)
+    assert all(plan.design.n == 7 for plan in plans)
 
 
 @pytest.mark.parametrize("chunk_size", [1, 7, 23, 31])

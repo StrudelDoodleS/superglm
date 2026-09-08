@@ -26,6 +26,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
 )
+from ._row_lookup import build_row_lookup
 
 
 class DenseGroupMatrix:
@@ -727,6 +728,7 @@ class SplineCategoricalGroupMatrix:
         "R_inv",
         "row_idx",
         "_sorted_rows",
+        "_row_lookup_certificate",
         "n_rows",
         "shape",
         "omega",
@@ -758,6 +760,7 @@ class SplineCategoricalGroupMatrix:
         self.row_idx = np.array(row_idx, dtype=np.intp, copy=True)
         self.row_idx.flags.writeable = False
         self._sorted_rows = None
+        self._row_lookup_certificate = None
         self.B_level = self.B[self.row_idx].tocsr()
         self._data = self.B_level.data.astype(np.float64)
         self._indices = self.B_level.indices
@@ -778,6 +781,11 @@ class SplineCategoricalGroupMatrix:
         self.spline_cat_level = None
         self.spline_cat_feature = None
 
+    def __getstate__(self):
+        dict_state, slot_state = object.__getstate__(self)
+        slot_state.pop("_row_lookup_certificate", None)
+        return dict_state, slot_state
+
     def __setstate__(self, state):
         # Accept learned matrices predating the lookup cache, and restore the
         # index ownership contract lost when NumPy arrays pass through pickle.
@@ -789,6 +797,7 @@ class SplineCategoricalGroupMatrix:
         self.row_idx = np.array(self.row_idx, dtype=np.intp, copy=True)
         self.row_idx.flags.writeable = False
         self._sorted_rows = None
+        self._row_lookup_certificate = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.shape[0], dtype=np.float64)
@@ -845,8 +854,9 @@ class SplineCategoricalGroupMatrix:
             idx_arr = idx_arr.astype(np.intp, copy=False)
         if self.row_idx.size and idx_arr.size:
             if self._sorted_rows is None:
-                self._sorted_rows = np.sort(self.row_idx)
-                self._sorted_rows.flags.writeable = False
+                self._sorted_rows, _, self._row_lookup_certificate = build_row_lookup(
+                    self.row_idx, with_order=False
+                )
             pos = np.searchsorted(self._sorted_rows, idx_arr)
             in_bounds = pos < self._sorted_rows.size
             matched = np.zeros(idx_arr.size, dtype=bool)

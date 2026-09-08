@@ -261,3 +261,65 @@ automatic policy. Include dense materialization, temporary allocations and
 complete-process RSS; an additional workspace estimate is not a total-fit memory
 cap. Preserve requested versus resolved execution metadata and specialized
 support/tensor routes in any subsequently justified policy change.
+
+### Size, threading and execution follow-through
+
+The fixed public fragmented layout now has exploratory complete fits at
+65,536, 262,144 and 1,048,576 rows. Model terms, knots and bins stay fixed;
+iteration counts agree across execution arms within each size, but change
+between sizes. At one million rows, ordinary discrete chunks take 70.093 s,
+optional panels 62.747 s, and the same stored discrete basis through dense
+execution 26.748 s. Process high-water RSS captured at fit completion is
+1,831.6, 1,832.5 and 3,177.7 MiB respectively; exact execution takes 30.014 s
+and 3,883.3 MiB. These are single runs, not a statistically established
+crossover. The larger book preserves the time/memory tradeoff. Fixed 8,065-row
+chunks repeat preparation and dispatch as the book grows.
+
+A separate two-repeat comparison at 262,144 rows uses the existing
+`SUPERGLM_BLAS_THREADS` override, with NumPy/SciPy pools witnessed inside the
+solver and other numerical thread pools held at one. BLAS one-to-four median
+wall times are 18.241 to 18.121 s for ordinary chunks, 16.394 to 15.933 s for
+panels, and 7.631 to 5.721 s for dense execution. Chunk/panel ranges overlap;
+dense ranges do not. Increased CPU use is recorded separately. The override
+also affects compilation: bin maps and raw support bases match exactly, while
+ten transformation-array hashes change between thread settings. Fitted outputs
+agree within floating-point error, but the receipts do not quantify the
+transformation-array differences. Do not claim identical stored representation
+hashes across those settings.
+
+Current-source call-stack profiles identify repeated row preparation and panel
+rendering as substantial remaining costs. The panel matrix products are already
+efficient; the range predicates are compiled, so their remaining scan cost is
+not the earlier Python-loop defect. Profile cumulative times nest and are not
+additive complete-fit timings. The detailed report separates their ownership.
+
+The comparison with regular SuperGLM also corrects an algorithm assumption.
+Scalar discrete REML selects a cached-working-weight optimizer and avoids
+rebuilding weighted geometry for each lambda trial. SuperLSS retains its
+distributional observed-curvature/EFS algorithm. Reusing scalar execution
+techniques and adopting its optimizer are distinct changes; signed coupled
+curvature needs its own valid contractions.
+
+The next implementation stages are:
+
+1. Improve the existing bounded panel renderer with explicitly budgeted,
+   chunk-local small support transformations and checked writes. Preserve
+   numerical guards, unsupported-type fallback and workspace lifetime; do not
+   cache numerical results across mutable designs by identity.
+2. Compare installed tabmat primitives with a dedicated distributional execution
+   plan that can reuse bounded row preparation for predictor, score and
+   curvature work. Resolve contiguous-range lookup validity before introducing
+   range shortcuts; a persistent sorted flag on mutable caches is insufficient.
+3. Validate any selected execution change with mathematical, memory and actual
+   dispatch regressions, then repeat serial complete-fit measurements. Keep
+   automatic dense and panel policy changes on hold until these findings are
+   incorporated. No further roadmap capability starts during this gate.
+
+The first two execution primitives now pass 602 combined focused checks, with
+four inapplicable exact-category permutation cases skipped. Independent review
+resolved obsolete lookup-buffer retention on same-object storage replacement;
+range authority is cleared on mismatch. Geometry snapshots retain bounded
+owned arrays. The support-table reserve and checked-writer coverage are reviewed,
+including public warmup and isolated allocation tests. Automatic policy remains
+unchanged. Compare this checkpoint against frozen `ed84669a` and evaluate the
+separate raw-basis tabmat prototype before selecting further integration.

@@ -12,6 +12,7 @@ from ._group_matrix_kernels import (
     _indexed_row_dot,
     _tensor_operand_in_reassociation_range,
 )
+from ._row_lookup import build_row_lookup
 
 
 class DiscretizedSSPGroupMatrix:
@@ -160,6 +161,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         "row_idx",
         "_row_order",
         "_sorted_rows",
+        "_row_lookup_certificate",
         "n_bins",
         "n_rows",
         "shape",
@@ -191,6 +193,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.row_idx.flags.writeable = False
         self._row_order = None
         self._sorted_rows = None
+        self._row_lookup_certificate = None
         bin_idx_arr = np.asarray(bin_idx, dtype=np.intp)
         self.bin_idx_level = (
             bin_idx_arr if bin_idx_is_level else bin_idx_arr[self.row_idx]
@@ -212,6 +215,11 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.spline_cat_level = None
         self.spline_cat_feature = None
 
+    def __getstate__(self):
+        dict_state, slot_state = object.__getstate__(self)
+        slot_state.pop("_row_lookup_certificate", None)
+        return dict_state, slot_state
+
     def __setstate__(self, state):
         # Older learned matrices have no lookup slots. Rebuild lazily after
         # restoring owned indices; NumPy pickle does not retain readonly flags.
@@ -224,6 +232,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.row_idx.flags.writeable = False
         self._row_order = None
         self._sorted_rows = None
+        self._row_lookup_certificate = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.n_rows, dtype=np.float64)
@@ -290,12 +299,9 @@ class DiscretizedSplineCategoricalGroupMatrix:
             # Chunked fits revisit this parent many times. Sort once, retaining
             # the original level order used by bin_idx_level and its algebra.
             if self._sorted_rows is None:
-                order = np.argsort(self.row_idx)
-                sorted_rows = self.row_idx[order]
-                order.flags.writeable = False
-                sorted_rows.flags.writeable = False
-                self._row_order = order
-                self._sorted_rows = sorted_rows
+                self._sorted_rows, self._row_order, self._row_lookup_certificate = build_row_lookup(
+                    self.row_idx, with_order=True
+                )
             pos = np.searchsorted(self._sorted_rows, idx_arr)
             in_bounds = pos < self._sorted_rows.size
             matched = np.zeros(idx_arr.size, dtype=bool)

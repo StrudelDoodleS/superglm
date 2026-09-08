@@ -9,6 +9,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
 from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
@@ -27,6 +28,7 @@ from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
 )
+from superglm.group_matrix import DesignMatrix
 
 ChunkSize = int | Literal["auto"]
 CurvatureSource = Literal["observed", "fisher"]
@@ -236,9 +238,10 @@ def _predictor_values(
 ) -> NDArray[np.float64]:
     """Evaluate a chunk without preparing coefficient-space geometry.
 
-    Each group subset is consumed immediately. In particular, value-only
-    line searches and convergence checks need neither a chunk DesignMatrix
-    (and its execution metadata) nor retained PredictorExecutionPlans.
+    Ordinary groups consume their bounded row range directly. Refused groups
+    retain the generic subset path, consumed immediately. Value-only line
+    searches and convergence checks need neither a chunk DesignMatrix nor
+    retained PredictorExecutionPlans.
     """
     eta = np.empty((len(rows.indices), len(layout.predictors)), dtype=np.float64)
     for state in layout.predictors:
@@ -248,7 +251,11 @@ def _predictor_values(
         column = int(intercept)
         for group in state.design.group_matrices:
             width = group.shape[1]
-            values += group.row_subset(rows.indices).matvec(local[column : column + width])
+            group_coefficients = local[column : column + width]
+            contribution = group_range_matvec(group, rows.start, rows.stop, group_coefficients)
+            if contribution is None:
+                contribution = group.row_subset(rows.indices).matvec(group_coefficients)
+            values += contribution
             column += width
         if include_offsets:
             values += state.offset[rows.start : rows.stop]
@@ -269,7 +276,14 @@ def _predictor_chunk(
     eta = np.empty((len(rows.indices), k_parameters), dtype=np.float64)
     plans: list[PredictorExecutionPlan] = []
     for state in layout.predictors:
-        design = state.design.row_subset(rows.indices)
+        if type(state.design) is DesignMatrix:
+            groups = []
+            for group in state.design.group_matrices:
+                child = group_row_range(group, rows.start, rows.stop)
+                groups.append(group.row_subset(rows.indices) if child is None else child)
+            design = DesignMatrix(groups, len(rows.indices), state.design.p)
+        else:
+            design = state.design.row_subset(rows.indices)
         intercept = state.intercept_index is not None
         plan = PredictorExecutionPlan(design, intercept)
         local = coefficients[state.coefficient_slice]
