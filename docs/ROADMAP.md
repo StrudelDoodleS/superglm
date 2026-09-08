@@ -148,6 +148,19 @@ capability; see the [performance report](research/2026-09-discrete-performance-r
 Scalar SuperGLM's cached-weight discrete REML optimizer remains a separate
 approximation contract.
 
+The next execution target is computation on marginal supports at the chosen
+resolution: aggregate changing row scores and signed curvature weights before
+contracting the support bases. Current-source profiles confirm repeated row
+expansion in mixed panels. A three-condition geometry-batch ablation confirms
+lost support-contraction amortization, but using one whole-book batch still does
+not beat the current panels in those diagnostics. Remaining mixed pair work
+includes repeated weighted-column scans and spline-by-category expansion.
+Prototype a bounded global moment accumulator with the small ordinary block
+processed together; preserve observation-level likelihood semantics and the
+distributional optimizer. Neither increasing N nor lifting the chunk limit alone
+is an evidenced solution. The proposed accumulator has no measured speed claim
+yet.
+
 In current priority order:
 
 **1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing
@@ -217,10 +230,12 @@ another predictor count. Reopen only with a concrete use case and validating evi
   convergence failure blocks an intended model. The tested NB2 stop prompted
   EFS recovery, pragmatic stopping and a bounded finite-NB2 range extension;
   it now reaches configured stationarity.
-- Reopen C1 when an intended book exceeds its memory or latency budget. Profile
-  family derivatives, retained history and coefficient factors before adding
-  another assembler. Bin sensitivity or covariance disagreement blocks a
-  representation change even if it improves speed.
+- C1 remains active through the discrete execution gate above. After that gate,
+  reopen scaling work when an intended book exceeds its memory or latency
+  budget. Profile derivative evaluation, accumulation, retained history and
+  coefficient factors before selecting another execution change. Bin
+  sensitivity or covariance disagreement blocks a representation change even
+  if it improves speed.
 - Promote C12/C11 for a blocked layer/capital decision, C10 for a demonstrated
   coverage gap, and C9 for repeatable held-out predictive gains. Compare
   log/tail scores, calibration and total cost on multiple books; novelty claims

@@ -386,8 +386,137 @@ tradeoff. The coefficient factors and covariance remain dense, and row scratch
 bounds are not whole-fit memory bounds. The million-row sweep measured an earlier
 checkpoint; the final automatic policy has complete-fit evidence at 262,144 rows.
 
-Further consolidation of bounded row preparation remains a possible next C1
-step, preserving the optimizer and signed matrix products. No replacement or
-universal discrete-speed claim follows from these measurements. The
+The next C1 investigation targets aggregation on the stored supports before
+coefficient-space contraction, preserving the optimizer and signed matrix
+products. No replacement or universal discrete-speed claim follows from these
+measurements. The
 [plan](2026-09-discrete-performance-plan.md) and [roadmap](../ROADMAP.md) retain
 the unresolved mixed-layout performance gate.
+
+## Computational discretization target
+
+The target is to exploit covariate grouping at the chosen resolution during
+computation. The current mixed panel path
+reduces stored design memory but performs curvature products on expanded row
+panels. Existing grouped paths can accumulate by bin, yet repeat support-matrix
+contractions for each small row batch. A fixed batch size preserves that
+overhead per row as the dataset grows.
+
+For one stored term pair, let A and B contain the support rows and u and v map
+observations to those rows. The observed-curvature weight w can be signed and
+can couple different distributional predictors. Accumulate
+
+    M[r, s] = sum(w[i] for i with u[i] == r and v[i] == s)
+
+and compute `A.T @ M @ B`. This regrouping is algebraically valid for signed
+rectangular blocks. Scores use marginal sums of their row contributions.
+Floating-point accumulation order and conditioning still require validation;
+the identity does not promise bitwise equality. Responses, offsets and current
+likelihood derivatives remain observation-specific. Marginal bin equality does
+not license collapsing complete observations into an averaged response.
+
+This target follows the marginal basis/index representation in the
+[BAM manual](https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/bam.html).
+The weight-accumulation and directional column-accumulation alternatives in
+[Li and Wood (2020), section 2](https://link.springer.com/article/10.1007/s11222-019-09864-2)
+also avoid requiring a dense support-pair table when that table is too large.
+Their applicability to the signed raw LSS crossproduct follows from the
+regrouping identity above; scalar positive-weight centering shortcuts require
+separate justification.
+
+The scalar source audit identifies three distinct benefits. Full-design
+support aggregation reduces each eligible support pair once per geometry.
+Discrete REML also selects cached-working-weight smoothing iteration rather
+than the exact observed/W(rho)-corrected route. In addition, some scalar families
+have constant working weights and can reuse the Gram across coefficient
+iterations. The latter two do not explain away the opportunity to improve LSS
+execution without changing its optimizer. A cached scalar lambda-trial solve
+avoids rebuilding geometry, but the complete trial can still evaluate row
+predictions and deviance. BAM's ordinary and discrete methods both use
+working-model smoothing iteration; the SuperGLM exact/discrete distinction must
+not be attributed to BAM's FALSE/TRUE switch.
+
+## Current-source complexity and profiling
+
+Six fresh diagnostic fits at `748c8596` use the public fragmented Gaussian
+fixture with 262,144 rows, two 51-coefficient predictors and 256 bins. Production
+source matches the validated checkpoint above. Three compare exact, default
+discrete and identical stored-discrete dense execution. Three disable panels
+and change only the geometry batch; other passes retain 8,065-row chunks.
+cProfile and integer work witnesses are enabled. These single-run times identify
+mechanisms and do not replace the uninstrumented benchmark estimates above.
+The tracked [receipt](../../benchmarks/discrete_performance_receipt.json) records
+the raw manifests, individual hashes, CPU, numerical comparisons and dispatch.
+
+| Diagnostic route | Fit wall (s) | Fit CPU (s) | Geometry phase (s) | Fit RSS (MiB) |
+|---|---:|---:|---:|---:|
+| Exact, dense | 8.697 | 8.680 | 4.360 | 1276.51 |
+| Stored discrete, default panels | 13.684 | 13.650 | 9.386 | 774.29 |
+| Same stored discrete, dense override | 7.576 | 7.541 | 4.219 | 1101.61 |
+| Panels off, geometry batch 8,065 | 22.669 | 22.644 | 18.488 | 779.34 |
+| Panels off, geometry batch 64,520 | 14.776 | 14.751 | 10.594 | 771.73 |
+| Panels off, geometry batch 262,144 | 14.174 | 14.151 | 10.047 | 823.20 |
+
+All six retain 18 coefficient iterations, seven smoothing iterations and 19
+geometry builds. The discrete execution controls have identical stored
+representation hashes. Panel/dense train and holdout differences are at most
+1.89e-15 and 1.11e-15. The batch ablations differ from default discrete training
+predictions by at most 1.33e-15; terminal-curvature relative differences are at
+most 3.37e-15. Exact-versus-binned representation differences are retained
+separately. All runs reach the existing practical plateau, without strict
+smoothing certification. Source, wrapper, pool and activity checks pass;
+Headroom/Kompress remains included in the activity protocol.
+
+The default geometry call-stack owner partitions into 3.486 s of curvature
+channel calls, 2.969 s of panel building, 2.398 s of likelihood-chunk iteration,
+0.463 s of grouped score accumulation and 0.069 s of other/self work. These are
+disjoint owners; their descendants must not be added again. Panel construction
+includes 2.635 s of rendering, while all small support-table transforms together
+consume only 0.046 s. Curvature calls include 3.226 s in actual panel products.
+The row-space products are efficient; repeated preparation and rendering are
+substantial additional work.
+
+Across the default fit, panels execute 38.865 billion multiply-add pairs, write
+508.0 million panel values and write 762.1 million weighted scratch values.
+These are executed shape-based work counts, not measured hardware traffic or
+bandwidth. For predictor widths p_a, the leading curvature work is proportional
+to `N * sum(p_a * p_b for a <= b)` per geometry. Compressing storage before
+expanding these rows does not remove that coefficient-quadratic term.
+
+The batch ablation directly tests lost support amortization:
+
+| Geometry batch | Histogram builds | Initialized histogram cells | Weighted histogram rows | Directional row-by-width work |
+|---|---:|---:|---:|---:|
+| 8,065 | 25,707 | 1,684,733,952 | 117,786,852 | 896,532,480 |
+| 64,520 | 3,895 | 255,262,720 | 117,786,852 | 896,532,480 |
+| 262,144 | 779 | 51,052,544 | 117,786,852 | 896,532,480 |
+
+The 33:5:1 repetition falls with batch count; row data work does not change.
+Time outside the geometry phase stays approximately 4.1–4.2 s. This confirms
+the repeated setup/contraction cost, but whole-book grouped geometry still does
+not beat the default panels in these diagnostics. Its remaining mixed term
+pairs perform repeated directional scans, numeric-by-spline-category column
+fallback and category-by-spline-category row expansion. Histogram construction
+itself accounts for only about 0.283 profiled seconds in that fit. Larger N
+alone is therefore not an established solution; both approaches can remain
+linear in N while differing substantially in coefficient/support dependence
+and repeated memory work.
+
+The next bounded prototype should accumulate signed support-pair and
+directional moments across derivative chunks, contract the support bases once,
+and process the small ordinary block together. This combines bin-space
+computation for smooths with efficient ordinary-block products. It must avoid
+fresh full-table initialization per chunk and repeated singleton-column scans.
+Large geometry batches remain a diagnostic, not a selected default or a claim
+of N-independent memory. No speed estimate for this new accumulator follows
+until it is implemented and measured in complete fits.
+
+For this fixture, conservative simultaneous accumulator state is 23.170 MiB:
+45 support-pair histograms of 256 by 256, 20 directional tables of 256 by 16,
+plus diagonal masses, scores and ordinary curvature. The ordinary block has
+six numeric columns, nine categorical columns and an intercept; each predictor
+has five smooth groups. No equal-predictor sharing is assumed. Two ordinary
+8,065-by-16 row blocks and weighted scratch add 3,096,960 bytes. The receipt
+pins the explicit pair enumeration and accounting. This is a design estimate,
+not an implemented peak-memory bound: source maps, derivative scratch,
+coefficient outputs, metadata and numerical fallback need separate accounting.

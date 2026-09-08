@@ -1,7 +1,8 @@
 # Discrete execution performance plan
 
-Status: current implementation and validation stages complete; the measured
-mixed-layout discrete-versus-exact speed gap remains open within C1.
+Status: previous implementation/validation and current-source profiling are
+complete. A bounded global moment accumulator with a combined ordinary block is
+the next prototype within the open C1 mixed-layout performance gate.
 Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
@@ -381,3 +382,63 @@ dense selection remains deferred and the raw-basis tabmat prototype remains
 unselected. The current implementation stages are validated; this residual C1
 execution issue remains ahead of other roadmap capabilities. Cross-predictor
 penalties stay deferred under the chosen scope.
+
+## Next stage: compute on supports, then reduce to coefficients
+
+Grouping covariates at the selected resolution is the computational objective.
+Faster panel rendering alone does not deliver the full
+benefit when curvature still expands every stored support row. Preserve the
+current solver and observation-level response, weight and offset semantics;
+accumulate their changing score and signed curvature contributions by support
+indices where the term representation permits it.
+
+1. Profile current production source, separately comparing exact execution,
+   default discrete execution and the identical stored discrete basis through
+   the existing dense backend. Separate disjoint call owners, iteration counts,
+   row rendering, weighted products and memory traffic. Use the original
+   controlled activity protocol, with Headroom/Kompress still included.
+2. Falsify the repeated-contraction hypothesis with three diagnostic complete
+   fits: panels disabled and only the geometry batch changed from 8,065 to
+   64,520 to all 262,144 rows. Preserve other pass sizes, family, optimizer and
+   stored basis. Count actual histogram, directional and row dispatch. These
+   instrumented fits identify mechanisms; their times are not replacement
+   benchmark estimates. Large geometry batches are a diagnostic, not an
+   automatic memory policy.
+3. Select the smallest supported execution change from that evidence. Eligible
+   pairs should accumulate weights or weighted columns before the final support
+   contraction, with explicit memory limits and mixed-term fallback. Scalar
+   full-design aggregation is reusable architectural evidence; its positive
+   working-weight centering and alternative smoothing optimizer are separate.
+4. Validate signed rectangular blocks, score reductions, cancellation/refusal,
+   live-input authority and workspace accounting independently. Compare the
+   stored design before measuring any resolution effects. Require a baseline
+   failure or mutation check for the relevant new regressions.
+5. After a selected implementation passes focused checks, evaluate complete fits
+   with wall/CPU, fit-end RSS, outputs, iterations and actual dispatch. Retain
+   the public insurance and favorable-support controls. Do not repeat the full
+   historical matrix without a new uncertainty that requires it.
+
+Steps 1 and 2 are complete at `748c8596`, whose production source matches the
+validated checkpoint above. The default panel geometry still has row-space
+quadratic coefficient work. Its disjoint profile attributes 2.969 s to panel
+building and 2.398 s to likelihood-chunk iteration, against 3.486 s for curvature
+channel calls. Only 0.046 s is spent transforming the small support tables;
+hoisting those transformations alone cannot recover the gap.
+
+Panel-off geometry batches of 8,065 / 64,520 / 262,144 rows produce diagnostic
+fit times of 22.669 / 14.776 / 14.174 s. Histogram builds fall 33:5:1 while
+weighted histogram rows and directional row-by-width work remain identical.
+Larger batches therefore recover setup/contraction amortization, but the
+whole-book grouped route still exceeds default panel geometry time. Mixed row
+work remains substantial. No larger chunk default is selected from this probe.
+
+Step 3 now has a specific bounded design to test: retain signed support-pair
+and directional moments across derivative chunks, contract supports once per
+geometry, and process the small numeric/categorical/intercept block together.
+Do not allocate and add a fresh full histogram for every chunk, which would
+preserve the repeated initialization just measured. Do not retain expanded
+N-by-p spline panels. Batch the ordinary columns to remove the existing
+singleton pair scans, preserving interaction masks and rectangular channels.
+Use explicit state/scratch budgets, fit-local ownership and the existing
+numerical/unsupported-layout fallback; full-design mutation authority cannot be
+inferred from matching hashes on this fixture. This prototype remains unmeasured.
