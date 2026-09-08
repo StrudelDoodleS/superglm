@@ -51,6 +51,42 @@ class FamilyLikelihoodPlan(Protocol):
     def take(self, indices: NDArray[np.integer]) -> FamilyLikelihoodPlan: ...
 
 
+@dataclass(frozen=True)
+class _LikelihoodReuseContract:
+    """Adapter-declared numerical inputs eligible for fixed-point certification."""
+
+    plan_type: type
+    prepared_array_fields: tuple[str, ...]
+    link_types: tuple[type, ...]
+
+
+_LIKELIHOOD_REUSE_CONTRACTS: dict[type, _LikelihoodReuseContract] = {}
+
+
+def _register_likelihood_reuse_contract(
+    family_type: type,
+    plan_type: type,
+    *,
+    prepared_array_fields: tuple[str, ...],
+    link_types: tuple[type, ...] = (),
+) -> None:
+    """Register an audited adapter after its exact family/plan types exist.
+
+    Contracts do not import adapters. Registration follows the existing
+    adapter-to-contract edge, including when an adapter is imported directly.
+    Subclasses receive no inherited eligibility.
+    """
+    contract = _LikelihoodReuseContract(plan_type, tuple(prepared_array_fields), tuple(link_types))
+    previous = _LIKELIHOOD_REUSE_CONTRACTS.get(family_type)
+    if previous is not None and previous != contract:
+        raise ValueError("a family already has a different likelihood reuse contract")
+    _LIKELIHOOD_REUSE_CONTRACTS[family_type] = contract
+
+
+def _likelihood_reuse_contract(family: object) -> _LikelihoodReuseContract | None:
+    return _LIKELIHOOD_REUSE_CONTRACTS.get(type(family))
+
+
 @runtime_checkable
 class LikelihoodPlanValidatingFamily(Protocol):
     """Optional one-shot validation for a family-owned likelihood plan.

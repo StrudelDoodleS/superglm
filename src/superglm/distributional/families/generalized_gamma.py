@@ -27,6 +27,7 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
+    _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
@@ -455,3 +456,11 @@ class GeneralizedGammaLSS:
             "near 1, or fit GeneralizedGammaLSS(parametrisation='location') for tail work "
             "where an infinite mean is legitimate"
         )
+
+
+_register_likelihood_reuse_contract(
+    GeneralizedGammaLSS,
+    GeneralizedGammaLikelihoodPlan,
+    prepared_array_fields=("exact_response", "parameter_independent_carrier"),
+    link_types=(LowerBoundedLogLink,),
+)

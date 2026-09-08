@@ -27,6 +27,7 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
+    _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
@@ -486,3 +487,10 @@ class GammaLS:
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
         cv2 = values[:, 1] * values[:, 1]
         return gamma_expected_shortfall(probabilities, values[:, 0], prior / cv2)
+
+
+_register_likelihood_reuse_contract(
+    GammaLS,
+    GammaLikelihoodPlan,
+    prepared_array_fields=("exact_response", "parameter_independent_carrier"),
+)

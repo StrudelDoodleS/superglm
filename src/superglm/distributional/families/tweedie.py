@@ -27,6 +27,7 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
+    _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
@@ -812,3 +813,11 @@ class TweedieLSS:
 
 
 __all__ = ["BoundedPowerLink", "TweedieLikelihoodPlan", "TweedieLSS"]
+
+
+_register_likelihood_reuse_contract(
+    TweedieLSS,
+    TweedieLikelihoodPlan,
+    prepared_array_fields=(),
+    link_types=(BoundedPowerLink,),
+)

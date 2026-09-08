@@ -16,6 +16,7 @@ from superglm.distributional.family import (
     DistributionalFamily,
     ExpectedInformationFamily,
     FamilyLikelihoodPlan,
+    _likelihood_reuse_contract,
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
@@ -221,60 +222,26 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
     not certify curvature: a design edit can leave the current predictor fixed.
     Unknown representations conservatively retain fresh likelihood evaluation.
     """
-    from superglm.distributional.families._links import BoundedLogitLink
-    from superglm.distributional.families.gamma import GammaLikelihoodPlan, GammaLS
-    from superglm.distributional.families.gaussian import (
-        GaussianLikelihoodPlan,
-        GaussianLS,
-        LowerBoundedLogLink,
-    )
-    from superglm.distributional.families.generalized_gamma import (
-        GeneralizedGammaLikelihoodPlan,
-        GeneralizedGammaLSS,
-    )
-    from superglm.distributional.families.generalized_pareto import (
-        GeneralizedParetoLikelihoodPlan,
-        GeneralizedParetoLSS,
-    )
-    from superglm.distributional.families.log_normal import LogNormalLikelihoodPlan, LogNormalLS
-    from superglm.distributional.families.negative_binomial import (
-        NegativeBinomialLikelihoodPlan,
-        NegativeBinomialLS,
-    )
-    from superglm.distributional.families.tweedie import (
-        BoundedPowerLink,
-        TweedieLikelihoodPlan,
-        TweedieLSS,
-    )
-    from superglm.distributional.families.two_piece import (
-        TwoPieceLikelihoodPlan,
-        TwoPieceLogNormalLSS,
-        TwoPieceNormalLSS,
-    )
+    from scipy.sparse import csr_matrix
+
     from superglm.distributional.weights import ResolvedLikelihoodWeights
     from superglm.group_matrix import (
+        CategoricalGroupMatrix,
         DenseGroupMatrix,
         DiscretizedSCOPGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
+        RandomEffectGroupMatrix,
+        SparseGroupMatrix,
         SupportCompressedSSPGroupMatrix,
     )
     from superglm.links import IdentityLink, LogLink
 
-    plan_types = {
-        GaussianLS: GaussianLikelihoodPlan,
-        GammaLS: GammaLikelihoodPlan,
-        NegativeBinomialLS: NegativeBinomialLikelihoodPlan,
-        LogNormalLS: LogNormalLikelihoodPlan,
-        GeneralizedGammaLSS: GeneralizedGammaLikelihoodPlan,
-        GeneralizedParetoLSS: GeneralizedParetoLikelihoodPlan,
-        TwoPieceLogNormalLSS: TwoPieceLikelihoodPlan,
-        TwoPieceNormalLSS: TwoPieceLikelihoodPlan,
-        TweedieLSS: TweedieLikelihoodPlan,
-    }
+    contract = _likelihood_reuse_contract(context.family)
     weights = context.likelihood_plan.weights
     if (
-        type(context.likelihood_plan) is not plan_types.get(type(context.family))
+        contract is None
+        or type(context.likelihood_plan) is not contract.plan_type
         or type(weights) is not ResolvedLikelihoodWeights
     ):
         return None
@@ -305,22 +272,12 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
     field(weights.provenance.contract.semantics)
     field((context.chunk_size, context.layout.n_coefficients))
     array(context.response)
-    if type(context.likelihood_plan) is not TweedieLikelihoodPlan:
-        array(context.likelihood_plan.parameter_independent_carrier)
-    if type(context.likelihood_plan) not in (GaussianLikelihoodPlan, TweedieLikelihoodPlan):
-        array(context.likelihood_plan.exact_response)
-    if type(context.likelihood_plan) is NegativeBinomialLikelihoodPlan:
-        array(context.likelihood_plan.exact_count)
+    for name in contract.prepared_array_fields:
+        array(getattr(context.likelihood_plan, name))
     for name in ("values", "geometry_values", "root_take_map", "input_positions"):
         array(getattr(weights, name))
     for state in context.layout.predictors:
-        if type(state.link) not in (
-            IdentityLink,
-            LogLink,
-            LowerBoundedLogLink,
-            BoundedPowerLink,
-            BoundedLogitLink,
-        ):
+        if type(state.link) not in (IdentityLink, LogLink, *contract.link_types):
             return None
         field((type(state.link).__name__, vars(state.link)))
         field(
@@ -338,6 +295,23 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
             field((kind.__name__, group.shape))
             if kind is DenseGroupMatrix:
                 names = ("M",)
+            elif kind in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
+                names = ("codes",)
+                field(group.n_levels)
+            elif kind is SparseGroupMatrix:
+                matrix = group.M
+                if type(matrix) is not csr_matrix:
+                    return None
+                field((matrix.shape, matrix.dtype.str))
+                field(
+                    (
+                        getattr(matrix, "_has_sorted_indices", None),
+                        getattr(matrix, "_has_canonical_format", None),
+                    )
+                )
+                for values in (matrix.data, matrix.indices, matrix.indptr):
+                    array(values)
+                continue
             elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
                 names = ("B_unique", "R_inv", "bin_idx")
                 field(group.n_bins)

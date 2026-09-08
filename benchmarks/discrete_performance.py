@@ -243,7 +243,7 @@ def comparison_report(manifest):
             for mode in ("exact", "discrete")
         ] + [
             (
-                "candidate_discrete_exact_approximation",
+                "candidate_discrete_exact_comparison",
                 (repeat, "candidate", "exact"),
                 (repeat, "candidate", "discrete"),
             )
@@ -293,7 +293,14 @@ def comparison_report(manifest):
                 )
             aggregates.append(item)
     return {
-        "interpretation": "Differences are descriptive; small errors do not establish exact equivalence.",
+        "interpretation": (
+            "Differences are descriptive. Discrete execution may preserve the observed "
+            "support exactly when the bin budget covers that support, or approximate "
+            "a larger support through binning. Classifying a run requires evidence "
+            "about its actual support and constructed representation; fixture names "
+            "alone are insufficient. Floating-point differences may occur with exact "
+            "support, and small errors do not establish equivalence."
+        ),
         "timing_caveat": "All available worker timings are retained, including endpoint-flagged runs; inspect audit flags before interpretation.",
         "aggregates": aggregates,
         "comparisons": comparisons,

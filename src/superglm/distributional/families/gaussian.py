@@ -28,6 +28,7 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
+    _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
@@ -516,3 +517,11 @@ class GaussianLS:
         scale = values[:, 1] / np.sqrt(_prior_weight_vector(weights, len(values)))
         probabilities = np.broadcast_to(np.asarray(p, dtype=np.float64), (len(values),))
         return _normal_expected_shortfall(probabilities, values[:, 0], scale)
+
+
+_register_likelihood_reuse_contract(
+    GaussianLS,
+    GaussianLikelihoodPlan,
+    prepared_array_fields=("parameter_independent_carrier",),
+    link_types=(LowerBoundedLogLink,),
+)

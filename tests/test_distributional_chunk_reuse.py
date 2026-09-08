@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import gc
 import weakref
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.sparse as sp
 
 import superglm.distributional.solver.solver as solver
 from superglm._frame import as_eager_frame
@@ -25,13 +26,16 @@ from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
 from superglm.distributional.solver import DenseSolverConfig, fit_dense_fixed_lambda
 from superglm.distributional.weights import ResolvedLikelihoodWeights
-from superglm.features import Numeric
+from superglm.features import Categorical, Numeric, RandomEffect
 from superglm.group_matrix import (
+    CategoricalGroupMatrix,
     DenseGroupMatrix,
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
+    RandomEffectGroupMatrix,
+    SparseGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
 
@@ -517,3 +521,211 @@ def test_three_parameter_tweedie_reuse_skips_likelihood_refresh(monkeypatch):
     reused = _fit(problem, session=session, source=source, chunk_size=5)
     assert reused.converged
     assert reused.iterations == 0
+
+
+@pytest.mark.parametrize("subclass_target", ["family", "plan"])
+def test_contract_registration_does_not_grant_inherited_eligibility(subclass_target):
+    context = _builtin_context(GaussianLS())
+    if subclass_target == "family":
+
+        class CustomFamily(GaussianLS):
+            pass
+
+        context = replace(context, family=CustomFamily())
+    else:
+        plan = context.likelihood_plan
+
+        class CustomPlan(type(plan)):
+            pass
+
+        copied = CustomPlan(
+            **{item.name: getattr(plan, item.name) for item in fields(plan) if item.init}
+        )
+        context = replace(context, likelihood_plan=copied)
+    assert solver._chunk_reuse_data_certificate(context) is None
+
+
+def _categorical_problem(kind):
+    n = 96
+    x = np.linspace(-1.0, 1.0, n)
+    categories = np.resize(np.array(["a", "b", "c"]), n)
+    family = GaussianLS()
+    weights = resolved_prior(np.ones(n))
+    category = RandomEffect() if kind is RandomEffectGroupMatrix else Categorical(base="a")
+    layout = build_stacked_layout(
+        compile_predictors(
+            as_eager_frame(pd.DataFrame({"category": categories, "x": x})),
+            weights,
+            family.parameters,
+            (
+                Predictor("location", {"category": category, "x": Numeric()}),
+                Predictor("scale", {"x": Numeric()}),
+            ),
+            offsets={"location": np.zeros(n), "scale": np.zeros(n)},
+        )
+    )
+    if kind is SparseGroupMatrix:
+        state = layout.predictors[0]
+        groups = list(state.design.group_matrices)
+        groups[0] = SparseGroupMatrix(sp.csr_matrix(groups[0].toarray()))
+        layout = replace(
+            layout,
+            predictors=(
+                replace(state, design=DesignMatrix(groups, n, state.design.p)),
+                layout.predictors[1],
+            ),
+        )
+    y = 0.2 + 0.3 * x + 0.4 * (categories == "b") + np.random.default_rng(121).normal(size=n)
+    plan = family.bind_likelihood(y, weights, COMPLETE_OBSERVATION)
+    penalty = 0.4 * np.eye(layout.n_coefficients)
+    for state in layout.predictors:
+        penalty[state.intercept_index, state.intercept_index] = 0.0
+    config = DenseSolverConfig(coefficient_curvature="observed", tolerance=1e-9)
+    return family, layout, y, plan, penalty, config
+
+
+@pytest.mark.parametrize(
+    "kind", [CategoricalGroupMatrix, RandomEffectGroupMatrix, SparseGroupMatrix]
+)
+def test_category_and_csr_reuse_does_not_expand_or_refresh(kind, monkeypatch):
+    family, layout, y, plan, _, config = _categorical_problem(kind)
+    p = layout.n_coefficients
+    problem = (family, layout, y, plan, np.eye(p) * 1000.0, replace(config, tolerance=1e20))
+    session = solver._DenseObservedReuseSession()
+    source = _fit(problem, session=session, initial=np.zeros(p))
+    assert source.converged
+    assert id(source) in session._chunk_results
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("category/CSR reuse expanded design or refreshed likelihood")
+
+    monkeypatch.setattr(kind, "toarray", forbidden)
+    monkeypatch.setattr(GaussianLS, "evaluate_natural", forbidden)
+    reused = _fit(problem, session=session, source=source)
+    assert reused.iterations == 0
+    np.testing.assert_array_equal(reused.terminal_data_curvature, source.terminal_data_curvature)
+
+
+@pytest.mark.parametrize(
+    "kind", [CategoricalGroupMatrix, RandomEffectGroupMatrix, SparseGroupMatrix]
+)
+def test_category_and_csr_changing_penalty_reuse_matches_fresh(kind):
+    problem = _categorical_problem(kind)
+    session = solver._DenseObservedReuseSession()
+    source = _fit(problem, session=session)
+    assert source.converged
+    assert id(source) in session._chunk_results
+    next_problem = (*problem[:4], problem[4] * 1.8, problem[5])
+    reused = _fit(next_problem, session=session, source=source)
+    fresh = _fit(next_problem, initial=source.coefficients)
+    np.testing.assert_array_equal(reused.coefficients, fresh.coefficients)
+    np.testing.assert_array_equal(reused.terminal_score, fresh.terminal_score)
+    np.testing.assert_array_equal(reused.terminal_data_curvature, fresh.terminal_data_curvature)
+    assert reused.log_likelihood == fresh.log_likelihood
+
+
+@pytest.mark.parametrize(
+    "kind,field",
+    [
+        (CategoricalGroupMatrix, "codes"),
+        (RandomEffectGroupMatrix, "codes"),
+        (SparseGroupMatrix, "data"),
+        (SparseGroupMatrix, "indices"),
+        (SparseGroupMatrix, "indptr"),
+    ],
+)
+def test_category_and_csr_changes_refuse_reuse_even_when_eta_is_fixed(kind, field, monkeypatch):
+    family, layout, y, plan, _, config = _categorical_problem(kind)
+    p = layout.n_coefficients
+    problem = (family, layout, y, plan, np.eye(p) * 1000.0, replace(config, tolerance=1e20))
+    session = solver._DenseObservedReuseSession()
+    source = _fit(problem, session=session, initial=np.zeros(p))
+    assert id(source) in session._chunk_results
+    group = layout.predictors[0].design.group_matrices[0]
+    if field == "codes":
+        group.codes[0] = (group.codes[0] + 1) % group.n_levels
+    elif field == "data":
+        group.M.data[0] += 0.25
+    elif field == "indices":
+        group.M.indices[0] = 1 - group.M.indices[0]
+    else:
+        # Move the second row's entry into the originally empty first row.
+        group.M.indptr[1] = group.M.indptr[2]
+    calls = 0
+    original = GaussianLS.evaluate_natural
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(GaussianLS, "evaluate_natural", counted)
+    _fit(problem, session=session, source=source)
+    assert calls > 0
+
+
+@pytest.mark.parametrize("change", ["shape", "data_dtype", "indices_dtype", "indptr_dtype"])
+def test_csr_certificate_covers_storage_shape_and_dtypes(change):
+    problem = _categorical_problem(SparseGroupMatrix)
+    context = solver._validated_context(
+        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    )
+    before = solver._chunk_reuse_data_certificate(context)
+    assert before is not None
+    matrix = context.layout.predictors[0].design.group_matrices[0].M
+    if change == "shape":
+        matrix._shape = (matrix.shape[0], matrix.shape[1] + 1)
+    elif change == "data_dtype":
+        matrix.data = matrix.data.astype(np.float32)
+    else:
+        name = change.removesuffix("_dtype")
+        value = getattr(matrix, name)
+        dtype = np.int64 if value.dtype != np.dtype(np.int64) else np.int32
+        setattr(matrix, name, value.astype(dtype))
+    assert solver._chunk_reuse_data_certificate(context) != before
+
+
+@pytest.mark.parametrize("replacement", ["csc", "csr_array", "subclass"])
+def test_csr_certificate_refuses_unrecognized_matrix_semantics(replacement):
+    problem = _categorical_problem(SparseGroupMatrix)
+    context = solver._validated_context(
+        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    )
+    group = context.layout.predictors[0].design.group_matrices[0]
+    if replacement == "csc":
+        group.M = group.M.tocsc()
+    elif replacement == "csr_array":
+        group.M = sp.csr_array(group.M)
+    else:
+
+        class CustomCSR(sp.csr_matrix):
+            pass
+
+        group.M = CustomCSR(group.M)
+    assert solver._chunk_reuse_data_certificate(context) is None
+
+
+@pytest.mark.parametrize("flag", ["_has_sorted_indices", "_has_canonical_format"])
+def test_csr_certificate_covers_independent_cached_flag_changes(flag):
+    problem = _categorical_problem(SparseGroupMatrix)
+    context = solver._validated_context(
+        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    )
+    before = solver._chunk_reuse_data_certificate(context)
+    assert before is not None
+    matrix = context.layout.predictors[0].design.group_matrices[0].M
+    setattr(matrix, flag, not getattr(matrix, flag, None))
+    assert solver._chunk_reuse_data_certificate(context) != before
+
+
+def test_csr_certificate_does_not_populate_cached_flags():
+    problem = _categorical_problem(SparseGroupMatrix)
+    context = solver._validated_context(
+        *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
+    )
+    matrix = context.layout.predictors[0].design.group_matrices[0].M
+    flags = ("_has_sorted_indices", "_has_canonical_format")
+    for flag in flags:
+        vars(matrix).pop(flag, None)
+    assert solver._chunk_reuse_data_certificate(context) is not None
+    assert not any(flag in vars(matrix) for flag in flags)

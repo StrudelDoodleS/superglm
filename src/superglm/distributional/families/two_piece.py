@@ -28,6 +28,7 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
+    _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
@@ -629,3 +630,19 @@ __all__ = [
     "TwoPieceLogNormalLSS",
     "TwoPieceNormalLSS",
 ]
+
+
+_register_likelihood_reuse_contract(
+    TwoPieceLogNormalLSS,
+    TwoPieceLikelihoodPlan,
+    prepared_array_fields=("exact_response", "parameter_independent_carrier"),
+    link_types=(LowerBoundedLogLink, BoundedLogitLink),
+)
+
+
+_register_likelihood_reuse_contract(
+    TwoPieceNormalLSS,
+    TwoPieceLikelihoodPlan,
+    prepared_array_fields=("exact_response", "parameter_independent_carrier"),
+    link_types=(LowerBoundedLogLink, BoundedLogitLink),
+)

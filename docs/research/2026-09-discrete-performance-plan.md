@@ -143,3 +143,36 @@ No new capability is promoted merely because a microbenchmark improves.
 - Repeat complete-fit comparisons from this new source checkpoint before
   closing the insurance gate. Earlier timing receipts remain historical evidence;
   kernel diagnostics alone do not establish a complete-fit improvement.
+
+### Representation and integration findings
+
+- The freMTPL2 severity fixture is an exact training-support representation:
+  its three covariates have 73, 21 and 82 distinct values, below the 256-bin
+  budget, and reconstruct every supplied training value exactly. Prediction
+  evaluates the learned basis at the supplied holdout values, including the
+  one unseen marginal value. Its exact/discrete arithmetic differences must
+  not be described as discretization error. The support-32 synthetic fixture
+  is also exact on supplied covariates; the continuous synthetic fixture uses
+  approximate training bins. The comparison harness now uses a neutral label.
+- The next insurance window at `6e611349` gives discrete complete-fit times
+  4.214, 2.976 and 3.821 seconds, versus 13.383, 13.115 and 14.926 seconds
+  before these changes. Exact candidate times are 2.962, 2.804 and 3.929 seconds.
+  Same-representation saved numerical outputs are identical in every repeat.
+  These ranges overlap; repeat the final comparison before drawing a firm
+  conclusion about the residual exact/discrete difference.
+- Instrumentation confirms seven accepted chunked endpoint reuses, versus
+  seven refusals at baseline. Remaining costs include repeated chunk-plan
+  preparation and separate trial-value/derivative evaluation. Do not compare
+  isolated assembly timers: dense derivative work is attributed to likelihood
+  evaluation, while chunked derivative work is inside geometry assembly.
+- Broad regression testing caught a forbidden solver-to-family dependency in
+  the first certificate implementation. Built-in adapters now register their
+  exact reuse schemas through the existing contract layer. All seven existing
+  architecture checks and 71 reuse tests pass without relaxing that policy.
+  Complete integration validation remains pending the final source freeze.
+- The reuse certificate now also covers built-in categorical and random-effect
+  groups and exact CSR matrices. It hashes codes, dimensions and sparse storage
+  directly, including relevant cached CSR flags, without dense expansion or new
+  row caches. Unknown matrix formats and custom subclasses still refresh.
+  The 94 reuse regressions and 22 Gamma execution tests pass at this checkpoint;
+  the existing architecture policy remains intact.
