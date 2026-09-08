@@ -156,6 +156,8 @@ class DiscretizedSplineCategoricalGroupMatrix:
         "R_inv",
         "bin_idx_level",
         "row_idx",
+        "_row_order",
+        "_sorted_rows",
         "n_bins",
         "n_rows",
         "shape",
@@ -181,7 +183,12 @@ class DiscretizedSplineCategoricalGroupMatrix:
     ):
         self.B_unique = np.asarray(B_unique, dtype=np.float64)
         self.R_inv = np.asarray(R_inv, dtype=np.float64)
-        self.row_idx = np.asarray(row_idx, dtype=np.intp)
+        # Own the category indices so a caller cannot invalidate the cached
+        # row lookup by mutating the constructor argument.
+        self.row_idx = np.array(row_idx, dtype=np.intp, copy=True)
+        self.row_idx.flags.writeable = False
+        self._row_order = None
+        self._sorted_rows = None
         bin_idx_arr = np.asarray(bin_idx, dtype=np.intp)
         self.bin_idx_level = (
             bin_idx_arr if bin_idx_is_level else bin_idx_arr[self.row_idx]
@@ -202,6 +209,19 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
+
+    def __setstate__(self, state):
+        # Older learned matrices have no lookup slots. Rebuild lazily after
+        # restoring owned indices; NumPy pickle does not retain readonly flags.
+        dict_state, slot_state = state
+        if dict_state is not None:
+            self.__dict__.update(dict_state)
+        for name, value in slot_state.items():
+            setattr(self, name, value)
+        self.row_idx = np.array(self.row_idx, dtype=np.intp, copy=True)
+        self.row_idx.flags.writeable = False
+        self._row_order = None
+        self._sorted_rows = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.n_rows, dtype=np.float64)
@@ -265,14 +285,21 @@ class DiscretizedSplineCategoricalGroupMatrix:
         else:
             idx_arr = idx_raw.astype(np.intp, copy=False)
         if self.row_idx.size and idx_arr.size:
-            order = np.argsort(self.row_idx)
-            sorted_rows = self.row_idx[order]
-            pos = np.searchsorted(sorted_rows, idx_arr)
-            in_bounds = pos < sorted_rows.size
+            # Chunked fits revisit this parent many times. Sort once, retaining
+            # the original level order used by bin_idx_level and its algebra.
+            if self._sorted_rows is None:
+                order = np.argsort(self.row_idx)
+                sorted_rows = self.row_idx[order]
+                order.flags.writeable = False
+                sorted_rows.flags.writeable = False
+                self._row_order = order
+                self._sorted_rows = sorted_rows
+            pos = np.searchsorted(self._sorted_rows, idx_arr)
+            in_bounds = pos < self._sorted_rows.size
             matched = np.zeros(idx_arr.size, dtype=bool)
-            matched[in_bounds] = sorted_rows[pos[in_bounds]] == idx_arr[in_bounds]
+            matched[in_bounds] = self._sorted_rows[pos[in_bounds]] == idx_arr[in_bounds]
             pos_sub = np.flatnonzero(matched).astype(np.intp, copy=False)
-            pos_self = order[pos[matched]]
+            pos_self = self._row_order[pos[matched]]
             bin_idx_level = self.bin_idx_level[pos_self]
         else:
             pos_sub = np.empty(0, dtype=np.intp)

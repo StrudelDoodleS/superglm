@@ -728,6 +728,7 @@ class SplineCategoricalGroupMatrix:
         "_p_b",
         "R_inv",
         "row_idx",
+        "_sorted_rows",
         "n_rows",
         "shape",
         "omega",
@@ -754,7 +755,11 @@ class SplineCategoricalGroupMatrix:
             if row_idx.size and (int(row_idx.min()) < 0 or int(row_idx.max()) >= self.n_rows):
                 raise ValueError("row index array contains rows outside the spline basis")
 
-        self.row_idx = np.asarray(row_idx, dtype=np.intp)
+        # Subset lookups are reusable only while the category indices are
+        # immutable; do not freeze or retain the caller's mutable array.
+        self.row_idx = np.array(row_idx, dtype=np.intp, copy=True)
+        self.row_idx.flags.writeable = False
+        self._sorted_rows = None
         self.B_level = self.B[self.row_idx].tocsr()
         self._data = self.B_level.data.astype(np.float64)
         self._indices = self.B_level.indices
@@ -774,6 +779,18 @@ class SplineCategoricalGroupMatrix:
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
+
+    def __setstate__(self, state):
+        # Accept learned matrices predating the lookup cache, and restore the
+        # index ownership contract lost when NumPy arrays pass through pickle.
+        dict_state, slot_state = state
+        if dict_state is not None:
+            self.__dict__.update(dict_state)
+        for name, value in slot_state.items():
+            setattr(self, name, value)
+        self.row_idx = np.array(self.row_idx, dtype=np.intp, copy=True)
+        self.row_idx.flags.writeable = False
+        self._sorted_rows = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.shape[0], dtype=np.float64)
@@ -828,7 +845,17 @@ class SplineCategoricalGroupMatrix:
             idx_arr = np.flatnonzero(idx_arr)
         else:
             idx_arr = idx_arr.astype(np.intp, copy=False)
-        sub_row_idx = np.flatnonzero(np.isin(idx_arr, self.row_idx))
+        if self.row_idx.size and idx_arr.size:
+            if self._sorted_rows is None:
+                self._sorted_rows = np.sort(self.row_idx)
+                self._sorted_rows.flags.writeable = False
+            pos = np.searchsorted(self._sorted_rows, idx_arr)
+            in_bounds = pos < self._sorted_rows.size
+            matched = np.zeros(idx_arr.size, dtype=bool)
+            matched[in_bounds] = self._sorted_rows[pos[in_bounds]] == idx_arr[in_bounds]
+            sub_row_idx = np.flatnonzero(matched)
+        else:
+            sub_row_idx = np.empty(0, dtype=np.intp)
         sub = SplineCategoricalGroupMatrix(self.B[idx_arr], self.R_inv, sub_row_idx)
         sub.omega = self.omega
         sub.projection = self.projection
