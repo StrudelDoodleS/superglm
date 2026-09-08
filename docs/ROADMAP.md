@@ -1,7 +1,8 @@
 # Roadmap
 
 Last strategic review: **2026-09-08**. Starting baseline: `origin/master` at
-`8962c452` (published v0.31.0); C3/C1 implementation through `9277baef`.
+`8962c452` (published v0.31.0); C3/C1 implementation through `1a8952a4`, with convergence follow-through at
+`5f994c8f`.
 
 This is **directional project state, not an implementation specification**,
 delivery commitment, or authorization to start a capability. Scope implementation
@@ -46,8 +47,9 @@ the scalar engine's existing performance and interpretability.
 - **Real gaps remain:** LSS shape constraints warn and fit unconstrained;
   cross-predictor penalties are unsupported. Dense coefficient factors, family
   derivative arrays and retained coefficient histories still limit size. Some
-  smoothing fits, including the tested large real-book NB2 configuration, remain
-  uncertified.
+  smoothing fits can still lack strict certification. The tested large real-book
+  NB2 configuration now reaches configured stationarity after a finite-NB2
+  numerical-range fix.
 
 ## Completed scoped work: C3 + C1
 
@@ -69,14 +71,26 @@ first-order numerical contract, not a rigorous enclosure of every derivative
 error or a local/global minimum guarantee. Unresolved reference probes remain
 visible.
 
+The [pragmatic convergence follow-through](research/2026-09-pragmatic-convergence.md)
+adds practical stopping across substantial outward lambda movement, retained-fit
+EFS recovery when Newton derivatives are unavailable, and a bounded finite-NB2
+low-mean range extension. The last change removes a numerical guard that blocked
+an improving coefficient step on one policy. The 610,212-policy NB2 book now
+reaches configured coefficient and LAML stationarity in nine outer iterations.
+Its corrected uncertainty differs materially from the earlier stopped fits.
+This does not add an exact Poisson face or a global-minimum guarantee.
+
 **C1 production route:** public observed chunking, bounded derivative replay and
 cached categorical row extraction are implemented and regression tested.
 Complete smoothing fits cover signed geometry, weight semantics, interactions,
 prediction/covariance and serialization. The insurance evidence shows a memory
 benefit on 449,000 synthetic rows formed by repeating 22,450 real severity
-policies; the smaller real book does not save RSS. The large real-book NB2 comparison
-reproduces an uncertified smoothing stop in both versions, so its lower RSS is
-not a claim of reliable converged fitting.
+policies; the smaller real book does not save RSS. The initial large real-book
+NB2 comparison stopped without strict certification. Its Newton derivative
+recovery and finite numerical range have since been corrected, and the same
+workload reaches configured stationarity;
+see the [follow-through evidence](research/2026-09-pragmatic-convergence.md).
+The historical RSS comparison remains separate from the new convergence result.
 
 Exact compiled-design checks and continuous-grid sensitivity are separate
 evidence. Continuous Gaussian grids of 64, 256 and 1,024 bins reduce held-out
@@ -85,6 +99,16 @@ approximation rate. Whole-process RSS, actual dispatch, complete-fit work and
 the timing audit are recorded in the completion report. This closes the chosen
 C1 scope without claiming constant memory, universal speedups or 10⁷–10⁸-row
 capability.
+
+The final-source [performance receipt](../benchmarks/c3_pragmatic_performance_receipt.json)
+records three serial runs per arm on the replicated 449,000-row severity
+workload: median complete-fit time 25.56 → 20.96 s (18.0% lower), and process
+high-water RSS 1,490.48 → 1,007.39 MiB (32.4% lower). Headroom remained active;
+the independently reviewed result is a qualified local observation, with
+background CPU and screening changes recorded. The comparison changes both
+source version and `discrete=False` to `True`; observed numerical agreement
+does not replace separate discretization-error evidence. Final production
+validation passed 11,546 tests with 174 skips and mandatory real-data availability.
 
 ## Next
 
@@ -153,9 +177,10 @@ another predictor count. Reopen only with a concrete use case and validating evi
 ## What changes the order
 
 - New demonstrated wrong-answer or uncertainty failures take precedence over
-  expansion. Reopen C3 for a scoped unsupported endpoint or a reproduced
-  convergence failure that blocks an intended model; the observed NB2 stop is
-  an explicit candidate, not a hidden passing result.
+  expansion. Reopen C3 when a scoped unsupported endpoint or reproduced
+  convergence failure blocks an intended model. The tested NB2 stop prompted
+  EFS recovery, pragmatic stopping and a bounded finite-NB2 range extension;
+  it now reaches configured stationarity.
 - Reopen C1 when an intended book exceeds its memory or latency budget. Profile
   family derivatives, retained history and coefficient factors before adding
   another assembler. Bin sensitivity or covariance disagreement blocks a

@@ -1,0 +1,919 @@
+{
+  "schema": 1,
+  "scope": "Paired GPD negative controls for the practical-boundary policy; these controls retain meaningful parameter motion and should not claim practical convergence.",
+  "interpretation": "Within each pair, unchanged outputs demonstrate the gate continues to refuse. The historical certified strict fit uses a different start and outer method: comparisons quantify different stopping solutions, not equivalence or representation parity.",
+  "timing": "UNMEASURED: numerical diagnostics potentially concurrent; no speed claim.",
+  "harness_note": "The helper changed between the original-cap and wide-cap pairs. Each run records its actual harness hash; equality is asserted only within each pair.",
+  "inference_note": "Conditional linear-predictor SE is sqrt(eta_variance), computed from predictor design and the conditional coefficient covariance; it excludes smoothing-parameter uncertainty.",
+  "parameter_columns": [
+    "scale",
+    "shape"
+  ],
+  "linear_predictor_columns": [
+    "log(scale)",
+    "bounded-logit(shape)"
+  ],
+  "gate_findings": [
+    "Original cap 1e10 and plateau tolerance 2e-6: objective changes pass the last three accepted steps, but parameter movement is 0.0030234, 0.0019716, 0.00096098. Only one consecutive step passes the 0.001 parameter tolerance; the required three-step window fails. The terminal cap refusal is not an accepted small step.",
+    "Wide cap 1e12 and default plateau tolerance 1e-7: last three accepted objective changes are 3.2425e-7, 3.7134e-7, 2.3531e-9, with parameter movements 0.0019716, 0.0039288, 0.000022061. Only the last step passes both tests; a later objective rejection cannot complete the window.",
+    "The strict reference has a lower objective by about 0.045-0.048, but substantial uncertainty differences remain: coefficient covariance Frobenius differences are about 32-33%, and shape-link conditional SE relative L2 differences about 10.5%. No equivalence claim follows from a small objective gap."
+  ],
+  "input_sha256": {
+    "frame": "9655f77be7bd127b9059519454241c65aef1dac8ae119cd2826088b0ffaea8e7",
+    "y": "efddc8f9aad9679bfb61fce8daeb747cc730b05cd3e1286ed3f1a6f29f1f1c36",
+    "weights": "3f2e580cc356710ddf1a69e0be460035c141269a4fba7ae776275289b24932a2"
+  },
+  "n": 1401,
+  "q": 98,
+  "comparison_script_sha256": "d2c0375d3f3ee5660fe12670fcbbcc95f61551cea419bb539d1c10f2b882a04e",
+  "pairs": {
+    "after": {
+      "baseline": "before",
+      "all_saved_arrays_bitwise_equal": true,
+      "result_history_and_work_equal": true,
+      "same_config_and_harness": true
+    },
+    "after-widecap": {
+      "baseline": "before-widecap",
+      "all_saved_arrays_bitwise_equal": true,
+      "result_history_and_work_equal": true,
+      "same_config_and_harness": true
+    }
+  },
+  "runs": {
+    "before": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/gpd-outward/before.json",
+      "raw_json_sha256": "7bc92c10b2e9b43603a46cc62f18a47a3d4b4f7b4169cdd54c994c787b589baf",
+      "raw_npz_sha256": "0f5ed2c9f69bbc0b77fb7c8c2869d4d718d8a766bb682091aaac5b764a127f41",
+      "source": {
+        "sha": "1a8952a43ef90f16f8aa8fd79f9dfabe8cf7d0e8",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_after": {
+        "sha": "1a8952a43ef90f16f8aa8fd79f9dfabe8cf7d0e8",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stable_during_fit": true,
+      "harness_sha256": "5c8cfe72ac67573a5c48b87de430a3f152a3c415995cd2a76ca46c2150e21820",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "provenance_helper_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "evidence_files_stable_during_fit": true,
+      "settings": {
+        "case": "gpd",
+        "source": "/home/max/projects/superglm/.worktrees/c3-c1-completion",
+        "outer": "efs",
+        "start": 0.1,
+        "strict": false,
+        "iterations": 60,
+        "acceleration": "multisecant",
+        "plateau_tol": 2e-06,
+        "parameter_tol": 0.001,
+        "oracle": false,
+        "row_reference": false
+      },
+      "smoothing_config": {
+        "max_iterations": 60,
+        "tolerance": 1e-06,
+        "max_log_step": 5.0,
+        "minimum_lambda": 1e-06,
+        "maximum_lambda": 10000000000.0,
+        "max_backtracks": 8,
+        "backtrack_factor": 0.5,
+        "objective_tolerance": 1e-09,
+        "initial_lambda": 0.1,
+        "plateau_tolerance": 2e-06,
+        "plateau_iterations": 3,
+        "practical_convergence": true,
+        "practical_parameter_tolerance": 0.001,
+        "boundary_saturation": 1.0,
+        "boundary_iterations": 3,
+        "acceleration": "multisecant",
+        "acceleration_history": 5,
+        "acceleration_max_amplification": 8.0,
+        "outer": "efs",
+        "handoff_step": 0.5,
+        "handoff_iterations": 10,
+        "max_newton_iterations": 20,
+        "derivative_step": 0.001,
+        "hessian_certificate_fraction": 0.1,
+        "maximum_lambda_conditioning": 100000000000000.0
+      },
+      "result": {
+        "converged": false,
+        "certified": false,
+        "reason": "lambda_cap_unresolved",
+        "objective": 10804.724537123871,
+        "edf": 24.178869943504658,
+        "log_likelihood": -10762.589114719545,
+        "lambdas": {
+          "scale:x#wiggle": 2.3125824466429483,
+          "scale:z#wiggle": 1.509689356787018,
+          "scale:x:z#margin_x": 0.04324338195793412,
+          "scale:x:z#margin_z": 0.0951106063708811,
+          "shape:x#wiggle": 2.394274591082817,
+          "shape:z#wiggle": 10000000000.0,
+          "shape:x:z#margin_x": 123.66348386484907,
+          "shape:x:z#margin_z": 0.08773803476369497
+        },
+        "unresolved": [
+          "shape:z#wiggle"
+        ],
+        "terminal_projected_gradient_norm": null,
+        "terminal_gradient": null,
+        "terminal_gradient_certificate": null,
+        "stationarity_bar": 0.01080572453712387,
+        "terminal_fit_index": 19,
+        "terminal_evidence_fresh": false,
+        "terminal_raw_log_steps": null,
+        "endpoint_directions": {}
+      },
+      "work": {
+        "outer_iterations": 15,
+        "accepted_outer_iterations": 14,
+        "stages": {
+          "efs": 15
+        },
+        "coefficient_fits": 21,
+        "coefficient_iterations_total": 41,
+        "coefficient_backtracks_total": 20
+      },
+      "last_accepted_window": {
+        "available": true,
+        "required_consecutive_accepted_steps": 3,
+        "parameter_scale": "abs(candidate-source)/(1+max(abs(source),abs(candidate))); maximum over all rows and both natural parameters",
+        "rows": [
+          {
+            "iteration": 12,
+            "source_fit_index": 15,
+            "accepted_fit_index": 17,
+            "relative_objective_change": 5.977394039757856e-07,
+            "all_parameter_change": 0.0030233979599211687,
+            "parameter_change_by_column": [
+              0.0030233979599211687,
+              0.002245278287027141
+            ],
+            "max_accepted_log_step": 1.5907581412000447,
+            "objective_gate_pass": true,
+            "parameter_gate_pass": false
+          },
+          {
+            "iteration": 13,
+            "source_fit_index": 17,
+            "accepted_fit_index": 18,
+            "relative_objective_change": 3.2425370204377296e-07,
+            "all_parameter_change": 0.0019716261891355316,
+            "parameter_change_by_column": [
+              0.0019716261891355316,
+              0.0014492987414861389
+            ],
+            "max_accepted_log_step": 1.5946676805534032,
+            "objective_gate_pass": true,
+            "parameter_gate_pass": false
+          },
+          {
+            "iteration": 14,
+            "source_fit_index": 18,
+            "accepted_fit_index": 19,
+            "relative_objective_change": 1.3619542145752985e-07,
+            "all_parameter_change": 0.0009609825227513425,
+            "parameter_change_by_column": [
+              0.0009609825227513425,
+              0.0006970480774142959
+            ],
+            "max_accepted_log_step": 1.2494055961756525,
+            "objective_gate_pass": true,
+            "parameter_gate_pass": true
+          }
+        ],
+        "objective_and_parameter_window_pass": false,
+        "cumulative_window": {
+          "relative_objective_change": 1.0581882080866605e-06,
+          "all_parameter_change": 0.005945251258729122,
+          "parameter_change_by_column": [
+            0.005945251258729122,
+            0.004385797997366826
+          ],
+          "objective_gate_pass": true,
+          "parameter_gate_pass": false
+        },
+        "limitation": "This is a necessary-window check. Rejections, lower-bound pressure, exact-face state, and terminal boundary assessment impose additional gates."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "UNMEASURED: numerical diagnostic, potentially concurrent"
+    },
+    "after": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/gpd-outward/after.json",
+      "raw_json_sha256": "880278137fe700979f86f89e6ebe57e04dc909f02e15f0c56021f8b545d83736",
+      "raw_npz_sha256": "0f5ed2c9f69bbc0b77fb7c8c2869d4d718d8a766bb682091aaac5b764a127f41",
+      "source": {
+        "sha": "8b66828d032878057815fb1acbb28028872c4cc8",
+        "diff_sha256": "0681e33afcc9151bba0030d7a4111f99cae383e3eafaaa79dfcbd37e8296ffc2",
+        "source_tree_sha256": "c330fc5d653dbf8d0d7cdf612cf9e3477f2761b051e77078ba670680c4d7760f"
+      },
+      "source_after": {
+        "sha": "8b66828d032878057815fb1acbb28028872c4cc8",
+        "diff_sha256": "0681e33afcc9151bba0030d7a4111f99cae383e3eafaaa79dfcbd37e8296ffc2",
+        "source_tree_sha256": "c330fc5d653dbf8d0d7cdf612cf9e3477f2761b051e77078ba670680c4d7760f"
+      },
+      "source_stable_during_fit": true,
+      "harness_sha256": "5c8cfe72ac67573a5c48b87de430a3f152a3c415995cd2a76ca46c2150e21820",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "provenance_helper_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "evidence_files_stable_during_fit": true,
+      "settings": {
+        "case": "gpd",
+        "source": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence",
+        "outer": "efs",
+        "start": 0.1,
+        "strict": false,
+        "iterations": 60,
+        "acceleration": "multisecant",
+        "plateau_tol": 2e-06,
+        "parameter_tol": 0.001,
+        "oracle": false,
+        "row_reference": false
+      },
+      "smoothing_config": {
+        "max_iterations": 60,
+        "tolerance": 1e-06,
+        "max_log_step": 5.0,
+        "minimum_lambda": 1e-06,
+        "maximum_lambda": 10000000000.0,
+        "max_backtracks": 8,
+        "backtrack_factor": 0.5,
+        "objective_tolerance": 1e-09,
+        "initial_lambda": 0.1,
+        "plateau_tolerance": 2e-06,
+        "plateau_iterations": 3,
+        "practical_convergence": true,
+        "practical_parameter_tolerance": 0.001,
+        "boundary_saturation": 1.0,
+        "boundary_iterations": 3,
+        "acceleration": "multisecant",
+        "acceleration_history": 5,
+        "acceleration_max_amplification": 8.0,
+        "outer": "efs",
+        "handoff_step": 0.5,
+        "handoff_iterations": 10,
+        "max_newton_iterations": 20,
+        "derivative_step": 0.001,
+        "hessian_certificate_fraction": 0.1,
+        "maximum_lambda_conditioning": 100000000000000.0
+      },
+      "result": {
+        "converged": false,
+        "certified": false,
+        "reason": "lambda_cap_unresolved",
+        "objective": 10804.724537123871,
+        "edf": 24.178869943504658,
+        "log_likelihood": -10762.589114719545,
+        "lambdas": {
+          "scale:x#wiggle": 2.3125824466429483,
+          "scale:z#wiggle": 1.509689356787018,
+          "scale:x:z#margin_x": 0.04324338195793412,
+          "scale:x:z#margin_z": 0.0951106063708811,
+          "shape:x#wiggle": 2.394274591082817,
+          "shape:z#wiggle": 10000000000.0,
+          "shape:x:z#margin_x": 123.66348386484907,
+          "shape:x:z#margin_z": 0.08773803476369497
+        },
+        "unresolved": [
+          "shape:z#wiggle"
+        ],
+        "terminal_projected_gradient_norm": null,
+        "terminal_gradient": null,
+        "terminal_gradient_certificate": null,
+        "stationarity_bar": 0.01080572453712387,
+        "terminal_fit_index": 19,
+        "terminal_evidence_fresh": false,
+        "terminal_raw_log_steps": {
+          "scale:x#wiggle": -0.0013597473639563873,
+          "scale:z#wiggle": -0.0007208925290290158,
+          "scale:x:z#margin_x": -0.0007116313924191431,
+          "scale:x:z#margin_z": -0.0006766905670598788,
+          "shape:x#wiggle": 0.007404569131117644,
+          "shape:z#wiggle": 1.598081914628434,
+          "shape:x:z#margin_x": 0.6127902866401254,
+          "shape:x:z#margin_z": -0.011364520400402256
+        },
+        "endpoint_directions": {}
+      },
+      "work": {
+        "outer_iterations": 15,
+        "accepted_outer_iterations": 14,
+        "stages": {
+          "efs": 15
+        },
+        "coefficient_fits": 21,
+        "coefficient_iterations_total": 41,
+        "coefficient_backtracks_total": 20
+      },
+      "last_accepted_window": {
+        "available": true,
+        "required_consecutive_accepted_steps": 3,
+        "parameter_scale": "abs(candidate-source)/(1+max(abs(source),abs(candidate))); maximum over all rows and both natural parameters",
+        "rows": [
+          {
+            "iteration": 12,
+            "source_fit_index": 15,
+            "accepted_fit_index": 17,
+            "relative_objective_change": 5.977394039757856e-07,
+            "all_parameter_change": 0.0030233979599211687,
+            "parameter_change_by_column": [
+              0.0030233979599211687,
+              0.002245278287027141
+            ],
+            "max_accepted_log_step": 1.5907581412000447,
+            "objective_gate_pass": true,
+            "parameter_gate_pass": false
+          },
+          {
+            "iteration": 13,
+            "source_fit_index": 17,
+            "accepted_fit_index": 18,
+            "relative_objective_change": 3.2425370204377296e-07,
+            "all_parameter_change": 0.0019716261891355316,
+            "parameter_change_by_column": [
+              0.0019716261891355316,
+              0.0014492987414861389
+            ],
+            "max_accepted_log_step": 1.5946676805534032,
+            "objective_gate_pass": true,
+            "parameter_gate_pass": false
+          },
+          {
+            "iteration": 14,
+            "source_fit_index": 18,
+            "accepted_fit_index": 19,
+            "relative_objective_change": 1.3619542145752985e-07,
+            "all_parameter_change": 0.0009609825227513425,
+            "parameter_change_by_column": [
+              0.0009609825227513425,
+              0.0006970480774142959
+            ],
+            "max_accepted_log_step": 1.2494055961756525,
+            "objective_gate_pass": true,
+            "parameter_gate_pass": true
+          }
+        ],
+        "objective_and_parameter_window_pass": false,
+        "cumulative_window": {
+          "relative_objective_change": 1.0581882080866605e-06,
+          "all_parameter_change": 0.005945251258729122,
+          "parameter_change_by_column": [
+            0.005945251258729122,
+            0.004385797997366826
+          ],
+          "objective_gate_pass": true,
+          "parameter_gate_pass": false
+        },
+        "limitation": "This is a necessary-window check. Rejections, lower-bound pressure, exact-face state, and terminal boundary assessment impose additional gates."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "UNMEASURED: numerical diagnostic, potentially concurrent"
+    },
+    "before-widecap": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/gpd-outward/before-widecap.json",
+      "raw_json_sha256": "9b65c77e931628c4e949376491a9e0a721b5d10cc088133dda4b69dbc1ee5ae5",
+      "raw_npz_sha256": "ea51e372d1516be9f6dd103e84c9c79a8d1c2c223c26a6e972cc5d1ce3a52cd3",
+      "source": {
+        "sha": "1a8952a43ef90f16f8aa8fd79f9dfabe8cf7d0e8",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_after": {
+        "sha": "1a8952a43ef90f16f8aa8fd79f9dfabe8cf7d0e8",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stable_during_fit": true,
+      "harness_sha256": "48fa84f8531865a57d19543affe1feeeb72a33710b9559b91bddfd456ef17bc5",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "provenance_helper_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "evidence_files_stable_during_fit": true,
+      "settings": {
+        "case": "gpd",
+        "source": "/home/max/projects/superglm/.worktrees/c3-c1-completion",
+        "outer": "efs",
+        "start": 0.1,
+        "strict": false,
+        "iterations": 60,
+        "acceleration": "multisecant",
+        "maximum_lambda": 1000000000000.0,
+        "plateau_tol": null,
+        "parameter_tol": null,
+        "oracle": false,
+        "row_reference": false
+      },
+      "smoothing_config": {
+        "max_iterations": 60,
+        "tolerance": 1e-06,
+        "max_log_step": 5.0,
+        "minimum_lambda": 1e-06,
+        "maximum_lambda": 1000000000000.0,
+        "max_backtracks": 8,
+        "backtrack_factor": 0.5,
+        "objective_tolerance": 1e-09,
+        "initial_lambda": 0.1,
+        "plateau_tolerance": 1e-07,
+        "plateau_iterations": 3,
+        "practical_convergence": true,
+        "practical_parameter_tolerance": 0.001,
+        "boundary_saturation": 1.0,
+        "boundary_iterations": 3,
+        "acceleration": "multisecant",
+        "acceleration_history": 5,
+        "acceleration_max_amplification": 8.0,
+        "outer": "efs",
+        "handoff_step": 0.5,
+        "handoff_iterations": 10,
+        "max_newton_iterations": 20,
+        "derivative_step": 0.001,
+        "hessian_certificate_fraction": 0.1,
+        "maximum_lambda_conditioning": 100000000000000.0
+      },
+      "result": {
+        "converged": false,
+        "certified": false,
+        "reason": "objective_rejected",
+        "objective": 10804.721970808165,
+        "edf": 24.188255604858895,
+        "log_likelihood": -10762.571209653397,
+        "lambdas": {
+          "scale:x#wiggle": 2.302943443828717,
+          "scale:z#wiggle": 1.5064098983163794,
+          "scale:x:z#margin_x": 0.043144531497601626,
+          "scale:x:z#margin_z": 0.09490480852262402,
+          "shape:x#wiggle": 2.446371719200814,
+          "shape:z#wiggle": 436978934885.76575,
+          "shape:x:z#margin_x": 539.7280013825266,
+          "shape:x:z#margin_z": 0.0842655581817791
+        },
+        "unresolved": [],
+        "terminal_projected_gradient_norm": null,
+        "terminal_gradient": null,
+        "terminal_gradient_certificate": null,
+        "stationarity_bar": 0.010805721970808164,
+        "terminal_fit_index": 25,
+        "terminal_evidence_fresh": false,
+        "terminal_raw_log_steps": null,
+        "endpoint_directions": {}
+      },
+      "work": {
+        "outer_iterations": 16,
+        "accepted_outer_iterations": 15,
+        "stages": {
+          "efs": 16
+        },
+        "coefficient_fits": 35,
+        "coefficient_iterations_total": 53,
+        "coefficient_backtracks_total": 7
+      },
+      "last_accepted_window": {
+        "available": true,
+        "required_consecutive_accepted_steps": 3,
+        "parameter_scale": "abs(candidate-source)/(1+max(abs(source),abs(candidate))); maximum over all rows and both natural parameters",
+        "rows": [
+          {
+            "iteration": 13,
+            "source_fit_index": 17,
+            "accepted_fit_index": 18,
+            "relative_objective_change": 3.2425370204377296e-07,
+            "all_parameter_change": 0.0019716261891355316,
+            "parameter_change_by_column": [
+              0.0019716261891355316,
+              0.0014492987414861389
+            ],
+            "max_accepted_log_step": 1.5946676805534032,
+            "objective_gate_pass": false,
+            "parameter_gate_pass": false
+          },
+          {
+            "iteration": 14,
+            "source_fit_index": 18,
+            "accepted_fit_index": 19,
+            "relative_objective_change": 3.713382099038619e-07,
+            "all_parameter_change": 0.00392877662933546,
+            "parameter_change_by_column": [
+              0.00392877662933546,
+              0.0028751484219466097
+            ],
+            "max_accepted_log_step": 5.0,
+            "objective_gate_pass": false,
+            "parameter_gate_pass": false
+          },
+          {
+            "iteration": 15,
+            "source_fit_index": 19,
+            "accepted_fit_index": 25,
+            "relative_objective_change": 2.3531201111677033e-09,
+            "all_parameter_change": 2.2061164853793913e-05,
+            "parameter_change_by_column": [
+              2.2061164853793913e-05,
+              1.6776850637080424e-05
+            ],
+            "max_accepted_log_step": 0.026705493192615393,
+            "objective_gate_pass": true,
+            "parameter_gate_pass": true
+          }
+        ],
+        "objective_and_parameter_window_pass": false,
+        "cumulative_window": {
+          "relative_objective_change": 6.979449100142023e-07,
+          "all_parameter_change": 0.005876047549052944,
+          "parameter_change_by_column": [
+            0.005876047549052944,
+            0.004303575564250602
+          ],
+          "objective_gate_pass": false,
+          "parameter_gate_pass": false
+        },
+        "limitation": "This is a necessary-window check. Rejections, lower-bound pressure, exact-face state, and terminal boundary assessment impose additional gates."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "UNMEASURED: numerical diagnostic, potentially concurrent"
+    },
+    "after-widecap": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/gpd-outward/after-widecap.json",
+      "raw_json_sha256": "dbbb25ce1a158fd82819a18550e50e9ee0e0c1b864cffd8adac58bf0950bc44d",
+      "raw_npz_sha256": "ea51e372d1516be9f6dd103e84c9c79a8d1c2c223c26a6e972cc5d1ce3a52cd3",
+      "source": {
+        "sha": "8b66828d032878057815fb1acbb28028872c4cc8",
+        "diff_sha256": "2e18550541eb479273e1af7f46f59613be3a19271d5b74d136edfc5db34467da",
+        "source_tree_sha256": "c330fc5d653dbf8d0d7cdf612cf9e3477f2761b051e77078ba670680c4d7760f"
+      },
+      "source_after": {
+        "sha": "8b66828d032878057815fb1acbb28028872c4cc8",
+        "diff_sha256": "2e18550541eb479273e1af7f46f59613be3a19271d5b74d136edfc5db34467da",
+        "source_tree_sha256": "c330fc5d653dbf8d0d7cdf612cf9e3477f2761b051e77078ba670680c4d7760f"
+      },
+      "source_stable_during_fit": true,
+      "harness_sha256": "48fa84f8531865a57d19543affe1feeeb72a33710b9559b91bddfd456ef17bc5",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "provenance_helper_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "evidence_files_stable_during_fit": true,
+      "settings": {
+        "case": "gpd",
+        "source": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence",
+        "outer": "efs",
+        "start": 0.1,
+        "strict": false,
+        "iterations": 60,
+        "acceleration": "multisecant",
+        "maximum_lambda": 1000000000000.0,
+        "plateau_tol": null,
+        "parameter_tol": null,
+        "oracle": false,
+        "row_reference": false
+      },
+      "smoothing_config": {
+        "max_iterations": 60,
+        "tolerance": 1e-06,
+        "max_log_step": 5.0,
+        "minimum_lambda": 1e-06,
+        "maximum_lambda": 1000000000000.0,
+        "max_backtracks": 8,
+        "backtrack_factor": 0.5,
+        "objective_tolerance": 1e-09,
+        "initial_lambda": 0.1,
+        "plateau_tolerance": 1e-07,
+        "plateau_iterations": 3,
+        "practical_convergence": true,
+        "practical_parameter_tolerance": 0.001,
+        "boundary_saturation": 1.0,
+        "boundary_iterations": 3,
+        "acceleration": "multisecant",
+        "acceleration_history": 5,
+        "acceleration_max_amplification": 8.0,
+        "outer": "efs",
+        "handoff_step": 0.5,
+        "handoff_iterations": 10,
+        "max_newton_iterations": 20,
+        "derivative_step": 0.001,
+        "hessian_certificate_fraction": 0.1,
+        "maximum_lambda_conditioning": 100000000000000.0
+      },
+      "result": {
+        "converged": false,
+        "certified": false,
+        "reason": "objective_rejected",
+        "objective": 10804.721970808165,
+        "edf": 24.188255604858895,
+        "log_likelihood": -10762.571209653397,
+        "lambdas": {
+          "scale:x#wiggle": 2.302943443828717,
+          "scale:z#wiggle": 1.5064098983163794,
+          "scale:x:z#margin_x": 0.043144531497601626,
+          "scale:x:z#margin_z": 0.09490480852262402,
+          "shape:x#wiggle": 2.446371719200814,
+          "shape:z#wiggle": 436978934885.76575,
+          "shape:x:z#margin_x": 539.7280013825266,
+          "shape:x:z#margin_z": 0.0842655581817791
+        },
+        "unresolved": [],
+        "terminal_projected_gradient_norm": null,
+        "terminal_gradient": null,
+        "terminal_gradient_certificate": null,
+        "stationarity_bar": 0.010805721970808164,
+        "terminal_fit_index": 25,
+        "terminal_evidence_fresh": false,
+        "terminal_raw_log_steps": {
+          "scale:x#wiggle": -0.00010784255243889707,
+          "scale:z#wiggle": -0.0001253773835402927,
+          "scale:x:z#margin_x": 0.0001479226760165986,
+          "scale:x:z#margin_z": 0.00019824192129158646,
+          "shape:x#wiggle": 0.0020352293603077554,
+          "shape:z#wiggle": -4.0968716064071486e-07,
+          "shape:x:z#margin_x": 0.6062794830726252,
+          "shape:x:z#margin_z": 0.007718405972176434
+        },
+        "endpoint_directions": {}
+      },
+      "work": {
+        "outer_iterations": 16,
+        "accepted_outer_iterations": 15,
+        "stages": {
+          "efs": 16
+        },
+        "coefficient_fits": 35,
+        "coefficient_iterations_total": 53,
+        "coefficient_backtracks_total": 7
+      },
+      "last_accepted_window": {
+        "available": true,
+        "required_consecutive_accepted_steps": 3,
+        "parameter_scale": "abs(candidate-source)/(1+max(abs(source),abs(candidate))); maximum over all rows and both natural parameters",
+        "rows": [
+          {
+            "iteration": 13,
+            "source_fit_index": 17,
+            "accepted_fit_index": 18,
+            "relative_objective_change": 3.2425370204377296e-07,
+            "all_parameter_change": 0.0019716261891355316,
+            "parameter_change_by_column": [
+              0.0019716261891355316,
+              0.0014492987414861389
+            ],
+            "max_accepted_log_step": 1.5946676805534032,
+            "objective_gate_pass": false,
+            "parameter_gate_pass": false
+          },
+          {
+            "iteration": 14,
+            "source_fit_index": 18,
+            "accepted_fit_index": 19,
+            "relative_objective_change": 3.713382099038619e-07,
+            "all_parameter_change": 0.00392877662933546,
+            "parameter_change_by_column": [
+              0.00392877662933546,
+              0.0028751484219466097
+            ],
+            "max_accepted_log_step": 5.0,
+            "objective_gate_pass": false,
+            "parameter_gate_pass": false
+          },
+          {
+            "iteration": 15,
+            "source_fit_index": 19,
+            "accepted_fit_index": 25,
+            "relative_objective_change": 2.3531201111677033e-09,
+            "all_parameter_change": 2.2061164853793913e-05,
+            "parameter_change_by_column": [
+              2.2061164853793913e-05,
+              1.6776850637080424e-05
+            ],
+            "max_accepted_log_step": 0.026705493192615393,
+            "objective_gate_pass": true,
+            "parameter_gate_pass": true
+          }
+        ],
+        "objective_and_parameter_window_pass": false,
+        "cumulative_window": {
+          "relative_objective_change": 6.979449100142023e-07,
+          "all_parameter_change": 0.005876047549052944,
+          "parameter_change_by_column": [
+            0.005876047549052944,
+            0.004303575564250602
+          ],
+          "objective_gate_pass": false,
+          "parameter_gate_pass": false
+        },
+        "limitation": "This is a necessary-window check. Rejections, lower-bound pressure, exact-face state, and terminal boundary assessment impose additional gates."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "UNMEASURED: numerical diagnostic, potentially concurrent"
+    },
+    "historical_strict": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-c1-completion/benchmarks/results/c3-c1-stress-v2/current_gpd_newton_001.json",
+      "raw_json_sha256": "3bdc91d07be93bb963b71b3c25fac96b7632ce4fefedbcb5965eb4b60a5037e1",
+      "raw_npz_sha256": "65a7046f52c3b89ed8bbe6431ac5f536725f3fe631b3f361d55203a45182e1db",
+      "source": {
+        "sha": "a433ab88a1b7fb26c88af2b69fccc0d24b051862",
+        "diff_sha256": "1686b000195281f94efb533d2e8132133146a7b40e28cc2599334b1799c8d530",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_after": {
+        "sha": "a433ab88a1b7fb26c88af2b69fccc0d24b051862",
+        "diff_sha256": "1686b000195281f94efb533d2e8132133146a7b40e28cc2599334b1799c8d530",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stable_during_fit": true,
+      "harness_sha256": "82b5f5ac0919e62b1e9abf9bac7b109c67e6d5b8f20b26b13317d9196ce86db2",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "provenance_helper_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "evidence_files_stable_during_fit": true,
+      "settings": {
+        "case": "gpd",
+        "source": "/home/max/projects/superglm/.worktrees/c3-c1-completion",
+        "outer": "efs+newton",
+        "start": 0.01,
+        "strict": true,
+        "iterations": 100,
+        "acceleration": "multisecant",
+        "oracle": true,
+        "row_reference": false
+      },
+      "smoothing_config": {
+        "max_iterations": 100,
+        "tolerance": 1e-06,
+        "max_log_step": 5.0,
+        "minimum_lambda": 1e-06,
+        "maximum_lambda": 10000000000.0,
+        "max_backtracks": 8,
+        "backtrack_factor": 0.5,
+        "objective_tolerance": 1e-09,
+        "initial_lambda": 0.01,
+        "plateau_tolerance": 1e-07,
+        "plateau_iterations": 3,
+        "practical_convergence": false,
+        "practical_parameter_tolerance": 0.001,
+        "boundary_saturation": 1.0,
+        "boundary_iterations": 3,
+        "acceleration": "multisecant",
+        "acceleration_history": 5,
+        "acceleration_max_amplification": 8.0,
+        "outer": "efs+newton",
+        "handoff_step": 0.5,
+        "handoff_iterations": 10,
+        "max_newton_iterations": 20,
+        "derivative_step": 0.001,
+        "hessian_certificate_fraction": 0.1,
+        "maximum_lambda_conditioning": 100000000000000.0
+      },
+      "result": {
+        "converged": true,
+        "certified": true,
+        "reason": "stationary",
+        "objective": 10804.67691594945,
+        "edf": 24.60857764559737,
+        "log_likelihood": -10762.152072032059,
+        "lambdas": {
+          "scale:x#wiggle": 2.610168463340046,
+          "scale:z#wiggle": 1.4749183089330578,
+          "scale:x:z#margin_x": 0.04323171124505918,
+          "scale:x:z#margin_z": 0.09797281477082805,
+          "shape:x#wiggle": 1.00351308815393,
+          "shape:z#wiggle": 166349043.30138907,
+          "shape:x:z#margin_x": 74.65146461244608,
+          "shape:x:z#margin_z": 0.04371817015296618
+        },
+        "unresolved": [],
+        "terminal_projected_gradient_norm": 0.006812795159057014,
+        "terminal_gradient": {
+          "scale:x#wiggle": 0.005988312056762653,
+          "scale:z#wiggle": -0.0014807904241261596,
+          "scale:x:z#margin_x": -0.00017141108812436696,
+          "scale:x:z#margin_z": 0.000985136284638477,
+          "shape:x#wiggle": 0.006812795159057014,
+          "shape:z#wiggle": -9.184105421266473e-09,
+          "shape:x:z#margin_x": -0.002187629082861743,
+          "shape:x:z#margin_z": 0.0005834809173321659
+        },
+        "terminal_gradient_certificate": {
+          "scale:x#wiggle": 4.5636277637024626e-08,
+          "scale:z#wiggle": 3.595041769219805e-08,
+          "scale:x:z#margin_x": 3.758849022514302e-08,
+          "scale:x:z#margin_z": 4.167007997341151e-08,
+          "shape:x#wiggle": 5.5821577618353794e-08,
+          "shape:z#wiggle": 1.0327208350948037e-15,
+          "shape:x:z#margin_x": 5.372454530152495e-10,
+          "shape:x:z#margin_z": 9.323560611735017e-08
+        },
+        "stationarity_bar": 0.01080567691594945,
+        "terminal_fit_index": 17,
+        "terminal_evidence_fresh": true,
+        "terminal_raw_log_steps": null,
+        "endpoint_directions": {}
+      },
+      "work": {
+        "outer_iterations": 13,
+        "accepted_outer_iterations": 13,
+        "stages": {
+          "efs": 10,
+          "newton": 3
+        },
+        "coefficient_fits": 18,
+        "coefficient_iterations_total": 46,
+        "coefficient_backtracks_total": 0
+      },
+      "last_accepted_window": {
+        "available": false,
+        "reason": "Historical artifact did not save per-fit parameters."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "UNMEASURED: numerical diagnostic, potentially concurrent"
+    }
+  },
+  "versus_historical_strict": {
+    "after": {
+      "reference": "historical_strict",
+      "objective_delta": 0.04762117442078306,
+      "edf_delta": -0.42970770209271336,
+      "parameters_all": {
+        "max_absolute": 43.69987162416078,
+        "relative_l2_or_frobenius": 0.012482733739555345,
+        "stable_relative_max": 0.04062452041981262
+      },
+      "parameters_by_column": [
+        {
+          "max_absolute": 43.69987162416078,
+          "relative_l2_or_frobenius": 0.012482720650271657,
+          "stable_relative_max": 0.04062452041981262
+        },
+        {
+          "max_absolute": 0.03536749518585021,
+          "relative_l2_or_frobenius": 0.05661153871775512,
+          "stable_relative_max": 0.030874495594631124
+        }
+      ],
+      "conditional_linear_predictor_se": {
+        "max_absolute": 0.3273460110704094,
+        "relative_l2_or_frobenius": 0.10134871953848461,
+        "stable_relative_max": 0.11712693696667528
+      },
+      "conditional_linear_predictor_se_by_column": [
+        {
+          "max_absolute": 0.008378229072683374,
+          "relative_l2_or_frobenius": 0.01157746060532495,
+          "stable_relative_max": 0.006633792046391495
+        },
+        {
+          "max_absolute": 0.3273460110704094,
+          "relative_l2_or_frobenius": 0.10585914907008553,
+          "stable_relative_max": 0.11712693696667528
+        }
+      ],
+      "covariance": {
+        "max_absolute": 8.51858285634078,
+        "relative_l2_or_frobenius": 0.3344660471704917,
+        "stable_relative_max": 0.47787339960712033
+      }
+    },
+    "after-widecap": {
+      "reference": "historical_strict",
+      "objective_delta": 0.04505485871413839,
+      "edf_delta": -0.42032204073847623,
+      "parameters_all": {
+        "max_absolute": 41.65548913081261,
+        "relative_l2_or_frobenius": 0.012439474755213311,
+        "stable_relative_max": 0.038724010069090854
+      },
+      "parameters_by_column": [
+        {
+          "max_absolute": 41.65548913081261,
+          "relative_l2_or_frobenius": 0.012439461962204388,
+          "stable_relative_max": 0.038724010069090854
+        },
+        {
+          "max_absolute": 0.03501985295181491,
+          "relative_l2_or_frobenius": 0.05589674404622755,
+          "stable_relative_max": 0.030580297441334302
+        }
+      ],
+      "conditional_linear_predictor_se": {
+        "max_absolute": 0.31948906336790506,
+        "relative_l2_or_frobenius": 0.10018657677862487,
+        "stable_relative_max": 0.11431566025280157
+      },
+      "conditional_linear_predictor_se_by_column": [
+        {
+          "max_absolute": 0.008175838049804707,
+          "relative_l2_or_frobenius": 0.011128767702117614,
+          "stable_relative_max": 0.006473541002145037
+        },
+        {
+          "max_absolute": 0.31948906336790506,
+          "relative_l2_or_frobenius": 0.10464842772069637,
+          "stable_relative_max": 0.11431566025280157
+        }
+      ],
+      "covariance": {
+        "max_absolute": 8.202582351312138,
+        "relative_l2_or_frobenius": 0.3214353351930633,
+        "stable_relative_max": 0.4453953231569449
+      }
+    }
+  }
+}

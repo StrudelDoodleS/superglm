@@ -1,0 +1,210 @@
+{
+  "schema": 1,
+  "scope": "Saved coefficient-mode diagnostic before/after finite-NB2 guard repair. This is not a completed full-book refit or a new smoothing-convergence claim.",
+  "timing_status": "UNMEASURED",
+  "implementation_commit": "5f994c8f6ac0501606594e2f36bfc0cd24050ec1",
+  "committed_file_sha256": {
+    "src/superglm/distributional/kernels/negative_binomial.py": "41fd907cc7245d9d4b117cd5d6d6f16e345af6f07acfddab808a9727b124578d",
+    "tests/test_negative_binomial_low_mean_ratio.py": "a393db715e8de85db0aaccce9d4eb8da23ec69fb1a545b5c4c872b20d28e1155"
+  },
+  "current_reproduction_script": {
+    "path": "benchmarks/c3_nb2_mode_probe.py",
+    "sha256": "1e838c1d473dda032ad24bd167fcca2fd5f87c4ca67f63d7ee81877391d5fec6",
+    "note": "This helper is not present in implementation commit 5f994c8f; its current hash does not identify the exact script bytes used for the historical runs."
+  },
+  "execution_provenance_limitation": "The diagnostic JSONs do not embed their executed source commit or script hash. The hashes above identify the committed implementation/reproduction script, not an authenticated run-time snapshot. Raw input hashes, reconstructed fingerprints, geometry checks, and diagnostic outputs are verified directly.",
+  "raw_diagnostics": {
+    "probe": {
+      "path": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/nb2-mode-probe/probe.json",
+      "sha256": "7621ba181457fcb8874459c792c0d903d1825900edc1756d4b10b87d04cf5f9a"
+    },
+    "after": {
+      "path": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/nb2-mode-probe/after.json",
+      "sha256": "3a3b0071420b357a9474320b5e89ae4677cf4a4a113fca2115a5f8e3d89b37e2"
+    }
+  },
+  "saved_mode_input": {
+    "path": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/nb2-recovery/recovery-0.json",
+    "json_sha256": "6f7473271250c132273dca24a9ea6f1a5889bc0a2b6d81228ce8947f574350e3",
+    "npz_sha256": "3fa26d71986c51a05b215ef06aa00c612b3abaf69c7542406f668c43e9fbd2f8",
+    "source_sha": "8b66828d032878057815fb1acbb28028872c4cc8",
+    "source_tree_sha256": "0b6cfb108eaa4f6b1cf46aed8ccfd09ca5e2202d36b7b8e317561c37b36b71ca",
+    "fingerprints": {
+      "train_frame": "ec266c62b7d608acbdf32b68f6ff00d48c499fe460dd0e45dfa95c3f42fbf5e2",
+      "y": "b0a57a00fd61bbf94f37a950d9730cd02e419e1248be32972546a71b55dbed0c",
+      "offset:mean": "5a6518c82f421b620f501810cf0823a62e6f1ecb72e1437884e590b1bc5091cb"
+    },
+    "lambdas": {
+      "mean:DrivAge#wiggle": 18.624702372736095,
+      "mean:VehAge#wiggle": 0.15287269408530002,
+      "mean:BonusMalus#wiggle": 2.3079048642542026,
+      "theta:DrivAge#wiggle": 2.0899560892359257,
+      "theta:VehAge#wiggle": 16.010915611505883,
+      "theta:BonusMalus#wiggle": 1.3403603853449506
+    }
+  },
+  "guard_scope": {
+    "old_lower_mean_theta_ratio": 1.4901161193847656e-08,
+    "new_lower_mean_theta_ratio": 2.220446049250313e-16,
+    "unchanged_lower_theta_mean_ratio": 1.4901161193847656e-08,
+    "explanation": "Only the low mean/theta side is extended. The opposite tail guard and finite numerical-domain checks remain. This remains finite NB2; no exact Poisson face, infinite theta, or substitution of Poisson likelihood is implemented.",
+    "weight_note": "The mode probe reconstructs the book under prior-weight semantics. Unit weights on this fixture do not test a new frequency-weight fit; the focused low-ratio tests cover both weight contracts."
+  },
+  "same_mode_checks": {
+    "saved_gradient_l2": 2.6903780156513424,
+    "fresh_gradient_l2": 2.6903780156513424,
+    "predicted_directional_slope": 0.14756849731934552,
+    "full_newton_relative_correction": 0.010552729557001659,
+    "prediction_max_difference": 4.656612873077393e-10,
+    "stable_objective_direction_checks": {
+      "quadratic_full_step_gain": 0.07378424865967276,
+      "actual_full_step_gain": 0.07448316336376593,
+      "central_slopes": {
+        "0.1": 0.14757590295630507,
+        "0.01": 0.14756857199245133,
+        "0.001": 0.14756849850527942
+      }
+    }
+  },
+  "full_newton_step": {
+    "before": {
+      "step": 1.0,
+      "rejection": {
+        "type": "NegativeBinomialPoissonBoundaryError",
+        "message": "negative-binomial row 96072 is Poisson-like beyond the supported finite theta numerical domain"
+      },
+      "optimizing_penalized": null,
+      "reported_penalized": null,
+      "stable_reported_penalized": -126594.29243927907,
+      "package_vs_stable_likelihood": null,
+      "max_row_likelihood_error": null,
+      "sum_row_likelihood_error": null,
+      "theta_max": 607534.6409357839,
+      "boundary_row": 96072,
+      "boundary_count": 0.0,
+      "boundary_mean": 0.002050178292381366,
+      "boundary_theta": 249165.117464057,
+      "boundary_ratio": 8.228191462944695e-09,
+      "boundary_relative_margin": -0.44781541814728343
+    },
+    "after": {
+      "step": 1.0,
+      "rejection": null,
+      "optimizing_penalized": -125227.5503555837,
+      "reported_penalized": -126594.29243927903,
+      "stable_reported_penalized": -126594.29243927907,
+      "package_vs_stable_likelihood": 4.3655745685100555e-11,
+      "max_row_likelihood_error": 7.105427357601002e-15,
+      "sum_row_likelihood_error": 2.0692429432249415e-13,
+      "theta_max": 607534.6409357839,
+      "boundary_row": 96072,
+      "boundary_count": 0.0,
+      "boundary_mean": 0.002050178292381366,
+      "boundary_theta": 249165.117464057,
+      "boundary_ratio": 8.228191462944695e-09,
+      "boundary_relative_margin": 37056479.006450824,
+      "former_boundary_relative_margin": -0.44781541814728343
+    },
+    "package_reported_penalized_gain": 0.07448316340742167,
+    "independent_penalized_gain": 0.07448316336376593,
+    "gain_absolute_error": 4.3655745685100555e-11,
+    "gain_comparison_roundoff_bound": 1.7990141560978037e-09,
+    "optimizing_penalized_gain": 0.07448316340742167,
+    "interpretation": "Previously refused full Newton direction now has a finite package evaluation and improves both package objectives. This saved-mode diagnostic does not itself run the solver or establish the eventual refitted optimum."
+  },
+  "curve_summary": [
+    {
+      "step": 0.0,
+      "old_refused": false,
+      "new_refused": false,
+      "independent_penalized_gain": 0.0,
+      "package_vs_independent_log_likelihood": 0.0
+    },
+    {
+      "step": 1.0,
+      "old_refused": true,
+      "new_refused": false,
+      "independent_penalized_gain": 0.07448316336376593,
+      "package_vs_independent_log_likelihood": 4.3655745685100555e-11
+    },
+    {
+      "step": -1.0,
+      "old_refused": false,
+      "new_refused": false,
+      "independent_penalized_gain": -0.2221390100021381,
+      "package_vs_independent_log_likelihood": -2.9103830456733704e-11
+    },
+    {
+      "step": 0.5,
+      "old_refused": true,
+      "new_refused": false,
+      "independent_penalized_gain": 0.05542809271719307,
+      "package_vs_independent_log_likelihood": 1.4551915228366852e-11
+    },
+    {
+      "step": 0.1,
+      "old_refused": true,
+      "new_refused": false,
+      "independent_penalized_gain": 0.014019743452081457,
+      "package_vs_independent_log_likelihood": 0.0
+    },
+    {
+      "step": -0.1,
+      "old_refused": false,
+      "new_refused": false,
+      "independent_penalized_gain": -0.015495437139179558,
+      "package_vs_independent_log_likelihood": 1.4551915228366852e-11
+    },
+    {
+      "step": 0.01,
+      "old_refused": true,
+      "new_refused": false,
+      "independent_penalized_gain": 0.001468307280447334,
+      "package_vs_independent_log_likelihood": -1.4551915228366852e-11
+    },
+    {
+      "step": -0.01,
+      "old_refused": false,
+      "new_refused": false,
+      "independent_penalized_gain": -0.0014830641594016925,
+      "package_vs_independent_log_likelihood": -2.9103830456733704e-11
+    },
+    {
+      "step": 0.001,
+      "old_refused": true,
+      "new_refused": false,
+      "independent_penalized_gain": 0.00014749470574315637,
+      "package_vs_independent_log_likelihood": 2.9103830456733704e-11
+    },
+    {
+      "step": -0.001,
+      "old_refused": false,
+      "new_refused": false,
+      "independent_penalized_gain": -0.00014764229126740247,
+      "package_vs_independent_log_likelihood": -4.3655745685100555e-11
+    },
+    {
+      "step": 3.725290298461914e-09,
+      "old_refused": true,
+      "new_refused": false,
+      "independent_penalized_gain": 5.384208634495735e-10,
+      "package_vs_independent_log_likelihood": 2.9103830456733704e-11
+    }
+  ],
+  "independent_reference": "Integer-count log-likelihood recurrence accumulated in numpy.longdouble, with scipy gammaln for the parameter-independent count factorial; distinct from the package kernel. Central directional differences converge toward the freshly assembled slope.",
+  "independent_regression_oracle": "The committed low-ratio test module separately uses a 220-decimal-digit Decimal finite-count recurrence for natural/log likelihood derivatives. It covers counts 0/1/7, means including the failing insurance row, ratios 2^-30/2^-40/2^-52, and prior/frequency weight contracts, plus boundary and higher-order directional checks.",
+  "point_diagnostic_note": "Domain-floor labels corrected from the historical symmetric floor to the current asymmetric floor after the probe; all measured evaluations unchanged.",
+  "validation": {
+    "focused_log": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/nb2-mode-probe/focused-tests.log",
+    "focused_log_sha256": "8a20765d825460c9c112695cc4c12a850edd629109cf3503419adeed2e1628df",
+    "reported_pass_count": 168,
+    "test_files": [
+      "tests/test_negative_binomial_low_mean_ratio.py",
+      "tests/test_negative_binomial_lss_kernel.py",
+      "tests/test_negative_binomial_lss_family.py",
+      "tests/test_negative_binomial_lss_efs.py"
+    ],
+    "limitation": "Pass count is verified from the saved log; this summarizer does not rerun tests."
+  },
+  "comparison_script_sha256": "996c93821cc1613feec34d9b765a2e94cfc51a85e0e57aa6334b54e85d22cf0b"
+}

@@ -212,6 +212,9 @@ def main():
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--iterations", type=int, default=60)
     parser.add_argument("--acceleration", choices=("none", "multisecant"), default="multisecant")
+    parser.add_argument("--maximum-lambda", type=float)
+    parser.add_argument("--plateau-tol", type=float)
+    parser.add_argument("--parameter-tol", type=float)
     parser.add_argument("--oracle", action="store_true")
     parser.add_argument("--row-reference", action="store_true")
     parser.add_argument("--out", required=True, type=Path)
@@ -248,6 +251,13 @@ def main():
         y = book["losses"][keep] - 1000
         weights = np.ones(len(y))
         model = lss_model(GeneralizedParetoLSS(), 3)
+    practical_controls = {}
+    if args.maximum_lambda is not None:
+        practical_controls["max_lambda"] = args.maximum_lambda
+    if args.plateau_tol is not None:
+        practical_controls["reml_plateau_tol"] = args.plateau_tol
+    if args.parameter_tol is not None:
+        practical_controls["practical_reml_parameter_tol"] = args.parameter_tol
     with threadpool_limits(limits=1):
         model.fit_reml(
             frame,
@@ -258,6 +268,7 @@ def main():
             initial_lambda=args.start,
             practical_reml=not args.strict,
             acceleration=args.acceleration,
+            **practical_controls,
         )
         fitted = model._require_fitted()
         smoothing = fitted.smoothing
@@ -335,6 +346,7 @@ def main():
             "smoothing_config": smoothing.config,
             "terminal_fit_index": smoothing.terminal_fit_index,
             "terminal_evidence_fresh": smoothing.terminal_evidence_fresh,
+            "terminal_raw_log_steps": getattr(smoothing, "terminal_raw_log_steps", None),
             "outer_history": smoothing.history,
             "coefficient_fits": [
                 {name: getattr(fit, name) for name in coefficient_fields}
@@ -371,6 +383,7 @@ def main():
         eta_variance=eta_variance,
         covariance=covariance,
         coefficients=model.result_.coefficients,
+        coefficient_fit_theta=np.stack([fit.theta for fit in smoothing.coefficient_fits]),
     )
     hashes = {
         path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in (args.out, arrays_path)

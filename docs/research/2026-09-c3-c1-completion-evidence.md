@@ -12,6 +12,13 @@ It does not introduce a new optimizer or a GPD shape penalty.
 Selected numerical summaries, timing audits and raw artifact checksums are
 collected in the tracked [complete-fit receipt](../../benchmarks/c3_c1_complete_fit_receipt.json).
 
+The [pragmatic convergence follow-through](2026-09-pragmatic-convergence.md)
+corrects the diagnosis of the NB2 stop recorded below. The old Newton recovery
+could stop after an improving accepted fit and report stale derivative evidence.
+The corrected finite-NB2 route reaches configured stationarity on the same book. Historical receipts
+here remain unchanged; their rejected smoothing status did not establish that
+the fitted model was unusable.
+
 ## Production changes
 
 Public `SuperLSS(discrete=True)` now selects the existing grouped, chunked

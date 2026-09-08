@@ -1,0 +1,1603 @@
+{
+  "schema": 1,
+  "independent_assessment": "qualified_local_observation",
+  "quiet_machine_approval": false,
+  "historical_approval_inherited": false,
+  "scope": "Gaussian log-severity: 449,000 training rows created by 20-fold replication of 22,450 real policies; 2,494 held-out policies and 92 coefficients. This is not a timing of the final NB2 full-book fit.",
+  "permitted_statement": "In this six-run serial fresh-process window with retained caches and recorded nonzero background CPU, the candidate observed 18.0% lower median fit elapsed time and 32.4% lower median process high-water RSS than the baseline.",
+  "limits": [
+    "Three runs per arm in fixed BCCBBC order; no randomization or confidence interval. This is a local observation, not a general speed guarantee.",
+    "Headroom remained active. Other Codex/tmux/btop/system processes consumed CPU. All benchmark workers were serial; agent/test idleness is session context, not a guarantee about every other workspace.",
+    "The initial 0.1-core preflight screen failed; a second screen used an explicitly raised 0.25-core threshold to admit the recorded modest background activity. Neither threshold constitutes quietness approval.",
+    "Endpoint CPU samples exclude only the exact recorded worker PID and miss short-lived processes, contention peaks, memory-bandwidth/cache/I/O interference, scheduling placement, and undetectable PID reuse. Categories are command-name heuristics.",
+    "Caches retained, fresh worker processes, no warmup or cache flush; cold-cache and warmed steady-state performance were not separately measured.",
+    "RSS is lifetime process high-water memory at fit return, including imports/data preparation. It is not isolated solver allocation.",
+    "Baseline 8962c452 uses discrete=False; candidate 5f994c8f uses discrete=True. All other model/data/solver controls match. This version-plus-representation comparison does not isolate any single change or the NB2 guard repair.",
+    "Numerical closeness on this fixture does not establish a general absence of discretization error or replace independent design/grid-sensitivity regressions."
+  ],
+  "raw_label_note": "The raw operator-asserted quiet serial measurement label is treated as an execution flag, not independent quietness approval. The neutral summary remains pending; this receipt records the independent qualified assessment.",
+  "numerical_assessment": "Saved arrays repeat bitwise within each arm. Across-arm objective, EDF, likelihood, fitted parameters and conditional covariance are numerically close at the recorded differences; this is separate from the NB2 historical stopping-solution comparisons. No general equivalence of discretized and continuous designs is claimed.",
+  "audit_method": "Raw-file hash and source/config/input checks; independent endpoint CPU-tick recomputation excluding exact worker PIDs; saved-array repeat and cross-arm comparisons. Fit times use only worker perf_counter fit_seconds, never tool/controller elapsed time.",
+  "source_shas": {
+    "baseline": "8962c4520cad948aa20c480a238b7bb1e276e9cd",
+    "candidate": "5f994c8f6ac0501606594e2f36bfc0cd24050ec1"
+  },
+  "artifact_hashes": {
+    "controller_json": "02a65820c3ae908a92c57433f62908065462603a3b4d426d6f04d6615d229139",
+    "summary_json": "88d63264a81ad67aad3b337a09c251aa45314a09888d9dcd4d86f160560e05dc",
+    "summary_script": "a15df5d8bc52495e4ff0f384ba32dacd287469dce49c1cfc36e7fdf58afa798d",
+    "execution_controller_script": "7f48497ec3f79d6e50ea0e143e796553f009d808f8a321a2d891d8a446b51f0b",
+    "harness": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+    "fixtures": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779"
+  },
+  "artifact_folder": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/final-timing-5f994c8f-window2",
+  "fixture": {
+    "rows": 449000,
+    "holdout_rows": 2494,
+    "provenance": {
+      "data_sha256": {
+        "freMTPL2freq.parquet": "d691f9a0b53719381467d8b1d3487814e546a9c7cd59f9a56e70ff5100dc14bf",
+        "freMTPL2sev.parquet": "101c58e726eae9fe25eadbd57736cbdf34e43adcbe9bbeeee6ea27c8834e39df"
+      },
+      "covariate_clips": {
+        "DrivAge": [
+          18,
+          90
+        ],
+        "VehAge": [
+          0,
+          20
+        ],
+        "BonusMalus": [
+          50,
+          150
+        ]
+      },
+      "response": "log aggregate claim amount",
+      "holdout_rule": "sorted IDpol, every 10th policy",
+      "row_replication": {
+        "factor": 20,
+        "original_training_rows": 22450,
+        "meaning": "Synthetic copies of observed policies; no additional independent real observations"
+      }
+    },
+    "fingerprints": {
+      "train_frame": "4ae37bda6d2af5c25da29444712dd2fbc6c7f2688938dfcde95580f82b1da4fa",
+      "holdout_frame": "d7dec1a6e402d1fed4f10b4a656077fea057e1c9384934bde916126855508085",
+      "y": "bf9e9b1dae098c42e1d3bedbb01643358c4efba25ae6917e2d9a1a5c4f4f2d5d"
+    }
+  },
+  "shared_config": {
+    "fixture": "severity-gaussian",
+    "n": 0,
+    "replicate": 20,
+    "knots": 12,
+    "mix": null,
+    "levels": 8,
+    "support_size": null,
+    "data": "/home/max/projects/superglm/.worktrees/c3-c1-completion/data",
+    "holdout_every": 10,
+    "n_bins": 256,
+    "outer": "efs+newton",
+    "initial_lambda": 0.1,
+    "max_lambda": 10000000000.0,
+    "practical_reml": false,
+    "max_reml_iter": 100,
+    "max_inner_iter": 100,
+    "reml_tol": 1e-06,
+    "inner_tol": 1e-07,
+    "threads": 1,
+    "repeat": 1,
+    "warmup": false,
+    "instrument": false,
+    "measure_time": true,
+    "quiet_profile": "current sampled serial window; final quietness review pending"
+  },
+  "representation_config": {
+    "baseline_discrete": false,
+    "candidate_discrete": true
+  },
+  "dependencies": {
+    "numpy": "2.5.2",
+    "scipy": "1.18.0",
+    "pandas": "3.0.5",
+    "numba": "0.67.0",
+    "tabmat": "4.2.1",
+    "threadpoolctl": "3.6.0",
+    "superglm": "0.31.0"
+  },
+  "threadpools": [
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "filepath": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+      "version": "0.3.34.0.0",
+      "threading_layer": "pthreads",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "filepath": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+      "version": "0.3.31.dev",
+      "threading_layer": "pthreads",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "openmp",
+      "internal_api": "openmp",
+      "num_threads": 1,
+      "prefix": "libgomp",
+      "filepath": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+      "version": null
+    }
+  ],
+  "preflight": {
+    "initial_threshold": 0.1,
+    "initial_status": "obvious_contention_refused_before_workers",
+    "initial_raw_sha256": "9432b4c7cd323e5a646a2af0e42edaeacaaf2caf8c306c34a6289f527968755d",
+    "initial_external_average_cores": 0.16471650870642485,
+    "initial_headroom_average_cores": 0.03294330174128497,
+    "second_threshold": 0.25,
+    "second_status": "screen_passed_not_quietness_approval",
+    "second_raw_sha256": "332c2d993952c87184d4f074eca6a500a2ccbde5689c06c533739d01e56d7ed3",
+    "second_external_average_cores": 0.1787043477920919,
+    "second_headroom_average_cores": 0.028952101038942264
+  },
+  "observations": {
+    "baseline": {
+      "fit_seconds": {
+        "values": [
+          24.5150430220001,
+          25.56155568400027,
+          26.315794875999927
+        ],
+        "min": 24.5150430220001,
+        "median": 25.56155568400027,
+        "max": 26.315794875999927
+      },
+      "fit_return_process_high_water_rss_bytes": {
+        "values": [
+          1569542144,
+          1559060480,
+          1562882048
+        ],
+        "min": 1559060480,
+        "median": 1562882048.0,
+        "max": 1569542144
+      },
+      "final_process_high_water_rss_bytes": {
+        "values": [
+          1569542144,
+          1559060480,
+          1562882048
+        ],
+        "min": 1559060480,
+        "median": 1562882048.0,
+        "max": 1569542144
+      },
+      "external_average_cores": {
+        "min": 0.13643733883139728,
+        "median": 0.16346156615993307,
+        "max": 0.2088620637870266
+      },
+      "headroom_or_kompress_average_cores": {
+        "min": 0.01641939321180139,
+        "median": 0.02731153349804368,
+        "max": 0.05620288261905443
+      },
+      "other_process_average_cores": {
+        "min": 0.12001794561959589,
+        "median": 0.13615003266188938,
+        "max": 0.15265918116797217
+      },
+      "worker_average_cores": {
+        "min": 0.9919049283849336,
+        "median": 0.9925908069811399,
+        "max": 0.9941551651812128
+      }
+    },
+    "candidate": {
+      "fit_seconds": {
+        "values": [
+          19.40362088800066,
+          20.960155150999526,
+          20.99652517999948
+        ],
+        "min": 19.40362088800066,
+        "median": 20.960155150999526,
+        "max": 20.99652517999948
+      },
+      "fit_return_process_high_water_rss_bytes": {
+        "values": [
+          1058906112,
+          1056321536,
+          1054760960
+        ],
+        "min": 1054760960,
+        "median": 1056321536.0,
+        "max": 1058906112
+      },
+      "final_process_high_water_rss_bytes": {
+        "values": [
+          1058906112,
+          1056321536,
+          1054760960
+        ],
+        "min": 1054760960,
+        "median": 1056321536.0,
+        "max": 1058906112
+      },
+      "external_average_cores": {
+        "min": 0.13037629297560596,
+        "median": 0.1462426235540585,
+        "max": 0.20450275178047125
+      },
+      "headroom_or_kompress_average_cores": {
+        "min": 0.01808138369734681,
+        "median": 0.020597552613247676,
+        "max": 0.062447227233663714
+      },
+      "other_process_average_cores": {
+        "min": 0.11229490927825915,
+        "median": 0.12564507094081084,
+        "max": 0.14205552454680753
+      },
+      "worker_average_cores": {
+        "min": 0.9948653682187494,
+        "median": 0.9973310586747085,
+        "max": 0.9974364852965187
+      }
+    }
+  },
+  "observed_median_elapsed_reduction_fraction": 0.18001253874704093,
+  "observed_median_process_high_water_rss_reduction_fraction": 0.32411947699331434,
+  "candidate_observed_assembly_chunk_policy": {
+    "selector": "distributional-auto-v1",
+    "memory_budget_bytes": 8388608,
+    "resolved_rows": 8738,
+    "source_file": "/home/max/projects/superglm/.worktrees/c3-pragmatic-final/src/superglm/distributional/solver/chunks.py",
+    "source_sha256": "513f28c19e08abf6d2031940884a547e7bbd25e4cb8bf3657ed42c82824f13d3",
+    "n_observations": 449000,
+    "n_parameters": 2,
+    "n_coefficients": 92,
+    "estimated_float64_columns": 120,
+    "estimated_bytes_per_row": 960,
+    "formula": "min(n, max(1, budget_bytes // (8 * (p + 6*k + 4*k*(k+1)//2 + 4))))",
+    "scope": "Observed coefficient assembly row bound; estimated temporary budget, not exact allocator RSS or a derivative/posterior replay bound."
+  },
+  "derivative_chunk_note": "Observed coefficient-assembly auto chunk 8,738 follows an 8 MiB budget divided by 960 bytes per row. A 4,096-row derivative-replay cap is a distinct path, not inferred from uninstrumented coefficient-fit dispatch.",
+  "numerical_comparison_candidate_minus_baseline": {
+    "coefficients": {
+      "max_absolute": 2.689348743700748e-12,
+      "relative_l2_or_frobenius": 5.68194734264431e-13
+    },
+    "covariance": {
+      "max_absolute": 8.603968232323567e-14,
+      "relative_l2_or_frobenius": 2.9703050250568728e-12
+    },
+    "train_parameters": {
+      "max_absolute": 6.563638521583925e-13,
+      "relative_l2_or_frobenius": 6.112929325426213e-15
+    },
+    "holdout_parameters": {
+      "max_absolute": 6.545874953189923e-13,
+      "relative_l2_or_frobenius": 6.088160798090219e-15
+    },
+    "smoothing_parameters": {
+      "max_absolute": 3.468816345275627e-10,
+      "relative_l2_or_frobenius": 1.621131905520995e-11
+    },
+    "edf": {
+      "max_absolute": 2.0591528482327703e-11,
+      "relative_l2_or_frobenius": 2.388274371767433e-13
+    },
+    "objective": {
+      "max_absolute": 1.1641532182693481e-10,
+      "relative_l2_or_frobenius": 1.697154669491763e-16
+    },
+    "log_likelihood": {
+      "max_absolute": 1.1641532182693481e-10,
+      "relative_l2_or_frobenius": 1.6980474272457389e-16
+    },
+    "terminal_score": {
+      "max_absolute": 6.305178601451189e-11,
+      "relative_l2_or_frobenius": 4.586124429150406e-06
+    },
+    "terminal_penalized_curvature": {
+      "max_absolute": 1.051812432706356e-07,
+      "relative_l2_or_frobenius": 1.9415657441400753e-13
+    },
+    "conditional_coefficient_se": {
+      "max_absolute": 7.210690378123275e-13,
+      "relative_l2": 2.7716374130581787e-12
+    }
+  },
+  "numerical_consistency_bound": {
+    "value": 1.831006915964292e-07,
+    "formula": "128*q*float64_epsilon*max(cond2(H_baseline),cond2(H_candidate))",
+    "maximum_condition": 70024.81372664392,
+    "scope": "coefficients/covariance/parameters/lambdas/EDF/objective/likelihood; not the near-zero score whose relative error is uninformative",
+    "limitation": "Conservative condition-aware consistency check, not a universal forward-error proof for complete iterative fits."
+  },
+  "runs": [
+    {
+      "index": 0,
+      "arm": "baseline",
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/final-timing-5f994c8f-window2/0-baseline/baseline-0.json",
+      "json_sha256": "287438d169b0d4c23b30686908e55be19e1bcafa251a5249140cd0859b10cdbc",
+      "npz_sha256": "0424a5d41c2a44ae9bbf008336a417289a225c42ba2808def80b0d9491565599",
+      "source_sha": "8962c4520cad948aa20c480a238b7bb1e276e9cd",
+      "source_tree_sha256": "b5dabb2445f0e25e927250f7d07f079c4364578ff077a5bca19bbd1e95e9e5c2",
+      "fit_seconds": 24.5150430220001,
+      "fit_return_process_high_water_rss_bytes": 1569542144,
+      "final_process_high_water_rss_bytes": 1569542144,
+      "raw_timing_status": "operator-asserted quiet serial measurement",
+      "discrete": false,
+      "backend": "distributional-dense-v1",
+      "observed_assembly_chunk_rows": null,
+      "objective": 685944.0917179165,
+      "log_likelihood": -685583.4528471469,
+      "edf": 86.21927499514648,
+      "lambdas": {
+        "location:DrivAge#wiggle": 12.99507196598107,
+        "location:VehAge#wiggle": 16.74612633372328,
+        "location:BonusMalus#wiggle": 1.3116345494131771,
+        "scale:DrivAge#wiggle": 2.0929586851688815,
+        "scale:VehAge#wiggle": 1.5983744313355046,
+        "scale:BonusMalus#wiggle": 0.480333135785425
+      },
+      "smoothing_reason": "stationary",
+      "outer_iterations": 7,
+      "inner_iterations": 24,
+      "coefficient_fits": 9,
+      "phase_work_counts": {
+        "frame_normalization": 1,
+        "predictor_compilation": 1,
+        "layout_penalty_assembly": 10,
+        "dense_predictor_matrices": 1,
+        "initialization": 9,
+        "likelihood_evaluation": 49,
+        "curvature_gradient_assembly": 25,
+        "coefficient_decomposition_solve": 24,
+        "efs_update_backtracking": 14,
+        "newton_endgame": 11,
+        "terminal_observed_retry_fallback": 9,
+        "inference_edf": 1,
+        "serialization": 0,
+        "fit_total": 1
+      },
+      "activity": {
+        "snapshot_interval_seconds": 24.531760549,
+        "exact_worker_pid_excluded": 109118,
+        "worker_average_cores": 0.9925908069811399,
+        "external_average_cores": 0.16346156615993307,
+        "headroom_or_kompress_average_cores": 0.02731153349804368,
+        "other_process_average_cores": 0.13615003266188938,
+        "external_process_deltas": [
+          {
+            "pid": 19725,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 114,
+            "average_cores": 0.046470370429507156
+          },
+          {
+            "pid": 3416,
+            "name": "tmux: server",
+            "categories": [],
+            "delta_cpu_ticks": 75,
+            "average_cores": 0.030572612124675762
+          },
+          {
+            "pid": 19666,
+            "name": "python",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 66,
+            "average_cores": 0.02690389866971467
+          },
+          {
+            "pid": 11620,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 59,
+            "average_cores": 0.024050454871411598
+          },
+          {
+            "pid": 3951,
+            "name": "btop",
+            "categories": [],
+            "delta_cpu_ticks": 33,
+            "average_cores": 0.013451949334857336
+          },
+          {
+            "pid": 61788,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 14,
+            "average_cores": 0.005706887596606143
+          },
+          {
+            "pid": 68681,
+            "name": "kworker/0:3-events",
+            "categories": [],
+            "delta_cpu_ticks": 6,
+            "average_cores": 0.002445808969974061
+          },
+          {
+            "pid": 97718,
+            "name": "kworker/13:3-events",
+            "categories": [],
+            "delta_cpu_ticks": 6,
+            "average_cores": 0.002445808969974061
+          },
+          {
+            "pid": 96563,
+            "name": "kworker/8:2-events",
+            "categories": [],
+            "delta_cpu_ticks": 5,
+            "average_cores": 0.002038174141645051
+          },
+          {
+            "pid": 2999,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 5,
+            "average_cores": 0.002038174141645051
+          },
+          {
+            "pid": 13849,
+            "name": "kworker/2:0-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 4,
+            "average_cores": 0.0016305393133160407
+          },
+          {
+            "pid": 83265,
+            "name": "kworker/u68:0-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0012229044849870305
+          },
+          {
+            "pid": 18,
+            "name": "rcu_preempt",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0008152696566580204
+          },
+          {
+            "pid": 21113,
+            "name": "codex-code-mode",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0008152696566580204
+          },
+          {
+            "pid": 108189,
+            "name": "kworker/1:0-events",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004076348283290102
+          },
+          {
+            "pid": 30913,
+            "name": "kworker/u67:0-kvfree_rcu_reclaim",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004076348283290102
+          },
+          {
+            "pid": 23321,
+            "name": "headroom",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004076348283290102
+          },
+          {
+            "pid": 18299,
+            "name": "kworker/9:0-events",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004076348283290102
+          },
+          {
+            "pid": 393,
+            "name": "kworker/u66:1-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004076348283290102
+          },
+          {
+            "pid": 98760,
+            "name": "kworker/u67:1-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004076348283290102
+          },
+          {
+            "pid": 504,
+            "name": "systemd-journal",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004076348283290102
+          }
+        ],
+        "born_endpoint_processes": [
+          {
+            "pid": 109175,
+            "name": "kworker/0:0-events",
+            "cpu_ticks_at_end": 0
+          },
+          {
+            "pid": 109197,
+            "name": "kworker/13:1-events",
+            "cpu_ticks_at_end": 0
+          },
+          {
+            "pid": 109213,
+            "name": "sshd-session",
+            "cpu_ticks_at_end": 1
+          },
+          {
+            "pid": 109214,
+            "name": "sshd-auth",
+            "cpu_ticks_at_end": 0
+          },
+          {
+            "pid": 109257,
+            "name": "sshd-session",
+            "cpu_ticks_at_end": 2
+          },
+          {
+            "pid": 109258,
+            "name": "sshd-auth",
+            "cpu_ticks_at_end": 1
+          }
+        ],
+        "missing_endpoint_processes": [
+          {
+            "pid": 101019,
+            "name": "kworker/9:1-ata_sff"
+          },
+          {
+            "pid": 101069,
+            "name": "kworker/6:1-ata_sff"
+          },
+          {
+            "pid": 103865,
+            "name": "kworker/12:0-ata_sff"
+          }
+        ]
+      }
+    },
+    {
+      "index": 1,
+      "arm": "candidate",
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/final-timing-5f994c8f-window2/1-candidate/candidate-0.json",
+      "json_sha256": "9fd414a562c2a1377e2c7d529825f0879ca1270f266f99b0eec1896682fd4ba0",
+      "npz_sha256": "661b886e628710fc726788b50dbb65068f66534f17a049f38bebb65f2552b9c0",
+      "source_sha": "5f994c8f6ac0501606594e2f36bfc0cd24050ec1",
+      "source_tree_sha256": "be9cdd414e7c5814653130f7e8d0823256ff580d81e21c0d0b4a1a3efc6e24c3",
+      "fit_seconds": 19.40362088800066,
+      "fit_return_process_high_water_rss_bytes": 1058906112,
+      "final_process_high_water_rss_bytes": 1058906112,
+      "raw_timing_status": "operator-asserted quiet serial measurement",
+      "discrete": true,
+      "backend": "distributional-chunked-v1",
+      "observed_assembly_chunk_rows": 8738,
+      "objective": 685944.0917179167,
+      "log_likelihood": -685583.4528471468,
+      "edf": 86.21927499516707,
+      "lambdas": {
+        "location:DrivAge#wiggle": 12.995071965634189,
+        "location:VehAge#wiggle": 16.746126333723264,
+        "location:BonusMalus#wiggle": 1.3116345494131503,
+        "scale:DrivAge#wiggle": 2.092958685159463,
+        "scale:VehAge#wiggle": 1.5983744313351045,
+        "scale:BonusMalus#wiggle": 0.4803331357855018
+      },
+      "smoothing_reason": "stationary",
+      "outer_iterations": 7,
+      "inner_iterations": 24,
+      "coefficient_fits": 9,
+      "phase_work_counts": {
+        "frame_normalization": 1,
+        "predictor_compilation": 1,
+        "layout_penalty_assembly": 10,
+        "dense_predictor_matrices": 0,
+        "initialization": 9,
+        "likelihood_evaluation": 66,
+        "curvature_gradient_assembly": 33,
+        "coefficient_decomposition_solve": 24,
+        "efs_update_backtracking": 14,
+        "newton_endgame": 11,
+        "terminal_observed_retry_fallback": 9,
+        "inference_edf": 1,
+        "serialization": 0,
+        "fit_total": 1
+      },
+      "activity": {
+        "snapshot_interval_seconds": 19.419782899,
+        "exact_worker_pid_excluded": 109374,
+        "worker_average_cores": 0.9974364852965187,
+        "external_average_cores": 0.1462426235540585,
+        "headroom_or_kompress_average_cores": 0.020597552613247676,
+        "other_process_average_cores": 0.12564507094081084,
+        "external_process_deltas": [
+          {
+            "pid": 19725,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 83,
+            "average_cores": 0.042739921672488926
+          },
+          {
+            "pid": 3416,
+            "name": "tmux: server",
+            "categories": [],
+            "delta_cpu_ticks": 60,
+            "average_cores": 0.030896328919871513
+          },
+          {
+            "pid": 11620,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 48,
+            "average_cores": 0.02471706313589721
+          },
+          {
+            "pid": 19666,
+            "name": "python",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 39,
+            "average_cores": 0.020082613797916486
+          },
+          {
+            "pid": 3951,
+            "name": "btop",
+            "categories": [],
+            "delta_cpu_ticks": 25,
+            "average_cores": 0.012873470383279798
+          },
+          {
+            "pid": 61788,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 9,
+            "average_cores": 0.004634449337980727
+          },
+          {
+            "pid": 98472,
+            "name": "kworker/10:0-events",
+            "categories": [],
+            "delta_cpu_ticks": 5,
+            "average_cores": 0.0025746940766559596
+          },
+          {
+            "pid": 2999,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 4,
+            "average_cores": 0.0020597552613247677
+          },
+          {
+            "pid": 83265,
+            "name": "kworker/u68:0-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0010298776306623839
+          },
+          {
+            "pid": 39306,
+            "name": "kworker/u74:2-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0010298776306623839
+          },
+          {
+            "pid": 18,
+            "name": "rcu_preempt",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0005149388153311919
+          },
+          {
+            "pid": 13849,
+            "name": "kworker/2:0-events",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0005149388153311919
+          },
+          {
+            "pid": 55421,
+            "name": "kworker/14:2-events",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0005149388153311919
+          },
+          {
+            "pid": 100616,
+            "name": "kworker/u74:1-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0005149388153311919
+          },
+          {
+            "pid": 48522,
+            "name": "kworker/u69:3-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0005149388153311919
+          },
+          {
+            "pid": 103321,
+            "name": "headroom",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0005149388153311919
+          },
+          {
+            "pid": 504,
+            "name": "systemd-journal",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0005149388153311919
+          }
+        ],
+        "born_endpoint_processes": [
+          {
+            "pid": 109512,
+            "name": "kworker/9:1",
+            "cpu_ticks_at_end": 0
+          }
+        ],
+        "missing_endpoint_processes": [
+          {
+            "pid": 109213,
+            "name": "sshd-session"
+          },
+          {
+            "pid": 109214,
+            "name": "sshd-auth"
+          }
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "arm": "candidate",
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/final-timing-5f994c8f-window2/2-candidate/candidate-0.json",
+      "json_sha256": "1fcedef02415fd94b53b34fb3efa41c0cd78073b5c21b77bb3c8b986fd732dbc",
+      "npz_sha256": "661b886e628710fc726788b50dbb65068f66534f17a049f38bebb65f2552b9c0",
+      "source_sha": "5f994c8f6ac0501606594e2f36bfc0cd24050ec1",
+      "source_tree_sha256": "be9cdd414e7c5814653130f7e8d0823256ff580d81e21c0d0b4a1a3efc6e24c3",
+      "fit_seconds": 20.960155150999526,
+      "fit_return_process_high_water_rss_bytes": 1056321536,
+      "final_process_high_water_rss_bytes": 1056321536,
+      "raw_timing_status": "operator-asserted quiet serial measurement",
+      "discrete": true,
+      "backend": "distributional-chunked-v1",
+      "observed_assembly_chunk_rows": 8738,
+      "objective": 685944.0917179167,
+      "log_likelihood": -685583.4528471468,
+      "edf": 86.21927499516707,
+      "lambdas": {
+        "location:DrivAge#wiggle": 12.995071965634189,
+        "location:VehAge#wiggle": 16.746126333723264,
+        "location:BonusMalus#wiggle": 1.3116345494131503,
+        "scale:DrivAge#wiggle": 2.092958685159463,
+        "scale:VehAge#wiggle": 1.5983744313351045,
+        "scale:BonusMalus#wiggle": 0.4803331357855018
+      },
+      "smoothing_reason": "stationary",
+      "outer_iterations": 7,
+      "inner_iterations": 24,
+      "coefficient_fits": 9,
+      "phase_work_counts": {
+        "frame_normalization": 1,
+        "predictor_compilation": 1,
+        "layout_penalty_assembly": 10,
+        "dense_predictor_matrices": 0,
+        "initialization": 9,
+        "likelihood_evaluation": 66,
+        "curvature_gradient_assembly": 33,
+        "coefficient_decomposition_solve": 24,
+        "efs_update_backtracking": 14,
+        "newton_endgame": 11,
+        "terminal_observed_retry_fallback": 9,
+        "inference_edf": 1,
+        "serialization": 0,
+        "fit_total": 1
+      },
+      "activity": {
+        "snapshot_interval_seconds": 20.977712831,
+        "exact_worker_pid_excluded": 109559,
+        "worker_average_cores": 0.9948653682187494,
+        "external_average_cores": 0.20450275178047125,
+        "headroom_or_kompress_average_cores": 0.062447227233663714,
+        "other_process_average_cores": 0.14205552454680753,
+        "external_process_deltas": [
+          {
+            "pid": 19666,
+            "name": "python",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 130,
+            "average_cores": 0.06197053084256705
+          },
+          {
+            "pid": 19725,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 117,
+            "average_cores": 0.05577347775831033
+          },
+          {
+            "pid": 3416,
+            "name": "tmux: server",
+            "categories": [],
+            "delta_cpu_ticks": 66,
+            "average_cores": 0.031461961812380194
+          },
+          {
+            "pid": 11620,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 53,
+            "average_cores": 0.025264908728123488
+          },
+          {
+            "pid": 3951,
+            "name": "btop",
+            "categories": [],
+            "delta_cpu_ticks": 28,
+            "average_cores": 0.013347498950706749
+          },
+          {
+            "pid": 61788,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 11,
+            "average_cores": 0.0052436603020633655
+          },
+          {
+            "pid": 2999,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 4,
+            "average_cores": 0.0019067855643866783
+          },
+          {
+            "pid": 16354,
+            "name": "kworker/15:2-events",
+            "categories": [],
+            "delta_cpu_ticks": 4,
+            "average_cores": 0.0019067855643866783
+          },
+          {
+            "pid": 39306,
+            "name": "kworker/u74:2-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0014300891732900087
+          },
+          {
+            "pid": 83265,
+            "name": "kworker/u68:0-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0009533927821933391
+          },
+          {
+            "pid": 18,
+            "name": "rcu_preempt",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 13849,
+            "name": "kworker/2:0-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 33,
+            "name": "ksoftirqd/2",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 81014,
+            "name": "headroom",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 121,
+            "name": "kworker/u72:0-ext4-rsv-conversion",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 21113,
+            "name": "codex-code-mode",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 163,
+            "name": "kcompactd0",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 21680,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 58568,
+            "name": "kworker/12:2-events",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 89891,
+            "name": "kworker/u70:1-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          },
+          {
+            "pid": 79956,
+            "name": "kworker/u66:3-writeback",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00047669639109666957
+          }
+        ],
+        "born_endpoint_processes": [],
+        "missing_endpoint_processes": []
+      }
+    },
+    {
+      "index": 3,
+      "arm": "baseline",
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/final-timing-5f994c8f-window2/3-baseline/baseline-0.json",
+      "json_sha256": "75ec4e6f51548582f8f6883bd2c9f285b49d63fd45ede893bb4469bfb1c9b6dd",
+      "npz_sha256": "0424a5d41c2a44ae9bbf008336a417289a225c42ba2808def80b0d9491565599",
+      "source_sha": "8962c4520cad948aa20c480a238b7bb1e276e9cd",
+      "source_tree_sha256": "b5dabb2445f0e25e927250f7d07f079c4364578ff077a5bca19bbd1e95e9e5c2",
+      "fit_seconds": 25.56155568400027,
+      "fit_return_process_high_water_rss_bytes": 1559060480,
+      "final_process_high_water_rss_bytes": 1559060480,
+      "raw_timing_status": "operator-asserted quiet serial measurement",
+      "discrete": false,
+      "backend": "distributional-dense-v1",
+      "observed_assembly_chunk_rows": null,
+      "objective": 685944.0917179165,
+      "log_likelihood": -685583.4528471469,
+      "edf": 86.21927499514648,
+      "lambdas": {
+        "location:DrivAge#wiggle": 12.99507196598107,
+        "location:VehAge#wiggle": 16.74612633372328,
+        "location:BonusMalus#wiggle": 1.3116345494131771,
+        "scale:DrivAge#wiggle": 2.0929586851688815,
+        "scale:VehAge#wiggle": 1.5983744313355046,
+        "scale:BonusMalus#wiggle": 0.480333135785425
+      },
+      "smoothing_reason": "stationary",
+      "outer_iterations": 7,
+      "inner_iterations": 24,
+      "coefficient_fits": 9,
+      "phase_work_counts": {
+        "frame_normalization": 1,
+        "predictor_compilation": 1,
+        "layout_penalty_assembly": 10,
+        "dense_predictor_matrices": 1,
+        "initialization": 9,
+        "likelihood_evaluation": 49,
+        "curvature_gradient_assembly": 25,
+        "coefficient_decomposition_solve": 24,
+        "efs_update_backtracking": 14,
+        "newton_endgame": 11,
+        "terminal_observed_retry_fallback": 9,
+        "inference_edf": 1,
+        "serialization": 0,
+        "fit_total": 1
+      },
+      "activity": {
+        "snapshot_interval_seconds": 25.579507999,
+        "exact_worker_pid_excluded": 109785,
+        "worker_average_cores": 0.9941551651812128,
+        "external_average_cores": 0.13643733883139728,
+        "headroom_or_kompress_average_cores": 0.01641939321180139,
+        "other_process_average_cores": 0.12001794561959589,
+        "external_process_deltas": [
+          {
+            "pid": 19725,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 92,
+            "average_cores": 0.035966289892517336
+          },
+          {
+            "pid": 3416,
+            "name": "tmux: server",
+            "categories": [],
+            "delta_cpu_ticks": 75,
+            "average_cores": 0.029320345021073915
+          },
+          {
+            "pid": 11620,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 60,
+            "average_cores": 0.02345627601685913
+          },
+          {
+            "pid": 19666,
+            "name": "python",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 42,
+            "average_cores": 0.01641939321180139
+          },
+          {
+            "pid": 3951,
+            "name": "btop",
+            "categories": [],
+            "delta_cpu_ticks": 33,
+            "average_cores": 0.012900951809272523
+          },
+          {
+            "pid": 61788,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 12,
+            "average_cores": 0.0046912552033718255
+          },
+          {
+            "pid": 58,
+            "name": "kworker/6:0-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 6,
+            "average_cores": 0.0023456276016859128
+          },
+          {
+            "pid": 98197,
+            "name": "kworker/5:0-events",
+            "categories": [],
+            "delta_cpu_ticks": 6,
+            "average_cores": 0.0023456276016859128
+          },
+          {
+            "pid": 29914,
+            "name": "kworker/7:2-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 4,
+            "average_cores": 0.0015637517344572753
+          },
+          {
+            "pid": 2999,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 4,
+            "average_cores": 0.0015637517344572753
+          },
+          {
+            "pid": 96563,
+            "name": "kworker/8:2-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0011728138008429564
+          },
+          {
+            "pid": 83265,
+            "name": "kworker/u68:0-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0011728138008429564
+          },
+          {
+            "pid": 18,
+            "name": "rcu_preempt",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0007818758672286377
+          },
+          {
+            "pid": 39306,
+            "name": "kworker/u74:2-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0007818758672286377
+          },
+          {
+            "pid": 87533,
+            "name": "kworker/4:1-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0007818758672286377
+          },
+          {
+            "pid": 108189,
+            "name": "kworker/1:0-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00039093793361431883
+          },
+          {
+            "pid": 21680,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00039093793361431883
+          },
+          {
+            "pid": 40938,
+            "name": "kworker/u65:1-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.00039093793361431883
+          }
+        ],
+        "born_endpoint_processes": [],
+        "missing_endpoint_processes": [
+          {
+            "pid": 104230,
+            "name": "kworker/7:0-ata_sff"
+          }
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "arm": "baseline",
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/final-timing-5f994c8f-window2/4-baseline/baseline-0.json",
+      "json_sha256": "5e88cfe7bbf01a7a7ad5ea3d4688d4e2aa1624bd51fcf98236534f814b7a9bae",
+      "npz_sha256": "0424a5d41c2a44ae9bbf008336a417289a225c42ba2808def80b0d9491565599",
+      "source_sha": "8962c4520cad948aa20c480a238b7bb1e276e9cd",
+      "source_tree_sha256": "b5dabb2445f0e25e927250f7d07f079c4364578ff077a5bca19bbd1e95e9e5c2",
+      "fit_seconds": 26.315794875999927,
+      "fit_return_process_high_water_rss_bytes": 1562882048,
+      "final_process_high_water_rss_bytes": 1562882048,
+      "raw_timing_status": "operator-asserted quiet serial measurement",
+      "discrete": false,
+      "backend": "distributional-dense-v1",
+      "observed_assembly_chunk_rows": null,
+      "objective": 685944.0917179165,
+      "log_likelihood": -685583.4528471469,
+      "edf": 86.21927499514648,
+      "lambdas": {
+        "location:DrivAge#wiggle": 12.99507196598107,
+        "location:VehAge#wiggle": 16.74612633372328,
+        "location:BonusMalus#wiggle": 1.3116345494131771,
+        "scale:DrivAge#wiggle": 2.0929586851688815,
+        "scale:VehAge#wiggle": 1.5983744313355046,
+        "scale:BonusMalus#wiggle": 0.480333135785425
+      },
+      "smoothing_reason": "stationary",
+      "outer_iterations": 7,
+      "inner_iterations": 24,
+      "coefficient_fits": 9,
+      "phase_work_counts": {
+        "frame_normalization": 1,
+        "predictor_compilation": 1,
+        "layout_penalty_assembly": 10,
+        "dense_predictor_matrices": 1,
+        "initialization": 9,
+        "likelihood_evaluation": 49,
+        "curvature_gradient_assembly": 25,
+        "coefficient_decomposition_solve": 24,
+        "efs_update_backtracking": 14,
+        "newton_endgame": 11,
+        "terminal_observed_retry_fallback": 9,
+        "inference_edf": 1,
+        "serialization": 0,
+        "fit_total": 1
+      },
+      "activity": {
+        "snapshot_interval_seconds": 26.333168888,
+        "exact_worker_pid_excluded": 110018,
+        "worker_average_cores": 0.9919049283849336,
+        "external_average_cores": 0.2088620637870266,
+        "headroom_or_kompress_average_cores": 0.05620288261905443,
+        "other_process_average_cores": 0.15265918116797217,
+        "external_process_deltas": [
+          {
+            "pid": 19725,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 148,
+            "average_cores": 0.05620288261905443
+          },
+          {
+            "pid": 19666,
+            "name": "python",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 147,
+            "average_cores": 0.05582313341216893
+          },
+          {
+            "pid": 3416,
+            "name": "tmux: server",
+            "categories": [],
+            "delta_cpu_ticks": 85,
+            "average_cores": 0.03227868258526775
+          },
+          {
+            "pid": 11620,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 68,
+            "average_cores": 0.025822946068214198
+          },
+          {
+            "pid": 3951,
+            "name": "btop",
+            "categories": [],
+            "delta_cpu_ticks": 36,
+            "average_cores": 0.013670971447878103
+          },
+          {
+            "pid": 61788,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 12,
+            "average_cores": 0.004556990482626035
+          },
+          {
+            "pid": 16354,
+            "name": "kworker/15:2-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 7,
+            "average_cores": 0.0026582444481985205
+          },
+          {
+            "pid": 109175,
+            "name": "kworker/0:0-events",
+            "categories": [],
+            "delta_cpu_ticks": 6,
+            "average_cores": 0.0022784952413130175
+          },
+          {
+            "pid": 55421,
+            "name": "kworker/14:2-events",
+            "categories": [],
+            "delta_cpu_ticks": 5,
+            "average_cores": 0.0018987460344275146
+          },
+          {
+            "pid": 98472,
+            "name": "kworker/10:0-events",
+            "categories": [],
+            "delta_cpu_ticks": 5,
+            "average_cores": 0.0018987460344275146
+          },
+          {
+            "pid": 2999,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 5,
+            "average_cores": 0.0018987460344275146
+          },
+          {
+            "pid": 18,
+            "name": "rcu_preempt",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0011392476206565087
+          },
+          {
+            "pid": 13849,
+            "name": "kworker/2:0-events",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0011392476206565087
+          },
+          {
+            "pid": 108189,
+            "name": "kworker/1:0-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0011392476206565087
+          },
+          {
+            "pid": 83265,
+            "name": "kworker/u68:0-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0011392476206565087
+          },
+          {
+            "pid": 21680,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0007594984137710058
+          },
+          {
+            "pid": 39306,
+            "name": "kworker/u74:2-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0007594984137710058
+          },
+          {
+            "pid": 98197,
+            "name": "kworker/5:0-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0007594984137710058
+          },
+          {
+            "pid": 104526,
+            "name": "headroom",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0003797492068855029
+          },
+          {
+            "pid": 21113,
+            "name": "codex-code-mode",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0003797492068855029
+          },
+          {
+            "pid": 30913,
+            "name": "kworker/u67:0-flush-254:0",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0003797492068855029
+          },
+          {
+            "pid": 58568,
+            "name": "kworker/12:2-events",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0003797492068855029
+          },
+          {
+            "pid": 100616,
+            "name": "kworker/u74:1-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0003797492068855029
+          },
+          {
+            "pid": 106395,
+            "name": "kworker/u73:1-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0003797492068855029
+          },
+          {
+            "pid": 453,
+            "name": "jbd2/vda4-8",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0003797492068855029
+          },
+          {
+            "pid": 40938,
+            "name": "kworker/u65:1-writeback",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0003797492068855029
+          }
+        ],
+        "born_endpoint_processes": [
+          {
+            "pid": 110093,
+            "name": "kworker/15:0",
+            "cpu_ticks_at_end": 0
+          },
+          {
+            "pid": 110209,
+            "name": "kworker/u75:2-flush-254:0",
+            "cpu_ticks_at_end": 0
+          }
+        ],
+        "missing_endpoint_processes": []
+      }
+    },
+    {
+      "index": 5,
+      "arm": "candidate",
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/final-timing-5f994c8f-window2/5-candidate/candidate-0.json",
+      "json_sha256": "483299650030feaa3a0e1ec721c27b3be840d01ca5bc01b37f5e4bb7b4b9e285",
+      "npz_sha256": "661b886e628710fc726788b50dbb65068f66534f17a049f38bebb65f2552b9c0",
+      "source_sha": "5f994c8f6ac0501606594e2f36bfc0cd24050ec1",
+      "source_tree_sha256": "be9cdd414e7c5814653130f7e8d0823256ff580d81e21c0d0b4a1a3efc6e24c3",
+      "fit_seconds": 20.99652517999948,
+      "fit_return_process_high_water_rss_bytes": 1054760960,
+      "final_process_high_water_rss_bytes": 1054760960,
+      "raw_timing_status": "operator-asserted quiet serial measurement",
+      "discrete": true,
+      "backend": "distributional-chunked-v1",
+      "observed_assembly_chunk_rows": 8738,
+      "objective": 685944.0917179167,
+      "log_likelihood": -685583.4528471468,
+      "edf": 86.21927499516707,
+      "lambdas": {
+        "location:DrivAge#wiggle": 12.995071965634189,
+        "location:VehAge#wiggle": 16.746126333723264,
+        "location:BonusMalus#wiggle": 1.3116345494131503,
+        "scale:DrivAge#wiggle": 2.092958685159463,
+        "scale:VehAge#wiggle": 1.5983744313351045,
+        "scale:BonusMalus#wiggle": 0.4803331357855018
+      },
+      "smoothing_reason": "stationary",
+      "outer_iterations": 7,
+      "inner_iterations": 24,
+      "coefficient_fits": 9,
+      "phase_work_counts": {
+        "frame_normalization": 1,
+        "predictor_compilation": 1,
+        "layout_penalty_assembly": 10,
+        "dense_predictor_matrices": 0,
+        "initialization": 9,
+        "likelihood_evaluation": 66,
+        "curvature_gradient_assembly": 33,
+        "coefficient_decomposition_solve": 24,
+        "efs_update_backtracking": 14,
+        "newton_endgame": 11,
+        "terminal_observed_retry_fallback": 9,
+        "inference_edf": 1,
+        "serialization": 0,
+        "fit_total": 1
+      },
+      "activity": {
+        "snapshot_interval_seconds": 21.016090713,
+        "exact_worker_pid_excluded": 110298,
+        "worker_average_cores": 0.9973310586747085,
+        "external_average_cores": 0.13037629297560596,
+        "headroom_or_kompress_average_cores": 0.01808138369734681,
+        "other_process_average_cores": 0.11229490927825915,
+        "external_process_deltas": [
+          {
+            "pid": 19725,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 70,
+            "average_cores": 0.03330781207405992
+          },
+          {
+            "pid": 3416,
+            "name": "tmux: server",
+            "categories": [],
+            "delta_cpu_ticks": 64,
+            "average_cores": 0.030452856753426214
+          },
+          {
+            "pid": 11620,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 51,
+            "average_cores": 0.024267120225386515
+          },
+          {
+            "pid": 19666,
+            "name": "python",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 37,
+            "average_cores": 0.01760555781057453
+          },
+          {
+            "pid": 3951,
+            "name": "btop",
+            "categories": [],
+            "delta_cpu_ticks": 27,
+            "average_cores": 0.012847298942851686
+          },
+          {
+            "pid": 61788,
+            "name": "codex",
+            "categories": [],
+            "delta_cpu_ticks": 8,
+            "average_cores": 0.0038066070941782768
+          },
+          {
+            "pid": 13849,
+            "name": "kworker/2:0-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 5,
+            "average_cores": 0.002379129433861423
+          },
+          {
+            "pid": 2999,
+            "name": "sshd-session",
+            "categories": [],
+            "delta_cpu_ticks": 4,
+            "average_cores": 0.0019033035470891384
+          },
+          {
+            "pid": 48522,
+            "name": "kworker/u69:3-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 3,
+            "average_cores": 0.0014274776603168536
+          },
+          {
+            "pid": 100616,
+            "name": "kworker/u74:1-events_unbound",
+            "categories": [],
+            "delta_cpu_ticks": 2,
+            "average_cores": 0.0009516517735445692
+          },
+          {
+            "pid": 18,
+            "name": "rcu_preempt",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004758258867722846
+          },
+          {
+            "pid": 17431,
+            "name": "kworker/3:0-mm_percpu_wq",
+            "categories": [],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004758258867722846
+          },
+          {
+            "pid": 62702,
+            "name": "headroom",
+            "categories": [
+              "headroom",
+              "python"
+            ],
+            "delta_cpu_ticks": 1,
+            "average_cores": 0.0004758258867722846
+          }
+        ],
+        "born_endpoint_processes": [],
+        "missing_endpoint_processes": []
+      }
+    }
+  ]
+}
