@@ -162,6 +162,7 @@ def worker_summary(receipt):
         "status": receipt.get("status"),
         "timing_status": receipt.get("timing_status"),
         "fit_seconds": receipt.get("fit_seconds"),
+        "fit_process_cpu_seconds": receipt.get("fit_process_cpu_seconds"),
         "peak_rss_mib": receipt.get("peak_fit_process_rss_bytes", 0) / (1024 * 1024)
         if "peak_fit_process_rss_bytes" in receipt
         else None,
@@ -277,7 +278,7 @@ def comparison_report(manifest):
                     r["run_id"] for r in subset if r["cpu_audit"]["endpoint_audit_flagged"]
                 ],
             }
-            for key in ("fit_seconds", "peak_rss_mib"):
+            for key in ("fit_seconds", "fit_process_cpu_seconds", "peak_rss_mib"):
                 values = [r.get("worker_summary", {}).get(key) for r in subset]
                 values = [v for v in values if isinstance(v, (float, int)) and math.isfinite(v)]
                 item[key] = (

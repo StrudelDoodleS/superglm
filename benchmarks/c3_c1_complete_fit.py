@@ -432,6 +432,7 @@ def worker(args):
             if args.instrument:
                 recorder.install_kernel_witnesses()
                 sys.setprofile(recorder)
+            cpu_start = time.process_time() if args.measure_time else None
             start = time.perf_counter()
             try:
                 model.fit_reml(
@@ -450,6 +451,10 @@ def worker(args):
                 )
             finally:
                 elapsed = time.perf_counter() - start
+                if cpu_start is not None:
+                    # Raw fit-region process CPU, retained even when wall timing
+                    # eligibility is withdrawn later; consult timing_status.
+                    report["fit_process_cpu_seconds"] = time.process_time() - cpu_start
                 sys.setprofile(None)
                 if args.instrument:
                     recorder.restore_kernel_witnesses()

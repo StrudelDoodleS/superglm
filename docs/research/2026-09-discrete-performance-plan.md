@@ -90,3 +90,19 @@ No new capability is promoted merely because a microbenchmark improves.
 - Defer a shared chunk-index slicing context: profile evidence favors simpler
   tensor and row-selection improvements first. Do not persistently cache
   marginal outer products while the underlying support tables remain mutable.
+- The reviewed candidate `aef4ee7e` improves the same public Gaussian case:
+  within the final window, median discrete time is 1.522 s versus 2.342 s at
+  baseline (35% lower). Iterations remain 9 smoothing / 26 inner; the largest
+  saved training-parameter difference is 2.1e-15. Candidate discrete repeats
+  span 1.167–1.562 s, so retain the raw variation and do not infer a precise
+  universal speed ratio. Larger and insurance comparisons remain in progress.
+- Separate instrumentation confirms 326 reassociated tensor Gram calls and
+  666 fused tensor prediction calls. Timed runs disable this instrumentation.
+- On 100,000 rows with 32 observed values per covariate, median discrete time
+  decreases from 3.753 s to 2.116 s. Candidate exact fitting takes 4.331 s;
+  peak process RSS medians are 483 MiB discrete and 695 MiB exact. This fixture
+  preserves the fitted covariates exactly, with no unseen holdout support
+  values. Saved exact/discrete training parameters differ by at most 3.8e-15.
+- Retain timing ranges: guest process CPU audits cannot establish exclusive
+  access to the physical host. Subsequent timed workers also record their own
+  fit CPU time alongside wall time to expose scheduling-related variation.
