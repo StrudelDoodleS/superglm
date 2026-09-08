@@ -434,8 +434,9 @@ def test_both_chunk_routes_accept_ordinary_ordered_children() -> None:
     np.testing.assert_array_equal(geometry.data_curvature, geometry.data_curvature.T)
 
 
-def test_nb2_discrete_fit_refuses_through_the_generic_missing_information_gate() -> None:
-    """Kills bypassing the generic chunking capability gate for one observed-only family."""
+@pytest.mark.parametrize("curvature", ["observed", "fisher"])
+def test_nb2_discrete_fit_checks_only_requested_information(curvature: str) -> None:
+    """Observed chunks work without Fisher; explicit Fisher remains unavailable."""
 
     family = NegativeBinomialLS()
     response = np.array([0.0, 1.0, 4.0, 2.0, 7.0, 3.0, 8.0, 5.0])
@@ -466,11 +467,8 @@ def test_nb2_discrete_fit_refuses_through_the_generic_missing_information_gate()
         COMPLETE_OBSERVATION,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="chunked fitting requires expected information capability",
-    ):
-        fit_dense_fixed_lambda(
+    def fit(chunk_size):
+        return fit_dense_fixed_lambda(
             family,
             layout,
             response,
@@ -480,9 +478,23 @@ def test_nb2_discrete_fit_refuses_through_the_generic_missing_information_gate()
             config=DenseSolverConfig(
                 max_iterations=2,
                 tolerance=1.0e-7,
-                coefficient_curvature="observed",
+                coefficient_curvature=curvature,
             ),
-            chunk_size=3,
+            chunk_size=chunk_size,
+        )
+
+    if curvature == "fisher":
+        with pytest.raises(ValueError, match="Fisher coefficient curvature requires expected"):
+            fit(3)
+    else:
+        dense = fit(None)
+        grouped = fit(3)
+        tolerance = np.sqrt(np.finfo(np.float64).eps) * layout.n_coefficients
+        np.testing.assert_allclose(grouped.coefficients, dense.coefficients, rtol=tolerance)
+        np.testing.assert_allclose(
+            compute_joint_inference(layout, grouped).covariance,
+            compute_joint_inference(layout, dense).covariance,
+            rtol=tolerance,
         )
 
 

@@ -218,8 +218,6 @@ def _validated_context(
     fisher_family = family if isinstance(family, ExpectedInformationFamily) else None
     if coefficient_curvature == "fisher" and fisher_family is None:
         raise ValueError("Fisher coefficient curvature requires expected information capability")
-    if chunk_size is not None and fisher_family is None:
-        raise ValueError("chunked fitting requires expected information capability")
     if not isinstance(layout, StackedLayout) or layout.n_coefficients < 1:
         raise ValueError("layout must contain at least one global coefficient")
     if coefficient_face is not None:

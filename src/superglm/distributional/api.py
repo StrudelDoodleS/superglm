@@ -131,6 +131,8 @@ class SuperLSSTrainingTelemetry:
     rank: int
     backtracking_steps: int
     curvature: CurvatureTelemetry
+    execution_backend_identifier: str = "distributional-dense-v1"
+    resolved_chunk_size: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -359,8 +361,7 @@ def _coefficient_curvature(
     requested, and a request needs the expected-information capability.  The
     fallback is unchanged and lives in the solver: a materially indefinite
     terminal penalized observed Hessian falls back to penalized expected
-    information when the family supplies it and is refused otherwise.  The
-    chunked route keeps its own requirement in ``solver/solver.py``.
+    information when the family supplies it and is refused otherwise.
     """
     if requested not in ("observed", "fisher"):
         raise ValueError("coefficient_curvature must be 'observed' or 'fisher'")
@@ -502,11 +503,6 @@ class SuperLSS:
         if not isinstance(discrete, bool):
             raise TypeError("discrete must be bool")
         self._separation = validate_separation_policy(separation)
-        if discrete:
-            raise NotImplementedError(
-                "Discrete SuperLSS fitting is not implemented yet. Use discrete=False; "
-                "discrete fitting remains available for scalar SuperGLM models."
-            )
         self._family = family
         self._predictors = _owned_predictors(family, predictors)
         self._coefficient_curvature = _coefficient_curvature(family, coefficient_curvature)
@@ -917,6 +913,8 @@ class SuperLSS:
             rank=result.rank,
             backtracking_steps=model.result.backtracking_steps,
             curvature=result.curvature_telemetry,
+            execution_backend_identifier=model.result.execution_backend_identifier,
+            resolved_chunk_size=model.result.resolved_chunk_size,
         )
 
     def to_bytes(self) -> bytes:
