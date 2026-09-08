@@ -291,7 +291,9 @@ _DOMAIN_HIGH = math.ldexp(1.0, 450)
         ),
         (0, 1.0, 1.0, np.nextafter(_DOMAIN_LOW, 0.0), NegativeBinomialNumericalDomainError),
         (0, 1.0, 1.0, np.nextafter(_DOMAIN_HIGH, np.inf), NegativeBinomialNumericalDomainError),
-        (0, 1.0, np.nextafter(2.0**26, np.inf), 1.0, NegativeBinomialPoissonBoundaryError),
+        (0, 1.0, np.nextafter(2.0**26, np.inf), 1.0, None),
+        (0, 1.0, 2.0**52, 1.0, None),
+        (0, 1.0, np.nextafter(2.0**52, np.inf), 1.0, NegativeBinomialPoissonBoundaryError),
         (0, np.nextafter(2.0**26, np.inf), 1.0, 1.0, NegativeBinomialNumericalDomainError),
     ],
 )
