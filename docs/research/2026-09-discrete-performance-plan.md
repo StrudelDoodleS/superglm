@@ -233,3 +233,14 @@ and family-layering tests. Independent review resolved stored-buffer coherence,
 subclass dispatch and mixed-CSR-index allocation issues. Automatic panel dispatch
 is still disabled while a frozen-source public off/on pilot evaluates the
 complete-fit tradeoff.
+
+The first off/on pilot at `e23cd41c` does not support automatic admission:
+one discrete fit takes 6.068 s with panels disabled and 6.423 s with panels
+enabled; exact controls take 2.074 and 2.207 s. Inputs, outputs and iteration
+counts agree within roundoff. Separate profiling confirms the intended route
+(90,255 ordinary cross calls reduced to 210), but identifies 1.400 s of direct
+Python range-check work. Replace those loops with the existing allocation-free
+compiled predicate, preserving the same bounds and refusals. Warm writable and
+readonly C, Fortran and strided layouts before repeating uninstrumented fits.
+The 101 focused panel, integration and public warmup checks pass; keep this
+unfavorable pilot and its profile receipts alongside the next comparison.

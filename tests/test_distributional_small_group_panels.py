@@ -510,3 +510,95 @@ def test_csr_index_conversion_refuses_before_source_slicing(
     result = _build((_plan([group]),), slice(0, 2), byte_budget=2**20)
     assert result.workspace is None
     assert result.reason == "unsupported-group"
+
+
+@pytest.mark.parametrize("layout", ["vector", "vector-strided", "vector-reversed", "C", "F", "A"])
+@pytest.mark.parametrize("readonly", [False, True])
+def test_in_range_matches_predicate_on_edges_and_strided_arrays(layout, readonly):
+    from superglm.distributional.solver._small_group_panels import _in_range
+
+    edges = [
+        0.0,
+        -0.0,
+        2.0**-128,
+        -(2.0**-128),
+        2.0**128,
+        -(2.0**128),
+        np.nextafter(2.0**-128, 0.0),
+        np.nextafter(2.0**128, np.inf),
+        np.nextafter(2.0**-128, np.inf),
+        np.nextafter(2.0**128, 0.0),
+        np.nextafter(0.0, 1.0),
+        np.nan,
+        np.inf,
+        -np.inf,
+    ]
+    for edge in edges:
+        base = np.full((6, 8), 0.5)
+        base[2, 4] = edge
+        values = {
+            "vector": base.ravel(),
+            "vector-strided": base.ravel()[::2],
+            "vector-reversed": base.ravel()[::-1],
+            "C": base,
+            "F": np.asfortranarray(base),
+            "A": base[::2, ::2],
+        }[layout]
+        if readonly:
+            values.flags.writeable = False
+        magnitude = np.abs(values)
+        expected = bool(
+            np.all((magnitude == 0) | ((magnitude >= 2.0**-128) & (magnitude <= 2.0**128)))
+        )
+        assert _in_range(values) == expected
+
+
+def test_in_range_dispatches_rank_one_and_two_without_copying(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    captured = []
+
+    def compiled(values):
+        captured.append(values)
+        return True
+
+    monkeypatch.setattr(panels, "_tensor_operand_in_reassociation_range", compiled)
+    for values in (np.ones(8)[::2], np.ones((4, 6))[:, ::2]):
+        values.flags.writeable = False
+        assert panels._in_range(values)
+        assert captured[-1].ndim == 2
+        assert np.shares_memory(captured[-1], values)
+        assert not captured[-1].flags.writeable
+    assert len(captured) == 2
+
+
+def test_in_range_refuses_types_before_views_or_compiled_dispatch(monkeypatch):
+    import superglm.distributional.solver._small_group_panels as panels
+
+    class CustomArray(np.ndarray):
+        def __getitem__(self, key):
+            raise AssertionError("subclass view must not be constructed")
+
+    def forbidden(values):
+        raise AssertionError("ineligible dtype/type reached compiled predicate")
+
+    monkeypatch.setattr(panels, "_tensor_operand_in_reassociation_range", forbidden)
+    for values in (
+        [1.0],
+        np.ones(2, dtype=np.float32),
+        np.ones(2, dtype=np.int64),
+        np.ones(2, dtype=np.dtype(float).newbyteorder("S")),
+        np.ones(2).view(CustomArray),
+    ):
+        assert panels._in_range(values) is False
+
+
+@pytest.mark.parametrize("shape", [(0,), (0, 3), (3, 0), (), (2, 3, 4)])
+def test_in_range_empty_and_generic_rank_semantics(shape):
+    from superglm.distributional.solver._small_group_panels import _in_range
+
+    values = np.zeros(shape)
+    assert _in_range(values)
+    if values.size:
+        values[...] = np.inf
+        assert not _in_range(values)

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.sparse as sp
 
+from superglm._group_matrix._group_matrix_kernels import _tensor_operand_in_reassociation_range
 from superglm.group_matrix import (
     CategoricalGroupMatrix,
     DenseGroupMatrix,
@@ -55,7 +56,12 @@ def _in_range(values):
     """
     if type(values) is not np.ndarray or values.dtype != np.float64:
         return False
-    # nditer buffers only a fixed number of elements, including strided maps.
+    if values.ndim == 1:
+        return _tensor_operand_in_reassociation_range(values[:, None])
+    if values.ndim == 2:
+        return _tensor_operand_in_reassociation_range(values)
+    # Preserve the generic-rank predicate with bounded buffers. All current
+    # panel, raw-basis, map and weight callers use the allocation-free paths.
     iterator = np.nditer(
         values,
         flags=["external_loop", "buffered", "zerosize_ok"],

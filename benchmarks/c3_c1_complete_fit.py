@@ -351,6 +351,10 @@ class CallRecorder:
             ),
             ("superglm.distributional.kernels.gamma", "_small_shape_series"),
             ("superglm.distributional.solver.solver", "_reuse_observed_initial_result"),
+            (
+                "superglm.distributional.solver._small_group_panels",
+                "_tensor_operand_in_reassociation_range",
+            ),
         )
         for module_name, name in targets:
             module = sys.modules.get(module_name)
@@ -441,6 +445,9 @@ class CallRecorder:
                     "_predictor_chunk",
                     "_predictor_values",
                     "_disc_disc_2d_hist",
+                    "_cross_gram",
+                    "_cross_gram_by_columns",
+                    "_agg_by_bin",
                     "_support_support_raw_cross",
                     "_factored_gram_raw",
                     "maximum_chunked_predictor_change",
