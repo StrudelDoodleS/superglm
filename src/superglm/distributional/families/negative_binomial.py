@@ -26,6 +26,7 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
+    _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
@@ -322,3 +323,10 @@ __all__ = [
     "NegativeBinomialLS",
     "NegativeBinomialPoissonBoundaryError",
 ]
+
+
+_register_likelihood_reuse_contract(
+    NegativeBinomialLS,
+    NegativeBinomialLikelihoodPlan,
+    prepared_array_fields=("exact_response", "exact_count", "parameter_independent_carrier"),
+)

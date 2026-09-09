@@ -1,0 +1,1184 @@
+{
+  "schema": 1,
+  "scope": "Frozen gradient-recovery stage only; excludes subsequent practical-boundary policy changes.",
+  "interpretation": "These are different stopping solutions on identical data and representation, not a representation-parity experiment. Practical convergence is not certified smoothing stationarity.",
+  "important_findings": [
+    "Recovery versus old rejected Newton barely changes predictions but changes covariance by 12.40% in relative Frobenius norm. Covariance is consistent with each run's terminal observed penalized curvature; theta smoothing penalties change by +7.96%, +9.45%, and -22.54%.",
+    "Recovery terminal coefficients stop by objective_and_step with 28 backtracks and relative score 8.839e-6 (inner tolerance 1e-7). Near-fixed coefficients with changed penalties explain differing inference geometry; this receipt does not establish a tightly stationary conditional mode.",
+    "Versus plain practical EFS, recovery theta maximum is 283710 versus 239.904, despite similar medians and p99. Maximum relative variance change is 11.73%; maximum absolute any-claim probability change is 0.01904. Covariance relative Frobenius change is 36.98%.",
+    "The old strict and old practical Newton runs have bitwise-identical saved arrays; their different iteration budgets and practical flags did not change the rejected stopping solution."
+  ],
+  "timing": "UNMEASURED: concurrent fits and Kompress activity; no speed or isolated memory-performance claim.",
+  "formulae": {
+    "variance": "mu + mu**2 / theta",
+    "probability_any_claim": "-expm1(-theta * log1p(mu / theta))"
+  },
+  "fixture": {
+    "rows": 610212,
+    "holdout_rows": 67801,
+    "provenance": {
+      "data_sha256": {
+        "freMTPL2freq.parquet": "d691f9a0b53719381467d8b1d3487814e546a9c7cd59f9a56e70ff5100dc14bf"
+      },
+      "covariate_clips": {
+        "DrivAge": [
+          18,
+          90
+        ],
+        "VehAge": [
+          0,
+          20
+        ],
+        "BonusMalus": [
+          50,
+          150
+        ]
+      },
+      "response": "nb2",
+      "holdout_rule": "sorted IDpol, every 10th policy"
+    },
+    "fingerprints": {
+      "train_frame": "ec266c62b7d608acbdf32b68f6ff00d48c499fe460dd0e45dfa95c3f42fbf5e2",
+      "holdout_frame": "f3bd8c598dfee0a819e213d1de713811bcf9d9a5da3134e2b8c612e0cea0003f",
+      "y": "b0a57a00fd61bbf94f37a950d9730cd02e419e1248be32972546a71b55dbed0c",
+      "offset:mean": "5a6518c82f421b620f501810cf0823a62e6f1ecb72e1437884e590b1bc5091cb",
+      "holdout_offset:mean": "f7ad2c705f4a60f92e5ee13ac562def5020ac361bd086bc4f6d0446505f86906"
+    }
+  },
+  "dependencies": {
+    "numpy": "2.5.2",
+    "scipy": "1.18.0",
+    "pandas": "3.0.5",
+    "numba": "0.67.0",
+    "tabmat": "4.2.1",
+    "threadpoolctl": "3.6.0",
+    "superglm": "0.31.0"
+  },
+  "python": "3.13.14 (main, Jul 23 2026, 14:44:45) [Clang 22.1.3 ]",
+  "comparison_script_sha256": "6bd99fbab809db2a7139eae804e138e995f5a8bd04de30b1b35dd064e07468da",
+  "checks": {
+    "artifact_hashes_valid": true,
+    "source_stable_all_runs": true,
+    "fixture_and_parameter_order_identical": true,
+    "all_arrays_finite": true,
+    "old_newton_strict_and_practical_all_arrays_bitwise_equal": true,
+    "history_counts_match_metadata": true
+  },
+  "runs": {
+    "recovery_newton_practical": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-pragmatic-convergence/.benchmark-artifacts/c3-practical/nb2-recovery/recovery-0.json",
+      "raw_json_sha256": "6f7473271250c132273dca24a9ea6f1a5889bc0a2b6d81228ce8947f574350e3",
+      "raw_npz_sha256": "3fa26d71986c51a05b215ef06aa00c612b3abaf69c7542406f668c43e9fbd2f8",
+      "source": {
+        "sha": "8b66828d032878057815fb1acbb28028872c4cc8",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_tree_sha256": "0b6cfb108eaa4f6b1cf46aed8ccfd09ca5e2202d36b7b8e317561c37b36b71ca"
+      },
+      "source_stable": true,
+      "source_after": {
+        "sha": "8b66828d032878057815fb1acbb28028872c4cc8",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_tree_sha256": "0b6cfb108eaa4f6b1cf46aed8ccfd09ca5e2202d36b7b8e317561c37b36b71ca"
+      },
+      "source_stability_note": "HEAD and source-file hash stayed fixed. A changed repository diff hash can reflect concurrent non-source edits; both hashes are retained.",
+      "harness_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "config": {
+        "fixture": "nb2",
+        "n": 0,
+        "knots": 12,
+        "data": "/home/max/projects/superglm/.worktrees/c3-c1-completion/data",
+        "holdout_every": 10,
+        "discrete": true,
+        "n_bins": 256,
+        "outer": "efs+newton",
+        "initial_lambda": 0.1,
+        "max_lambda": 10000000000.0,
+        "practical_reml": true,
+        "max_reml_iter": 100,
+        "max_inner_iter": 100,
+        "reml_tol": 1e-06,
+        "inner_tol": 1e-07,
+        "threads": 1,
+        "instrument": false,
+        "measure_time": false
+      },
+      "converged": true,
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "smoothing_certified": false,
+      "smoothing": {
+        "objective": 125368.35495270696,
+        "initial_objective": 125420.53504782413,
+        "convergence_reason": "practical_plateau",
+        "terminal_raw_max_log_step": 0.00027482973707632086,
+        "terminal_gradient": null,
+        "terminal_gradient_certificate": null,
+        "terminal_projected_gradient_norm": null,
+        "terminal_endpoint_directions": {},
+        "unresolved_upper_bound": [],
+        "beyond_cap_components": [],
+        "newton_iterations": 1,
+        "bfgs_fallback_iterations": 1,
+        "stationarity_bar": 0.12536935495270696
+      },
+      "lambdas": {
+        "mean:DrivAge#wiggle": 18.624702372736095,
+        "mean:VehAge#wiggle": 0.15287269408530002,
+        "mean:BonusMalus#wiggle": 2.3079048642542026,
+        "theta:DrivAge#wiggle": 2.0899560892359257,
+        "theta:VehAge#wiggle": 16.010915611505883,
+        "theta:BonusMalus#wiggle": 1.3403603853449506
+      },
+      "edf": 54.83012289135243,
+      "log_likelihood": -126570.95166303398,
+      "penalized_log_likelihood": -126594.36692244244,
+      "terminal_coefficient_fit": {
+        "converged": true,
+        "convergence_reason": "objective_and_step",
+        "execution_backend_identifier": "distributional-chunked-v1",
+        "resolved_chunk_size": 8738,
+        "iterations": 1,
+        "log_likelihood": -126570.95166303398,
+        "penalized_log_likelihood": -126594.36692244244,
+        "terminal_curvature": {
+          "requested_source": "observed",
+          "actual_source": "observed",
+          "reason": null,
+          "minimum_eigenvalue": 3.0357021353754927,
+          "rank": 92,
+          "condition_estimate": 207.5082789232792,
+          "fallback_count": 0,
+          "matrix_kind": "penalized"
+        },
+        "score_relative": 8.839211888166599e-06,
+        "step_relative": 3.9311975667060024e-11,
+        "objective_relative_change": 4.415705909012282e-15,
+        "backtracking_steps": 28
+      },
+      "covariance_provenance": {
+        "kind": "conditional covariance: inverse terminal observed penalized curvature",
+        "api": "DistributionalGLM.covariance_ -> compute_joint_inference -> terminal_pseudo_inverse",
+        "inverse_max_absolute_residual": 2.1141159529211772e-13,
+        "inverse_normalized_backward_error": 1.744740161131109e-17,
+        "terminal_penalized_score_l2": 2.6903780156513424,
+        "local_newton_decrement_squared": 0.14756849731934552
+      },
+      "exact_face_components": [],
+      "work": {
+        "outer_iterations": 11,
+        "accepted_outer_iterations": 11,
+        "stages": {
+          "efs": 10,
+          "newton": 1
+        },
+        "coefficient_fits": 12,
+        "coefficient_fit_iterations_total": 41,
+        "coefficient_fit_backtracking_steps_total": 148,
+        "inner_iterations_reported": 41
+      },
+      "dispatch": {
+        "coefficient_fit_backends": {
+          "distributional-chunked-v1": 12
+        },
+        "resolved_chunk_sizes": [
+          8738
+        ],
+        "terminal_curvature": {
+          "requested_source": "observed",
+          "actual_source": "observed",
+          "reason": null,
+          "minimum_eigenvalue": 3.0357021353754927,
+          "rank": 92,
+          "condition_estimate": 207.5082789232792,
+          "fallback_count": 0,
+          "matrix_kind": "penalized"
+        },
+        "instrumentation_enabled": false,
+        "limitation": "Recorded coefficient-fit backend dispatch; uninstrumented derivative dispatch is not inferred."
+      },
+      "memory": {
+        "peak_fit_process_rss_bytes": 1620172800,
+        "peak_process_rss_bytes": 1620172800,
+        "interpretation": "Observed process RSS, not an isolated memory-performance comparison."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "unmeasured",
+      "holdout_observable_quantiles": {
+        "mu": {
+          "0": 0.00010491437638774219,
+          "0.001": 0.00019893241768411218,
+          "0.01": 0.0007680113582804963,
+          "0.5": 0.04598572461084769,
+          "0.9": 0.1016063812737888,
+          "0.95": 0.1393434365459918,
+          "0.99": 0.24709011271437573,
+          "0.999": 0.5399520696829795,
+          "1": 1.1588272281406813
+        },
+        "theta": {
+          "0": 0.1415655722036657,
+          "0.001": 0.2444533004625791,
+          "0.01": 0.35757958029330444,
+          "0.5": 0.9214097527469007,
+          "0.9": 1.8471422368909705,
+          "0.95": 2.411742169756409,
+          "0.99": 4.15566274708053,
+          "0.999": 798.3823706569029,
+          "1": 283710.4627011221
+        },
+        "variance": {
+          "0": 0.00010493589083409319,
+          "0.001": 0.0001989825608678085,
+          "0.01": 0.0007687641798445882,
+          "0.5": 0.04874619555679061,
+          "0.9": 0.11109878587096098,
+          "0.95": 0.1555368461876515,
+          "0.99": 0.31672095625064256,
+          "0.999": 0.7417123370765065,
+          "1": 1.6372081584320393
+        },
+        "probability_any_claim": {
+          "0": 0.00010489811844256329,
+          "0.001": 0.0001988875698348908,
+          "0.01": 0.0007673882138613719,
+          "0.5": 0.04360263308114553,
+          "0.9": 0.09273803867636511,
+          "0.95": 0.12309508471580065,
+          "0.99": 0.1966536134966369,
+          "0.999": 0.37020973360769216,
+          "1": 0.6846421255937529
+        }
+      }
+    },
+    "old_newton_practical": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-c1-completion/.benchmark-artifacts/c3-practical/nb2-practical-original/before-0.json",
+      "raw_json_sha256": "2d6d31e9cf583f82db43b6365833532663497d1fbd999bd251d4743a511f1162",
+      "raw_npz_sha256": "24c82df9fd2c435564284dfc487fcf380ae1a308827302ed52eda4a25fdb94ce",
+      "source": {
+        "sha": "1a8952a43ef90f16f8aa8fd79f9dfabe8cf7d0e8",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stable": true,
+      "source_after": {
+        "sha": "1a8952a43ef90f16f8aa8fd79f9dfabe8cf7d0e8",
+        "diff_sha256": "bea897057f4c12b3954959beba57b0a3ac68e4b8722c9900547bea73e19ce275",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stability_note": "HEAD and source-file hash stayed fixed. A changed repository diff hash can reflect concurrent non-source edits; both hashes are retained.",
+      "harness_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "config": {
+        "fixture": "nb2",
+        "n": 0,
+        "knots": 12,
+        "data": "/home/max/projects/superglm/.worktrees/c3-c1-completion/data",
+        "holdout_every": 10,
+        "discrete": true,
+        "n_bins": 256,
+        "outer": "efs+newton",
+        "initial_lambda": 0.1,
+        "max_lambda": 10000000000.0,
+        "practical_reml": true,
+        "max_reml_iter": 100,
+        "max_inner_iter": 100,
+        "reml_tol": 1e-06,
+        "inner_tol": 1e-07,
+        "threads": 1,
+        "instrument": false,
+        "measure_time": false
+      },
+      "converged": false,
+      "coefficient_converged": true,
+      "smoothing_converged": false,
+      "smoothing_certified": false,
+      "smoothing": {
+        "objective": 125368.4676792604,
+        "initial_objective": 125420.53504782413,
+        "convergence_reason": "objective_rejected",
+        "terminal_raw_max_log_step": 0.09803376898955918,
+        "terminal_gradient": {
+          "mean:DrivAge#wiggle": 0.019229135992814384,
+          "mean:VehAge#wiggle": -0.031985880627577006,
+          "mean:BonusMalus#wiggle": -0.017943594212441055,
+          "theta:DrivAge#wiggle": -0.5405950163456973,
+          "theta:VehAge#wiggle": -0.3764369972573493,
+          "theta:BonusMalus#wiggle": -0.9482488613084192
+        },
+        "terminal_gradient_certificate": {
+          "mean:DrivAge#wiggle": 3.858627745531596e-08,
+          "mean:VehAge#wiggle": 2.8301913528185685e-08,
+          "mean:BonusMalus#wiggle": 5.159257592572883e-08,
+          "theta:DrivAge#wiggle": 7.19310802151006e-08,
+          "theta:VehAge#wiggle": 4.719931766027837e-08,
+          "theta:BonusMalus#wiggle": 2.1875322869937597e-07
+        },
+        "terminal_projected_gradient_norm": null,
+        "terminal_endpoint_directions": {},
+        "unresolved_upper_bound": [],
+        "beyond_cap_components": [],
+        "newton_iterations": 2,
+        "bfgs_fallback_iterations": 2,
+        "stationarity_bar": 0.12536946767926038
+      },
+      "lambdas": {
+        "mean:DrivAge#wiggle": 18.45677349409432,
+        "mean:VehAge#wiggle": 0.15728274120797317,
+        "mean:BonusMalus#wiggle": 2.3190466005147927,
+        "theta:DrivAge#wiggle": 1.9357980703346431,
+        "theta:VehAge#wiggle": 14.628094989586467,
+        "theta:BonusMalus#wiggle": 1.7303313959889535
+      },
+      "edf": 54.778846088628256,
+      "log_likelihood": -126570.95166403608,
+      "penalized_log_likelihood": -126594.75304169703,
+      "terminal_coefficient_fit": {
+        "converged": true,
+        "convergence_reason": "objective_and_step",
+        "execution_backend_identifier": "distributional-chunked-v1",
+        "resolved_chunk_size": 8738,
+        "iterations": 13,
+        "log_likelihood": -126570.95166403608,
+        "penalized_log_likelihood": -126594.75304169703,
+        "terminal_curvature": {
+          "requested_source": "observed",
+          "actual_source": "observed",
+          "reason": null,
+          "minimum_eigenvalue": 3.079793010518395,
+          "rank": 92,
+          "condition_estimate": 204.33775530054905,
+          "fallback_count": 0,
+          "matrix_kind": "penalized"
+        },
+        "score_relative": 5.050979717167219e-07,
+        "step_relative": 7.326633543067737e-08,
+        "objective_relative_change": 1.8452945691946908e-13,
+        "backtracking_steps": 56
+      },
+      "covariance_provenance": {
+        "kind": "conditional covariance: inverse terminal observed penalized curvature",
+        "api": "DistributionalGLM.covariance_ -> compute_joint_inference -> terminal_pseudo_inverse",
+        "inverse_max_absolute_residual": 3.253573567667761e-13,
+        "inverse_normalized_backward_error": 2.4805239375731074e-17,
+        "terminal_penalized_score_l2": 0.12170832624640236,
+        "local_newton_decrement_squared": 0.00018902895797712058
+      },
+      "exact_face_components": [],
+      "work": {
+        "outer_iterations": 8,
+        "accepted_outer_iterations": 7,
+        "stages": {
+          "efs": 6,
+          "newton": 2
+        },
+        "coefficient_fits": 9,
+        "coefficient_fit_iterations_total": 38,
+        "coefficient_fit_backtracking_steps_total": 75,
+        "inner_iterations_reported": 38
+      },
+      "dispatch": {
+        "coefficient_fit_backends": {
+          "distributional-chunked-v1": 9
+        },
+        "resolved_chunk_sizes": [
+          8738
+        ],
+        "terminal_curvature": {
+          "requested_source": "observed",
+          "actual_source": "observed",
+          "reason": null,
+          "minimum_eigenvalue": 3.079793010518395,
+          "rank": 92,
+          "condition_estimate": 204.33775530054905,
+          "fallback_count": 0,
+          "matrix_kind": "penalized"
+        },
+        "instrumentation_enabled": false,
+        "limitation": "Recorded coefficient-fit backend dispatch; uninstrumented derivative dispatch is not inferred."
+      },
+      "memory": {
+        "peak_fit_process_rss_bytes": 1592520704,
+        "peak_process_rss_bytes": 1592520704,
+        "interpretation": "Observed process RSS, not an isolated memory-performance comparison."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "unmeasured",
+      "holdout_observable_quantiles": {
+        "mu": {
+          "0": 0.0001049143763120607,
+          "0.001": 0.00019893241822607454,
+          "0.01": 0.0007680113590301604,
+          "0.5": 0.04598572457627064,
+          "0.9": 0.10160638129090302,
+          "0.95": 0.13934343641876354,
+          "0.99": 0.2470901122692909,
+          "0.999": 0.5399520695451602,
+          "1": 1.1588272259566619
+        },
+        "theta": {
+          "0": 0.1415655593700522,
+          "0.001": 0.24445329790133213,
+          "0.01": 0.35757955265358804,
+          "0.5": 0.921409853241801,
+          "0.9": 1.8471423162630576,
+          "0.95": 2.411742040146259,
+          "0.99": 4.1556626993886185,
+          "0.999": 798.3807236604428,
+          "1": 283709.4784953144
+        },
+        "variance": {
+          "0": 0.00010493589075767348,
+          "0.001": 0.00019898256141387966,
+          "0.01": 0.0007687641805696014,
+          "0.5": 0.04874619578482836,
+          "0.9": 0.11109878558139404,
+          "0.95": 0.15553684416606917,
+          "0.99": 0.3167209498075382,
+          "0.999": 0.7417123430293496,
+          "1": 1.63720807549899
+        },
+        "probability_any_claim": {
+          "0": 0.00010489811836725873,
+          "0.001": 0.0001988875703746918,
+          "0.01": 0.0007673882120502647,
+          "0.5": 0.043602633011618284,
+          "0.9": 0.09273803880196207,
+          "0.95": 0.12309508452523944,
+          "0.99": 0.1966536139868257,
+          "0.999": 0.37020973854429445,
+          "1": 0.6846421227496484
+        }
+      }
+    },
+    "old_efs_practical": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-c1-completion/.benchmark-artifacts/c3-practical/nb2-efs-practical-original/before-0.json",
+      "raw_json_sha256": "5f1940f061dfbef4a8daae8fad910cf024daf22cf4a4eff867d34ebec436a597",
+      "raw_npz_sha256": "2d0f59435111b1c267c9a42b46af9adf3361005504d610a932bd13d5eac4a0f9",
+      "source": {
+        "sha": "1a8952a43ef90f16f8aa8fd79f9dfabe8cf7d0e8",
+        "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stable": true,
+      "source_after": {
+        "sha": "1a8952a43ef90f16f8aa8fd79f9dfabe8cf7d0e8",
+        "diff_sha256": "b79c2ccda9931c92b972b1d08e0a79377f81aa94546f1a33981a8db0d4732119",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stability_note": "HEAD and source-file hash stayed fixed. A changed repository diff hash can reflect concurrent non-source edits; both hashes are retained.",
+      "harness_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "config": {
+        "fixture": "nb2",
+        "n": 0,
+        "knots": 12,
+        "data": "/home/max/projects/superglm/.worktrees/c3-c1-completion/data",
+        "holdout_every": 10,
+        "discrete": true,
+        "n_bins": 256,
+        "outer": "efs",
+        "initial_lambda": 0.1,
+        "max_lambda": 10000000000.0,
+        "practical_reml": true,
+        "max_reml_iter": 100,
+        "max_inner_iter": 100,
+        "reml_tol": 1e-06,
+        "inner_tol": 1e-07,
+        "threads": 1,
+        "instrument": false,
+        "measure_time": false
+      },
+      "converged": true,
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "smoothing_certified": false,
+      "smoothing": {
+        "objective": 125370.43674279822,
+        "initial_objective": 125420.53504782413,
+        "convergence_reason": "practical_plateau",
+        "terminal_raw_max_log_step": 0.0009194076126879391,
+        "terminal_gradient": null,
+        "terminal_gradient_certificate": null,
+        "terminal_projected_gradient_norm": null,
+        "terminal_endpoint_directions": {},
+        "unresolved_upper_bound": [],
+        "beyond_cap_components": [],
+        "newton_iterations": 0,
+        "bfgs_fallback_iterations": 0,
+        "stationarity_bar": 0.12537143674279821
+      },
+      "lambdas": {
+        "mean:DrivAge#wiggle": 18.63907009128167,
+        "mean:VehAge#wiggle": 0.15195769264869566,
+        "mean:BonusMalus#wiggle": 2.3118756391181776,
+        "theta:DrivAge#wiggle": 2.9522289340172505,
+        "theta:VehAge#wiggle": 19.21667880575478,
+        "theta:BonusMalus#wiggle": 0.6966037903208299
+      },
+      "edf": 55.56579838341173,
+      "log_likelihood": -126571.07815960038,
+      "penalized_log_likelihood": -126594.85431590858,
+      "terminal_coefficient_fit": {
+        "converged": true,
+        "convergence_reason": "objective_and_score",
+        "execution_backend_identifier": "distributional-chunked-v1",
+        "resolved_chunk_size": 8738,
+        "iterations": 1,
+        "log_likelihood": -126571.07815960038,
+        "penalized_log_likelihood": -126594.85431590858,
+        "terminal_curvature": {
+          "requested_source": "observed",
+          "actual_source": "observed",
+          "reason": null,
+          "minimum_eigenvalue": 3.0253910036489207,
+          "rank": 92,
+          "condition_estimate": 208.9818316737553,
+          "fallback_count": 0,
+          "matrix_kind": "penalized"
+        },
+        "score_relative": 5.944942284244986e-11,
+        "step_relative": 0.0001272893271290348,
+        "objective_relative_change": 1.0370651673115394e-10,
+        "backtracking_steps": 0
+      },
+      "covariance_provenance": {
+        "kind": "conditional covariance: inverse terminal observed penalized curvature",
+        "api": "DistributionalGLM.covariance_ -> compute_joint_inference -> terminal_pseudo_inverse",
+        "inverse_max_absolute_residual": 3.608228282534061e-13,
+        "inverse_normalized_backward_error": 2.5375914258890883e-17,
+        "terminal_penalized_score_l2": 1.1764426650382878e-05,
+        "local_newton_decrement_squared": 1.5807126699784322e-13
+      },
+      "exact_face_components": [],
+      "work": {
+        "outer_iterations": 24,
+        "accepted_outer_iterations": 24,
+        "stages": {
+          "efs": 24
+        },
+        "coefficient_fits": 25,
+        "coefficient_fit_iterations_total": 45,
+        "coefficient_fit_backtracking_steps_total": 0,
+        "inner_iterations_reported": 45
+      },
+      "dispatch": {
+        "coefficient_fit_backends": {
+          "distributional-chunked-v1": 25
+        },
+        "resolved_chunk_sizes": [
+          8738
+        ],
+        "terminal_curvature": {
+          "requested_source": "observed",
+          "actual_source": "observed",
+          "reason": null,
+          "minimum_eigenvalue": 3.0253910036489207,
+          "rank": 92,
+          "condition_estimate": 208.9818316737553,
+          "fallback_count": 0,
+          "matrix_kind": "penalized"
+        },
+        "instrumentation_enabled": false,
+        "limitation": "Recorded coefficient-fit backend dispatch; uninstrumented derivative dispatch is not inferred."
+      },
+      "memory": {
+        "peak_fit_process_rss_bytes": 1757741056,
+        "peak_process_rss_bytes": 1757741056,
+        "interpretation": "Observed process RSS, not an isolated memory-performance comparison."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "unmeasured",
+      "holdout_observable_quantiles": {
+        "mu": {
+          "0": 0.00010491031259125747,
+          "0.001": 0.0001986144858308094,
+          "0.01": 0.000768469273588159,
+          "0.5": 0.045985043481735446,
+          "0.9": 0.10159754460934171,
+          "0.95": 0.13941216135929313,
+          "0.99": 0.24735524472458642,
+          "0.999": 0.540524214484798,
+          "1": 1.1609518344539
+        },
+        "theta": {
+          "0": 0.1510663387630641,
+          "0.001": 0.2503695335317035,
+          "0.01": 0.35925815831871005,
+          "0.5": 0.9214246608633088,
+          "0.9": 1.8611252656002766,
+          "0.95": 2.4240104636460345,
+          "0.99": 4.185055589797343,
+          "0.999": 68.62388522302979,
+          "1": 239.90417753506853
+        },
+        "variance": {
+          "0": 0.00010493210068682103,
+          "0.001": 0.00019868641285628331,
+          "0.01": 0.0007690367923584553,
+          "0.5": 0.04873196176844012,
+          "0.9": 0.11099731383998984,
+          "0.95": 0.1556863000977322,
+          "0.99": 0.316763090433593,
+          "0.999": 0.7432695956728107,
+          "1": 1.6866272426052813
+        },
+        "probability_any_claim": {
+          "0": 0.00010489391829979527,
+          "0.001": 0.00019855881603714028,
+          "0.01": 0.0007678906747692712,
+          "0.5": 0.04360777009681564,
+          "0.9": 0.09273996748219983,
+          "0.95": 0.12305189272879112,
+          "0.99": 0.19658349729834249,
+          "0.999": 0.3682205653282956,
+          "1": 0.6825071723023562
+        }
+      }
+    },
+    "old_newton_strict": {
+      "raw_json": "/home/max/projects/superglm/.worktrees/c3-c1-completion/.benchmark-artifacts/c3-c1/nb2-k12-candidate-discrete256/candidate-0.json",
+      "raw_json_sha256": "5407309416b7f3bc7c6871052fa8e3a33b727aa5424d377f6e8479cb2c81ff76",
+      "raw_npz_sha256": "24c82df9fd2c435564284dfc487fcf380ae1a308827302ed52eda4a25fdb94ce",
+      "source": {
+        "sha": "a433ab88a1b7fb26c88af2b69fccc0d24b051862",
+        "diff_sha256": "ab3e33590542c252296237a38447030323822af66eb3dbfbfeb4e69bad62b29b",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stable": true,
+      "source_after": {
+        "sha": "a433ab88a1b7fb26c88af2b69fccc0d24b051862",
+        "diff_sha256": "ab3e33590542c252296237a38447030323822af66eb3dbfbfeb4e69bad62b29b",
+        "source_tree_sha256": "ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af"
+      },
+      "source_stability_note": "HEAD and source-file hash stayed fixed. A changed repository diff hash can reflect concurrent non-source edits; both hashes are retained.",
+      "harness_sha256": "17ae1a9c6ce7334b50640c8b3b9057db59ab28b9407ab0cab888cd37aee1a3c7",
+      "fixtures_sha256": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "config": {
+        "fixture": "nb2",
+        "n": 0,
+        "knots": 12,
+        "data": "/home/max/projects/superglm/.worktrees/c3-c1-completion/data",
+        "holdout_every": 10,
+        "discrete": true,
+        "n_bins": 256,
+        "outer": "efs+newton",
+        "initial_lambda": 0.1,
+        "max_lambda": 10000000000.0,
+        "practical_reml": false,
+        "max_reml_iter": 60,
+        "max_inner_iter": 100,
+        "reml_tol": 1e-06,
+        "inner_tol": 1e-07,
+        "threads": 1,
+        "instrument": false,
+        "measure_time": false
+      },
+      "converged": false,
+      "coefficient_converged": true,
+      "smoothing_converged": false,
+      "smoothing_certified": false,
+      "smoothing": {
+        "objective": 125368.4676792604,
+        "initial_objective": 125420.53504782413,
+        "convergence_reason": "objective_rejected",
+        "terminal_raw_max_log_step": 0.09803376898955918,
+        "terminal_gradient": {
+          "mean:DrivAge#wiggle": 0.019229135992814384,
+          "mean:VehAge#wiggle": -0.031985880627577006,
+          "mean:BonusMalus#wiggle": -0.017943594212441055,
+          "theta:DrivAge#wiggle": -0.5405950163456973,
+          "theta:VehAge#wiggle": -0.3764369972573493,
+          "theta:BonusMalus#wiggle": -0.9482488613084192
+        },
+        "terminal_gradient_certificate": {
+          "mean:DrivAge#wiggle": 3.858627745531596e-08,
+          "mean:VehAge#wiggle": 2.8301913528185685e-08,
+          "mean:BonusMalus#wiggle": 5.159257592572883e-08,
+          "theta:DrivAge#wiggle": 7.19310802151006e-08,
+          "theta:VehAge#wiggle": 4.719931766027837e-08,
+          "theta:BonusMalus#wiggle": 2.1875322869937597e-07
+        },
+        "terminal_projected_gradient_norm": null,
+        "terminal_endpoint_directions": {},
+        "unresolved_upper_bound": [],
+        "beyond_cap_components": [],
+        "newton_iterations": 2,
+        "bfgs_fallback_iterations": 2,
+        "stationarity_bar": 0.12536946767926038
+      },
+      "lambdas": {
+        "mean:DrivAge#wiggle": 18.45677349409432,
+        "mean:VehAge#wiggle": 0.15728274120797317,
+        "mean:BonusMalus#wiggle": 2.3190466005147927,
+        "theta:DrivAge#wiggle": 1.9357980703346431,
+        "theta:VehAge#wiggle": 14.628094989586467,
+        "theta:BonusMalus#wiggle": 1.7303313959889535
+      },
+      "edf": 54.778846088628256,
+      "log_likelihood": -126570.95166403608,
+      "penalized_log_likelihood": -126594.75304169703,
+      "terminal_coefficient_fit": {
+        "converged": true,
+        "convergence_reason": "objective_and_step",
+        "execution_backend_identifier": "distributional-chunked-v1",
+        "resolved_chunk_size": 8738,
+        "iterations": 13,
+        "log_likelihood": -126570.95166403608,
+        "penalized_log_likelihood": -126594.75304169703,
+        "terminal_curvature": {
+          "requested_source": "observed",
+          "actual_source": "observed",
+          "reason": null,
+          "minimum_eigenvalue": 3.079793010518395,
+          "rank": 92,
+          "condition_estimate": 204.33775530054905,
+          "fallback_count": 0,
+          "matrix_kind": "penalized"
+        },
+        "score_relative": 5.050979717167219e-07,
+        "step_relative": 7.326633543067737e-08,
+        "objective_relative_change": 1.8452945691946908e-13,
+        "backtracking_steps": 56
+      },
+      "covariance_provenance": {
+        "kind": "conditional covariance: inverse terminal observed penalized curvature",
+        "api": "DistributionalGLM.covariance_ -> compute_joint_inference -> terminal_pseudo_inverse",
+        "inverse_max_absolute_residual": 3.253573567667761e-13,
+        "inverse_normalized_backward_error": 2.4805239375731074e-17,
+        "terminal_penalized_score_l2": 0.12170832624640236,
+        "local_newton_decrement_squared": 0.00018902895797712058
+      },
+      "exact_face_components": [],
+      "work": {
+        "outer_iterations": 8,
+        "accepted_outer_iterations": 7,
+        "stages": {
+          "efs": 6,
+          "newton": 2
+        },
+        "coefficient_fits": 9,
+        "coefficient_fit_iterations_total": 38,
+        "coefficient_fit_backtracking_steps_total": 75,
+        "inner_iterations_reported": 38
+      },
+      "dispatch": {
+        "coefficient_fit_backends": {
+          "distributional-chunked-v1": 9
+        },
+        "resolved_chunk_sizes": [
+          8738
+        ],
+        "terminal_curvature": {
+          "requested_source": "observed",
+          "actual_source": "observed",
+          "reason": null,
+          "minimum_eigenvalue": 3.079793010518395,
+          "rank": 92,
+          "condition_estimate": 204.33775530054905,
+          "fallback_count": 0,
+          "matrix_kind": "penalized"
+        },
+        "instrumentation_enabled": false,
+        "limitation": "Recorded coefficient-fit backend dispatch; uninstrumented derivative dispatch is not inferred."
+      },
+      "memory": {
+        "peak_fit_process_rss_bytes": 1608032256,
+        "peak_process_rss_bytes": 1608032256,
+        "interpretation": "Observed process RSS, not an isolated memory-performance comparison."
+      },
+      "timing_status": "UNMEASURED",
+      "raw_timing_status": "unmeasured",
+      "holdout_observable_quantiles": {
+        "mu": {
+          "0": 0.0001049143763120607,
+          "0.001": 0.00019893241822607454,
+          "0.01": 0.0007680113590301604,
+          "0.5": 0.04598572457627064,
+          "0.9": 0.10160638129090302,
+          "0.95": 0.13934343641876354,
+          "0.99": 0.2470901122692909,
+          "0.999": 0.5399520695451602,
+          "1": 1.1588272259566619
+        },
+        "theta": {
+          "0": 0.1415655593700522,
+          "0.001": 0.24445329790133213,
+          "0.01": 0.35757955265358804,
+          "0.5": 0.921409853241801,
+          "0.9": 1.8471423162630576,
+          "0.95": 2.411742040146259,
+          "0.99": 4.1556626993886185,
+          "0.999": 798.3807236604428,
+          "1": 283709.4784953144
+        },
+        "variance": {
+          "0": 0.00010493589075767348,
+          "0.001": 0.00019898256141387966,
+          "0.01": 0.0007687641805696014,
+          "0.5": 0.04874619578482836,
+          "0.9": 0.11109878558139404,
+          "0.95": 0.15553684416606917,
+          "0.99": 0.3167209498075382,
+          "0.999": 0.7417123430293496,
+          "1": 1.63720807549899
+        },
+        "probability_any_claim": {
+          "0": 0.00010489811836725873,
+          "0.001": 0.0001988875703746918,
+          "0.01": 0.0007673882120502647,
+          "0.5": 0.043602633011618284,
+          "0.9": 0.09273803880196207,
+          "0.95": 0.12309508452523944,
+          "0.99": 0.1966536139868257,
+          "0.999": 0.37020973854429445,
+          "1": 0.6846421227496484
+        }
+      }
+    }
+  },
+  "comparisons": {
+    "old_newton_practical": {
+      "direction": "recovery minus baseline; pointwise relative errors divide by baseline",
+      "objective_delta": -0.11272655344509985,
+      "lambda_ratios": {
+        "mean:DrivAge#wiggle": 1.009098495936763,
+        "mean:VehAge#wiggle": 0.9719610232578424,
+        "mean:BonusMalus#wiggle": 0.9951955530957779,
+        "theta:DrivAge#wiggle": 1.0796353820492408,
+        "theta:VehAge#wiggle": 1.0945318322655018,
+        "theta:BonusMalus#wiggle": 0.7746264030416447
+      },
+      "edf_delta": 0.051276802724174786,
+      "log_likelihood_delta": 1.0021030902862549e-06,
+      "holdout": {
+        "mu": {
+          "mean_signed": 4.474111071780942e-12,
+          "mean_absolute": 6.551870128318173e-11,
+          "absolute_quantiles": {
+            "0": 1.8713329497099807e-16,
+            "0.001": 6.168459840139029e-15,
+            "0.01": 1.4897891947862618e-13,
+            "0.5": 2.943400384536332e-11,
+            "0.9": 1.6480973530352827e-10,
+            "0.95": 2.405085713919064e-10,
+            "0.99": 4.880261195161495e-10,
+            "0.999": 1.3524553255094974e-09,
+            "1": 4.037711498483532e-09
+          },
+          "relative_l2": 1.8176401323651671e-09,
+          "absolute_relative_quantiles": {
+            "0": 1.5441668183329063e-13,
+            "0.001": 2.1804870677886346e-13,
+            "0.01": 9.208549898671177e-12,
+            "0.5": 8.965117143577269e-10,
+            "0.9": 2.4701340059839102e-09,
+            "0.95": 3.071634961764318e-09,
+            "0.99": 4.103581884092101e-09,
+            "0.999": 4.903494000296373e-09,
+            "1": 5.913500321143976e-09
+          }
+        },
+        "theta": {
+          "mean_signed": 0.0001502005856421539,
+          "mean_absolute": 0.0001502730897586362,
+          "absolute_quantiles": {
+            "0": 9.867107131356079e-13,
+            "0.001": 4.2674197509029455e-11,
+            "0.01": 3.64472563241236e-10,
+            "0.5": 3.133663173393586e-08,
+            "0.9": 1.8728260275935327e-07,
+            "0.95": 2.6462213442712823e-07,
+            "0.99": 5.710812631676276e-07,
+            "0.999": 0.0016468526318931247,
+            "1": 0.9842058076756075
+          },
+          "relative_l2": 3.4508973200419996e-06,
+          "absolute_relative_quantiles": {
+            "0": 1.9938320363658624e-12,
+            "0.001": 7.394053135464365e-11,
+            "0.01": 4.951477442258086e-10,
+            "0.5": 3.538766618260502e-08,
+            "0.9": 1.3194788334357558e-07,
+            "0.95": 1.562776825960827e-07,
+            "0.99": 2.047204514739311e-07,
+            "0.999": 2.044498047235404e-06,
+            "1": 3.548284622345936e-06
+          }
+        },
+        "variance": {
+          "mean_signed": 3.844524386026459e-11,
+          "mean_absolute": 3.7757374412853385e-10,
+          "absolute_quantiles": {
+            "0": 2.019326546254252e-16,
+            "0.001": 2.1199491814782866e-14,
+            "0.01": 2.730315973309416e-13,
+            "0.5": 8.823990149675609e-11,
+            "0.9": 7.895619158482248e-10,
+            "0.95": 1.3766315309915456e-09,
+            "0.99": 4.057196856255274e-09,
+            "0.999": 2.4353299288293162e-08,
+            "1": 8.293304931683565e-08
+          },
+          "relative_l2": 1.896545656629916e-08,
+          "absolute_relative_quantiles": {
+            "0": 5.110722097158024e-14,
+            "0.001": 3.295737466461833e-12,
+            "0.01": 4.241115875201949e-11,
+            "0.5": 2.2358136969831527e-09,
+            "0.9": 8.329341905596705e-09,
+            "0.95": 1.1520598814976152e-08,
+            "0.99": 2.1081814293226177e-08,
+            "0.999": 4.14921234401655e-08,
+            "1": 7.64844454026987e-08
+          }
+        },
+        "probability_any_claim": {
+          "mean_signed": -5.442914274310088e-12,
+          "mean_absolute": 8.30124307059896e-11,
+          "absolute_quantiles": {
+            "0": 5.44811591673966e-18,
+            "0.001": 1.7552430862932678e-14,
+            "0.01": 1.7082689429681608e-13,
+            "0.5": 2.7120729273466537e-11,
+            "0.9": 1.613945088685398e-10,
+            "0.95": 2.9579155791381595e-10,
+            "0.99": 9.016441065989866e-10,
+            "0.999": 3.957354532957413e-09,
+            "1": 1.0574763398274456e-08
+          },
+          "relative_l2": 4.374997343047076e-09,
+          "absolute_relative_quantiles": {
+            "0": 1.1246100894435274e-14,
+            "0.001": 1.7627992012707508e-12,
+            "0.01": 1.4328437165308615e-11,
+            "0.5": 8.570748767438003e-10,
+            "0.9": 2.419095303522936e-09,
+            "0.95": 3.2458374389148836e-09,
+            "0.99": 6.813124334826261e-09,
+            "0.999": 1.5207237971948338e-08,
+            "1": 3.2262109989506185e-08
+          }
+        }
+      },
+      "covariance": {
+        "max_absolute": 0.015936764849226022,
+        "relative_frobenius": 0.12401701517885566,
+        "diagonal": {
+          "mean_signed": 0.0014230772865806967,
+          "mean_absolute": 0.0021113366464186726,
+          "absolute_quantiles": {
+            "0": 7.917747085075632e-10,
+            "0.001": 1.2010597375940907e-07,
+            "0.01": 1.1939337652175228e-06,
+            "0.5": 0.0002702865984674789,
+            "0.9": 0.008274491247971123,
+            "0.95": 0.013073831784694543,
+            "0.99": 0.015199303061997472,
+            "0.999": 0.01586301867050317,
+            "1": 0.015936764849226022
+          },
+          "relative_l2": 0.14448621238209183,
+          "absolute_relative_quantiles": {
+            "0": 2.0672689349911363e-05,
+            "0.001": 7.993814393694264e-05,
+            "0.01": 0.0006133272352202241,
+            "0.5": 0.014387006462667058,
+            "0.9": 0.21403790774508658,
+            "0.95": 0.273317234325453,
+            "0.99": 0.285605866646753,
+            "0.999": 0.2856084603068016,
+            "1": 0.28560874849125145
+          }
+        }
+      },
+      "coefficients": {
+        "mean_signed": 2.682890206267021e-09,
+        "mean_absolute": 1.9898901129814565e-08,
+        "absolute_quantiles": {
+          "0": 2.5284024873784006e-11,
+          "0.001": 2.636213872891924e-11,
+          "0.01": 3.606516342513633e-11,
+          "0.5": 3.752032406989514e-09,
+          "0.9": 5.998372264726105e-08,
+          "0.95": 9.01165630808748e-08,
+          "0.99": 1.507829676189456e-07,
+          "0.999": 2.054636999545005e-07,
+          "1": 2.1153933688067283e-07
+        },
+        "relative_l2": 9.967168777323905e-08
+      }
+    },
+    "old_efs_practical": {
+      "direction": "recovery minus baseline; pointwise relative errors divide by baseline",
+      "objective_delta": -2.081790091266157,
+      "lambda_ratios": {
+        "mean:DrivAge#wiggle": 0.9992291611933851,
+        "mean:VehAge#wiggle": 1.006021422283107,
+        "mean:BonusMalus#wiggle": 0.9982824444374138,
+        "theta:DrivAge#wiggle": 0.707924803918243,
+        "theta:VehAge#wiggle": 0.8331780831301154,
+        "theta:BonusMalus#wiggle": 1.924135934901575
+      },
+      "edf_delta": -0.7356754920593005,
+      "log_likelihood_delta": 0.1264965664013289,
+      "holdout": {
+        "mu": {
+          "mean_signed": -5.248648378984798e-06,
+          "mean_absolute": 4.0837310712675955e-05,
+          "absolute_quantiles": {
+            "0": 2.0142436329972924e-11,
+            "0.001": 7.479691126448945e-09,
+            "0.01": 6.424557051284974e-08,
+            "0.5": 1.5480232332554245e-05,
+            "0.9": 0.00010943178304789747,
+            "0.95": 0.00016761732501544002,
+            "0.99": 0.0003278908615029774,
+            "0.999": 0.0009934634655968167,
+            "1": 0.003230810957019936
+          },
+          "relative_l2": 0.0012759709820681312,
+          "absolute_relative_quantiles": {
+            "0": 3.37322780516278e-09,
+            "0.001": 1.1454724900793613e-06,
+            "0.01": 3.828848233603407e-06,
+            "0.5": 0.0004557564961594499,
+            "0.9": 0.0015687565885025752,
+            "0.95": 0.0019506052448325481,
+            "0.99": 0.0026060879422653478,
+            "0.999": 0.003265081511131816,
+            "1": 0.0038235064705905326
+          }
+        },
+        "theta": {
+          "mean_signed": 44.40721200975938,
+          "mean_absolute": 44.45367649502317,
+          "absolute_quantiles": {
+            "0": 9.320540017565548e-08,
+            "0.001": 3.105184801199812e-05,
+            "0.01": 0.00035842596303892194,
+            "0.5": 0.01901021428404781,
+            "0.9": 0.11652699760528185,
+            "0.95": 0.16726394764684094,
+            "0.99": 0.3439833913907835,
+            "0.999": 746.253211445128,
+            "1": 283694.5271096657
+          },
+          "relative_l2": 502.9006812762727,
+          "absolute_relative_quantiles": {
+            "0": 1.6430090226124513e-07,
+            "0.001": 3.755076061580378e-05,
+            "0.01": 0.0004776523656803854,
+            "0.5": 0.023143188246476282,
+            "0.9": 0.08068881854152529,
+            "0.95": 0.0952158820137829,
+            "0.99": 0.12104674252867798,
+            "0.999": 14.385063782646354,
+            "1": 18245.423620338
+          }
+        },
+        "variance": {
+          "mean_signed": -4.106980428918354e-05,
+          "mean_absolute": 0.00024268414833179702,
+          "absolute_quantiles": {
+            "0": 1.5591626180790942e-10,
+            "0.001": 1.029999009522723e-08,
+            "0.01": 1.2185882877291734e-07,
+            "0.5": 5.13159098342042e-05,
+            "0.9": 0.0004969970184185019,
+            "0.95": 0.000880772368550331,
+            "0.99": 0.002751113539353034,
+            "0.999": 0.015031255644177224,
+            "1": 0.07324792779353206
+          },
+          "relative_l2": 0.0127848665882048,
+          "absolute_relative_quantiles": {
+            "0": 3.1106359314093472e-09,
+            "0.001": 2.7173811494314732e-06,
+            "0.01": 2.1015155361971644e-05,
+            "0.5": 0.0013671599773868116,
+            "0.9": 0.0052935416408048,
+            "0.95": 0.007339629723130465,
+            "0.99": 0.013332159430235146,
+            "0.999": 0.027362938835592317,
+            "1": 0.11727107653366248
+          }
+        },
+        "probability_any_claim": {
+          "mean_signed": 5.29670200182086e-06,
+          "mean_absolute": 4.975609702969925e-05,
+          "absolute_quantiles": {
+            "0": 1.1867730929926434e-10,
+            "0.001": 7.288564834832811e-09,
+            "0.01": 8.457432074809867e-08,
+            "0.5": 1.3614344080904728e-05,
+            "0.9": 9.255717638113198e-05,
+            "0.95": 0.00017172705461704352,
+            "0.99": 0.0006018511476184041,
+            "0.999": 0.002617794973961073,
+            "1": 0.01904293728610318
+          },
+          "relative_l2": 0.0034266062838002,
+          "absolute_relative_quantiles": {
+            "0": 9.886694591287103e-09,
+            "0.001": 8.229307210912404e-07,
+            "0.01": 7.983186198879597e-06,
+            "0.5": 0.0004392459370650274,
+            "0.9": 0.001443498081912757,
+            "0.95": 0.001985979333580101,
+            "0.99": 0.004072776684239764,
+            "0.999": 0.010296019284281555,
+            "1": 0.05727541110959411
+          }
+        }
+      },
+      "covariance": {
+        "max_absolute": 0.06455973209391316,
+        "relative_frobenius": 0.36982244597190683,
+        "diagonal": {
+          "mean_signed": -0.0038469101191511397,
+          "mean_absolute": 0.007485173648758642,
+          "absolute_quantiles": {
+            "0": 1.0347627246793853e-08,
+            "0.001": 1.0791584428716304e-08,
+            "0.01": 1.4787199066018354e-08,
+            "0.5": 0.00032595381677498914,
+            "0.9": 0.029172430968956928,
+            "0.95": 0.04917154677107658,
+            "0.99": 0.0583207573617093,
+            "0.999": 0.06393583462069281,
+            "1": 0.06455973209391316
+          },
+          "relative_l2": 0.3848800491618862,
+          "absolute_relative_quantiles": {
+            "0": 1.829495844707958e-05,
+            "0.001": 2.7447579496116874e-05,
+            "0.01": 0.00010982116893745252,
+            "0.5": 0.021887363295069504,
+            "0.9": 0.4028757958003581,
+            "0.95": 0.4399755300450442,
+            "0.99": 0.8364073486628015,
+            "0.999": 4.137283332206849,
+            "1": 4.504047330378384
+          }
+        }
+      },
+      "coefficients": {
+        "mean_signed": -0.00018700679685308214,
+        "mean_absolute": 0.024995270377160463,
+        "absolute_quantiles": {
+          "0": 3.267453581855262e-05,
+          "0.001": 3.283320026276333e-05,
+          "0.01": 3.426118026065975e-05,
+          "0.5": 0.001602928652141164,
+          "0.9": 0.0867066681751215,
+          "0.95": 0.14645464835118369,
+          "0.99": 0.21273577592885864,
+          "0.999": 0.4429115839784229,
+          "1": 0.46848667376170605
+        },
+        "relative_l2": 0.15908492904902116
+      }
+    }
+  }
+}

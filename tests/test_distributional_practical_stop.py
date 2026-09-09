@@ -307,3 +307,299 @@ def test_trajectory_unsettled_severity_is_label_independent() -> None:
         smoothing.terminal_raw_max_log_step, smoothing.config.tolerance
     )
     assert findings[0].severity == expected
+
+
+def _ridge_outward_window(*, t=0.5, moves=(0.3, 0.4, 0.5), second_moves=None):
+    """Exact unit-information Gaussian ridge profile, including its covariance.
+
+    beta=t/(1+lambda), Var(beta)=1/(1+lambda), and the rank-one LAML
+    F=.5*(log(1+1/lambda)+t**2*lambda/(1+lambda)).  Its EFS raw
+    log step is log((1+lambda)/(t**2*lambda)), so t<1 pushes outward
+    while t>1 at large lambda returns toward a finite optimum.
+    """
+    names = ("mean:a",) if second_moves is None else ("mean:a", "mean:b")
+    movements = [moves] if second_moves is None else [moves, second_moves]
+    paths = [1.0e6 * np.exp(np.r_[0.0, np.cumsum(values)]) for values in movements]
+    fits = []
+    objectives = []
+    for index in range(4):
+        penalties = np.array([path[index] for path in paths])
+        means = t / (1.0 + penalties)
+        fits.append(
+            SimpleNamespace(
+                theta=np.column_stack((means, np.ones_like(means))),
+                covariance=np.diag(1.0 / (1.0 + penalties)),
+            )
+        )
+        objectives.append(
+            float(0.5 * np.sum(np.log1p(1.0 / penalties) + t**2 * penalties / (1 + penalties)))
+        )
+    history = []
+    for index in range(3):
+        history.append(
+            SimpleNamespace(
+                accepted=True,
+                stage="efs",
+                source_fit_index=index,
+                accepted_fit_index=index + 1,
+                lambdas_before={name: paths[k][index] for k, name in enumerate(names)},
+                lambdas_after={name: paths[k][index + 1] for k, name in enumerate(names)},
+                accepted_log_steps={name: movements[k][index] for k, name in enumerate(names)},
+                objective_before=objectives[index],
+                objective_after=objectives[index + 1],
+                objective_relative_change=abs(objectives[index + 1] - objectives[index])
+                / (1.0 + abs(objectives[index])),
+                activated_face_components=(),
+                deactivated_face_components=(),
+                revalidated_face_components=(),
+                refused_face_components=(),
+            )
+        )
+    raw_steps = {
+        name: math.log((1.0 + paths[k][-1]) / (t**2 * paths[k][-1])) for k, name in enumerate(names)
+    }
+    config = DistributionalEFSConfig(
+        practical_convergence=True,
+        plateau_tolerance=1.0e-6,
+        practical_parameter_tolerance=1.0e-4,
+    )
+    return history, fits, raw_steps, config
+
+
+def _outward_window_matches(history, fits, raw_steps, config):
+    from superglm.distributional.results.smoothing import _practical_outward_window
+
+    return _practical_outward_window(
+        history=history,
+        coefficient_fits=fits,
+        terminal_raw_log_steps=raw_steps,
+        config=config,
+    )
+
+
+def test_practical_outward_window_distinguishes_ridge_drift_from_finite_optimum() -> None:
+    outward = _ridge_outward_window(t=0.5)
+    inward = _ridge_outward_window(t=2.0)
+    assert _outward_window_matches(*outward)
+    assert not _outward_window_matches(*inward)
+    # The accepted finite ridge fit is already close to its exact nullspace:
+    # both prediction and covariance error are bounded by 1/lambda.
+    history, fits, _raw, _config = outward
+    terminal_lambda = history[-1].lambdas_after["mean:a"]
+    assert np.max(np.abs(fits[-1].theta[:, 0])) <= 0.5 / terminal_lambda
+    assert np.linalg.norm(fits[-1].covariance, ord=2) <= 1.0 / terminal_lambda
+
+
+@pytest.mark.parametrize(
+    "moves",
+    [
+        (0.02, 0.03, 0.05),  # a small accepted probe is not evidence of flatness
+        (0.6, -0.1, 0.7),  # net outward distance cannot conceal an oscillation
+        (0.5, 0.7, 0.0),  # a clipped duplicate cannot complete the window
+    ],
+)
+def test_practical_outward_window_requires_substantial_monotone_probes(moves) -> None:
+    assert not _outward_window_matches(*_ridge_outward_window(moves=moves))
+
+
+def test_practical_outward_window_checks_each_coordinate_span() -> None:
+    assert not _outward_window_matches(*_ridge_outward_window(second_moves=(0.02, 0.03, 0.05)))
+    assert _outward_window_matches(*_ridge_outward_window(second_moves=(0.4, 0.4, 0.4)))
+
+
+@pytest.mark.parametrize("parameter", [0, 1, 2])
+def test_practical_outward_window_checks_cumulative_all_parameter_change(parameter: int) -> None:
+    history, fits, raw_steps, config = _ridge_outward_window()
+    for index, fit in enumerate(fits):
+        if parameter == 2:
+            fit.theta = np.column_stack((fit.theta, np.ones(fit.theta.shape[0])))
+        fit.theta[:, parameter] = 1.0 + index * 1.5e-4
+    # Every individual change is below 1e-4 relative to (1+|theta|), but
+    # the complete first-source-to-terminal window moves by more than it.
+    assert not _outward_window_matches(history, fits, raw_steps, config)
+
+
+def test_practical_outward_window_checks_cumulative_objective_change() -> None:
+    history, fits, raw_steps, config = _ridge_outward_window()
+    for index, item in enumerate(history):
+        item.objective_before = 1.0 - index * 1.5e-6
+        item.objective_after = 1.0 - (index + 1) * 1.5e-6
+        item.objective_relative_change = 1.5e-6 / (1.0 + abs(item.objective_before))
+    assert not _outward_window_matches(history, fits, raw_steps, config)
+
+
+def test_practical_outward_window_rejects_missing_coordinate_pressure() -> None:
+    history, fits, raw_steps, config = _ridge_outward_window(second_moves=(0.02, 0.03, 0.05))
+    raw_steps.pop("mean:b")
+    assert not _outward_window_matches(history, fits, raw_steps, config)
+
+
+def test_practical_outward_window_preserves_lower_bound_authority() -> None:
+    history, fits, raw_steps, config = _ridge_outward_window(second_moves=(0.0, 0.0, 0.0))
+    config = replace(config, minimum_lambda=1.0e6, initial_lambda=1.0e6)
+    raw_steps["mean:b"] = -0.1
+    assert not _outward_window_matches(history, fits, raw_steps, config)
+
+
+def test_practical_outward_window_cannot_omit_unchanged_lower_pressure() -> None:
+    history, fits, raw_steps, config = _ridge_outward_window(second_moves=(0.0, 0.0, 0.0))
+    config = replace(config, minimum_lambda=1.0e6, initial_lambda=1.0e6)
+    raw_steps["mean:b"] = -0.1
+    assert not _outward_window_matches(history, fits, raw_steps, config)
+    # The coordinate is pinned by clipping, not stationary. Removing its
+    # pressure used to bypass the veto because its accepted lambda never moved.
+    raw_steps.pop("mean:b")
+    assert not _outward_window_matches(history, fits, raw_steps, config)
+
+
+@pytest.mark.parametrize("fixed_value", [0.0, 1.0e10])
+def test_practical_outward_window_allows_unchanged_zero_pressure_fixed_coordinate(fixed_value):
+    history, fits, raw_steps, config = _ridge_outward_window()
+    for item in history:
+        item.lambdas_before["mean:fixed"] = fixed_value
+        item.lambdas_after["mean:fixed"] = fixed_value
+        item.accepted_log_steps["mean:fixed"] = 0.0
+    raw_steps["mean:fixed"] = 0.0
+    assert _outward_window_matches(history, fits, raw_steps, config)
+
+
+def test_practical_outward_window_requires_pressure_in_terminal_coordinate_order() -> None:
+    history, fits, raw_steps, config = _ridge_outward_window(second_moves=(0.4, 0.4, 0.4))
+    assert not _outward_window_matches(history, fits, dict(reversed(raw_steps.items())), config)
+
+
+@pytest.mark.parametrize("window_size", [1, 2])
+def test_practical_outward_window_honors_configured_probe_count(window_size) -> None:
+    history, fits, raw_steps, config = _ridge_outward_window(moves=(0.1, 0.2, 1.2))
+    config = replace(
+        config,
+        plateau_iterations=window_size,
+        maximum_lambda=history[-1].lambdas_after["mean:a"],
+    )
+    assert _outward_window_matches(history[-window_size:], fits, raw_steps, config)
+
+
+def _outward_random_effect_fit(*, practical=True, max_log_step=0.5, span=1.5, fixed_lambda=None):
+    frame, y = _preempt_fixture()
+    features = {"effect": RandomEffect()}
+    if fixed_lambda is not None:
+        frame["fixed"] = np.tile(["u", "v"], len(frame) // 2)
+        features["fixed"] = RandomEffect(lambda_policy=LambdaPolicy.fixed(fixed_lambda))
+    model = SuperLSS(
+        family=GaussianLS(scale_floor=1.0e-4),
+        predictors=(Predictor("location", features), Predictor("scale", {})),
+    )
+    model.fit_reml(
+        frame,
+        y,
+        lambdas={"location:effect#wiggle": 1.0e6},
+        max_lambda=1.0e6 * math.exp(span),
+        max_log_step=max_log_step,
+        max_reml_iter=20,
+        reml_tol=1.0e-8,
+        inner_tol=1.0e-10,
+        reml_plateau_tol=1.0e-6,
+        practical_reml=practical,
+    )
+    return model, model._require_fitted().smoothing
+
+
+@pytest.mark.parametrize("fixed_value", [0.0, 1.0e6 * math.exp(1.5)])
+def test_practical_outward_result_records_fixed_coordinate_pressure(fixed_value):
+    model, smoothing = _outward_random_effect_fit(fixed_lambda=fixed_value)
+    assert smoothing.convergence_reason == "practical_plateau"
+    assert tuple(smoothing.terminal_raw_log_steps) == tuple(smoothing.lambdas)
+    assert smoothing.terminal_raw_log_steps["location:fixed#wiggle"] == 0.0
+    pressure = dict(smoothing.terminal_raw_log_steps)
+    pressure.pop("location:fixed#wiggle")
+    with pytest.raises(ValueError, match="raw log steps.*all terminal lambdas"):
+        replace(smoothing, terminal_raw_log_steps=pressure)
+
+    from superglm.distributional.serialization import (
+        deserialize_distributional_model,
+        serialize_distributional_model,
+    )
+
+    restored = deserialize_distributional_model(
+        serialize_distributional_model(model._require_fitted())
+    ).smoothing
+    assert restored.terminal_raw_log_steps == smoothing.terminal_raw_log_steps
+
+
+def test_practical_outward_cap_stop_keeps_pressure_and_replays_finite_fit() -> None:
+    _model, smoothing = _outward_random_effect_fit()
+    assert smoothing.convergence_reason == "practical_plateau"
+    assert smoothing.converged and not smoothing.matched_certified
+    assert smoothing.unresolved_upper_bound == ("location:effect#wiggle",)
+    assert smoothing.terminal_fit.coefficient_face is None
+    assert smoothing.terminal_raw_log_steps["location:effect#wiggle"] > 0.0
+    assert len(smoothing.history) == smoothing.config.plateau_iterations
+    with pytest.raises(ValueError, match="practical|outward"):
+        replace(smoothing, terminal_raw_log_steps={"location:effect#wiggle": -0.1})
+    with pytest.raises(ValueError, match="practical|outward"):
+        replace(smoothing, terminal_raw_log_steps=None)
+
+    _strict_model, strict = _outward_random_effect_fit(practical=False)
+    assert strict.converged and strict.terminal_fit.coefficient_face is not None
+    finite_theta = smoothing.terminal_fit.theta
+    exact_theta = strict.terminal_fit.theta
+    relative = np.abs(finite_theta - exact_theta) / (
+        1.0 + np.maximum(np.abs(finite_theta), np.abs(exact_theta))
+    )
+    assert np.max(relative) < smoothing.config.practical_parameter_tolerance
+    assert (
+        abs(smoothing.objective - strict.objective) / (1.0 + abs(strict.objective))
+        < smoothing.config.plateau_tolerance
+    )
+    finite_covariance = smoothing.terminal_fit.terminal_pseudo_inverse()
+    exact_covariance = strict.terminal_fit.terminal_pseudo_inverse()
+    assert (
+        np.linalg.norm(finite_covariance - exact_covariance, ord=2)
+        / (1.0 + np.linalg.norm(exact_covariance, ord=2))
+        < smoothing.config.practical_parameter_tolerance
+    )
+
+
+def test_practical_outward_pressure_survives_artifact_roundtrip() -> None:
+    import json
+
+    from superglm.distributional.serialization import (
+        deserialize_distributional_model,
+        serialize_distributional_model,
+    )
+
+    model, smoothing = _outward_random_effect_fit()
+    encoded = serialize_distributional_model(model._require_fitted())
+    manifest = json.loads(encoded)["manifest"]["smoothing"]
+    assert manifest["terminal_raw_log_steps"] == dict(smoothing.terminal_raw_log_steps)
+    restored = deserialize_distributional_model(encoded).smoothing
+    assert restored.convergence_reason == "practical_plateau"
+    assert restored.unresolved_upper_bound == smoothing.unresolved_upper_bound
+    assert restored.terminal_raw_log_steps == smoothing.terminal_raw_log_steps
+    assert not restored.matched_certified
+    with pytest.raises(TypeError):
+        restored.terminal_raw_log_steps["location:effect#wiggle"] = -0.1
+
+
+def test_older_artifact_without_raw_pressure_metadata_gets_optional_default() -> None:
+    import json
+
+    from superglm.distributional.serialization import (
+        deserialize_distributional_model,
+        serialize_distributional_model,
+    )
+    from tests.test_distributional_serialization import _rehash_pickled_artifact
+
+    model, smoothing = _preempt_fit(True)
+    artifact = json.loads(serialize_distributional_model(model._require_fitted()))
+    artifact["manifest"]["smoothing"].pop("terminal_raw_log_steps", None)
+
+    def omit_optional_field(restored):
+        vars(restored.smoothing).pop("terminal_raw_log_steps")
+
+    restored = deserialize_distributional_model(
+        _rehash_pickled_artifact(artifact, omit_optional_field)
+    ).smoothing
+    assert restored.terminal_raw_log_steps is None
+    assert restored.convergence_reason == smoothing.convergence_reason
+    assert restored.matched_certified == smoothing.matched_certified

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -9,7 +11,10 @@ from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
     _fused_2d_bincount_2,
     _fused_bincount_2,
+    _indexed_row_dot,
+    _tensor_operand_in_reassociation_range,
 )
+from ._row_lookup import build_row_lookup
 
 
 class DiscretizedSSPGroupMatrix:
@@ -156,6 +161,9 @@ class DiscretizedSplineCategoricalGroupMatrix:
         "R_inv",
         "bin_idx_level",
         "row_idx",
+        "_row_order",
+        "_sorted_rows",
+        "_row_lookup_certificate",
         "n_bins",
         "n_rows",
         "shape",
@@ -181,7 +189,13 @@ class DiscretizedSplineCategoricalGroupMatrix:
     ):
         self.B_unique = np.asarray(B_unique, dtype=np.float64)
         self.R_inv = np.asarray(R_inv, dtype=np.float64)
-        self.row_idx = np.asarray(row_idx, dtype=np.intp)
+        # Own the category indices so a caller cannot invalidate the cached
+        # row lookup by mutating the constructor argument.
+        self.row_idx = np.array(row_idx, dtype=np.intp, copy=True)
+        self.row_idx.flags.writeable = False
+        self._row_order = None
+        self._sorted_rows = None
+        self._row_lookup_certificate = None
         bin_idx_arr = np.asarray(bin_idx, dtype=np.intp)
         self.bin_idx_level = (
             bin_idx_arr if bin_idx_is_level else bin_idx_arr[self.row_idx]
@@ -202,6 +216,29 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
+
+    def __getstate__(self):
+        dict_state, slot_state = cast(
+            tuple[dict[str, object] | None, dict[str, object]], object.__getstate__(self)
+        )
+        slot_state.pop("_row_order", None)
+        slot_state.pop("_sorted_rows", None)
+        slot_state.pop("_row_lookup_certificate", None)
+        return dict_state, slot_state
+
+    def __setstate__(self, state):
+        # Older learned matrices have no lookup slots. Rebuild lazily after
+        # restoring owned indices; NumPy pickle does not retain readonly flags.
+        dict_state, slot_state = state
+        if dict_state is not None:
+            self.__dict__.update(dict_state)
+        for name, value in slot_state.items():
+            setattr(self, name, value)
+        self.row_idx = np.array(self.row_idx, dtype=np.intp, copy=True)
+        self.row_idx.flags.writeable = False
+        self._row_order = None
+        self._sorted_rows = None
+        self._row_lookup_certificate = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.n_rows, dtype=np.float64)
@@ -265,14 +302,18 @@ class DiscretizedSplineCategoricalGroupMatrix:
         else:
             idx_arr = idx_raw.astype(np.intp, copy=False)
         if self.row_idx.size and idx_arr.size:
-            order = np.argsort(self.row_idx)
-            sorted_rows = self.row_idx[order]
-            pos = np.searchsorted(sorted_rows, idx_arr)
-            in_bounds = pos < sorted_rows.size
+            # Chunked fits revisit this parent many times. Sort once, retaining
+            # the original level order used by bin_idx_level and its algebra.
+            if self._sorted_rows is None:
+                self._sorted_rows, self._row_order, self._row_lookup_certificate = build_row_lookup(
+                    self.row_idx, with_order=True
+                )
+            pos = np.searchsorted(self._sorted_rows, idx_arr)
+            in_bounds = pos < self._sorted_rows.size
             matched = np.zeros(idx_arr.size, dtype=bool)
-            matched[in_bounds] = sorted_rows[pos[in_bounds]] == idx_arr[in_bounds]
+            matched[in_bounds] = self._sorted_rows[pos[in_bounds]] == idx_arr[in_bounds]
             pos_sub = np.flatnonzero(matched).astype(np.intp, copy=False)
-            pos_self = order[pos[matched]]
+            pos_self = cast(NDArray[np.intp], self._row_order)[pos[matched]]
             bin_idx_level = self.bin_idx_level[pos_self]
         else:
             pos_sub = np.empty(0, dtype=np.intp)
@@ -345,28 +386,50 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         self._own_margin_cache: dict[tuple[int, int, int], int | None] = {}
 
     def _factored_gram_raw(self, w_grid: NDArray) -> NDArray:
-        """Compute B_joint.T @ diag(w) @ B_joint via Kronecker factorization.
+        """Compute the raw tensor Gram, ordered by j1 * K2 + j2.
 
-        Given w_grid (n_bins1, n_bins2) = 2D weight histogram on marginal bins,
-        returns the raw (K1*K2, K1*K2) gram matrix in the centered marginal space.
-
-        Column ordering: j1 * K2 + j2, matching _row_kron_dense().
+        Contract the stored marginal row outer products. The usual route uses
+        two ordinary GEMMs without a bin-grid-by-basis weighted workspace.
         """
         B1, B2 = self.B1_unique_t, self.B2_unique_t
         K1, K2 = B1.shape[1], B2.shape[1]
-        n1 = B1.shape[0]
-
-        # Step 1: C[a, m, n] = sum_b w_grid[a,b] * B2[b,m] * B2[b,n]
-        #   = (B2.T @ diag(w_grid[a,:]) @ B2) per a — use batch BLAS
-        WB2 = w_grid[:, :, None] * B2[None, :, :]  # (n1, n2, K2)
-        C = WB2.transpose(0, 2, 1) @ B2[None, :, :]  # batch: (n1, K2, K2)
-
-        # Step 2: G[(j1,j3), (j2,j4)] = sum_a B1[a,j1]*B1[a,j3] * C[a,j2,j4]
-        #   = B1_outer_flat.T @ C_flat — single BLAS gemm
-        B1_outer = B1[:, :, None] * B1[:, None, :]  # (n1, K1, K1)
-        G_K1K1_K2K2 = B1_outer.reshape(n1, K1 * K1).T @ C.reshape(n1, K2 * K2)
-
-        # Reindex: G_K1K1_K2K2[j1*K1+j3, j2*K2+j4] → G[j1*K2+j2, j3*K2+j4]
+        n1, n2 = B1.shape[0], B2.shape[0]
+        # B1's outer table and the raw coefficient Gram occur in both routes.
+        # Retain the old contraction when the second outer table would cost
+        # more workspace, as can happen with a wide second marginal basis.
+        left_cells = n2 * K1 * K1
+        right_cells = n1 * K2 * K2
+        outer_cells = n2 * K2 * K2
+        old_cells = n1 * n2 * K2 + right_cells
+        B1_outer = (B1[:, :, None] * B1[:, None, :]).reshape(n1, K1 * K1)
+        # Forming B2's outer product before weighting changes integer/float32
+        # promotion. Keep the original arithmetic for other operand dtypes.
+        float64_inputs = B1.dtype == B2.dtype == w_grid.dtype == np.float64
+        # Five original factors contribute to each raw Gram term. Bounding
+        # nonzero magnitudes by 2**(+/-128) leaves exponent headroom even for
+        # two sums with 64-bit index-sized dimensions (640 + 126 < 1024).
+        # This prevents new range failures from reassociation; cancellation
+        # still follows ordinary floating-point arithmetic. Extreme inputs
+        # retain the previous weighting order, including its finite results.
+        reassociate = (
+            float64_inputs
+            and outer_cells + min(left_cells, right_cells) <= old_cells
+            and _tensor_operand_in_reassociation_range(B1)
+            and _tensor_operand_in_reassociation_range(B2)
+            and _tensor_operand_in_reassociation_range(w_grid)
+        )
+        if reassociate:
+            # Marginal tables can be mutable aliases. Recompute these small
+            # products instead of retaining a cache that could become stale.
+            B2_outer = (B2[:, :, None] * B2[:, None, :]).reshape(n2, K2 * K2)
+            if right_cells <= left_cells:
+                G_K1K1_K2K2 = B1_outer.T @ (w_grid @ B2_outer)
+            else:
+                G_K1K1_K2K2 = (B1_outer.T @ w_grid) @ B2_outer
+        else:
+            WB2 = w_grid[:, :, None] * B2[None, :, :]
+            C = WB2.transpose(0, 2, 1) @ B2[None, :, :]
+            G_K1K1_K2K2 = B1_outer.T @ C.reshape(n1, K2 * K2)
         return G_K1K1_K2K2.reshape(K1, K1, K2, K2).transpose(0, 2, 1, 3).reshape(K1 * K2, K1 * K2)
 
     def gram(self, W: NDArray) -> NDArray:
@@ -410,6 +473,14 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
 
         u = (self.R_inv @ v).reshape(K1, K2)
         B1u = B1 @ u  # (n_bins1, K2)
+        # Sequential accumulation in the fused kernel has a different range
+        # from NumPy's pairwise sum. Preserve the old sum for extreme operands.
+        if (
+            B1u.dtype == B2.dtype == np.float64
+            and _tensor_operand_in_reassociation_range(B1u)
+            and _tensor_operand_in_reassociation_range(B2)
+        ):
+            return _indexed_row_dot(B1u, B2, self.idx1, self.idx2)
         return np.sum(B1u[self.idx1] * B2[self.idx2], axis=1)
 
     def rmatvec(self, w: NDArray) -> NDArray:

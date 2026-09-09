@@ -48,6 +48,7 @@ EFSConvergenceReason = Literal[
     "coefficient_not_converged",
     "stationary",
     "gradient_unresolved",
+    "derivative_unavailable",
 ]
 
 

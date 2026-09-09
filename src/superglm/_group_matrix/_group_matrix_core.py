@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -26,6 +26,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
 )
+from ._row_lookup import build_row_lookup
 
 
 class DenseGroupMatrix:
@@ -127,10 +128,8 @@ class CategoricalGroupMatrix:
         return out
 
     def row_subset(self, idx: NDArray) -> CategoricalGroupMatrix:
-        # Must pass original -1-coded form to __init__ for re-remapping
-        c = self.codes[idx].copy()
-        c[c == self.n_levels] = -1
-        return CategoricalGroupMatrix(c, self.n_levels)
+        # The constructor accepts sink codes and owns a fresh array, even for slices.
+        return CategoricalGroupMatrix(self.codes[idx], self.n_levels)
 
 
 class RandomEffectGroupMatrix(CategoricalGroupMatrix):
@@ -728,6 +727,8 @@ class SplineCategoricalGroupMatrix:
         "_p_b",
         "R_inv",
         "row_idx",
+        "_sorted_rows",
+        "_row_lookup_certificate",
         "n_rows",
         "shape",
         "omega",
@@ -754,7 +755,12 @@ class SplineCategoricalGroupMatrix:
             if row_idx.size and (int(row_idx.min()) < 0 or int(row_idx.max()) >= self.n_rows):
                 raise ValueError("row index array contains rows outside the spline basis")
 
-        self.row_idx = np.asarray(row_idx, dtype=np.intp)
+        # Subset lookups are reusable only while the category indices are
+        # immutable; do not freeze or retain the caller's mutable array.
+        self.row_idx = np.array(row_idx, dtype=np.intp, copy=True)
+        self.row_idx.flags.writeable = False
+        self._sorted_rows = None
+        self._row_lookup_certificate = None
         self.B_level = self.B[self.row_idx].tocsr()
         self._data = self.B_level.data.astype(np.float64)
         self._indices = self.B_level.indices
@@ -774,6 +780,27 @@ class SplineCategoricalGroupMatrix:
         self.lambda_policies = None
         self.spline_cat_level = None
         self.spline_cat_feature = None
+
+    def __getstate__(self):
+        dict_state, slot_state = cast(
+            tuple[dict[str, object] | None, dict[str, object]], object.__getstate__(self)
+        )
+        slot_state.pop("_sorted_rows", None)
+        slot_state.pop("_row_lookup_certificate", None)
+        return dict_state, slot_state
+
+    def __setstate__(self, state):
+        # Accept learned matrices predating the lookup cache, and restore the
+        # index ownership contract lost when NumPy arrays pass through pickle.
+        dict_state, slot_state = state
+        if dict_state is not None:
+            self.__dict__.update(dict_state)
+        for name, value in slot_state.items():
+            setattr(self, name, value)
+        self.row_idx = np.array(self.row_idx, dtype=np.intp, copy=True)
+        self.row_idx.flags.writeable = False
+        self._sorted_rows = None
+        self._row_lookup_certificate = None
 
     def matvec(self, v: NDArray) -> NDArray:
         out = np.zeros(self.shape[0], dtype=np.float64)
@@ -828,7 +855,18 @@ class SplineCategoricalGroupMatrix:
             idx_arr = np.flatnonzero(idx_arr)
         else:
             idx_arr = idx_arr.astype(np.intp, copy=False)
-        sub_row_idx = np.flatnonzero(np.isin(idx_arr, self.row_idx))
+        if self.row_idx.size and idx_arr.size:
+            if self._sorted_rows is None:
+                self._sorted_rows, _, self._row_lookup_certificate = build_row_lookup(
+                    self.row_idx, with_order=False
+                )
+            pos = np.searchsorted(self._sorted_rows, idx_arr)
+            in_bounds = pos < self._sorted_rows.size
+            matched = np.zeros(idx_arr.size, dtype=bool)
+            matched[in_bounds] = self._sorted_rows[pos[in_bounds]] == idx_arr[in_bounds]
+            sub_row_idx = np.flatnonzero(matched)
+        else:
+            sub_row_idx = np.empty(0, dtype=np.intp)
         sub = SplineCategoricalGroupMatrix(self.B[idx_arr], self.R_inv, sub_row_idx)
         sub.omega = self.omega
         sub.projection = self.projection

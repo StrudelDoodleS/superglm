@@ -22,6 +22,7 @@ from superglm.distributional.result import (
     _dense_penalty_fingerprint,
     _maximum_relative_natural_parameter_change,
 )
+from superglm.distributional.results.smoothing import _practical_outward_window
 from superglm.distributional.smoothing.acceleration import WindowedTypeIIAnderson
 from superglm.distributional.smoothing.authority import (
     _face_authority_config,
@@ -127,6 +128,18 @@ def _efs_result(
         ),
         terminal_gradient=gradient,
         terminal_gradient_certificate=certificate,
+        terminal_raw_log_steps=(
+            {
+                name: (
+                    terminal_evidence.update.raw_log_steps[name]
+                    if name in terminal_evidence.estimated_names
+                    else 0.0
+                )
+                for name in lambdas
+            }
+            if terminal_evidence.update is not None and terminal_evidence.estimated_names
+            else None
+        ),
         terminal_projected_gradient_norm=(
             None if endgame is None else endgame.projected_gradient_norm
         ),
@@ -282,6 +295,8 @@ def fit_distributional_efs(
         """Run the endgame from the accepted state; a result ends the fit, ``None`` continues."""
         nonlocal current_lambdas, current_fit, current_objective, terminal_fit_index
         nonlocal terminal_evidence, endgame_outcome, endgame_stationary, pending_cap, newton_budget
+        nonlocal plateau_run, practical_run, plateau_qualified
+        nonlocal previous_accepted_step, saturated_run
         if newton_budget <= 0:
             return _result(converged=False, reason="max_iterations")
         outcome = run_newton_endgame(
@@ -308,6 +323,27 @@ def fit_distributional_efs(
         current_objective = state.objective
         terminal_fit_index = state.terminal_fit_index
         terminal_evidence = state.evidence
+        if outcome.kind == "derivative_unavailable":
+            # Preserve the accepted coefficient fit, but abandon derivatives
+            # and acceleration memory that cannot describe the next EFS step.
+            # Disabling handoff makes recovery bounded by the ordinary outer
+            # budget even if derivatives remain unavailable on every call.
+            endgame_outcome = None
+            endgame_stationary = False
+            pending_cap = None
+            newton_budget = 0
+            if beyond_cap:
+                # EFS proposals use the original finite box and cannot safely
+                # continue from a component released above that box.
+                return _result(converged=False, reason="derivative_unavailable")
+            plateau_run = 0
+            practical_run = 0
+            plateau_qualified = False
+            previous_accepted_step = math.inf
+            saturated_run = dict.fromkeys(estimated_names, 0)
+            if accelerator is not None:
+                accelerator.reset()
+            return None
         if outcome.kind == "stationary":
             # The exact gradient is the authority now: no component is at the cap
             # with an outward gradient, so a Fellner--Schall nomination is void.
@@ -1319,6 +1355,30 @@ def fit_distributional_efs(
                 else 0
             )
         previous_accepted_step = max_accepted_step
+
+        # A finite profile can also settle while a penalty continues moving
+        # outward. Require substantial accepted probes before this policy may
+        # preempt the next cap or endpoint decision; retain the raw pressure.
+        if (
+            outer_config.practical_convergence
+            and current_face is None
+            and terminal_evidence.maximum > outer_config.tolerance
+            and terminal_evidence.update is not None
+            and _practical_outward_window(
+                history=history,
+                coefficient_fits=coefficient_fits,
+                terminal_raw_log_steps={
+                    name: (
+                        terminal_evidence.update.raw_log_steps[name]
+                        if name in terminal_evidence.estimated_names
+                        else 0.0
+                    )
+                    for name in current_lambdas
+                },
+                config=outer_config,
+            )
+        ):
+            return _result(converged=True, reason="practical_plateau")
         # A practical plateau is an interior stop.  While any estimated
         # component sits at the cap with outward pressure, or is a working
         # infinity, the top of the loop owns the next decision: it either

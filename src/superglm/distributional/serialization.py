@@ -538,6 +538,8 @@ def _smoothing_manifest(smoothing: DistributionalEFSResult | None) -> dict[str, 
         assert smoothing.terminal_gradient_certificate is not None
         manifest["terminal_gradient"] = dict(smoothing.terminal_gradient)
         manifest["terminal_gradient_certificate"] = dict(smoothing.terminal_gradient_certificate)
+    if smoothing.terminal_raw_log_steps is not None:
+        manifest["terminal_raw_log_steps"] = dict(smoothing.terminal_raw_log_steps)
     if smoothing.terminal_projected_gradient_norm is not None:
         manifest["terminal_projected_gradient_norm"] = smoothing.terminal_projected_gradient_norm
     if smoothing.smoothing_hessian is not None:

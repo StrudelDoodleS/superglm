@@ -397,3 +397,197 @@ def test_stationary_handoff_never_forms_a_hessian(monkeypatch) -> None:
     assert calls == [False]
     assert handed.newton_iterations == 0 and handed.smoothing_hessian is None
     assert all(it.stage == "efs" for it in handed.history)
+
+
+@pytest.mark.parametrize("failed_gradient_pass", [1, 2])
+@pytest.mark.parametrize("efs_budget", [3, 250])
+@pytest.mark.parametrize("newton_budget", [1, 4])
+def test_unavailable_newton_gradient_resumes_efs_from_accepted_fit(
+    monkeypatch, failed_gradient_pass: int, efs_budget: int, newton_budget: int
+) -> None:
+    """An unavailable gradient preserves the accepted fit and spends only EFS budget.
+
+    The second-pass case reproduces the former opposite half-step recovery on a
+    real Gaussian fit: its stale source gradient and premature objective refusal
+    prevented EFS from continuing from the accepted Newton point.
+    """
+    from superglm.distributional.smoothing import loop as loop_module
+    from superglm.distributional.smoothing import newton as newton_module
+    from superglm.distributional.smoothing.derivatives import LamlDerivativeError
+
+    real_derivatives = newton_module.laml_derivatives
+    real_endgame = loop_module.run_newton_endgame
+    gradient_fits = []
+    gradient_lambdas = []
+    outcomes = []
+
+    def unavailable_gradient(*args, **kwargs):
+        if not kwargs.get("want_hessian", True):
+            gradient_fits.append(kwargs["fit"])
+            gradient_lambdas.append(dict(kwargs["lambdas"]))
+            if len(gradient_fits) >= failed_gradient_pass:
+                raise LamlDerivativeError("injected unavailable gradient at accepted fit")
+        return real_derivatives(*args, **kwargs)
+
+    def record_endgame(*args, **kwargs):
+        outcome = real_endgame(*args, **kwargs)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(newton_module, "laml_derivatives", unavailable_gradient)
+    monkeypatch.setattr(loop_module, "run_newton_endgame", record_endgame)
+    result = _newton_stop(
+        "gaussian",
+        max_iterations=efs_budget,
+        max_newton_iterations=newton_budget,
+        handoff_iterations=1,
+    )
+
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    resumed = [
+        item
+        for item in result.history
+        if item.stage == "efs" and item.source_fit_index == outcome.state.terminal_fit_index
+    ]
+    assert resumed, "EFS must resume from the last accepted fit, including an accepted Newton step"
+    assert outcome.kind == "derivative_unavailable"
+    assert outcome.derivatives is None and outcome.projected_gradient_norm is None
+    assert len(gradient_fits) == failed_gradient_pass
+    assert outcome.state.fit is gradient_fits[-1]
+    assert dict(outcome.state.lambdas) == gradient_lambdas[-1]
+    if failed_gradient_pass == 2:
+        assert gradient_lambdas[0] != gradient_lambdas[1]
+        assert gradient_fits[0] is not gradient_fits[1]
+        assert any(item.stage == "newton" and item.accepted for item in result.history)
+
+    assert dict(resumed[0].lambdas_before) == dict(outcome.state.lambdas)
+    assert resumed[0].objective_before == outcome.state.objective
+    accepted_objectives = [result.initial_objective] + [
+        item.objective_after for item in result.history if item.accepted
+    ]
+    for before, after in zip(accepted_objectives, accepted_objectives[1:]):
+        assert after <= before + result.config.objective_tolerance * (1.0 + abs(before))
+    assert result.objective < outcome.state.objective
+    assert result.terminal_gradient is None
+    assert result.terminal_gradient_certificate is None
+    assert result.terminal_projected_gradient_norm is None
+    assert result.smoothing_hessian is None
+    assert result.smoothing_hessian_certificate is None
+    assert result.newton_iterations <= result.config.max_newton_iterations
+    assert len(result.history) <= efs_budget
+    if efs_budget == 3:
+        assert not result.converged and result.convergence_reason == "max_iterations"
+    else:
+        assert result.converged and result.matched_certified
+        assert result.convergence_reason in {"lambda_change", "objective_plateau"}
+
+
+def test_unavailable_hessian_keeps_gradient_based_bfgs_fallback(monkeypatch) -> None:
+    """A missing Hessian still permits steps with the fresh certified gradient."""
+    from superglm.distributional.smoothing import newton as newton_module
+    from superglm.distributional.smoothing.derivatives import LamlDerivativeError
+
+    real_derivatives = newton_module.laml_derivatives
+
+    def unavailable_hessian(*args, **kwargs):
+        if kwargs.get("want_hessian", True):
+            raise LamlDerivativeError("injected unavailable Hessian")
+        return real_derivatives(*args, **kwargs)
+
+    monkeypatch.setattr(newton_module, "laml_derivatives", unavailable_hessian)
+    result = _newton_stop("gaussian")
+    assert result.converged and result.convergence_reason == "stationary"
+    assert any(item.accepted and item.step_source == "bfgs" for item in result.history)
+    assert result.terminal_gradient is not None
+    assert result.terminal_projected_gradient_norm <= result.stationarity_bar
+    assert result.smoothing_hessian is None
+
+
+def test_unavailable_gradient_after_cap_release_retains_uncertified_fit(monkeypatch) -> None:
+    """A real bracket release must survive failure of its fresh derivative pass.
+
+    The unfixed loop labels this missing-gradient state ``gradient_unresolved``,
+    whose result validator requires a gradient, and raises instead of returning.
+    """
+    from superglm.distributional import GaussianLS
+    from superglm.distributional.serialization import (
+        deserialize_distributional_model,
+        serialize_distributional_model,
+    )
+    from superglm.distributional.smoothing import loop as loop_module
+    from superglm.distributional.smoothing import newton as newton_module
+    from superglm.distributional.smoothing.derivatives import LamlDerivativeError
+
+    rng = np.random.default_rng(17)
+    x = np.linspace(0.0, 1.0, 200)
+    y = 2.0 * np.sin(2.0 * np.pi * x) + rng.normal(0.0, 0.5, len(x))
+    real_endgame = loop_module.run_newton_endgame
+    released_states = []
+
+    def unavailable_gradient(*args, **kwargs):
+        raise LamlDerivativeError("injected fresh-gradient failure after real cap release")
+
+    def fail_after_release(*args, **kwargs):
+        if kwargs["upper_bounds"]:
+            released_states.append(kwargs["state"])
+            with monkeypatch.context() as local:
+                local.setattr(newton_module, "laml_derivatives", unavailable_gradient)
+                return real_endgame(*args, **kwargs)
+        return real_endgame(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "run_newton_endgame", fail_after_release)
+    model = fit_dense_distributional(
+        pd.DataFrame({"x": x}),
+        y,
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Spline(kind="cr", n_knots=5)}),
+            Predictor("scale", {}),
+        ),
+        weight_contract=WeightContract("prior"),
+        config=DenseSolverConfig(max_iterations=200, tolerance=1.0e-10),
+        efs_config=DistributionalEFSConfig(
+            outer="efs+newton",
+            maximum_lambda=1.0e-4,
+            initial_lambda=1.0e-4,
+            maximum_lambda_conditioning=1.0,
+            max_iterations=12,
+        ),
+        retain_rows=True,
+    )
+    result = model.smoothing
+    assert result is not None
+    assert result.convergence_reason == "derivative_unavailable"
+    assert not result.converged and not result.matched_certified
+    assert len(released_states) == 1
+    retained = released_states[0]
+    assert result.terminal_fit is retained.fit
+    assert result.terminal_fit.converged
+    assert result.objective == retained.objective
+    assert dict(result.lambdas) == dict(retained.lambdas)
+    assert result.beyond_cap_components == ("location:x#wiggle",)
+    assert result.lambdas["location:x#wiggle"] > result.config.maximum_lambda
+    assert result.history[-1].step_source == "bracket"
+    assert result.history[-1].accepted_fit_index == result.terminal_fit_index
+    assert result.objective < result.history[-1].objective_before
+    assert result.terminal_gradient is None
+    assert result.terminal_gradient_certificate is None
+    assert result.terminal_projected_gradient_norm is None
+    assert result.smoothing_hessian is None
+    assert result.smoothing_hessian_certificate is None
+
+    restored = deserialize_distributional_model(serialize_distributional_model(model)).smoothing
+    assert restored.convergence_reason == "derivative_unavailable"
+    assert restored.beyond_cap_components == result.beyond_cap_components
+    assert restored.terminal_gradient is None and not restored.matched_certified
+    with pytest.raises(ValueError, match="gradient_unresolved requires"):
+        replace(result, convergence_reason="gradient_unresolved")
+    with pytest.raises(ValueError, match="derivative_unavailable"):
+        replace(result, terminal_projected_gradient_norm=0.0)
+    with pytest.raises(ValueError, match="derivative_unavailable"):
+        replace(
+            result,
+            terminal_gradient={"location:x#wiggle": 0.0},
+            terminal_gradient_certificate={"location:x#wiggle": 0.0},
+        )

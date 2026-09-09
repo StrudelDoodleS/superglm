@@ -25,6 +25,11 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional._row_design import (
+    BoundedPredictorMatrix,
+    PredictorMatrix,
+    matrix_row_chunk,
+)
 from superglm.distributional.family import (
     DistributionalFamily,
     FamilyLikelihoodPlan,
@@ -159,15 +164,22 @@ class LamlDerivatives:
 
 def _validated_matrices(
     layout: StackedLayout,
-    dense_matrices: Sequence[NDArray],
+    dense_matrices: Sequence[PredictorMatrix],
     n_observations: int,
-) -> tuple[NDArray[np.float64], ...]:
-    matrices = tuple(np.asarray(matrix, dtype=np.float64) for matrix in dense_matrices)
+) -> tuple[PredictorMatrix, ...]:
+    matrices = tuple(
+        matrix
+        if isinstance(matrix, BoundedPredictorMatrix)
+        else np.asarray(matrix, dtype=np.float64)
+        for matrix in dense_matrices
+    )
     if len(matrices) != len(layout.predictors):
         raise ValueError("one dense predictor matrix per predictor is required")
     for state, matrix in zip(layout.predictors, matrices, strict=True):
         width = state.coefficient_slice.stop - state.coefficient_slice.start
-        if matrix.shape != (n_observations, width) or not np.all(np.isfinite(matrix)):
+        if matrix.shape != (n_observations, width) or (
+            not isinstance(matrix, BoundedPredictorMatrix) and not np.all(np.isfinite(matrix))
+        ):
             raise ValueError(f"dense matrix for predictor {state.name!r} has invalid shape")
     return matrices
 
@@ -283,18 +295,22 @@ def _second_derivatives(
 
 
 def _predictor_directions(
-    matrices: tuple[NDArray[np.float64], ...],
+    matrices: tuple[PredictorMatrix, ...],
     slices: tuple[slice, ...],
     vector: NDArray[np.float64],
 ) -> NDArray[np.float64]:
     """eta direction ``X v`` as an ``(n, K)`` array."""
-    return np.column_stack(
-        [matrix @ vector[block] for matrix, block in zip(matrices, slices, strict=True)]
-    )
+    result = np.empty((matrices[0].shape[0], len(matrices)), dtype=np.float64)
+    chunk = matrix_row_chunk(matrices, _ROW_CHUNK)
+    for start in range(0, len(result), chunk):
+        rows = slice(start, min(start + chunk, len(result)))
+        for q, (matrix, block) in enumerate(zip(matrices, slices, strict=True)):
+            result[rows, q] = matrix[rows] @ vector[block]
+    return result
 
 
 def _cross_all(
-    matrices: tuple[NDArray[np.float64], ...],
+    matrices: tuple[PredictorMatrix, ...],
     slices: tuple[slice, ...],
     packed: NDArray[np.float64],
     width: int,
@@ -316,6 +332,7 @@ def _cross_all(
         raise ValueError("packed weights must carry one channel per parameter pair")
     if isinstance(chunk, bool) or not isinstance(chunk, int) or chunk < 1:
         raise ValueError("chunk must be a positive integer")
+    chunk = matrix_row_chunk(matrices, chunk)
     result = np.zeros((count, width, width), dtype=np.float64)
     for channel, (left, right) in enumerate(pairs):
         left_matrix = matrices[left]
@@ -337,7 +354,7 @@ def _cross_all(
 
 
 def _leverage_blocks(
-    matrices: tuple[NDArray[np.float64], ...],
+    matrices: tuple[PredictorMatrix, ...],
     slices: tuple[slice, ...],
     inverse: NDArray[np.float64],
 ) -> NDArray[np.float64]:
@@ -345,9 +362,13 @@ def _leverage_blocks(
     k_parameters = len(matrices)
     pairs = packed_pairs(k_parameters)
     blocks = np.empty((matrices[0].shape[0], len(pairs)), dtype=np.float64)
-    for channel, (left, right) in enumerate(pairs):
-        product = matrices[left] @ inverse[slices[left], slices[right]]
-        blocks[:, channel] = np.einsum("ij,ij->i", product, matrices[right])
+    chunk = matrix_row_chunk(matrices, _ROW_CHUNK)
+    for start in range(0, len(blocks), chunk):
+        rows = slice(start, min(start + chunk, len(blocks)))
+        local = tuple(matrix[rows] for matrix in matrices)
+        for channel, (left, right) in enumerate(pairs):
+            product = local[left] @ inverse[slices[left], slices[right]]
+            blocks[rows, channel] = np.einsum("ij,ij->i", product, local[right])
     return blocks
 
 
@@ -452,8 +473,8 @@ class _GradientPass:
     """Everything one gradient pass computed, for a Hessian pass at the same fit.
 
     With ``G_i`` the row leverage blocks and ``w`` the packed weights (two on
-    an off-diagonal channel): ``direction_stack[:, q, k]`` is ``eta_k[:, q]``,
-    ``coefficient_directions[:, k]`` is ``beta_k``, ``weighted_blocks`` is
+    an off-diagonal channel): ``coefficient_directions[:, k]`` is ``beta_k``;
+    predictor directions are evaluated in row chunks. ``weighted_blocks`` is
     ``G_i w`` row by row, ``third_vector`` is ``sum_q X_q' P_q`` with
     ``P_q[i] = <D1_q[i], G_i>_w``, ``certificate_leverage[:, q]`` is
     ``<C1_q[i], |G_i|>_w`` and ``leverage_trace[i]`` is ``tr(G_i)``, the
@@ -471,7 +492,7 @@ class _GradientPass:
     rank_hessian: dict[tuple[str, str], float]
     rows: _PackedRows
     eta: NDArray[np.float64]
-    matrices: tuple[NDArray[np.float64], ...]
+    matrices: tuple[PredictorMatrix, ...]
     slices: tuple[slice, ...]
     width: int
     beta: NDArray[np.float64]
@@ -485,7 +506,6 @@ class _GradientPass:
     trace: NDArray[np.float64]
     beta_k: list[NDArray[np.float64]]
     coefficient_directions: NDArray[np.float64]
-    direction_stack: NDArray[np.float64]
     weights: NDArray[np.float64]
     weighted_blocks: NDArray[np.float64]
     absolute_weighted_blocks: NDArray[np.float64]
@@ -501,7 +521,7 @@ class _GradientPass:
         fit: DenseSolverResult,
         lambdas: Mapping[str, float],
         step: float,
-        dense_matrices: Sequence[NDArray],
+        dense_matrices: Sequence[PredictorMatrix],
     ) -> bool:
         return (
             self.family is family
@@ -545,7 +565,7 @@ def _gradient_pass(
     *,
     lambdas: Mapping[str, float],
     fit: DenseSolverResult,
-    dense_matrices: Sequence[NDArray],
+    dense_matrices: Sequence[PredictorMatrix],
     step: float,
 ) -> _GradientPass:
     source = fit.terminal_curvature.actual_source
@@ -615,9 +635,6 @@ def _gradient_pass(
     )
     beta_k = [-(inverse @ (lambda_values[k] * penalty_beta[k])) for k in range(count)]
     coefficient_directions = np.column_stack(beta_k)
-    direction_stack = np.stack(
-        [matrices[q] @ coefficient_directions[slices[q]] for q in range(k_parameters)], axis=1
-    )
     weights = _packed_weights(k_parameters)
     weighted_blocks = _leverage_blocks(matrices, slices, inverse) * weights
     absolute_weighted_blocks = np.abs(weighted_blocks)
@@ -639,13 +656,17 @@ def _gradient_pass(
         ]
     )
     third_vector = np.zeros(width, dtype=np.float64)
-    for q in range(k_parameters):
-        third_vector[slices[q]] = matrices[q].T @ first_leverage[:, q]
+    gradient_certificate = np.zeros(count, dtype=np.float64)
+    chunk = matrix_row_chunk(matrices, _ROW_CHUNK)
+    for start in range(0, n_observations, chunk):
+        rows = slice(start, min(start + chunk, n_observations))
+        for q in range(k_parameters):
+            matrix = matrices[q][rows]
+            third_vector[slices[q]] += matrix.T @ first_leverage[rows, q]
+            directions = matrix @ coefficient_directions[slices[q]]
+            gradient_certificate += np.abs(directions).T @ certificate_leverage[rows, q]
     fs_gradient = 0.5 * quadratic + 0.5 * trace - 0.5 * ranks
     gradient = fs_gradient + 0.5 * (third_vector @ coefficient_directions)
-    gradient_certificate = np.zeros(count, dtype=np.float64)
-    for q in range(k_parameters):
-        gradient_certificate += np.abs(direction_stack[:, q, :]).T @ certificate_leverage[:, q]
     gradient_certificate *= 0.5
     # Every term of h_kl that needs no third or fourth derivative of the
     # likelihood, from the factor and the penalties alone:
@@ -715,7 +736,6 @@ def _gradient_pass(
         trace=trace,
         beta_k=beta_k,
         coefficient_directions=coefficient_directions,
-        direction_stack=direction_stack,
         weights=weights,
         weighted_blocks=weighted_blocks,
         absolute_weighted_blocks=absolute_weighted_blocks,
@@ -773,7 +793,7 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
         p.quadratic,
         p.trace,
     )
-    beta_k, direction_stack, weights = p.beta_k, p.direction_stack, p.weights
+    beta_k, weights = p.beta_k, p.weights
     weighted_blocks, absolute_weighted_blocks = p.weighted_blocks, p.absolute_weighted_blocks
     first, first_certificate = p.first, p.first_certificate
     third_vector, certificate_leverage, leverage_trace = (
@@ -790,11 +810,34 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
         block = component.coefficient_slice
         matrix[block, block] = lambda_values[k] * component.penalty
         embedded.append(matrix)
-    packed = np.zeros((n_observations, count, channels), dtype=np.float64)
-    for q in range(k_parameters):
-        packed += direction_stack[:, q, :, None] * first[q][:, None, :]
-    crosses = _cross_all(matrices, slices, packed, width)
-    del packed
+    # Predictor directions and derivative row weights depend on the number of
+    # smoothing components. Keep both local to a bounded row chunk.
+    crosses = np.zeros((count, width, width), dtype=np.float64)
+    hessian_error_norm = np.zeros(count, dtype=np.float64)
+    fourth_trace = np.zeros((count, count), dtype=np.float64)
+    fourth_certificate = np.zeros((count, count), dtype=np.float64)
+    chunk = matrix_row_chunk(matrices, _ROW_CHUNK)
+    for start in range(0, n_observations, chunk):
+        rows = slice(start, min(start + chunk, n_observations))
+        local = tuple(matrix[rows] for matrix in matrices)
+        directions = [local[q] @ p.coefficient_directions[slices[q]] for q in range(k_parameters)]
+        absolute_directions = [np.abs(direction) for direction in directions]
+        packed = np.zeros((rows.stop - rows.start, count, channels), dtype=np.float64)
+        for q in range(k_parameters):
+            packed += directions[q][:, :, None] * first[q][rows, None, :]
+            certificate_weight = (first_certificate[q][rows] @ weights) * leverage_trace[rows]
+            hessian_error_norm += absolute_directions[q].T @ certificate_weight
+            for r in range(k_parameters):
+                pair = (q, r) if q <= r else (r, q)
+                second_leverage = np.sum(weighted_blocks[rows] * second[pair][rows], axis=1)
+                second_certificate_leverage = np.sum(
+                    absolute_weighted_blocks[rows] * second_certificate[pair][rows], axis=1
+                )
+                fourth_trace += (directions[q] * second_leverage[:, None]).T @ directions[r]
+                fourth_certificate += (
+                    absolute_directions[q] * second_certificate_leverage[:, None]
+                ).T @ absolute_directions[r]
+        crosses += _cross_all(local, slices, packed, width)
     hessians = [embedded[k] + crosses[k] for k in range(count)]
     products = [inverse @ hessians[k] for k in range(count)]
 
@@ -803,12 +846,6 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
     # certificate of V_k[i]:
     #   e_k = sum_i tr(G_i) <C_k[i], w>  >=  ||H^-1/2 delta H_k H^-1/2||_2,
     # since delta H_k = sum_i X_i' delta V_k[i] X_i and ||Y_i' M Y_i|| <= ||Y_i||_F^2 ||M||_F.
-    certificate_weight = leverage_trace[:, None] * np.column_stack(
-        [first_certificate[q] @ weights for q in range(k_parameters)]
-    )
-    hessian_error_norm = np.zeros(count, dtype=np.float64)
-    for q in range(k_parameters):
-        hessian_error_norm += np.abs(direction_stack[:, q, :]).T @ certificate_weight[:, q]
     # ||H^-1/2 H_k H^-1/2||_2 from the symmetric square root of the pseudo-inverse:
     # tr(H^-1 H_l H^-1 delta H_k) = sum_i <Y_i (H^-1/2 H_l H^-1/2) Y_i', delta V_k[i]>
     # is bounded by that norm times e_k.
@@ -844,22 +881,6 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
     # beta_kl . v for v = sum_q X_q' P_q, the second K^2 GEMMs of the (n, m)
     # direction matrices; the certificate follows the same split with absolute
     # values, so no pair touches the rows on its own.
-    fourth_trace = np.zeros((count, count), dtype=np.float64)
-    fourth_certificate = np.zeros((count, count), dtype=np.float64)
-    absolute_directions = np.abs(direction_stack)
-    for q in range(k_parameters):
-        for r in range(k_parameters):
-            pair = (q, r) if q <= r else (r, q)
-            second_leverage = np.sum(weighted_blocks * second[pair], axis=1)
-            second_certificate_leverage = np.sum(
-                absolute_weighted_blocks * second_certificate[pair], axis=1
-            )
-            fourth_trace += (direction_stack[:, q, :] * second_leverage[:, None]).T @ (
-                direction_stack[:, r, :]
-            )
-            fourth_certificate += (
-                absolute_directions[:, q, :] * second_certificate_leverage[:, None]
-            ).T @ absolute_directions[:, r, :]
     flat = np.stack([product.ravel() for product in products])
     flat_transposed = np.stack([product.T.ravel() for product in products])
     product_trace = flat_transposed @ flat.T
@@ -879,8 +900,8 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
     pair_directions = -(inverse @ right_hand_sides)
     third_values = third_vector @ pair_directions
     third_certificate = np.zeros(len(pairs), dtype=np.float64)
-    for start in range(0, n_observations, _ROW_CHUNK):
-        rows = slice(start, min(start + _ROW_CHUNK, n_observations))
+    for start in range(0, n_observations, chunk):
+        rows = slice(start, min(start + chunk, n_observations))
         for q in range(k_parameters):
             third_certificate += (
                 np.abs(matrices[q][rows] @ pair_directions[slices[q]]).T
@@ -932,7 +953,7 @@ def laml_derivatives(
     *,
     lambdas: Mapping[str, float],
     fit: DenseSolverResult,
-    dense_matrices: Sequence[NDArray],
+    dense_matrices: Sequence[PredictorMatrix],
     step: float = DEFAULT_STEP,
     want_hessian: bool = True,
     reuse: LamlDerivativeWorkspace | None = None,
@@ -941,10 +962,16 @@ def laml_derivatives(
 
     ``fit`` must be the converged penalised-likelihood fit at ``lambdas`` whose
     published curvature defines ``joint_laplace_objective``; ``dense_matrices``
-    are the layout's dense predictor matrices (the reuse session's).  With a
+    are the layout's dense predictor matrices or bounded grouped row adapters. With a
     ``reuse`` workspace, a gradient-only call stores its stencils and leverage
     blocks there and a later Hessian call at the same fit adds only the centre
     and mixed-pair evaluations.
+
+    Family stencils and derivative channels retain ``O(n K^2 C)`` values, with
+    ``C = K(K+1)/2``. Smoothing-component directions and contractions use row
+    chunks; coefficient-space Hessians and pair directions retain ``O(m P^2 +
+    P m^2)`` values. The bounded design path does not retain an ``n by P`` design
+    or an ``n by m`` smoothing-direction array.
     """
     if not isinstance(fit, DenseSolverResult):
         raise TypeError("fit must be a DenseSolverResult")

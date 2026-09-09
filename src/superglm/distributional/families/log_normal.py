@@ -27,6 +27,7 @@ from superglm.distributional.family import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
+    _register_likelihood_reuse_contract,
     _validated_derivative_order,
     _validated_parameter_matrix,
 )
@@ -419,3 +420,11 @@ class LogNormalLS:
         return log_normal_expected_shortfall(
             probabilities, self._location_coordinates(values), values[:, 1]
         )
+
+
+_register_likelihood_reuse_contract(
+    LogNormalLS,
+    LogNormalLikelihoodPlan,
+    prepared_array_fields=("exact_response", "parameter_independent_carrier"),
+    link_types=(LowerBoundedLogLink,),
+)

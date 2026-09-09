@@ -32,6 +32,14 @@ _TINY = np.nextafter(_FLOAT(0.0), _FLOAT(1.0))
 _DOMAIN_MIN = math.ldexp(1.0, -450)
 _DOMAIN_MAX = math.ldexp(1.0, 450)
 _MIN_RATIO = math.ldexp(1.0, -26)
+# The low-mean tail uses stable log1p recurrences and the certified theta
+# series. At the absolute exponent limits, its leading zero-count natural
+# theta Hessian scales as (weight/theta) * (mean/theta)**2: a 2^-52 ratio
+# leaves the extreme exponent at -1004, above binary64's normal floor -1022.
+# Keep the tighter reciprocal bound: the large-mean recurrence approaches
+# log1p(-1) there. Neither extension nor a tiny ratio replaces finite NB2 by
+# Poisson; derivative-representation checks remain authoritative throughout.
+_MIN_MEAN_THETA_RATIO = _EPS
 _POISSON_LIKE_INITIAL_THETA_FACTOR = 0.5 / math.sqrt(_EPS)
 _SERIES_ORDER = 12
 _SERIES_RATIO = 1.0 / 16.0
@@ -273,8 +281,8 @@ def _domain(
     effective_mean, effective_theta = scale * mean, scale * theta
     _require_numerical_domain_range(effective_mean, "effective mean")
     _require_numerical_domain_range(effective_theta, "effective theta")
-    ratio_bad = np.minimum(effective_mean, effective_theta) < _MIN_RATIO * np.maximum(
-        effective_mean, effective_theta
+    ratio_bad = (effective_mean < _MIN_MEAN_THETA_RATIO * effective_theta) | (
+        effective_theta < _MIN_RATIO * effective_mean
     )
     if np.any(ratio_bad):
         row = int(np.flatnonzero(ratio_bad)[0])
@@ -765,8 +773,8 @@ def evaluate_negative_binomial_rows(
     """Evaluate normalized NB2 rows, excluding the factorial carrier.
 
     Continuous inputs and effective prior-scaled parameters must be in
-    ``[2^-450, 2^450]`` with effective ``min(mean, theta) / max(mean, theta)``
-    at least ``2^-26``. Hessians are packed as ``(mean-mean, mean-theta,
+    ``[2^-450, 2^450]``, with effective ``mean/theta >= 2^-52`` and
+    ``theta/mean >= 2^-26``. Hessians are packed as ``(mean-mean, mean-theta,
     theta-theta)`` in natural coordinates.
     """
 

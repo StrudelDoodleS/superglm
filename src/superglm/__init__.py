@@ -145,10 +145,14 @@ def warmup() -> None:
     from superglm._group_matrix._group_matrix_kernels import _warmup_group_matrix_kernels
     from superglm._tweedie_profile_kernel import _warmup_tweedie_profile
     from superglm.distributional.kernels.tweedie import _warmup_tweedie
+    from superglm.distributional.solver._global_moments import _warmup_global_moments
+    from superglm.distributional.solver._small_group_panels import _warmup_small_group_panels
 
     _warmup_tweedie()
     _warmup_tweedie_profile()
     _warmup_group_matrix_kernels()
+    _warmup_small_group_panels()
+    _warmup_global_moments()
 
 
 __all__ = [

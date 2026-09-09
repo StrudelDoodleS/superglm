@@ -49,6 +49,18 @@ regression tests. Performance-sensitive work must compare complete-fit timing,
 memory, numerical outputs, and actual backend dispatch against the relevant
 baseline.
 
+## Project direction
+
+Read [docs/ROADMAP.md](docs/ROADMAP.md) when proposing substantial new
+functionality, making major architectural/API decisions, choosing what to work
+on next, or doing strategic research. It is not required for narrowly scoped
+bug or regression fixes, tests, CI/build work, dependency maintenance,
+mechanical refactors, or explicitly scoped audits.
+
+The roadmap is directional project state, not an implementation specification.
+If repository evidence contradicts it, report the discrepancy and propose an
+update rather than conforming the implementation to an outdated assumption.
+
 ## Numerical test policy
 
 - Boundary tests assert mathematical or certified invariants such as rank,
@@ -84,10 +96,11 @@ whose message is the consolidated changelog since the previous release, tagged
 PyPI move together and can never disagree. Tags remain release-only. A merge
 never authorizes a tag or publication.
 
-Why one act instead of per-pull-request version records: the record convention
-accumulated concrete unpublished versions — 0.22.0 through 0.24.0 sit on
-master untagged and unpublished, and remain as changelog commits that never
-shipped. The next release bumps directly from 0.24.0 to whatever ships next.
+Earlier per-pull-request version records accumulated unpublished versions:
+0.22.0 through 0.24.0 were recorded but never released. Those historical commits
+remain changelog evidence, not release state. Determine the release base from
+the current published release and its matching tag; do not infer it from an
+unpublished version-record commit.
 
 Only an explicit user request to assess, prepare, or publish a release may
 spawn the project-scoped `release_manager` specialist from

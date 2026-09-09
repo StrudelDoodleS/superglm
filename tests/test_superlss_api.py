@@ -451,16 +451,21 @@ def test_public_imports_and_fixed_fit_publish_named_immutable_views() -> None:
     assert telemetry.curvature is model.result_.curvature_telemetry
 
 
-def test_public_superlss_refuses_unfinished_discrete_fitting() -> None:
-    with pytest.raises(
-        NotImplementedError,
-        match="Discrete SuperLSS fitting is not implemented",
-    ):
-        SuperLSS(
-            family=GaussianLS(),
-            predictors=(Predictor("location", {}), Predictor("scale", {})),
-            discrete=True,
-        )
+def test_public_superlss_discrete_fitting_selects_automatic_chunks() -> None:
+    frame, response, weights, offsets = _fixture()
+    model = SuperLSS(
+        family=GaussianLS(),
+        predictors=(Predictor("location", {}), Predictor("scale", {})),
+        discrete=True,
+    ).fit(frame, response, sample_weight=weights, offsets=offsets)
+    fitted = model._require_fitted()
+    assert fitted.fit_state.requested_discrete is True
+    assert fitted.fit_state.requested_chunk_size == "auto"
+    assert fitted.result.resolved_chunk_size is not None
+    assert model.result_.coefficient_converged
+    telemetry = model.training_telemetry()
+    assert telemetry.execution_backend_identifier == "distributional-chunked-v1"
+    assert telemetry.resolved_chunk_size == fitted.result.resolved_chunk_size
 
 
 def test_public_reml_defaults_to_practical_convergence_with_a_strict_opt_out(

@@ -1,0 +1,1517 @@
+{
+  "nq_scaling_checkpoint": {
+    "schema": "superglm.nq-scaling-checkpoint.v1",
+    "source_sha": "751df3db6518024f2c33048b547e92b6a08d8382",
+    "source_tree_sha256": "ac0a89ccc89d3f37f66159ac5ad771d8847ce10515b1e6982836fc569f49d33c",
+    "raw_directory": ".benchmark-artifacts/discrete-performance/nq-grid-751df3db",
+    "fixture": {"name": "gaussian-fragmented", "seed": 28109, "holdout_seed": 28110, "holdout_rows": 2000, "bins": 256, "q_formula": "10 * knots + 62"},
+    "clock_contract": "Fresh processes, unchanged public harness and tolerances. Public warmup precedes the uninstrumented complete-fit perf_counter/process_time clocks; input generation and saved-output comparisons are outside them. No cache clearing or cold-start claim. Fit includes compilation, optimization and finalization.",
+    "thread_contract": "Dense BLAS 8 / Numba 1; discrete BLAS 1 / Numba 16. SUPERGLM_BLAS_THREADS independently overrides the solver cap. OMP_WAIT_POLICY and GOMP_SPINCOUNT are explicitly unset in defaults; only the separate PASSIVE arm sets OMP_WAIT_POLICY=PASSIVE, before imports.",
+    "ordered_runs": ["n262144-k4-dense", "n262144-k4-discrete", "n262144-k16-discrete", "n262144-k16-dense", "n1048576-k4-dense", "n1048576-k4-discrete", "passive-n1048576-k4-discrete", "n1048576-k16-discrete", "n1048576-k16-dense", "witness-n1048576-k16-discrete"],
+    "grid_rows": [
+      {"label": "n262144-k4-dense", "n": 262144, "knots": 4, "q": 102, "route": "dense", "blas_threads": 8, "numba_threads": 1, "fit_seconds": 6.782876944998861, "fit_cpu_seconds": 50.088118166, "fit_highwater_bytes": 1341214720, "later_highwater_bytes": 1341214720, "warmup_seconds": 1.0154532229935285, "coefficient_iterations": 18, "smoothing_iterations": 7, "geometry_evaluations": 19, "likelihood_evaluations": 37},
+      {"label": "n262144-k4-discrete", "n": 262144, "knots": 4, "q": 102, "route": "discrete", "blas_threads": 1, "numba_threads": 16, "fit_seconds": 5.077865113998996, "fit_cpu_seconds": 21.639812946, "fit_highwater_bytes": 840597504, "later_highwater_bytes": 845164544, "warmup_seconds": 1.0730456250021234, "coefficient_iterations": 18, "smoothing_iterations": 7, "geometry_evaluations": 19, "likelihood_evaluations": 45},
+      {"label": "n262144-k16-discrete", "n": 262144, "knots": 16, "q": 222, "route": "discrete", "blas_threads": 1, "numba_threads": 16, "fit_seconds": 6.160809833003441, "fit_cpu_seconds": 26.569733637, "fit_highwater_bytes": 891088896, "later_highwater_bytes": 922058752, "warmup_seconds": 1.2057873960002325, "coefficient_iterations": 24, "smoothing_iterations": 10, "geometry_evaluations": 25, "likelihood_evaluations": 62},
+      {"label": "n262144-k16-dense", "n": 262144, "knots": 16, "q": 222, "route": "dense", "blas_threads": 8, "numba_threads": 1, "fit_seconds": 11.056406398987747, "fit_cpu_seconds": 98.542699416, "fit_highwater_bytes": 1825312768, "later_highwater_bytes": 1825312768, "warmup_seconds": 0.7453072019998217, "coefficient_iterations": 24, "smoothing_iterations": 10, "geometry_evaluations": 25, "likelihood_evaluations": 52},
+      {"label": "n1048576-k4-dense", "n": 1048576, "knots": 4, "q": 102, "route": "dense", "blas_threads": 8, "numba_threads": 1, "fit_seconds": 21.221870136010693, "fit_cpu_seconds": 102.292036955, "fit_highwater_bytes": 3888189440, "later_highwater_bytes": 3888189440, "warmup_seconds": 0.863552590002655, "coefficient_iterations": 16, "smoothing_iterations": 7, "geometry_evaluations": 17, "likelihood_evaluations": 35},
+      {"label": "n1048576-k4-discrete", "n": 1048576, "knots": 4, "q": 102, "route": "discrete", "blas_threads": 1, "numba_threads": 16, "fit_seconds": 13.511510746000567, "fit_cpu_seconds": 65.03296782299999, "fit_highwater_bytes": 1994964992, "later_highwater_bytes": 2005565440, "warmup_seconds": 0.8127573170058895, "coefficient_iterations": 16, "smoothing_iterations": 7, "geometry_evaluations": 17, "likelihood_evaluations": 42},
+      {"label": "n1048576-k16-discrete", "n": 1048576, "knots": 16, "q": 222, "route": "discrete", "blas_threads": 1, "numba_threads": 16, "fit_seconds": 17.473720684996806, "fit_cpu_seconds": 89.50123424099999, "fit_highwater_bytes": 2098380800, "later_highwater_bytes": 2209243136, "warmup_seconds": 0.7915881419903599, "coefficient_iterations": 23, "smoothing_iterations": 9, "geometry_evaluations": 24, "likelihood_evaluations": 59},
+      {"label": "n1048576-k16-dense", "n": 1048576, "knots": 16, "q": 222, "route": "dense", "blas_threads": 8, "numba_threads": 1, "fit_seconds": 44.79244942200603, "fit_cpu_seconds": 290.391265394, "fit_highwater_bytes": 5806956544, "later_highwater_bytes": 5806956544, "warmup_seconds": 0.7876735000027111, "coefficient_iterations": 23, "smoothing_iterations": 9, "geometry_evaluations": 24, "likelihood_evaluations": 50}
+    ],
+    "passive_control": {"sample": {"label": "passive-n1048576-k4-discrete", "n": 1048576, "knots": 4, "q": 102, "route": "discrete", "blas_threads": 1, "numba_threads": 16, "fit_seconds": 14.299657335010124, "fit_cpu_seconds": 24.682680172, "fit_highwater_bytes": 1996845056, "later_highwater_bytes": 2023542784, "warmup_seconds": 0.807186244011973, "coefficient_iterations": 16, "smoothing_iterations": 7, "geometry_evaluations": 17, "likelihood_evaluations": 42}, "wall_change_fraction": 0.05833149259366488, "cpu_reduction_fraction": 0.6204589610737317, "all_ten_arrays_full_result_smoothing_coefficient_fits_and_representation_exact": true, "decision": "One sample uses less CPU but takes longer; no latency improvement demonstrated."},
+    "within_cell_comparisons": {
+      "n1048576-k16": {"wall_reduction_fraction": 0.6098958438202273, "fit_highwater_reduction_fraction": 0.6386436192349092, "coefficient_and_smoothing_iterations_match": true, "ten_array_differences": {"coefficients": {"max_absolute": 0.0013531276630506517, "norm_relative": 0.0015443356491501546}, "covariance": {"max_absolute": 3.988791145508822e-06, "norm_relative": 0.010549829329146316}, "edf": {"max_absolute": 0.007081836346515047, "norm_relative": 5.31383909395871e-05}, "holdout_parameters": {"max_absolute": 0.0006701917646752542, "norm_relative": 0.00011770458564369151}, "log_likelihood": {"max_absolute": 10.950486608082429, "norm_relative": 9.368470254865773e-06}, "objective": {"max_absolute": 11.028037480311468, "norm_relative": 9.430780140361528e-06}, "smoothing_parameters": {"max_absolute": 196.10321049043705, "norm_relative": 0.0027335314006054247}, "terminal_penalized_curvature": {"max_absolute": 1911.3837963532424, "norm_relative": 0.0006449070600340704}, "terminal_score": {"max_absolute": 1.6896427055268504e-05, "norm_relative": 0.3578284448323351}, "train_parameters": {"max_absolute": 0.0008389854480095327, "norm_relative": 0.00011817920161165873}}},
+      "n1048576-k4": {"wall_reduction_fraction": 0.3633213915924719, "fit_highwater_reduction_fraction": 0.4869167197779335, "coefficient_and_smoothing_iterations_match": true, "ten_array_differences": {"coefficients": {"max_absolute": 0.0015427590048230563, "norm_relative": 0.0020073306321318814}, "covariance": {"max_absolute": 5.302281352084206e-06, "norm_relative": 0.0021047033325815004}, "edf": {"max_absolute": 0.002780753731840946, "norm_relative": 3.064877169620391e-05}, "holdout_parameters": {"max_absolute": 0.00032326769724166926, "norm_relative": 7.759652385911182e-05}, "log_likelihood": {"max_absolute": 11.180517444154248, "norm_relative": 9.56501024522503e-06}, "objective": {"max_absolute": 11.167987195542082, "norm_relative": 9.550750921476415e-06}, "smoothing_parameters": {"max_absolute": 2.8031791885478015, "norm_relative": 0.0018355181312864277}, "terminal_penalized_curvature": {"max_absolute": 244.29930103872903, "norm_relative": 0.00010200060497008028}, "terminal_score": {"max_absolute": 0.011033646636008143, "norm_relative": 0.3739352418852468}, "train_parameters": {"max_absolute": 0.0005071597336518963, "norm_relative": 7.708682073223749e-05}}},
+      "n262144-k16": {"wall_reduction_fraction": 0.44278370288853663, "fit_highwater_reduction_fraction": 0.511815776659269, "coefficient_and_smoothing_iterations_match": true, "ten_array_differences": {"coefficients": {"max_absolute": 0.0006166612103131672, "norm_relative": 0.0011855231817047807}, "covariance": {"max_absolute": 1.4903156392641163e-06, "norm_relative": 0.003685369838252619}, "edf": {"max_absolute": 0.04532971854879975, "norm_relative": 0.0003963918308276004}, "holdout_parameters": {"max_absolute": 0.0008991678628058608, "norm_relative": 0.0001683837293951398}, "log_likelihood": {"max_absolute": 2.6029630993143655, "norm_relative": 8.906991650783082e-06}, "objective": {"max_absolute": 2.4868514318368398, "norm_relative": 8.49771364584886e-06}, "smoothing_parameters": {"max_absolute": 78.71705222761375, "norm_relative": 0.0024439532615581475}, "terminal_penalized_curvature": {"max_absolute": 767.77562693652, "norm_relative": 0.0011773464040698383}, "terminal_score": {"max_absolute": 1.9044902750398052e-06, "norm_relative": 0.09140190901533571}, "train_parameters": {"max_absolute": 0.0014045810548052873, "norm_relative": 0.000165766613511783}}},
+      "n262144-k4": {"wall_reduction_fraction": 0.2513700078632566, "fit_highwater_reduction_fraction": 0.37325657744048624, "coefficient_and_smoothing_iterations_match": true, "ten_array_differences": {"coefficients": {"max_absolute": 0.0021994750125113732, "norm_relative": 0.0034812884089810703}, "covariance": {"max_absolute": 1.5156060508558344e-05, "norm_relative": 0.0035606966926872152}, "edf": {"max_absolute": 0.018872613186161402, "norm_relative": 0.00022158103999168216}, "holdout_parameters": {"max_absolute": 0.000736070979115766, "norm_relative": 0.0001165258352107952}, "log_likelihood": {"max_absolute": 2.446712258271873, "norm_relative": 8.371850507851402e-06}, "objective": {"max_absolute": 2.3769537657499313, "norm_relative": 8.122835673208593e-06}, "smoothing_parameters": {"max_absolute": 4.0058346200104324, "norm_relative": 0.004736803070204864}, "terminal_penalized_curvature": {"max_absolute": 46.828670491755474, "norm_relative": 0.00016194552490414566}, "terminal_score": {"max_absolute": 2.888081906293749e-06, "norm_relative": 0.0860255047622133}, "train_parameters": {"max_absolute": 0.0009904808256117614, "norm_relative": 0.0001135397835720063}}}
+    },
+    "descriptive_scaling": {"dense": {"N_4x_wall_ratios_by_q": {"102": 3.128741728339619, "222": 4.051266551318784}, "q_102_to_222_wall_ratios_by_N": {"262144": 1.6300467321819596, "1048576": 2.110673995031154}}, "discrete": {"N_4x_wall_ratios_by_q": {"102": 2.6608644465074773, "222": 2.8362700941344}, "q_102_to_222_wall_ratios_by_N": {"262144": 1.2132677207235991, "1048576": 1.2932469960969435}}},
+    "q222_witness": {"native_dispatch_calls": {"_accumulate_batched": 384}, "batch_worker_observations": {"actual_workers:16": 384, "calls": 384, "paired_active_rows": 184520736, "paired_targets:10": 384}, "signatures_unchanged": true, "signature_counts": {"_accumulate_batched": 1, "_accumulate_batched_strided": 1}, "digest_thread_ids": 16, "digest_calls": 1330, "endpoint_reuse": {"chunked:accepted": 9, "chunked:invoked": 9}, "panel_observations": {}, "all_ten_arrays_full_result_smoothing_coefficient_fits_and_representation_exact": true, "fit_highwater_bytes": 2088075264, "dispatch_scope": "Timed receipts resolve dense/chunked policy and observe thread pools, without kernel instrumentation. Only this untimed witness directly observes batched native calls; empty panel observations do not establish panel dispatch."},
+    "guards": {"source_receipts_equal": true, "opening_helpers_unchanged": true, "all_raw_hashes_verified": true, "all_runtime_activity_and_memory_guards_passed": true, "memory_policy": "Before each worker, host MemAvailable and inherited finite cgroup headroom must cover twice the estimated peak plus 4 GiB. All observed fit highwaters, including witness, fit their estimates. No finite inherited cgroup limit was found.", "activity_policy": "Ten-second external CPU preflight and endpoint audit; no flagged contention. These guards do not prove absence of all transient activity."},
+    "helper_sha256": {
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/capture_worker.py": "8ab35df2092bc265e173acef80d93d4f8820332e3cc3fa50259973e8e29a3f23",
+      ".benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/capture_worker.py": "f95fbe6ba7d0358e97208a5c11fd40596e40949abd3b1ab532a8dc1821be426f",
+      ".benchmark-artifacts/discrete-performance/nq-grid-751df3db/run.py": "24b902b463052a1c0650b5eb88679b5c9f29c56ddf73314866f7c4bd140a5f88",
+      "benchmarks/_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+      "benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+    },
+    "campaign_sha256": {
+      "run.py": "24b902b463052a1c0650b5eb88679b5c9f29c56ddf73314866f7c4bd140a5f88",
+      "summarize.py": "edbcf8850c089c4e3e13fe509462645a81b841b530c37b4d006cf91f4ee00b71",
+      "protocol.md": "6c42dabb56a81380acb46db164ed3364884ec27978e952ea198f63fe8c02787d",
+      "manifest.json": "adee41dae7131c2459a0d495a2b7b35b00b62c2f54d009d5928fca224e592714",
+      "summary.json": "2c4ea3ebcf64c05d956423551ea1471ef7de9e61f5b1420dd74f795098e5e7a7",
+      "final-validation.json": "68eeab165d1a806fd4e3a0d88a09685a49335dbf0cced0af19aa8b11990a979e"
+    },
+    "raw_hash_manifest": "manifest.json stores every worker report, ten-array NPZ, capture, capture-start, log and activity-audit hash; all were rechecked after completion.",
+    "caveats": ["Eight single grid fits, one separate control and one untimed witness; no medians, confirmations, significance or universal scaling law. Optimization work changes across N and q; paired routes have matched coefficient/smoothing iterations but likelihood counts differ.", "Dense/discrete differences describe the accepted 256-bin approximation, not roundoff certification or exact equality. Terminal-score relative differences are sensitive to small reference norms.", "Fit RSS is process highwater and can include preceding allocations; later output highwater is separately reported. Conservative planning estimates are not certified memory bounds.", "Default arms explicitly clear GOMP_SPINCOUNT. Earlier campaigns inherited unspecified wait/spin environment; cross-window differences cannot be assigned to source changes or wait policy.", "Dense settings reuse the previous fair tuning; this grid does not retune every N/q cell."]
+  },
+  "ordinary_blas_discriminator": {
+    "schema": "superglm.ordinary-blas-discriminator.v1",
+    "decision": "This single pair supplies no evidence of geometry latency improvement; defer this local policy for the current target, without claiming a universal ranking.",
+    "source_sha": "4e1edda6f193d1c5c86a018a5b8390408a0aa79b",
+    "source_tree_sha256": "ac0a89ccc89d3f37f66159ac5ad771d8847ce10515b1e6982836fc569f49d33c",
+    "helper_sha256": "56ce0992993806617bbb5fb1c116d803e2e8dae678d52d854e80e61c69039242",
+    "method_sha256": "5e05cce478c68d90f9fcd215e2c5614fef5b18f07bd1dc29b72bb30f11cc1a0f",
+    "module_sha256": "811d9d10655673ac58d2ce211f1fd54aafca898e824667967c632730decd547f",
+    "protocol": "One fixed-channel public N1048576/q102/knots4/bins256 geometry per arm, ordinary BLAS1 first then ordinary-onlyBLAS8, native16/OpenMP1 throughout. Original production AST/math preserved; BLAS1 restored before native accumulation and at exit. No fit.",
+    "measurements": {"arms": {"ordinary_blas1": {"wall_seconds": 0.426940098, "cpu_seconds": 3.471702002, "chunk_wall_seconds": 0.394933467, "chunk_cpu_seconds": 3.380451514, "controller_construction_seconds": 0.001455893, "instrumentation_construction_seconds": 0.019587401, "scope_entries": 16, "estimated_peak_bytes": 58406496, "highwater_bytes": 1189167104, "refusals": 0, "native_workers": 16, "ast_projection_matches_original": true, "pool_observations": {"ordinary": [{"user_api": "blas", "num_threads": 1}, {"user_api": "blas", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}], "native_entry": [{"user_api": "blas", "num_threads": 1}, {"user_api": "blas", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}], "final_exit": [{"user_api": "blas", "num_threads": 1}, {"user_api": "blas", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}]}}, "ordinary_blas8": {"wall_seconds": 0.442617703, "cpu_seconds": 6.085171969, "chunk_wall_seconds": 0.428505276, "chunk_cpu_seconds": 6.011181539, "controller_construction_seconds": 0.001116413, "instrumentation_construction_seconds": 0.004075593, "scope_entries": 16, "estimated_peak_bytes": 58406496, "highwater_bytes": 1189167104, "refusals": 0, "native_workers": 16, "ast_projection_matches_original": true, "pool_observations": {"ordinary": [{"user_api": "blas", "num_threads": 8}, {"user_api": "blas", "num_threads": 8}, {"user_api": "openmp", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}], "native_entry": [{"user_api": "blas", "num_threads": 1}, {"user_api": "blas", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}], "final_exit": [{"user_api": "blas", "num_threads": 1}, {"user_api": "blas", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}, {"user_api": "openmp", "num_threads": 1}]}}}, "differences": {"score_data": {"error_norm": 2.17980285931179e-09, "reference_norm": 3861366.3075857377, "relative_difference": 5.64515947380988e-16}, "score_penalized": {"error_norm": 2.17980285931179e-09, "reference_norm": 3861366.3075857377, "relative_difference": 5.64515947380988e-16}, "data_curvature": {"error_norm": 0.0, "reference_norm": 26364960.51688836, "relative_difference": 0.0}, "penalty": {"error_norm": 0.0, "reference_norm": 6.796709850043884, "relative_difference": 0.0}, "penalized_curvature": {"error_norm": 0.0, "reference_norm": 26364961.04519048, "relative_difference": 0.0}}, "warmup_seconds": 0.9104738110036124, "setup_seconds": 5.478198680997593, "wall_reduction": -0.03672085398734315, "cpu_change": 0.7527921363914345, "scope": "One fixed-channel geometry pair, firstBLAS1 thenordinary-onlyBLAS8. Constructor/scope setup included. No full-fit claim; same-worker highwater is monotonic. Numerical differences descriptive only."},
+    "source_and_activity_guards_passed": true,
+    "small_oracle": "12 tests passed in 2.96 seconds: independent signed/cancellation geometry oracle and scope/restoration/method-drift guards.",
+    "raw_sha256": {
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/probe.py": "56ce0992993806617bbb5fb1c116d803e2e8dae678d52d854e80e61c69039242",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/protocol.md": "b6398953405ca760a4ff21074e36f2e56edf17a9a545cc12a9e017e541c26c79",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/test_probe.py": "9d003ab8325877850631a734513e989e14b626981c0ae9f6c08c2be9b7dbfe05",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/green.xml": "9a341c226fc820a062296a1619575026374e88917ede054ab8cbaf191ced3c8e",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/geometry.json": "210167e52c8c349d3fa8424db2828996868955fd7b2946444954110a76652461",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/geometry.npz": "077216f491e4a51699bdf0d6dd176335b7206bbe518cd48fe6854edced922322",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/summary.json": "8c7629943ff38b22967b5d5b1b409b21b37f79b667a890feef31f212376c083b",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/controller.py": "95fc43266e1ca8b60908888f159d4b73fd6356c9897930cdd783318a7f88b28b",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/controller-result.json": "75931966b02e0cbadaeb769c9b02c10917bc95735a038b0727a65d57372a5e21",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/controller-start.json": "bec128403310d53395ce7f2062d7b964087c9760e93ca8f318bc56add96ff265",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/preflight.json": "ff522b71ed259446fe7ae339a258eb3939bdf49e9f3f3c26301bf454bcb7a423",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/activity.json": "5c51da646ab07e7fac367673f2447860314c236713e0b49a7fc186905734e937",
+      ".benchmark-artifacts/discrete-performance/ordinary-blas-probe/geometry.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "caveats": ["Constructor-inclusive wall charges AST/controller setup: baseline 19.59 ms AST construction versus alternative 4.08 ms. This asymmetry favors the alternative; chunk-only wall also increased.", "Large-case score relative difference 5.65e-16 is descriptive; curvature and penalty agree exactly. Cancellation-safe evidence belongs to the independent small oracle.", "Same-worker highwater is monotonic; equal RSS and owned-array estimates do not prove equal independent process peaks or native scratch usage.", "One pair and fixed order do not establish significance or universal BLAS policy. No complete-fit improvement or 12.5-second result follows."]
+  },
+  "category_support_discriminator": {
+    "schema": "superglm.category-support-discriminator.v1",
+    "decision": "This single pair supplies no evidence of latency improvement; category placement is deferred for the current target, not proven inferior universally.",
+    "source_sha": "beabd523e6f7d040d58dc975b8f034b84c36b8a8",
+    "source_tree_sha256": "ac0a89ccc89d3f37f66159ac5ad771d8847ce10515b1e6982836fc569f49d33c",
+    "probe_sha256": "111f2c50bce5a6abc7a05b1a63690a090ae9d1355f102c2bccf7c382f7bb810a",
+    "fixture_helper_sha256": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+    "protocol": {"fixture": "Public gaussian-fragmented N1048576/q102/knots4/bins256; seeds28109/28110", "channels": "Fixed score and signed observed curvature, generated once from the same public family; no optimizer or fit", "order": ["current_categories", "inactive_category_supports"], "blas": 1, "numba": 16, "chunk_rows": 65536, "global_budget_bytes": 67108864, "clock": "Constructor inclusive: category adapter construction, plan descriptors/build/reset, chunks and sentinel rewrite, finish/restoration/close/release. Common public warmup and channel setup excluded.", "warmup_seconds": 0.9258999699959531, "common_setup_seconds": 5.520819176992518, "channel_sha256": {"score": "6f57a56327860ff0bd9c42e95112eebe3304f183004164a8528606c05310c2c3", "curvature": "07f991ec0822d91e23ef184f32a34c61e9bb7139c7964c3d748f3a1db5489885"}},
+    "arms": {"current_categories": {"wall_seconds": 0.308186111, "cpu_seconds": 3.235533454, "counted_work": {"ordinary_widths": [16, 16], "support_count": 10, "histogram_count": 45, "directional_count": 20, "rows": 1048576, "chunks": 16, "native_moment_workers": 16, "refusal_count": 0, "histogram_row_visits": 47185920, "histogram_active_updates": 24808542, "directional_row_width_work": 246027648, "support_pair_finalizations": 45, "batched_moment_calls": 16}, "estimated_extra_owned_peak_array_bytes": 58406496, "process_highwater_bytes": 1188687872, "owned_bytes_after_close": 0}, "inactive_category_supports": {"wall_seconds": 0.319262056, "cpu_seconds": 4.136897432, "counted_work": {"ordinary_widths": [7, 7], "support_count": 18, "histogram_count": 153, "directional_count": 36, "rows": 1048576, "chunks": 16, "native_moment_workers": 16, "refusal_count": 0, "histogram_row_visits": 160432128, "histogram_active_updates": 82768621, "directional_row_width_work": 188347516, "support_pair_finalizations": 153, "batched_moment_calls": 16}, "estimated_extra_owned_peak_array_bytes": 49324368, "process_highwater_bytes": 1188687872, "owned_bytes_after_close": 0}},
+    "alternative_wall_change_fraction": 0.0359391439285206,
+    "alternative_cpu_change_fraction": 0.2785828027479267,
+    "numerical_differences": {"score_data": {"error_norm": 2.9842231775604e-08, "reference_norm": 3861366.3075857377, "relative_difference": 7.728412535474372e-15, "gamma_n_plus_q_times_reference_norm": 0.0008991318573346554, "error_over_descriptive_scale": 3.31900505272574e-05}, "score_penalized": {"error_norm": 2.9842231775604e-08, "reference_norm": 3861366.3075857377, "relative_difference": 7.728412535474372e-15, "gamma_n_plus_q_times_reference_norm": 0.0008991318573346554, "error_over_descriptive_scale": 3.31900505272574e-05}, "data_curvature": {"error_norm": 2.373303437644224e-05, "reference_norm": 26364960.51688836, "relative_difference": 9.001733327550324e-13, "gamma_n_plus_q_times_reference_norm": 0.00613916785660417, "error_over_descriptive_scale": 0.0038658389753770265}, "penalty": {"error_norm": 0.0, "reference_norm": 6.796709850043884, "relative_difference": 0.0, "gamma_n_plus_q_times_reference_norm": 1.5826362651036865e-09, "error_over_descriptive_scale": 0.0}, "penalized_curvature": {"error_norm": 2.373303437644224e-05, "reference_norm": 26364961.04519048, "relative_difference": 9.001733147173241e-13, "gamma_n_plus_q_times_reference_norm": 0.006139167979621057, "error_over_descriptive_scale": 0.0038658388979131942}},
+    "numerical_scope": "Large geometry uses descriptive relative differences and gamma_(N+q)*reference-norm scales only, not cancellation-safe certification. Independent small oracle uses dimension/epsilon/absolute-product bounds and a mutation witness.",
+    "small_oracle": {"passed": 19, "seconds": 2.66, "receipt": ".benchmark-artifacts/discrete-performance/category-support-probe/validation-final.xml", "test_helper_sha256": "39fc0be0b8da762b7e850cf35eac066ffc0178e87cd3b28d2b6bedeb6f28a669"},
+    "guards": {"source_stable": true, "helper_stable": true, "worker_exit_code": 0, "activity_guard_passed": true, "original_source_storage_unchanged": true},
+    "raw_sha256": {
+      ".benchmark-artifacts/discrete-performance/category-support-probe/protocol.md": "8e4902ab1af50d16bcdaae1a4fb0c1b03f8b54959e7b5759a65efb8afbf7af96",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/probe.py": "111f2c50bce5a6abc7a05b1a63690a090ae9d1355f102c2bccf7c382f7bb810a",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/test_probe.py": "39fc0be0b8da762b7e850cf35eac066ffc0178e87cd3b28d2b6bedeb6f28a669",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/validation-final.xml": "e0f14dfb7f73bb07519268747a54acbfbfdeedbcd83959a11d3233ddd9cffab6",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/controller.py": "a0b11b57fd98bac4ecbcc172806caca4753b0994199898678a0059a6eaec4eda",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/controller-start.json": "b05395f97c4541d501f1c5dcb09a8c3c4c49bcfec626e1ab2a531b4bc0f9ed7c",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/controller-result.json": "74d75356fbe2ce391276fa4d9d1018f66032eeb15ed1a5ede76825d0f7b64dd3",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/preflight.json": "0e57a9bcb147604b9bb71fd1c62ccd2f474cdb5736643d2941e7cc3bf3835d22",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/activity.json": "2d1191181d22c58596539b9955bb1172deda71496f229de6bdd6b1be9d9fed50",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/geometry.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/geometry.json": "8a8f1d0d98a51e1c83dc08c90fea3d20649aadc412258274ce029a009c96bd26",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/geometry.npz": "0fab1e73b7ab1147f76ec5bad61785c1a50cf9237c8f8b708ee062886abc74bf",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/summary.json": "7336a8968f918d3fa71d57f9d5cdc372965983eea289d041620cac36536261ad"
+    },
+    "caveats": [
+      "One geometry sample per arm in fixed order; no statistical or universal ranking follows. No complete-fit or 12.5-second latency result is established.",
+      "Estimated owned-array peaks include category adapter tables and rewrite scratch but exclude original source, fixed channels and Python/native runtime storage.",
+      "Process highwater is monotonic in the same worker; equal values do not establish independent arm RSS peaks.",
+      "The alternative narrows ordinary blocks but increases support/histogram targets. The smaller allocation estimate is a separate possible capacity tradeoff."
+    ]
+  },
+  "controlled_cold_start_checkpoint": {
+    "schema": "superglm.controlled-cold-start-pair.v1",
+    "status": "one_controlled_pair_and_one_untimed_witness",
+    "fixture": "Public Gaussian-fragmented N1048576/q102/knots4/bins256, seeds28109/28110; same responses, frame and holdout",
+    "thread_settings": {"blas": 1, "numba": 16, "native_openmp": 1},
+    "cache_contract": "Each timed arm used a unique initially empty NUMBA_CACHE_DIR. Existing Numba caches and all other caches were preserved; this is not a system-cold or cold-filesystem experiment. Cache directories are retained and omitted from file-checksum maps.",
+    "clock_contract": "Numerical-import clock starts before numerical-package imports. Input generation and public warmup measured separately outside unchanged public fit_reml clock. Wrapper total starts after importing time, before remaining wrapper imports; controller child elapsed includes interpreter startup. Reported subtotals exclude intervening preparation/output work.",
+    "samples": [
+      {"label": "cold-baseline", "source_sha": "37f4ecdb1f6e40e5c1507121dc04b0ea300bfcea", "source_tree_sha256": "4ca35ee19e7f2c3fe822af7ddaf9c657b563dc03c47e1e2bb2e325e33fb58897", "numba_cache_dir": ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-baseline.numba-cache", "cache_initially_empty": true, "fit_seconds": 13.692610854006489, "fit_cpu_seconds": 65.29776257399999, "harness_warmup_seconds": 84.36706233900622, "startup_phases": {"input_generation": {"cpu_seconds": 1.89158414, "wall_seconds": 1.8965524660015944}, "numerical_imports": {"cpu_seconds": 1.73756761, "wall_seconds": 1.7375097930053016}, "public_warmup": {"cpu_seconds": 89.53772256799999, "wall_seconds": 84.36650005199772}}, "boundaries": [{"elapsed_cpu_seconds": 0.012508678000000002, "elapsed_wall_seconds": 0.012562470001284964, "name": "before_numerical_imports", "process_highwater_bytes": 23040000}, {"elapsed_cpu_seconds": 1.750102276, "elapsed_wall_seconds": 1.750104705002741, "name": "after_numerical_imports", "process_highwater_bytes": 336617472}, {"elapsed_cpu_seconds": 1.751351911, "elapsed_wall_seconds": 1.7513541340013035, "name": "before_capture_worker", "process_highwater_bytes": 336748544}, {"elapsed_cpu_seconds": 1.805220749, "elapsed_wall_seconds": 1.8204571779933758, "name": "before_input_generation", "process_highwater_bytes": 338685952}, {"elapsed_cpu_seconds": 3.6968229950000002, "elapsed_wall_seconds": 3.7170349119987804, "name": "after_input_generation", "process_highwater_bytes": 691400704}, {"elapsed_cpu_seconds": 14.980283338000001, "elapsed_wall_seconds": 15.021116165997228, "name": "before_public_warmup", "process_highwater_bytes": 1023389696}, {"elapsed_cpu_seconds": 104.51804468399999, "elapsed_wall_seconds": 99.38766385099734, "name": "after_public_warmup", "process_highwater_bytes": 1523712000}, {"elapsed_cpu_seconds": 173.92468897400002, "elapsed_wall_seconds": 117.21434343099827, "name": "after_capture_worker_and_outputs", "process_highwater_bytes": 2720423936}], "fit_highwater_bytes": 2710102016, "output_highwater_bytes": 2720423936, "warmup_plus_fit_seconds": 98.05911090600421, "imports_plus_warmup_plus_fit_seconds": 99.79662069900951, "total_wrapper_wall_seconds": 117.21688467799686, "total_wrapper_cpu_seconds": 173.927228645, "controller_child_elapsed_seconds": 120.26220996800112, "runtime_guards_passed": true, "activity_guards_passed": true, "signature_counts": {"native_signatures_before_warmup": {"_accumulate_batched": 0}, "native_signatures_after_warmup": {"_accumulate_batched": 36}, "native_signatures_after_fit": {"_accumulate_batched": 36}}},
+      {"label": "cold-candidate", "source_sha": "ae6a35d3873a57bee88917042824f487e3477af1", "source_tree_sha256": "ac0a89ccc89d3f37f66159ac5ad771d8847ce10515b1e6982836fc569f49d33c", "numba_cache_dir": ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-candidate.numba-cache", "cache_initially_empty": true, "fit_seconds": 14.020247209002264, "fit_cpu_seconds": 65.558082243, "harness_warmup_seconds": 32.94419205799932, "startup_phases": {"input_generation": {"cpu_seconds": 1.8390087009999998, "wall_seconds": 1.8502441559976432}, "numerical_imports": {"cpu_seconds": 1.7228049250000002, "wall_seconds": 1.730162220002967}, "public_warmup": {"cpu_seconds": 33.302188135, "wall_seconds": 32.94403921900084}}, "boundaries": [{"elapsed_cpu_seconds": 0.012752835, "elapsed_wall_seconds": 0.012798718991689384, "name": "before_numerical_imports", "process_highwater_bytes": 39690240}, {"elapsed_cpu_seconds": 1.735582808, "elapsed_wall_seconds": 1.7429932789964369, "name": "after_numerical_imports", "process_highwater_bytes": 336318464}, {"elapsed_cpu_seconds": 1.736705682, "elapsed_wall_seconds": 1.744114108994836, "name": "before_capture_worker", "process_highwater_bytes": 336449536}, {"elapsed_cpu_seconds": 1.790124643, "elapsed_wall_seconds": 1.816829053001129, "name": "before_input_generation", "process_highwater_bytes": 338518016}, {"elapsed_cpu_seconds": 3.629149809, "elapsed_wall_seconds": 3.667097195997485, "name": "after_input_generation", "process_highwater_bytes": 691286016}, {"elapsed_cpu_seconds": 13.952631486, "elapsed_wall_seconds": 14.003327928992803, "name": "before_public_warmup", "process_highwater_bytes": 1022861312}, {"elapsed_cpu_seconds": 47.254853682, "elapsed_wall_seconds": 46.94740886500222, "name": "after_public_warmup", "process_highwater_bytes": 1125142528}, {"elapsed_cpu_seconds": 116.861345763, "elapsed_wall_seconds": 65.0390251189965, "name": "after_capture_worker_and_outputs", "process_highwater_bytes": 2335047680}], "fit_highwater_bytes": 2312237056, "output_highwater_bytes": 2335047680, "warmup_plus_fit_seconds": 46.964286428003106, "imports_plus_warmup_plus_fit_seconds": 48.69444864800607, "total_wrapper_wall_seconds": 65.04155458699097, "total_wrapper_cpu_seconds": 116.863874467, "controller_child_elapsed_seconds": 66.78204873000504, "runtime_guards_passed": true, "activity_guards_passed": true, "signature_counts": {"native_signatures_before_warmup": {"_accumulate_batched": 0, "_accumulate_batched_strided": 0}, "native_signatures_after_warmup": {"_accumulate_batched": 1, "_accumulate_batched_strided": 1}, "native_signatures_after_fit": {"_accumulate_batched": 1, "_accumulate_batched_strided": 1}}}
+    ],
+    "comparisons": {"arrays": {"coefficients": {"equal": true, "maxabs": 0.0}, "covariance": {"equal": true, "maxabs": 0.0}, "train_parameters": {"equal": true, "maxabs": 0.0}, "holdout_parameters": {"equal": true, "maxabs": 0.0}, "smoothing_parameters": {"equal": true, "maxabs": 0.0}, "edf": {"equal": true, "maxabs": 0.0}, "objective": {"equal": true, "maxabs": 0.0}, "log_likelihood": {"equal": true, "maxabs": 0.0}, "terminal_score": {"equal": true, "maxabs": 0.0}, "terminal_penalized_curvature": {"equal": true, "maxabs": 0.0}}, "result_equal": true, "smoothing_equal": true, "coefficient_fits_equal": true, "representation_equal": true, "fixture_equal": true, "warmup_reduction": 0.6095135809562506, "fit_reduction": -0.023927968047080528, "total_wrapper_reduction": 0.44511787047007134},
+    "untimed_witness": {"ten_arrays_equal": {"coefficients": true, "covariance": true, "train_parameters": true, "holdout_parameters": true, "smoothing_parameters": true, "edf": true, "objective": true, "log_likelihood": true, "terminal_score": true, "terminal_penalized_curvature": true}, "result_equal": true, "native_dispatch_calls": {"_accumulate_batched": 272}, "signature_counts_entry": {"_accumulate_batched": 1, "_accumulate_batched_strided": 1}, "signature_counts_after_fit": {"_accumulate_batched": 1, "_accumulate_batched_strided": 1}, "batch_observations": {"actual_workers:16": 272, "calls": 272, "paired_active_rows": 130702188, "paired_targets:10": 272}, "digest_distinct_thread_ids": 16, "digest_calls": 1050, "reuse": {"chunked:invoked": 7, "chunked:accepted": 7}, "runtime_guards_passed": true},
+    "helper_sha256": {
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/run.py": "80d39c88e622fadcf710daaec5aa1b2bb0fb8e4793f64bfa54858bfaf32c2e83",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/startup_worker.py": "899d99b782265430cdbb934b224ebb3117e6f6dd64dc8b60182eb689505c96a8",
+      "benchmarks/_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+      "benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/capture_worker.py": "8ab35df2092bc265e173acef80d93d4f8820332e3cc3fa50259973e8e29a3f23",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/run.py": "cd60585a52302e1e78ff3006485642898107b57e08c1cf7efd791568b2573aa1",
+      ".benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/capture_worker.py": "f95fbe6ba7d0358e97208a5c11fd40596e40949abd3b1ab532a8dc1821be426f"
+    },
+    "raw_sha256": {
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-baseline.audit.json": "a673f346773511120e276f57e0140f5ae75fda3e0e4d57285768f0df9309ab0f",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-baseline.capture-start.json": "3c5722ec90947df47863e3c96989f3341d922695de651b06ce3ed61c7c826cec",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-baseline.capture.json": "9466bad08610a42d636cea977906f06ab5492b7ec83b9b7443f25a2e9288d82f",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-baseline.json": "8c7c00d0240e72b784b4486813d92c06edc1c6041c7a2e77ac4190b6a6fd079d",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-baseline.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-baseline.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-baseline.startup.json": "0ecdc0c8affe47cfa1be040d067b5d6dace02af93f1789fa0876fb60c487cb7e",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-candidate.audit.json": "ddbecdc1d2ce1c41a7a2b506e71e1d4e38ad8e49b1a97b7b674c1ab74097511c",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-candidate.capture-start.json": "7dfadcd917f1db328033625c36f8e40aef3202761b3312d576603f87b5bac162",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-candidate.capture.json": "2b70f2d85c0195e509a4cb42e55de98220e957de4ca83a46f46f9149e8c2158e",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-candidate.json": "7b2712902a3b6fd3299d4d2a2abf69e093246f1b1214b613f696c5fffa53b342",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-candidate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-candidate.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/cold-candidate.startup.json": "c1447e7db930eaa6ab4244c2c3d6b1c12ca53201d9b8dc14cd6c8e7267207c71",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/comparison.json": "91d96e44aa6d3e70f907b58e7dfadfd4c952a52ce00812c8aab3d1d3255d9fe6",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/controller.log": "e83b633a68801e0bd3a0c76404a01b72bbc91fca5bf8a3c9aff91f2f77f707d9",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/manifest.json": "6348f9d0a0e944db655c7e8400cb0c6f40a524986c8062b8461de79705328ddc",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/run.py": "80d39c88e622fadcf710daaec5aa1b2bb0fb8e4793f64bfa54858bfaf32c2e83",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/startup_worker.py": "899d99b782265430cdbb934b224ebb3117e6f6dd64dc8b60182eb689505c96a8",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3/witness_worker.py": "8ab35df2092bc265e173acef80d93d4f8820332e3cc3fa50259973e8e29a3f23",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/capture_worker.py": "8ab35df2092bc265e173acef80d93d4f8820332e3cc3fa50259973e8e29a3f23",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/controller.log": "7690694e5f43bf0386daea3fe92724b08419071aeac81fe3f76b590c33276cf9",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/manifest.json": "50a88662080763226fab51893847386380fe170b2ce42e3552dcb2d180344e47",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/run.py": "cd60585a52302e1e78ff3006485642898107b57e08c1cf7efd791568b2573aa1",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/summary.json": "0d491adc860e27d3468153f9166cd8a02caf7f4c9f61ca44d48e7b3fe772c0cd",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/witness-candidate.audit.json": "064ff1f96ffebbf34a5bb1714af1bd60c89ed7298344b2b66e195018c812fc05",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/witness-candidate.capture-start.json": "11bbbbc3f810d41526f6085877061eb2837727f30de6b2cf2b49db525c6c4f92",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/witness-candidate.capture.json": "99e49a041fd83e8fab2d58f6b367190f82dfb8ca2d5db298c185c61a9ee56de6",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/witness-candidate.json": "2cc188d0274e21bd021505037e8da4dd28048996a48a43a79443d2922e47a3b4",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/witness-candidate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/witness-candidate.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0"
+    },
+    "caveats": [
+      "One fresh-cache pair, baseline then candidate, without replication. Warmup fell60.95% and total wrapper elapsed44.51%; these are observed single-pair reductions.",
+      "The warmed fit was13.693 versus14.020seconds: candidate2.39% slower in this pair. This change establishes lower startup cost, not improved warmed-fit latency.",
+      "Fit-end ru_maxrss includes earlier imports, input generation and compilation; lower highwater is not an isolated live-fit allocation improvement.",
+      "Before public warmup both sources have zero native signatures. Baseline compiles36; candidate compiles one contiguous and one strided signature, with no fit-time growth.",
+      "Untimed witness observed272 contiguous dispatches and zero strided dispatches, with16 actual workers per batch. Digest thread IDs measure participation over the fit, not simultaneous concurrency.",
+      "All ten saved arrays, full result, smoothing/coefficient-fit records and stored representation agree exactly across pair; witness arrays and full result agree with timed candidate.",
+      "Activity/runtime guards passed; endpoint process accounting is incomplete and does not establish physical host isolation. No new confirmations or larger-shape experiment were run."
+    ]
+  },
+  "paired_moments_checkpoint": {
+    "schema": "superglm.paired-moments-confirmation.v1",
+    "source_sha": "37f4ecdb1f6e40e5c1507121dc04b0ea300bfcea",
+    "source_tree_sha256": "4ca35ee19e7f2c3fe822af7ddaf9c657b563dc03c47e1e2bb2e325e33fb58897",
+    "baseline_sha": "b1ca0f6e3af6d520bf4c6de632ed2ceadd1e4572",
+    "baseline_source_tree_sha256": "4315580ea57e6ec3a1c971cef65f361f3fccd451f026d96ddee99a4e4ef9b690",
+    "status": "three_of_three_new_discrete_confirmations_under_15_seconds",
+    "fixture": "Same public gaussian-fragmented N1048576/q102/knots4/bins256/seeds28109,28110; unchanged public fit clock and stopping rules",
+    "order": ["discrete-1", "dense-1", "dense-2", "discrete-2", "discrete-3", "dense-3"],
+    "thread_settings": {"discrete": {"blas": 1, "numba": 16}, "dense": {"blas": 8, "numba": 1}},
+    "screen_pair": {"arrays": {"coefficients": {"equal": true, "maxabs": 0.0}, "covariance": {"equal": true, "maxabs": 0.0}, "train_parameters": {"equal": true, "maxabs": 0.0}, "holdout_parameters": {"equal": true, "maxabs": 0.0}, "smoothing_parameters": {"equal": true, "maxabs": 0.0}, "edf": {"equal": true, "maxabs": 0.0}, "objective": {"equal": true, "maxabs": 0.0}, "log_likelihood": {"equal": true, "maxabs": 0.0}, "terminal_score": {"equal": true, "maxabs": 0.0}, "terminal_penalized_curvature": {"equal": true, "maxabs": 0.0}}, "result_differences": [], "smoothing_differences": [], "coefficient_fit_differences": [], "representation_equal": true, "fixture_equal": true, "samples": [{"fit_seconds": 16.066262712993193, "warmup_seconds": 13.03907150500163, "fit_process_cpu_seconds": 70.22970823, "peak_fit_process_rss_bytes": 2115964928}, {"fit_seconds": 14.940997565994621, "warmup_seconds": 72.08864792001259, "fit_process_cpu_seconds": 68.66321312200002, "peak_fit_process_rss_bytes": 2497687552}], "wall_reduction": 0.07003901075814856},
+    "confirmations": [
+      {"label": "discrete-1", "route": "discrete", "wall": 14.807340273007867, "warmup": 1.873917523000273, "cpu": 69.301926954, "fit_highwater_bytes": 2026110976, "output_highwater_bytes": 2053181440, "source_sha": "37f4ecdb1f6e40e5c1507121dc04b0ea300bfcea", "source_tree_sha256": "4ca35ee19e7f2c3fe822af7ddaf9c657b563dc03c47e1e2bb2e325e33fb58897", "guards": true},
+      {"label": "dense-1", "route": "dense", "wall": 24.299111555010313, "warmup": 1.5734371580037987, "cpu": 112.124299854, "fit_highwater_bytes": 3934572544, "output_highwater_bytes": 3934572544, "source_sha": "37f4ecdb1f6e40e5c1507121dc04b0ea300bfcea", "source_tree_sha256": "4ca35ee19e7f2c3fe822af7ddaf9c657b563dc03c47e1e2bb2e325e33fb58897", "guards": true},
+      {"label": "dense-2", "route": "dense", "wall": 26.239154556998983, "warmup": 1.5156024470052216, "cpu": 117.638848897, "fit_highwater_bytes": 3928551424, "output_highwater_bytes": 3928551424, "source_sha": "37f4ecdb1f6e40e5c1507121dc04b0ea300bfcea", "source_tree_sha256": "4ca35ee19e7f2c3fe822af7ddaf9c657b563dc03c47e1e2bb2e325e33fb58897", "guards": true},
+      {"label": "discrete-2", "route": "discrete", "wall": 14.825610141997458, "warmup": 1.3123346339998534, "cpu": 69.678696594, "fit_highwater_bytes": 2017230848, "output_highwater_bytes": 2026868736, "source_sha": "37f4ecdb1f6e40e5c1507121dc04b0ea300bfcea", "source_tree_sha256": "4ca35ee19e7f2c3fe822af7ddaf9c657b563dc03c47e1e2bb2e325e33fb58897", "guards": true},
+      {"label": "discrete-3", "route": "discrete", "wall": 14.991532312997151, "warmup": 1.5835272330004955, "cpu": 68.5917593, "fit_highwater_bytes": 2018934784, "output_highwater_bytes": 2045280256, "source_sha": "37f4ecdb1f6e40e5c1507121dc04b0ea300bfcea", "source_tree_sha256": "4ca35ee19e7f2c3fe822af7ddaf9c657b563dc03c47e1e2bb2e325e33fb58897", "guards": true},
+      {"label": "dense-3", "route": "dense", "wall": 24.686451065004803, "warmup": 1.3807631460076664, "cpu": 111.05804971699999, "fit_highwater_bytes": 3928616960, "output_highwater_bytes": 3928616960, "source_sha": "37f4ecdb1f6e40e5c1507121dc04b0ea300bfcea", "source_tree_sha256": "4ca35ee19e7f2c3fe822af7ddaf9c657b563dc03c47e1e2bb2e325e33fb58897", "guards": true}
+    ],
+    "confirmation_aggregates": {"discrete": {"wall": {"median": 14.825610141997458, "min": 14.807340273007867, "max": 14.991532312997151}, "cpu": {"median": 69.301926954, "min": 68.5917593, "max": 69.678696594}, "warmup": {"median": 1.5835272330004955, "min": 1.3123346339998534, "max": 1.873917523000273}, "fit_highwater_bytes": {"median": 2018934784, "min": 2017230848, "max": 2026110976}, "output_highwater_bytes": {"median": 2045280256, "min": 2026868736, "max": 2053181440}}, "dense": {"wall": {"median": 24.686451065004803, "min": 24.299111555010313, "max": 26.239154556998983}, "cpu": {"median": 112.124299854, "min": 111.05804971699999, "max": 117.638848897}, "warmup": {"median": 1.5156024470052216, "min": 1.3807631460076664, "max": 1.5734371580037987}, "fit_highwater_bytes": {"median": 3928616960, "min": 3928551424, "max": 3934572544}, "output_highwater_bytes": {"median": 3928616960, "min": 3928551424, "max": 3934572544}}},
+    "discrete_median_wall_reduction": 0.3994434395224167,
+    "discrete_median_fit_highwater_reduction": 0.4860952837713147,
+    "exactness": {"same_route_all_ten_arrays_equal": true, "within_route_full_result_equal": {"discrete": true, "dense": true}, "within_route_representation_equal": {"discrete": true, "dense": true}, "witness_and_profile_ten_arrays_equal_to_current_discrete": true, "profile_full_result_and_representation_equal": true},
+    "dense_vs_discrete_binning_differences_each_of_three_pairs": {"coefficients": {"maxabs": 0.0015427590048230563, "normrel": 0.0020073306321318814}, "covariance": {"maxabs": 5.302281352084206e-06, "normrel": 0.0021047033325815004}, "train_parameters": {"maxabs": 0.0005071597336518963, "normrel": 7.708682073223749e-05}, "holdout_parameters": {"maxabs": 0.00032326769724166926, "normrel": 7.759652385911182e-05}, "smoothing_parameters": {"maxabs": 2.8031791885478015, "normrel": 0.0018355181312864277}, "edf": {"maxabs": 0.002780753731840946, "normrel": 3.064877169620391e-05}, "objective": {"maxabs": 11.167987195542082, "normrel": 9.550750921476415e-06}, "log_likelihood": {"maxabs": 11.180517444154248, "normrel": 9.56501024522503e-06}, "terminal_score": {"maxabs": 0.011033646636008143, "normrel": 0.3739352418852468}, "terminal_penalized_curvature": {"maxabs": 244.29930103872903, "normrel": 0.00010200060497008028}},
+    "dispatch": {"backend": "distributional-chunked-v1", "chunk_size": 65536, "batch_observations": {"actual_workers:16": 272, "calls": 272, "paired_active_rows": 130702188, "paired_targets:10": 272}, "digest_calls": 1050, "distinct_digest_thread_ids": 16, "endpoint_reuse": {"chunked:invoked": 7, "chunked:accepted": 7}, "runtime_guards_passed": true},
+    "diagnostic_profile": {"path": ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current", "status": "complete", "wall_seconds_diagnostic_only": 17.279215470000054, "cpu_seconds_diagnostic_only": 72.54134358, "exclusive_watched_seconds": {"main-q102/geometry/batch._accumulate_batched": 0.8565526829916053, "main-q102/geometry/global.GlobalMomentPlan._accumulate_prepared": 2.8876796048134565, "main-q102/geometry/global.GlobalMomentPlan._prepare_chunk": 1.9434682451828849, "main-q102/other/solver._chunk_reuse_data_certificate": 0.22261418201378547, "main-q102/reuse/solver._chunk_reuse_data_certificate": 0.17086712298623752}, "warning": "Selected exclusive intervals retain unwatched descendants; never sum nested inclusive owner times."},
+    "helper_sha256": {
+      ".benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/capture_worker.py": "f95fbe6ba7d0358e97208a5c11fd40596e40949abd3b1ab532a8dc1821be426f",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/run.py": "18d00631cb22e291f08447271af81bea580cc325d14f1759fd09dc4a0cce97b2",
+      "benchmarks/_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+      "benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/run.py": "a86ce3a75869953f57396bc09aab2e0cc9e6c402f4da18727bd6294a354cda82",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/capture_worker.py": "ec996f6b3386d8ed51336deaed7417ca330ab0e3f835544966ff8fbe7f477b23",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/run.py": "7aaa0910aeb1924670ecccb904cef3695e416a0db625bc85a827ab94d806b641"
+    },
+    "raw_sha256": {
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/comparison.json": "69dc32a1bc2aa62f0c82b49445abb379ec4fae8ef2d392405d11e582bb57e5b0",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/controller.log": "f56b4d1f229dbbc31d933849ae7b70e93c52a309fee88960af75dda5ee3d94ed",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/manifest.json": "bbcf2919b018e0339a8908b2a7f5e99c7515c35de8f9183e672eaa5ec089f833",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-baseline.audit.json": "0e3c80e7c405b15acfbed6c7cff28c3366f6ac47582ccfc6b4e9f5556d3cdb1e",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-baseline.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-baseline.capture.json": "c64b7ddf60915ee9cc71bdf52f7b90392a1458433f27f3d55f8eb107d8d3a14c",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-baseline.json": "167814c66f51851f6d494df44978f4671c12b98bec814823644b8b809d6ba32b",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-baseline.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-baseline.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-candidate.audit.json": "107fdf812d30ca559fc326226b3aee9284d3add1fc8b65c9cd2ba0de846d2854",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-candidate.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-candidate.capture.json": "52ada02b1a11fead7d0ff2d1ca97489e5df046f826355f425c8d177c2070f440",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-candidate.json": "12eb1f2a48cb46f0ef6d681c2b0b3def22e6e8c82540f69a1858a0153a23d2cc",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-candidate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/pair-candidate.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb/run.py": "18d00631cb22e291f08447271af81bea580cc325d14f1759fd09dc4a0cce97b2",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/controller.log": "fd495a2ef8678d6121689f348528194f6bd8b5376d36013c86d204aa45b83821",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-1.audit.json": "1e1c291a6fa5a188d8ff9b5dda640d624ceae4d8fcb26a479133e50f7b3cb1f6",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-1.capture-start.json": "b5c5b2567965eb4bba8f9e4e37e2a08e36f3ba0f672ef52689674e9fc7c9bc9a",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-1.capture.json": "100d55f2d744445a073042dc2606ec2cedfa09159f854e1b3117c2da7f5c5d58",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-1.json": "79d0729395f4fa9f180bf851fa0cdde65d3124f858fadff75715b32f934bb635",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-1.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-1.npz": "fba1cfa76cf9b589b78f23bddfa0d675c1cda21e2bfcdb7f06406b6e02b7086e",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-2.audit.json": "4589d21ee369e62d055f5a1fdb01225f3625e56d4ead4254c59fcec58d6b6c40",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-2.capture-start.json": "b5c5b2567965eb4bba8f9e4e37e2a08e36f3ba0f672ef52689674e9fc7c9bc9a",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-2.capture.json": "b7de8b9596e6bdfa2ace6d2b330ab4052f0b61dd3cd0e396afefa28be609b573",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-2.json": "0e707b030a7810bc869f8d5318c5935670f6f18b00d4789769e228ad08a6298d",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-2.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-2.npz": "fba1cfa76cf9b589b78f23bddfa0d675c1cda21e2bfcdb7f06406b6e02b7086e",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-3.audit.json": "7e01b654b07c2dd6ca905989afca20e695b378334c82e177ed2fb3cb43e0500e",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-3.capture-start.json": "b5c5b2567965eb4bba8f9e4e37e2a08e36f3ba0f672ef52689674e9fc7c9bc9a",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-3.capture.json": "b76e3c907a7cafc36d09398c4616eca15fb0da2db578b960eab2aa32566f2b50",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-3.json": "1eaf777063e47d9ddf1b7ff901d58df5dddb10747c3b9384c6d4b20b431498e0",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-3.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/dense-3.npz": "fba1cfa76cf9b589b78f23bddfa0d675c1cda21e2bfcdb7f06406b6e02b7086e",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-1.audit.json": "4bf42a0a871fe967fc6b63c3ba3ce9baf57b1b827ede785db9315d631095d4d2",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-1.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-1.capture.json": "3e404d495a686adecaee7e57bdc2e7e6f20a4f7f006dc28b44877bc62943ca12",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-1.json": "2560319a390e754806344bfe93cb3e3731d2f6353140e24ff023f2d1b196b093",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-1.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-1.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-2.audit.json": "51f03f9a22d32f12a749d9d9f31d1fdc6adcddbd3f34752c241eb76b8748391d",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-2.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-2.capture.json": "3d6e8a061a9ed011dfdd284619a99e806c7e6c655262b823ad3b48a73601c6a1",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-2.json": "897d068d167a8dff06b82781568d191990dbbedac49f978b36504d4cdaf680f2",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-2.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-2.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-3.audit.json": "b4fffd14646532c7d73a9beb7bf6eeca4490156bf82f5db1e6395013f21475ba",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-3.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-3.capture.json": "4ca2f308218c147dfec4b2d403bde68150740e67bc32c668e5ec37b614eba118",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-3.json": "41da8dfc21c10470ca82ad524087647463397bc52c1192f95c91cf512667e996",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-3.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/discrete-3.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/manifest.json": "7459101862486cf685f9cc9d663b8a18929266a359f231889623fc80d9fd8a13",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/run.py": "a86ce3a75869953f57396bc09aab2e0cc9e6c402f4da18727bd6294a354cda82",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-confirm/summary.json": "b5113863924ae01cc610fc5c90bf81607c9ed23d80c667bd452397f2fb3f50db",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/capture_worker.py": "ec996f6b3386d8ed51336deaed7417ca330ab0e3f835544966ff8fbe7f477b23",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/controller.log": "01d0c16cc32d6e6a68e8a943cb8f3005087dad7d1383c5e5a64b82b9e9f549f2",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/manifest.json": "a9bfb54e1d30c4dd6ab1df627f84683fab67078930de93b7d6cde15fa098cff1",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/run.py": "7aaa0910aeb1924670ecccb904cef3695e416a0db625bc85a827ab94d806b641",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/witness-candidate.audit.json": "87ed4a84dc3c2d3a69a2b63024c5882bb5ff3b1d3c15a4268ddb0b1224d2f46a",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/witness-candidate.capture-start.json": "54288d0c218a49cfd5f46b57f969ba1339b2623ed68110f37f50ea7891bbbeba",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/witness-candidate.capture.json": "6cbb21da40d8febab95c4f174e72e22f7130d050148fe4bd7f1b128186a1572c",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/witness-candidate.json": "effcd9eb09ac434a632d8817464c5874f004970cb599b3599d0bd5f13e347e16",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/witness-candidate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/paired-moments-37f4ecdb-witness/witness-candidate.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/analysis.json": "392c60aa7e661064b1187bcef2f2400205c28c2a38cbbd3a8174946ec740e5d5",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/cpu.json": "549ab283b0b8ce88ca9485fc1ac77bcc7274233d95e583f3c6ce77a349cbbeed",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/current-discrete.capture-start.json": "c8df83a5463055d36412bf926f7076ff2884de7603e7693a0888004f480ec728",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/current-discrete.capture.json": "396ca4f28dabb08d512a584fa29d25ce3c750723ad9f085f051880ee5c93c32d",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/current-discrete.json": "75d51fb2668b875546dbce8233c95309b7cee60fb10e72f2218bb39aad1eda54",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/current-discrete.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/current-discrete.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/current-discrete.prof": "5b555736f446520249e548e13b874bb86204fa550c14558fdaed925a82534172",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/current-discrete.profile-start.json": "433967d297af4ad14fd5805f74ef6fc08ffbf8aac1450f473bb59332fc81065c",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/current-discrete.profile.json": "201c1566efd6508f2dcff0df71cc8cc30f963a2196f9421eb4e6bd054bcceb4a",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/manifest-start.json": "5ce91eebb108d1f1732fc4e4b43f99c3d063202d2be47c84de4a43f925b437d7",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/manifest.json": "36fb38a3fde7f19ebaf231fbbe14957ecc189ddcfb85e1db5fd88bb72b2efe0e",
+      ".benchmark-artifacts/discrete-performance/remaining-cost-37f4ecdb/profile-current/preflight.json": "bce2656bfdfb40e08ce48b49cb77da6cccc8d5afad87fcce53fba96a020b42b4"
+    },
+    "caveats": [
+      "Screen pair excluded from all confirmation medians; three new fits per route are descriptive observations, not significance or universal-scaling evidence.",
+      "Initial baseline/candidate public warmup was13.039/72.089seconds outside the fitclock. These were ordinary existing-cache runs, not a controlled fresh-cache cold-start experiment. New confirmation warmups are recorded individually.",
+      "All fit-end ru_maxrss values include imports, input generation and warmup; compilation inflated candidate screening highwater. These are not isolated live fit allocations.",
+      "Current dense confirmation median24.686seconds differs from earlier22.136seconds at the same B8/N1 setting; cross-window variation prevents attributing that change to implementation. The39.94% advantage describes this same-source confirmation window.",
+      "Binned versus continuous basis differences remain separate from same-route exactness. The terminal-score relative difference is large near zero; small prediction differences are descriptive, not certified bounds.",
+      "Witness digest thread IDs establish participation over the fit, not simultaneous concurrency. Instrumented witness/profile clocks are excluded from confirmation timing.",
+      "No startup-latency, larger-N/q scaling or12.5-second milestone is established;15seconds is a warmed-fit milestone on this one fixture."
+    ]
+  },
+  "reuse_digest_checkpoint": {
+    "schema": "superglm.reuse-digest-first-pair.v1",
+    "status": "screen_only_no_confirmations",
+    "source_tree_sha256_by_commit": {"64f8b4515cccda6666384ec6becee7a9d4b0f4a6": "9857449b7ae9615aead32c83840a084641d1aa244321daf5afd5330ce113718b", "b1ca0f6e3af6d520bf4c6de632ed2ceadd1e4572": "4315580ea57e6ec3a1c971cef65f361f3fccd451f026d96ddee99a4e4ef9b690"},
+    "fixture": {"name": "gaussian-fragmented", "public": true, "rows": 1048576, "total_coefficients": 102, "knots": 4, "bins": 256, "training_seed": 28109, "holdout_seed": 28110, "holdout_rows": 2000, "fingerprints": {"train_frame": "1e0f03bef7db90365b455710d118d1b3eb262e9f57f920a0b130cd9269a295bb", "holdout_frame": "0a6d80c6af90809b7801dae9e3aa64fe13a4f2942da479f7ae342c0063d4ddfb", "y": "a73eba0dfa1f6e8675a8e99ef345ea49b39030348d69e359e25f757532b69d9f"}},
+    "clock_contract": {"included": "Public fit_reml: compilation, optimization, null fit and finalization", "excluded": "Input generation, standard public warmup, output serialization and untimed witness", "threads": "Explicit SUPERGLM_BLAS_THREADS; native pool environment follows BLAS; NUMBA_NUM_THREADS independent; default OMP_WAIT_POLICY", "memory": "Process ru_maxrss at fit end includes imports/input/warmup; not incremental allocations. Output highwater separate."},
+    "samples": [
+      {"label": "pair-baseline", "source_sha": "64f8b4515cccda6666384ec6becee7a9d4b0f4a6", "blas": 1, "numba": 16, "instrumented": false, "wall_seconds": 18.140451191997272, "cpu_seconds": 67.878290007, "fit_highwater_bytes": 2020913152, "pre_fit_highwater_bytes": 1021972480, "output_highwater_bytes": 2056708096, "backend": "distributional-chunked-v1", "chunk_size": 65536, "inner_iterations": 16, "smoothing_iterations": 7, "stop": "practical_plateau", "runtime_guards_passed": true, "activity_guard_passed": true},
+      {"label": "pair-candidate", "source_sha": "b1ca0f6e3af6d520bf4c6de632ed2ceadd1e4572", "blas": 1, "numba": 16, "instrumented": false, "wall_seconds": 15.405469311008346, "cpu_seconds": 68.493008991, "fit_highwater_bytes": 1989652480, "pre_fit_highwater_bytes": 1022070784, "output_highwater_bytes": 2033385472, "backend": "distributional-chunked-v1", "chunk_size": 65536, "inner_iterations": 16, "smoothing_iterations": 7, "stop": "practical_plateau", "runtime_guards_passed": true, "activity_guard_passed": true},
+      {"label": "witness-candidate", "source_sha": "b1ca0f6e3af6d520bf4c6de632ed2ceadd1e4572", "blas": 1, "numba": 16, "instrumented": true, "wall_seconds": null, "cpu_seconds": null, "fit_highwater_bytes": 1994493952, "pre_fit_highwater_bytes": 1021509632, "output_highwater_bytes": 2021441536, "backend": "distributional-chunked-v1", "chunk_size": 65536, "inner_iterations": 16, "smoothing_iterations": 7, "stop": "practical_plateau", "runtime_guards_passed": true, "activity_guard_passed": true},
+      {"label": "candidate-b2-n16", "source_sha": "b1ca0f6e3af6d520bf4c6de632ed2ceadd1e4572", "blas": 2, "numba": 16, "instrumented": false, "wall_seconds": 17.180735275993356, "cpu_seconds": 100.212949962, "fit_highwater_bytes": 1997705216, "pre_fit_highwater_bytes": 1021730816, "output_highwater_bytes": 2024869888, "backend": "distributional-chunked-v1", "chunk_size": 65536, "inner_iterations": 16, "smoothing_iterations": 7, "stop": "practical_plateau", "runtime_guards_passed": true, "activity_guard_passed": true}
+    ],
+    "pair_comparison": {"arrays": {"coefficients": {"equal": true, "maxabs": 0.0}, "covariance": {"equal": true, "maxabs": 0.0}, "train_parameters": {"equal": true, "maxabs": 0.0}, "holdout_parameters": {"equal": true, "maxabs": 0.0}, "smoothing_parameters": {"equal": true, "maxabs": 0.0}, "edf": {"equal": true, "maxabs": 0.0}, "objective": {"equal": true, "maxabs": 0.0}, "log_likelihood": {"equal": true, "maxabs": 0.0}, "terminal_score": {"equal": true, "maxabs": 0.0}, "terminal_penalized_curvature": {"equal": true, "maxabs": 0.0}}, "result_equal": true, "smoothing_equal": true, "coefficient_fits_equal": true, "representation_equal": true, "fixture_equal": true, "wall_reduction": 0.15076702624659488},
+    "b2_vs_candidate_b1": {"arrays": {"coefficients": {"equal": false, "maxabs": 2.636779683484747e-16, "normrel": 3.5303809318766387e-16, "epsilon_dimension_norm_scale": 3.9269837576202796e-14, "delta_over_scale": 0.01558766887183876}, "covariance": {"equal": false, "maxabs": 3.376205565119861e-16, "normrel": 2.718659736515919e-13, "epsilon_dimension_norm_scale": 1.2088743037926386e-16, "delta_over_scale": 12.003681349333592}, "train_parameters": {"equal": false, "maxabs": 1.3322676295501878e-15, "normrel": 1.3140325660100694e-16, "epsilon_dimension_norm_scale": 3.1005614837431314e-07, "delta_over_scale": 5.643726896892209e-07}, "holdout_parameters": {"equal": false, "maxabs": 6.661338147750939e-16, "normrel": 1.3310672331685655e-16, "epsilon_dimension_norm_scale": 2.5445657755518124e-11, "delta_over_scale": 0.00029972969476515143}, "smoothing_parameters": {"equal": false, "maxabs": 9.094947017729282e-13, "normrel": 7.258633587719662e-16, "epsilon_dimension_norm_scale": 3.944831834333193e-12, "delta_over_scale": 0.3268997952087324}, "edf": {"equal": false, "maxabs": 3.126388037344441e-13, "normrel": 3.4459322645862377e-15, "epsilon_dimension_norm_scale": 2.0145422001724824e-14, "delta_over_scale": 15.51909926273455}, "objective": {"equal": true, "maxabs": 0.0, "normrel": 0.0, "epsilon_dimension_norm_scale": 2.596460748374006e-10, "delta_over_scale": 0.0}, "log_likelihood": {"equal": true, "maxabs": 0.0, "normrel": 0.0, "epsilon_dimension_norm_scale": 2.5954988661153907e-10, "delta_over_scale": 0.0}, "terminal_score": {"equal": false, "maxabs": 7.150902092689648e-11, "normrel": 5.997937385999323e-09, "epsilon_dimension_norm_scale": 6.730275150999806e-16, "delta_over_scale": 264826.5546723345}, "terminal_penalized_curvature": {"equal": false, "maxabs": 2.3283064365386963e-10, "normrel": 1.925087246772165e-16, "epsilon_dimension_norm_scale": 2.2463016887866017e-07, "delta_over_scale": 0.008499825693351781}}, "scale_caveat": "epsilon*maximum array dimension*baseline Frobenius norm is a descriptive roundoff scale, not a conditioning or certified forward-error bound", "result_equal": false, "result_differing_fields": ["total_effective_df", "smoothing_parameters", "predictor_edf", "term_edf", "curvature_telemetry"], "smoothing_equal": false, "coefficient_fits_equal": false, "representation_equal": true, "fixture_equal": true, "b1": {"fit_seconds": 15.405469311008346, "fit_process_cpu_seconds": 68.493008991, "peak_fit_process_rss_bytes": 1989652480}, "b2": {"fit_seconds": 17.180735275993356, "fit_process_cpu_seconds": 100.212949962, "peak_fit_process_rss_bytes": 1997705216}, "wall_reduction": -0.11523608461031776, "runtime_guards_passed": true},
+    "untimed_dispatch_witness": {"endpoint_reuse": {"chunked:invoked": 7, "chunked:accepted": 7}, "digest_calls": 1050, "distinct_digest_thread_ids": 16, "solver_entry": [{"numba_threads": 16, "pools": [{"internal_api": "openblas", "user_api": "blas", "num_threads": 1}, {"internal_api": "openblas", "user_api": "blas", "num_threads": 1}, {"internal_api": "openmp", "user_api": "openmp", "num_threads": 1}, {"internal_api": "openmp", "user_api": "openmp", "num_threads": 1}]}]},
+    "helper_sha256": {
+      ".benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/capture_worker.py": "f95fbe6ba7d0358e97208a5c11fd40596e40949abd3b1ab532a8dc1821be426f",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/run.py": "f8c3fd78883f9186a52340b911e59813f2c83b2c18cd1254cdf3096bf7b45471",
+      "benchmarks/_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+      "benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-witness/capture_worker.py": "add782ffbb580bf15d2a40f8b8d26545250979af86a4268a6281dfe8cf64879d",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-witness/run.py": "7de51e9271b7a56263fe13e26fe54dd8fba9b00507a3bd680b8ecbb24442ed16",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-b2/run.py": "8ee7a64257a4ff974ef41d328f41f18f3219912ef69d0a3b5226c9e71c8a66e9"
+    },
+    "raw_sha256": {
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/manifest.json": "d8378adea91ffc89ebbf0aec379cc744cd1932a0a10082cc61de57e0ac735b91",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-baseline.json": "d88b0f98c764ed8d2903b95658793e35c8806d7f0d526bb760045f714a4ed6b3",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-baseline.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-baseline.capture.json": "64a031aaa20f7a2345c35f181bd900f55518343be06597326f3fcab7656fb802",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-baseline.audit.json": "c0184f4fc07188a7224719bcc947ae0830972cd853121dc57bdbed568cd36302",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-baseline.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-candidate.json": "a860689f8019e61450aa2c4e295d956114c054e9e6a720657cf0c292ed166e91",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-candidate.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-candidate.capture.json": "acb438f93738433da411607219b81902980b32f0acbb7093e6fc9ef60dbc3ef2",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-candidate.audit.json": "da9e3c5abab01fa91400ddc67cd7d3387a06a4c0ded272ad664ce892f12d5f39",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/pair-candidate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-witness/manifest.json": "ad54eee453023318dfdf14667eb38a7fe7c5eabb4019c1bf8623379e1d07d7a7",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-witness/witness-candidate.json": "d1dc6016d85dfc736eed217ead063f6e92034cef1937dac91dd5f95033552d1f",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-witness/witness-candidate.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-witness/witness-candidate.capture.json": "b60e5e43a72ad1cccf3cd0cf693c4f5d37e40a5858dcf5bb61a114ce17e8c5c6",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-witness/witness-candidate.audit.json": "4eee2e45463795d0c5b5e779faff97e22c9c76e143570ce24aa98f044f7d8a70",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-witness/witness-candidate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-b2/manifest.json": "91632c0f515f82bf8349c1797162a824442f99b363a3f5f4ca3f077a79013bdb",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-b2/candidate-b2-n16.json": "d9215c8562b96b5fb82d7fc94163be4cbcab6c089308963bf7c0410661b2b687",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-b2/candidate-b2-n16.npz": "0e70550828002d30fa9d27cb525c6171c564b7f8b46c28c83cd0997efac61e1a",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-b2/candidate-b2-n16.capture.json": "b3110fae5cf047608adfd872aa79449a984657e921a4c3a9b932f1ffb2e64f59",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-b2/candidate-b2-n16.audit.json": "e276cecf943159d94d16ad2726c034a9f0d238e7650f79570a398af7cb32cf28",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-b2/candidate-b2-n16.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e/comparison.json": "c560c89a0319dc65f667df9aa57ab6ba94a8c31b0e87798d8c716b05b64006bb",
+      ".benchmark-artifacts/discrete-performance/reuse-digest-b1ca0f6e-b2/comparison.json": "c08b9aab24bad5f98ea25c10b28387b37019f17f879c49ee462640510ed73a57"
+    },
+    "caveats": [
+      "One fresh timed sample per condition; no confirmation medians or significance claim. Baseline then candidate; B2 followed untimed witness.",
+      "Candidate B1 wall is 15.0767% lower than baseline; B2 is 11.5236% slower than candidate B1. Under-15-second milestone not met.",
+      "All ten arrays, full result, smoothing/coefficient-fit records and representation agree exactly for baseline versus candidate B1; witness arrays also agree exactly.",
+      "B2 preserves representation and work counts but numerical records differ. Epsilon/dimension/output-norm scales are descriptive, not certified bounds; near-zero scores amplify relative changes and covariance depends on conditioning.",
+      "Sixteen distinct executor thread IDs establish participation across the witness, not simultaneous concurrency; timed workers have no witness hooks.",
+      "Activity/runtime guards pass but endpoint process accounting is incomplete and does not establish host isolation.",
+      "No current dense confirmation or larger-N/q scaling claim follows. Historical receipt below is preserved."
+    ]
+  },
+  "schema": "superglm.discrete_latency.v1",
+  "status": "three_of_three_complete_fits_under_20_seconds",
+  "fixture": {
+    "name": "gaussian-fragmented",
+    "public": true,
+    "n": 1048576,
+    "coefficients": 102,
+    "knots": 4,
+    "n_bins": 256,
+    "training_seed": 28109,
+    "holdout_seed": 28110
+  },
+  "measurement": {
+    "target_seconds": 20,
+    "schedule": [
+      "candidate-r1",
+      "baseline-new",
+      "candidate-r2",
+      "candidate-r3"
+    ],
+    "threads": {
+      "BLIS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "NUMBA_NUM_THREADS": "4",
+      "NUMEXPR_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "SUPERGLM_BLAS_THREADS": "1",
+      "VECLIB_MAXIMUM_THREADS": "1"
+    },
+    "OMP_WAIT_POLICY": null,
+    "included": "Worker complete-fit clock: feature compilation, optimization, null fit and finalization.",
+    "excluded": "Input generation, standard public warmup, output capture and separate instrumentation.",
+    "memory": "Fit-end process ru_maxrss includes imports, inputs and warmup; it is not an isolated allocation measurement."
+  },
+  "sources": {
+    "baseline": {
+      "sha": "8fb261bc5c1a26ba86e0d2c06779a0cb2c499a5e",
+      "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
+      "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "candidate": {
+      "sha": "8fb261bc5c1a26ba86e0d2c06779a0cb2c499a5e",
+      "source_tree_sha256": "6ea1435a53b4aa44c663ae4ae996a900033f1b8425df0e0807baa4bcb48efbd9",
+      "diff_sha256": "3a6fc2da39013fa0da882a44f0d90de27f43ea43c00a6ae2c49e416515f12d0b"
+    }
+  },
+  "runs": [
+    {
+      "id": "candidate-r1",
+      "wall_seconds": 18.607102323003346,
+      "cpu_seconds": 31.903827973,
+      "fit_end_highwater_mib": 1904.05859375,
+      "pre_fit_highwater_mib": 974.515625,
+      "warmup_seconds": 0.816778822998458,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 65536,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    },
+    {
+      "id": "candidate-r2",
+      "wall_seconds": 19.2696263320031,
+      "cpu_seconds": 32.99192969799999,
+      "fit_end_highwater_mib": 1908.765625,
+      "pre_fit_highwater_mib": 974.9453125,
+      "warmup_seconds": 0.5865908620035043,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 65536,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    },
+    {
+      "id": "candidate-r3",
+      "wall_seconds": 19.66450051299762,
+      "cpu_seconds": 32.854176255,
+      "fit_end_highwater_mib": 1898.21875,
+      "pre_fit_highwater_mib": 977.875,
+      "warmup_seconds": 0.5423040870009572,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 65536,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    },
+    {
+      "id": "baseline-new",
+      "wall_seconds": 29.068125327998132,
+      "cpu_seconds": 29.024986786999996,
+      "fit_end_highwater_mib": 1866.61328125,
+      "pre_fit_highwater_mib": 973.66796875,
+      "warmup_seconds": 0.5223605080027482,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 8065,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    },
+    {
+      "id": "baseline-previous",
+      "wall_seconds": 26.724655830999836,
+      "cpu_seconds": 26.678528334,
+      "fit_end_highwater_mib": 1866.546875,
+      "pre_fit_highwater_mib": 973.16015625,
+      "warmup_seconds": 0.35696373200335074,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 8065,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    }
+  ],
+  "candidate_aggregate": {
+    "after_output_highwater_mib": {
+      "max": 1924.41015625,
+      "median": 1918.91015625,
+      "min": 1913.53125
+    },
+    "cpu_seconds": {
+      "max": 32.99192969799999,
+      "median": 32.854176255,
+      "min": 31.903827973
+    },
+    "fit_end_highwater_mib": {
+      "max": 1908.765625,
+      "median": 1904.05859375,
+      "min": 1898.21875
+    },
+    "pre_fit_highwater_mib": {
+      "max": 977.875,
+      "median": 974.9453125,
+      "min": 974.515625
+    },
+    "wall_seconds": {
+      "max": 19.66450051299762,
+      "median": 19.2696263320031,
+      "min": 18.607102323003346
+    }
+  },
+  "both_baseline_samples_aggregate": {
+    "after_output_highwater_mib": {
+      "max": 1892.3359375,
+      "median": 1892.15625,
+      "min": 1891.9765625
+    },
+    "cpu_seconds": {
+      "max": 29.024986786999996,
+      "median": 27.851757560499998,
+      "min": 26.678528334
+    },
+    "fit_end_highwater_mib": {
+      "max": 1866.61328125,
+      "median": 1866.580078125,
+      "min": 1866.546875
+    },
+    "pre_fit_highwater_mib": {
+      "max": 973.66796875,
+      "median": 973.4140625,
+      "min": 973.16015625
+    },
+    "wall_seconds": {
+      "max": 29.068125327998132,
+      "median": 27.896390579498984,
+      "min": 26.724655830999836
+    }
+  },
+  "candidate_reduction_vs_both_baseline_median": 0.30924302636613066,
+  "numerical_comparison": {
+    "all_ten_saved_arrays_equal_to_preceding_candidate": true,
+    "fixture_representation_status_iterations_match": true,
+    "candidate_vs_baseline": {
+      "coefficients": {
+        "max_absolute_difference": 1.5265566588595902e-16,
+        "norm_relative_difference": 3.061945041309977e-16
+      },
+      "covariance": {
+        "max_absolute_difference": 1.235990476633475e-16,
+        "norm_relative_difference": 1.0478875016672829e-13
+      },
+      "edf": {
+        "max_absolute_difference": 2.2737367544323206e-13,
+        "norm_relative_difference": 2.5061325560627245e-15
+      },
+      "holdout_parameters": {
+        "max_absolute_difference": 8.881784197001252e-16,
+        "norm_relative_difference": 1.6450118819430347e-16
+      },
+      "log_likelihood": {
+        "max_absolute_difference": 0,
+        "norm_relative_difference": 0
+      },
+      "objective": {
+        "max_absolute_difference": 0,
+        "norm_relative_difference": 0
+      },
+      "smoothing_parameters": {
+        "max_absolute_difference": 6.821210263296962e-13,
+        "norm_relative_difference": 6.004271194178127e-16
+      },
+      "terminal_penalized_curvature": {
+        "max_absolute_difference": 1.3969838619232178e-9,
+        "norm_relative_difference": 3.4492639173476974e-16
+      },
+      "terminal_score": {
+        "max_absolute_difference": 1.3275602839257772e-10,
+        "norm_relative_difference": 8.541441595628827e-9
+      },
+      "train_parameters": {
+        "max_absolute_difference": 1.7763568394002505e-15,
+        "norm_relative_difference": 1.62318386923721e-16
+      }
+    },
+    "interpretation": "Same stored binned model. Different row-partition reduction order can change roundoff; these differences are separate from approximation relative to an exact feature basis."
+  },
+  "witness": {
+    "batched_moment_calls": 272,
+    "global_byte_budget": 67108864,
+    "global_chunks": 272,
+    "global_finishes": 17,
+    "global_peak_estimate_bytes": 58395920,
+    "global_refusals": 0,
+    "native_moment_workers": [
+      4
+    ],
+    "preparation_profile": {
+      "inclusive_seconds": {
+        "GaussianLikelihoodPlan.take": 0.03748443700169446,
+        "ResolvedLikelihoodWeights.take": 0.02826266400370514,
+        "gaussian._carrier_digest": 0.011218132000067271,
+        "weights._child_digest": 0.018720302010478918
+      },
+      "interpretation": "Only four requested Python frames use perf_counter on call/return. Inclusive times contain nested watched calls and profiling overhead; do not add them. Union time covers overlapping watched stacks once. Diagnostic locator costs, not authoritative complete-fit timings.",
+      "returned": {
+        "GaussianLikelihoodPlan.take": 16,
+        "ResolvedLikelihoodWeights.take": 16,
+        "gaussian._carrier_digest": 17,
+        "weights._child_digest": 16
+      },
+      "started": {
+        "GaussianLikelihoodPlan.take": 16,
+        "ResolvedLikelihoodWeights.take": 16,
+        "gaussian._carrier_digest": 17,
+        "weights._child_digest": 16
+      },
+      "unreturned_watched_frames": 0,
+      "watched_stack_union_seconds": 0.04291099500551354
+    },
+    "previous_preparation_profile": {
+      "inclusive_seconds": {
+        "GaussianLikelihoodPlan.take": 1.3235275189363165,
+        "ResolvedLikelihoodWeights.take": 0.9948805138483294,
+        "gaussian._carrier_digest": 0.208520126005169,
+        "weights._child_digest": 0.6646028260583989
+      },
+      "interpretation": "Only four requested Python frames use perf_counter on call/return. Inclusive times contain nested watched calls and profiling overhead; do not add them. Union time covers overlapping watched stacks once. Diagnostic locator costs, not authoritative complete-fit timings.",
+      "returned": {
+        "GaussianLikelihoodPlan.take": 560,
+        "ResolvedLikelihoodWeights.take": 560,
+        "gaussian._carrier_digest": 561,
+        "weights._child_digest": 560
+      },
+      "started": {
+        "GaussianLikelihoodPlan.take": 560,
+        "ResolvedLikelihoodWeights.take": 560,
+        "gaussian._carrier_digest": 561,
+        "weights._child_digest": 560
+      },
+      "unreturned_watched_frames": 0,
+      "watched_stack_union_seconds": 1.328817947935022
+    },
+    "timing_status": "unmeasured"
+  },
+  "all_source_helper_runtime_guards_passed": true,
+  "validation": {
+    "combined_solver_tests_passed": 755,
+    "warning_strict_cache_tests_passed": 125,
+    "test_overlap": "Cache suites overlap; two extra ownership tests were added after the combined run.",
+    "ruff_check": true,
+    "ruff_format": true,
+    "uv_lock_check": true,
+    "uv_pip_check": true,
+    "run_test": {
+      "exit_code": 0,
+      "converged": true,
+      "iterations": 12,
+      "shape_diagnostic": "CHECK (informational, not an assertion)"
+    },
+    "independent_review": "No blockers"
+  },
+  "limitations": [
+    "Three fresh candidate samples on this public million-row/P102 fixture; all below20s. This does not establish every future run, wider model or dataset will stay below20s.",
+    "Both baseline samples26.72466 and29.06813 retained; one belongs to the earlier matched-thread window, so their spread is explicit.",
+    "Worker wall includes completefit/compilation/inference, with standard publicwarmup outside clock; fixture generation/output capture excluded per unchanged harness.",
+    "Process highwater includes imports/input/warmup; pre-fit and after-output samples separately recorded, not subtracted to invent isolated allocations.",
+    "Candidate result/arrays exactly match prior same-model run on this fixture; baseline cross-chunk differences remain descriptive, separate from binning approximation.",
+    "Witness preparation times are inclusive/nested and profiled; union avoids doublecounting, and differences are not promised recoverable completefit time.",
+    "Globalstats witness272batchedcalls/fourconfigurednativeworkers; logical histogram counts are not oldfunction call counts, and configuration is not OS thread participation."
+  ],
+  "raw_summary": {
+    "path": ".benchmark-artifacts/discrete-performance/parallel-moments-pilot/likelihood-cache-validation/summary.json",
+    "sha256": "e83da925bf97538baa582afc0989623f83bb573cfb8a2eaf3d4360bd421496cf"
+  },
+  "harness_sha256": {
+    "capture_worker.py": "c2bab6a7dd56073be0f0cf4def5c79f22dadac0b9f10953cba408a26c536104e",
+    "preparation_witness_worker.py": "aa483b87a8562d8b217212eaa4c3ee13b75d205ed4496cc3e484fa7853c1ae8d",
+    "_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+    "c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+    "discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+  },
+  "fused_trial_checkpoint": {
+    "candidate_seconds_above_target": 0.5861180759966373,
+    "caveats": [
+      "One baseline/candidate pair, no replication, confidence interval or universal speed claim.",
+      "The 12.5-second target was not reached; no confirmation or dense control stage ran.",
+      "Unequal warmup (cold baseline compilation versus warm candidate cache) and pre-fit highwater preclude attributing the observed RSS difference to this fix. No causal memory-gain claim.",
+      "Fit-end and later process RSS are highwater measurements, not isolated live allocations.",
+      "Phase allocation changes because likelihood sums and geometry share work; individual phase times are not directly interchangeable across implementations.",
+      "A fused geometry return alone does not establish Armijo acceptance; retain optimizer/backtrack outputs.",
+      "The practical plateau termination is converged but smoothing-uncertified, consistently in both arms.",
+      "Intermediate smoothing/coefficient histories differ in nine scalar fields; the largest objective or likelihood difference is 2.3283064365386963e-10. All ten saved terminal arrays and full terminal result JSON are equal."
+    ],
+    "clock_contract": "Complete public fit_reml, including source compilation and optimizer work; identical public warmup before fit, post-fit diagnose after clocks/RSS/output capture.",
+    "decision": "Stop with this bounded fix and evidence; no confirmation or additional sweep.",
+    "fixture": {
+      "knots": 4,
+      "n": 1048576,
+      "n_bins": 256,
+      "name": "gaussian-fragmented",
+      "public": true,
+      "q": 102
+    },
+    "guards": {
+      "pair": {
+        "all_preflights_pass": true,
+        "all_workers_successful": true,
+        "manifest_complete": true,
+        "no_endpoint_flags": true
+      },
+      "witness": {
+        "all_preflights_pass": true,
+        "all_workers_successful": true,
+        "manifest_complete": true,
+        "no_endpoint_flags": true
+      }
+    },
+    "helper_sha256": {
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/capture_worker.py": "8ab35df2092bc265e173acef80d93d4f8820332e3cc3fa50259973e8e29a3f23",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/capture_worker.py": "f95fbe6ba7d0358e97208a5c11fd40596e40949abd3b1ab532a8dc1821be426f",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/fused-trial-prepared/plan.py": "074d2cc49e8860c7e3909b438bdeaade7d6de0c8db479eafa4a1117df88b9963",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/fused-trial-prepared/run.py": "6120930479e9bbbbe11bf4f48042c179b4dfcaea4f775ad6e6cae50fbf14c9ee",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/fused-trial-prepared/worker.py": "c8d39063361cb8c46298457b0e233c4e82e81470a6acc85001a38c651f5ff61e",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+    },
+    "observed_pair_wall_reduction_fraction": 0.08302588297623108,
+    "observed_pair_wall_reduction_seconds": 1.1848606060084421,
+    "ordered_timed_samples": [
+      {
+        "after_diagnose_highwater_bytes": 2333552640,
+        "after_output_highwater_bytes": 2333552640,
+        "after_representation_highwater_bytes": 2333552640,
+        "coefficient_fit_iterations": [
+          8,
+          2,
+          2,
+          2,
+          1,
+          1,
+          0,
+          0
+        ],
+        "converged": true,
+        "diagnose_findings": [
+          {
+            "code": "fit.termination_uncertified",
+            "headline": "The fit used practical REML convergence, not strict stationarity.",
+            "severity": "info"
+          },
+          {
+            "code": "smoothing.trajectory_unsettled",
+            "headline": "Practical REML stopped before strict smoothing stationarity.",
+            "severity": "info"
+          },
+          {
+            "code": "smoothing.update_dominance",
+            "headline": "Penalty component 'scale:curve:group[level2]#wiggle' dominated accepted smoothing movement.",
+            "severity": "warning"
+          }
+        ],
+        "diagnose_fit_status": "converged_uncertified",
+        "diagnose_seconds_outside_fit": 0.0012384130095597357,
+        "fit_cpu_seconds": 66.795287101,
+        "fit_end_process_highwater_bytes": 2298585088,
+        "fit_wall_seconds": 14.27097868200508,
+        "label": "baseline-discrete",
+        "phase_snapshot": {
+          "counts": {
+            "coefficient_decomposition_solve": 16,
+            "curvature_gradient_assembly": 17,
+            "dense_predictor_matrices": 0,
+            "efs_update_backtracking": 30,
+            "fit_total": 1,
+            "frame_normalization": 1,
+            "inference_edf": 1,
+            "initialization": 8,
+            "layout_penalty_assembly": 9,
+            "likelihood_evaluation": 42,
+            "newton_endgame": 0,
+            "predictor_compilation": 1,
+            "serialization": 0,
+            "terminal_observed_retry_fallback": 8
+          },
+          "seconds": {
+            "coefficient_decomposition_solve": 0.036220502996002324,
+            "curvature_gradient_assembly": 6.564941745979013,
+            "dense_predictor_matrices": 0.0,
+            "efs_update_backtracking": 0.018040783994365484,
+            "fit_total": 14.251271647997783,
+            "frame_normalization": 3.889099752996117e-05,
+            "inference_edf": 0.3233934430027148,
+            "initialization": 1.9006296489824308,
+            "layout_penalty_assembly": 0.0010269749909639359,
+            "likelihood_evaluation": 2.087841376051074,
+            "newton_endgame": 0.0,
+            "predictor_compilation": 2.7833521330030635,
+            "serialization": 0.0,
+            "terminal_observed_retry_fallback": 0.5791644209821243
+          }
+        },
+        "pre_fit_process_highwater_bytes": 1129091072,
+        "smoothing_certified": false,
+        "smoothing_reason": "practical_plateau",
+        "source_sha": "51d530702d40e230919fc9dff37287f7d186a6b1",
+        "source_tree_sha256": "ac0a89ccc89d3f37f66159ac5ad771d8847ce10515b1e6982836fc569f49d33c",
+        "warmup_seconds_outside_fit": 33.587511543999426,
+        "work": {
+          "backtracked_proposals": 0,
+          "coefficient_fits": 8,
+          "inner_iterations": 16,
+          "outer_iterations": 7,
+          "rejected_proposals": 0
+        }
+      },
+      {
+        "after_diagnose_highwater_bytes": 2035523584,
+        "after_output_highwater_bytes": 2035523584,
+        "after_representation_highwater_bytes": 2035523584,
+        "coefficient_fit_iterations": [
+          8,
+          2,
+          2,
+          2,
+          1,
+          1,
+          0,
+          0
+        ],
+        "converged": true,
+        "diagnose_findings": [
+          {
+            "code": "fit.termination_uncertified",
+            "headline": "The fit used practical REML convergence, not strict stationarity.",
+            "severity": "info"
+          },
+          {
+            "code": "smoothing.trajectory_unsettled",
+            "headline": "Practical REML stopped before strict smoothing stationarity.",
+            "severity": "info"
+          },
+          {
+            "code": "smoothing.update_dominance",
+            "headline": "Penalty component 'scale:curve:group[level2]#wiggle' dominated accepted smoothing movement.",
+            "severity": "warning"
+          }
+        ],
+        "diagnose_fit_status": "converged_uncertified",
+        "diagnose_seconds_outside_fit": 0.0011494049977045506,
+        "fit_cpu_seconds": 68.089209318,
+        "fit_end_process_highwater_bytes": 2025353216,
+        "fit_wall_seconds": 13.086118075996637,
+        "label": "candidate-discrete",
+        "phase_snapshot": {
+          "counts": {
+            "coefficient_decomposition_solve": 16,
+            "curvature_gradient_assembly": 18,
+            "dense_predictor_matrices": 0,
+            "efs_update_backtracking": 30,
+            "fit_total": 1,
+            "frame_normalization": 1,
+            "inference_edf": 1,
+            "initialization": 8,
+            "layout_penalty_assembly": 9,
+            "likelihood_evaluation": 26,
+            "newton_endgame": 0,
+            "predictor_compilation": 1,
+            "serialization": 0,
+            "terminal_observed_retry_fallback": 8
+          },
+          "seconds": {
+            "coefficient_decomposition_solve": 0.03872465401946101,
+            "curvature_gradient_assembly": 7.113858763012104,
+            "dense_predictor_matrices": 0.0,
+            "efs_update_backtracking": 0.017125248996308073,
+            "fit_total": 13.063691133997054,
+            "frame_normalization": 6.428000051528215e-05,
+            "inference_edf": 0.34134500900108833,
+            "initialization": 1.3039214399759658,
+            "layout_penalty_assembly": 0.0012737300130538642,
+            "likelihood_evaluation": 1.0976121390558546,
+            "newton_endgame": 0.0,
+            "predictor_compilation": 2.6151853690098505,
+            "serialization": 0.0,
+            "terminal_observed_retry_fallback": 0.5966315439727623
+          }
+        },
+        "pre_fit_process_highwater_bytes": 1027301376,
+        "smoothing_certified": false,
+        "smoothing_reason": "practical_plateau",
+        "source_sha": "06e1ccff93cf193a7aaa26949975efdac9c9032f",
+        "source_tree_sha256": "a40119f12edd73d798633c04de7a8f07d2bc88a25316d78dfab67edf594960be",
+        "warmup_seconds_outside_fit": 0.9095046180009376,
+        "work": {
+          "backtracked_proposals": 0,
+          "coefficient_fits": 8,
+          "inner_iterations": 16,
+          "outer_iterations": 7,
+          "rejected_proposals": 0
+        }
+      }
+    ],
+    "raw_directory": ".benchmark-artifacts/discrete-performance/fused-trial-prepared",
+    "raw_sha256": {
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.audit.json": "1470629e32fceca36da0cc77ab06672a23277b5f5da7b33072f8dc26bb44f697",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.capture.json": "43732c9db11b2516d792a66fa85e120e35f06f4bf2d948f49f52cd188124c171",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.json": "8d3ed7256d21ecd78d88a50e948b6ce7bdf4f6ec78a99d27af004d8b8ad12ef2",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.trial.json": "d1984089947d956f161403e9a1f58fdb0bf6eded5e274149f836a48db4671284",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.audit.json": "88df7211e8fa7b746816c0c22d8dd21314455cc8fc6b7fc0e4f77db140dcdbd5",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.capture-start.json": "11bbbbc3f810d41526f6085877061eb2837727f30de6b2cf2b49db525c6c4f92",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.capture.json": "ee268f2f2b2025ec0b5505e87c66db8ef9c88a8b61e97b3b6ae218f444ed4c77",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.json": "5da837fd01e2d922a466470a205c0a41d1e4e45df8741db342bf6f829dfcce5f",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.trial.json": "11af75ebf4f2f0a2199bec1419871f643c41b916b38d60952ae87d8a56244711",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.audit.json": "1feae1248b8fd1ee4df6c4cd5b1a02afa246b8c4bff52a91de0fb568ecee0b4f",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.capture.json": "de1230b150fc23555c4a3d190dac352096c5e3471fec66f7048e65ffa9b20c7b",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.json": "c4c23c14b234a2bece08c0a2dd99f157c74f1b8366a3720679785cd382491572",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.trial.json": "c65c6dcd4c25419f3eaadeb81be197d33c7e84e98d637efba111ccb1f724e5f9",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.audit.json": "423a3f644893f8af6209b06f235976bf35aecb3f71bc6658edf389f0e2fcd8ec",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.capture-start.json": "11bbbbc3f810d41526f6085877061eb2837727f30de6b2cf2b49db525c6c4f92",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.capture.json": "647a0b7244ac1fa496494861e4e0a9ba41880700d9d8dc68815bb1d24afec598",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.json": "6bbd11482e503adf4fdfb1701d7dc6a7d34da645d1e8110a3291809803fadd8d",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.trial.json": "dcb2c2f579a7a5577b7aa1ba3c5518e0a80adf7d225bbc4b90c6ac4da3bf08a8",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/pair.manifest.json": "09877c2e4907f71a639d8e4834c035441a47afd9088804b5b44c9c2d060edcaa",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/witness.manifest.json": "4a935a65bb8105b97feebfb3aaf17a43139a9ece42bf46812f3ed2e0ab69c5cb"
+    },
+    "schema": "superglm.discrete_latency.fused_trial.v1",
+    "status": "single_pair_improvement_target_not_reached",
+    "target_seconds": 12.5,
+    "thread_contract": {
+      "GOMP_SPINCOUNT": "unset",
+      "OMP_WAIT_POLICY": "unset",
+      "discrete_blas": 1,
+      "native": 16
+    },
+    "timed_pair_comparison": {
+      "all_saved_arrays_numerically_equal": true,
+      "arrays": {
+        "coefficients": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1.7338786850498709,
+          "shape": [
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "covariance": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 0.005337535160880681,
+          "shape": [
+            102,
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "edf": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 90.72691502018931,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "holdout_parameters": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 57.2985273929743,
+          "shape": [
+            2000,
+            2
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "log_likelihood": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1168908.7726277818,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "objective": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1169341.9658859293,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "smoothing_parameters": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1776.5943179142241,
+          "shape": [
+            10
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "terminal_penalized_curvature": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 9918081.81233437,
+          "shape": [
+            102,
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "terminal_score": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 0.029716141825631016,
+          "shape": [
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "train_parameters": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1331.6810171913978,
+          "shape": [
+            1048576,
+            2
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        }
+      },
+      "coefficient_fits_equal": false,
+      "fixture_equal": true,
+      "full_result_equal": true,
+      "other": "candidate-discrete",
+      "reference": "baseline-discrete",
+      "smoothing_equal": false,
+      "stored_representation_equal": true
+    },
+    "untimed_witnesses": [
+      {
+        "acceptance_caveat": "Generator resumes are not counted as new passes. Geometry-returned does not imply Armijo acceptance; unchanged solver iteration/backtrack records decide acceptance. Profiling witness timings are excluded.",
+        "all_streams_complete": true,
+        "batch_worker_observations": {
+          "actual_workers:16": 272,
+          "calls": 272,
+          "paired_active_rows": 130702188,
+          "paired_targets:10": 272
+        },
+        "global_finishes": 17,
+        "global_peak_estimate_bytes": 58406496,
+        "global_stats_totals": {
+          "batched_moment_calls": 272,
+          "chunks": 272,
+          "refusal_count": 0,
+          "rows": 17825792
+        },
+        "label": "baseline-witness",
+        "likelihood_stream_count": 17,
+        "native_dispatch_calls": {
+          "_accumulate_batched": 272
+        },
+        "native_moment_workers": [
+          16
+        ],
+        "native_signatures_after_fit": {
+          "_accumulate_batched": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ],
+          "_accumulate_batched_strided": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'A', True, aligned=True), Array(float64, 2, 'A', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ]
+        },
+        "native_signatures_at_fit_entry": {
+          "_accumulate_batched": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ],
+          "_accumulate_batched_strided": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'A', True, aligned=True), Array(float64, 2, 'A', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ]
+        },
+        "phase_counts": {
+          "coefficient_decomposition_solve": 16,
+          "curvature_gradient_assembly": 17,
+          "dense_predictor_matrices": 0,
+          "efs_update_backtracking": 30,
+          "fit_total": 1,
+          "frame_normalization": 1,
+          "inference_edf": 1,
+          "initialization": 8,
+          "layout_penalty_assembly": 9,
+          "likelihood_evaluation": 42,
+          "newton_endgame": 0,
+          "predictor_compilation": 1,
+          "serialization": 0,
+          "terminal_observed_retry_fallback": 8
+        },
+        "runtime_guards_passed": true,
+        "stream_classes": {
+          "observed:range=True": 17
+        },
+        "stream_total_chunks": 272,
+        "stream_total_rows": 17825792,
+        "timing_status": "untimed dispatch/pass witness",
+        "trial_counts": {
+          "_evaluate_state_unmeasured:calls": 19,
+          "_measured_geometry:calls": 18,
+          "assemble_chunked_geometry:calls": 17,
+          "evaluate_chunked_log_likelihood:calls": 18,
+          "natural_derivative_order:0:calls": 288,
+          "natural_derivative_order:0:rows": 18874368,
+          "natural_derivative_order:2:calls": 273,
+          "natural_derivative_order:2:rows": 18874368,
+          "predictor_values:_reuse_observed_initial_result:chunks": 112,
+          "predictor_values:_reuse_observed_initial_result:rows": 7340032,
+          "predictor_values:evaluate_chunked_log_likelihood:chunks": 288,
+          "predictor_values:evaluate_chunked_log_likelihood:rows": 18874368,
+          "predictor_values:iter_likelihood_chunks:chunks": 272,
+          "predictor_values:iter_likelihood_chunks:rows": 17825792,
+          "predictor_values:materialize_terminal_predictions:chunks": 128,
+          "predictor_values:materialize_terminal_predictions:rows": 8388608,
+          "predictor_values:maximum_chunked_predictor_change:chunks": 256,
+          "predictor_values:maximum_chunked_predictor_change:rows": 16777216
+        }
+      },
+      {
+        "acceptance_caveat": "Generator resumes are not counted as new passes. Geometry-returned does not imply Armijo acceptance; unchanged solver iteration/backtrack records decide acceptance. Profiling witness timings are excluded.",
+        "all_streams_complete": true,
+        "batch_worker_observations": {
+          "actual_workers:16": 288,
+          "calls": 288,
+          "paired_active_rows": 138390552,
+          "paired_targets:10": 288
+        },
+        "global_finishes": 18,
+        "global_peak_estimate_bytes": 58406496,
+        "global_stats_totals": {
+          "batched_moment_calls": 288,
+          "chunks": 288,
+          "refusal_count": 0,
+          "rows": 18874368
+        },
+        "label": "candidate-witness",
+        "likelihood_stream_count": 18,
+        "native_dispatch_calls": {
+          "_accumulate_batched": 288
+        },
+        "native_moment_workers": [
+          16
+        ],
+        "native_signatures_after_fit": {
+          "_accumulate_batched": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ],
+          "_accumulate_batched_strided": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'A', True, aligned=True), Array(float64, 2, 'A', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ]
+        },
+        "native_signatures_at_fit_entry": {
+          "_accumulate_batched": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ],
+          "_accumulate_batched_strided": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'A', True, aligned=True), Array(float64, 2, 'A', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ]
+        },
+        "phase_counts": {
+          "coefficient_decomposition_solve": 16,
+          "curvature_gradient_assembly": 18,
+          "dense_predictor_matrices": 0,
+          "efs_update_backtracking": 30,
+          "fit_total": 1,
+          "frame_normalization": 1,
+          "inference_edf": 1,
+          "initialization": 8,
+          "layout_penalty_assembly": 9,
+          "likelihood_evaluation": 26,
+          "newton_endgame": 0,
+          "predictor_compilation": 1,
+          "serialization": 0,
+          "terminal_observed_retry_fallback": 8
+        },
+        "runtime_guards_passed": true,
+        "stream_classes": {
+          "observed:range=True": 18
+        },
+        "stream_total_chunks": 288,
+        "stream_total_rows": 18874368,
+        "timing_status": "untimed dispatch/pass witness",
+        "trial_counts": {
+          "_assemble_chunked_geometry:calls": 18,
+          "_evaluate_chunked_geometry:calls": 16,
+          "_evaluate_fused_trial:calls": 16,
+          "_evaluate_fused_trial:geometry_returned": 16,
+          "_evaluate_state_unmeasured:calls": 3,
+          "_fused_first_trial_eligible:calls": 16,
+          "_fused_first_trial_eligible:return:True": 16,
+          "_measured_geometry:calls": 3,
+          "assemble_chunked_geometry:calls": 2,
+          "evaluate_chunked_log_likelihood:calls": 2,
+          "natural_derivative_order:0:calls": 32,
+          "natural_derivative_order:0:rows": 2097152,
+          "natural_derivative_order:2:calls": 289,
+          "natural_derivative_order:2:rows": 19922944,
+          "predictor_values:_reuse_observed_initial_result:chunks": 112,
+          "predictor_values:_reuse_observed_initial_result:rows": 7340032,
+          "predictor_values:evaluate_chunked_log_likelihood:chunks": 32,
+          "predictor_values:evaluate_chunked_log_likelihood:rows": 2097152,
+          "predictor_values:iter_likelihood_chunks:chunks": 288,
+          "predictor_values:iter_likelihood_chunks:rows": 18874368,
+          "predictor_values:materialize_terminal_predictions:chunks": 128,
+          "predictor_values:materialize_terminal_predictions:rows": 8388608,
+          "predictor_values:maximum_chunked_predictor_change:chunks": 256,
+          "predictor_values:maximum_chunked_predictor_change:rows": 16777216
+        }
+      }
+    ],
+    "witness_output_comparisons": [
+      {
+        "all_saved_arrays_numerically_equal": true,
+        "arrays": {
+          "coefficients": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1.7338786850498709,
+            "shape": [
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "covariance": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 0.005337535160880681,
+            "shape": [
+              102,
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "edf": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 90.72691502018931,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "holdout_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 57.2985273929743,
+            "shape": [
+              2000,
+              2
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "log_likelihood": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1168908.7726277818,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "objective": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1169341.9658859293,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "smoothing_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1776.5943179142241,
+            "shape": [
+              10
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "terminal_penalized_curvature": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 9918081.81233437,
+            "shape": [
+              102,
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "terminal_score": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 0.029716141825631016,
+            "shape": [
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "train_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1331.6810171913978,
+            "shape": [
+              1048576,
+              2
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          }
+        },
+        "coefficient_fits_equal": true,
+        "fixture_equal": true,
+        "full_result_equal": true,
+        "other": "baseline-witness",
+        "reference": "baseline-discrete",
+        "smoothing_equal": true,
+        "stored_representation_equal": true
+      },
+      {
+        "all_saved_arrays_numerically_equal": true,
+        "arrays": {
+          "coefficients": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1.7338786850498709,
+            "shape": [
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "covariance": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 0.005337535160880681,
+            "shape": [
+              102,
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "edf": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 90.72691502018931,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "holdout_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 57.2985273929743,
+            "shape": [
+              2000,
+              2
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "log_likelihood": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1168908.7726277818,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "objective": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1169341.9658859293,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "smoothing_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1776.5943179142241,
+            "shape": [
+              10
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "terminal_penalized_curvature": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 9918081.81233437,
+            "shape": [
+              102,
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "terminal_score": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 0.029716141825631016,
+            "shape": [
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "train_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1331.6810171913978,
+            "shape": [
+              1048576,
+              2
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          }
+        },
+        "coefficient_fits_equal": true,
+        "fixture_equal": true,
+        "full_result_equal": true,
+        "other": "candidate-witness",
+        "reference": "candidate-discrete",
+        "smoothing_equal": true,
+        "stored_representation_equal": true
+      }
+    ]
+  }
+}

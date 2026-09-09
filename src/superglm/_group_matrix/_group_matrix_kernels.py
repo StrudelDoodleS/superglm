@@ -7,6 +7,29 @@ from numba import njit  # type: ignore[import-untyped]
 
 
 @njit(cache=True)
+def _tensor_operand_in_reassociation_range(values):
+    """Check exponent headroom without allocating absolute-value/mask arrays."""
+    for row in range(values.shape[0]):
+        for col in range(values.shape[1]):
+            value = values[row, col]
+            if value != 0.0 and not 2.0**-128 <= abs(value) <= 2.0**128:
+                return False
+    return True
+
+
+@njit(cache=True)
+def _indexed_row_dot(left, right, left_idx, right_idx):
+    """Row dot products gathered from two support tables, without row panels."""
+    result = np.empty(len(left_idx), dtype=np.float64)
+    for row in range(len(left_idx)):
+        value = 0.0
+        for col in range(left.shape[1]):
+            value += left[left_idx[row], col] * right[right_idx[row], col]
+        result[row] = value
+    return result
+
+
+@njit(cache=True)
 def _csr_weighted_gram(data, indices, indptr, W, p):
     """B.T @ diag(W) @ B exploiting CSR sparsity (symmetric accumulation)."""
     result = np.zeros((p, p))
@@ -399,6 +422,18 @@ def _warmup_group_matrix_kernels() -> None:
     matrix = np.eye(2, dtype=np.float64)
     frozen_matrix = matrix.copy()
     frozen_matrix.setflags(write=False)
+    frozen_codes = codes.copy()
+    frozen_codes.setflags(write=False)
+    # Maps and packed curvature columns also supply Fortran and strided
+    # operands. Cover both mutabilities so their first fit need not compile.
+    for operand in (matrix, np.asfortranarray(matrix), np.ones((3, 4))[:, ::2]):
+        _tensor_operand_in_reassociation_range(operand)
+        frozen_operand = operand.view()
+        frozen_operand.setflags(write=False)
+        _tensor_operand_in_reassociation_range(frozen_operand)
+    for support in (matrix, frozen_matrix):
+        for indices in (codes, frozen_codes):
+            _indexed_row_dot(matrix, support, indices, indices)
     row_patterns = np.array([0, 1], dtype=np.int32)
     unique_codes = np.array([[0, 0], [1, 1]], dtype=np.int32)
     marginal_offsets = np.array([0, 2, 4], dtype=np.intp)

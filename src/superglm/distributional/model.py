@@ -165,11 +165,7 @@ def _predict_one_eta(
     local_coefficients = result.coefficients[state.coefficient_slice]
     intercept_width = int(state.intercept_index is not None)
     slopes = local_coefficients[intercept_width:]
-    eta = np.full(
-        len(frame),
-        local_coefficients[0] if intercept_width else 0.0,
-        dtype=np.float64,
-    )
+    eta = np.zeros(len(frame), dtype=np.float64)
     assigned = np.zeros(len(slopes), dtype=np.bool_)
 
     for name in predictor.compiled.feature_order:
@@ -198,6 +194,13 @@ def _predict_one_eta(
     if not np.all(assigned):
         missing = np.flatnonzero(~assigned).tolist()
         raise RuntimeError(f"prediction plan did not assign local coefficient columns {missing}")
+    # Match geometry, value screens and terminal materialization: accumulate
+    # the ordered slopes first, then add the intercept and finally the offset.
+    if intercept_width:
+        if len(slopes):
+            eta += local_coefficients[0]
+        else:
+            eta[:] = local_coefficients[0]
     eta += offset
     return _readonly(eta)
 

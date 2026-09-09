@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import weakref
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.solver.chunks as chunking
 from superglm.distributional.family import (
+    ConfigurableDistributionalFamily,
     DistributionalFamily,
     ExpectedInformationFamily,
     FamilyLikelihoodPlan,
+    _likelihood_reuse_contract,
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
@@ -29,6 +33,12 @@ from superglm.distributional.result import (
     _validate_resolution_limited_stationarity,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.solver._likelihood_cache import (
+    _is_builtin_gaussian_gamma,
+    _LikelihoodCache,
+    build_likelihood_cache,
+)
+from superglm.distributional.solver._reuse_digest import _ReuseDigest
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     _assemble_dense_geometry_from_matrices,
@@ -48,8 +58,11 @@ from superglm.distributional.solver.derivatives import (
 )
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
-from superglm.distributional.weights import UnsupportedLikelihoodContractError
-from superglm.links import Link
+from superglm.distributional.weights import (
+    ResolvedLikelihoodWeights,
+    UnsupportedLikelihoodContractError,
+)
+from superglm.links import IdentityLink, Link, LogLink
 from superglm.solvers.rank import (
     RankDecomposition,
     decompose_gram,
@@ -84,6 +97,7 @@ class _SolverContext:
     execution_backend_identifier: ExecutionBackendIdentifier
     dense_matrices: tuple[NDArray[np.float64], ...] | None
     coefficient_face: PenaltyFace | None
+    likelihood_cache: _LikelihoodCache | None = None
 
 
 @dataclass(frozen=True)
@@ -111,11 +125,29 @@ class _DenseObservedReuseOwner:
 
 
 class _DenseObservedReuseSession:
-    """Recognize dense observed results produced inside one fit session."""
+    """Recognize certified observed results produced inside one fit session."""
 
     def __init__(self) -> None:
         self._results: dict[int, tuple[DenseSolverResult, _DenseObservedReuseOwner]] = {}
+        self._chunk_results: dict[int, _ChunkObservedReuseRecord] = {}
         self._dense: dict[int, tuple[StackedLayout, tuple[NDArray[np.float64], ...]]] = {}
+        self._likelihood: (
+            tuple[DistributionalFamily, FamilyLikelihoodPlan, _LikelihoodCache | None] | None
+        ) = None
+
+    def likelihood_cache(
+        self, family: DistributionalFamily, plan: FamilyLikelihoodPlan
+    ) -> _LikelihoodCache | None:
+        """Share bounded static row preparation across coefficient fits."""
+        entry = self._likelihood
+        if entry is not None:
+            if entry[0] is family and entry[1] is plan:
+                return entry[2]
+            if entry[2] is not None:
+                entry[2].clear()
+        cache = build_likelihood_cache(family, plan)
+        self._likelihood = (family, plan, cache)
+        return cache
 
     def dense_matrices(
         self,
@@ -148,6 +180,9 @@ class _DenseObservedReuseSession:
         self,
         result: DenseSolverResult,
         owner: _DenseObservedReuseOwner,
+        *,
+        context: _SolverContext | None = None,
+        score_data: NDArray[np.float64] | None = None,
     ) -> None:
         curvature = result.terminal_curvature
         if (
@@ -165,6 +200,305 @@ class _DenseObservedReuseSession:
             and curvature.fallback_count == 0
         ):
             self._results[id(result)] = (result, owner)
+        elif (
+            context is not None
+            and score_data is not None
+            and context.chunk_size is not None
+            and owner.chunk_size is not None
+            and owner.coefficient_face is None
+            and owner.stop_policy == "ordinary"
+            and owner.config.coefficient_curvature == "observed"
+            and result.config == owner.config
+            and result.resolved_chunk_size == context.chunk_size
+            and result.execution_backend_identifier == CHUNKED_EXECUTION_BACKEND_IDENTIFIER
+            and result.coefficient_face is None
+            and result.converged
+            and curvature.requested_source == "observed"
+            and curvature.actual_source == "observed"
+            and curvature.fallback_count == 0
+        ):
+            certificate = _chunk_reuse_data_certificate(context)
+            if certificate is not None:
+                key = id(result)
+                self._chunk_results[key] = _ChunkObservedReuseRecord(
+                    source=weakref.ref(result, lambda _ref: self._chunk_results.pop(key, None)),
+                    owner=owner,
+                    coefficients=_readonly(result.coefficients),
+                    score_data=_readonly(score_data),
+                    data_curvature=_readonly(result.terminal_data_curvature),
+                    certificate=certificate,
+                )
+
+
+@dataclass(frozen=True)
+class _ChunkObservedReuseRecord:
+    """Fit-owned aggregates; the source's row predictions are weakly referenced."""
+
+    source: weakref.ReferenceType[DenseSolverResult]
+    owner: _DenseObservedReuseOwner
+    coefficients: NDArray[np.float64]
+    score_data: NDArray[np.float64]
+    data_curvature: NDArray[np.float64]
+    certificate: str
+
+
+def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
+    """Certify supported fixed designs without materializing observation rows.
+
+    Public design arrays can be mutable. Identity and equal predictors alone do
+    not certify curvature: a design edit can leave the current predictor fixed.
+    Unknown representations conservatively retain fresh likelihood evaluation.
+    """
+    with _ReuseDigest() as digest:
+        return _build_chunk_reuse_data_certificate(context, digest)
+
+
+def _build_chunk_reuse_data_certificate(
+    context: _SolverContext, digest: _ReuseDigest
+) -> str | None:
+    from scipy.sparse import csr_matrix
+
+    from superglm.distributional.weights import ResolvedLikelihoodWeights
+    from superglm.group_matrix import (
+        CategoricalGroupMatrix,
+        DenseGroupMatrix,
+        DiscretizedSCOPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
+        DiscretizedSSPGroupMatrix,
+        DiscretizedTensorGroupMatrix,
+        FactorSmoothGroupMatrix,
+        RandomEffectGroupMatrix,
+        SparseGroupMatrix,
+        SplineCategoricalGroupMatrix,
+        SupportCompressedSplineCategoricalGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
+    from superglm.links import IdentityLink, LogLink
+
+    contract = _likelihood_reuse_contract(context.family)
+    weights = context.likelihood_plan.weights
+    if (
+        contract is None
+        or type(context.likelihood_plan) is not contract.plan_type
+        or type(weights) is not ResolvedLikelihoodWeights
+    ):
+        return None
+    field = digest.field
+    array = digest.array
+
+    def builtin_array(values: object) -> bool:
+        # An ndarray subclass can change arithmetic at identical bytes. Limit
+        # this schema to ordinary real buffers, with at most 64 KiB per digest
+        # block under array()'s 8192-element iterator.
+        return bool(
+            type(values) is np.ndarray
+            and values.dtype.kind in "biuf"
+            and values.dtype.itemsize <= 8
+        )
+
+    def splinecat_csr(matrix: object) -> bool:
+        if type(matrix) is not csr_matrix:
+            return False
+        buffers = (matrix.data, matrix.indices, matrix.indptr)
+        if not all(builtin_array(values) for values in buffers):
+            return False
+        # Read raw flags: the public properties can populate caches. Their
+        # values affect SciPy dispatch even when the CSR bytes are unchanged.
+        flags = (
+            getattr(matrix, "_has_sorted_indices", None),
+            getattr(matrix, "_has_canonical_format", None),
+        )
+        if any(value is not None and type(value) not in (bool, np.bool_) for value in flags):
+            return False
+        field((matrix.shape, matrix.dtype.str, flags))
+        for values in buffers:
+            array(values)
+        return True
+
+    field(
+        json.dumps(
+            cast(ConfigurableDistributionalFamily, context.family).to_config(), sort_keys=True
+        )
+    )
+    field(context.likelihood_plan.plan_identifier)
+    # Some built-in identifiers contain stored weight digests. The evaluator
+    # consumes the live contract, so certify it independently of those digests.
+    field(weights.provenance.contract.semantics)
+    field((context.chunk_size, context.layout.n_coefficients))
+    array(context.response)
+    for name in contract.prepared_array_fields:
+        array(getattr(context.likelihood_plan, name))
+    for name in ("values", "geometry_values", "root_take_map", "input_positions"):
+        array(getattr(weights, name))
+    for state in context.layout.predictors:
+        if type(state.link) not in (IdentityLink, LogLink, *contract.link_types):
+            return None
+        field((type(state.link).__name__, vars(state.link)))
+        field(
+            (
+                state.name,
+                state.parameter_index,
+                state.coefficient_slice,
+                state.intercept_index,
+                state.design.shape,
+            )
+        )
+        array(state.offset)
+        for group in state.design.group_matrices:
+            kind = type(group)
+            field((kind.__name__, group.shape))
+            if kind is DenseGroupMatrix:
+                names = ("M",)
+            elif kind in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
+                group = cast(CategoricalGroupMatrix | RandomEffectGroupMatrix, group)
+                names = ("codes",)
+                field(group.n_levels)
+            elif kind is SparseGroupMatrix:
+                group = cast(SparseGroupMatrix, group)
+                matrix = group.M
+                if type(matrix) is not csr_matrix:
+                    return None
+                field((matrix.shape, matrix.dtype.str))
+                field(
+                    (
+                        getattr(matrix, "_has_sorted_indices", None),
+                        getattr(matrix, "_has_canonical_format", None),
+                    )
+                )
+                for values in (matrix.data, matrix.indices, matrix.indptr):
+                    if type(values) is not np.ndarray:
+                        return None
+                    array(values)
+                continue
+            elif kind is FactorSmoothGroupMatrix:
+                group = cast(FactorSmoothGroupMatrix, group)
+                field(
+                    (
+                        group.n_levels,
+                        group.coefficient_levels,
+                        group.block_size,
+                        group.raw_width,
+                        group.factor_basis,
+                        group.is_discrete,
+                    )
+                )
+                # Row subsetting reconstructs the group from B, while exact
+                # matvec and moments read the separately stored CSR buffers.
+                # Certify both: public attributes can be replaced independently.
+                if group.is_discrete:
+                    if any(
+                        value is not None
+                        for value in (group.B, group._data, group._indices, group._indptr)
+                    ):
+                        return None
+                    names = ("codes", "natural_map", "B_unique", "bin_idx")
+                else:
+                    matrix = group.B
+                    if (
+                        type(matrix) is not csr_matrix
+                        or group.B_unique is not None
+                        or group.bin_idx is not None
+                    ):
+                        return None
+                    field((matrix.shape, matrix.dtype.str))
+                    field(
+                        (
+                            getattr(matrix, "_has_sorted_indices", None),
+                            getattr(matrix, "_has_canonical_format", None),
+                        )
+                    )
+                    for values in (matrix.data, matrix.indices, matrix.indptr):
+                        if type(values) is not np.ndarray:
+                            return None
+                        array(values)
+                    names = ("codes", "natural_map", "_data", "_indices", "_indptr")
+                if any(type(getattr(group, name)) is not np.ndarray for name in names):
+                    return None
+            elif kind in (
+                SplineCategoricalGroupMatrix,
+                DiscretizedSplineCategoricalGroupMatrix,
+                SupportCompressedSplineCategoricalGroupMatrix,
+            ):
+                group = cast(
+                    SplineCategoricalGroupMatrix
+                    | DiscretizedSplineCategoricalGroupMatrix
+                    | SupportCompressedSplineCategoricalGroupMatrix,
+                    group,
+                )
+                if (
+                    type(group.n_rows) is not int
+                    or type(group._p_b) is not int
+                    or (
+                        group.spline_cat_feature is not None
+                        and type(group.spline_cat_feature) is not str
+                    )
+                ):
+                    return None
+                # The feature selects a same-parent cross-Gram route.
+                field((group.n_rows, group._p_b, group.spline_cat_feature))
+                names = ("R_inv", "row_idx")
+                if kind is SplineCategoricalGroupMatrix:
+                    group = cast(SplineCategoricalGroupMatrix, group)
+                    # Subsetting reads full B; matvec reads B_level; sparse
+                    # moments read independent buffers. A saturated Gram can
+                    # instead read its lazy dense copy. All remain live.
+                    if not splinecat_csr(group.B) or not splinecat_csr(group.B_level):
+                        return None
+                    names += ("_data", "_indices", "_indptr")
+                    dense = group._dense_level
+                    if dense is None or dense is False:
+                        field(("_dense_level", dense))
+                    elif builtin_array(dense):
+                        names += ("_dense_level",)
+                    else:
+                        return None
+                    cache_names = ("_sorted_rows",)
+                else:
+                    group = cast(
+                        DiscretizedSplineCategoricalGroupMatrix
+                        | SupportCompressedSplineCategoricalGroupMatrix,
+                        group,
+                    )
+                    if type(group.n_bins) is not int:
+                        return None
+                    field(group.n_bins)
+                    names += ("B_unique", "bin_idx_level")
+                    cache_names = ("_row_order", "_sorted_rows")
+                # Do not sort, materialize, or populate a lookup to certify it.
+                # Cache creation, replacement and mutation each change the
+                # certificate, including independently replaced alignment maps.
+                for name in cache_names:
+                    value = getattr(group, name)
+                    field((name, value is None))
+                    if value is not None:
+                        names += (name,)
+                if any(not builtin_array(getattr(group, name)) for name in names):
+                    return None
+            elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
+                group = cast(DiscretizedSSPGroupMatrix | SupportCompressedSSPGroupMatrix, group)
+                names = ("B_unique", "R_inv", "bin_idx")
+                field(group.n_bins)
+            elif kind is DiscretizedSCOPGroupMatrix:
+                group = cast(DiscretizedSCOPGroupMatrix, group)
+                names = ("B_scop_unique", "bin_idx")
+                field(group.n_bins)
+            elif kind is DiscretizedTensorGroupMatrix:
+                group = cast(DiscretizedTensorGroupMatrix, group)
+                names = (
+                    "B_unique",
+                    "R_inv",
+                    "bin_idx",
+                    "B1_unique_t",
+                    "B2_unique_t",
+                    "idx1",
+                    "idx2",
+                )
+                field((group.tensor_id, group.n_bins, group.n_bins1, group.n_bins2))
+            else:
+                return None
+            for name in names:
+                array(getattr(group, name))
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -212,14 +546,13 @@ def _validated_context(
     chunk_size: chunking.ChunkSize | None,
     coefficient_face: PenaltyFace | None,
     dense_matrices: tuple[NDArray[np.float64], ...] | None = None,
+    _reuse_session: _DenseObservedReuseSession | None = None,
 ) -> _SolverContext:
     if not isinstance(family, DistributionalFamily):
         raise TypeError("family must implement DistributionalFamily")
     fisher_family = family if isinstance(family, ExpectedInformationFamily) else None
     if coefficient_curvature == "fisher" and fisher_family is None:
         raise ValueError("Fisher coefficient curvature requires expected information capability")
-    if chunk_size is not None and fisher_family is None:
-        raise ValueError("chunked fitting requires expected information capability")
     if not isinstance(layout, StackedLayout) or layout.n_coefficients < 1:
         raise ValueError("layout must contain at least one global coefficient")
     if coefficient_face is not None:
@@ -254,18 +587,17 @@ def _validated_context(
             "penalty must be positive semidefinite under the shared rank policy"
         ) from exc
     links = tuple(state.link for state in layout.predictors)
-    resolved_chunk_size = (
-        None
-        if chunk_size is None
-        else chunking.resolve_chunk_size(
-            n_observations,
-            len(layout.predictors),
-            chunk_size,
-            p_coefficients=layout.n_coefficients,
-        )
+    resolved_chunk_size = chunking._resolve_fitting_chunk_size(
+        family, layout, root_likelihood_plan, chunk_size
     )
+    likelihood_cache = None
     if resolved_chunk_size is not None:
         dense_matrices = None
+        likelihood_cache = (
+            build_likelihood_cache(family, root_likelihood_plan)
+            if _reuse_session is None
+            else _reuse_session.likelihood_cache(family, root_likelihood_plan)
+        )
     elif dense_matrices is None:
         dense_matrices = dense_predictor_matrices(layout)
     elif len(dense_matrices) != len(layout.predictors) or any(
@@ -289,6 +621,7 @@ def _validated_context(
         ),
         dense_matrices=dense_matrices,
         coefficient_face=coefficient_face,
+        likelihood_cache=likelihood_cache,
     )
 
 
@@ -325,6 +658,7 @@ def _evaluate_state_unmeasured(
                 context.likelihood_plan,
                 coefficient_values,
                 chunk_size=context.chunk_size,
+                likelihood_cache=context.likelihood_cache,
             )
             penalty_value = 0.5 * float(coefficient_values @ context.penalty @ coefficient_values)
             penalized_optimizing = likelihood.optimizing_log_likelihood - penalty_value
@@ -424,6 +758,70 @@ def _evaluate_state(
         )
 
 
+def _fused_first_trial_eligible(context: _SolverContext) -> bool:
+    contract = _likelihood_reuse_contract(context.family)
+    return bool(
+        context.chunk_size is not None
+        and _is_builtin_gaussian_gamma(context.family)
+        and contract is not None
+        and contract.deterministic_chunk_replay
+        and type(context.likelihood_plan) is contract.plan_type
+        and type(context.likelihood_plan.weights) is ResolvedLikelihoodWeights
+        and len(context.links) == len(context.layout.predictors)
+        and all(state.link is link for state, link in zip(context.layout.predictors, context.links))
+        and all(
+            type(link) in (IdentityLink, LogLink, *contract.link_types) for link in context.links
+        )
+    )
+
+
+def _evaluate_fused_trial(
+    context: _SolverContext,
+    coefficients: NDArray,
+    source: CoefficientCurvature,
+    phase_recorder: FitPhaseRecorder | None,
+) -> tuple[_AcceptedState, DenseJointGeometry] | None:
+    """Own one immediate trial; numerical derivative refusal retries its value."""
+    values = np.asarray(coefficients, dtype=np.float64)
+    if values.shape != (context.layout.n_coefficients,) or not np.all(np.isfinite(values)):
+        return None
+    values = _readonly(values)
+    assert context.chunk_size is not None
+    try:
+        with measure_phase(phase_recorder, "curvature_gradient_assembly"):
+            geometry, likelihood = chunking._evaluate_chunked_geometry(
+                context.family,
+                context.layout,
+                context.response,
+                context.likelihood_plan,
+                values,
+                penalty=context.penalty,
+                chunk_size=context.chunk_size,
+                curvature_source=source,
+                likelihood_cache=context.likelihood_cache,
+            )
+    except chunking._TrialDerivativeError:
+        return None
+    penalty_value = 0.5 * float(values @ context.penalty @ values)
+    optimizing = likelihood.optimizing_log_likelihood - penalty_value
+    reported = likelihood.log_likelihood - penalty_value
+    if not np.isfinite(optimizing) or not np.isfinite(reported):
+        return None
+    state = _AcceptedState(
+        coefficients=values,
+        eta=None,
+        theta=None,
+        derivatives=None,
+        fisher_curvature_packed=None,
+        optimizing_log_likelihood=likelihood.optimizing_log_likelihood,
+        parameter_independent_carrier=likelihood.parameter_independent_carrier,
+        log_likelihood=likelihood.log_likelihood,
+        penalized_optimizing_log_likelihood=optimizing,
+        penalized_log_likelihood=reported,
+    )
+    return state, geometry
+
+
 def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
     initialized = context.family.initialize(context.response, context.likelihood_plan)
     initialized.validate_shape(
@@ -487,6 +885,7 @@ def _geometry(
             penalty=context.penalty,
             chunk_size=context.chunk_size,
             curvature_source=source,
+            likelihood_cache=context.likelihood_cache,
         )
     if state.derivatives is None:
         raise RuntimeError("dense accepted state is missing derivative geometry")
@@ -760,6 +1159,7 @@ def _run_iterations(
                 config.max_predictor_step,
             )
         accepted: _AcceptedState | None = None
+        accepted_geometry = None
         alpha = 1.0
         backtracks = 0
         distinct_finite_trial_evaluated = False
@@ -773,13 +1173,27 @@ def _run_iterations(
             if np.array_equal(candidate_coefficients, state.coefficients):
                 reached_identical_candidate = True
                 break
-            # Keep the usual full-step path and score-only certification unchanged.
+            # Only the immediate first ordinary chunked trial owns speculative
+            # geometry. Rejected backtracks and certification keep their screens.
             screen = stop_policy == "ordinary" and context.chunk_size is None and attempt > 0
-            candidate = _evaluate_state(
-                context,
-                candidate_coefficients,
-                phase_recorder=phase_recorder,
-                derivative_order=0 if screen else 2,
+            fused = (
+                _evaluate_fused_trial(
+                    context, candidate_coefficients, config.coefficient_curvature, phase_recorder
+                )
+                if stop_policy == "ordinary"
+                and attempt == 0
+                and _fused_first_trial_eligible(context)
+                else None
+            )
+            candidate = (
+                fused[0]
+                if fused is not None
+                else _evaluate_state(
+                    context,
+                    candidate_coefficients,
+                    phase_recorder=phase_recorder,
+                    derivative_order=0 if screen else 2,
+                )
             )
             directional_derivative = float(geometry.score_penalized @ applied_step)
             required = (
@@ -816,7 +1230,10 @@ def _run_iterations(
                 )
             ):
                 accepted = candidate
+                accepted_geometry = None if fused is None else fused[1]
+                fused = None
                 break
+            fused = None
             if attempt == config.max_backtracks:
                 break
             alpha *= config.backtrack_factor
@@ -875,12 +1292,13 @@ def _run_iterations(
                 step_relative=step_relative,
             )
 
-        accepted_geometry = _measured_geometry(
-            context,
-            accepted,
-            config.coefficient_curvature,
-            phase_recorder,
-        )
+        if accepted_geometry is None:
+            accepted_geometry = _measured_geometry(
+                context,
+                accepted,
+                config.coefficient_curvature,
+                phase_recorder,
+            )
         objective_relative_change = abs(
             accepted.penalized_optimizing_log_likelihood - state.penalized_optimizing_log_likelihood
         ) / (1.0 + abs(state.penalized_optimizing_log_likelihood))
@@ -975,37 +1393,66 @@ def _reuse_observed_initial_result(
     source: DenseSolverResult,
     owner: _DenseObservedReuseOwner,
 ) -> tuple[_AcceptedState, DenseJointGeometry] | None:
-    """Re-penalize a same-session dense endpoint without reevaluating rows."""
+    """Re-penalize a certified same-session endpoint without likelihood refresh."""
     optimizing = source.optimizing_log_likelihood
     if (
-        not session.remembers(source, owner)
-        or context.chunk_size is not None
-        or context.coefficient_face is not None
+        context.coefficient_face is not None
         or context.coefficient_curvature != "observed"
         or source.family_likelihood_plan_identifier != context.likelihood_plan.plan_identifier
         or optimizing is None
         or not np.array_equal(coefficients, source.coefficients)
-        or context.dense_matrices is None
     ):
         return None
 
-    eta = _evaluate_predictors_from_matrices(
-        context.layout,
-        coefficients,
-        context.dense_matrices,
-    )
-    if not np.array_equal(eta, source.eta):
-        return None
-    theta = _theta_from_eta(context, eta)
-    if not np.array_equal(theta, source.theta):
-        return None
+    if context.chunk_size is None:
+        if not session.remembers(source, owner) or context.dense_matrices is None:
+            return None
+        eta = _evaluate_predictors_from_matrices(
+            context.layout,
+            coefficients,
+            context.dense_matrices,
+        )
+        if not np.array_equal(eta, source.eta):
+            return None
+        theta = _theta_from_eta(context, eta)
+        if not np.array_equal(theta, source.theta):
+            return None
+
+        score_data = source.terminal_score + source.penalty @ coefficients
+        data_curvature = np.asarray(source.terminal_data_curvature, dtype=np.float64)
+    else:
+        record = session._chunk_results.get(id(source))
+        if (
+            record is None
+            or record.source() is not source
+            or not record.owner.matches(owner)
+            or source.resolved_chunk_size != context.chunk_size
+            or source.execution_backend_identifier != CHUNKED_EXECUTION_BACKEND_IDENTIFIER
+            or not np.array_equal(coefficients, record.coefficients)
+            or _chunk_reuse_data_certificate(context) != record.certificate
+        ):
+            return None
+        support_predictions = chunking._SupportPredictions()
+        for rows in chunking.iter_row_chunks(len(context.response), context.chunk_size):
+            eta = chunking._predictor_values(
+                context.layout,
+                coefficients,
+                rows,
+                include_offsets=True,
+                support_predictions=support_predictions,
+            )
+            theta = chunking._theta_chunk(context.layout, eta)
+            if not np.array_equal(eta, source.eta[rows.start : rows.stop]) or not np.array_equal(
+                theta, source.theta[rows.start : rows.stop]
+            ):
+                return None
+        score_data = record.score_data
+        data_curvature = record.data_curvature
 
     penalty_value = 0.5 * float(coefficients @ context.penalty @ coefficients)
     penalized_optimizing = float(optimizing - penalty_value)
     penalized_reported = float(source.log_likelihood - penalty_value)
-    score_data = source.terminal_score + source.penalty @ coefficients
     score_penalized = score_data - context.penalty @ coefficients
-    data_curvature = np.asarray(source.terminal_data_curvature, dtype=np.float64)
     penalized_curvature = data_curvature + context.penalty
     if not (
         np.isfinite(penalized_optimizing)
@@ -1017,8 +1464,8 @@ def _reuse_observed_initial_result(
 
     state = _AcceptedState(
         coefficients=source.coefficients,
-        eta=source.eta,
-        theta=source.theta,
+        eta=source.eta if context.chunk_size is None else None,
+        theta=source.theta if context.chunk_size is None else None,
         derivatives=None,
         fisher_curvature_packed=None,
         optimizing_log_likelihood=float(optimizing),
@@ -1091,6 +1538,7 @@ def _fit_dense_fixed_lambda_core(
         chunk_size=chunk_size,
         coefficient_face=coefficient_face,
         dense_matrices=memoised,
+        _reuse_session=_reuse_session,
     )
     with measure_phase(phase_recorder, "initialization"):
         if initial is None:
@@ -1357,7 +1805,9 @@ def _fit_dense_fixed_lambda_core(
             terminal_reduced_rank=terminal_reduced_rank,
         )
         if _reuse_session is not None:
-            _reuse_session.remember(result, reuse_owner)
+            _reuse_session.remember(
+                result, reuse_owner, context=context, score_data=terminal_score_geometry.score_data
+            )
         return result
 
 

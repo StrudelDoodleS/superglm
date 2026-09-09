@@ -99,6 +99,19 @@ superglm.warmup()
 compiled = signatures()
 assert all(compiled.values()), [name for name, signatures in compiled.items() if not signatures]
 
+for values in (
+    np.ones((3, 4)),
+    np.asfortranarray(np.ones((3, 4))),
+    np.ones((6, 4))[::2, ::2],
+    np.ones((3, 4))[::-1],
+    np.ones(9)[::2, None],
+):
+    frozen = values.view()
+    frozen.setflags(write=False)
+    for operand in (values, frozen):
+        assert group_kernels._tensor_operand_in_reassociation_range(operand)
+assert signatures() == compiled, "range checks compiled new layouts after public warmup"
+
 writable_profile_arrays = (
     np.array([0.0, 1.0], dtype=np.float64),
     np.ones(2, dtype=np.float64),

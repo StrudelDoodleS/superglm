@@ -317,24 +317,26 @@ def test_observed_dense_solver_accepts_order_two_family_without_fisher() -> None
     result.terminal_curvature.assert_no_fallback()
 
 
-def test_observed_only_chunked_solver_still_requires_expected_information() -> None:
+def test_observed_only_chunked_solver_does_not_require_expected_information() -> None:
     response = np.array([-0.4, 0.2, 1.1, 2.0])
     base_family, layout = _intercept_layout(len(response))
     family = _ObservedOnlyGaussian(base_family)
 
-    with pytest.raises(ValueError, match=r"chunked.*expected information"):
-        fit_dense_fixed_lambda(
-            family,
-            layout,
-            response,
-            _plan(family, response, np.ones(len(response))),
-            np.zeros((layout.n_coefficients, layout.n_coefficients)),
-            config=DenseSolverConfig(coefficient_curvature="observed"),
-            chunk_size=2,
-        )
+    result = fit_dense_fixed_lambda(
+        family,
+        layout,
+        response,
+        _plan(family, response, np.ones(len(response))),
+        np.zeros((layout.n_coefficients, layout.n_coefficients)),
+        config=DenseSolverConfig(coefficient_curvature="observed"),
+        chunk_size=2,
+    )
 
-    assert family.initializations == 0
-    assert family.evaluations == 0
+    assert result.converged
+    assert result.resolved_chunk_size == 2
+    result.terminal_curvature.assert_no_fallback()
+    assert family.initializations > 0
+    assert family.evaluations > 0
 
 
 def test_observed_dense_state_never_evaluates_available_expected_information() -> None:
@@ -774,8 +776,10 @@ def test_expected_information_terminal_policy_assesses_penalized_curvature_on_fa
     assert family.expected_information_calls == 0
 
 
+@pytest.mark.parametrize("chunk_size", [None, 2])
 def test_observed_only_terminal_policy_refuses_repeated_material_indefiniteness(
     monkeypatch: pytest.MonkeyPatch,
+    chunk_size: int | None,
 ) -> None:
     base_family, layout = _intercept_layout(4)
     family = _ObservedOnlyGaussian(base_family)
@@ -784,6 +788,15 @@ def test_observed_only_terminal_policy_refuses_repeated_material_indefiniteness(
     observed_data_curvature = np.array([[1.0, 2.0], [2.0, 1.0]])
     original_geometry = solver_module._geometry
     observed_geometry_calls = 0
+    original_run = solver_module._run_iterations
+    run_calls = 0
+
+    def count_run(*args, **kwargs):
+        nonlocal run_calls
+        run_calls += 1
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(solver_module, "_run_iterations", count_run)
 
     def force_indefinite_observed_data(context, state, source):
         nonlocal observed_geometry_calls
@@ -807,9 +820,11 @@ def test_observed_only_terminal_policy_refuses_repeated_material_indefiniteness(
             np.zeros((layout.n_coefficients, layout.n_coefficients)),
             initial=np.zeros(layout.n_coefficients),
             config=DenseSolverConfig(coefficient_curvature="observed"),
+            chunk_size=chunk_size,
         )
 
-    assert observed_geometry_calls == 2
+    assert run_calls == 2
+    assert observed_geometry_calls >= 1
 
 
 def test_solver_result_plan_and_execution_fields_are_required() -> None:

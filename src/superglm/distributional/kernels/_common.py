@@ -20,6 +20,10 @@ FLOAT = np.float64
 _DERIVATIVE_ORDER_MESSAGE = "derivative_order must be an integer from zero through two"
 
 
+class _NumericalEvaluationError(ValueError):
+    """Valid primitive inputs have no representable numerical result."""
+
+
 def readonly(
     values: object,
     *,
