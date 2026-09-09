@@ -221,6 +221,8 @@ class DiscretizedSplineCategoricalGroupMatrix:
         dict_state, slot_state = cast(
             tuple[dict[str, object] | None, dict[str, object]], object.__getstate__(self)
         )
+        slot_state.pop("_row_order", None)
+        slot_state.pop("_sorted_rows", None)
         slot_state.pop("_row_lookup_certificate", None)
         return dict_state, slot_state
 

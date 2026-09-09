@@ -181,6 +181,32 @@ def test_lookup_cannot_be_made_writeable_and_replacement_releases_old_storage(ki
 
 
 @pytest.mark.parametrize("kind", _CATEGORIES)
+def test_serialization_omits_lookup_arrays_without_changing_stored_algebra(kind):
+    group = _group(kind, n=4096)
+    cold_payload = pickle.dumps(group, protocol=5)
+    expected = group.toarray()
+    rows = np.array([11, 3, 11, 0, 4095])
+    group.row_subset(rows)
+    cache_names = ("_sorted_rows", "_row_order", "_row_lookup_certificate")
+    caches = {name: getattr(group, name) for name in cache_names if hasattr(group, name)}
+    assert all(value is not None for value in caches.values())
+
+    _, slots = group.__getstate__()
+    assert not slots.keys() & caches.keys()
+    warm_payload = pickle.dumps(group, protocol=5)
+    assert len(warm_payload) == len(cold_payload)
+    assert all(getattr(group, name) is value for name, value in caches.items())
+
+    restored = pickle.loads(warm_payload)
+    np.testing.assert_array_equal(restored.row_idx, group.row_idx)
+    assert not restored.row_idx.flags.writeable
+    _assert_close(restored.toarray(), expected)
+    _assert_close(restored.row_subset(rows).toarray(), expected[rows])
+    _assert_close(restored.matvec(np.ones(2)), expected @ np.ones(2))
+    _assert_close(ranges.group_range_matvec(restored, 3, 19, np.ones(2)), expected[3:19].sum(1))
+
+
+@pytest.mark.parametrize("kind", _CATEGORIES)
 @pytest.mark.parametrize("method", ["pickle", "deepcopy"])
 def test_serialization_rebuilds_range_certificate_with_lookup(kind, method):
     group = _group(kind)

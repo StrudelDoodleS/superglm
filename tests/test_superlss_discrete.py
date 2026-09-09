@@ -198,6 +198,57 @@ def test_public_discrete_explicit_fisher_still_requires_capability(kind: str) ->
         )
 
 
+@pytest.mark.parametrize("discrete", [False, True])
+def test_public_serialization_size_ignores_primed_category_lookups(discrete) -> None:
+    from superglm._group_matrix._group_matrix_core import SplineCategoricalGroupMatrix
+    from superglm._group_matrix._group_matrix_discretized import (
+        DiscretizedSplineCategoricalGroupMatrix,
+    )
+
+    frame, y, _, _, family, _ = _fixture("gaussian", "frequency")
+    model = SuperLSS(
+        family=family,
+        predictors=(
+            Predictor(
+                "location",
+                {"x": Spline(kind="cr", n_knots=4), "g": Categorical(base="a")},
+                interaction_specs={"x:g": SplineCategorical("x", "g")},
+            ),
+            Predictor("scale", {}),
+        ),
+        discrete=discrete,
+        n_bins=32,
+    ).fit(
+        frame,
+        y,
+        lambdas=dict.fromkeys(
+            ("location:x#wiggle", "location:x:g[b]#wiggle", "location:x:g[c]#wiggle"),
+            1.0,
+        ),
+    )
+    model = SuperLSS.from_bytes(model.to_bytes())
+    cold_size = len(model.to_bytes())
+    groups = [
+        group
+        for state in model._require_fitted().layout.predictors
+        for group in state.design.group_matrices
+        if isinstance(
+            group, (SplineCategoricalGroupMatrix, DiscretizedSplineCategoricalGroupMatrix)
+        )
+    ]
+    assert groups
+    for group in groups:
+        assert group._sorted_rows is None
+        group.row_subset(np.arange(17))
+        assert group._sorted_rows is not None
+    payload = model.to_bytes()
+    assert len(payload) == cold_size
+    restored = SuperLSS.from_bytes(payload)
+    np.testing.assert_array_equal(
+        restored.predict_parameters(frame), model.predict_parameters(frame)
+    )
+
+
 def test_public_discrete_tensor_and_categorical_interaction_parity() -> None:
     frame, y, weights, offsets, family, _ = _fixture("gaussian", "frequency")
     predictors = (
