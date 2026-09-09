@@ -173,8 +173,9 @@ def test_curvature_alias_is_refused_without_mutating_outputs():
 def test_metadata_accounting_and_warmup_cover_runtime_signatures():
     module = _module()
     module._warmup_batched_moments()
-    compiled = tuple(module._accumulate_batched.nopython_signatures)
-    assert compiled
+    kernels = (module._accumulate_batched, module._accumulate_batched_strided)
+    compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
+    assert tuple(map(len, compiled)) == (1, 1)
     _, sizes, ordinary, bins, histograms, directions = _fixture()
     bins.fill(0)
     for panel in ordinary:
@@ -193,4 +194,4 @@ def test_metadata_accounting_and_warmup_cover_runtime_signatures():
             weights = np.ones((11, 6))[:, ::2] if layout == "A" else np.ones((11, 3), order=layout)
             weights.flags.writeable = not readonly
             batch.accumulate(weights, 11)
-    assert tuple(module._accumulate_batched.nopython_signatures) == compiled
+    assert tuple(tuple(kernel.nopython_signatures) for kernel in kernels) == compiled

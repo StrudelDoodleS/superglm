@@ -255,13 +255,35 @@ def _channels(layout, readonly, width):
     values = (
         np.ones((11, 2 * width))[:, ::2] if layout == "A" else np.ones((11, width), order=layout)
     )
+    values[:] = np.arange(values.size).reshape(values.shape) - 7.0
+    values[:4, 0] = [-0.0, 2.0**54, 1.0, -(2.0**54)]
     values.flags.writeable = not readonly
     return values
 
 
-def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts():
+def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts(monkeypatch):
+    assert hasattr(batch_api, "_accumulate_batched_strided"), (
+        "the batch still specializes the heavy kernel for every channel storage combination"
+    )
     batch_api._warmup_batched_moments()
-    signatures = tuple(batch_api._accumulate_batched.nopython_signatures)
+    kernels = (batch_api._accumulate_batched, batch_api._accumulate_batched_strided)
+    signatures = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)
+    assert tuple(map(len, signatures)) == (1, 1)
+    calls = [0, 0]
+    for index, (kernel, layout) in enumerate(zip(kernels, ("C", "A"), strict=True)):
+        for channel in kernel.nopython_signatures[0].args[5:7]:
+            assert channel.layout == layout
+            assert not channel.mutable
+
+        def counted(*args, index=index, kernel=kernel):
+            calls[index] += 1
+            return kernel(*args)
+
+        monkeypatch.setattr(
+            batch_api,
+            "_accumulate_batched" if index == 0 else "_accumulate_batched_strided",
+            counted,
+        )
     fixture = _fixture(True)
     batch = _build(fixture)
     exact, reserve = batch_api._batch_workspace_bytes(1, 1, 2, vector_count=17)
@@ -269,13 +291,37 @@ def test_paired_memory_accounting_and_warmup_cover_independent_channel_layouts()
     assert len(batch.owned_arrays) == 2
     assert batch.metadata_reserve_bytes == reserve
     assert not batch.owned_arrays[0].flags.writeable
+    _, _, ordinary, bins, histograms, directions, vectors = fixture
+    bins[0, 4:7] = -1
+    bins[-1] = -1
+    outputs = [spec[-1] for spec in histograms + directions]
+    outputs += [out for spec in vectors for out in spec[-2:]]
+    for out in outputs:
+        out.fill(-0.0)
+    expected = [out.copy() for out in outputs]
     for score_layout in ("C", "F", "A"):
         for curvature_layout in ("C", "F", "A"):
             for score_readonly in (False, True):
                 for curvature_readonly in (False, True):
-                    batch.accumulate(
-                        _channels(curvature_layout, curvature_readonly, 3),
-                        11,
-                        score=_channels(score_layout, score_readonly, 2),
-                    )
-    assert tuple(batch_api._accumulate_batched.nopython_signatures) == signatures
+                    score = _channels(score_layout, score_readonly, 2)
+                    curvature = _channels(curvature_layout, curvature_readonly, 3)
+                    before_score = score.tobytes()
+                    before_curvature = curvature.tobytes()
+                    for (g, h, channel, _), out in zip(histograms, expected[:1], strict=True):
+                        _accumulate_histogram(out, bins[g], bins[h], curvature[:, channel])
+                    for (g, a, channel, _), out in zip(directions, expected[1:2], strict=True):
+                        _accumulate_directional(out, bins[g], ordinary[a], curvature[:, channel])
+                    for vector, (g, sc, cc, _, _) in enumerate(vectors):
+                        _accumulate_vector(expected[2 + 2 * vector], bins[g], score[:, sc])
+                        _accumulate_vector(expected[3 + 2 * vector], bins[g], curvature[:, cc])
+                    batch.accumulate(curvature, 11, score=score)
+                    assert score.flags.writeable is not score_readonly
+                    assert curvature.flags.writeable is not curvature_readonly
+                    assert score.tobytes() == before_score
+                    assert curvature.tobytes() == before_curvature
+                    for actual, oracle in zip(outputs, expected, strict=True):
+                        np.testing.assert_array_equal(
+                            actual.view(np.uint64), oracle.view(np.uint64)
+                        )
+    assert calls == [4, 32]
+    assert tuple(tuple(kernel.nopython_signatures) for kernel in kernels) == signatures

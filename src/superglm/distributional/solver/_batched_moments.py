@@ -9,6 +9,7 @@ Only integer diagnostics are reduced across workers; fastmath is disabled.
 from __future__ import annotations
 
 from bisect import bisect_left
+from threading import Lock
 from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
@@ -116,6 +117,54 @@ def _accumulate_batched(
     for worker in range(activity.size):
         workers += activity[worker]
     return histogram_active, directional_work, vector_active, workers
+
+
+# Keep C addressing in the common path and one general-stride fallback. Numba's
+# mutable-to-readonly and contiguous-to-A casts reuse the array descriptor;
+# neither dispatcher copies rows or changes the caller's writeability flags.
+if TYPE_CHECKING:
+    # Numba's py_func stub models descriptor binding on this plain function.
+    _accumulate_batched_strided = _accumulate_batched
+else:
+    _accumulate_batched_strided = njit(cache=True, parallel=True)(_accumulate_batched.py_func)
+_batched_initialization_lock = Lock()
+_batched_initialized = False
+
+
+def _initialize_batched_moments():
+    """Compile exactly two native signatures on warmup or first admitted call."""
+    global _batched_initialized
+    if _batched_initialized:
+        return
+    with _batched_initialization_lock:
+        if _batched_initialized:
+            return
+        matrix = types.Array(types.float64, 2, "C")
+        vector = types.Array(types.float64, 1, "C")
+        for kernel, layout in ((_accumulate_batched, "C"), (_accumulate_batched_strided, "A")):
+            channels = types.Array(types.float64, 2, layout, readonly=True)
+            kernel.compile(
+                (
+                    types.Array(types.intp, 2, "C", readonly=True),
+                    types.ListType(matrix),
+                    types.ListType(vector),
+                    types.ListType(matrix),
+                    types.Array(types.intp, 2, "C"),
+                    channels,
+                    channels,
+                    types.intp,
+                    types.intp,
+                    types.intp,
+                    types.Array(types.intp, 1, "C"),
+                    types.intp,
+                )
+            )
+        # A failed compile leaves readiness false and propagates before any
+        # accumulation. Retain successful compilation for a subsequent retry;
+        # dispatcher identities and Numba's own failure semantics stay intact.
+        _accumulate_batched.disable_compile()
+        _accumulate_batched_strided.disable_compile()
+        _batched_initialized = True
 
 
 def _batch_workspace_bytes(histogram_count, directional_count, ordinary_count, *, vector_count=0):
@@ -281,7 +330,7 @@ class _BatchedMomentReducers:
         self.last_worker_count = 0
         self.last_vector_active_updates = 0
 
-    def _check_channels(self, values, n, channels, label):
+    def _check_channels(self, values, n, channels, label) -> np.ndarray:
         if (
             type(values) is not np.ndarray
             or values.dtype != np.dtype(np.float64)
@@ -301,6 +350,7 @@ class _BatchedMomentReducers:
         last = bisect_left(self._output_starts, upper) - 1
         if last >= 0 and self._output_stops[last] > lower:
             raise ValueError(f"{label} must not overlap a moment accumulator")
+        return values
 
     def accumulate(self, curvature, n, *, score=None):
         """Update prepared rows and return histogram visits and directional work.
@@ -315,9 +365,9 @@ class _BatchedMomentReducers:
             or not 1 <= n <= self._capacity
         ):
             raise ValueError("active rows must be within the owned chunk capacity")
-        self._check_channels(curvature, n, self._n_channels, "curvature")
+        curvature = self._check_channels(curvature, n, self._n_channels, "curvature")
         if self._n_vectors or score is not None:
-            self._check_channels(score, n, self._n_score_channels, "score")
+            score = self._check_channels(score, n, self._n_score_channels, "score")
         else:
             # No paired target reads this operand. Reuse a checked matrix so
             # legacy calls need neither an extra array nor an optional signature.
@@ -326,7 +376,13 @@ class _BatchedMomentReducers:
             self.last_worker_count = 0
             self.last_vector_active_updates = 0
             return 0, 0
-        histogram_active, directional_work, vector_active, workers = _accumulate_batched(
+        _initialize_batched_moments()
+        kernel = (
+            _accumulate_batched
+            if score.flags.c_contiguous and curvature.flags.c_contiguous
+            else _accumulate_batched_strided
+        )
+        histogram_active, directional_work, vector_active, workers = kernel(
             self._metadata,
             self._outputs,
             self._vector_outputs,
@@ -346,7 +402,8 @@ class _BatchedMomentReducers:
 
 
 def _warmup_batched_moments():
-    """Warm typed lists and independent score/curvature storage signatures."""
+    """Warm the two native signatures and the actual typed-list construction."""
+    _initialize_batched_moments()
     batch = _BatchedMomentReducers(
         [(0, 1, 0, np.zeros((2, 3)))],
         [(0, 0, 1, np.zeros((2, 2)))],
@@ -358,19 +415,5 @@ def _warmup_batched_moments():
         n_score_channels=2,
     )
 
-    def channels(width):
-        result = []
-        for layout in ("C", "F", "A"):
-            for readonly in (False, True):
-                values = (
-                    np.ones((4, 2 * width))[:, ::2]
-                    if layout == "A"
-                    else np.ones((4, width), order=layout)
-                )
-                values.flags.writeable = not readonly
-                result.append(values)
-        return result
-
-    for score in channels(2):
-        for curvature in channels(3):
-            batch.accumulate(curvature, 4, score=score)
+    batch.accumulate(np.ones((4, 3)), 4, score=np.ones((4, 2)))
+    batch.accumulate(np.ones((4, 6))[:, ::2], 4, score=np.ones((4, 2), order="F"))

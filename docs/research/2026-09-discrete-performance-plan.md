@@ -1,6 +1,45 @@
 # Discrete execution performance plan
 
-## Active checkpoint: consolidate, then 15 seconds
+## Active checkpoint: 15 seconds confirmed, then 12.5 seconds
+
+The 15-second fit target is demonstrated at `37f4ecdb`: three new fits take
+14.807340, 14.825610 and 14.991532 seconds (median 14.825610). Fresh dense
+controls take 24.299112, 26.239155 and 24.686451 seconds. All same-route saved
+arrays/results/representations agree exactly, and the actual backend witness
+passes. Preserve these measurements and all preceding screens.
+
+Next, fix the paired kernel's cold-warmup regression (36 heavy storage
+specializations; 72.089 seconds in its first source-screen warmup) using two
+explicit, lazy signatures: readonly contiguous channels and a readonly strided
+fallback. Preserve zero-copy inputs, the specialized contiguous path, and all
+ownership/admission checks. Compare isolated fresh-cache startup separately
+from the established complete-fit clock. Cached confirmation warmups took
+1.31–1.87 seconds and do not characterize cold compilation.
+
+The 12.5-second stage uses the current diagnostic profile to select its next
+bounded change. Repeated predictor work and ordinary moment assembly remain
+material. The latest scan fusion and parallel hashing change constant factors;
+they do not establish a lower asymptotic order in N. A controlled N-by-q scaling
+study remains separate work after this explicit latency gate.
+
+The two-signature startup fix is implemented and independently reviewed.
+Its 53 focused tests cover all 36 storage combinations, bitwise reducer
+agreement, unchanged inputs, public warmup, concurrent first use and a failed
+compile followed by retry. Another 162 integration checks pass; Ruff passes
+and the CI-matched type count remains 828. Controlled fresh-cache startup and
+same-clock complete-fit comparisons are pending; unit tests establish the
+specialization bound, not a cold-start timing claim.
+
+The next algorithmic discriminator is the previously unrun categorical-support
+placement idea. Current ordinary score/weight/Gram work occupies approximately
+2.888 diagnostic seconds after removing the watched native batch. Moving the
+fixture's categorical columns into tiny identity supports reduces ordinary
+width 16 to 7 while increasing histogram targets 45 to 153. This preserves the
+stored design and adds no binning; added histogram scans may offset the smaller
+Gram products. Prepare one constructor-inclusive fixed-channel geometry
+comparison before production integration or a full-fit performance claim.
+The original plan held this idea when ordinary products cost only 1.055 seconds;
+the current profile supplies a new reason to measure it, not a new idea.
 
 The user has chosen sequential complete-fit targets of **15 seconds**, then
 **12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,
@@ -32,7 +71,8 @@ predecessor branches and the original uncommitted strategy worktree.
 5. Confirm a qualifying candidate with three new fits, retaining every valid
    sample and reporting median/range. Compare fairly tuned dense in the same
    window. Only after the 15-second target is demonstrated start the 12.5-second
-   stage; neither target nor larger-N capacity is yet demonstrated.
+   stage. The 15-second stage is now demonstrated above; 12.5 seconds and
+   larger-N capacity remain open.
 
 The combined [PR #379](https://github.com/StrudelDoodleS/superglm/pull/379) is
 ready for review; it has not been merged.

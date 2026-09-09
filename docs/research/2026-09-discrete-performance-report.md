@@ -1,6 +1,43 @@
 # Discrete execution performance
 
-## Current checkpoint: pursuing 15 seconds
+## Current checkpoint: 15 seconds confirmed
+
+At `37f4ecdb`, three fresh discrete complete fits take **14.807, 14.826 and
+14.992 seconds**, giving a **14.826-second median**. The public fixture remains
+N=1,048,576, q=102, four knots and 256 bins, with BLAS one and 16 native workers.
+All ten saved arrays, full results and stored representations match exactly
+within each route and between the two discrete implementation checkpoints.
+
+Fresh dense fits at BLAS eight/native one take 24.299, 26.239 and 24.686 seconds
+(median 24.686). In this window discrete uses 39.94% less median wall time and
+48.61% less median fit-end process highwater: 2,018,934,784 versus 3,928,616,960
+bytes. Median CPU time is 69.302 versus 112.124 seconds. The predeclared order
+is discrete/dense/dense/discrete/discrete/dense; screening samples are excluded.
+The earlier dense median was 22.136 seconds in a different window; do not
+attribute that between-window variation to the code change.
+
+This confirms warmed-fit latency. The first candidate's public warmup took
+**72.089 seconds**, versus 13.039 seconds for its preceding control, because
+the new paired kernel compiled 36 independent channel-storage variants.
+Confirmation warmups use the populated cache and take 1.31–1.87 seconds.
+Cold startup is therefore a regression to fix, not a cost hidden by the fit
+claim. The next work limits heavy native specialization while preserving the
+contiguous fast path and pursues the requested 12.5-second fit target.
+
+The untimed witness records 272 batches with ten paired targets and 16 actual
+native workers, seven accepted reuses, and digest participation on 16 threads.
+All source/runtime/activity guards pass. Binning remains the approximation
+described below: maximum holdout-parameter difference from dense is 3.23e-4;
+the optimized moment representation does not add an approximation.
+
+The recent scan fusion, copy removal and parallel certification improve
+constant factors. The structural discrete change is earlier: accumulate
+support-index moments before contraction into coefficient space, avoiding
+row-level work across every expanded basis coefficient and the full dense
+N-by-q design. Likelihood evaluation and retained inputs still scale linearly
+with N. This one-shape benchmark is not an empirical N-by-q scaling curve.
+
+## Earlier screen: parallel live-source certification
 
 The first fresh complete-fit comparison of parallel live-source certification
 (`b1ca0f6e`) against its integration baseline (`64f8b451`) improves discrete
@@ -9,14 +46,12 @@ fixture: 15.08% less wall time. All ten saved numerical arrays, full fitting
 result and stored representation agree exactly. Fit-end process highwater is
 1927.29 versus 1897.48 MiB; CPU time is 67.878 versus 68.493 seconds.
 
-These are single screening samples. The requested 15-second target and the
-subsequent 12.5-second target remain open. A bounded two-BLAS-thread control
+These were single screening samples. A bounded two-BLAS-thread control
 takes 17.181 seconds, so one BLAS thread and 16 native workers remain selected.
 An untimed witness observes hashing on 16 worker thread IDs and seven accepted
-endpoint reuses. The clock and memory definitions below are unchanged. Further
-work targets repeated ordinary-panel writes and separate score/mass bin scans;
-neither has a complete-fit result yet. Fair dense timing must be refreshed on
-the final candidate before claiming a new route-to-route advantage.
+endpoint reuses. The clock and memory definitions below are unchanged. The
+following checkpoint removes repeated ordinary-panel writes and separate
+score/mass bin scans, with fresh confirmation and dense timing reported above.
 
 ## Confirmed checkpoint: fair dense comparison
 
