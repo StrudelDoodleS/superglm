@@ -22,6 +22,12 @@ material. The latest scan fusion and parallel hashing change constant factors;
 they do not establish a lower asymptotic order in N. A controlled N-by-q scaling
 study remains separate work after this explicit latency gate.
 
+The BAM comparison must not treat remaining `O(N)` passes as a failure of
+discretization: its marginal method also retains linear aggregation. Judge the
+strategy by cheaper row work, bin-space matrix work, pass/iteration counts and
+memory across N and q. The 12.5-second target is a latency milestone, not a
+substitute for this scaling evidence; see the current report's primary sources.
+
 The two-signature startup fix is implemented and independently reviewed.
 Its 53 focused tests cover all 36 storage combinations, bitwise reducer
 agreement, unchanged inputs, public warmup, concurrent first use and a failed

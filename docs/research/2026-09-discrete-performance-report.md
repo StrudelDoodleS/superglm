@@ -71,6 +71,18 @@ floating-point accumulation error are separate. The signed, masked and
 cancellation regression oracles check the latter against independent stored
 rows and dimension/epsilon/absolute-product bounds.
 
+Remaining linear row work is consistent with the `bam(discrete=TRUE)` strategy,
+not evidence that marginal discretization has failed. Wood's
+[2025 review, section 4.5](https://www.pure.ed.ac.uk/ws/portalfiles/portal/453319394/gam-review2.pdf)
+explains the reduction of a smooth's transpose-vector product from `O(N p)`
+to `O(N + m p)` and explicitly retains the linear aggregation pass. The
+[mgcv documentation](https://stat.ethz.ch/R-manual/R-patched/library/mgcv/html/bam.html)
+describes marginal bin tables with original-observation indices and one
+smoothing update per working-model iteration. Compare row-pass cost, iteration
+schedule, model-width dependence and memory; sublinear complete-fit time in N
+is not the appropriate requirement. Empirical comparisons must record iteration
+counts and bin dimensions rather than assume them constant.
+
 The next category-placement discriminator at `beabd523` is negative for
 latency in its single fixed-channel comparison. Moving the categorical columns
 into exact identity supports reduces ordinary width 16 to 7 but raises support
