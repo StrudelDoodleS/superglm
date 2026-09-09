@@ -1,5 +1,43 @@
 # Discrete execution performance plan
 
+## Active checkpoint: consolidate, then 15 seconds
+
+The user has chosen sequential complete-fit targets of **15 seconds**, then
+**12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,
+four knots and 256 bins. Treat these as discrete latency targets and continue
+to tune dense fairly. The existing C3/C1 chain is now checked out as
+`feat/c3-c1-integration` in the existing implementation worktree, preserving
+all predecessor branches and the original uncommitted strategy worktree.
+
+1. Review the combined C3/C1 diff and run the required suite with public
+   freMTPL2 data present. Fix integration blockers, then create one combined
+   PR against current `origin/master`. Keep larger-N and latency goals explicit
+   as unfinished work rather than describing the whole roadmap as complete.
+2. Use saved current-source profiles and independent code analysis to select
+   a bounded optimization. Dense candidates include weighted cross-product
+   scratch/layout and redundant owned-buffer copies during initial rendering;
+   dense matrices are already cached across fits. Discrete candidates must
+   address measured geometry or repeated row-pass costs. Do not infer a scaling
+   law from the one-shape thread screen or change stopping rules to hit time.
+3. Make each change with focused mathematical and ownership regressions,
+   including an unfixed demonstration. Preserve the chosen binned model and
+   record any intended change of representation separately. Retain independent
+   numerical correctness and dispatch assertions.
+4. Freeze the candidate source and run serial, fresh, complete-fit controls
+   with no overlapping tests or profiling. Record wall/CPU, process highwater
+   at fit end, outputs, iterations and separate untimed backend witnesses.
+   Use the established clock/warmup boundary. A bounded mixed-thread control
+   may test a concrete hypothesis; do not repeat a full sweep without cause.
+5. Confirm a qualifying candidate with three new fits, retaining every valid
+   sample and reporting median/range. Compare fairly tuned dense in the same
+   window. Only after the 15-second target is demonstrated start the 12.5-second
+   stage; neither target nor larger-N capacity is yet demonstrated.
+
+Numerical benchmarks remain paused while the integration test suite runs.
+Parallel agents own read-only C3/C1 integration review and separate dense and
+discrete cost analysis. The root owns integration and sequencing; benchmark
+control alone owns measurement windows.
+
 Status: the fair dense comparison is complete on current source `68bf3cd5`.
 Three new confirmations give medians of 18.379 seconds discrete (Numba 16,
 BLAS 1) and 22.136 seconds dense (BLAS 8, Numba 1): 16.97% less time and 50.79%
