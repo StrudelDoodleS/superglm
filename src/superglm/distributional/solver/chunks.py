@@ -320,24 +320,20 @@ def _predictor_values(
     *,
     include_offsets: bool,
     support_predictions=None,
-    sum_slopes_first: bool = False,
 ) -> NDArray[np.float64]:
     """Evaluate a chunk without preparing coefficient-space geometry.
 
     Ordinary groups consume their bounded row range directly. Refused groups
     retain the generic subset path, consumed immediately. Value-only line
     searches and convergence checks need neither a chunk DesignMatrix nor
-    retained PredictorExecutionPlans.
+    retained PredictorExecutionPlans. Sum the ordered slope contributions
+    before adding the intercept and offset, as geometry and prediction do.
     """
     eta = np.empty((len(rows.indices), len(layout.predictors)), dtype=np.float64)
     for state in layout.predictors:
         intercept = state.intercept_index is not None
         local = coefficients[state.coefficient_slice]
-        values = np.full(
-            len(rows.indices),
-            local[0] if intercept and not sum_slopes_first else 0.0,
-            dtype=np.float64,
-        )
+        values = np.zeros(len(rows.indices), dtype=np.float64)
         column = int(intercept)
         for group in state.design.group_matrices:
             width = group.shape[1]
@@ -354,7 +350,7 @@ def _predictor_values(
                 contribution = group.row_subset(rows.indices).matvec(group_coefficients)
             values += contribution
             column += width
-        if sum_slopes_first and intercept:
+        if intercept:
             if state.design.p:
                 values += local[0]
             else:
@@ -553,7 +549,6 @@ def iter_likelihood_chunks(
                 rows,
                 include_offsets=True,
                 support_predictions=support_predictions,
-                sum_slopes_first=True,
             )
             plans = range_plans
         try:

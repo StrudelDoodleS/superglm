@@ -1344,6 +1344,13 @@ def _cross_gram(
             and B_j.dtype == np.float64
             and (n_joint > _MAX_DISC_DISC_HIST_CELLS or 4 * row_work < 3 * hist_work)
         )
+        # Speculative rows change (B_i.T @ histogram(W)) @ B_j into
+        # B_i.T @ (W * B_j). Preserve the histogram's exponent behavior when
+        # its allocation fits; above the cap retain the bounded row fallback.
+        if use_rows and n_joint <= _MAX_DISC_DISC_HIST_CELLS:
+            use_rows = all(
+                _tensor_operand_in_reassociation_range(value) for value in (B_i, B_j, W[:, None])
+            )
         if use_rows or n_joint <= _MAX_DISC_DISC_HIST_CELLS:
             if use_rows:
                 raw = _support_support_raw_cross(B_i, gm_i.bin_idx, B_j, gm_j.bin_idx, W)
