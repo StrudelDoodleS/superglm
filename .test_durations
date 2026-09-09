@@ -2155,6 +2155,8 @@
     "tests/test_distributional_fit_state.py::test_successful_refit_swaps_one_complete_revision_after_validation": 0.044141776859760284,
     "tests/test_distributional_fused_trial.py::test_accepted_first_trial_does_not_repeat_the_likelihood_pass": 0.17,
     "tests/test_distributional_fused_trial.py::test_derivative_failure_releases_partial_trial_before_value_retry": 0.211,
+    "tests/test_distributional_fused_trial.py::test_fused_admission_keeps_exact_builtin_scope_with_other_replay_contracts[GammaLS]": 0.009,
+    "tests/test_distributional_fused_trial.py::test_fused_admission_keeps_exact_builtin_scope_with_other_replay_contracts[GaussianLS]": 0.008,
     "tests/test_distributional_fused_trial.py::test_fused_gaussian_cancellation_obeys_independent_backward_bounds[False]": 0.01,
     "tests/test_distributional_fused_trial.py::test_fused_gaussian_cancellation_obeys_independent_backward_bounds[True]": 0.009,
     "tests/test_distributional_fused_trial.py::test_gamma_unrepresentable_derivative_keeps_its_finite_value_screen": 0.013,

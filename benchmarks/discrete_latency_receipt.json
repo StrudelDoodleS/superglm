@@ -708,5 +708,810 @@
     "_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
     "c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
     "discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+  },
+  "fused_trial_checkpoint": {
+    "candidate_seconds_above_target": 0.5861180759966373,
+    "caveats": [
+      "One baseline/candidate pair, no replication, confidence interval or universal speed claim.",
+      "The 12.5-second target was not reached; no confirmation or dense control stage ran.",
+      "Unequal warmup (cold baseline compilation versus warm candidate cache) and pre-fit highwater preclude attributing the observed RSS difference to this fix. No causal memory-gain claim.",
+      "Fit-end and later process RSS are highwater measurements, not isolated live allocations.",
+      "Phase allocation changes because likelihood sums and geometry share work; individual phase times are not directly interchangeable across implementations.",
+      "A fused geometry return alone does not establish Armijo acceptance; retain optimizer/backtrack outputs.",
+      "The practical plateau termination is converged but smoothing-uncertified, consistently in both arms.",
+      "Intermediate smoothing/coefficient histories differ in nine scalar fields; the largest objective or likelihood difference is 2.3283064365386963e-10. All ten saved terminal arrays and full terminal result JSON are equal."
+    ],
+    "clock_contract": "Complete public fit_reml, including source compilation and optimizer work; identical public warmup before fit, post-fit diagnose after clocks/RSS/output capture.",
+    "decision": "Stop with this bounded fix and evidence; no confirmation or additional sweep.",
+    "fixture": {
+      "knots": 4,
+      "n": 1048576,
+      "n_bins": 256,
+      "name": "gaussian-fragmented",
+      "public": true,
+      "q": 102
+    },
+    "guards": {
+      "pair": {
+        "all_preflights_pass": true,
+        "all_workers_successful": true,
+        "manifest_complete": true,
+        "no_endpoint_flags": true
+      },
+      "witness": {
+        "all_preflights_pass": true,
+        "all_workers_successful": true,
+        "manifest_complete": true,
+        "no_endpoint_flags": true
+      }
+    },
+    "helper_sha256": {
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/cold-warmup-ae6a35d3-witness/capture_worker.py": "8ab35df2092bc265e173acef80d93d4f8820332e3cc3fa50259973e8e29a3f23",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/capture_worker.py": "f95fbe6ba7d0358e97208a5c11fd40596e40949abd3b1ab532a8dc1821be426f",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/fused-trial-prepared/plan.py": "074d2cc49e8860c7e3909b438bdeaade7d6de0c8db479eafa4a1117df88b9963",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/fused-trial-prepared/run.py": "6120930479e9bbbbe11bf4f48042c179b4dfcaea4f775ad6e6cae50fbf14c9ee",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/.benchmark-artifacts/discrete-performance/fused-trial-prepared/worker.py": "c8d39063361cb8c46298457b0e233c4e82e81470a6acc85001a38c651f5ff61e",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+      "/home/max/projects/superglm/.worktrees/discrete-performance/benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+    },
+    "observed_pair_wall_reduction_fraction": 0.08302588297623108,
+    "observed_pair_wall_reduction_seconds": 1.1848606060084421,
+    "ordered_timed_samples": [
+      {
+        "after_diagnose_highwater_bytes": 2333552640,
+        "after_output_highwater_bytes": 2333552640,
+        "after_representation_highwater_bytes": 2333552640,
+        "coefficient_fit_iterations": [
+          8,
+          2,
+          2,
+          2,
+          1,
+          1,
+          0,
+          0
+        ],
+        "converged": true,
+        "diagnose_findings": [
+          {
+            "code": "fit.termination_uncertified",
+            "headline": "The fit used practical REML convergence, not strict stationarity.",
+            "severity": "info"
+          },
+          {
+            "code": "smoothing.trajectory_unsettled",
+            "headline": "Practical REML stopped before strict smoothing stationarity.",
+            "severity": "info"
+          },
+          {
+            "code": "smoothing.update_dominance",
+            "headline": "Penalty component 'scale:curve:group[level2]#wiggle' dominated accepted smoothing movement.",
+            "severity": "warning"
+          }
+        ],
+        "diagnose_fit_status": "converged_uncertified",
+        "diagnose_seconds_outside_fit": 0.0012384130095597357,
+        "fit_cpu_seconds": 66.795287101,
+        "fit_end_process_highwater_bytes": 2298585088,
+        "fit_wall_seconds": 14.27097868200508,
+        "label": "baseline-discrete",
+        "phase_snapshot": {
+          "counts": {
+            "coefficient_decomposition_solve": 16,
+            "curvature_gradient_assembly": 17,
+            "dense_predictor_matrices": 0,
+            "efs_update_backtracking": 30,
+            "fit_total": 1,
+            "frame_normalization": 1,
+            "inference_edf": 1,
+            "initialization": 8,
+            "layout_penalty_assembly": 9,
+            "likelihood_evaluation": 42,
+            "newton_endgame": 0,
+            "predictor_compilation": 1,
+            "serialization": 0,
+            "terminal_observed_retry_fallback": 8
+          },
+          "seconds": {
+            "coefficient_decomposition_solve": 0.036220502996002324,
+            "curvature_gradient_assembly": 6.564941745979013,
+            "dense_predictor_matrices": 0.0,
+            "efs_update_backtracking": 0.018040783994365484,
+            "fit_total": 14.251271647997783,
+            "frame_normalization": 3.889099752996117e-05,
+            "inference_edf": 0.3233934430027148,
+            "initialization": 1.9006296489824308,
+            "layout_penalty_assembly": 0.0010269749909639359,
+            "likelihood_evaluation": 2.087841376051074,
+            "newton_endgame": 0.0,
+            "predictor_compilation": 2.7833521330030635,
+            "serialization": 0.0,
+            "terminal_observed_retry_fallback": 0.5791644209821243
+          }
+        },
+        "pre_fit_process_highwater_bytes": 1129091072,
+        "smoothing_certified": false,
+        "smoothing_reason": "practical_plateau",
+        "source_sha": "51d530702d40e230919fc9dff37287f7d186a6b1",
+        "source_tree_sha256": "ac0a89ccc89d3f37f66159ac5ad771d8847ce10515b1e6982836fc569f49d33c",
+        "warmup_seconds_outside_fit": 33.587511543999426,
+        "work": {
+          "backtracked_proposals": 0,
+          "coefficient_fits": 8,
+          "inner_iterations": 16,
+          "outer_iterations": 7,
+          "rejected_proposals": 0
+        }
+      },
+      {
+        "after_diagnose_highwater_bytes": 2035523584,
+        "after_output_highwater_bytes": 2035523584,
+        "after_representation_highwater_bytes": 2035523584,
+        "coefficient_fit_iterations": [
+          8,
+          2,
+          2,
+          2,
+          1,
+          1,
+          0,
+          0
+        ],
+        "converged": true,
+        "diagnose_findings": [
+          {
+            "code": "fit.termination_uncertified",
+            "headline": "The fit used practical REML convergence, not strict stationarity.",
+            "severity": "info"
+          },
+          {
+            "code": "smoothing.trajectory_unsettled",
+            "headline": "Practical REML stopped before strict smoothing stationarity.",
+            "severity": "info"
+          },
+          {
+            "code": "smoothing.update_dominance",
+            "headline": "Penalty component 'scale:curve:group[level2]#wiggle' dominated accepted smoothing movement.",
+            "severity": "warning"
+          }
+        ],
+        "diagnose_fit_status": "converged_uncertified",
+        "diagnose_seconds_outside_fit": 0.0011494049977045506,
+        "fit_cpu_seconds": 68.089209318,
+        "fit_end_process_highwater_bytes": 2025353216,
+        "fit_wall_seconds": 13.086118075996637,
+        "label": "candidate-discrete",
+        "phase_snapshot": {
+          "counts": {
+            "coefficient_decomposition_solve": 16,
+            "curvature_gradient_assembly": 18,
+            "dense_predictor_matrices": 0,
+            "efs_update_backtracking": 30,
+            "fit_total": 1,
+            "frame_normalization": 1,
+            "inference_edf": 1,
+            "initialization": 8,
+            "layout_penalty_assembly": 9,
+            "likelihood_evaluation": 26,
+            "newton_endgame": 0,
+            "predictor_compilation": 1,
+            "serialization": 0,
+            "terminal_observed_retry_fallback": 8
+          },
+          "seconds": {
+            "coefficient_decomposition_solve": 0.03872465401946101,
+            "curvature_gradient_assembly": 7.113858763012104,
+            "dense_predictor_matrices": 0.0,
+            "efs_update_backtracking": 0.017125248996308073,
+            "fit_total": 13.063691133997054,
+            "frame_normalization": 6.428000051528215e-05,
+            "inference_edf": 0.34134500900108833,
+            "initialization": 1.3039214399759658,
+            "layout_penalty_assembly": 0.0012737300130538642,
+            "likelihood_evaluation": 1.0976121390558546,
+            "newton_endgame": 0.0,
+            "predictor_compilation": 2.6151853690098505,
+            "serialization": 0.0,
+            "terminal_observed_retry_fallback": 0.5966315439727623
+          }
+        },
+        "pre_fit_process_highwater_bytes": 1027301376,
+        "smoothing_certified": false,
+        "smoothing_reason": "practical_plateau",
+        "source_sha": "06e1ccff93cf193a7aaa26949975efdac9c9032f",
+        "source_tree_sha256": "a40119f12edd73d798633c04de7a8f07d2bc88a25316d78dfab67edf594960be",
+        "warmup_seconds_outside_fit": 0.9095046180009376,
+        "work": {
+          "backtracked_proposals": 0,
+          "coefficient_fits": 8,
+          "inner_iterations": 16,
+          "outer_iterations": 7,
+          "rejected_proposals": 0
+        }
+      }
+    ],
+    "raw_directory": ".benchmark-artifacts/discrete-performance/fused-trial-prepared",
+    "raw_sha256": {
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.audit.json": "1470629e32fceca36da0cc77ab06672a23277b5f5da7b33072f8dc26bb44f697",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.capture.json": "43732c9db11b2516d792a66fa85e120e35f06f4bf2d948f49f52cd188124c171",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.json": "8d3ed7256d21ecd78d88a50e948b6ce7bdf4f6ec78a99d27af004d8b8ad12ef2",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-discrete.trial.json": "d1984089947d956f161403e9a1f58fdb0bf6eded5e274149f836a48db4671284",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.audit.json": "88df7211e8fa7b746816c0c22d8dd21314455cc8fc6b7fc0e4f77db140dcdbd5",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.capture-start.json": "11bbbbc3f810d41526f6085877061eb2837727f30de6b2cf2b49db525c6c4f92",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.capture.json": "ee268f2f2b2025ec0b5505e87c66db8ef9c88a8b61e97b3b6ae218f444ed4c77",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.json": "5da837fd01e2d922a466470a205c0a41d1e4e45df8741db342bf6f829dfcce5f",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/baseline-witness.trial.json": "11af75ebf4f2f0a2199bec1419871f643c41b916b38d60952ae87d8a56244711",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.audit.json": "1feae1248b8fd1ee4df6c4cd5b1a02afa246b8c4bff52a91de0fb568ecee0b4f",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.capture-start.json": "5a135a8d503e5d74f5d1f8c94837e3fd0c6a70203d55eef4d41ae42a0542c6d3",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.capture.json": "de1230b150fc23555c4a3d190dac352096c5e3471fec66f7048e65ffa9b20c7b",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.json": "c4c23c14b234a2bece08c0a2dd99f157c74f1b8366a3720679785cd382491572",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-discrete.trial.json": "c65c6dcd4c25419f3eaadeb81be197d33c7e84e98d637efba111ccb1f724e5f9",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.audit.json": "423a3f644893f8af6209b06f235976bf35aecb3f71bc6658edf389f0e2fcd8ec",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.capture-start.json": "11bbbbc3f810d41526f6085877061eb2837727f30de6b2cf2b49db525c6c4f92",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.capture.json": "647a0b7244ac1fa496494861e4e0a9ba41880700d9d8dc68815bb1d24afec598",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.json": "6bbd11482e503adf4fdfb1701d7dc6a7d34da645d1e8110a3291809803fadd8d",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.npz": "cf58c9abe606bfd6c1082b24fc5642dde6fb24cdbba3e9ab07ce41a47f5282b0",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/candidate-witness.trial.json": "dcb2c2f579a7a5577b7aa1ba3c5518e0a80adf7d225bbc4b90c6ac4da3bf08a8",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/pair.manifest.json": "09877c2e4907f71a639d8e4834c035441a47afd9088804b5b44c9c2d060edcaa",
+      ".benchmark-artifacts/discrete-performance/fused-trial-prepared/witness.manifest.json": "4a935a65bb8105b97feebfb3aaf17a43139a9ece42bf46812f3ed2e0ab69c5cb"
+    },
+    "schema": "superglm.discrete_latency.fused_trial.v1",
+    "status": "single_pair_improvement_target_not_reached",
+    "target_seconds": 12.5,
+    "thread_contract": {
+      "GOMP_SPINCOUNT": "unset",
+      "OMP_WAIT_POLICY": "unset",
+      "discrete_blas": 1,
+      "native": 16
+    },
+    "timed_pair_comparison": {
+      "all_saved_arrays_numerically_equal": true,
+      "arrays": {
+        "coefficients": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1.7338786850498709,
+          "shape": [
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "covariance": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 0.005337535160880681,
+          "shape": [
+            102,
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "edf": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 90.72691502018931,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "holdout_parameters": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 57.2985273929743,
+          "shape": [
+            2000,
+            2
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "log_likelihood": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1168908.7726277818,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "objective": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1169341.9658859293,
+          "shape": [],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "smoothing_parameters": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1776.5943179142241,
+          "shape": [
+            10
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "terminal_penalized_curvature": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 9918081.81233437,
+          "shape": [
+            102,
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "terminal_score": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 0.029716141825631016,
+          "shape": [
+            102
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        },
+        "train_parameters": {
+          "difference_norm": 0.0,
+          "max_absolute_difference": 0.0,
+          "norm_relative_difference": 0.0,
+          "reference_norm": 1331.6810171913978,
+          "shape": [
+            1048576,
+            2
+          ],
+          "status": "descriptive_difference",
+          "zero_reference_norm": false
+        }
+      },
+      "coefficient_fits_equal": false,
+      "fixture_equal": true,
+      "full_result_equal": true,
+      "other": "candidate-discrete",
+      "reference": "baseline-discrete",
+      "smoothing_equal": false,
+      "stored_representation_equal": true
+    },
+    "untimed_witnesses": [
+      {
+        "acceptance_caveat": "Generator resumes are not counted as new passes. Geometry-returned does not imply Armijo acceptance; unchanged solver iteration/backtrack records decide acceptance. Profiling witness timings are excluded.",
+        "all_streams_complete": true,
+        "batch_worker_observations": {
+          "actual_workers:16": 272,
+          "calls": 272,
+          "paired_active_rows": 130702188,
+          "paired_targets:10": 272
+        },
+        "global_finishes": 17,
+        "global_peak_estimate_bytes": 58406496,
+        "global_stats_totals": {
+          "batched_moment_calls": 272,
+          "chunks": 272,
+          "refusal_count": 0,
+          "rows": 17825792
+        },
+        "label": "baseline-witness",
+        "likelihood_stream_count": 17,
+        "native_dispatch_calls": {
+          "_accumulate_batched": 272
+        },
+        "native_moment_workers": [
+          16
+        ],
+        "native_signatures_after_fit": {
+          "_accumulate_batched": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ],
+          "_accumulate_batched_strided": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'A', True, aligned=True), Array(float64, 2, 'A', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ]
+        },
+        "native_signatures_at_fit_entry": {
+          "_accumulate_batched": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ],
+          "_accumulate_batched_strided": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'A', True, aligned=True), Array(float64, 2, 'A', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ]
+        },
+        "phase_counts": {
+          "coefficient_decomposition_solve": 16,
+          "curvature_gradient_assembly": 17,
+          "dense_predictor_matrices": 0,
+          "efs_update_backtracking": 30,
+          "fit_total": 1,
+          "frame_normalization": 1,
+          "inference_edf": 1,
+          "initialization": 8,
+          "layout_penalty_assembly": 9,
+          "likelihood_evaluation": 42,
+          "newton_endgame": 0,
+          "predictor_compilation": 1,
+          "serialization": 0,
+          "terminal_observed_retry_fallback": 8
+        },
+        "runtime_guards_passed": true,
+        "stream_classes": {
+          "observed:range=True": 17
+        },
+        "stream_total_chunks": 272,
+        "stream_total_rows": 17825792,
+        "timing_status": "untimed dispatch/pass witness",
+        "trial_counts": {
+          "_evaluate_state_unmeasured:calls": 19,
+          "_measured_geometry:calls": 18,
+          "assemble_chunked_geometry:calls": 17,
+          "evaluate_chunked_log_likelihood:calls": 18,
+          "natural_derivative_order:0:calls": 288,
+          "natural_derivative_order:0:rows": 18874368,
+          "natural_derivative_order:2:calls": 273,
+          "natural_derivative_order:2:rows": 18874368,
+          "predictor_values:_reuse_observed_initial_result:chunks": 112,
+          "predictor_values:_reuse_observed_initial_result:rows": 7340032,
+          "predictor_values:evaluate_chunked_log_likelihood:chunks": 288,
+          "predictor_values:evaluate_chunked_log_likelihood:rows": 18874368,
+          "predictor_values:iter_likelihood_chunks:chunks": 272,
+          "predictor_values:iter_likelihood_chunks:rows": 17825792,
+          "predictor_values:materialize_terminal_predictions:chunks": 128,
+          "predictor_values:materialize_terminal_predictions:rows": 8388608,
+          "predictor_values:maximum_chunked_predictor_change:chunks": 256,
+          "predictor_values:maximum_chunked_predictor_change:rows": 16777216
+        }
+      },
+      {
+        "acceptance_caveat": "Generator resumes are not counted as new passes. Geometry-returned does not imply Armijo acceptance; unchanged solver iteration/backtrack records decide acceptance. Profiling witness timings are excluded.",
+        "all_streams_complete": true,
+        "batch_worker_observations": {
+          "actual_workers:16": 288,
+          "calls": 288,
+          "paired_active_rows": 138390552,
+          "paired_targets:10": 288
+        },
+        "global_finishes": 18,
+        "global_peak_estimate_bytes": 58406496,
+        "global_stats_totals": {
+          "batched_moment_calls": 288,
+          "chunks": 288,
+          "refusal_count": 0,
+          "rows": 18874368
+        },
+        "label": "candidate-witness",
+        "likelihood_stream_count": 18,
+        "native_dispatch_calls": {
+          "_accumulate_batched": 288
+        },
+        "native_moment_workers": [
+          16
+        ],
+        "native_signatures_after_fit": {
+          "_accumulate_batched": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ],
+          "_accumulate_batched_strided": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'A', True, aligned=True), Array(float64, 2, 'A', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ]
+        },
+        "native_signatures_at_fit_entry": {
+          "_accumulate_batched": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', True, aligned=True), Array(float64, 2, 'C', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ],
+          "_accumulate_batched_strided": [
+            "(Array(int64, 2, 'C', True, aligned=True), ListType(Array(float64, 2, 'C', False, aligned=True)), ListType(Array(float64, 1, 'C', False, aligned=True)), ListType(Array(float64, 2, 'C', False, aligned=True)), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'A', True, aligned=True), Array(float64, 2, 'A', True, aligned=True), int64, int64, int64, Array(int64, 1, 'C', False, aligned=True), int64)"
+          ]
+        },
+        "phase_counts": {
+          "coefficient_decomposition_solve": 16,
+          "curvature_gradient_assembly": 18,
+          "dense_predictor_matrices": 0,
+          "efs_update_backtracking": 30,
+          "fit_total": 1,
+          "frame_normalization": 1,
+          "inference_edf": 1,
+          "initialization": 8,
+          "layout_penalty_assembly": 9,
+          "likelihood_evaluation": 26,
+          "newton_endgame": 0,
+          "predictor_compilation": 1,
+          "serialization": 0,
+          "terminal_observed_retry_fallback": 8
+        },
+        "runtime_guards_passed": true,
+        "stream_classes": {
+          "observed:range=True": 18
+        },
+        "stream_total_chunks": 288,
+        "stream_total_rows": 18874368,
+        "timing_status": "untimed dispatch/pass witness",
+        "trial_counts": {
+          "_assemble_chunked_geometry:calls": 18,
+          "_evaluate_chunked_geometry:calls": 16,
+          "_evaluate_fused_trial:calls": 16,
+          "_evaluate_fused_trial:geometry_returned": 16,
+          "_evaluate_state_unmeasured:calls": 3,
+          "_fused_first_trial_eligible:calls": 16,
+          "_fused_first_trial_eligible:return:True": 16,
+          "_measured_geometry:calls": 3,
+          "assemble_chunked_geometry:calls": 2,
+          "evaluate_chunked_log_likelihood:calls": 2,
+          "natural_derivative_order:0:calls": 32,
+          "natural_derivative_order:0:rows": 2097152,
+          "natural_derivative_order:2:calls": 289,
+          "natural_derivative_order:2:rows": 19922944,
+          "predictor_values:_reuse_observed_initial_result:chunks": 112,
+          "predictor_values:_reuse_observed_initial_result:rows": 7340032,
+          "predictor_values:evaluate_chunked_log_likelihood:chunks": 32,
+          "predictor_values:evaluate_chunked_log_likelihood:rows": 2097152,
+          "predictor_values:iter_likelihood_chunks:chunks": 288,
+          "predictor_values:iter_likelihood_chunks:rows": 18874368,
+          "predictor_values:materialize_terminal_predictions:chunks": 128,
+          "predictor_values:materialize_terminal_predictions:rows": 8388608,
+          "predictor_values:maximum_chunked_predictor_change:chunks": 256,
+          "predictor_values:maximum_chunked_predictor_change:rows": 16777216
+        }
+      }
+    ],
+    "witness_output_comparisons": [
+      {
+        "all_saved_arrays_numerically_equal": true,
+        "arrays": {
+          "coefficients": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1.7338786850498709,
+            "shape": [
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "covariance": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 0.005337535160880681,
+            "shape": [
+              102,
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "edf": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 90.72691502018931,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "holdout_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 57.2985273929743,
+            "shape": [
+              2000,
+              2
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "log_likelihood": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1168908.7726277818,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "objective": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1169341.9658859293,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "smoothing_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1776.5943179142241,
+            "shape": [
+              10
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "terminal_penalized_curvature": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 9918081.81233437,
+            "shape": [
+              102,
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "terminal_score": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 0.029716141825631016,
+            "shape": [
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "train_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1331.6810171913978,
+            "shape": [
+              1048576,
+              2
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          }
+        },
+        "coefficient_fits_equal": true,
+        "fixture_equal": true,
+        "full_result_equal": true,
+        "other": "baseline-witness",
+        "reference": "baseline-discrete",
+        "smoothing_equal": true,
+        "stored_representation_equal": true
+      },
+      {
+        "all_saved_arrays_numerically_equal": true,
+        "arrays": {
+          "coefficients": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1.7338786850498709,
+            "shape": [
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "covariance": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 0.005337535160880681,
+            "shape": [
+              102,
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "edf": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 90.72691502018931,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "holdout_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 57.2985273929743,
+            "shape": [
+              2000,
+              2
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "log_likelihood": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1168908.7726277818,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "objective": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1169341.9658859293,
+            "shape": [],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "smoothing_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1776.5943179142241,
+            "shape": [
+              10
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "terminal_penalized_curvature": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 9918081.81233437,
+            "shape": [
+              102,
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "terminal_score": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 0.029716141825631016,
+            "shape": [
+              102
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          },
+          "train_parameters": {
+            "difference_norm": 0.0,
+            "max_absolute_difference": 0.0,
+            "norm_relative_difference": 0.0,
+            "reference_norm": 1331.6810171913978,
+            "shape": [
+              1048576,
+              2
+            ],
+            "status": "descriptive_difference",
+            "zero_reference_norm": false
+          }
+        },
+        "coefficient_fits_equal": true,
+        "fixture_equal": true,
+        "full_result_equal": true,
+        "other": "candidate-witness",
+        "reference": "candidate-discrete",
+        "smoothing_equal": true,
+        "stored_representation_equal": true
+      }
+    ]
   }
 }

@@ -1,5 +1,54 @@
 # Discrete execution performance
 
+## Fused first-trial evaluation
+
+At `06e1ccff`, eligible Gaussian/Gamma chunked fits obtain a trial's likelihood
+and geometry in the same stream, reusing geometry if Armijo accepts the step.
+Later backtracks and unsupported contracts retain their existing evaluation.
+Typed numerical refusal preserves value retry without hiding malformed inputs;
+failure-only validation keeps live-source errors authoritative. Nineteen focused
+regressions and independent review cover these boundaries, cancellation bounds,
+weights/offsets, cleanup and small complete fits.
+
+One fresh public million-row q102 comparison takes **14.271 seconds before and
+13.086 seconds after**, an observed 8.30% reduction. Both use BLAS1/native16 and
+the same complete-fit clock. All ten saved final arrays, the full final result and stored representation
+agree exactly. Intermediate coefficient-fit/smoothing records differ in nine
+scalar fields, with maximum absolute objective/likelihood difference 2.33e-10;
+these are descriptive differences. Both finish
+with 16 inner iterations and seven smoothing updates at `practical_plateau`;
+`diagnose()` retains the same convergence classification and findings.
+
+The separate witnesses reduce standalone chunked likelihood evaluations from
+18 to two. Sixteen first-trial geometry evaluations replace the duplicate value
+passes; one rejected coefficient trial adds geometry work, so total geometries
+rise from 17 to 18. This reduces row passes without changing the asymptotic
+order in N or the binned statistical model. Both witnesses match their timed
+outputs exactly. Native calls rise from 272 to 288, using 16 workers with zero
+global refusals or new native signatures; accepted endpoint reuse remains.
+The combined scalar/geometry predictor pass count falls from 35 to 20.
+
+Fit-end process highwater is 2,298,585,088 / 2,025,353,216 bytes; later output
+highwater is 2,333,552,640 / 2,035,523,584 bytes. These are recorded observations,
+not a memory-gain claim: baseline warmup compiled in its new checkout and took
+33.588 seconds, versus 0.910 seconds using the candidate's existing cache.
+Warmup is outside both fit clocks, but its allocations affect process highwater.
+CPU time is 66.795 / 68.089 seconds. All source, helper, memory and activity
+guards pass.
+
+This is one pair, not a replicated speed estimate. The **12.5-second target
+remains unmet**; the earlier repeated 15-second confirmation remains the
+established milestone. Retain this bounded fix and its evidence without another
+optimization or thread sweep. The tracked latency receipt preserves the full
+comparison, clock boundaries and independent dispatch records.
+
+The final dependency fix moves the unchanged exact-family predicate into the
+existing likelihood helper, preserving the module dependency rules and all
+admission conditions. The measurements above remain pinned to `06e1ccff`.
+After that relocation, 632 surrounding solver, family, geometry and architecture
+regressions pass, including 21 fused-trial/admission cases. Ruff, scoped typing,
+lock/dependency checks, the smoke script and strict documentation build pass.
+
 ## Initial N-by-width complete-fit diagnostic
 
 Eight fresh fits at `751df3db` vary rows and spline width independently, keeping
@@ -50,8 +99,8 @@ in both arms; earlier campaigns did not establish its inherited value. Keep
 this control separate from the grid and historical confirmation medians.
 
 The 15-second target remains confirmed by the repeated measurements below;
-12.5 seconds remains open. The grid supplies initial scaling evidence while
-the next optimization targets duplicated accepted-point evaluation work.
+12.5 seconds remains open. The grid supplies initial scaling evidence; the
+subsequent first-trial fusion checkpoint is reported above.
 
 ## Current checkpoint: 15 seconds confirmed
 

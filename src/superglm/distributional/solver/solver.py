@@ -11,8 +11,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.solver.chunks as chunking
-from superglm.distributional.families.gamma import GammaLS
-from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import (
     ConfigurableDistributionalFamily,
     DistributionalFamily,
@@ -36,6 +34,7 @@ from superglm.distributional.result import (
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.solver._likelihood_cache import (
+    _is_builtin_gaussian_gamma,
     _LikelihoodCache,
     build_likelihood_cache,
 )
@@ -763,7 +762,7 @@ def _fused_first_trial_eligible(context: _SolverContext) -> bool:
     contract = _likelihood_reuse_contract(context.family)
     return bool(
         context.chunk_size is not None
-        and type(context.family) in (GaussianLS, GammaLS)
+        and _is_builtin_gaussian_gamma(context.family)
         and contract is not None
         and contract.deterministic_chunk_replay
         and type(context.likelihood_plan) is contract.plan_type

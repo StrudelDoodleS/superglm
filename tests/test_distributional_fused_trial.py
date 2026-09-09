@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from superglm._frame import as_eager_frame
+from superglm.distributional import family as family_api
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
@@ -286,6 +287,28 @@ def test_live_layout_link_replacement_refuses_fused_admission():
         ),
     )
     assert not solver_api._fused_first_trial_eligible(replace(context, layout=layout))
+
+
+@pytest.mark.parametrize("family_type", [GaussianLS, GammaLS])
+def test_fused_admission_keeps_exact_builtin_scope_with_other_replay_contracts(
+    monkeypatch, family_type
+):
+    context, _ = _context(_family_problem(family_type))
+    assert solver_api._fused_first_trial_eligible(context)
+    contract = family_api._likelihood_reuse_contract(context.family)
+    assert contract is not None and contract.deterministic_chunk_replay
+
+    class CustomFamily(family_type):
+        pass
+
+    class OtherReplayFamily:
+        pass
+
+    for other_type in (CustomFamily, OtherReplayFamily):
+        # A separate replay declaration must not widen this first-trial scope,
+        # even when its bound plan, weights and links satisfy every other guard.
+        monkeypatch.setitem(family_api._LIKELIHOOD_REUSE_CONTRACTS, other_type, contract)
+        assert not solver_api._fused_first_trial_eligible(replace(context, family=other_type()))
 
 
 def test_nonfinite_completed_likelihood_sums_refuse_only_the_fused_trial(monkeypatch):

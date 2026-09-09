@@ -1,6 +1,6 @@
 # Discrete execution performance plan
 
-## Active checkpoint: 15 seconds confirmed, then 12.5 seconds
+## Closing checkpoint: 15 seconds confirmed; 12.5 seconds open
 
 The 15-second fit target is demonstrated at `37f4ecdb`: three new fits take
 14.807340, 14.825610 and 14.991532 seconds (median 14.825610). Fresh dense
@@ -102,7 +102,7 @@ Retain the default waiting policy. Earlier campaign inheritance of
 `GOMP_SPINCOUNT` was not established; this explicitly cleared pair must remain
 distinct from those observations.
 
-The next implementation fuses the first trial's value and geometry evaluation. The audit locates
+The implementation fuses the first trial's value and geometry evaluation. The audit locates
 the duplicate pass in `_evaluate_state_unmeasured` followed by the accepted
 trial's `_measured_geometry`; `iter_likelihood_chunks` already supplies the
 optimizing-likelihood and carrier arrays. The disjoint value predictor, link
@@ -140,18 +140,34 @@ independent cancellation bounds, weights/offsets, small Gaussian/Gamma fits,
 fallback cleanup and live-source mutation. A private `ValueError` subclass
 distinguishes Gamma's numerical derivative refusal from malformed inputs;
 failure-only source validation preserves hard-error priority before a value
-retry. Whole-source Ruff checks pass. Complete-fit measurement against
-`51d53070` is the next gate; no new latency gain is claimed yet.
+retry. Whole-source Ruff checks pass. The bounded comparison at `06e1ccff`
+against `51d53070` is complete: 14.271 versus 13.086 seconds, all ten final
+arrays and final results exactly equal, and unchanged iteration counts.
+Intermediate objective/likelihood records differ by at most 2.33e-10.
+Separate witnesses observe 35 versus 20 scalar/geometry predictor passes,
+16-worker native execution and zero global refusals. Unequal warmup/cache
+allocations prevent attributing the RSS difference to this fix. Retain this
+single pair without claiming replicated speed or reaching 12.5 seconds.
+The user has chosen to close this checkpoint with fixes, evidence, regression
+checks and integration; further optimization and expanded sweeps are deferred.
+
+Final integration exposed one dependency-rule violation: direct family imports
+in the solver. The exact-family predicate now resides in the existing likelihood
+helper, with unchanged admission behavior. The architecture test remains intact;
+632 surrounding regressions pass, including 21 fused/admission cases and all
+seven architecture tests. Ruff, scoped typing, lock/dependency checks, the smoke
+script and strict documentation build pass. Benchmarks retain their exact
+`06e1ccff` source pin before this helper relocation.
 
 The user has chosen sequential complete-fit targets of **15 seconds**, then
 **12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,
 four knots and 256 bins. Treat these as discrete latency targets and continue
 to tune dense fairly. The existing C3/C1 chain and validated latency follow-ups
-are consolidated in the same PR on `feat/c3-c1-integration`, advanced to
-`4e1edda6`. Integration review found no blockers; all applicable CI checks pass
-on that head, including both complete Python 3.12 suites, all four Python 3.14
-regression groups and the required public real-data suites.
-Further latency work continues on `feat/c1-fit-latency` in the same
+are consolidated in the same PR on `feat/c3-c1-integration`. All applicable CI
+checks passed at `4e1edda6`, including both complete Python 3.12 suites, all four
+Python 3.14 regression groups and the required public real-data suites. The
+final helper relocation fixes the later architecture check; the PR runs CI again
+on the final head. The implementation remains on `feat/c1-fit-latency` in the same
 implementation worktree, preserving all predecessor worktrees and the original
 uncommitted strategy documents.
 

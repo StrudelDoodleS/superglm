@@ -257,7 +257,7 @@ smoothing iterations and `practical_plateau`. This is one shape on one machine,
 with screen-selected settings and standard warmup excluded. It establishes a
 moderate time advantage and a larger memory advantage, not a general optimum,
 an mgcv comparison or a whole-fit bounded-memory guarantee. Larger-N capacity,
-n-by-q validation and automatic threading remain C1 work. See the
+broader n-by-q validation and automatic threading remain C1 work. See the
 [thread receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_thread_screen_receipt.json).
 
 The selected latency targets are 15 seconds, then 12.5 seconds, on this
@@ -271,7 +271,7 @@ factors while preserving row summation order. A two-BLAS-thread control is
 slower. Two explicit native signatures fix the cold public-warmup regression:
 a controlled fresh-cache pair at `ae6a35d3` reduces warmup 84.367 to 32.944
 seconds, with exactly equal outputs and no new fit-time gain claimed.
-The next work pursues 12.5 seconds. Keep larger-N capacity, controlled N-by-q
+The 12.5-second target remains open. Keep larger-N capacity, controlled N-by-q
 scaling and general thread policy distinct from this latency result.
 Linear aggregation in N is compatible with BAM-style marginal discretization;
 the scaling target is cheaper row passes and reduced basis-width dependence,
@@ -291,8 +291,15 @@ use the same iteration counts within each cell; single samples and changing
 iterations across cells limit scaling-law claims. The untimed q222 witness
 confirms actual grouped execution and exactly equal saved outputs. A separate
 PASSIVE OpenMP control lowers CPU but increases fit time, so retain the default
-waiting policy. The 12.5-second target remains open; next inspect duplicated
-accepted-point value/geometry work.
+waiting policy. Fusing first-trial likelihood and geometry at `06e1ccff` reduces
+one complete-fit comparison from 14.271 to 13.086 seconds, with exactly equal
+final arrays and unchanged iterations. Separate witnesses observe 15 fewer
+combined scalar/geometry predictor passes. Intermediate objective records differ
+by at most 2.33e-10. This is one pair, not a replicated speed estimate; unequal
+warmup/cache allocations prevent attributing its RSS difference to the fix.
+The 12.5-second target remains unmet. Close this implementation checkpoint with
+its edge-case regressions and evidence; further optimization, larger-N capacity
+and general thread-policy work remain deferred rather than claimed complete.
 
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,

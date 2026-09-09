@@ -203,10 +203,15 @@ def _include_buffer_ownership(snapshot, excluded):
             _include_buffer_ownership(item, excluded)
 
 
+def _is_builtin_gaussian_gamma(family: object) -> bool:
+    """Exact adapter types admitted by the bounded likelihood optimizations."""
+    return type(family) in (GaussianLS, GammaLS)
+
+
 def _eligible(family, plan):
     contract = _likelihood_reuse_contract(family)
     return (
-        type(family) in (GaussianLS, GammaLS)
+        _is_builtin_gaussian_gamma(family)
         and contract is not None
         and contract.deterministic_chunk_replay
         and type(plan) is contract.plan_type
