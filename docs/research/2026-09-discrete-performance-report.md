@@ -49,6 +49,43 @@ row-level work across every expanded basis coefficient and the full dense
 N-by-q design. Likelihood evaluation and retained inputs still scale linearly
 with N. This one-shape benchmark is not an empirical N-by-q scaling curve.
 
+For an admitted stored support group, write its row as `X_g[i] = T_g[b_g(i)]`,
+with inactive rows zero. If `H_gh[r,s]` is the sum of the signed curvature
+weights over observations in bin pair `(r,s)`, then the exact identity is
+`X_g.T @ diag(w) @ X_h = T_g.T @ H_gh @ T_h`. With `d_g` coefficients and
+`m_g` bins in group g, a dense group-pair product costs `O(N d_g d_h)`;
+the implemented histogram and left-to-right contraction cost
+`O(N + d_g m_g m_h + d_g m_h d_h)`, plus table initialization. The basis-width
+product leaves the observation loop. This is a structural reduction relative
+to the materialized dense LSS reference; scalar support paths already use
+related identities and must not be assigned that dense bound universally.
+
+The number of support pairs can still grow quadratically with the number of
+terms. Ordinary blocks retain their row-by-width products, bin tables have
+their own dimension costs, and coefficient factorization remains roughly
+cubic in q. At fixed model and bin dimensions, both current fit routes remain
+linear in N per evaluation. The implementation does not aggregate the whole
+optimization into a smaller set of joint rows. The exact identity applies to
+the chosen binned design; discretization error against the unbinned model and
+floating-point accumulation error are separate. The signed, masked and
+cancellation regression oracles check the latter against independent stored
+rows and dimension/epsilon/absolute-product bounds.
+
+The next category-placement discriminator at `beabd523` is negative for
+latency in its single fixed-channel comparison. Moving the categorical columns
+into exact identity supports reduces ordinary width 16 to 7 but raises support
+pair targets 45 to 153. Constructor-inclusive geometry takes **0.308186 versus
+0.319262 seconds**, with CPU **3.235533 versus 4.136897 seconds**. Both process
+all 1,048,576 rows with 16 native workers and zero refusals. Estimated owned
+array peaks are 58,406,496 and 49,324,368 bytes, including the bounded adapter
+scratch; the same worker's monotonic RSS cannot establish separate arm peaks.
+Nineteen independent small oracle/mutation checks pass. Large-case score and
+curvature norm-relative differences are 7.73e-15 and 9.00e-13, and the penalty
+is exact; those large-case comparisons are descriptive, not cancellation-safe
+certificates. No fit was run. Retain the experiment in the latency receipt and
+defer this placement change for the current target, without inferring universal
+inferiority or discarding its possible workspace benefit.
+
 ## Earlier screen: parallel live-source certification
 
 The first fresh complete-fit comparison of parallel live-source certification

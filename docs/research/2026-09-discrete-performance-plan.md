@@ -35,14 +35,24 @@ calls, zero strided calls and one signature per dispatcher without growth.
 Retain the cache scope, startup clocks and all raw observations separately from
 warmed confirmations.
 
-The next algorithmic discriminator is the previously unrun categorical-support
-placement idea. Current ordinary score/weight/Gram work occupies approximately
+The categorical-support placement discriminator is now complete at `beabd523`.
+Current ordinary score/weight/Gram work occupies approximately
 2.888 diagnostic seconds after removing the watched native batch. Moving the
 fixture's categorical columns into tiny identity supports reduces ordinary
 width 16 to 7 while increasing histogram targets 45 to 153. This preserves the
 stored design and adds no binning; added histogram scans may offset the smaller
-Gram products. Prepare one constructor-inclusive fixed-channel geometry
-comparison before production integration or a full-fit performance claim.
+Gram products. One constructor-inclusive fixed-channel geometry comparison
+takes 0.308186 seconds for the current representation and 0.319262 seconds for
+category supports. CPU rises from 3.235533 to 4.136897 seconds. Estimated owned
+array peaks fall from 58,406,496 to 49,324,368 bytes, including adapter scratch;
+the paired worker's monotonic process highwater cannot establish separate RSS
+peaks. All rows and expected targets execute with 16 workers and zero refusals.
+The 19 independent small oracle/mutation checks pass. Large-case score and
+curvature relative differences are 7.73e-15 and 9.00e-13; these are descriptive
+checks, not cancellation-safe bounds. This single comparison supplies no
+evidence of a latency improvement: defer category placement for the 12.5-second
+target and retain its possible workspace tradeoff for later capacity work.
+No production integration or complete-fit claim follows from this experiment.
 The original plan held this idea when ordinary products cost only 1.055 seconds;
 the current profile supplies a new reason to measure it, not a new idea.
 

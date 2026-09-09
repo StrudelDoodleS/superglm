@@ -273,6 +273,12 @@ a controlled fresh-cache pair at `ae6a35d3` reduces warmup 84.367 to 32.944
 seconds, with exactly equal outputs and no new fit-time gain claimed.
 The next work pursues 12.5 seconds. Keep larger-N capacity, controlled N-by-q
 scaling and general thread policy distinct from this latency result.
+One fixed-channel categorical-support placement experiment at `beabd523`
+reduces estimated owned geometry arrays but takes 0.319 seconds versus 0.308
+seconds for the current representation. It supplies no latency improvement
+evidence, so defer this route for the current target and retain the workspace
+tradeoff as separate capacity evidence. This is a geometry comparison, not a
+complete-fit result.
 
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,

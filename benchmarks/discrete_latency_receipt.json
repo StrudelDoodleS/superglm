@@ -1,4 +1,41 @@
 {
+  "category_support_discriminator": {
+    "schema": "superglm.category-support-discriminator.v1",
+    "decision": "This single pair supplies no evidence of latency improvement; category placement is deferred for the current target, not proven inferior universally.",
+    "source_sha": "beabd523e6f7d040d58dc975b8f034b84c36b8a8",
+    "source_tree_sha256": "ac0a89ccc89d3f37f66159ac5ad771d8847ce10515b1e6982836fc569f49d33c",
+    "probe_sha256": "111f2c50bce5a6abc7a05b1a63690a090ae9d1355f102c2bccf7c382f7bb810a",
+    "fixture_helper_sha256": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+    "protocol": {"fixture": "Public gaussian-fragmented N1048576/q102/knots4/bins256; seeds28109/28110", "channels": "Fixed score and signed observed curvature, generated once from the same public family; no optimizer or fit", "order": ["current_categories", "inactive_category_supports"], "blas": 1, "numba": 16, "chunk_rows": 65536, "global_budget_bytes": 67108864, "clock": "Constructor inclusive: category adapter construction, plan descriptors/build/reset, chunks and sentinel rewrite, finish/restoration/close/release. Common public warmup and channel setup excluded.", "warmup_seconds": 0.9258999699959531, "common_setup_seconds": 5.520819176992518, "channel_sha256": {"score": "6f57a56327860ff0bd9c42e95112eebe3304f183004164a8528606c05310c2c3", "curvature": "07f991ec0822d91e23ef184f32a34c61e9bb7139c7964c3d748f3a1db5489885"}},
+    "arms": {"current_categories": {"wall_seconds": 0.308186111, "cpu_seconds": 3.235533454, "counted_work": {"ordinary_widths": [16, 16], "support_count": 10, "histogram_count": 45, "directional_count": 20, "rows": 1048576, "chunks": 16, "native_moment_workers": 16, "refusal_count": 0, "histogram_row_visits": 47185920, "histogram_active_updates": 24808542, "directional_row_width_work": 246027648, "support_pair_finalizations": 45, "batched_moment_calls": 16}, "estimated_extra_owned_peak_array_bytes": 58406496, "process_highwater_bytes": 1188687872, "owned_bytes_after_close": 0}, "inactive_category_supports": {"wall_seconds": 0.319262056, "cpu_seconds": 4.136897432, "counted_work": {"ordinary_widths": [7, 7], "support_count": 18, "histogram_count": 153, "directional_count": 36, "rows": 1048576, "chunks": 16, "native_moment_workers": 16, "refusal_count": 0, "histogram_row_visits": 160432128, "histogram_active_updates": 82768621, "directional_row_width_work": 188347516, "support_pair_finalizations": 153, "batched_moment_calls": 16}, "estimated_extra_owned_peak_array_bytes": 49324368, "process_highwater_bytes": 1188687872, "owned_bytes_after_close": 0}},
+    "alternative_wall_change_fraction": 0.0359391439285206,
+    "alternative_cpu_change_fraction": 0.2785828027479267,
+    "numerical_differences": {"score_data": {"error_norm": 2.9842231775604e-08, "reference_norm": 3861366.3075857377, "relative_difference": 7.728412535474372e-15, "gamma_n_plus_q_times_reference_norm": 0.0008991318573346554, "error_over_descriptive_scale": 3.31900505272574e-05}, "score_penalized": {"error_norm": 2.9842231775604e-08, "reference_norm": 3861366.3075857377, "relative_difference": 7.728412535474372e-15, "gamma_n_plus_q_times_reference_norm": 0.0008991318573346554, "error_over_descriptive_scale": 3.31900505272574e-05}, "data_curvature": {"error_norm": 2.373303437644224e-05, "reference_norm": 26364960.51688836, "relative_difference": 9.001733327550324e-13, "gamma_n_plus_q_times_reference_norm": 0.00613916785660417, "error_over_descriptive_scale": 0.0038658389753770265}, "penalty": {"error_norm": 0.0, "reference_norm": 6.796709850043884, "relative_difference": 0.0, "gamma_n_plus_q_times_reference_norm": 1.5826362651036865e-09, "error_over_descriptive_scale": 0.0}, "penalized_curvature": {"error_norm": 2.373303437644224e-05, "reference_norm": 26364961.04519048, "relative_difference": 9.001733147173241e-13, "gamma_n_plus_q_times_reference_norm": 0.006139167979621057, "error_over_descriptive_scale": 0.0038658388979131942}},
+    "numerical_scope": "Large geometry uses descriptive relative differences and gamma_(N+q)*reference-norm scales only, not cancellation-safe certification. Independent small oracle uses dimension/epsilon/absolute-product bounds and a mutation witness.",
+    "small_oracle": {"passed": 19, "seconds": 2.66, "receipt": ".benchmark-artifacts/discrete-performance/category-support-probe/validation-final.xml", "test_helper_sha256": "39fc0be0b8da762b7e850cf35eac066ffc0178e87cd3b28d2b6bedeb6f28a669"},
+    "guards": {"source_stable": true, "helper_stable": true, "worker_exit_code": 0, "activity_guard_passed": true, "original_source_storage_unchanged": true},
+    "raw_sha256": {
+      ".benchmark-artifacts/discrete-performance/category-support-probe/protocol.md": "8e4902ab1af50d16bcdaae1a4fb0c1b03f8b54959e7b5759a65efb8afbf7af96",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/probe.py": "111f2c50bce5a6abc7a05b1a63690a090ae9d1355f102c2bccf7c382f7bb810a",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/test_probe.py": "39fc0be0b8da762b7e850cf35eac066ffc0178e87cd3b28d2b6bedeb6f28a669",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/validation-final.xml": "e0f14dfb7f73bb07519268747a54acbfbfdeedbcd83959a11d3233ddd9cffab6",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/controller.py": "a0b11b57fd98bac4ecbcc172806caca4753b0994199898678a0059a6eaec4eda",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/controller-start.json": "b05395f97c4541d501f1c5dcb09a8c3c4c49bcfec626e1ab2a531b4bc0f9ed7c",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/controller-result.json": "74d75356fbe2ce391276fa4d9d1018f66032eeb15ed1a5ede76825d0f7b64dd3",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/preflight.json": "0e57a9bcb147604b9bb71fd1c62ccd2f474cdb5736643d2941e7cc3bf3835d22",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/activity.json": "2d1191181d22c58596539b9955bb1172deda71496f229de6bdd6b1be9d9fed50",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/geometry.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/geometry.json": "8a8f1d0d98a51e1c83dc08c90fea3d20649aadc412258274ce029a009c96bd26",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/geometry.npz": "0fab1e73b7ab1147f76ec5bad61785c1a50cf9237c8f8b708ee062886abc74bf",
+      ".benchmark-artifacts/discrete-performance/category-support-probe/summary.json": "7336a8968f918d3fa71d57f9d5cdc372965983eea289d041620cac36536261ad"
+    },
+    "caveats": [
+      "One geometry sample per arm in fixed order; no statistical or universal ranking follows. No complete-fit or 12.5-second latency result is established.",
+      "Estimated owned-array peaks include category adapter tables and rewrite scratch but exclude original source, fixed channels and Python/native runtime storage.",
+      "Process highwater is monotonic in the same worker; equal values do not establish independent arm RSS peaks.",
+      "The alternative narrows ordinary blocks but increases support/histogram targets. The smaller allocation estimate is a separate possible capacity tradeoff."
+    ]
+  },
   "controlled_cold_start_checkpoint": {
     "schema": "superglm.controlled-cold-start-pair.v1",
     "status": "one_controlled_pair_and_one_untimed_witness",
