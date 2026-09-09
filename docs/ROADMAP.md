@@ -1,8 +1,9 @@
 # Roadmap
 
-Last strategic review: **2026-09-09**. Starting baseline: `origin/master` at
-`8962c452` (published v0.31.0); C3/C1 implementation through `1a8952a4`, with convergence follow-through at
-`5f994c8f`.
+Last strategic review: **2026-09-09**. Current implementation baseline:
+`origin/master` at `7d054022`, the merged C3+C1 checkpoint in PR #379.
+The starting baseline was `8962c452` (published v0.31.0); individual implementation
+and benchmark revisions remain pinned in the evidence below.
 
 This is **directional project state, not an implementation specification**,
 delivery commitment, or authorization to start a capability. Scope implementation
@@ -10,11 +11,12 @@ separately. If code, tests, benchmarks, or user evidence contradict this roadmap
 report the discrepancy and propose an update; do not change the implementation
 to satisfy an outdated assumption. Explicitly scoped user work takes precedence.
 
-The [research dossier](research/2026-09-superglm-feature-roadmap-dossier.md)
-contains the candidate details and literature (C1–C14 below). Its recommendations,
-estimates, and original living-document header are prior analysis; this file
-records the current ordering. Update the review date, revision, and evidence when
-a capability lands or a gate changes; retire completed work from the queue.
+The candidate catalogue covers **C1–C26**. The [original research dossier]
+contains C1–C14; the [reviewed numerical and function-space additions] contain C15–C26.
+Their recommendations, estimates and readiness labels are research input;
+this file records the current ordering. `READY` means ready to scope or prototype,
+not an implementation commitment. Update the review date, revision and evidence
+when a capability lands or a gate changes; retire completed work from the queue.
 
 ## Current position
 
@@ -362,6 +364,35 @@ joint covariance is the dependency; neither C1 nor a general AD engine is needed
   misrepresents the intended book. The dossier calls NCV already road-mapped, but
   the repository has no public NCV implementation; it is not an assumed prerequisite.
 
+### Numerical and function-space candidates: C15–C26
+
+The reviewed additions organize computational research into three complementary
+directions: C1 reduces row-side basis-product work; C15/C18 target coefficient
+storage and iterative solves; C16/C21/C22 target representation efficiency, with
+C26 as a possible specialist solver. Composition is a research question, not an
+assumption that one backend should serve every size regime. These additions do
+not reorder the existing delivery queue or reopen the completed C3+C1 checkpoint.
+
+| Candidate | Idea | Reviewed readiness and promotion gate |
+| --- | --- | --- |
+| [C15] | Matrix-free large-coefficient EFS/REML | Research / candidate prototype. Measure operator, preconditioner and smoothing-trace costs; quantify stochastic error and test composition with C1. |
+| [C16] | Adaptive hierarchical splines | Research, high value. Separate refinement indicators from certificates relative to a fixed fine model; account for re-estimated smoothing. |
+| [C17] | Fisher orthogonality and observed-geometry preconditioning | Research. Measure expected and observed coupling separately; retain dispersion/power coupling unless zeros are established. |
+| [C18] | Multigrid and Krylov recycling | Multigrid is research. Recycling is ready to prototype after C15 supplies an iterative operator backend; C16 may supply a shared hierarchy. |
+| [C19] | qEFS and safeguarded Anderson acceleration | qEFS is ready to reproduce and benchmark; Anderson remains research. Preserve acceptance, fallback and convergence contracts. |
+| [C20] | Progressive exactification / inexact Newton | Research. Budget sampling and likelihood error separately; full-objective cleanup does not guarantee the same nonconvex branch. |
+| [C21] | Sparse-grid and factorized spline interactions | Research, high predictive upside. Derive identifiability, penalties and C1 compatibility; keep factorized discovery distinct from inferential refitting. |
+| [C22] | Trend filtering and graph effects | Quadratic graph effects are candidates for scoping. Trend and graph-trend effects need an active-set/post-selection inference contract. |
+| [C23] | Functional and compositional predictors | Functional-linear terms are candidates for scoping; richer functional GAMs remain research. Specify grids, quadrature, identifiability and composition-zero handling. |
+| [C24] | HODLR/HSS coefficient-matrix compression | Speculative. Measure off-diagonal ranks first; reject the approach if ranks grow proportionally with block size. |
+| [C25] | Continuation and branch following | Research for robustness and branch exploration. Finding one branch does not certify uniqueness. |
+| [C26] | Semismooth Newton / primal-dual active sets | Research / candidate prototype when C22 requires it. Require KKT checks and defined nonsmooth inference; retain the existing BCD path where appropriate. |
+
+The proposed [adaptive regularized C3 controller] is future research in
+trust-region/cubic steps and curvature reuse. Promotion
+requires a scoped remaining limitation; the merged convergence evidence remains
+the description of delivered behavior.
+
 ## Deferred
 
 - **Copula/multivariate LSS (C8):** require stable marginal fits and evidence that
@@ -426,3 +457,18 @@ existence and numerical-resolution checks rather than the dossier's generic rule
 [rectangular cross-products]: https://github.com/StrudelDoodleS/superglm/blob/21007082/src/superglm/_group_matrix/_cross_matrix_execution.py
 [tests against materializing discrete slopes]: https://github.com/StrudelDoodleS/superglm/blob/21007082/tests/test_distributional_grouped_assembly.py
 [SCOP acceptance/termination question]: https://github.com/StrudelDoodleS/superglm/issues/366
+[original research dossier]: research/2026-09-superglm-feature-roadmap-dossier.md
+[reviewed numerical and function-space additions]: research/2026-09-superglm-feature-roadmap-additions.md
+[adaptive regularized C3 controller]: research/2026-09-superglm-feature-roadmap-additions.md#strengthen-c3-adaptive-regularized-newton-controller
+[C15]: research/2026-09-superglm-feature-roadmap-additions.md#c15-matrix-free-large-p-superglm-backend
+[C16]: research/2026-09-superglm-feature-roadmap-additions.md#c16-adaptive-hierarchical-splines-as-statistical-mesh-refinement
+[C17]: research/2026-09-superglm-feature-roadmap-additions.md#c17-exploit-fisher-orthogonality-and-precondition-observed-lss-geometry
+[C18]: research/2026-09-superglm-feature-roadmap-additions.md#c18-multigrid-and-krylov-recycling
+[C19]: research/2026-09-superglm-feature-roadmap-additions.md#c19-qefs-and-safeguarded-fixed-point-acceleration
+[C20]: research/2026-09-superglm-feature-roadmap-additions.md#c20-progressive-exactification-and-inexact-newton
+[C21]: research/2026-09-superglm-feature-roadmap-additions.md#c21-higher-dimensional-smooth-interactions-without-full-tensor-explosion
+[C22]: research/2026-09-superglm-feature-roadmap-additions.md#c22-locally-adaptive-and-graph-structured-effects
+[C23]: research/2026-09-superglm-feature-roadmap-additions.md#c23-functional-and-compositional-predictors
+[C24]: research/2026-09-superglm-feature-roadmap-additions.md#c24-test-whether-superglm-hessians-have-hierarchical-low-rank
+[C25]: research/2026-09-superglm-feature-roadmap-additions.md#c25-continuation-and-branch-following-for-difficult-distributional-likelihoods
+[C26]: research/2026-09-superglm-feature-roadmap-additions.md#c26-semismooth-newton-primal-dual-active-set-backend
