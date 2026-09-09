@@ -62,6 +62,19 @@ No production integration or complete-fit claim follows from this experiment.
 The original plan held this idea when ordinary products cost only 1.055 seconds;
 the current profile supplies a new reason to measure it, not a new idea.
 
+Next, run one fixed-channel geometry control with BLAS eight scoped only to
+ordinary score and weighted-Gram products, restoring BLAS one before native
+moments. Keep native workers at 16. Charge a pre-created BLAS controller and
+all scope-entry/restoration costs, and check actual pools at each boundary.
+The ignored helper must preserve the production expressions, source validation,
+workspace and chunk order; use signed/rectangular/cancellation oracles because
+BLAS reduction order may change. Global BLAS two was slower, but did not isolate
+this section. Its approximately 2.888 diagnostic seconds form an optimistic
+saving ceiling, not a speed prediction. If this single local control supplies
+no gain, defer the route instead of expanding the thread sweep and prioritize
+the N-by-width scaling diagnostic. No production policy change follows without
+complete-fit evidence.
+
 The user has chosen sequential complete-fit targets of **15 seconds**, then
 **12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,
 four knots and 256 bins. Treat these as discrete latency targets and continue
