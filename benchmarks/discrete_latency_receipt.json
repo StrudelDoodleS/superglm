@@ -1,0 +1,343 @@
+{
+  "schema": "superglm.discrete_latency.v1",
+  "status": "three_of_three_complete_fits_under_20_seconds",
+  "fixture": {
+    "name": "gaussian-fragmented",
+    "public": true,
+    "n": 1048576,
+    "coefficients": 102,
+    "knots": 4,
+    "n_bins": 256,
+    "training_seed": 28109,
+    "holdout_seed": 28110
+  },
+  "measurement": {
+    "target_seconds": 20,
+    "schedule": [
+      "candidate-r1",
+      "baseline-new",
+      "candidate-r2",
+      "candidate-r3"
+    ],
+    "threads": {
+      "BLIS_NUM_THREADS": "1",
+      "MKL_NUM_THREADS": "1",
+      "NUMBA_NUM_THREADS": "4",
+      "NUMEXPR_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "SUPERGLM_BLAS_THREADS": "1",
+      "VECLIB_MAXIMUM_THREADS": "1"
+    },
+    "OMP_WAIT_POLICY": null,
+    "included": "Worker complete-fit clock: feature compilation, optimization, null fit and finalization.",
+    "excluded": "Input generation, standard public warmup, output capture and separate instrumentation.",
+    "memory": "Fit-end process ru_maxrss includes imports, inputs and warmup; it is not an isolated allocation measurement."
+  },
+  "sources": {
+    "baseline": {
+      "sha": "8fb261bc5c1a26ba86e0d2c06779a0cb2c499a5e",
+      "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
+      "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "candidate": {
+      "sha": "8fb261bc5c1a26ba86e0d2c06779a0cb2c499a5e",
+      "source_tree_sha256": "6ea1435a53b4aa44c663ae4ae996a900033f1b8425df0e0807baa4bcb48efbd9",
+      "diff_sha256": "3a6fc2da39013fa0da882a44f0d90de27f43ea43c00a6ae2c49e416515f12d0b"
+    }
+  },
+  "runs": [
+    {
+      "id": "candidate-r1",
+      "wall_seconds": 18.607102323003346,
+      "cpu_seconds": 31.903827973,
+      "fit_end_highwater_mib": 1904.05859375,
+      "pre_fit_highwater_mib": 974.515625,
+      "warmup_seconds": 0.816778822998458,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 65536,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    },
+    {
+      "id": "candidate-r2",
+      "wall_seconds": 19.2696263320031,
+      "cpu_seconds": 32.99192969799999,
+      "fit_end_highwater_mib": 1908.765625,
+      "pre_fit_highwater_mib": 974.9453125,
+      "warmup_seconds": 0.5865908620035043,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 65536,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    },
+    {
+      "id": "candidate-r3",
+      "wall_seconds": 19.66450051299762,
+      "cpu_seconds": 32.854176255,
+      "fit_end_highwater_mib": 1898.21875,
+      "pre_fit_highwater_mib": 977.875,
+      "warmup_seconds": 0.5423040870009572,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 65536,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    },
+    {
+      "id": "baseline-new",
+      "wall_seconds": 29.068125327998132,
+      "cpu_seconds": 29.024986786999996,
+      "fit_end_highwater_mib": 1866.61328125,
+      "pre_fit_highwater_mib": 973.66796875,
+      "warmup_seconds": 0.5223605080027482,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 8065,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    },
+    {
+      "id": "baseline-previous",
+      "wall_seconds": 26.724655830999836,
+      "cpu_seconds": 26.678528334,
+      "fit_end_highwater_mib": 1866.546875,
+      "pre_fit_highwater_mib": 973.16015625,
+      "warmup_seconds": 0.35696373200335074,
+      "backend": "distributional-chunked-v1",
+      "chunk_size": 8065,
+      "result": {
+        "coefficient_converged": true,
+        "converged": true,
+        "n_inner_iter": 16,
+        "n_smoothing_iter": 7,
+        "q": 102,
+        "smoothing_converged": true,
+        "smoothing_reason": "practical_plateau"
+      }
+    }
+  ],
+  "candidate_aggregate": {
+    "after_output_highwater_mib": {
+      "max": 1924.41015625,
+      "median": 1918.91015625,
+      "min": 1913.53125
+    },
+    "cpu_seconds": {
+      "max": 32.99192969799999,
+      "median": 32.854176255,
+      "min": 31.903827973
+    },
+    "fit_end_highwater_mib": {
+      "max": 1908.765625,
+      "median": 1904.05859375,
+      "min": 1898.21875
+    },
+    "pre_fit_highwater_mib": {
+      "max": 977.875,
+      "median": 974.9453125,
+      "min": 974.515625
+    },
+    "wall_seconds": {
+      "max": 19.66450051299762,
+      "median": 19.2696263320031,
+      "min": 18.607102323003346
+    }
+  },
+  "both_baseline_samples_aggregate": {
+    "after_output_highwater_mib": {
+      "max": 1892.3359375,
+      "median": 1892.15625,
+      "min": 1891.9765625
+    },
+    "cpu_seconds": {
+      "max": 29.024986786999996,
+      "median": 27.851757560499998,
+      "min": 26.678528334
+    },
+    "fit_end_highwater_mib": {
+      "max": 1866.61328125,
+      "median": 1866.580078125,
+      "min": 1866.546875
+    },
+    "pre_fit_highwater_mib": {
+      "max": 973.66796875,
+      "median": 973.4140625,
+      "min": 973.16015625
+    },
+    "wall_seconds": {
+      "max": 29.068125327998132,
+      "median": 27.896390579498984,
+      "min": 26.724655830999836
+    }
+  },
+  "candidate_reduction_vs_both_baseline_median": 0.30924302636613066,
+  "numerical_comparison": {
+    "all_ten_saved_arrays_equal_to_preceding_candidate": true,
+    "fixture_representation_status_iterations_match": true,
+    "candidate_vs_baseline": {
+      "coefficients": {
+        "max_absolute_difference": 1.5265566588595902e-16,
+        "norm_relative_difference": 3.061945041309977e-16
+      },
+      "covariance": {
+        "max_absolute_difference": 1.235990476633475e-16,
+        "norm_relative_difference": 1.0478875016672829e-13
+      },
+      "edf": {
+        "max_absolute_difference": 2.2737367544323206e-13,
+        "norm_relative_difference": 2.5061325560627245e-15
+      },
+      "holdout_parameters": {
+        "max_absolute_difference": 8.881784197001252e-16,
+        "norm_relative_difference": 1.6450118819430347e-16
+      },
+      "log_likelihood": {
+        "max_absolute_difference": 0,
+        "norm_relative_difference": 0
+      },
+      "objective": {
+        "max_absolute_difference": 0,
+        "norm_relative_difference": 0
+      },
+      "smoothing_parameters": {
+        "max_absolute_difference": 6.821210263296962e-13,
+        "norm_relative_difference": 6.004271194178127e-16
+      },
+      "terminal_penalized_curvature": {
+        "max_absolute_difference": 1.3969838619232178e-9,
+        "norm_relative_difference": 3.4492639173476974e-16
+      },
+      "terminal_score": {
+        "max_absolute_difference": 1.3275602839257772e-10,
+        "norm_relative_difference": 8.541441595628827e-9
+      },
+      "train_parameters": {
+        "max_absolute_difference": 1.7763568394002505e-15,
+        "norm_relative_difference": 1.62318386923721e-16
+      }
+    },
+    "interpretation": "Same stored binned model. Different row-partition reduction order can change roundoff; these differences are separate from approximation relative to an exact feature basis."
+  },
+  "witness": {
+    "batched_moment_calls": 272,
+    "global_byte_budget": 67108864,
+    "global_chunks": 272,
+    "global_finishes": 17,
+    "global_peak_estimate_bytes": 58395920,
+    "global_refusals": 0,
+    "native_moment_workers": [
+      4
+    ],
+    "preparation_profile": {
+      "inclusive_seconds": {
+        "GaussianLikelihoodPlan.take": 0.03748443700169446,
+        "ResolvedLikelihoodWeights.take": 0.02826266400370514,
+        "gaussian._carrier_digest": 0.011218132000067271,
+        "weights._child_digest": 0.018720302010478918
+      },
+      "interpretation": "Only four requested Python frames use perf_counter on call/return. Inclusive times contain nested watched calls and profiling overhead; do not add them. Union time covers overlapping watched stacks once. Diagnostic locator costs, not authoritative complete-fit timings.",
+      "returned": {
+        "GaussianLikelihoodPlan.take": 16,
+        "ResolvedLikelihoodWeights.take": 16,
+        "gaussian._carrier_digest": 17,
+        "weights._child_digest": 16
+      },
+      "started": {
+        "GaussianLikelihoodPlan.take": 16,
+        "ResolvedLikelihoodWeights.take": 16,
+        "gaussian._carrier_digest": 17,
+        "weights._child_digest": 16
+      },
+      "unreturned_watched_frames": 0,
+      "watched_stack_union_seconds": 0.04291099500551354
+    },
+    "previous_preparation_profile": {
+      "inclusive_seconds": {
+        "GaussianLikelihoodPlan.take": 1.3235275189363165,
+        "ResolvedLikelihoodWeights.take": 0.9948805138483294,
+        "gaussian._carrier_digest": 0.208520126005169,
+        "weights._child_digest": 0.6646028260583989
+      },
+      "interpretation": "Only four requested Python frames use perf_counter on call/return. Inclusive times contain nested watched calls and profiling overhead; do not add them. Union time covers overlapping watched stacks once. Diagnostic locator costs, not authoritative complete-fit timings.",
+      "returned": {
+        "GaussianLikelihoodPlan.take": 560,
+        "ResolvedLikelihoodWeights.take": 560,
+        "gaussian._carrier_digest": 561,
+        "weights._child_digest": 560
+      },
+      "started": {
+        "GaussianLikelihoodPlan.take": 560,
+        "ResolvedLikelihoodWeights.take": 560,
+        "gaussian._carrier_digest": 561,
+        "weights._child_digest": 560
+      },
+      "unreturned_watched_frames": 0,
+      "watched_stack_union_seconds": 1.328817947935022
+    },
+    "timing_status": "unmeasured"
+  },
+  "all_source_helper_runtime_guards_passed": true,
+  "validation": {
+    "combined_solver_tests_passed": 755,
+    "warning_strict_cache_tests_passed": 125,
+    "test_overlap": "Cache suites overlap; two extra ownership tests were added after the combined run.",
+    "ruff_check": true,
+    "ruff_format": true,
+    "uv_lock_check": true,
+    "uv_pip_check": true,
+    "run_test": {
+      "exit_code": 0,
+      "converged": true,
+      "iterations": 12,
+      "shape_diagnostic": "CHECK (informational, not an assertion)"
+    },
+    "independent_review": "No blockers"
+  },
+  "limitations": [
+    "Three fresh candidate samples on this public million-row/P102 fixture; all below20s. This does not establish every future run, wider model or dataset will stay below20s.",
+    "Both baseline samples26.72466 and29.06813 retained; one belongs to the earlier matched-thread window, so their spread is explicit.",
+    "Worker wall includes completefit/compilation/inference, with standard publicwarmup outside clock; fixture generation/output capture excluded per unchanged harness.",
+    "Process highwater includes imports/input/warmup; pre-fit and after-output samples separately recorded, not subtracted to invent isolated allocations.",
+    "Candidate result/arrays exactly match prior same-model run on this fixture; baseline cross-chunk differences remain descriptive, separate from binning approximation.",
+    "Witness preparation times are inclusive/nested and profiled; union avoids doublecounting, and differences are not promised recoverable completefit time.",
+    "Globalstats witness272batchedcalls/fourconfigurednativeworkers; logical histogram counts are not oldfunction call counts, and configuration is not OS thread participation."
+  ],
+  "raw_summary": {
+    "path": ".benchmark-artifacts/discrete-performance/parallel-moments-pilot/likelihood-cache-validation/summary.json",
+    "sha256": "e83da925bf97538baa582afc0989623f83bb573cfb8a2eaf3d4360bd421496cf"
+  },
+  "harness_sha256": {
+    "capture_worker.py": "c2bab6a7dd56073be0f0cf4def5c79f22dadac0b9f10953cba408a26c536104e",
+    "preparation_witness_worker.py": "aa483b87a8562d8b217212eaa4c3ee13b75d205ed4496cc3e484fa7853c1ae8d",
+    "_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+    "c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+    "discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+  }
+}

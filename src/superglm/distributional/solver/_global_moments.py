@@ -14,8 +14,14 @@ from itertools import combinations
 import numpy as np
 from numba import njit
 
+from superglm._group_matrix._group_matrix_range import _category_rows
 from superglm.distributional.layout import PredictorState, StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
+from superglm.distributional.solver._batched_moments import (
+    _batch_workspace_bytes,
+    _BatchedMomentReducers,
+    _warmup_batched_moments,
+)
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     validated_dense_penalty,
@@ -123,6 +129,7 @@ def _accumulate_directional(out, bins, ordinary, weights):
 
 def _warmup_global_moments():
     """Compile bounded writer/reducer signatures without constructing a plan."""
+    _warmup_batched_moments()
     for layout in ("C", "F", "A"):
         for readonly in (False, True):
             values = (
@@ -190,7 +197,7 @@ def _index_values(values, count, upper, label):
     return values
 
 
-def _metadata(layout):
+def _metadata(layout, *, check_values=True):
     if type(layout) is not StackedLayout or not 1 <= len(layout.predictors) <= 2:
         raise GlobalMomentRefusalError("global moments accept one or two StackedLayout predictors")
     if any(
@@ -262,8 +269,9 @@ def _metadata(layout):
                 _array(transform, (raw_width, width), np.dtype(np.float64), "solver map")
                 if group.n_bins != m:
                     raise GlobalMomentRefusalError("n_bins disagrees with support basis")
-                _small_finite(basis, "support basis")
-                _small_finite(transform, "solver map")
+                if check_values:
+                    _small_finite(basis, "support basis")
+                    _small_finite(transform, "solver map")
                 if group_type is DiscretizedSSPGroupMatrix:
                     _array(group.bin_idx, (n,), np.dtype(np.intp), "source support bins")
                 else:
@@ -295,6 +303,140 @@ def _metadata(layout):
     return int(n), predictors, supports
 
 
+def _workspace_spec(n, p, predictor_meta, support_meta, *, chunk_size, byte_budget):
+    """Describe construction and peak bytes using only validated dimensions."""
+    c = int(chunk_size)
+    k, s = len(predictor_meta), len(support_meta)
+    ordinary_widths = [len(meta[2]) for meta in predictor_meta]
+    # Specs contain support slots / predictor slots and packed channel index.
+    hist_specs, mass_specs, directional_specs, ordinary_specs = [], [], [], []
+    for channel, (a, b) in enumerate(packed_pairs(k)):
+        left_slots, right_slots = predictor_meta[a][4], predictor_meta[b][4]
+        ordinary_specs.append((a, b, channel))
+        if a == b:
+            hist_specs.extend((g, h, channel) for g, h in combinations(left_slots, 2))
+            mass_specs.extend((g, channel) for g in left_slots)
+        else:
+            hist_specs.extend((g, h, channel) for g in left_slots for h in right_slots)
+        if ordinary_widths[b]:
+            directional_specs.extend((g, b, channel) for g in left_slots)
+        if a != b and ordinary_widths[a]:
+            directional_specs.extend((h, a, channel) for h in right_slots)
+    bins = [meta[4].shape[0] for meta in support_meta]
+    hist_bytes = 8 * sum(bins[g] * bins[h] for g, h, _ in hist_specs)
+    mass_bytes = 8 * sum(bins[g] for g, _ in mass_specs)
+    direction_bytes = 8 * sum(bins[g] * ordinary_widths[a] for g, a, _ in directional_specs)
+    score_bytes = 8 * (sum(bins) + sum(ordinary_widths))
+    ordinary_bytes = 8 * sum(ordinary_widths[a] * ordinary_widths[b] for a, b, _ in ordinary_specs)
+    support_bytes = sum(meta[4].nbytes + meta[5].nbytes for meta in support_meta)
+    solver_support_bytes = 8 * sum(meta[4].shape[0] * meta[5].shape[1] for meta in support_meta)
+    int_bytes = np.dtype(np.intp).itemsize
+    scratch_bytes = (
+        8 * c * (sum(ordinary_widths) + max(ordinary_widths, default=0)) + int_bytes * c * s
+    )
+    indices_bytes = int_bytes * (sum(ordinary_widths) + sum(len(meta[3]) for meta in support_meta))
+    accumulator_bytes = hist_bytes + mass_bytes + direction_bytes + score_bytes + ordinary_bytes
+    coefficient_bytes = 8 * (p * p + p)
+    batch_bytes, batch_metadata_reserve = _batch_workspace_bytes(
+        len(hist_specs), len(directional_specs), k
+    )
+    persistent_bytes = (
+        accumulator_bytes
+        + support_bytes
+        + solver_support_bytes
+        + scratch_bytes
+        + indices_bytes
+        + coefficient_bytes
+        + batch_bytes
+    )
+    # Includes simultaneous local and readonly result copies, penalty
+    # validation, exact-symmetry checks, and worst NumPy boolean temporaries.
+    output_reserve = 8 * (12 * p * p + 12 * p)
+    finish_scratch = 0
+    construction_scratch = 0
+    for meta in support_meta:
+        m, d = meta[4].shape
+        r = meta[5].shape[1]
+        o = max(ordinary_widths, default=0)
+        # Conservative allowance for operand packing during the one-time
+        # B @ R transform; the resulting support is persistent state.
+        construction_scratch = max(construction_scratch, 8 * (m * d + d * r + m * r))
+        finish_scratch = max(
+            finish_scratch,
+            8 * (2 * m * r + 4 * r * r + 2 * r * o),
+        )
+    for g, h, _ in hist_specs:
+        left, right = support_meta[g], support_meta[h]
+        m_right = right[4].shape[0]
+        r_left, r_right = left[5].shape[1], right[5].shape[1]
+        # T_left.T @ H first produces solver_width_left by m_right;
+        # unequal supports cannot be bounded from either marginal alone.
+        finish_scratch = max(
+            finish_scratch,
+            8 * (2 * r_left * m_right + 4 * r_left * r_right),
+        )
+    finish_scratch += max((bins[g] * bins[h] for g, h, _ in hist_specs), default=0)
+    group_count = sum(len(meta[3]) for meta in predictor_meta)
+    metadata_reserve = 65536 + 4096 * (
+        k + s + group_count + len(hist_specs) + len(directional_specs) + len(mass_specs)
+    )
+    metadata_reserve += batch_metadata_reserve
+    # Index validation / array_equal use bounded temporary booleans.  A
+    # masked assignment may also form a chunk-length advanced-index buffer.
+    validation_reserve = 24 * c + max(
+        (meta[4].size + meta[5].size for meta in support_meta), default=0
+    )
+    estimate = int(
+        persistent_bytes
+        + output_reserve
+        + construction_scratch
+        + finish_scratch
+        + metadata_reserve
+        + validation_reserve
+    )
+    accounting = dict(
+        accumulator_bytes=accumulator_bytes,
+        histogram_bytes=hist_bytes,
+        diagonal_mass_bytes=mass_bytes,
+        directional_bytes=direction_bytes,
+        score_accumulator_bytes=score_bytes,
+        ordinary_curvature_bytes=ordinary_bytes,
+        support_authority_bytes=support_bytes,
+        solver_support_bytes=solver_support_bytes,
+        row_scratch_bytes=scratch_bytes,
+        coefficient_state_bytes=coefficient_bytes,
+        layout_index_bytes=indices_bytes,
+        batched_reducer_bytes=batch_bytes,
+        persistent_allocated_bytes=persistent_bytes,
+        output_reserve_bytes=output_reserve,
+        construction_scratch_bytes=construction_scratch,
+        finalization_scratch_bytes=finish_scratch,
+        metadata_reserve_bytes=metadata_reserve,
+        validation_reserve_bytes=validation_reserve,
+        estimated_peak_bytes=estimate,
+        published_output_bytes=8 * (2 * p + 3 * p * p),
+        histogram_count=len(hist_specs),
+        directional_count=len(directional_specs),
+        diagonal_count=len(mass_specs),
+        support_count=s,
+        ordinary_widths=ordinary_widths,
+        chunk_size=c,
+        byte_budget=int(byte_budget),
+    )
+    return (
+        n,
+        p,
+        c,
+        predictor_meta,
+        support_meta,
+        hist_specs,
+        mass_specs,
+        directional_specs,
+        ordinary_specs,
+        accounting,
+    )
+
+
 def build_global_moment_plan(layout, *, byte_budget=64 << 20, chunk_size):
     """Estimate all owned array state and conservative peak scratch before allocation.
 
@@ -315,141 +457,69 @@ def build_global_moment_plan(layout, *, byte_budget=64 << 20, chunk_size):
         ):
             raise GlobalMomentRefusalError("positive integer byte_budget and chunk_size required")
         n, predictor_meta, support_meta = _metadata(layout)
-        c = int(chunk_size)
-        k, p, s = len(predictor_meta), layout.n_coefficients, len(support_meta)
-        ordinary_widths = [len(meta[2]) for meta in predictor_meta]
-        # Specs contain support slots / predictor slots and packed channel index.
-        hist_specs, mass_specs, directional_specs, ordinary_specs = [], [], [], []
-        for channel, (a, b) in enumerate(packed_pairs(k)):
-            left_slots, right_slots = predictor_meta[a][4], predictor_meta[b][4]
-            ordinary_specs.append((a, b, channel))
-            if a == b:
-                hist_specs.extend((g, h, channel) for g, h in combinations(left_slots, 2))
-                mass_specs.extend((g, channel) for g in left_slots)
-            else:
-                hist_specs.extend((g, h, channel) for g in left_slots for h in right_slots)
-            if ordinary_widths[b]:
-                directional_specs.extend((g, b, channel) for g in left_slots)
-            if a != b and ordinary_widths[a]:
-                directional_specs.extend((h, a, channel) for h in right_slots)
-        bins = [meta[4].shape[0] for meta in support_meta]
-        hist_bytes = 8 * sum(bins[g] * bins[h] for g, h, _ in hist_specs)
-        mass_bytes = 8 * sum(bins[g] for g, _ in mass_specs)
-        direction_bytes = 8 * sum(bins[g] * ordinary_widths[a] for g, a, _ in directional_specs)
-        score_bytes = 8 * (sum(bins) + sum(ordinary_widths))
-        ordinary_bytes = 8 * sum(
-            ordinary_widths[a] * ordinary_widths[b] for a, b, _ in ordinary_specs
+        spec = _workspace_spec(
+            n,
+            layout.n_coefficients,
+            predictor_meta,
+            support_meta,
+            chunk_size=chunk_size,
+            byte_budget=byte_budget,
         )
-        support_bytes = sum(meta[4].nbytes + meta[5].nbytes for meta in support_meta)
-        solver_support_bytes = 8 * sum(meta[4].shape[0] * meta[5].shape[1] for meta in support_meta)
-        int_bytes = np.dtype(np.intp).itemsize
-        scratch_bytes = (
-            8 * c * (sum(ordinary_widths) + max(ordinary_widths, default=0)) + int_bytes * c * s
-        )
-        indices_bytes = int_bytes * (
-            sum(ordinary_widths) + sum(len(meta[3]) for meta in support_meta)
-        )
-        accumulator_bytes = hist_bytes + mass_bytes + direction_bytes + score_bytes + ordinary_bytes
-        coefficient_bytes = 8 * (p * p + p)
-        persistent_bytes = (
-            accumulator_bytes
-            + support_bytes
-            + solver_support_bytes
-            + scratch_bytes
-            + indices_bytes
-            + coefficient_bytes
-        )
-        # Includes simultaneous local and readonly result copies, penalty
-        # validation, exact-symmetry checks, and worst NumPy boolean temporaries.
-        output_reserve = 8 * (12 * p * p + 12 * p)
-        finish_scratch = 0
-        construction_scratch = 0
-        for meta in support_meta:
-            m, d = meta[4].shape
-            r = meta[5].shape[1]
-            o = max(ordinary_widths, default=0)
-            # Conservative allowance for operand packing during the one-time
-            # B @ R transform; the resulting support is persistent state.
-            construction_scratch = max(construction_scratch, 8 * (m * d + d * r + m * r))
-            finish_scratch = max(
-                finish_scratch,
-                8 * (2 * m * r + 4 * r * r + 2 * r * o),
-            )
-        for g, h, _ in hist_specs:
-            left, right = support_meta[g], support_meta[h]
-            m_right = right[4].shape[0]
-            r_left, r_right = left[5].shape[1], right[5].shape[1]
-            # T_left.T @ H first produces solver_width_left by m_right;
-            # unequal supports cannot be bounded from either marginal alone.
-            finish_scratch = max(
-                finish_scratch,
-                8 * (2 * r_left * m_right + 4 * r_left * r_right),
-            )
-        finish_scratch += max((bins[g] * bins[h] for g, h, _ in hist_specs), default=0)
-        group_count = sum(len(meta[3]) for meta in predictor_meta)
-        metadata_reserve = 65536 + 4096 * (
-            k + s + group_count + len(hist_specs) + len(directional_specs) + len(mass_specs)
-        )
-        # Index validation / array_equal use bounded temporary booleans.  A
-        # masked assignment may also form a chunk-length advanced-index buffer.
-        validation_reserve = 24 * c + max(
-            (meta[4].size + meta[5].size for meta in support_meta), default=0
-        )
-        estimate = int(
-            persistent_bytes
-            + output_reserve
-            + construction_scratch
-            + finish_scratch
-            + metadata_reserve
-            + validation_reserve
-        )
+        estimate = spec[-1]["estimated_peak_bytes"]
         if estimate > byte_budget:
             raise GlobalMomentRefusalError(
                 f"estimated peak {estimate} exceeds byte_budget {byte_budget}"
             )
-        accounting = dict(
-            accumulator_bytes=accumulator_bytes,
-            histogram_bytes=hist_bytes,
-            diagonal_mass_bytes=mass_bytes,
-            directional_bytes=direction_bytes,
-            score_accumulator_bytes=score_bytes,
-            ordinary_curvature_bytes=ordinary_bytes,
-            support_authority_bytes=support_bytes,
-            solver_support_bytes=solver_support_bytes,
-            row_scratch_bytes=scratch_bytes,
-            coefficient_state_bytes=coefficient_bytes,
-            layout_index_bytes=indices_bytes,
-            persistent_allocated_bytes=persistent_bytes,
-            output_reserve_bytes=output_reserve,
-            construction_scratch_bytes=construction_scratch,
-            finalization_scratch_bytes=finish_scratch,
-            metadata_reserve_bytes=metadata_reserve,
-            validation_reserve_bytes=validation_reserve,
-            estimated_peak_bytes=estimate,
-            published_output_bytes=8 * (2 * p + 3 * p * p),
-            histogram_count=len(hist_specs),
-            directional_count=len(directional_specs),
-            diagonal_count=len(mass_specs),
-            support_count=s,
-            ordinary_widths=ordinary_widths,
-            chunk_size=c,
-            byte_budget=int(byte_budget),
-        )
-        plan = GlobalMomentPlan(
-            n,
-            p,
-            c,
-            predictor_meta,
-            support_meta,
-            hist_specs,
-            mass_specs,
-            directional_specs,
-            ordinary_specs,
-            accounting,
-        )
+        plan = GlobalMomentPlan(*spec)
         return GlobalMomentBuild(plan, None, estimate)
     except (GlobalMomentRefusalError, MemoryError) as exc:
         return GlobalMomentBuild(None, str(exc) or "allocation failed", estimate)
+
+
+def global_moment_chunk_size(layout, *, byte_budget, minimum_chunk_size, maximum_chunk_size=65536):
+    """Increase an admitted automatic row bound only within the owned budget.
+
+    This metadata-only selector owns no plan and scans no numeric arrays. Its
+    caller supplies the existing row bound and handles family/scope admission.
+    The builder independently revalidates all sources before allocation; this
+    estimate grants no numerical authority or persistent source certificate.
+    Caller-owned likelihood arrays remain outside the assembler's byte cap.
+    """
+    if any(
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, np.integer))
+        or value <= 0
+        for value in (byte_budget, minimum_chunk_size, maximum_chunk_size)
+    ):
+        return minimum_chunk_size
+    minimum, maximum = int(minimum_chunk_size), int(maximum_chunk_size)
+    if maximum <= minimum:
+        return minimum
+    try:
+        n, predictor_meta, support_meta = _metadata(layout, check_values=False)
+        maximum = min(n, maximum)
+        if maximum <= minimum:
+            return minimum
+
+        def peak(rows):
+            return _workspace_spec(
+                n,
+                layout.n_coefficients,
+                predictor_meta,
+                support_meta,
+                chunk_size=rows,
+                byte_budget=byte_budget,
+            )[-1]["estimated_peak_bytes"]
+
+        # Every row-dependent workspace term is affine in the chunk size.
+        # Derive both terms from the shared construction estimate, so changing
+        # its scratch accounting cannot leave a duplicate selector formula.
+        one_row = peak(1)
+        bytes_per_row = peak(2) - one_row
+        selected = min(maximum, 1 + (int(byte_budget) - one_row) // bytes_per_row)
+        return max(minimum, selected)
+    except (GlobalMomentRefusalError, MemoryError):
+        return minimum
 
 
 class GlobalMomentPlan:
@@ -539,6 +609,14 @@ class GlobalMomentPlan:
             (chunk_size, max(len(p.ordinary_columns) for p in self._predictors))
         )
         self._bins = np.empty((len(self._supports), chunk_size), dtype=np.intp)
+        self._batched_moments = _BatchedMomentReducers(
+            self._histograms,
+            self._directions,
+            self._ordinary,
+            self._bins,
+            support_sizes=tuple(support.n_bins for support in self._supports),
+            n_channels=len(self._predictors) * (len(self._predictors) + 1) // 2,
+        )
         self._coefficients = np.empty(width)
         self._penalty = np.empty((width, width))
         self._accumulators = (
@@ -554,6 +632,7 @@ class GlobalMomentPlan:
             self._accumulators
             + self._ordinary
             + [self._weighted, self._bins, self._coefficients, self._penalty]
+            + list(self._batched_moments.owned_arrays)
             + [p.ordinary_columns for p in self._predictors]
             + [
                 array
@@ -592,6 +671,8 @@ class GlobalMomentPlan:
                     "global_zeroed_bytes",
                     "refusal_count",
                     "support_authority_checks",
+                    "batched_moment_calls",
+                    "native_moment_workers",
                 )
             }
         )
@@ -642,7 +723,7 @@ class GlobalMomentPlan:
         self._stats["histogram_zeroings"] += len(self._histograms)
         self._stats["global_zeroed_bytes"] += self._stats["accumulator_bytes"]
 
-    def _prepare_chunk(self, plans, score, curvature):
+    def _prepare_chunk(self, plans, score, curvature, *, row_range=None):
         k = len(self._predictors)
         if not isinstance(plans, (tuple, list)) or len(plans) != k:
             raise GlobalMomentRefusalError("one chunk plan per predictor required")
@@ -651,6 +732,22 @@ class GlobalMomentPlan:
         n = score.shape[0]
         if not 1 <= n <= self._chunk_size or self._rows + n > self._n:
             raise GlobalMomentRefusalError("chunk exceeds workspace or remaining geometry rows")
+        source_n = n
+        selection = slice(None)
+        if row_range is not None:
+            start, stop = row_range
+            if (
+                type(start) is not int
+                or type(stop) is not int
+                or start != self._rows
+                or not 0 <= start < stop <= self._n
+                or stop - start != n
+            ):
+                raise GlobalMomentRefusalError(
+                    "row range must be contiguous and match channel rows"
+                )
+            source_n = self._n
+            selection = slice(start, stop)
         _array(score, (n, k), np.dtype(np.float64), "score channels")
         _array(curvature, (n, k * (k + 1) // 2), np.dtype(np.float64), "curvature channels")
         numerical_refusal = None
@@ -665,7 +762,7 @@ class GlobalMomentPlan:
                 or type(live.design) is not DesignMatrix
                 or live.intercept != owned.intercept
                 or live.width != owned.width
-                or live.design.n != n
+                or live.design.n != source_n
                 or len(live.design.group_matrices) != len(owned.groups)
             ):
                 raise GlobalMomentRefusalError("chunk predictor layout/type/order mismatch")
@@ -675,10 +772,12 @@ class GlobalMomentPlan:
                 panel[:, 0] = 1.0
             for group, meta in zip(live.design.group_matrices, owned.groups, strict=True):
                 group_type, width, ordinary_start, slot = meta
-                if type(group) is not group_type or group.shape != (n, width):
+                if type(group) is not group_type or group.shape != (source_n, width):
                     raise GlobalMomentRefusalError("chunk group type/order/width mismatch")
                 if group_type is DenseGroupMatrix:
-                    values = _array(group.M, (n, width), np.dtype(np.float64), "dense chunk")
+                    values = _array(
+                        group.M, (source_n, width), np.dtype(np.float64), "dense source"
+                    )[selection]
                     if not _finite_bounded_2d(values):
                         numerical_refusal = (
                             numerical_refusal or "nonfinite or out-of-domain ordinary value"
@@ -687,7 +786,10 @@ class GlobalMomentPlan:
                 elif group_type is CategoricalGroupMatrix:
                     if group.n_levels != width:
                         raise GlobalMomentRefusalError("categorical n_levels mismatch")
-                    codes = _index_values(group.codes, n, width + 1, "categorical codes")
+                    codes = _array(
+                        group.codes, (source_n,), np.dtype(np.intp), "categorical source codes"
+                    )[selection]
+                    _index_values(codes, n, width + 1, "categorical codes")
                     _pack_categorical(panel, codes, ordinary_start, width)
                 else:
                     support = self._supports[slot]
@@ -705,24 +807,52 @@ class GlobalMomentPlan:
                     self._stats["support_authority_checks"] += 1
                     target = self._bins[slot, :n]
                     if group_type is DiscretizedSSPGroupMatrix:
-                        bins = _index_values(group.bin_idx, n, support.n_bins, "support bins")
+                        bins = _array(
+                            group.bin_idx, (source_n,), np.dtype(np.intp), "source support bins"
+                        )[selection]
+                        _index_values(bins, n, support.n_bins, "support bins")
                         target[:] = bins
                     else:
                         rows = group.row_idx
-                        if type(rows) is not np.ndarray or rows.ndim != 1 or rows.size > n:
+                        if type(rows) is not np.ndarray or rows.ndim != 1 or rows.size > source_n:
                             raise GlobalMomentRefusalError(
-                                "activity rows must be a vector bounded by the chunk rows"
+                                "activity rows must be a vector bounded by the source rows"
                             )
+                        _array(rows, rows.shape, np.dtype(np.intp), "source activity rows")
+                        bins = _array(
+                            group.bin_idx_level,
+                            rows.shape,
+                            np.dtype(np.intp),
+                            "source active support bins",
+                        )
+                        if row_range is not None:
+                            extracted = _category_rows(group, start, stop)
+                            if extracted is None:
+                                # Replay the ordinary row_subset interpretation
+                                # after releasing this workspace. Keep checking
+                                # later sources so a hard error wins over this
+                                # recoverable dispatch refusal.
+                                numerical_refusal = (
+                                    numerical_refusal or "uncertified category row lookup"
+                                )
+                                continue
+                            rows, bins = extracted
+                            del extracted
+                            if type(rows) is not np.ndarray or rows.ndim != 1 or rows.size > n:
+                                raise GlobalMomentRefusalError(
+                                    "activity rows must be a vector bounded by the chunk rows"
+                                )
                         _index_values(rows, len(rows), n, "activity rows")
                         if len(rows) > 1 and np.any(rows[1:] <= rows[:-1]):
                             raise GlobalMomentRefusalError(
                                 "activity rows must be strictly increasing"
                             )
-                        bins = _index_values(
-                            group.bin_idx_level, len(rows), support.n_bins, "active support bins"
-                        )
+                        _index_values(bins, len(rows), support.n_bins, "active support bins")
                         target.fill(-1)
                         target[rows] = bins
+                        # Release the two bounded extraction arrays before
+                        # the next category allocates its row/bin pair.
+                        del rows, bins
         if numerical_refusal is not None:
             raise GlobalMomentRefusalError(numerical_refusal, recoverable=True)
         return n
@@ -732,6 +862,33 @@ class GlobalMomentPlan:
             self._refuse("add_chunk requires a reset and an unrefused, unfinished geometry")
         try:
             n = self._prepare_chunk(plans, score_eta, curvature_packed)
+        except GlobalMomentRefusalError as exc:
+            self._refuse(exc.reason, recoverable=exc.recoverable)
+        except (ValueError, IndexError, FloatingPointError) as exc:
+            self._refuse(str(exc))
+        self._accumulate_prepared(n, score_eta, curvature_packed)
+
+    def add_row_range(self, plans, start, stop, score_eta, curvature_packed):
+        """Ingest contiguous original-design rows using the owned chunk buffers.
+
+        Live numeric arrays are checked before slicing. Small B/R authority
+        tables are compared exactly on each call; source-sized row lookup
+        caches retain the ordinary row_subset contract and belong to the
+        caller's groups. The usual certified path constructs no child designs.
+        """
+        if self._state != "accumulating":
+            self._refuse("add_row_range requires a reset and an unrefused, unfinished geometry")
+        try:
+            n = self._prepare_chunk(plans, score_eta, curvature_packed, row_range=(start, stop))
+        except GlobalMomentRefusalError as exc:
+            self._refuse(exc.reason, recoverable=exc.recoverable)
+        except (ValueError, IndexError, FloatingPointError) as exc:
+            self._refuse(str(exc))
+        self._accumulate_prepared(n, score_eta, curvature_packed)
+
+    def _accumulate_prepared(self, n, score_eta, curvature_packed):
+        """Update moments only after complete source and channel validation."""
+        try:
             panels = [panel[:n] for panel in self._ordinary]
             bins = self._bins[:, :n]
             for a, panel in enumerate(panels):
@@ -751,19 +908,16 @@ class GlobalMomentPlan:
             for g, channel, accumulator in self._masses:
                 _accumulate_vector(accumulator, bins[g], curvature_packed[:, channel])
                 self._stats["mass_update_calls"] += 1
-            for g, h, channel, accumulator in self._histograms:
-                active = _accumulate_histogram(
-                    accumulator, bins[g], bins[h], curvature_packed[:, channel]
-                )
-                self._stats["histogram_update_calls"] += 1
-                self._stats["histogram_row_visits"] += n
-                self._stats["histogram_active_updates"] += int(active)
-            for g, a, channel, accumulator in self._directions:
-                active = _accumulate_directional(
-                    accumulator, bins[g], panels[a], curvature_packed[:, channel]
-                )
-                self._stats["directional_update_calls"] += 1
-                self._stats["directional_row_width_work"] += int(active) * panels[a].shape[1]
+            active, directional_work = self._batched_moments.accumulate(curvature_packed, n)
+            self._stats["batched_moment_calls"] += 1
+            self._stats["native_moment_workers"] = max(
+                self._stats["native_moment_workers"], self._batched_moments.last_worker_count
+            )
+            self._stats["histogram_update_calls"] += len(self._histograms)
+            self._stats["histogram_row_visits"] += n * len(self._histograms)
+            self._stats["histogram_active_updates"] += active
+            self._stats["directional_update_calls"] += len(self._directions)
+            self._stats["directional_row_width_work"] += directional_work
         except GlobalMomentRefusalError as exc:
             self._refuse(exc.reason, recoverable=exc.recoverable)
         except (ValueError, IndexError, FloatingPointError) as exc:
@@ -837,6 +991,7 @@ class GlobalMomentPlan:
 
     def close(self):
         """Release owned arrays; returned DenseJointGeometry owns independent copies."""
+        self._batched_moments = None
         self._accumulators = []
         self._histograms = self._masses = self._directions = self._ordinary_blocks = []
         self._support_scores = self._ordinary_scores = self._ordinary = []

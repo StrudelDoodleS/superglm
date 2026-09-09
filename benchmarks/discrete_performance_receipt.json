@@ -1,5 +1,12 @@
 {
   "schema": "superglm-public-discrete-performance-evidence-v1",
+  "million_row_latency_checkpoint": {
+    "receipt": "benchmarks/discrete_latency_receipt.json",
+    "status": "three_of_three_complete_fits_under_20_seconds",
+    "candidate_median_seconds": 19.2696263320031,
+    "candidate_production_tree_sha256": "6ea1435a53b4aa44c663ae4ae996a900033f1b8425df0e0807baa4bcb48efbd9",
+    "raw_summary_sha256": "e83da925bf97538baa582afc0989623f83bb573cfb8a2eaf3d4360bd421496cf"
+  },
   "fixed_channel_width_control": {
     "source_sha": "c9f62dd58657626994727e6ced69a20b6ae8121b",
     "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",

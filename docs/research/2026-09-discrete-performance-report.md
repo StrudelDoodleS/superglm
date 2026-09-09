@@ -1,5 +1,92 @@
 # Discrete execution performance
 
+The requested **20-second complete-fit milestone is met** on the public
+million-row fragmented Gaussian workload. Three predeclared fresh-process fits
+take **18.607, 19.270 and 19.665 seconds**, with a median of **19.270 seconds**.
+All three samples are included. The model still has 1,048,576 training rows,
+102 coefficients, four knots and 256 bins. Each fit converges through the
+existing `practical_plateau` rule, with 16 inner and seven smoothing iterations.
+
+| Source | Complete-fit wall seconds | Fit-end process highwater, MiB |
+| --- | --- | --- |
+| Baseline `8fb261bc`, earlier matched run | 26.725 | 1,866.55 |
+| Baseline `8fb261bc`, current window | 29.068 | 1,866.61 |
+| Current implementation, run 1 | 18.607 | 1,904.06 |
+| Current implementation, run 2 | 19.270 | 1,908.77 |
+| Current implementation, run 3 | 19.665 | 1,898.22 |
+
+Both baseline samples remain visible; their variation precludes treating one
+sample as a precise population speed estimate. These are improvements to the
+same discrete model against the immediately preceding implementation, not a
+comparison against an exact model or published v0.31.0. The candidate median is
+about 31% below the median of the two matched baseline samples.
+
+The clock includes feature compilation, coefficient and smoothing fitting, the
+null fit and finalization. Input generation, the standard public `warmup()`
+(0.542–0.817 s for these candidates), post-fit output capture and the separate
+dispatch witness are outside it. Every timed process uses four Numba workers,
+one BLAS thread and the default OpenMP waiting policy; all runtime, source and
+process checks pass. Candidate CPU times are 31.904–32.992 s: additional CPU is
+an accepted cost of reducing wall time. The timed order is candidate, baseline,
+candidate, candidate, with other numerical jobs paused. No timing hooks or
+profiling are present in the authoritative fit clocks.
+
+All ten saved numerical outputs agree exactly across the three candidates,
+the untimed witness and the immediately preceding candidate. Against the older
+baseline, the changed row partition produces maximum holdout-parameter and
+coefficient differences of 8.88e-16 and 1.53e-16; the covariance norm-relative
+difference is 1.05e-13. Objective and log likelihood agree exactly. Stored
+representation hashes and convergence outcomes match. This is an execution
+equivalence check for the chosen binned model; approximation relative to the
+continuous feature basis remains a separate resolution question.
+
+The implementation removes repeated support products and child design creation
+from row processing, accumulates independent support moments on four native
+workers, and selects one coherent row batch from the existing assembler
+workspace estimate. On this fixture that selects 65,536 rows. One-column numeric
+range products use elementwise multiplication. The final change reuses exactly
+prepared immutable Gaussian/Gamma likelihood children within one fit session;
+it does not cache changing likelihood values or derivatives. Source and child
+authority checks revoke reuse after mutation, and unsupported cases retain
+fresh legacy preparation.
+
+A separate untimed trace confirms **560 child preparations fall to 16**.
+The overlapping watched preparation time falls from 1.329 to 0.043 s, including
+profiling overhead; this is supporting evidence, not another fit-time estimate.
+Actual dispatch remains 17 successful global geometries, 272 batched native
+calls, four workers and zero refusals. The peak assembler estimate is
+58,395,920 bytes within its 64 MiB allowance. The child cache has a separate
+64 MiB retained-byte limit and a 256-entry limit. A fresh uncached child and
+caller-owned likelihood batches are outside those retained workspace budgets.
+Whole-process highwater rises by approximately 38 MiB at the median, to about
+1.86 GiB; no bounded whole-fit RAM claim follows from the local allowances.
+
+The combined solver regression run passes 755 tests. All 125 cache tests,
+including two subsequent ownership regressions, pass with warnings treated as
+errors. The suites overlap. Focused tests establish identical cached/uncached
+fit results, mathematical assembly invariants, real dispatch and bounded
+ownership separately. The missing-session regression fails before integration;
+mutation cases reject stale arrays and metadata. Ruff check/format and static
+diff checks pass, and independent reviews report no blockers.
+
+The measured baseline production-tree hash is
+`0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea`;
+the candidate production-tree hash is
+`6ea1435a53b4aa44c663ae4ae996a900033f1b8425df0e0807baa4bcb48efbd9`.
+Raw runs, source pins and exact commands are preserved in
+`.benchmark-artifacts/discrete-performance/parallel-moments-pilot/likelihood-cache-validation/`.
+The tracked [latency receipt](../../benchmarks/discrete_latency_receipt.json)
+contains all timings, memory boundaries, numerical differences, dispatch
+evidence and raw-summary hash
+`e83da925bf97538baa582afc0989623f83bb573cfb8a2eaf3d4360bd421496cf`.
+The public workload is defined by `gaussian_fragmented_fixture` in
+`benchmarks/c3_c1_complete_fit.py` (seeds 28109 and 28110). This checkpoint closes
+the immediate C1 latency milestone. A generally optimal thread policy, larger-N
+capacity, compact solver history and bounded input/endpoint storage remain open.
+The chosen task remains C3+C1; this result does not advance it to C5.
+
+## Earlier streamed-moment checkpoint
+
 Production streamed moments at `5c1ce17e` reduce the 262,144-row discrete fit
 median from 12.036 to 7.884 s against the immediately preceding implementation.
 At 1,048,576 rows and 102 coefficients, the single discrete sample takes

@@ -9,10 +9,12 @@ def test_public_warmup_covers_global_moments_in_a_fresh_process():
 import numpy as np
 import superglm
 from superglm.distributional.solver import _global_moments as moments
+from superglm.distributional.solver._batched_moments import _accumulate_batched
 
 kernels = (moments._finite_bounded_1d, moments._finite_bounded_2d,
            moments._pack_categorical, moments._accumulate_vector,
-           moments._accumulate_histogram, moments._accumulate_directional)
+           moments._accumulate_histogram, moments._accumulate_directional,
+           _accumulate_batched)
 assert all(not kernel.nopython_signatures for kernel in kernels)
 superglm.warmup()
 compiled = tuple(tuple(kernel.nopython_signatures) for kernel in kernels)

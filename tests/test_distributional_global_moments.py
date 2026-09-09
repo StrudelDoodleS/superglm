@@ -7,6 +7,7 @@ no grouped algebra is used to construct expected values.
 from __future__ import annotations
 
 import importlib
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
@@ -360,6 +361,8 @@ def test_global_dispatch_does_not_materialize_or_use_grouped_moments(api, monkey
         monkeypatch.setattr(cls, "toarray", forbidden)
     monkeypatch.setattr(PredictorExecutionPlan, "diagonal_moment", forbidden)
     monkeypatch.setattr(PredictorExecutionPlan, "cross_moment", forbidden)
+    monkeypatch.setattr(api, "_accumulate_histogram", forbidden)
+    monkeypatch.setattr(api, "_accumulate_directional", forbidden)
     with accepted_plan(api, fixture) as plan:
         accumulate(plan, fixture, 8)
         assert plan.stats["chunks"] == 5
@@ -367,6 +370,8 @@ def test_global_dispatch_does_not_materialize_or_use_grouped_moments(api, monkey
         assert plan.stats["histogram_update_calls"] > 0
         assert plan.stats["directional_update_calls"] > 0
         assert plan.stats["ordinary_curvature_products"] > 0
+        assert plan.stats["batched_moment_calls"] == 5
+        assert plan.stats["native_moment_workers"] >= 1
 
 
 def test_budget_accounts_for_owned_solver_support_and_chunk_scratch(api):
@@ -388,6 +393,9 @@ def test_budget_accounts_for_owned_solver_support_and_chunk_scratch(api):
                 stats["accumulator_bytes"] + stats["support_authority_bytes"] + support_bytes
             )
             assert stats["persistent_allocated_bytes"] <= build.estimated_peak_bytes
+            assert stats["batched_reducer_bytes"] == sum(
+                array.nbytes for array in build.plan._batched_moments.owned_arrays
+            )
             estimates.append(build.estimated_peak_bytes)
         finally:
             build.plan.close()
@@ -501,7 +509,13 @@ def test_close_releases_state_and_cannot_be_revived(api):
     build = api.build_global_moment_plan(fixture.layout, chunk_size=8)
     assert build.plan is not None
     plan = build.plan
+    owned = [
+        weakref.ref(array)
+        for array in [plan._bins, *plan._ordinary, *plan._accumulators]
+        + list(plan._batched_moments.owned_arrays)
+    ]
     plan.close()
+    assert all(reference() is None for reference in owned)
     for _ in range(2):
         with pytest.raises(api.GlobalMomentRefusalError):
             plan.reset(coefficients=fixture.coefficients, penalty=fixture.penalty)
@@ -591,6 +605,7 @@ def test_live_array_subclass_refuses_before_hooks_or_native_updates(api, monkeyp
         # fail safely rather than exposing the test runner to invalid indices.
         for name in ("_accumulate_vector", "_accumulate_histogram", "_accumulate_directional"):
             monkeypatch.setattr(api, name, forbidden)
+        monkeypatch.setattr(api._BatchedMomentReducers, "accumulate", forbidden)
         if field == "codes":
             monkeypatch.setattr(api, "_pack_categorical", forbidden)
         with pytest.raises(api.GlobalMomentRefusalError) as caught:

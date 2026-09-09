@@ -92,12 +92,14 @@ def _category_rows(group, start, stop):
     return local_rows, bins
 
 
-def group_range_matvec(group, start: int, stop: int, beta):
+def group_range_matvec(group, start: int, stop: int, beta, support_prediction=None):
     """Evaluate a built-in group's current stored algebra on ``[start, stop)``."""
     if not _plain_array(beta, np.float64, 1) or not _supported(group, start, stop):
         return None
     kind = type(group)
     if kind is DenseGroupMatrix:
+        if group.M.shape[1] == 1 and beta.shape == (1,):
+            return group.M[start:stop, 0] * beta[0]
         return group.M[start:stop] @ beta
     if kind in _CATEGORICAL:
         codes = group.codes[start:stop]
@@ -108,7 +110,11 @@ def group_range_matvec(group, start: int, stop: int, beta):
         extended[group.n_levels] = 0.0
         return extended[codes]
     if kind in _SUPPORT:
-        values = group.B_unique @ (group.R_inv @ beta)
+        values = (
+            group.B_unique @ (group.R_inv @ beta)
+            if support_prediction is None
+            else support_prediction(group, beta)
+        )
         return values[group.bin_idx[start:stop]]
     rows = _category_rows(group, start, stop)
     if rows is None:
@@ -116,11 +122,16 @@ def group_range_matvec(group, start: int, stop: int, beta):
     local_rows, bins = rows
     out = np.zeros(stop - start, dtype=np.float64)
     if local_rows.size:
-        raw_beta = group.R_inv @ beta
         if kind is SplineCategoricalGroupMatrix:
+            raw_beta = group.R_inv @ beta
             out[local_rows] = np.asarray(group.B[local_rows + start] @ raw_beta).ravel()
         else:
-            out[local_rows] = (group.B_unique @ raw_beta)[bins]
+            values = (
+                group.B_unique @ (group.R_inv @ beta)
+                if support_prediction is None
+                else support_prediction(group, beta)
+            )
+            out[local_rows] = values[bins]
     return out
 
 

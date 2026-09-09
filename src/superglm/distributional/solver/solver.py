@@ -33,6 +33,10 @@ from superglm.distributional.result import (
     _validate_resolution_limited_stationarity,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.solver._likelihood_cache import (
+    _LikelihoodCache,
+    build_likelihood_cache,
+)
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     _assemble_dense_geometry_from_matrices,
@@ -88,6 +92,7 @@ class _SolverContext:
     execution_backend_identifier: ExecutionBackendIdentifier
     dense_matrices: tuple[NDArray[np.float64], ...] | None
     coefficient_face: PenaltyFace | None
+    likelihood_cache: _LikelihoodCache | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,23 @@ class _DenseObservedReuseSession:
         self._results: dict[int, tuple[DenseSolverResult, _DenseObservedReuseOwner]] = {}
         self._chunk_results: dict[int, _ChunkObservedReuseRecord] = {}
         self._dense: dict[int, tuple[StackedLayout, tuple[NDArray[np.float64], ...]]] = {}
+        self._likelihood: (
+            tuple[DistributionalFamily, FamilyLikelihoodPlan, _LikelihoodCache | None] | None
+        ) = None
+
+    def likelihood_cache(
+        self, family: DistributionalFamily, plan: FamilyLikelihoodPlan
+    ) -> _LikelihoodCache | None:
+        """Share bounded static row preparation across coefficient fits."""
+        entry = self._likelihood
+        if entry is not None:
+            if entry[0] is family and entry[1] is plan:
+                return entry[2]
+            if entry[2] is not None:
+                entry[2].clear()
+        cache = build_likelihood_cache(family, plan)
+        self._likelihood = (family, plan, cache)
+        return cache
 
     def dense_matrices(
         self,
@@ -507,6 +529,7 @@ def _validated_context(
     chunk_size: chunking.ChunkSize | None,
     coefficient_face: PenaltyFace | None,
     dense_matrices: tuple[NDArray[np.float64], ...] | None = None,
+    _reuse_session: _DenseObservedReuseSession | None = None,
 ) -> _SolverContext:
     if not isinstance(family, DistributionalFamily):
         raise TypeError("family must implement DistributionalFamily")
@@ -547,18 +570,17 @@ def _validated_context(
             "penalty must be positive semidefinite under the shared rank policy"
         ) from exc
     links = tuple(state.link for state in layout.predictors)
-    resolved_chunk_size = (
-        None
-        if chunk_size is None
-        else chunking.resolve_chunk_size(
-            n_observations,
-            len(layout.predictors),
-            chunk_size,
-            p_coefficients=layout.n_coefficients,
-        )
+    resolved_chunk_size = chunking._resolve_fitting_chunk_size(
+        family, layout, root_likelihood_plan, chunk_size
     )
+    likelihood_cache = None
     if resolved_chunk_size is not None:
         dense_matrices = None
+        likelihood_cache = (
+            build_likelihood_cache(family, root_likelihood_plan)
+            if _reuse_session is None
+            else _reuse_session.likelihood_cache(family, root_likelihood_plan)
+        )
     elif dense_matrices is None:
         dense_matrices = dense_predictor_matrices(layout)
     elif len(dense_matrices) != len(layout.predictors) or any(
@@ -582,6 +604,7 @@ def _validated_context(
         ),
         dense_matrices=dense_matrices,
         coefficient_face=coefficient_face,
+        likelihood_cache=likelihood_cache,
     )
 
 
@@ -618,6 +641,7 @@ def _evaluate_state_unmeasured(
                 context.likelihood_plan,
                 coefficient_values,
                 chunk_size=context.chunk_size,
+                likelihood_cache=context.likelihood_cache,
             )
             penalty_value = 0.5 * float(coefficient_values @ context.penalty @ coefficient_values)
             penalized_optimizing = likelihood.optimizing_log_likelihood - penalty_value
@@ -780,6 +804,7 @@ def _geometry(
             penalty=context.penalty,
             chunk_size=context.chunk_size,
             curvature_source=source,
+            likelihood_cache=context.likelihood_cache,
         )
     if state.derivatives is None:
         raise RuntimeError("dense accepted state is missing derivative geometry")
@@ -1307,9 +1332,14 @@ def _reuse_observed_initial_result(
             or _chunk_reuse_data_certificate(context) != record.certificate
         ):
             return None
+        support_predictions = chunking._SupportPredictions()
         for rows in chunking.iter_row_chunks(len(context.response), context.chunk_size):
             eta = chunking._predictor_values(
-                context.layout, coefficients, rows, include_offsets=True
+                context.layout,
+                coefficients,
+                rows,
+                include_offsets=True,
+                support_predictions=support_predictions,
             )
             theta = chunking._theta_chunk(context.layout, eta)
             if not np.array_equal(eta, source.eta[rows.start : rows.stop]) or not np.array_equal(
@@ -1408,6 +1438,7 @@ def _fit_dense_fixed_lambda_core(
         chunk_size=chunk_size,
         coefficient_face=coefficient_face,
         dense_matrices=memoised,
+        _reuse_session=_reuse_session,
     )
     with measure_phase(phase_recorder, "initialization"):
         if initial is None:

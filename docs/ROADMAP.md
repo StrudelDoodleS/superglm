@@ -229,6 +229,21 @@ processing remains the immediate latency task; compact history addresses a
 separate capacity limit. Large N amplifies the avoided per-row basis work even
 though both routes remain linear in N at fixed model dimensions.
 
+The requested 20-second latency milestone is now met on the existing public
+million-row fragmented Gaussian workload (N=1,048,576, P=102, four knots,
+256 bins): three predeclared complete fits take 18.607, 19.270 and 19.665 s.
+Both matched baseline samples remain recorded, at 26.725 and 29.068 s. The
+measurement uses four native workers and one BLAS thread, with standard public
+warmup outside the fit clock. Direct row-range ingestion, parallel support
+moments, coherent workspace-sized batches, support prediction reuse and bounded
+immutable likelihood preparation preserve the chosen binned model. The last
+change reduces repeated child preparations from 560 to 16. Peak process memory
+is about 1.86 GiB, approximately 38 MiB above the baseline median; the prepared
+child cache has a separate 64 MiB retention allowance. This is a C1 latency
+milestone, not a universal thread policy or a bounded whole-fit RAM claim.
+Larger-N capacity work remains within the chosen C3+C1 scope. See the current
+[performance report](research/2026-09-discrete-performance-report.md).
+
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,
 backend or timing input; `-1` disables intervention rather than selecting an

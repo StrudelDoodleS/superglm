@@ -9,6 +9,10 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm._group_matrix._group_matrix_discretized import (
+    DiscretizedSplineCategoricalGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+)
 from superglm._group_matrix._group_matrix_range import group_range_matvec, group_row_range
 from superglm.distributional._global_moment_policy import automatic_global_moment_budget
 from superglm.distributional._panel_policy import automatic_small_group_panel_budget
@@ -23,6 +27,7 @@ from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._global_moments import (
     GlobalMomentRefusalError,
     build_global_moment_plan,
+    global_moment_chunk_size,
 )
 from superglm.distributional.solver._small_group_panels import build_small_group_panels
 from superglm.distributional.solver.assembly import DenseJointGeometry, GroupedGeometryAccumulator
@@ -43,6 +48,45 @@ CurvatureSource = Literal["observed", "fisher"]
 # It is a deterministic bound selector, not a claim about exact allocator RSS.
 AUTO_CHUNK_SELECTOR = "distributional-auto-v1"
 AUTO_CHUNK_MEMORY_BYTES = 8 * 1024 * 1024
+
+# Retained snapshots plus support vectors per pass; refresh uses bounded scratch.
+# No observation-sized predictions are retained here.
+_SUPPORT_PREDICTION_BYTES = 1024 * 1024
+
+
+class _SupportPredictions:
+    """Reuse small support products while checking mutable algebra each chunk."""
+
+    def __init__(self):
+        self.entries = {}
+        self.nbytes = 0
+
+    def __call__(self, group, beta):
+        key = id(group)
+        source = (group.B_unique, group.R_inv, beta)
+        entry = self.entries.get(key)
+        if entry is not None:
+            snapshots, values = entry
+            if all(np.array_equal(a, b) for a, b in zip(source, snapshots, strict=True)):
+                return values
+            self.nbytes -= sum(a.nbytes for a in snapshots) + values.nbytes
+            del self.entries[key]
+            del entry, snapshots, values
+        values = group.B_unique @ (group.R_inv @ beta)
+        size = sum(a.nbytes for a in source) + values.nbytes
+        if size <= _SUPPORT_PREDICTION_BYTES - self.nbytes:
+            self.entries[key] = (tuple(a.copy() for a in source), values)
+            self.nbytes += size
+        return values
+
+
+def _support_range(group, rows, beta, support_predictions):
+    if support_predictions is None or type(group) not in (
+        DiscretizedSSPGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
+    ):
+        return None
+    return group_range_matvec(group, rows.start, rows.stop, beta, support_predictions)
 
 
 def _immutable_response(response: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -149,6 +193,29 @@ def resolve_chunk_size(
     return min(rows, _positive_integer(chunk_size, name="chunk_size"))
 
 
+def _resolve_fitting_chunk_size(family, layout, likelihood_plan, chunk_size):
+    """Resolve one row bound for all phases of an admitted global fit.
+
+    Larger batches amortize native scheduling and likelihood preparation. The
+    global assembler's shared estimate limits its additional workspace; the
+    caller's likelihood arrays remain separately bounded by the returned rows.
+    Explicit requests and unsupported models retain the ordinary selector.
+    """
+    if chunk_size is None:
+        return None
+    resolved = resolve_chunk_size(
+        layout.predictors[0].design.n,
+        len(layout.predictors),
+        chunk_size,
+        p_coefficients=layout.n_coefficients,
+    )
+    if type(chunk_size) is str and chunk_size == "auto":
+        budget = automatic_global_moment_budget(family, likelihood_plan, layout)
+        if budget is not None:
+            return global_moment_chunk_size(layout, byte_budget=budget, minimum_chunk_size=resolved)
+    return resolved
+
+
 @dataclass(frozen=True)
 class RowChunk:
     """One contiguous, non-empty row range and its subset indices."""
@@ -241,6 +308,8 @@ def _predictor_values(
     rows: RowChunk,
     *,
     include_offsets: bool,
+    support_predictions=None,
+    sum_slopes_first: bool = False,
 ) -> NDArray[np.float64]:
     """Evaluate a chunk without preparing coefficient-space geometry.
 
@@ -253,16 +322,32 @@ def _predictor_values(
     for state in layout.predictors:
         intercept = state.intercept_index is not None
         local = coefficients[state.coefficient_slice]
-        values = np.full(len(rows.indices), local[0] if intercept else 0.0, dtype=np.float64)
+        values = np.full(
+            len(rows.indices),
+            local[0] if intercept and not sum_slopes_first else 0.0,
+            dtype=np.float64,
+        )
         column = int(intercept)
         for group in state.design.group_matrices:
             width = group.shape[1]
             group_coefficients = local[column : column + width]
-            contribution = group_range_matvec(group, rows.start, rows.stop, group_coefficients)
+            contribution = _support_range(
+                group,
+                rows,
+                group_coefficients,
+                support_predictions if type(state.design) is DesignMatrix else None,
+            )
+            if contribution is None:
+                contribution = group_range_matvec(group, rows.start, rows.stop, group_coefficients)
             if contribution is None:
                 contribution = group.row_subset(rows.indices).matvec(group_coefficients)
             values += contribution
             column += width
+        if sum_slopes_first and intercept:
+            if state.design.p:
+                values += local[0]
+            else:
+                values[:] = local[0]
         if include_offsets:
             values += state.offset[rows.start : rows.stop]
         eta[:, state.parameter_index] = values
@@ -277,6 +362,7 @@ def _predictor_chunk(
     rows: RowChunk,
     *,
     include_offsets: bool,
+    support_predictions=None,
 ) -> tuple[NDArray[np.float64], tuple[PredictorExecutionPlan, ...]]:
     k_parameters = len(layout.predictors)
     eta = np.empty((len(rows.indices), k_parameters), dtype=np.float64)
@@ -300,7 +386,31 @@ def _predictor_chunk(
             dtype=np.float64,
         )
         if design.p:
-            values += design.matvec(local[slope_start:])
+            if (
+                support_predictions is not None
+                and type(state.design) is DesignMatrix
+                and not (
+                    design._tabmat_vector_candidate and design._tabmat_holder.split is not None
+                )
+                and any(
+                    type(group)
+                    in (DiscretizedSSPGroupMatrix, DiscretizedSplineCategoricalGroupMatrix)
+                    for group in state.design.group_matrices
+                )
+            ):
+                slopes = np.zeros(len(rows.indices), dtype=np.float64)
+                column = slope_start
+                for group, child in zip(
+                    state.design.group_matrices, design.group_matrices, strict=True
+                ):
+                    width = group.shape[1]
+                    beta = local[column : column + width]
+                    contribution = _support_range(group, rows, beta, support_predictions)
+                    slopes += child.matvec(beta) if contribution is None else contribution
+                    column += width
+                values += slopes
+            else:
+                values += design.matvec(local[slope_start:])
         if include_offsets:
             values += state.offset[rows.indices]
         eta[:, state.parameter_index] = values
@@ -356,6 +466,12 @@ def _validate_chunk_inputs(
     return response, likelihood_plan, _validated_coefficients(layout, coefficients)
 
 
+def _take_likelihood_rows(plan, rows, likelihood_cache):
+    if likelihood_cache is None:
+        return plan.take(rows.indices)
+    return likelihood_cache.take(plan, rows.indices, start=rows.start, stop=rows.stop)
+
+
 def iter_likelihood_chunks(
     family: DistributionalFamily,
     layout: StackedLayout,
@@ -365,8 +481,14 @@ def iter_likelihood_chunks(
     *,
     chunk_size: ChunkSize,
     curvature_source: CurvatureSource,
+    _range_geometry: bool = False,
+    likelihood_cache=None,
 ):
-    """Yield bounded predictor derivatives and curvature for each row chunk."""
+    """Yield bounded predictor derivatives and curvature for each row chunk.
+
+    Private global assembly may retain original plans and consume their row
+    ranges directly. The default stream continues to supply owned child plans.
+    """
     if curvature_source not in ("observed", "fisher"):
         raise ValueError("curvature_source must be 'observed' or 'fisher'")
     if curvature_source == "fisher" and not isinstance(family, ExpectedInformationFamily):
@@ -380,20 +502,45 @@ def iter_likelihood_chunks(
     )
     links = tuple(state.link for state in layout.predictors)
     k_parameters = len(links)
+    support_predictions = _SupportPredictions()
+    range_plans = None
+    if _range_geometry and all(
+        type(state.design) is DesignMatrix
+        and not (
+            state.design._tabmat_vector_candidate and state.design._tabmat_holder.split is not None
+        )
+        for state in layout.predictors
+    ):
+        range_plans = tuple(
+            PredictorExecutionPlan(state.design, state.intercept_index is not None)
+            for state in layout.predictors
+        )
     for rows in iter_row_chunks(
         len(response),
         chunk_size,
         k_parameters=k_parameters,
         p_coefficients=layout.n_coefficients,
     ):
-        eta, plans = _predictor_chunk(
-            layout,
-            coefficient_values,
-            rows,
-            include_offsets=True,
-        )
+        if range_plans is None:
+            eta, plans = _predictor_chunk(
+                layout,
+                coefficient_values,
+                rows,
+                include_offsets=True,
+                support_predictions=support_predictions,
+            )
+        else:
+            eta = _predictor_values(
+                layout,
+                coefficient_values,
+                rows,
+                include_offsets=True,
+                support_predictions=support_predictions,
+                sum_slopes_first=True,
+            )
+            plans = range_plans
         theta = _theta_chunk(layout, eta)
-        child_plan = plan.take(rows.indices)
+        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache)
         if len(child_plan.weights.values) != len(rows.indices):
             raise UnsupportedLikelihoodContractError(
                 "family likelihood slicing returned the wrong number of rows"
@@ -435,6 +582,7 @@ def evaluate_chunked_log_likelihood(
     coefficients: NDArray,
     *,
     chunk_size: ChunkSize,
+    likelihood_cache=None,
 ) -> ChunkedLikelihoodSums:
     """Evaluate only the scalar weighted likelihood in bounded row chunks."""
     response, plan, coefficient_values = _validate_chunk_inputs(
@@ -446,6 +594,7 @@ def evaluate_chunked_log_likelihood(
     )
     optimizing_total = 0.0
     carrier_total = 0.0
+    support_predictions = _SupportPredictions()
     for rows in iter_row_chunks(
         len(response),
         chunk_size,
@@ -457,9 +606,10 @@ def evaluate_chunked_log_likelihood(
             coefficient_values,
             rows,
             include_offsets=True,
+            support_predictions=support_predictions,
         )
         theta = _theta_chunk(layout, eta)
-        child_plan = plan.take(rows.indices)
+        child_plan = _take_likelihood_rows(plan, rows, likelihood_cache)
         if len(child_plan.weights.values) != len(rows.indices):
             raise UnsupportedLikelihoodContractError(
                 "family likelihood slicing returned the wrong number of rows"
@@ -493,6 +643,7 @@ def assemble_chunked_geometry(
     chunk_size: ChunkSize,
     curvature_source: CurvatureSource,
     small_group_panel_byte_budget: int | Literal["auto"] | None = "auto",
+    likelihood_cache=None,
 ) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
 
@@ -533,6 +684,7 @@ def assemble_chunked_geometry(
                     penalty=penalty,
                     chunk_size=chunk_size,
                     curvature_source=curvature_source,
+                    likelihood_cache=likelihood_cache,
                 )
                 if result is not None:
                     return result
@@ -546,6 +698,7 @@ def assemble_chunked_geometry(
         chunk_size=chunk_size,
         curvature_source=curvature_source,
         panel_byte_budget=panel_byte_budget,
+        likelihood_cache=likelihood_cache,
     )
 
 
@@ -560,6 +713,7 @@ def _try_global_geometry(
     penalty,
     chunk_size,
     curvature_source,
+    likelihood_cache=None,
 ) -> DenseJointGeometry | None:
     """Own one attempt; no exception/stream frame survives into fallback."""
     iterator = None
@@ -574,6 +728,8 @@ def _try_global_geometry(
             coefficients,
             chunk_size=chunk_size,
             curvature_source=curvature_source,
+            _range_geometry=hasattr(plan, "add_row_range"),
+            **({"likelihood_cache": likelihood_cache} if likelihood_cache is not None else {}),
         )
         expected_start = 0
         n = layout.predictors[0].design.n
@@ -589,7 +745,16 @@ def _try_global_geometry(
                 or rows.stop - rows.start != len(chunk.score_eta)
             ):
                 raise ValueError("global moment stream has inconsistent row ranges")
-            plan.add_chunk(chunk.plans, chunk.score_eta, chunk.curvature_packed)
+            if hasattr(plan, "add_row_range") and all(
+                predictor.design is state.design
+                for predictor, state in zip(chunk.plans, layout.predictors, strict=True)
+            ):
+                plan.add_row_range(
+                    chunk.plans, rows.start, rows.stop, chunk.score_eta, chunk.curvature_packed
+                )
+            else:
+                # Preserve streams supplied by callers which own child plans.
+                plan.add_chunk(chunk.plans, chunk.score_eta, chunk.curvature_packed)
             expected_start = rows.stop
             chunk = None
         if expected_start != n:
@@ -621,6 +786,7 @@ def _assemble_grouped_chunk_geometry(
     chunk_size,
     curvature_source,
     panel_byte_budget,
+    likelihood_cache=None,
 ) -> DenseJointGeometry:
     accumulator = GroupedGeometryAccumulator(
         layout,
@@ -635,6 +801,7 @@ def _assemble_grouped_chunk_geometry(
         coefficients,
         chunk_size=chunk_size,
         curvature_source=curvature_source,
+        **({"likelihood_cache": likelihood_cache} if likelihood_cache is not None else {}),
     ):
         workspace = None
         if panel_byte_budget is not None:
@@ -669,6 +836,7 @@ def maximum_chunked_predictor_change(
     """Return the largest absolute linear-predictor change without full rows."""
     step = _validated_coefficients(layout, coefficient_step)
     maximum = 0.0
+    support_predictions = _SupportPredictions()
     n_observations = layout.predictors[0].design.n
     for rows in iter_row_chunks(
         n_observations,
@@ -681,6 +849,7 @@ def maximum_chunked_predictor_change(
             step,
             rows,
             include_offsets=False,
+            support_predictions=support_predictions,
         )
         maximum = max(maximum, float(np.max(np.abs(change), initial=0.0)))
     return maximum
@@ -698,6 +867,7 @@ def materialize_terminal_predictions(
     k_parameters = len(layout.predictors)
     eta = np.empty((n_observations, k_parameters), dtype=np.float64)
     theta = np.empty_like(eta)
+    support_predictions = _SupportPredictions()
     for rows in iter_row_chunks(
         n_observations,
         chunk_size,
@@ -709,6 +879,7 @@ def materialize_terminal_predictions(
             coefficient_values,
             rows,
             include_offsets=True,
+            support_predictions=support_predictions,
         )
         theta_chunk = _theta_chunk(layout, eta_chunk)
         eta[rows.start : rows.stop] = eta_chunk

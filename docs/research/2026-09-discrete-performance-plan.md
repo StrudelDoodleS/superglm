@@ -1,6 +1,13 @@
 # Discrete execution performance plan
 
-Status: production streamed moments are implemented, reviewed and validated.
+Status: the requested 20-second complete-fit milestone is met on the public
+million-row fixture: 18.607, 19.270 and 19.665 seconds in three predeclared fresh
+processes. Median 19.270 seconds; all samples are retained. The settings are
+four native workers, one BLAS thread, four knots and 256 bins, with the standard
+public warmup outside the fit clock. Production streamed moments are implemented,
+reviewed and validated. The current checkpoint and its memory cost are in the
+[report](2026-09-discrete-performance-report.md); larger-scale C1 capacity work
+remains open.
 Fifteen timed fits and five separate witnesses establish faster discrete
 execution on the measured mixed layouts through one million rows. C1 performance
 work remains active: the user considers the 8% one-thread time advantage over
@@ -30,6 +37,51 @@ Assess the resolution tradeoff using prediction/inference differences and
 complete-fit time/memory together. A different likelihood or working-model
 approximation must be identified and validated as such, rather than silently
 described as the existing scalar discretization contract.
+The immediate acceptance target is a reproducible complete fit at or below
+20 seconds on the existing public million-row fragmented Gaussian fixture
+(N=1,048,576, P=102, four knots, 256 bins). Keep the existing public warmup
+outside the fit clock and feature compilation, optimization and finalization
+inside it. Record native and BLAS thread counts separately; using more CPU is
+explicitly acceptable. Preserve numerical results for the stored binned model.
+Pass-local support prediction reuse is implemented and passes focused tests,
+but its four-fit comparison against `8fb261bc` improves the median only from
+28.055 to 27.653 seconds (1.43%); all saved arrays are identical. This does not
+meet the target. Direct original-range ingestion and parallel native moment
+accumulation are now implemented with 210 combined regressions passing. Four
+native workers produce a 22.982-second complete fit; eight produce 23.357 seconds
+(BLAS remains one thread). Both retain exact equality of all ten saved arrays
+against the baseline. Four workers remain the measured choice.
+Automatic row batches now grow only for admitted global layouts, using the
+assembler's shared workspace estimate and a 65,536-row ceiling. The resolved
+size propagates through the solver context, result and reuse certificate;
+609 combined checks pass. Its 64 MiB bound covers additional assembler
+workspace; caller-owned likelihood batches have a separate memory cost.
+Explicit chunk sizes and unsupported models keep their existing policy.
+The complete fit falls to 20.546 seconds with four native workers and one BLAS
+thread. Passive waiting lowers CPU but gives 20.624 seconds; four BLAS threads
+give 20.497 seconds. Neither meets the target. Direct elementwise multiplication
+for one-column numeric ranges gives four complete fits of 20.017, 19.353, 20.715
+and 20.849 seconds: median 20.366, still above the reproducible target. All ten
+saved arrays agree exactly across those runs. A fresh baseline fit with the
+same four-native/one-BLAS settings takes 26.725 seconds; that baseline has only
+one repetition and must not be conflated with the earlier thread configuration.
+The selective untimed profile measures 560 child-likelihood preparations with
+1.329 seconds across overlapping watched calls, including profiling overhead.
+The final bounded change reuses audited immutable Gaussian/Gamma prepared rows
+within one fit session, with a separate 64 MiB retained-cache allowance and a
+256-entry limit. It preserves legacy child preparation, validates immutable
+authority on hits and falls back to fresh preparation on mutation or refusal.
+It does not reuse changing likelihood values or derivative channels. The five
+integration checks pass, including identical cached/uncached fitting outputs.
+The combined solver run passes 755 tests; all 125 cache checks, including two
+additional ownership regressions, pass with warnings treated as errors. The
+final three complete fits meet the target; the fresh baseline takes 29.068
+seconds, alongside the earlier 26.725-second matched baseline. A separate
+untimed witness confirms child preparations fall from 560 to 16 and preserves
+all 17 global geometries, 272 native batched calls and zero refusals. Fit-end
+process highwater is 1,898.22–1,908.77 MiB versus approximately 1,866.6 MiB for
+the baseline. This closes the immediate latency milestone, not the remaining
+large-N memory/capacity work, and does not advance the task to C5.
 Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
