@@ -12,9 +12,13 @@ one-thread time advantage over exact insufficient and requested further fitting
 time reductions. Single-fit wall time is the objective; higher CPU consumption
 is acceptable when it saves time. The subsequent thread/shape screen confirms
 that four BLAS threads substantially help dense fits but offer little benefit
-to the new discrete route. Its numerical work and remaining repeated passes
-are the next profiling target. See the production evidence at the end of this
-report; earlier checkpoints below remain historical observations.
+to the new discrete route. Profiling, row-partition controls, corrected scalar
+dispatch and a bounded joint-state audit are complete. The user's current
+priority is bounded-RAM execution and fewer full-data passes on much larger,
+mostly distinct-row datasets. Joint-state aggregation is an optional accelerator;
+it does not solve that general scaling problem. No ten-million-row or larger
+capability has been established. See the evidence at the end of this report;
+earlier checkpoints below remain historical observations.
 
 The preceding automatic-panel complete-fit source was
 `74ce13f3c42be7f415f90366c3979f5df9b148db`, with production code unchanged from
@@ -815,8 +819,16 @@ to an imported `optimize_discrete_reml_cached_w` alias. The helper patched the
 defining module and missed that alias. The preserved scalar diagnostics also
 record the analytical iterations and line-search fits of cached-W. Thus the
 exact/discrete ratio includes a different smoothing execution strategy and
-cannot isolate compressed matrix computation. A corrected call witness is
-being prepared; the original raw captures and their hashes remain unchanged.
+cannot isolate compressed matrix computation. A corrected call witness at
+`f4a37c11` now records one outer `optimize_direct_reml` call and one inner
+`direct.optimize_discrete_reml_cached_w` call. All original saved arrays,
+result scalars and input/stored-representation hashes match exactly. The
+configured BLAS limit is one inside both calls and returns to four after fit;
+this does not measure actual worker participation. Its instrumented clock is
+diagnostic only and does not replace the 0.648 s timing above. The original
+raw captures and their hashes remain unchanged. The tracked receipt pins the
+completed correction as SHA256
+`a884c11b29d159accd9a80f9d9ddede2dfb9a20d8f16bc67e62112b50813c497`.
 Four BLAS threads offer no observed scalar time advantage, independent
 of CPU cost. These are single samples on this fixture, not a universal scalar
 thread-policy validation or a discrete scalar one/four comparison.
@@ -899,11 +911,68 @@ Raw receipt SHA256 is
 `3d1afda315b49ee4e6fd789dbb3c66885e38084689323117873e58f95e17c2dd`;
 the tracked receipt pins it and both complete manifests.
 
-The user now emphasizes reducing row-dependent time and memory complexity.
-An all-pass 65,536-row helper is prepared but unexecuted; further batching and
-parallel prototypes are held. The next audit separates scalar cached-W reuse,
-which still evaluates N likelihood records, from exact aggregation of joint
-predictor states and additional approximation by coarsening those states.
-The marginal-binning versus fewer-records target is being clarified. A smaller
-likelihood dataset requires valid family-specific statistics and a measured
-group-count/accuracy tradeoff. C1 remains active.
+### Joint-state census and bounded Gamma oracle
+
+The source-`f4a37c11` census measures coefficient-independent joint design
+states in the existing stored representations, without fitting, new bins or
+representative recompilation. Held-out rows are excluded, responses are not
+part of the keys, and both predictor offsets and unit prior weights are checked.
+
+| Public fixture | Training rows N | Joint states U | Interpretation |
+|---|---:|---:|---|
+| Synthetic fragmented Gaussian, P102 | 1,048,576 | 1,048,576 | A stored unbinned numeric column certifies distinct rows; exact grouping removes no likelihood records. |
+| Original freMTPL2 severity, P44 | 22,450 | 9,835 | Conservative tuples of the stored bins across both predictors; 6,511 singleton states, maximum multiplicity 43. |
+
+The severity count is not a minimal solver-row equivalence count. Its original
+2,494 held-out policies stay separate. Artificial fourfold replication in the
+raw census is a derived count on frozen states, not more independent data or a
+recompiled-model result. Census receipt SHA256 is
+`8aa6d1962c98b1fbe67dbd104d556e88c83224a08c451e2738aa9b8cb47cfec4`.
+
+A separate no-fit Gamma oracle retains per-state `F=count`, `Y=sum(y)` and
+`L=sum(log(y))`, preserving the complete unit-weight likelihood analytically.
+It retains the original learned B/R/bin arrays and penalty. At three fixed
+coefficient vectors with mean/CV intercepts (1000, 1), (3000, 0.7) and
+(10000, 2), including fixed slope perturbations in the latter two, the grouped
+and original row-family paths agree within derived bounds for complete
+likelihood, both score channels, all three signed observed-curvature channels,
+and coefficient/penalized score and curvature. The maximum elementwise
+error/bound ratio is 0.040233. Replacing each class's responses by their mean
+fails the scale-score and scale-curvature controls in all three cases.
+
+The initial oracle receipt records `mathematical_mismatch`: its mean-mean
+curvature bound omitted cancellation in the reference's generic link
+transformation. With `r=y/mu` and `a=1/sigma^2`, that path evaluates
+`-(a*(1-2*r) + a*(r-1)) = a*r`. Its absolute operand scale is bounded by
+`a*(2+3*r)`, rather than the small final `a*r`. The corrected class envelope
+therefore uses `a*(2*F+3*T)`, where `T=Y/mu`, with the original
+`gamma(2*h+64)` multiplier unchanged (`h` is the physical class size).
+This follows the natural/shape/link operations in the Gamma kernel and
+derivative transformation; it is not a fitted relative tolerance on a cancelled
+answer. Independent 100-digit Decimal checks of the worst singleton (`y=1`)
+confirm that both paths satisfy their respective operand-derived bounds.
+
+Independent review confirms that all 65 saved non-bound arrays are byte-identical
+between the initial and corrected runs. Only nine bound arrays change: the
+mean-mean channel and its propagated coefficient/penalized curvature envelopes
+for three vectors. No likelihood or derivative formula changes. The tracked
+receipt preserves the initial helper and failing receipt, the corrected helper
+and passing receipt, saved-array hashes and the review. Initial/passing receipt
+SHA256 values are respectively
+`4a72349afd188151a898eb24c795950a9cccfb1734d97da5a7d694380e5308e4`
+and `e9ba17f929809055376db06345859fcb1b545eb4bb75bdc6f200033d090fd483`.
+
+This validation covers unit prior weights, zero offsets and moderate Gamma
+shapes `a` in [0.05, 20] at three fixed vectors only. It does not validate
+nonunit weights, offsets, extreme shapes, initialization, smoothing, complete
+fits, speed or memory savings. It adds no production aggregation capability.
+
+C1 remains active. The user's priority is scalability to much larger,
+mostly distinct-row datasets: bound resident RAM and account for full-data
+passes, ingestion, fitting and requested outputs even when `U=N`. Existing
+all-row inputs, maps and results still impose O(N) storage; bounded geometry
+workspace alone is not a bounded-RAM fit. Exact grouping remains an optional
+accelerator when states repeat. Further pseudo-observation/statistical
+aggregation experiments, the unexecuted all-pass 65,536-row follow-up and
+parallel prototypes are held. No production/default change or demonstrated
+ten-million-row-plus capability follows from these audits.

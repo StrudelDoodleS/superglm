@@ -199,11 +199,27 @@ Current / 65,536-row geometry / full geometry / all full-row passes take
 1,869.01 / 1,894.90 / 2,460.33 / 2,461.75 MiB. Stored designs match,
 iterations remain unchanged and output differences are at rounding scale.
 These are single samples; full-row execution still constructs copied state.
-No default changed. The user now emphasizes reductions in row-dependent
-complexity, so further batching/threading work is held while auditing scalar
-cached-W reuse and exact/approximate joint-row aggregation. Distinguish marginal
-binning from fewer likelihood records; the intended approximation tradeoff is
-being clarified. The shared BLAS
+No default changed. A corrected scalar witness confirms the inner cached-W
+dispatch with saved outputs identical to the original control. The completed
+joint-state census finds no exact row reduction on the million-row fragmented
+fixture; the original severity book has 9,835 conservative states for 22,450
+training rows. A bounded Gamma sufficient-statistic oracle passes, but supplies
+no complete-fit speed result. Exact grouping is an optional accelerator.
+
+The user's stated objective is now explicit: scale GAMLSS end to end, including
+mostly distinct observations. The next C1 stage targets compact internal solver
+history, bounded-row input/likelihood preparation and fewer avoidable row passes.
+The working validation sequence is 10 million then 100 million rows with a
+bounded coefficient count on a single machine; these are milestones, not
+demonstrated capabilities. Billion-row fitting remains unproven. Current full-N
+inputs, prepared arrays and retained endpoints prevent a bounded whole-fit RAM
+claim, despite bounded geometry workspaces. Preserve the compiled binned model
+and current convergence/inference contracts when replacing those allocations.
+The dossier's promised removal of the N factor does not describe total fitting:
+observation likelihood work remains, while support contraction reduces expensive
+basis-width dependence. Further grouping and pseudo-response experiments are held.
+
+The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,
 backend or timing input; `-1` disables intervention rather than selecting an
 optimal count. It does not parallelize native moment loops. Use live

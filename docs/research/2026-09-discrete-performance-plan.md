@@ -7,11 +7,15 @@ work remains active: the user considers the 8% one-thread time advantage over
 exact at one million rows insufficient. A completed eight-fit BLAS/shape screen
 shows the remaining comparison against threaded dense execution. The production
 profile, scalar policy controls and four-condition full-pass comparison are
-complete. The scalar optimizer witness missed an imported cached-W alias;
-its earlier same-inner-optimizer interpretation is withdrawn. Next, audit
-which row-dependent work scalar reuse avoids and what joint-row aggregation
-could preserve exactly or approximate with measured error. Further batching
-and parallel prototypes are held pending that complexity audit.
+complete. A corrected scalar witness confirms the inner cached-W dispatch;
+the earlier same-inner-optimizer interpretation is withdrawn. The joint-state
+census and bounded Gamma aggregation oracle are complete. Aggregation offers no
+row reduction on the million-row mostly-distinct fixture, so it is an optional
+accelerator rather than the basis of the scalability plan. The active priority
+is end-to-end fitting with bounded working RAM, efficient row passes and compact
+solver history, preserving the current binned objective and certification.
+Ten million rows is the next proposed validation milestone, followed by one
+hundred million; neither scale, nor billion-row capability, is demonstrated.
 Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
@@ -718,7 +722,7 @@ promoting a production/default change.
 Parallel independent moment updates remain a subsequent measured option.
 Moving every categorical column into support tables is lower priority: it can
 reduce ordinary width but increases histogram pairs 45 to 153. The measured
-ordinary-product cost limits its immediate payoff. Do not remove intermediate
+ordinary-product cost limits its immediate payoff. Do not simply discard intermediate
 terminal row arrays: they support exact endpoint replay, practical-convergence
 certification and public immutable result contracts. The eight materializations
 are the initial coefficient fit plus seven smoothing proposals, not a redundant
@@ -754,3 +758,98 @@ all-pass 65,536-row follow-up and parallel-accumulator work. Audit:
    Clarify the intended aggregation tradeoff before changing a statistical
    target. Do not infer that a scalar cached-W implementation transfers
    unchanged to coupled signed LSS curvature or smoothing certification.
+
+### End-to-end large-data scope
+
+The user explicitly asks for true large-data GAMLSS. The working target is the
+dossier's 10^7–10^8-row range on a single machine, with a bounded coefficient
+count and mostly distinct observations. A billion rows remains a later target
+requiring measured storage, pass count and runtime evidence. This work stays
+within C1; C5 and other capabilities remain deferred.
+
+The initial scaling fixture is the existing two-predictor Gaussian model, with
+the public Gamma book retained as a numerical/insurance control. The accelerated
+global path currently admits only audited Gaussian/Gamma families and at most
+two predictors; other existing families/layouts retain their established routes.
+Scaling row count does not establish scaling model width: dense coefficient
+storage and solves still cost O(P^2) memory and O(P^3) arithmetic, and additional
+distribution parameters add coupled derivative channels. Report N, P and the
+number of predictors separately; broader family/width claims need their own
+dispatch and complete-fit evidence.
+
+The completed audit changes the next decision:
+
+- The corrected scalar call witness confirms cached-W inside the direct wrapper,
+  with all saved outputs identical to the original discrete control. Scalar
+  lambda trials still evaluate observation-level likelihood vectors. Its timing
+  ratio is not a same-optimizer discretization comparison.
+- The million-row fragmented fixture has one distinct joint design state per
+  row. Exact row grouping cannot reduce that fixture. The original public
+  severity training partition has 9,835 conservative states for 22,450 rows;
+  its grouped Gamma likelihood/derivative oracle passes in a bounded unit-weight,
+  no-offset domain. This is an optional opportunity, not a complete-fit result.
+- Marginal support moments reduce the dependence of expensive matrix work on
+  basis width. They do not remove observation-level likelihood work. The
+  dossier's proposed removal of the N factor must not be read as an end-to-end
+  complexity result or a promise of sub-second fitting.
+- Existing chunk bounds cover selected temporary workspaces. Full-length input,
+  prepared-family, predictor and history arrays still prevent an end-to-end
+  bounded-RAM claim. Keeping `retain_rows=False` alone does not solve this.
+
+Proceed in dependency order:
+
+1. Audit retained row arrays and endpoint consumers. Design a compact internal
+   coefficient endpoint plus streamed endpoint comparison/replay that retains
+   live design, family, weight and offset authority. Preserve public result
+   behavior and the current practical/strict convergence distinctions. A memory
+   reduction that silently adds full row passes is not automatically a speed win.
+2. Establish a replayable, bounded-row input and prepared-likelihood path.
+   Freeze compiled supports, transformations and base penalty operators once;
+   smoothing parameters and their assembled penalties still update between
+   proposals. Fitting must not re-estimate knots or centering independently for
+   each block. Account for
+   input storage and preprocessing separately from the solver's working RAM.
+3. Reduce avoidable copies and scans in that path. Reuse structural metadata,
+   fuse compatible reductions, and evaluate native parallelism by complete-fit
+   time. Changed weights and curvature still require fresh numerical reductions.
+4. Validate the same stored model against the current implementation at a
+   tractable size before escalating to 10 million and then 100 million rows.
+   Record complete-fit wall/CPU time, fit peak memory, original-row numerical
+   outputs or streamed reductions, convergence, actual dispatch, full row passes
+   and storage traffic. Fixture construction and requested output materialization
+   have separate clocks/highwaters and explicit disk requirements.
+
+Only the source audits and design are active at this checkpoint. No compact
+endpoint, out-of-core input API, new chunk/thread default or larger-scale fit
+has been implemented or demonstrated. Further grouping and pseudo-response
+experiments are held; repeated rows are not a prerequisite for progress.
+
+The first allocation audit identifies a concrete history cost. Each coefficient
+endpoint materializes and copies eta/theta in `solver/chunks.py` and
+`results/solver.py`; `smoothing/loop.py` retains the initial and proposed fits.
+At N=100 million and K=2, eight such pairs require 25.6 GB of float64 storage
+before inputs, prepared likelihoods, designs or result publication. This is
+allocation arithmetic, not a measured fit. Default retained-row publication
+adds another 11 float64 columns (8.8 GB at that N). Disabling retained rows does
+not remove EFS endpoint history or the native training frame retained by the API.
+
+The first implementation slice must therefore distinguish compact internal
+endpoints from the existing final public endpoint. Its regression contract is
+the same stored-design likelihood, signed geometry, penalty, predictor-change
+decision and source-mutation refusal. Demonstrate that retained history no
+longer owns per-iteration N-by-K arrays, and compare complete-fit row-pass counts
+and timings. This slice alone does not bound input, initialization, null-fit,
+final-output or serialization memory; those remain explicit subsequent work.
+Existing eager array and history access is a compatibility constraint: a bounded
+mode must offer explicit streamed/backed access or opt-in materialization rather
+than silently deleting outputs. Retaining the existing final eager endpoint is
+compatible with the first history reduction, but not with a whole-fit RAM bound.
+
+The capacity audit observes 16 guest vCPUs, 62.8 GiB total RAM and approximately
+1.9 TiB free disk. These permit planning a cautious 10-million-row pilot, not a
+100-million-row capacity claim. The 32 GiB `/tmp` filesystem is memory-backed;
+large fixture files must use disk storage. Prepare fixtures without per-row
+Python strings, verify any storage-only generator change at small N, and gate
+larger runs on measured input/preparation/fitting/output ownership. Avoid a blind
+dense reference beyond available memory. Hardware availability is a snapshot;
+recheck before the next numerical window.

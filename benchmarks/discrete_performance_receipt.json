@@ -1,5 +1,152 @@
 {
   "schema": "superglm-public-discrete-performance-evidence-v1",
+  "row_scalability_audit": {
+    "source_sha": "f4a37c1194341f76f93e19032ddb0af76440f1ec",
+    "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
+    "current_scope": "C1 remains active. Prioritize bounded resident RAM and full-data pass counts for much larger, mostly distinct-row data, including U=N. Joint-state aggregation is an optional accelerator. Further pseudo-observation/statistical aggregation experiments, batching follow-ups and parallel prototypes are held. No production/default change or demonstrated 10-million-row-plus capability.",
+    "scalar_dispatch_correction": {
+      "status": "actual_inner_dispatch_confirmed",
+      "raw_receipt": {
+        "path": ".benchmark-artifacts/discrete-performance/scalar-dispatch-correction/witness-f4a37c11/correction-receipt.json",
+        "sha256": "a884c11b29d159accd9a80f9d9ddede2dfb9a20d8f16bc67e62112b50813c497"
+      },
+      "manifest": {
+        "path": ".benchmark-artifacts/discrete-performance/scalar-dispatch-correction/witness-f4a37c11/manifest.json",
+        "sha256": "8eeca1c3fe94a81b7add9fbdd4da42c7ab8090ee7b2fb8fa1ac3a6e56cbbefd7"
+      },
+      "helper": {
+        "path": ".benchmark-artifacts/discrete-performance/scalar-dispatch-correction/probe_dispatch.py",
+        "sha256": "2b04d2c6e18187dae56ecd45b2f891ba981aa875ed928ab9b6a92444816d9c21"
+      },
+      "fixture": "Public synthetic Poisson spline/category discrete-auto, N=100000, P=79.",
+      "dispatch_counts": {
+        "reml_ops.optimize_direct_reml": 1,
+        "direct.optimize_discrete_reml_cached_w": 1,
+        "discrete.optimize_discrete_reml_cached_w": 0
+      },
+      "interpretation": "The direct wrapper calls its imported cached-W alias. Zero calls through the defining-module lookup do not mean cached-W was unused. The original same-inner-optimizer interpretation is withdrawn; the exact/discrete timing ratio includes a smoothing-strategy difference.",
+      "all_original_saved_arrays_exactly_equal": true,
+      "result_scalars_identical": true,
+      "stored_representation_and_inputs_identical": true,
+      "configured_blas": {
+        "before_fit": 4,
+        "inside_wrapper_and_inner_optimizer": 1,
+        "after_fit": 4
+      },
+      "scope": "Separate instrumented dispatch witness only; its diagnostic clock is not a new benchmark estimate. Original timings, raw outputs and failure receipts remain unchanged. Configured limits do not measure actual worker participation."
+    },
+    "joint_state_census": {
+      "status": "complete",
+      "raw_receipt": {
+        "path": ".benchmark-artifacts/discrete-performance/joint-state-census/census-f4a37c11.json",
+        "sha256": "8aa6d1962c98b1fbe67dbd104d556e88c83224a08c451e2738aa9b8cb47cfec4"
+      },
+      "scope": "Coefficient-independent states of existing stored representations; no fitting, new quantization, representative recompilation or performance measurement. Responses excluded from keys; held-out rows kept separate; zero offsets and unit prior weights checked.",
+      "gaussian_fragmented": {
+        "training_rows": 1048576,
+        "joint_state_count": 1048576,
+        "n_coefficients": 102,
+        "holdout_rows_excluded": 2000,
+        "method": "Exact uniqueness of a stored unbinned numeric column certifies U=N without constructing a full joint-key matrix."
+      },
+      "original_public_severity": {
+        "training_rows": 22450,
+        "conservative_joint_key_count": 9835,
+        "n_coefficients": 44,
+        "holdout_rows_excluded": 2494,
+        "singleton_keys": 6511,
+        "maximum_multiplicity": 43,
+        "method": "Stored bin tuples across both predictors; duplicate key columns omitted only after equality checks. Conservative classes may overcount solver-equivalent rows."
+      },
+      "replication_caveat": "The raw fourfold replication count is derived from frozen original states only; it is not more independent data or evidence about a recompiled basis."
+    },
+    "bounded_gamma_oracle": {
+      "status": "pass_after_source_derived_bound_correction",
+      "initial_receipt": {
+        "path": ".benchmark-artifacts/discrete-performance/joint-state-oracle/original-unit-f4a37c11/receipt.json",
+        "sha256": "4a72349afd188151a898eb24c795950a9cccfb1734d97da5a7d694380e5308e4"
+      },
+      "initial_helper": {
+        "path": ".benchmark-artifacts/discrete-performance/joint-state-oracle/oracle.py",
+        "sha256": "0a8c38b115be080394d707137e56fa9525c5e82decca0ff7de2a16e13c20e42c"
+      },
+      "initial_arrays": {
+        "path": ".benchmark-artifacts/discrete-performance/joint-state-oracle/original-unit-f4a37c11/arrays.npz",
+        "sha256": "dbfc985d4b3b9e8522abb191eee78e7a5a5dc96270f1a0e84c70b754212c3935"
+      },
+      "corrected_receipt": {
+        "path": ".benchmark-artifacts/discrete-performance/joint-state-oracle/original-unit-chain-bound-f4a37c11/receipt.json",
+        "sha256": "e9ba17f929809055376db06345859fcb1b545eb4bb75bdc6f200033d090fd483"
+      },
+      "corrected_helper": {
+        "path": ".benchmark-artifacts/discrete-performance/joint-state-oracle/oracle_chain_bound.py",
+        "sha256": "9595a39fd7e25073cfd59fae06cae16d448e5211b0c173b40816f6dbaed3cc63"
+      },
+      "corrected_arrays": {
+        "path": ".benchmark-artifacts/discrete-performance/joint-state-oracle/original-unit-chain-bound-f4a37c11/arrays.npz",
+        "sha256": "3b0d69a48b7e4e49739d9f0a52f309f4be7c829f255f8124f3b81fd60e35d573"
+      },
+      "independent_review": {
+        "path": ".benchmark-artifacts/discrete-performance/joint-state-math-f4a37c11/oracle-review.md",
+        "sha256": "60e260ddd128ab04faff5a3060ab0be7bce5bcf4601a6e1cfe323926a0b8b12b"
+      },
+      "training_rows": 22450,
+      "joint_states": 9835,
+      "holdout_rows_excluded": 2494,
+      "sufficient_statistics": [
+        "F=count",
+        "Y=sum(y)",
+        "L=sum(log(y))"
+      ],
+      "shape_domain": [
+        0.05,
+        20
+      ],
+      "fixed_mean_cv_intercepts": [
+        [
+          1000,
+          1
+        ],
+        [
+          3000,
+          0.7
+        ],
+        [
+          10000,
+          2
+        ]
+      ],
+      "perturbations": "Fixed slope perturbations in the latter two coefficient vectors; no fit.",
+      "checks": [
+        "complete and class log likelihood",
+        "both score channels",
+        "all three signed observed-curvature channels",
+        "coefficient and penalized score and curvature"
+      ],
+      "all_corrected_checks_pass": true,
+      "maximum_elementwise_error_over_bound": 0.040232477833967745,
+      "mean_response_mutation": "Replacing class responses by their mean fails scale-score and scale-curvature controls for all three vectors.",
+      "preserved_initial_status": "mathematical_mismatch",
+      "bound_correction": {
+        "cause": "Initial mean-mean curvature envelope omitted cancellation in the original generic natural-to-link transformation.",
+        "definitions": "r=y/mu, a=1/sigma^2, T=Y/mu, F=h=physical class size; gamma(q)=q*eps/(1-q*eps).",
+        "original_path": "-(a*(1-2*r)+a*(r-1)) = a*r",
+        "corrected_operand_scale": "a*(2*F+3*T)",
+        "unchanged_multiplier": "gamma(2*h+64)",
+        "source_trace": [
+          "src/superglm/distributional/kernels/gamma.py:554,746,784",
+          "src/superglm/distributional/solver/derivatives.py:157"
+        ],
+        "independent_check": "100-digit Decimal evaluation of the worst singleton y=1 confirms that original and grouped results satisfy their respective operand-derived bounds.",
+        "reviewed_non_bound_arrays_byte_identical": 65,
+        "changed_bound_arrays": 9,
+        "numerical_formulas_changed": false,
+        "interpretation": "Operand-derived moderate-domain arithmetic comparison, not a fitted relative tolerance on a cancelled result or an extreme-domain libm guarantee. Original failing evidence remains preserved."
+      },
+      "scope": "Original public freMTPL2 severity, unit prior weights, zero offsets and three fixed moderate-shape vectors only. Original learned B/R/bin arrays and penalty retained; representatives not recompiled. No nonunit-weight/offset/extreme-shape validation, grouped initializer, smoothing loop, complete-fit comparison, speed or memory claim, or production aggregation.",
+      "general_scalability_limit": "The fragmented million-row fixture has U=N; grouping removes no likelihood records there. Existing all-row inputs, maps and results still require O(N) storage."
+    }
+  },
   "chunk_partition_ablation": {
     "source_sha": "21f7d3fcc4e7fa48966005f51c2c1079afd8d838",
     "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
@@ -31,7 +178,7 @@
       "path": ".benchmark-artifacts/discrete-performance/chunk-size-16b01adb/public-receipt-21f7d3fc.json",
       "sha256": "3d1afda315b49ee4e6fd789dbb3c66885e38084689323117873e58f95e17c2dd"
     },
-    "scope": "Single sample per partition, four separate witnesses; no production/default change. Marginal design compression still retains N likelihood records. Further batching held for scalar-reuse and aggregation audit.",
+    "scope": "Single sample per partition, four separate witnesses; no production/default change. Marginal design compression still retains N likelihood records. Scalar dispatch and the bounded aggregation audit are now recorded under row_scalability_audit; further batching is held for the user's mostly-distinct-row bounded-RAM/pass-count priority.",
     "arms": {
       "all_full": {
         "fit_wall_seconds": 26.978042312999605,
@@ -1048,7 +1195,7 @@
     "interpretation": [
       "Single-fit wall time is the user objective; CPU consumption is explanatory, not a rejection criterion for a faster fit.",
       "Both NumPy and SciPy pools are configured at four before/after fitting; exact forced1 and both auto fits observe one inside existing fit and optimizer scopes. These are configured limits, not measured BLAS-worker participation.",
-      "Correction: all four captured calls enter optimize_direct_reml, but these are wrapper observations. Its discrete branch delegates to an imported optimize_discrete_reml_cached_w alias that the helper did not patch. Source audit and preserved cached-W diagnostics establish that the scalar exact/discrete comparison changes smoothing execution strategy. The original no-cached-W interpretation is withdrawn; raw captures remain unchanged.",
+      "Correction: all four captured calls enter optimize_direct_reml, but these are wrapper observations. Its discrete branch delegates to an imported optimize_discrete_reml_cached_w alias that the helper did not patch. The completed f4a37c11 witness under row_scalability_audit confirms that inner call with original outputs unchanged. The scalar exact/discrete comparison changes smoothing execution strategy. The original no-cached-W interpretation is withdrawn; raw captures remain unchanged.",
       "This public scalar screen adds no evidence about global-moment LSS speed, no discrete forced1/4 sensitivity, and no universal threading policy. C1 performance work remains active.",
       "Exact forced1 and exact-auto outputs and stored representation hashes match exactly. Exact forced1/4 output differences are quantitative descriptive comparisons; exact/discrete differences include basis discretization and changed REML iteration counts.",
       "Fit-end RSS is process highwater including imports, fixture and warmup, captured before telemetry/prediction/NPZ. Telemetry extraction/file output is separately timed after fit RSS; highwater increase is not total diagnostic allocation."
