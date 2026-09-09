@@ -1,5 +1,51 @@
 # Discrete execution performance
 
+## Numerical review follow-up
+
+At `41ae3960`, value screens, terminal materialization and public scoring use
+geometry's slope/intercept/offset addition order. Speculative row cross-products
+also use the existing exponent-range guard when histogram fallback fits its
+allocation cap. Automatically admitted cancellation and signed overflow/underflow
+regressions fail before the fixes; 347 surrounding tests pass afterward.
+
+One public Gaussian fit pair compares `31380778` with `41ae3960`, using the
+unchanged N=1,048,576/q102/knots4/bins256 contract and BLAS1/native16:
+
+| Observation | Before | After |
+|---|---:|---:|
+| Complete fit, seconds | 14.157303 | 13.549086 |
+| CPU, seconds | 70.253641 | 68.214821 |
+| Fit-end process highwater, bytes | 2,008,440,832 | 1,987,522,560 |
+| After output and diagnosis, bytes | 2,018,693,120 | 2,014,253,056 |
+| Timed-worker public warmup, seconds | 0.843481 | 0.884251 |
+
+Separate setup processes populate normal warmup caches before both fresh timed
+workers. Feature compilation and remaining fit-specific compilation stay inside
+the fit clock. Pre-fit highwater is 1,023,193,088 / 1,023,483,904 bytes. These are
+single observations, not a replicated speed estimate or causal memory claim;
+the 12.5-second target remains open.
+
+Coefficients, covariance, smoothing parameters, EDF, objective, likelihood,
+terminal score and curvature agree exactly, as do all captured fit and smoothing
+histories. Train/holdout parameter predictions differ by at most 1.34e-15 /
+8.89e-16 following the addition-order correction; these are descriptive
+differences, not inferred tolerances. The stored representation is unchanged,
+so this comparison measures execution arithmetic separately from binning error.
+Both runs retain 16 inner iterations, seven smoothing updates and the same
+`converged_uncertified` diagnosis and three findings.
+
+The valid untimed witness matches the candidate's saved outputs exactly. It
+observes 288 native calls using 16 workers, 18 complete geometry streams, 16
+fused trials, two standalone likelihood streams and zero global refusals.
+This workload does not enter the speculative row-cross branch; its boundary
+coverage comes from the focused regressions, not the timing result. The first
+witness was rejected because documentation changed during its workspace guard;
+its raw records are preserved, followed by one authorized replacement under the
+unchanged guards. Neither timed fit was repeated. Raw captures and their digest
+summary remain under `.benchmark-artifacts/discrete-performance/numerical-review-prepared/`.
+The summary SHA256 is
+`2a894ed8ccb69d7f1cd4ca459fd981a835634d47ff91a1c655dfbb270d4766c1`.
+
 ## Fused first-trial evaluation
 
 At `06e1ccff`, eligible Gaussian/Gamma chunked fits obtain a trial's likelihood

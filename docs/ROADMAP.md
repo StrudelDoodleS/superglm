@@ -301,6 +301,13 @@ The 12.5-second target remains unmet. Close this implementation checkpoint with
 its edge-case regressions and evidence; further optimization, larger-N capacity
 and general thread-policy work remain deferred rather than claimed complete.
 
+The `41ae3960` review follow-up corrects predictor-state consistency across
+geometry, value screening and published predictions, and protects speculative
+cross-products against exponent overflow/underflow. Its 347 selected regression
+tests pass, including automatically admitted execution and unfixed boundary
+demonstrations. These corrections preserve the selected C3+C1 scope and do not
+establish a new latency milestone.
+
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,
 backend or timing input; `-1` disables intervention rather than selecting an

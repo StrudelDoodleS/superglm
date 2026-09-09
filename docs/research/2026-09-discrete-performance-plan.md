@@ -159,6 +159,15 @@ seven architecture tests. Ruff, scoped typing, lock/dependency checks, the smoke
 script and strict documentation build pass. Benchmarks retain their exact
 `06e1ccff` source pin before this helper relocation.
 
+Review follow-up at `41ae3960` aligns value evaluation, terminal materialization
+and public prediction with geometry's slope/intercept/offset order, and guards
+speculative row cross-products against unsafe exponent reassociation. The
+automatically admitted cancellation and signed overflow/underflow regressions
+fail on the preceding implementation; 347 surrounding tests pass after the
+fixes. A bounded public before/after fit and separate dispatch witness validate
+this follow-up without reopening optimization or thread sweeps; see the
+performance report for the pinned observations and their limits.
+
 The user has chosen sequential complete-fit targets of **15 seconds**, then
 **12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,
 four knots and 256 bins. Treat these as discrete latency targets and continue
