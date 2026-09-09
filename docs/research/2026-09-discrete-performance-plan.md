@@ -26,9 +26,14 @@ The two-signature startup fix is implemented and independently reviewed.
 Its 53 focused tests cover all 36 storage combinations, bitwise reducer
 agreement, unchanged inputs, public warmup, concurrent first use and a failed
 compile followed by retry. Another 162 integration checks pass; Ruff passes
-and the CI-matched type count remains 828. Controlled fresh-cache startup and
-same-clock complete-fit comparisons are pending; unit tests establish the
-specialization bound, not a cold-start timing claim.
+and the CI-matched type count remains 828. Controlled fresh-cache startup at
+`ae6a35d3` now reduces public warmup 84.367 to 32.944 seconds and total wrapper
+elapsed 117.217 to 65.042 seconds. The separate complete-fit clocks are 13.693
+and 14.020 seconds; this single pair shows no new fit-time gain. All outputs,
+results and representations agree exactly. The witness observes 272 C-dispatch
+calls, zero strided calls and one signature per dispatcher without growth.
+Retain the cache scope, startup clocks and all raw observations separately from
+warmed confirmations.
 
 The next algorithmic discriminator is the previously unrun categorical-support
 placement idea. Current ordinary score/weight/Gram work occupies approximately

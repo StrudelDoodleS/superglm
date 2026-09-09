@@ -268,8 +268,10 @@ the 15-second target is met with exactly equal saved outputs and representation.
 Fresh dense controls have median 24.686 seconds. Parallel source certification,
 single-write ordinary panels and paired score/mass scans improve constant
 factors while preserving row summation order. A two-BLAS-thread control is
-slower. The next work fixes a cold public-warmup regression (36 heavy native
-variants) and pursues 12.5 seconds. Keep larger-N capacity, controlled N-by-q
+slower. Two explicit native signatures fix the cold public-warmup regression:
+a controlled fresh-cache pair at `ae6a35d3` reduces warmup 84.367 to 32.944
+seconds, with exactly equal outputs and no new fit-time gain claimed.
+The next work pursues 12.5 seconds. Keep larger-N capacity, controlled N-by-q
 scaling and general thread policy distinct from this latency result.
 
 The shared BLAS

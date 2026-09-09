@@ -20,9 +20,21 @@ This confirms warmed-fit latency. The first candidate's public warmup took
 **72.089 seconds**, versus 13.039 seconds for its preceding control, because
 the new paired kernel compiled 36 independent channel-storage variants.
 Confirmation warmups use the populated cache and take 1.31–1.87 seconds.
-Cold startup is therefore a regression to fix, not a cost hidden by the fit
-claim. The next work limits heavy native specialization while preserving the
-contiguous fast path and pursues the requested 12.5-second fit target.
+Cold startup was therefore a regression to fix, not a cost hidden by the fit
+claim. The following two-signature change preserves the contiguous fast path;
+the 12.5-second fitting target remains open.
+
+At `ae6a35d3`, a controlled pair with a separate initially empty Numba cache
+for each source reduces public warmup from **84.367 to 32.944 seconds** and
+total wrapper elapsed time from **117.217 to 65.042 seconds**. Imports take
+1.738/1.730 seconds and input generation 1.897/1.850 seconds. Fit-end process
+highwater falls from 2,710,102,016 to 2,312,237,056 bytes, including cold
+compilation. Fit time is 13.693/14.020 seconds: a 2.39% increase in this single
+pair, so no additional fitting-speed claim follows. All ten outputs, full
+results and representations agree exactly. The witness records 272 contiguous
+kernel calls and no strided calls, with one signature per dispatcher both
+before and after fitting. Only the Numba cache is fresh; other caches remain.
+Do not combine these startup samples with the existing-cache confirmations.
 
 The untimed witness records 272 batches with ten paired targets and 16 actual
 native workers, seven accepted reuses, and digest participation on 16 threads.
