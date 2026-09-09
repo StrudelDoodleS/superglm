@@ -1,0 +1,743 @@
+{
+  "schema": "superglm-public-discrete-thread-screen-v1",
+  "scope": "Public gaussian-fragmented N1048576/P102/knots4/bins256; ten one-sample thread settings, three NEW winner confirmations each, two untimed witnesses; unchanged current-source defaults",
+  "source": {
+    "sha": "68bf3cd5f5435d044f44a7540d17bea3a44585d4",
+    "diff_sha256": "a190bb1d2f82e560a8ebff01fd9a18df0f3033e3a0de4941b0ac2218db7c6068",
+    "source_tree_sha256": "6ea1435a53b4aa44c663ae4ae996a900033f1b8425df0e0807baa4bcb48efbd9"
+  },
+  "raw_summary": {
+    "path": ".benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/summary.json",
+    "sha256": "5ed61e73b11171b3121c9f2bed5d7e60307f94b325de6fe52c8930f0c2467738"
+  },
+  "manifest_sha256": "079a39fdc48b3e3acdfcd2ff342c25f273e032571b2fd67de213bf89e847aa8b",
+  "helper_sha256": {
+    ".benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/capture_worker.py": "f95fbe6ba7d0358e97208a5c11fd40596e40949abd3b1ab532a8dc1821be426f",
+    ".benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/run.py": "5a31d94898af786038f7e04a7e1306a6c499d37fa7f73bb908107de73b1a52a9",
+    "benchmarks/_c3_c1_fixtures.py": "b193fe84f5418cd61d6ae781ee34460d0be11e18f5c8a8df2a1c723562b8d779",
+    "benchmarks/c3_c1_complete_fit.py": "4de2df1de45b810b64acc29b3a02856a8cbfd731211ff1b694a82f441882f376",
+    "benchmarks/discrete_performance.py": "f87f9ed1e5f1d2549e7cec20412530c6b84a1a32bb184001bea66e2e35cfd244"
+  },
+  "fixture": {
+    "rows": 1048576,
+    "holdout_rows": 2000,
+    "provenance": {
+      "seed": 28109,
+      "holdout_seed": 28110,
+      "construction": "Independent synthetic Gaussian location-scale with small feature groups",
+      "numeric_terms": 6,
+      "categorical_levels": [
+        3,
+        3,
+        4
+      ],
+      "spline_terms": 2,
+      "grouped_curve": {
+        "basis": "spline-by-categorical",
+        "levels": 3
+      }
+    },
+    "fingerprints": {
+      "train_frame": "1e0f03bef7db90365b455710d118d1b3eb262e9f57f920a0b130cd9269a295bb",
+      "holdout_frame": "0a6d80c6af90809b7801dae9e3aa64fe13a4f2942da479f7ae342c0063d4ddfb",
+      "y": "a73eba0dfa1f6e8675a8e99ef345ea49b39030348d69e359e25f757532b69d9f"
+    }
+  },
+  "protocol": {
+    "hardware": "16-vCPU guest; guest process audits do not establish physical host isolation",
+    "order": "Ten alternating nonmonotone screen settings, then three entirely new confirmations per selected route in dense/discrete pairs, then two untimed witnesses",
+    "selection": "Minimum valid screening wall time per route; screen excluded from confirmation summaries; all 18 workers retained and successful",
+    "thread_control": "Direct capture workers; SUPERGLM_BLAS_THREADS set explicitly; native BLAS and OpenMP environment follows BLAS count, NUMBA_NUM_THREADS independently set",
+    "fit_clock_includes": [
+      "feature compilation",
+      "coefficient and smoothing fitting",
+      "null fit",
+      "finalization"
+    ],
+    "fit_clock_excludes": [
+      "input generation",
+      "standard public warmup",
+      "output capture",
+      "instrumented witnesses"
+    ],
+    "memory": "ru_maxrss sampled at fit end; process highwater includes imports, input and warmup. Later output and representation highwaters separate; not incremental fit allocations.",
+    "units": "wall, cpu, warmup in seconds; memory in MiB; average_cores = CPU seconds / wall seconds"
+  },
+  "rows": [
+    {
+      "label": "screen-01-dense-b4-n1",
+      "route": "dense",
+      "blas": 4,
+      "numba": 1,
+      "wall": 21.243246858997736,
+      "cpu": 66.45948828600001,
+      "average_cores": 3.128499552216548,
+      "fit_rss_mib": 3894.55078125,
+      "prefit_rss_mib": 974.49609375,
+      "output_rss_mib": 3894.55078125,
+      "representation_rss_mib": 3894.55078125,
+      "warmup": 0.6231861910055159,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "screen-02-discrete-b1-n4",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 4,
+      "wall": 19.226547449012287,
+      "cpu": 32.65239617,
+      "average_cores": 1.6982974325781737,
+      "fit_rss_mib": 1902.7890625,
+      "prefit_rss_mib": 974.8671875,
+      "output_rss_mib": 1936.375,
+      "representation_rss_mib": 1936.375,
+      "warmup": 0.5271395229938207,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    },
+    {
+      "label": "screen-03-dense-b1-n1",
+      "route": "dense",
+      "blas": 1,
+      "numba": 1,
+      "wall": 28.309581281006103,
+      "cpu": 28.134539494000002,
+      "average_cores": 0.9938168712116013,
+      "fit_rss_mib": 3894.78125,
+      "prefit_rss_mib": 974.671875,
+      "output_rss_mib": 3894.78125,
+      "representation_rss_mib": 3894.78125,
+      "warmup": 0.5963087699929019,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "screen-04-discrete-b1-n1",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 1,
+      "wall": 21.284238744992763,
+      "cpu": 21.258642934999997,
+      "average_cores": 0.9987974289191439,
+      "fit_rss_mib": 1891.34765625,
+      "prefit_rss_mib": 974.05078125,
+      "output_rss_mib": 1925.41796875,
+      "representation_rss_mib": 1925.41796875,
+      "warmup": 0.5847544369898969,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    },
+    {
+      "label": "screen-05-dense-b16-n1",
+      "route": "dense",
+      "blas": 16,
+      "numba": 1,
+      "wall": 21.29883478699776,
+      "cpu": 154.796207543,
+      "average_cores": 7.267825169360815,
+      "fit_rss_mib": 3894.79296875,
+      "prefit_rss_mib": 974.94140625,
+      "output_rss_mib": 3894.79296875,
+      "representation_rss_mib": 3894.79296875,
+      "warmup": 0.5818157470057486,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "screen-06-discrete-b1-n16",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 16,
+      "wall": 16.899949119004305,
+      "cpu": 63.991353045000004,
+      "average_cores": 3.7864819943771635,
+      "fit_rss_mib": 1902.94921875,
+      "prefit_rss_mib": 976.83984375,
+      "output_rss_mib": 1913.2578125,
+      "representation_rss_mib": 1913.2578125,
+      "warmup": 0.5174139609880513,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    },
+    {
+      "label": "screen-07-dense-b2-n1",
+      "route": "dense",
+      "blas": 2,
+      "numba": 1,
+      "wall": 23.342778476013336,
+      "cpu": 40.845291735,
+      "average_cores": 1.7498041964872335,
+      "fit_rss_mib": 3894.82421875,
+      "prefit_rss_mib": 974.44140625,
+      "output_rss_mib": 3894.82421875,
+      "representation_rss_mib": 3894.82421875,
+      "warmup": 0.5476836419984465,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "screen-08-discrete-b1-n2",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 2,
+      "wall": 18.896138538999367,
+      "cpu": 24.260727459,
+      "average_cores": 1.2838986869687035,
+      "fit_rss_mib": 1901.23046875,
+      "prefit_rss_mib": 976.015625,
+      "output_rss_mib": 1935.2734375,
+      "representation_rss_mib": 1935.2734375,
+      "warmup": 0.6817891690006945,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    },
+    {
+      "label": "screen-09-dense-b8-n1",
+      "route": "dense",
+      "blas": 8,
+      "numba": 1,
+      "wall": 20.673034053994343,
+      "cpu": 99.10469347399999,
+      "average_cores": 4.793911392742637,
+      "fit_rss_mib": 3894.93359375,
+      "prefit_rss_mib": 975.84375,
+      "output_rss_mib": 3894.93359375,
+      "representation_rss_mib": 3894.93359375,
+      "warmup": 0.5946151870011818,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "screen-10-discrete-b1-n8",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 8,
+      "wall": 17.56141369001125,
+      "cpu": 42.331698512,
+      "average_cores": 2.4104949213785583,
+      "fit_rss_mib": 1907.89453125,
+      "prefit_rss_mib": 974.93359375,
+      "output_rss_mib": 1933.71484375,
+      "representation_rss_mib": 1933.71484375,
+      "warmup": 0.5607458819868043,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    },
+    {
+      "label": "confirm-1-dense",
+      "route": "dense",
+      "blas": 8,
+      "numba": 1,
+      "wall": 22.27826392199495,
+      "cpu": 105.16893837500001,
+      "average_cores": 4.720697211561827,
+      "fit_rss_mib": 3896.95703125,
+      "prefit_rss_mib": 976.77734375,
+      "output_rss_mib": 3896.95703125,
+      "representation_rss_mib": 3896.95703125,
+      "warmup": 0.7535259099968243,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "confirm-1-discrete",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 16,
+      "wall": 18.379499481990933,
+      "cpu": 67.777803245,
+      "average_cores": 3.6876849291468337,
+      "fit_rss_mib": 1885.55859375,
+      "prefit_rss_mib": 974.84765625,
+      "output_rss_mib": 1918.9375,
+      "representation_rss_mib": 1918.9375,
+      "warmup": 0.6823091600090265,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    },
+    {
+      "label": "confirm-2-dense",
+      "route": "dense",
+      "blas": 8,
+      "numba": 1,
+      "wall": 22.13613386399811,
+      "cpu": 104.414156633,
+      "average_cores": 4.716910246139127,
+      "fit_rss_mib": 3895.015625,
+      "prefit_rss_mib": 975.33984375,
+      "output_rss_mib": 3895.015625,
+      "representation_rss_mib": 3895.015625,
+      "warmup": 0.576576601000852,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "confirm-2-discrete",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 16,
+      "wall": 18.083607987995492,
+      "cpu": 67.234062465,
+      "average_cores": 3.717956201529707,
+      "fit_rss_mib": 1916.98828125,
+      "prefit_rss_mib": 974.296875,
+      "output_rss_mib": 1927.5078125,
+      "representation_rss_mib": 1927.5078125,
+      "warmup": 0.6948619429895189,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    },
+    {
+      "label": "confirm-3-dense",
+      "route": "dense",
+      "blas": 8,
+      "numba": 1,
+      "wall": 22.050128670001868,
+      "cpu": 105.237373306,
+      "average_cores": 4.772642141048834,
+      "fit_rss_mib": 3894.984375,
+      "prefit_rss_mib": 974.71875,
+      "output_rss_mib": 3894.984375,
+      "representation_rss_mib": 3894.984375,
+      "warmup": 0.6282301030005328,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "confirm-3-discrete",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 16,
+      "wall": 18.802224150989787,
+      "cpu": 70.003278755,
+      "average_cores": 3.7231381879528804,
+      "fit_rss_mib": 1916.578125,
+      "prefit_rss_mib": 975.265625,
+      "output_rss_mib": 1950.99609375,
+      "representation_rss_mib": 1950.99609375,
+      "warmup": 0.6007306230021641,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    },
+    {
+      "label": "witness-dense",
+      "route": "dense",
+      "blas": 8,
+      "numba": 1,
+      "wall": null,
+      "cpu": null,
+      "average_cores": null,
+      "fit_rss_mib": 3895.046875,
+      "prefit_rss_mib": 974.828125,
+      "output_rss_mib": 3895.046875,
+      "representation_rss_mib": 3895.046875,
+      "warmup": 0.607798337994609,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-dense-v1",
+      "chunk": null
+    },
+    {
+      "label": "witness-discrete",
+      "route": "discrete",
+      "blas": 1,
+      "numba": 16,
+      "wall": null,
+      "cpu": null,
+      "average_cores": null,
+      "fit_rss_mib": 1914.96484375,
+      "prefit_rss_mib": 975.4140625,
+      "output_rss_mib": 1925.19140625,
+      "representation_rss_mib": 1925.19140625,
+      "warmup": 0.6104565349960467,
+      "converged": true,
+      "inner": 16,
+      "smooth": 7,
+      "reason": "practical_plateau",
+      "backend": "distributional-chunked-v1",
+      "chunk": 65536
+    }
+  ],
+  "screen_winners": {
+    "dense": "screen-09-dense-b8-n1",
+    "discrete": "screen-06-discrete-b1-n16"
+  },
+  "confirmation_aggregates": {
+    "dense": {
+      "wall": {
+        "median": 22.13613386399811,
+        "min": 22.050128670001868,
+        "max": 22.27826392199495
+      },
+      "cpu": {
+        "median": 105.16893837500001,
+        "min": 104.414156633,
+        "max": 105.237373306
+      },
+      "average_cores": {
+        "median": 4.720697211561827,
+        "min": 4.716910246139127,
+        "max": 4.772642141048834
+      },
+      "fit_rss_mib": {
+        "median": 3895.015625,
+        "min": 3894.984375,
+        "max": 3896.95703125
+      },
+      "prefit_rss_mib": {
+        "median": 975.33984375,
+        "min": 974.71875,
+        "max": 976.77734375
+      },
+      "output_rss_mib": {
+        "median": 3895.015625,
+        "min": 3894.984375,
+        "max": 3896.95703125
+      }
+    },
+    "discrete": {
+      "wall": {
+        "median": 18.379499481990933,
+        "min": 18.083607987995492,
+        "max": 18.802224150989787
+      },
+      "cpu": {
+        "median": 67.777803245,
+        "min": 67.234062465,
+        "max": 70.003278755
+      },
+      "average_cores": {
+        "median": 3.717956201529707,
+        "min": 3.6876849291468337,
+        "max": 3.7231381879528804
+      },
+      "fit_rss_mib": {
+        "median": 1916.578125,
+        "min": 1885.55859375,
+        "max": 1916.98828125
+      },
+      "prefit_rss_mib": {
+        "median": 974.84765625,
+        "min": 974.296875,
+        "max": 975.265625
+      },
+      "output_rss_mib": {
+        "median": 1927.5078125,
+        "min": 1918.9375,
+        "max": 1950.99609375
+      }
+    }
+  },
+  "discrete_median_wall_reduction": 0.1697059841202403,
+  "discrete_median_fit_highwater_reduction": 0.5079408378496556,
+  "same_source_discrete_screen_n4_to_n16_wall_reduction": 0.12100967873602841,
+  "within_route_maximum_output_differences": {
+    "dense": {
+      "coefficients": {
+        "maxabs": 1.0630385460785874e-14,
+        "normrel": 1.7738534540704943e-14
+      },
+      "covariance": {
+        "maxabs": 7.498342224909749e-16,
+        "normrel": 6.610893015082843e-13
+      },
+      "edf": {
+        "maxabs": 3.410605131648481e-13,
+        "normrel": 3.7590836192672505e-15
+      },
+      "holdout_parameters": {
+        "maxabs": 1.7208456881689926e-15,
+        "normrel": 4.1269424986738625e-16
+      },
+      "log_likelihood": {
+        "maxabs": 2.3283064365386963e-10,
+        "normrel": 1.9918823105240142e-16
+      },
+      "objective": {
+        "maxabs": 2.3283064365386963e-10,
+        "normrel": 1.9911443713982567e-16
+      },
+      "smoothing_parameters": {
+        "maxabs": 1.978150976356119e-11,
+        "normrel": 1.1958975861649754e-14
+      },
+      "terminal_penalized_curvature": {
+        "maxabs": 1.1059455573558807e-08,
+        "normrel": 1.021636510763392e-14
+      },
+      "terminal_score": {
+        "maxabs": 1.5267964670329093e-10,
+        "normrel": 6.194223805203693e-09
+      },
+      "train_parameters": {
+        "maxabs": 3.1086244689504383e-15,
+        "normrel": 4.1168694812397635e-16
+      }
+    },
+    "discrete": {
+      "coefficients": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "covariance": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "edf": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "holdout_parameters": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "log_likelihood": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "objective": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "smoothing_parameters": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "terminal_penalized_curvature": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "terminal_score": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      },
+      "train_parameters": {
+        "maxabs": 0.0,
+        "normrel": 0.0
+      }
+    }
+  },
+  "dense_vs_discrete_binning_differences_all_three_pairs": {
+    "coefficients": {
+      "maxabs": 0.0015427590048230563,
+      "normrel": 0.0020073306321318814
+    },
+    "covariance": {
+      "maxabs": 5.302281352084206e-06,
+      "normrel": 0.0021047033325815004
+    },
+    "edf": {
+      "maxabs": 0.002780753731840946,
+      "normrel": 3.064877169620391e-05
+    },
+    "holdout_parameters": {
+      "maxabs": 0.00032326769724166926,
+      "normrel": 7.759652385911182e-05
+    },
+    "log_likelihood": {
+      "maxabs": 11.180517444154248,
+      "normrel": 9.56501024522503e-06
+    },
+    "objective": {
+      "maxabs": 11.167987195542082,
+      "normrel": 9.550750921476415e-06
+    },
+    "smoothing_parameters": {
+      "maxabs": 2.8031791885478015,
+      "normrel": 0.0018355181312864277
+    },
+    "terminal_penalized_curvature": {
+      "maxabs": 244.29930103872903,
+      "normrel": 0.00010200060497008028
+    },
+    "terminal_score": {
+      "maxabs": 0.011033646636008143,
+      "normrel": 0.3739352418852468
+    },
+    "train_parameters": {
+      "maxabs": 0.0005071597336518963,
+      "normrel": 7.708682073223749e-05
+    }
+  },
+  "representation": {
+    "discrete_all_stored_hashes_identical": true,
+    "discrete_sha256": "d477623e62a08244c1d51d46484ed1de310b879d8e1c8b63ebfca10db5bce02f",
+    "dense_changed_array_paths_across_thread_settings": [
+      "0/10/R_inv",
+      "0/11/R_inv",
+      "0/13/R_inv",
+      "0/14/R_inv",
+      "0/9/R_inv",
+      "1/10/R_inv",
+      "1/11/R_inv",
+      "1/13/R_inv",
+      "1/14/R_inv",
+      "1/9/R_inv"
+    ],
+    "interpretation": "Within-route arithmetic/representation observations are separate from dense-versus-discrete resolution approximation."
+  },
+  "actual_solver_entry_pool_observations": {
+    "dense": [
+      {
+        "boundary": "instrumented_actual_solver_entry",
+        "numba_threading_layer": "omp",
+        "numba_threads": 1,
+        "pools": [
+          {
+            "architecture": "SkylakeX",
+            "internal_api": "openblas",
+            "num_threads": 8,
+            "prefix": "libscipy_openblas",
+            "threading_layer": "pthreads",
+            "user_api": "blas",
+            "version": "0.3.34.0.0"
+          },
+          {
+            "internal_api": "openmp",
+            "num_threads": 8,
+            "prefix": "libgomp",
+            "user_api": "openmp",
+            "version": null
+          },
+          {
+            "architecture": "SkylakeX",
+            "internal_api": "openblas",
+            "num_threads": 8,
+            "prefix": "libscipy_openblas",
+            "threading_layer": "pthreads",
+            "user_api": "blas",
+            "version": "0.3.31.dev"
+          },
+          {
+            "internal_api": "openmp",
+            "num_threads": 8,
+            "prefix": "libgomp",
+            "user_api": "openmp",
+            "version": null
+          }
+        ]
+      }
+    ],
+    "discrete": [
+      {
+        "boundary": "instrumented_actual_solver_entry",
+        "numba_threading_layer": "omp",
+        "numba_threads": 16,
+        "pools": [
+          {
+            "architecture": "SkylakeX",
+            "internal_api": "openblas",
+            "num_threads": 1,
+            "prefix": "libscipy_openblas",
+            "threading_layer": "pthreads",
+            "user_api": "blas",
+            "version": "0.3.34.0.0"
+          },
+          {
+            "internal_api": "openmp",
+            "num_threads": 1,
+            "prefix": "libgomp",
+            "user_api": "openmp",
+            "version": null
+          },
+          {
+            "architecture": "SkylakeX",
+            "internal_api": "openblas",
+            "num_threads": 1,
+            "prefix": "libscipy_openblas",
+            "threading_layer": "pthreads",
+            "user_api": "blas",
+            "version": "0.3.31.dev"
+          },
+          {
+            "internal_api": "openmp",
+            "num_threads": 1,
+            "prefix": "libgomp",
+            "user_api": "openmp",
+            "version": null
+          }
+        ]
+      }
+    ]
+  },
+  "all18_source_runtime_activity_guards_passed": true,
+  "limitations": [
+    "One fixed public shape and machine; five settings per route do not prove a universal optimal setting.",
+    "Screen observations retained separately and excluded from confirmation medians.",
+    "Dense native OpenMP limits vary with BLAS; both BLAS pools are observed configured limits, not actual participation. Numba active count also observed.",
+    "Complete-fit wall is primary; CPU/wall is whole-fit average cores, not instantaneous utilization.",
+    "Standard public warmup excluded from fit clock, caches retained. Fit-end process highwater includes imports/input/warmup; later outputs/representation highwater separate.",
+    "Within-route thread/association deltas are distinct from dense-versus-discrete binning differences; small discrepancies alone do not prove exact equivalence.",
+    "No per-kernel worker-participation instrumentation added. Endpoint CPU audit cannot observe every exited/new process or prove host isolation.",
+    "Dense BLAS 4/8/16 screen times are close; the selected count is not a proven global optimum.",
+    "No n-by-q scaling law, universal automatic policy, mgcv comparison or gigadata capacity result follows.",
+    "Confirmation pairs always ran dense then discrete; order was not counterbalanced. Three confirmations give descriptive medians and ranges, not a significance claim."
+  ]
+}

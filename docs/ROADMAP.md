@@ -244,6 +244,22 @@ milestone, not a universal thread policy or a bounded whole-fit RAM claim.
 Larger-N capacity work remains within the chosen C3+C1 scope. See the current
 [performance report](research/2026-09-discrete-performance-report.md).
 
+A subsequent fair comparison uses the same production source `68bf3cd5` for
+both routes, screens 1/2/4/8/16 threads, then runs three new confirmations per
+selected setting. Dense with eight BLAS threads takes median 22.136 s; discrete
+with 16 Numba workers and one BLAS thread takes 18.379 s. Discrete reduces median
+wall time by 16.97% and process highwater at fit end by 50.79% (3,895.02 to
+1,916.58 MiB). Thus 16 workers help the current implementation, revising the
+earlier four-worker choice. The saved discrete outputs remain exactly equal
+across tested settings; the intended binning approximation against dense has
+maximum holdout parameter difference 3.23e-4. All fits retain 16 inner/seven
+smoothing iterations and `practical_plateau`. This is one shape on one machine,
+with screen-selected settings and standard warmup excluded. It establishes a
+moderate time advantage and a larger memory advantage, not a general optimum,
+an mgcv comparison or a whole-fit bounded-memory guarantee. Larger-N capacity,
+n-by-q validation and automatic threading remain C1 work. See the
+[thread receipt](../benchmarks/discrete_thread_screen_receipt.json).
+
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,
 backend or timing input; `-1` disables intervention rather than selecting an

@@ -1,5 +1,15 @@
 {
   "schema": "superglm-public-discrete-performance-evidence-v1",
+  "fair_dense_thread_checkpoint": {
+    "receipt": "benchmarks/discrete_thread_screen_receipt.json",
+    "source_sha": "68bf3cd5f5435d044f44a7540d17bea3a44585d4",
+    "dense_confirmation_median_seconds": 22.13613386399811,
+    "discrete_confirmation_median_seconds": 18.379499481990933,
+    "discrete_median_wall_reduction": 0.1697059841202403,
+    "discrete_median_fit_highwater_reduction": 0.5079408378496556,
+    "scope": "One public million-row/q102 shape; screen-selected dense BLAS8/Numba1 and discrete BLAS1/Numba16; three new confirmations each",
+    "raw_summary_sha256": "5ed61e73b11171b3121c9f2bed5d7e60307f94b325de6fe52c8930f0c2467738"
+  },
   "million_row_latency_checkpoint": {
     "receipt": "benchmarks/discrete_latency_receipt.json",
     "status": "three_of_three_complete_fits_under_20_seconds",

@@ -1,5 +1,108 @@
 # Discrete execution performance
 
+## Current checkpoint: fair dense comparison
+
+On the same production source `68bf3cd5`, the public million-row Gaussian
+location-scale fixture takes **18.379 s discrete versus 22.136 s dense** at
+their separately screened thread settings. Three new confirmations per route
+give **16.97% lower median wall time** and **50.79% lower median process
+highwater at fit end** for discrete. This is a moderate time advantage and a
+larger memory advantage at N=1,048,576 and 102 total coefficients; larger-N
+capacity and a general thread policy remain C1 work.
+
+| Route and selected settings | Three new complete fits, seconds | Median seconds | Median fit-end highwater, MiB | Median CPU seconds |
+| --- | --- | --- | --- | --- |
+| Dense: BLAS 8, Numba 1 | 22.278, 22.136, 22.050 | 22.136 | 3,895.02 | 105.169 |
+| Discrete: BLAS 1, Numba 16 | 18.379, 18.084, 18.802 | 18.379 | 1,916.58 | 67.778 |
+
+![Thread screening and fresh complete-fit confirmations](figures/2026-09-dense-discrete-thread-screen.png)
+
+The screen ran one fresh process at each setting below, alternating routes in
+thread order 4, 1, 16, 2, 8. Selection used the minimum valid screen time for
+each route. The three subsequent confirmation pairs each ran dense then
+discrete; their order was not counterbalanced. All ten screen samples and six
+confirmation samples are retained. Screen observations are excluded from the
+confirmation summaries, which are descriptive estimates rather than a
+statistical significance claim.
+
+| Thread count | Dense BLAS count, Numba 1: seconds | Discrete Numba count, BLAS 1: seconds |
+| --- | --- | --- |
+| 1 | 28.310 | 21.284 |
+| 2 | 23.343 | 18.896 |
+| 4 | 21.243 | 19.227 |
+| 8 | 20.673 | 17.561 |
+| 16 | 21.299 | 16.900 |
+
+This corrects the earlier assumption that four native workers remain the
+measured choice: the current implementation benefits from 16 on this fixture.
+The 12.1% reduction from four to 16 is screening evidence only. Dense's 4/8/16
+samples are close, and the screen does not prove a global optimum. Discrete
+BLAS remains fixed at one; there is no exhaustive mixed-thread or n-by-q sweep.
+Both routes use explicit `SUPERGLM_BLAS_THREADS` overrides so the shared
+controller's default one-thread cap cannot silently override the experiment.
+The harness's native OpenMP limits follow BLAS while Numba is set independently.
+
+The fit clock includes feature compilation, coefficient and smoothing fitting,
+null fitting and finalization. Input generation, the standard public warmup,
+output capture and two separate instrumented witnesses are excluded. The RSS
+measure is process `ru_maxrss` sampled at fit end, including imports, input and
+warmup; it is not an incremental allocation measure. Later output highwaters
+are recorded separately. All 18 workers pass source, runtime and activity
+guards. Guest process checks do not establish physical host isolation.
+
+All fits converge with 16 inner and seven smoothing iterations and the existing
+`practical_plateau` classification. All ten saved discrete output arrays and
+stored representation hashes agree exactly across its tested settings and
+witness. Dense cross-thread holdout differences are at most 1.72e-15; ten
+`R_inv` transform hashes change, while raw bases and indices remain unchanged.
+Repeated outputs at each selected setting agree exactly within that route.
+
+Dense uses the continuous feature basis and discrete uses 256 bins. This
+intended resolution approximation is separate from the execution checks above.
+Across all three confirmation pairs, the maximum holdout parameter difference
+is 3.23e-4 and its norm-relative difference is 7.76e-5. The maximum training
+parameter difference is 5.07e-4; coefficient and covariance norm-relative
+differences are 0.00201 and 0.00210. The absolute objective difference is 11.168
+and the EDF difference is 0.00278. Differences are not uniformly small in every
+relative metric: the terminal score changes by 0.0110 maximum absolute and
+0.374 norm-relative. The receipt retains all ten numerical comparisons.
+
+The separate witnesses observe `distributional-dense-v1` with BLAS/OpenMP 8 and
+Numba 1, and `distributional-chunked-v1` with 65,536-row batches, BLAS/OpenMP 1
+and Numba 16 at solver entry. Configured runtime limits do not establish actual
+worker participation in every kernel. CPU divided by wall time gives median
+whole-fit averages of 4.72 cores for dense and 3.72 for discrete on the 16-vCPU
+guest. This does not reveal instantaneous utilization or establish a memory
+bandwidth bottleneck. In the single-sample discrete screen, measured geometry
+assembly falls from 11.947 s at one worker to 7.409 s at 16; compilation,
+initialization, likelihood and terminal work remain. Phase timers may overlap
+and must not be summed as an exact decomposition.
+
+Published mgcv speed ratios are context, not a target average for this fixture.
+Li and Wood's Figure 1 varies four smooths from 20 to 500 coefficients each,
+with one thread, whereas this fixture has 102 total coefficients and jointly
+fits mean and scale. Their 30-fold example concerns a particular cross-product
+improvement, not an average complete-fit ratio.
+See [Li and Wood (2020)](https://link.springer.com/article/10.1007/s11222-019-09864-2).
+mgcv documents Gaussian location-scale `gaulss` as available only with `gam`;
+a matched package comparison would therefore require `gam(..., family=gaulss())`
+with compatible bases, links, penalties, fitting criteria and thread settings.
+See [mgcv gaulss documentation](https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/gaulss.html).
+No such comparison has been run, so superiority of SuperLSS dense over mgcv
+remains unmeasured.
+
+The [thread receipt](../../benchmarks/discrete_thread_screen_receipt.json)
+preserves all sample rows, source/helper hashes, numerical differences, runtime
+observations and limitations. Raw records are in
+`.benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/`, with
+summary SHA256 `5ed61e73b11171b3121c9f2bed5d7e60307f94b325de6fe52c8930f0c2467738`.
+Both routes use production-tree SHA256
+`6ea1435a53b4aa44c663ae4ae996a900033f1b8425df0e0807baa4bcb48efbd9`.
+This campaign changes evidence and the thread-setting conclusion; it changes
+no production code and does not advance the chosen C3+C1 task to C5.
+
+## Earlier four-worker latency checkpoint
+
 The requested **20-second complete-fit milestone is met** on the public
 million-row fragmented Gaussian workload. Three predeclared fresh-process fits
 take **18.607, 19.270 and 19.665 seconds**, with a median of **19.270 seconds**.

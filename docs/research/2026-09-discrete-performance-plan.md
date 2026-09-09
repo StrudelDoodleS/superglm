@@ -1,6 +1,13 @@
 # Discrete execution performance plan
 
-Status: the requested 20-second complete-fit milestone is met on the public
+Status: the fair dense comparison is complete on current source `68bf3cd5`.
+Three new confirmations give medians of 18.379 seconds discrete (Numba 16,
+BLAS 1) and 22.136 seconds dense (BLAS 8, Numba 1): 16.97% less time and 50.79%
+less process highwater at fit end. This is one public N=1,048,576/q=102 fixture
+on one machine, with separately screened settings; larger-N C1 capacity and
+a general thread policy remain open. The plan and evidence preserve all samples.
+
+Earlier status: the requested 20-second complete-fit milestone is met on the public
 million-row fixture: 18.607, 19.270 and 19.665 seconds in three predeclared fresh
 processes. Median 19.270 seconds; all samples are retained. The settings are
 four native workers, one BLAS thread, four knots and 256 bins, with the standard
@@ -8,6 +15,97 @@ public warmup outside the fit clock. Production streamed moments are implemented
 reviewed and validated. The current checkpoint and its memory cost are in the
 [report](2026-09-discrete-performance-report.md); larger-scale C1 capacity work
 remains open.
+
+## Completed checkpoint: fair dense comparison
+
+The user requires a comparison against properly tuned dense fitting before
+calling the discrete result a decisive win. The 20-second milestone compares
+the new implementation with earlier discrete code. The earlier one-thread dense
+measurement does not establish a win over the best current dense setting.
+
+Use current production source `68bf3cd5` for both routes. This checkpoint holds
+the public fragmented Gaussian workload fixed at N=1,048,576, q=102, four knots
+and 256 bins. It is a thread screen at one shape, not an n-by-q scaling law.
+No production change is authorized by a timing hypothesis alone.
+
+- [x] Audit actual dense/discrete dispatch and the independent thread controls.
+  Extend only a copy of the existing ignored capture wrapper to accept BLAS
+  counts 1, 2, 4, 8 and 16; preserve the public complete-fit worker and its clock.
+- [x] Predeclare ten screening conditions: dense with one Numba worker and
+  BLAS 1/2/4/8/16; discrete with BLAS one and Numba 1/2/4/8/16. Alternate routes
+  and use a nonmonotone thread order. Record all native runtime limits, including
+  the harness's OpenMP limit, rather than attributing every pool change to BLAS.
+  Set `SUPERGLM_BLAS_THREADS` explicitly to the requested BLAS count so the
+  facade's default cap does not override the experiment. Invoke capture workers
+  directly to avoid the harness controller overwriting the Numba environment.
+  The Gaussian dense geometry does not enter the parallel moment kernel.
+- [x] Run fresh processes serially with the same public warmup, inputs, stopping
+  rules, source pins and quiet-machine checks. Capture complete-fit wall/CPU,
+  fit-end process highwater, numerical outputs, iterations and actual backend.
+  Feature compilation, optimization, null fit and finalization stay inside the
+  clock. Input generation, public warmup and output capture remain outside.
+- [x] Select the fastest valid screened setting per route, then run three NEW
+  confirmations per selected setting in alternating order. Report their median
+  and range separately from the screening observations to expose selection noise.
+  Keep all valid and failed receipts; do not repeatedly sample until one route wins.
+- [x] Compare within-route numerical changes from threading separately from the
+  approximation between exact and binned feature bases. Preserve convergence
+  classifications and disclose changed iteration counts. Include memory and CPU
+  alongside wall time; this user accepts higher CPU when it reduces fitting time.
+  Use one separate instrumented witness per selected route to observe actual
+  solver-entry pools and backend; those witnesses never contribute fit timings.
+- [x] Write a compact tracked receipt and update the report/roadmap with the
+  measured conclusion, including a dense win or near tie if that is the result.
+  This screen does not establish a global optimum over mixed thread settings,
+  other row counts, widths, families or hardware. Follow-up implementation must
+  target an observed remaining cost, with focused regression tests.
+
+The root owns this plan and tracked evidence. Benchmark control owns ignored
+measurement artifacts; a separate reader audits source and dispatch without
+running numerical jobs. Freeze production/tests during all timed windows and
+pause other numerical work. Preserve the original strategy worktree unchanged.
+
+Outcome: all 18 workers pass the guards and retain the same convergence
+classification and iteration counts. The timed window is closed. The current
+screen revises the earlier four-worker choice: 16 helps this implementation.
+All saved discrete arrays agree exactly across tested settings; the difference
+from dense is separately reported as the intended 256-bin approximation.
+Three confirmations per route exclude screening samples, but pair order was
+always dense then discrete. No significance or universal optimum claim follows.
+The [thread receipt](../../benchmarks/discrete_thread_screen_receipt.json) and
+[report](2026-09-discrete-performance-report.md) contain the complete evidence.
+No production changes or additional solver test run are required for this
+documentation checkpoint. Remaining C1 work must establish gains across n/q
+and larger feasible fits before choosing an automatic threading policy.
+
+## Earlier checkpoints
+
+Integration inventory (2026-09-09): the implementation branches are already
+linear, with no divergent solver work to merge between them:
+
+| Branch | Audited checkpoint | Commits beyond predecessor |
+| --- | --- | --- |
+| `origin/master` | `8962c452` | Release baseline |
+| `feat/c3-c1-completion` | `1a8952a4` | 5 |
+| `feat/c3-pragmatic-convergence` | `0a15736e` | 4 |
+| `feat/discrete-performance` | `68bf3cd5` | 21 before this evidence update |
+
+The latest branch contains all 30 implementation/evidence commits. Both earlier
+implementation worktrees are clean. The original `docs/roadmap-dossier`
+worktree has no unique commits; its uncommitted strategy inputs remain
+preserved there. Its revised `AGENTS.md` is already identical here and the
+dossier differs only by a final newline. Keep this branch's evolved roadmap;
+replacing it with the original would discard established implementation facts.
+The original `!docs/ROADMAP.md` ignore exception is carried forward here.
+
+Before integration, finish the remaining chosen C3+C1 acceptance work, refresh
+the remote base, review the combined diff and run required checks on the final
+integration head. One combined PR can carry the chain; separately reviewed
+stacked PRs must follow the order above. Do not delete any worktree while it
+contains uncommitted inputs or unique commits. Local `master` is stale; use
+`origin/master` as the integration base. No merge or publication has occurred
+at this checkpoint.
+
 Fifteen timed fits and five separate witnesses establish faster discrete
 execution on the measured mixed layouts through one million rows. C1 performance
 work remains active: the user considers the 8% one-thread time advantage over
