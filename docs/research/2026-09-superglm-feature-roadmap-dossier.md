@@ -1,9 +1,14 @@
 # SuperGLM Roadmap
 
-Status: Living document
-Last strategic review: 2026-09-07
+Status: Historical research dossier, C1–C14
+Original strategic review: 2026-09-07
 
-This document records current direction, not commitments.
+The September 7 analysis below is retained as research evidence. The
+[main roadmap](../ROADMAP.md) records current implementation status, corrections
+and priorities. The [reviewed additions](2026-09-superglm-feature-roadmap-additions.md)
+extend the catalogue with **C15–C26**, including C18's multigrid/Krylov work and
+C24's hierarchical matrix-compression proposal. Read both dossiers through the
+current roadmap; their readiness labels are proposals to scope, not commitments.
 
 Priority order may change as benchmarks, implementation experience,
 published research, or user needs change. A roadmap item is not an
