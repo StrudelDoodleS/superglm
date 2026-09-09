@@ -5,9 +5,10 @@
 The user has chosen sequential complete-fit targets of **15 seconds**, then
 **12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,
 four knots and 256 bins. Treat these as discrete latency targets and continue
-to tune dense fairly. The existing C3/C1 chain is now checked out as
-`feat/c3-c1-integration` in the existing implementation worktree, preserving
-all predecessor branches and the original uncommitted strategy worktree.
+to tune dense fairly. The existing C3/C1 chain is consolidated on
+`feat/c3-c1-integration` at `64f8b451`. Latency work continues on its descendant
+`feat/c1-fit-latency` in the same implementation worktree, preserving all
+predecessor branches and the original uncommitted strategy worktree.
 
 1. Review the combined C3/C1 diff and run the required suite with public
    freMTPL2 data present. Fix integration blockers, then create one combined
@@ -33,7 +34,8 @@ all predecessor branches and the original uncommitted strategy worktree.
    window. Only after the 15-second target is demonstrated start the 12.5-second
    stage; neither target nor larger-N capacity is yet demonstrated.
 
-The combined draft is [PR #379](https://github.com/StrudelDoodleS/superglm/pull/379).
+The combined [PR #379](https://github.com/StrudelDoodleS/superglm/pull/379) is
+ready for review; it has not been merged.
 All four duration-balanced test groups pass on the integration source: 12,707
 tests passed, with 176 skipped test cases and two skipped collection modules
 (the latter repeat in each shard's summary). `SUPERGLM_REQUIRE_DATA=1` was set
@@ -63,6 +65,18 @@ serial and parallel results must agree. A separate dense candidate removes an
 unnecessary copy of newly owned predictor storage. Both need full-fit evidence
 before any latency claim. The root owns sequencing; benchmark control owns
 measurement windows.
+
+The first candidate implements both changes. Its digest tree retains fresh
+reads of every occurrence, ordered domain-separated metadata and leaves,
+bounded pending work, and worker cleanup on success, refusal and error. Wide
+replacement dtypes retain the 64 KiB scratch bound; early schema refusals do
+not start workers. Independent review is complete. Focused tests demonstrate
+the serial dispatch defect and catch injected ordering and queue-bound faults.
+The dense render allocation regression falls from 6,816,566 to 4,719,608 bytes;
+this is an isolated allocation result, not whole-fit memory or speed evidence.
+The next measurement compares the committed `64f8b451` baseline and candidate
+in fresh processes, followed by a separate untimed dispatch witness. Neither
+the 15-second nor 12.5-second target is claimed from unit tests or profiling.
 
 Status: the fair dense comparison is complete on current source `68bf3cd5`.
 Three new confirmations give medians of 18.379 seconds discrete (Numba 16,

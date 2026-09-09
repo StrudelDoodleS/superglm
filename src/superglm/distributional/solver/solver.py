@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import weakref
 from dataclasses import dataclass, replace
@@ -38,6 +37,7 @@ from superglm.distributional.solver._likelihood_cache import (
     _LikelihoodCache,
     build_likelihood_cache,
 )
+from superglm.distributional.solver._reuse_digest import _ReuseDigest
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     _assemble_dense_geometry_from_matrices,
@@ -245,6 +245,13 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
     not certify curvature: a design edit can leave the current predictor fixed.
     Unknown representations conservatively retain fresh likelihood evaluation.
     """
+    with _ReuseDigest() as digest:
+        return _build_chunk_reuse_data_certificate(context, digest)
+
+
+def _build_chunk_reuse_data_certificate(
+    context: _SolverContext, digest: _ReuseDigest
+) -> str | None:
     from scipy.sparse import csr_matrix
 
     from superglm.distributional.weights import ResolvedLikelihoodWeights
@@ -272,25 +279,8 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
         or type(weights) is not ResolvedLikelihoodWeights
     ):
         return None
-    digest = hashlib.sha256()
-
-    def field(value: object) -> None:
-        encoded = repr(value).encode("utf-8")
-        digest.update(len(encoded).to_bytes(8, "big"))
-        digest.update(encoded)
-
-    def array(values: NDArray) -> None:
-        values = np.asarray(values)
-        field((values.dtype.str, values.shape))
-        # nditer bounds copies even for a non-contiguous dense design.
-        for block in np.nditer(
-            values,
-            flags=["external_loop", "buffered", "zerosize_ok"],
-            op_flags=["readonly"],
-            order="C",
-            buffersize=8192,
-        ):
-            digest.update(memoryview(np.ascontiguousarray(block)).cast("B"))
+    field = digest.field
+    array = digest.array
 
     def builtin_array(values: object) -> bool:
         # An ndarray subclass can change arithmetic at identical bytes. Limit

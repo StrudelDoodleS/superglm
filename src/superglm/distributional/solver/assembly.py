@@ -84,12 +84,17 @@ def dense_predictor_matrices(layout: StackedLayout) -> tuple[NDArray[np.float64]
         )
         if slopes.shape != (n_observations, slope_width) or not np.all(np.isfinite(slopes)):
             raise ValueError(f"dense design for predictor {state.name!r} has invalid state")
-        matrix = (
-            np.column_stack((np.ones(n_observations), slopes))
-            if state.intercept_index is not None
-            else slopes
-        )
-        matrices.append(_readonly(matrix))
+        if state.intercept_index is not None:
+            # column_stack owns fresh float64 storage, so freezing it needs no
+            # further full-design copy. Keep the defensive copy for slopes alone.
+            matrix = np.column_stack((np.ones(n_observations), slopes))
+            if type(slopes) is np.ndarray and type(matrix) is np.ndarray and matrix.flags.owndata:
+                matrix.setflags(write=False)
+            else:
+                matrix = _readonly(matrix)
+        else:
+            matrix = _readonly(slopes)
+        matrices.append(matrix)
     return tuple(matrices)
 
 

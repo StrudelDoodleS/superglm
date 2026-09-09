@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import pickle
 import tracemalloc
 import weakref
@@ -19,7 +20,7 @@ from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.solver import DenseSolverConfig, fit_dense_fixed_lambda
+from superglm.distributional.solver import DenseSolverConfig, _reuse_digest, fit_dense_fixed_lambda
 from superglm.features import Numeric
 from superglm.group_matrix import (
     DesignMatrix,
@@ -356,26 +357,43 @@ def test_certificate_hashes_bounded_buffers_without_expansion_or_cache_creation(
         group.B_unique = group.B_unique[::-1, ::-1]
         assert not group.B_unique.flags.c_contiguous
     context = _context(problem)
-    real_sha256 = solver.hashlib.sha256
+    real_sha256 = hashlib.sha256
+    real_leaf = _reuse_digest._array_digest
+    current_source = None
     updates = []
+
+    def observed_leaf(values):
+        nonlocal current_source
+        current_source = values
+        return real_leaf(values)
 
     class BoundedDigest:
         def __init__(self, data=b""):
-            self.digest = real_sha256()
+            self._hash = real_sha256()
             self.update(data)
 
         def update(self, data):
-            assert len(data) <= 64 * 1024
-            updates.append(len(data))
-            self.digest.update(data)
+            if isinstance(data, memoryview) and not np.shares_memory(data.obj, current_source):
+                assert isinstance(data.obj.base, np.nditer)
+                assert not data.obj.flags.owndata
+                assert data.obj.nbytes <= 64 * 1024
+                updates.append(data.obj.nbytes)
+            self._hash.update(data)
+
+        def digest(self):
+            return self._hash.digest()
 
         def hexdigest(self):
-            return self.digest.hexdigest()
+            return self._hash.hexdigest()
 
     def forbid_expansion(*args, **kwargs):
         raise AssertionError("certificate materialized or subsetted the design")
 
-    monkeypatch.setattr(solver.hashlib, "sha256", BoundedDigest)
+    # Keep this allocation/no-materialization regression serial; parallel
+    # scratch ownership and worker bounds are checked in reuse_digest tests.
+    monkeypatch.setattr(_reuse_digest, "get_num_threads", lambda: 1)
+    monkeypatch.setattr(_reuse_digest, "_array_digest", observed_leaf)
+    monkeypatch.setattr(hashlib, "sha256", BoundedDigest)
     monkeypatch.setattr(kind, "toarray", forbid_expansion)
     monkeypatch.setattr(kind, "row_subset", forbid_expansion)
     if kind is SplineCategoricalGroupMatrix:
@@ -387,7 +405,10 @@ def test_certificate_hashes_bounded_buffers_without_expansion_or_cache_creation(
     finally:
         tracemalloc.stop()
     assert before is not None
-    assert updates and max(updates) == 64 * 1024
+    if kind is SplineCategoricalGroupMatrix:
+        assert not updates
+    else:
+        assert updates and max(updates) <= 64 * 1024
     # Four digest buffers allow iterator/contiguity workspace and Python
     # metadata; one observation-length float64 copy alone exceeds this bound.
     assert peak < 4 * 64 * 1024

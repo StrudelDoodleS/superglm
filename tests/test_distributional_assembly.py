@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tracemalloc
 from dataclasses import replace
 
 import numpy as np
@@ -54,6 +55,84 @@ def _layout(n: int = 7):
 def _gamma(operation_count: int) -> float:
     epsilon = np.finfo(np.float64).eps
     return operation_count * epsilon / (1.0 - operation_count * epsilon)
+
+
+@pytest.mark.parametrize("intercept", [True, False])
+@pytest.mark.parametrize("slope_width", [0, 2])
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_dense_rendering_owns_readonly_storage(
+    intercept: bool, slope_width: int, borrowed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Freezing or retaining mutable group storage must not publish aliases."""
+    n = 5
+    frame = as_eager_frame(pd.DataFrame({"x": np.arange(n), "z": -np.arange(n)}))
+    builds = compile_predictors(
+        frame,
+        resolved_prior(np.ones(n)),
+        (_parameter("location"),),
+        (
+            Predictor(
+                "location",
+                {name: Numeric() for name in ("x", "z")[:slope_width]},
+                intercept=intercept,
+            ),
+        ),
+    )
+    layout = build_stacked_layout(builds)
+    sources = [group.toarray() for group in layout.predictors[0].design.group_matrices]
+    if borrowed and slope_width:
+        # A dense rendering provider need not transfer ownership of its buffer.
+        # Exercise that boundary without changing its values or design metadata.
+        slopes = layout.predictors[0].design.toarray()
+        monkeypatch.setattr(layout.predictors[0].design, "toarray", lambda: slopes)
+        sources.append(slopes)
+    writeability = [source.flags.writeable for source in sources]
+    assert all(writeability)
+    expected = np.empty((n, slope_width + int(intercept)))
+    if intercept:
+        expected[:, 0] = 1.0
+    if slope_width:
+        expected[:, int(intercept) :] = np.column_stack((np.arange(n), -np.arange(n)))
+
+    (matrix,) = dense_predictor_matrices(layout)
+
+    assert matrix.dtype == np.float64
+    assert matrix.flags.owndata
+    assert not matrix.flags.writeable
+    np.testing.assert_array_equal(matrix, expected)
+    for source, was_writeable in zip(sources, writeability, strict=True):
+        assert source.flags.writeable == was_writeable
+        assert not np.shares_memory(matrix, source)
+        if was_writeable:
+            source[:] = 73.0
+    np.testing.assert_array_equal(matrix, expected)
+
+
+def test_dense_rendering_peak_allocation_excludes_duplicate_augmented_matrix() -> None:
+    """An extra full augmented copy exceeds the slopes-plus-output memory budget."""
+    n, slope_width = 32768, 8
+    frame = as_eager_frame(
+        pd.DataFrame({f"x{i}": np.arange(n, dtype=float) for i in range(slope_width)})
+    )
+    builds = compile_predictors(
+        frame,
+        resolved_prior(np.ones(n)),
+        (_parameter("location"),),
+        (Predictor("location", {f"x{i}": Numeric() for i in range(slope_width)}),),
+    )
+    layout = build_stacked_layout(builds)
+    # Allow the final matrix, slope rendering, intercept vector and 256 KiB
+    # of Python/validation overhead. A second output is 2.25 MiB here.
+    itemsize = np.dtype(np.float64).itemsize
+    budget = n * (2 * slope_width + 2) * itemsize + 256 * 1024
+    tracemalloc.start()
+    try:
+        (matrix,) = dense_predictor_matrices(layout)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert matrix.shape == (n, slope_width + 1)
+    assert peak <= budget, f"dense rendering allocated {peak} bytes; budget is {budget}"
 
 
 @pytest.mark.parametrize(

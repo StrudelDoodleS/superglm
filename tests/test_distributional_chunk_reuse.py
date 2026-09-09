@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import weakref
+from contextlib import contextmanager
 from dataclasses import fields, replace
 
 import numpy as np
@@ -24,7 +25,7 @@ from superglm.distributional.families.two_piece import TwoPieceLogNormalLSS, Two
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.layout import build_stacked_layout
 from superglm.distributional.predictor import Predictor, compile_predictors
-from superglm.distributional.solver import DenseSolverConfig, fit_dense_fixed_lambda
+from superglm.distributional.solver import DenseSolverConfig, _reuse_digest, fit_dense_fixed_lambda
 from superglm.distributional.weights import ResolvedLikelihoodWeights
 from superglm.features import Categorical, Numeric, RandomEffect
 from superglm.group_matrix import (
@@ -553,23 +554,24 @@ def test_certificate_hashes_noncontiguous_designs_in_bounded_buffers(monkeypatch
     context = solver._validated_context(
         *problem[:5], coefficient_curvature="observed", chunk_size=17, coefficient_face=None
     )
-    original_sha256 = solver.hashlib.sha256
+    original_nditer = np.nditer
     sizes = []
 
-    class BoundedHash:
-        def __init__(self, *args, **kwargs):
-            self.digest = original_sha256(*args, **kwargs)
+    def checked_blocks(iterator):
+        for block in iterator:
+            assert isinstance(block.base, original_nditer)
+            assert not block.flags.owndata
+            sizes.append(block.nbytes)
+            yield block
 
-        def update(self, value):
-            sizes.append(len(value))
-            self.digest.update(value)
+    @contextmanager
+    def bounded_iterator(*args, **kwargs):
+        with original_nditer(*args, **kwargs) as iterator:
+            yield checked_blocks(iterator)
 
-        def hexdigest(self):
-            return self.digest.hexdigest()
-
-    monkeypatch.setattr(solver.hashlib, "sha256", BoundedHash)
+    monkeypatch.setattr(_reuse_digest.np, "nditer", bounded_iterator)
     assert solver._chunk_reuse_data_certificate(context) is not None
-    assert max(sizes) <= 8192 * 8
+    assert sizes and max(sizes) == 8192 * 8
 
 
 @pytest.mark.parametrize(
