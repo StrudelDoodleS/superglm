@@ -98,6 +98,29 @@ certificates. No fit was run. Retain the experiment in the latency receipt and
 defer this placement change for the current target, without inferring universal
 inferiority or discarding its possible workspace benefit.
 
+The ordinary-only BLAS control at `4e1edda6` also supplies no latency gain.
+Its single constructor-inclusive geometry takes 0.426940 seconds at BLAS one
+and 0.442618 seconds with BLAS eight confined to ordinary products, restoring
+one before the native batch. CPU rises from 3.471702 to 6.085172 seconds. The
+source-pinned AST preserves the original expressions and control flow after
+instrumentation hooks are removed. Twelve small oracle/restoration checks pass;
+the large score norm-relative difference is 5.65e-16 and curvature/penalty
+arrays agree exactly. Both arms observe 16 native workers and zero refusals.
+Owned numerical-array estimates match; same-worker RSS is monotonic. AST setup
+costs 19.59 ms in the first arm and 4.08 ms in the alternative, so including
+setup favors the alternative. Defer this local thread policy; this experiment
+does not measure complete fitting or establish a universal thread choice.
+
+The next complete-fit diagnostic crosses two N values and two basis widths.
+A separate fixed-thread wait-policy control tests a distinct runtime hypothesis:
+the observed Numba backend is libgomp, whose
+[default waiting policy](https://gcc.gnu.org/onlinedocs/libgomp/OMP_005fWAIT_005fPOLICY.html)
+permits busy waiting before workers sleep. With `GOMP_SPINCOUNT` unset,
+[`PASSIVE` changes the default spin count to zero](https://gcc.gnu.org/onlinedocs/libgomp/GOMP_005fSPINCOUNT.html).
+Excess CPU does not prove this waiting causes fit latency. The planned fresh
+default/PASSIVE pair holds thread counts fixed and assesses complete-fit wall
+time, outputs and observed execution separately from the scaling grid.
+
 ## Earlier screen: parallel live-source certification
 
 The first fresh complete-fit comparison of parallel live-source certification

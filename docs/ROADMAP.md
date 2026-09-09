@@ -282,6 +282,11 @@ seconds for the current representation. It supplies no latency improvement
 evidence, so defer this route for the current target and retain the workspace
 tradeoff as separate capacity evidence. This is a geometry comparison, not a
 complete-fit result.
+An ordinary-only BLAS8 geometry control also supplies no gain (0.443 versus
+0.427 seconds). Both candidate changes remain outside production. The next
+diagnostic measures complete fits across two N values and two basis widths,
+with a separate fixed-thread OpenMP wait-policy control. The 12.5-second target
+remains open.
 
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,

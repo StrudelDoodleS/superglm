@@ -8,19 +8,18 @@ controls take 24.299112, 26.239155 and 24.686451 seconds. All same-route saved
 arrays/results/representations agree exactly, and the actual backend witness
 passes. Preserve these measurements and all preceding screens.
 
-Next, fix the paired kernel's cold-warmup regression (36 heavy storage
-specializations; 72.089 seconds in its first source-screen warmup) using two
-explicit, lazy signatures: readonly contiguous channels and a readonly strided
-fallback. Preserve zero-copy inputs, the specialized contiguous path, and all
-ownership/admission checks. Compare isolated fresh-cache startup separately
-from the established complete-fit clock. Cached confirmation warmups took
-1.31–1.87 seconds and do not characterize cold compilation.
+The paired kernel's cold-warmup regression (36 heavy storage specializations)
+is fixed using two explicit, lazy signatures: readonly contiguous channels and
+a readonly strided fallback. Zero-copy inputs, the specialized contiguous path
+and all ownership/admission checks remain. Controlled startup evidence is
+reported below, separately from cached-fit confirmations.
 
 The 12.5-second stage uses the current diagnostic profile to select its next
 bounded change. Repeated predictor work and ordinary moment assembly remain
 material. The latest scan fusion and parallel hashing change constant factors;
-they do not establish a lower asymptotic order in N. A controlled N-by-q scaling
-study remains separate work after this explicit latency gate.
+they do not establish a lower asymptotic order in N. Two subsequent geometry
+controls supply no latency gain. An initial N-by-q diagnostic now proceeds
+alongside the open 12.5-second target rather than deferring scaling evidence.
 
 The BAM comparison must not treat remaining `O(N)` passes as a failure of
 discretization: its marginal method also retains linear aggregation. Judge the
@@ -62,26 +61,44 @@ No production integration or complete-fit claim follows from this experiment.
 The original plan held this idea when ordinary products cost only 1.055 seconds;
 the current profile supplies a new reason to measure it, not a new idea.
 
-Next, run one fixed-channel geometry control with BLAS eight scoped only to
+The fixed-channel geometry control with BLAS eight scoped only to
 ordinary score and weighted-Gram products, restoring BLAS one before native
-moments. Keep native workers at 16. Charge a pre-created BLAS controller and
-all scope-entry/restoration costs, and check actual pools at each boundary.
-The ignored helper must preserve the production expressions, source validation,
-workspace and chunk order; use signed/rectangular/cancellation oracles because
-BLAS reduction order may change. Global BLAS two was slower, but did not isolate
-this section. Its approximately 2.888 diagnostic seconds form an optimistic
-saving ceiling, not a speed prediction. If this single local control supplies
-no gain, defer the route instead of expanding the thread sweep and prioritize
-the N-by-width scaling diagnostic. No production policy change follows without
-complete-fit evidence.
+moments, is also complete at `4e1edda6`. Native workers remain 16 and the actual
+pool boundaries pass. Inclusive geometry takes 0.426940 seconds at BLAS one
+and 0.442618 seconds with the local eight-thread scope; CPU rises from 3.471702
+to 6.085172 seconds. Construction is included and is more costly in the first
+arm; even that favors the alternative. Curvature/penalty arrays are exact and
+score norm-relative difference is 5.65e-16. Twelve independent small numerical,
+scope and exception-restoration checks pass. Defer this policy for the current
+target; no production thread change or complete-fit gain follows.
+
+Run eight fresh complete fits on one frozen source: N=262,144 and 1,048,576,
+each at knots four/q102 and knots sixteen/q222, with dense BLAS8/native1 and
+discrete BLAS1/native16. Keep bins256 and alternate route order across cells.
+Record iterations/evaluations, wall/CPU, fit-end highwater, outputs and resolved
+policy; use one separate q222/N=1,048,576 discrete witness for actual execution.
+These are initial diagnostic samples, not confirmations or proof of optimal
+thread settings at every shape. Input draws at different N are not nested.
+Recheck available RAM and cgroup limits before the largest cell.
+
+Add one separate `OMP_WAIT_POLICY=PASSIVE` discrete fit immediately after the
+matching default q102/N=1,048,576 fit, holding BLAS1/native16 fixed. Explicitly
+unset `GOMP_SPINCOUNT` in both and record both variables before imports. The
+observed Numba backend uses libgomp; its default waiting policy permits busy
+spinning between short native regions. This is a scheduling hypothesis, not
+proof that the excess CPU causes wall time. Retain the extra arm outside the
+scaling grid and require a wall-time improvement, not merely lower CPU. No
+additional thread-count sweep is planned.
 
 The user has chosen sequential complete-fit targets of **15 seconds**, then
 **12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,
 four knots and 256 bins. Treat these as discrete latency targets and continue
-to tune dense fairly. The existing C3/C1 chain is consolidated on
-`feat/c3-c1-integration` at `64f8b451`. Latency work continues on its descendant
-`feat/c1-fit-latency` in the same implementation worktree, preserving all
-predecessor branches and the original uncommitted strategy worktree.
+to tune dense fairly. The existing C3/C1 chain and validated latency follow-ups
+are consolidated in the same PR on `feat/c3-c1-integration`, advanced to
+`4e1edda6`. Integration review found no blockers; CI is running on that head.
+Further latency work continues on `feat/c1-fit-latency` in the same
+implementation worktree, preserving all predecessor worktrees and the original
+uncommitted strategy documents.
 
 1. Review the combined C3/C1 diff and run the required suite with public
    freMTPL2 data present. Fix integration blockers, then create one combined
