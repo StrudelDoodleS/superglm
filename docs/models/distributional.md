@@ -682,17 +682,18 @@ If fresh LAML gradients become unavailable after an accepted endgame fit, the
 solver retains that fit and resumes EFS for the remaining outer iterations,
 with further Newton handoffs disabled. Unavailable terminal derivative fields
 are cleared. A state already released beyond the configured upper bounds keeps
-an explicit `gradient_unresolved` stop instead of being clipped into the EFS box.
+an explicit `derivative_unavailable` stop instead of being clipped into the EFS box.
 Hessian-only failures retain the BFGS fallback.
 
 With the default `outer="efs"`, `practical_reml=True` permits a sustained
 objective-and-parameter plateau to stop the fit. `smoothing_convergence_reason_`
 reports how the search ended. `stationary` is the optional endgame's converged
 stop; `lambda_change` and `objective_plateau` are the Fellner–Schall fixed
-point's. `gradient_unresolved` means fresh gradient evidence is unavailable or a
-component's gradient certificate exceeded the stationarity bar. Available
-certificates are published in `training_telemetry()`; unavailable derivatives
-are represented by `None`.
+point's. `gradient_unresolved` carries evaluated gradient evidence whose
+certificate cannot resolve stationarity. `derivative_unavailable` means fresh
+derivative evaluation failed at a retained fit already released above the cap;
+smoothing remains nonconverged. Available certificates are published in
+`training_telemetry()`; unavailable derivatives are represented by `None`.
 
 A component at `max_lambda` whose gradient still points outward beyond the bar
 is assessed at the exact face: the endpoint LAML derivative at τ = 1/λ = 0

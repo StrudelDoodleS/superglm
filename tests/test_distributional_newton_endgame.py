@@ -502,3 +502,92 @@ def test_unavailable_hessian_keeps_gradient_based_bfgs_fallback(monkeypatch) -> 
     assert result.terminal_gradient is not None
     assert result.terminal_projected_gradient_norm <= result.stationarity_bar
     assert result.smoothing_hessian is None
+
+
+def test_unavailable_gradient_after_cap_release_retains_uncertified_fit(monkeypatch) -> None:
+    """A real bracket release must survive failure of its fresh derivative pass.
+
+    The unfixed loop labels this missing-gradient state ``gradient_unresolved``,
+    whose result validator requires a gradient, and raises instead of returning.
+    """
+    from superglm.distributional import GaussianLS
+    from superglm.distributional.serialization import (
+        deserialize_distributional_model,
+        serialize_distributional_model,
+    )
+    from superglm.distributional.smoothing import loop as loop_module
+    from superglm.distributional.smoothing import newton as newton_module
+    from superglm.distributional.smoothing.derivatives import LamlDerivativeError
+
+    rng = np.random.default_rng(17)
+    x = np.linspace(0.0, 1.0, 200)
+    y = 2.0 * np.sin(2.0 * np.pi * x) + rng.normal(0.0, 0.5, len(x))
+    real_endgame = loop_module.run_newton_endgame
+    released_states = []
+
+    def unavailable_gradient(*args, **kwargs):
+        raise LamlDerivativeError("injected fresh-gradient failure after real cap release")
+
+    def fail_after_release(*args, **kwargs):
+        if kwargs["upper_bounds"]:
+            released_states.append(kwargs["state"])
+            with monkeypatch.context() as local:
+                local.setattr(newton_module, "laml_derivatives", unavailable_gradient)
+                return real_endgame(*args, **kwargs)
+        return real_endgame(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "run_newton_endgame", fail_after_release)
+    model = fit_dense_distributional(
+        pd.DataFrame({"x": x}),
+        y,
+        family=GaussianLS(),
+        predictors=(
+            Predictor("location", {"x": Spline(kind="cr", n_knots=5)}),
+            Predictor("scale", {}),
+        ),
+        weight_contract=WeightContract("prior"),
+        config=DenseSolverConfig(max_iterations=200, tolerance=1.0e-10),
+        efs_config=DistributionalEFSConfig(
+            outer="efs+newton",
+            maximum_lambda=1.0e-4,
+            initial_lambda=1.0e-4,
+            maximum_lambda_conditioning=1.0,
+            max_iterations=12,
+        ),
+        retain_rows=True,
+    )
+    result = model.smoothing
+    assert result is not None
+    assert result.convergence_reason == "derivative_unavailable"
+    assert not result.converged and not result.matched_certified
+    assert len(released_states) == 1
+    retained = released_states[0]
+    assert result.terminal_fit is retained.fit
+    assert result.terminal_fit.converged
+    assert result.objective == retained.objective
+    assert dict(result.lambdas) == dict(retained.lambdas)
+    assert result.beyond_cap_components == ("location:x#wiggle",)
+    assert result.lambdas["location:x#wiggle"] > result.config.maximum_lambda
+    assert result.history[-1].step_source == "bracket"
+    assert result.history[-1].accepted_fit_index == result.terminal_fit_index
+    assert result.objective < result.history[-1].objective_before
+    assert result.terminal_gradient is None
+    assert result.terminal_gradient_certificate is None
+    assert result.terminal_projected_gradient_norm is None
+    assert result.smoothing_hessian is None
+    assert result.smoothing_hessian_certificate is None
+
+    restored = deserialize_distributional_model(serialize_distributional_model(model)).smoothing
+    assert restored.convergence_reason == "derivative_unavailable"
+    assert restored.beyond_cap_components == result.beyond_cap_components
+    assert restored.terminal_gradient is None and not restored.matched_certified
+    with pytest.raises(ValueError, match="gradient_unresolved requires"):
+        replace(result, convergence_reason="gradient_unresolved")
+    with pytest.raises(ValueError, match="derivative_unavailable"):
+        replace(result, terminal_projected_gradient_norm=0.0)
+    with pytest.raises(ValueError, match="derivative_unavailable"):
+        replace(
+            result,
+            terminal_gradient={"location:x#wiggle": 0.0},
+            terminal_gradient_certificate={"location:x#wiggle": 0.0},
+        )

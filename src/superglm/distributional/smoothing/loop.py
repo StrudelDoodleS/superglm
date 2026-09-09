@@ -335,7 +335,7 @@ def fit_distributional_efs(
             if beyond_cap:
                 # EFS proposals use the original finite box and cannot safely
                 # continue from a component released above that box.
-                return _result(converged=False, reason="gradient_unresolved")
+                return _result(converged=False, reason="derivative_unavailable")
             plateau_run = 0
             practical_run = 0
             plateau_qualified = False

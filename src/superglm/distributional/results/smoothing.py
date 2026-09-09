@@ -227,6 +227,7 @@ class DistributionalEFSResult:
             "objective_rejected",
             "coefficient_not_converged",
             "gradient_unresolved",
+            "derivative_unavailable",
         }
         if self.convergence_reason not in valid_reasons:
             raise ValueError(f"invalid EFS convergence reason: {self.convergence_reason!r}")
@@ -291,6 +292,7 @@ class DistributionalEFSResult:
             "max_iterations",
             "objective_rejected",
             "gradient_unresolved",
+            "derivative_unavailable",
             # A practical stop is allowed only after the complete outward
             # window is replayed below against the accepted coefficient fits.
             "practical_plateau",
@@ -1130,6 +1132,10 @@ class DistributionalEFSResult:
                 )
         if self.convergence_reason == "gradient_unresolved" and gradient is None:
             raise ValueError("gradient_unresolved requires the terminal gradient and certificate")
+        if self.convergence_reason == "derivative_unavailable" and (
+            gradient is not None or norm is not None
+        ):
+            raise ValueError("derivative_unavailable cannot carry terminal derivative evidence")
         beyond = tuple(self.beyond_cap_components)
         beyond_set = set(beyond)
         if (

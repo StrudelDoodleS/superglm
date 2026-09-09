@@ -47,7 +47,12 @@ disables further Newton handoffs for that solve, and clears unavailable
 terminal derivative metadata. Existing full-profile objective acceptance
 continues to control progress. Hessian-only failures still use the existing
 BFGS fallback. A released beyond-cap state is not silently clipped into the
-ordinary EFS box; it retains an explicit unresolved-gradient result.
+ordinary EFS box; it retains an explicit `derivative_unavailable` result when
+fresh derivative evaluation fails. This differs from `gradient_unresolved`,
+which carries evaluated gradient evidence whose certificate cannot resolve
+stationarity. The integration regression exercises a real bracket release,
+then injects fresh derivative failure: the accepted model and released penalty
+survive without stale derivative fields or an exception, including serialization.
 
 Real Gaussian fault-injection regressions demonstrate the old missing EFS
 continuation and the new retained-state behavior, bounded budgets, actual EFS

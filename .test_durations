@@ -2229,6 +2229,7 @@
     "tests/test_distributional_newton_endgame.py::test_start_independence[1000.0]": 0.3253051186911762,
     "tests/test_distributional_newton_endgame.py::test_stationary_handoff_never_forms_a_hessian": 0.04499421315267682,
     "tests/test_distributional_newton_endgame.py::test_stationary_results_are_validated_on_replay": 0.061896024737507105,
+    "tests/test_distributional_newton_endgame.py::test_unavailable_gradient_after_cap_release_retains_uncertified_fit": 0.46,
     "tests/test_distributional_newton_endgame.py::test_unavailable_hessian_keeps_gradient_based_bfgs_fallback": 0.1,
     "tests/test_distributional_newton_endgame.py::test_unavailable_newton_gradient_resumes_efs_from_accepted_fit[1-250-1]": 0.114,
     "tests/test_distributional_newton_endgame.py::test_unavailable_newton_gradient_resumes_efs_from_accepted_fit[1-250-2]": 0.675,
