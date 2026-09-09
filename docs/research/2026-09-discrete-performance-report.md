@@ -976,3 +976,53 @@ accelerator when states repeat. Further pseudo-observation/statistical
 aggregation experiments, the unexecuted all-pass 65,536-row follow-up and
 parallel prototypes are held. No production/default change or demonstrated
 ten-million-row-plus capability follows from these audits.
+
+### Fixed-channel spline-width control
+
+The scalar control changes both smoothing execution and model layout: its
+Poisson CR spline/category interaction is not the fragmented Gaussian LSS
+layout. Its 15 moment assemblies versus LSS's 17 geometries do not establish
+that LSS lacks a comparable cached-W shortcut. The previous wider LSS complete
+fit also changes inner iterations from 16 to 23, so those times alone cannot
+isolate the effect of spline width.
+
+Four fresh geometry workers at `c9f62dd5` hold 262,144 public rows, responses,
+eta/theta, scores and all three signed curvature channels identical. Each width
+compares production global moments with dense BLAS on the same stored discrete
+design. All numerical pools are one, with three warmed repetitions per worker;
+common compilation and channel evaluation are outside both clocks. Global
+setup, child-plan creation and accumulation are charged.
+
+| Total coefficients | Global setup + accumulation + cleanup (s) | Dense assembly on cached matrices (s) | Dense rendering + assembly (s) |
+|---|---:|---:|---:|
+| 102 | 0.1554 | 0.1981 | 0.3761 |
+| 182 | 0.1774 | 0.4195 | 0.6879 |
+
+Dense complete fitting caches rendered matrices once per layout across EFS
+coefficient fits (`solver/solver.py:125–142,1395–1400`); repeated geometry uses
+that cache (`:804–810`). The final column is therefore a standalone construction
+measurement, not the recurring dense cost in a fit. Against cached dense
+assembly, the global geometry advantage grows from about 1.28x to 2.36x at
+these widths. Global accumulation/finalization alone takes 0.1366/0.1506 s;
+it includes validation and packing, not just native arithmetic.
+
+Both global workers execute 45 histograms, 20 directional targets, ordinary
+widths [16,16] and 33 chunks, with zero refusal. All five geometry outputs and
+intercept checks satisfy finite dimension/epsilon/absolute-product bounds;
+the maximum error/bound ratio is 5.09e-7. Global process highwaters are
+562.8/578.8 MiB, versus dense 1,003.6/1,408.3 MiB; these include inputs, channels
+and warmup. Source, helper, representation, channel and native checks pass.
+
+This demonstrates the expected width-dependent computational benefit on the
+matched geometry. It excludes likelihood evaluation, optimizer work and fit
+finalization, and does not establish threaded or complete-fit speed ratios.
+Large N matters because the removed basis-width work would otherwise repeat
+on every observation; both paths remaining linear in N at fixed dimensions
+does not imply equal cost. Marginal binning reduces this work and N-by-basis
+storage, while retaining response-level likelihood records. It is distinct
+from downsampling observations or an additional joint-state approximation.
+
+The remaining latency task is to carry that benefit through row processing.
+Compact history remains capacity work, not a substitute for the speed task.
+The tracked receipt pins the four workers and summary SHA256
+`0651797fda1c26feec60fc3efd96ba139b689259b2a5af8697aa44093f0850f4`.

@@ -219,6 +219,16 @@ The dossier's promised removal of the N factor does not describe total fitting:
 observation likelihood work remains, while support contraction reduces expensive
 basis-width dependence. Further grouping and pseudo-response experiments are held.
 
+A matched fixed-channel geometry control now isolates that width benefit:
+global setup plus accumulation takes 0.155/0.177 s at P102/P182, versus cached
+dense assembly 0.198/0.419 s on the same stored designs and signed channels.
+These are one-thread geometry diagnostics at N262,144, not complete fits. Dense
+fitting renders its matrices once per layout, so fresh rendering is recorded
+separately. Carrying the compressed benefit through predictor/likelihood row
+processing remains the immediate latency task; compact history addresses a
+separate capacity limit. Large N amplifies the avoided per-row basis work even
+though both routes remain linear in N at fixed model dimensions.
+
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,
 backend or timing input; `-1` disables intervention rather than selecting an

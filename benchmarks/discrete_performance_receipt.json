@@ -1,5 +1,127 @@
 {
   "schema": "superglm-public-discrete-performance-evidence-v1",
+  "fixed_channel_width_control": {
+    "source_sha": "c9f62dd58657626994727e6ced69a20b6ae8121b",
+    "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",
+    "raw_summary": {
+      "path": ".benchmark-artifacts/discrete-performance/geometry-width-control-c9f62dd5/summary.json",
+      "sha256": "0651797fda1c26feec60fc3efd96ba139b689259b2a5af8697aa44093f0850f4"
+    },
+    "helper_sha256": "f1890c1a770907bb1d73fc38a62d21d9b20da550d6eea8e6ea734cba614b1bf2",
+    "fixed_channels_identical_all_four": true,
+    "all_numerical_checks_pass": true,
+    "max_error_over_bound": 5.088363330256536e-7,
+    "protocol": "Four fresh serial workers, three warmed geometry repetitions each, all numerical pools1; identical stored binned model within each width and identical actual signed channels across all workers. No fit or optimizer timing.",
+    "dense_cache_interpretation": "Actual dense EFS fits cache rendered predictor matrices once per layout across coefficient fits. Dense representation_setup is not charged for each geometry in a complete fit. Compare recurring dense assembly with global inclusive geometry; retain constructor-inclusive totals separately.",
+    "rows": [
+      {
+        "arm": "k4-production-global",
+        "n": 262144,
+        "p": 102,
+        "knots": 4,
+        "median_seconds": {
+          "representation_setup": 0.016946423,
+          "accumulation_finalization": 0.136612379,
+          "teardown": 0.000054806,
+          "inclusive": 0.155354349
+        },
+        "median_cpu_seconds": {
+          "representation_setup": 0.016860646,
+          "accumulation_finalization": 0.136407763,
+          "teardown": 0.000053941,
+          "inclusive": 0.155264975
+        },
+        "inclusive_range_seconds": [
+          0.151837259,
+          0.166075543
+        ],
+        "geometry_highwater_mib": 562.82421875,
+        "endpoint_audit_flagged": false
+      },
+      {
+        "arm": "k4-dense-blas",
+        "n": 262144,
+        "p": 102,
+        "knots": 4,
+        "median_seconds": {
+          "representation_setup": 0.177345595,
+          "accumulation_finalization": 0.198095814,
+          "teardown": 0,
+          "inclusive": 0.376077582
+        },
+        "median_cpu_seconds": {
+          "representation_setup": 0.177191134,
+          "accumulation_finalization": 0.197987857,
+          "teardown": 0,
+          "inclusive": 0.375826362
+        },
+        "inclusive_range_seconds": [
+          0.369024694,
+          0.44094209
+        ],
+        "geometry_highwater_mib": 1003.56640625,
+        "endpoint_audit_flagged": false
+      },
+      {
+        "arm": "k12-production-global",
+        "n": 262144,
+        "p": 182,
+        "knots": 12,
+        "median_seconds": {
+          "representation_setup": 0.024489378,
+          "accumulation_finalization": 0.150574842,
+          "teardown": 0.000052872,
+          "inclusive": 0.177420033
+        },
+        "median_cpu_seconds": {
+          "representation_setup": 0.024371571,
+          "accumulation_finalization": 0.1503521,
+          "teardown": 0.000051798,
+          "inclusive": 0.177349602
+        },
+        "inclusive_range_seconds": [
+          0.173746069,
+          0.177960307
+        ],
+        "geometry_highwater_mib": 578.75390625,
+        "endpoint_audit_flagged": false
+      },
+      {
+        "arm": "k12-dense-blas",
+        "n": 262144,
+        "p": 182,
+        "knots": 12,
+        "median_seconds": {
+          "representation_setup": 0.263701838,
+          "accumulation_finalization": 0.419451537,
+          "teardown": 0,
+          "inclusive": 0.687855114
+        },
+        "median_cpu_seconds": {
+          "representation_setup": 0.263459525,
+          "accumulation_finalization": 0.407337944,
+          "teardown": 0,
+          "inclusive": 0.671696257
+        },
+        "inclusive_range_seconds": [
+          0.654609251,
+          0.840818763
+        ],
+        "geometry_highwater_mib": 1408.29296875,
+        "endpoint_audit_flagged": false
+      }
+    ],
+    "limits": [
+      "Geometry diagnostic only, no fitting or optimizer iteration comparison.",
+      "Fixture compilation and shared fixed observed-channel generation are excluded equally. Both routes charge representation setup and all assembly allocations; global additionally charges child-plan creation.",
+      "Accumulation/finalization phase includes each route's validation and packing; not a pure BLAS/native-kernel clock.",
+      "Three warmed repetitions within each fresh worker, not three independent complete fits. Process highwater includes imports, fixture, fixed channels and warmup; it is not geometry-only allocated memory.",
+      "Both NumPy and SciPy BLAS pools and OpenMP/Numba configured1; this does not measure actual worker participation.",
+      "Global builder is explicitly selected for the geometry diagnostic; no claim of automatic policy or complete-fit performance.",
+      "Row count, data, signed likelihood channels, ordinary width and support-pair counts held fixed. Width changes the compiled spline coefficient basis; comparison across widths is cost only, not equal coefficient arrays.",
+      "No exact/unbinned fit or representative recompilation. No throughput or giga-data result."
+    ]
+  },
   "row_scalability_audit": {
     "source_sha": "f4a37c1194341f76f93e19032ddb0af76440f1ec",
     "source_tree_sha256": "0da3cf592be4e26727059d42cdd2c2161f37b08649b5cbc522bf9bad6e4c06ea",

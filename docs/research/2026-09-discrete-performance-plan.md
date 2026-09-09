@@ -16,6 +16,20 @@ is end-to-end fitting with bounded working RAM, efficient row passes and compact
 solver history, preserving the current binned objective and certification.
 Ten million rows is the next proposed validation milestone, followed by one
 hundred million; neither scale, nor billion-row capability, is demonstrated.
+Immediate latency priority: the matched fixed-channel width control now confirms
+the compressed geometry advantage, including its setup, against cached dense
+assembly (1.28x at P102, 2.36x at P182; one numerical thread). Preserve that gain
+through predictor/likelihood preparation and repeated row passes before treating
+compact history or out-of-core storage as the next speed improvement. The latter
+remain capacity work. The report records the control and its limits; it supplies
+no complete-fit ratio or evidence that a cached-W optimizer transplant is needed.
+The user explicitly accepts the resolution approximation that makes discrete
+fitting useful. Numerical regression tests certify computation for the chosen
+binned model; they do not require roundoff agreement with the continuous model.
+Assess the resolution tradeoff using prediction/inference differences and
+complete-fit time/memory together. A different likelihood or working-model
+approximation must be identified and validated as such, rather than silently
+described as the existing scalar discretization contract.
 Baseline: `0a15736e88a317088bfd01e56933d45c58e4ac9a`
 (production source unchanged since `5f994c8f6ac0501606594e2f36bfc0cd24050ec1`).
 
