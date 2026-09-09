@@ -18,8 +18,8 @@ The 12.5-second stage uses the current diagnostic profile to select its next
 bounded change. Repeated predictor work and ordinary moment assembly remain
 material. The latest scan fusion and parallel hashing change constant factors;
 they do not establish a lower asymptotic order in N. Two subsequent geometry
-controls supply no latency gain. An initial N-by-q diagnostic now proceeds
-alongside the open 12.5-second target rather than deferring scaling evidence.
+controls supply no latency gain. The initial N-by-q diagnostic is complete,
+providing scaling evidence alongside the open 12.5-second target.
 
 The BAM comparison must not treat remaining `O(N)` passes as a failure of
 discretization: its marginal method also retains linear aggregation. Judge the
@@ -102,7 +102,7 @@ Retain the default waiting policy. Earlier campaign inheritance of
 `GOMP_SPINCOUNT` was not established; this explicitly cleared pair must remain
 distinct from those observations.
 
-Next fuse the first trial's value and geometry evaluation. The audit locates
+The next implementation fuses the first trial's value and geometry evaluation. The audit locates
 the duplicate pass in `_evaluate_state_unmeasured` followed by the accepted
 trial's `_measured_geometry`; `iter_likelihood_chunks` already supplies the
 optimizing-likelihood and carrier arrays. The disjoint value predictor, link
@@ -134,12 +134,23 @@ adds geometry work, so this is an opportunity rather than a promised saving.
    and actual-dispatch contract. If it qualifies, use fresh confirmations and
    fair dense controls for the 12.5-second gate; retain every valid sample.
 
+Steps one through four are implemented and independently reviewed. Nineteen
+focused tests pass, including the unfixed duplicate-pass demonstration,
+independent cancellation bounds, weights/offsets, small Gaussian/Gamma fits,
+fallback cleanup and live-source mutation. A private `ValueError` subclass
+distinguishes Gamma's numerical derivative refusal from malformed inputs;
+failure-only source validation preserves hard-error priority before a value
+retry. Whole-source Ruff checks pass. Complete-fit measurement against
+`51d53070` is the next gate; no new latency gain is claimed yet.
+
 The user has chosen sequential complete-fit targets of **15 seconds**, then
 **12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,
 four knots and 256 bins. Treat these as discrete latency targets and continue
 to tune dense fairly. The existing C3/C1 chain and validated latency follow-ups
 are consolidated in the same PR on `feat/c3-c1-integration`, advanced to
-`4e1edda6`. Integration review found no blockers; CI is running on that head.
+`4e1edda6`. Integration review found no blockers; all applicable CI checks pass
+on that head, including both complete Python 3.12 suites, all four Python 3.14
+regression groups and the required public real-data suites.
 Further latency work continues on `feat/c1-fit-latency` in the same
 implementation worktree, preserving all predecessor worktrees and the original
 uncommitted strategy documents.

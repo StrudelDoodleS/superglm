@@ -11,6 +11,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.solver.chunks as chunking
+from superglm.distributional.families.gamma import GammaLS
+from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import (
     ConfigurableDistributionalFamily,
     DistributionalFamily,
@@ -57,8 +59,11 @@ from superglm.distributional.solver.derivatives import (
 )
 from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
-from superglm.distributional.weights import UnsupportedLikelihoodContractError
-from superglm.links import Link
+from superglm.distributional.weights import (
+    ResolvedLikelihoodWeights,
+    UnsupportedLikelihoodContractError,
+)
+from superglm.links import IdentityLink, Link, LogLink
 from superglm.solvers.rank import (
     RankDecomposition,
     decompose_gram,
@@ -754,6 +759,70 @@ def _evaluate_state(
         )
 
 
+def _fused_first_trial_eligible(context: _SolverContext) -> bool:
+    contract = _likelihood_reuse_contract(context.family)
+    return bool(
+        context.chunk_size is not None
+        and type(context.family) in (GaussianLS, GammaLS)
+        and contract is not None
+        and contract.deterministic_chunk_replay
+        and type(context.likelihood_plan) is contract.plan_type
+        and type(context.likelihood_plan.weights) is ResolvedLikelihoodWeights
+        and len(context.links) == len(context.layout.predictors)
+        and all(state.link is link for state, link in zip(context.layout.predictors, context.links))
+        and all(
+            type(link) in (IdentityLink, LogLink, *contract.link_types) for link in context.links
+        )
+    )
+
+
+def _evaluate_fused_trial(
+    context: _SolverContext,
+    coefficients: NDArray,
+    source: CoefficientCurvature,
+    phase_recorder: FitPhaseRecorder | None,
+) -> tuple[_AcceptedState, DenseJointGeometry] | None:
+    """Own one immediate trial; numerical derivative refusal retries its value."""
+    values = np.asarray(coefficients, dtype=np.float64)
+    if values.shape != (context.layout.n_coefficients,) or not np.all(np.isfinite(values)):
+        return None
+    values = _readonly(values)
+    assert context.chunk_size is not None
+    try:
+        with measure_phase(phase_recorder, "curvature_gradient_assembly"):
+            geometry, likelihood = chunking._evaluate_chunked_geometry(
+                context.family,
+                context.layout,
+                context.response,
+                context.likelihood_plan,
+                values,
+                penalty=context.penalty,
+                chunk_size=context.chunk_size,
+                curvature_source=source,
+                likelihood_cache=context.likelihood_cache,
+            )
+    except chunking._TrialDerivativeError:
+        return None
+    penalty_value = 0.5 * float(values @ context.penalty @ values)
+    optimizing = likelihood.optimizing_log_likelihood - penalty_value
+    reported = likelihood.log_likelihood - penalty_value
+    if not np.isfinite(optimizing) or not np.isfinite(reported):
+        return None
+    state = _AcceptedState(
+        coefficients=values,
+        eta=None,
+        theta=None,
+        derivatives=None,
+        fisher_curvature_packed=None,
+        optimizing_log_likelihood=likelihood.optimizing_log_likelihood,
+        parameter_independent_carrier=likelihood.parameter_independent_carrier,
+        log_likelihood=likelihood.log_likelihood,
+        penalized_optimizing_log_likelihood=optimizing,
+        penalized_log_likelihood=reported,
+    )
+    return state, geometry
+
+
 def _initial_coefficients(context: _SolverContext) -> NDArray[np.float64]:
     initialized = context.family.initialize(context.response, context.likelihood_plan)
     initialized.validate_shape(
@@ -1091,6 +1160,7 @@ def _run_iterations(
                 config.max_predictor_step,
             )
         accepted: _AcceptedState | None = None
+        accepted_geometry = None
         alpha = 1.0
         backtracks = 0
         distinct_finite_trial_evaluated = False
@@ -1104,13 +1174,27 @@ def _run_iterations(
             if np.array_equal(candidate_coefficients, state.coefficients):
                 reached_identical_candidate = True
                 break
-            # Keep the usual full-step path and score-only certification unchanged.
+            # Only the immediate first ordinary chunked trial owns speculative
+            # geometry. Rejected backtracks and certification keep their screens.
             screen = stop_policy == "ordinary" and context.chunk_size is None and attempt > 0
-            candidate = _evaluate_state(
-                context,
-                candidate_coefficients,
-                phase_recorder=phase_recorder,
-                derivative_order=0 if screen else 2,
+            fused = (
+                _evaluate_fused_trial(
+                    context, candidate_coefficients, config.coefficient_curvature, phase_recorder
+                )
+                if stop_policy == "ordinary"
+                and attempt == 0
+                and _fused_first_trial_eligible(context)
+                else None
+            )
+            candidate = (
+                fused[0]
+                if fused is not None
+                else _evaluate_state(
+                    context,
+                    candidate_coefficients,
+                    phase_recorder=phase_recorder,
+                    derivative_order=0 if screen else 2,
+                )
             )
             directional_derivative = float(geometry.score_penalized @ applied_step)
             required = (
@@ -1147,7 +1231,10 @@ def _run_iterations(
                 )
             ):
                 accepted = candidate
+                accepted_geometry = None if fused is None else fused[1]
+                fused = None
                 break
+            fused = None
             if attempt == config.max_backtracks:
                 break
             alpha *= config.backtrack_factor
@@ -1206,12 +1293,13 @@ def _run_iterations(
                 step_relative=step_relative,
             )
 
-        accepted_geometry = _measured_geometry(
-            context,
-            accepted,
-            config.coefficient_curvature,
-            phase_recorder,
-        )
+        if accepted_geometry is None:
+            accepted_geometry = _measured_geometry(
+                context,
+                accepted,
+                config.coefficient_curvature,
+                phase_recorder,
+            )
         objective_relative_change = abs(
             accepted.penalized_optimizing_log_likelihood - state.penalized_optimizing_log_likelihood
         ) / (1.0 + abs(state.penalized_optimizing_log_likelihood))

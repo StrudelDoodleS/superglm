@@ -12,6 +12,7 @@ from scipy import special
 
 from superglm.distributional.kernels._common import (
     WeightSemantics,
+    _NumericalEvaluationError,
     positive_weights,
     readonly,
     readonly_bool,
@@ -387,7 +388,7 @@ def _binary_product_divide(
     try:
         return math.copysign(math.ldexp(mantissa, exponent), sign)
     except OverflowError as exc:
-        raise ValueError("final natural channel is not representable") from exc
+        raise _NumericalEvaluationError("final natural channel is not representable") from exc
 
 
 def _log_ratio(y: float, mean: float) -> float:
@@ -680,7 +681,7 @@ def _shape_from_scale(
             (float(scale[index]), float(scale[index])),
         )
         if value == 0.0 or not math.isfinite(value):
-            raise ValueError("derived Gamma shape is not representable")
+            raise _NumericalEvaluationError("derived Gamma shape is not representable")
         shape[index] = value
     return shape, multiplier
 
@@ -695,11 +696,15 @@ def _channel(
     mathematical_zero = any(value == 0.0 for value in numerators)
     value = _binary_product_divide(numerators, denominators)
     if not math.isfinite(value):
-        raise ValueError(f"Gamma {name} is not representable")
+        raise _NumericalEvaluationError(f"Gamma {name} is not representable")
     if value == 0.0 and not mathematical_zero:
-        raise ValueError(f"Gamma {name} is not representable after natural-scale underflow")
+        raise _NumericalEvaluationError(
+            f"Gamma {name} is not representable after natural-scale underflow"
+        )
     if positive and value <= 0.0:
-        raise ValueError(f"Gamma {name} must remain strictly positive and representable")
+        raise _NumericalEvaluationError(
+            f"Gamma {name} must remain strictly positive and representable"
+        )
     return value
 
 

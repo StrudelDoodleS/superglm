@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Literal
 
@@ -22,6 +23,7 @@ from superglm.distributional.family import (
     FamilyLikelihoodPlan,
     LikelihoodPlanValidatingFamily,
 )
+from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver._global_moments import (
@@ -289,6 +291,15 @@ class ChunkedLikelihoodSums:
         return float(self.optimizing_log_likelihood + self.parameter_independent_carrier)
 
 
+class _TrialDerivativeError(ValueError):
+    """A numerical derivative failure permits a fresh value-only trial screen."""
+
+    def __init__(self, reason, *, rows=None, plans=None):
+        super().__init__(reason)
+        self.rows = rows
+        self.plans = plans
+
+
 def _validated_coefficients(
     layout: StackedLayout,
     coefficients: NDArray,
@@ -423,12 +434,17 @@ def _predictor_chunk(
 def _theta_chunk(
     layout: StackedLayout,
     eta: NDArray[np.float64],
+    *,
+    _recover_derivative_failure: bool = False,
 ) -> NDArray[np.float64]:
     theta = np.empty_like(eta)
     for state in layout.predictors:
         values = np.asarray(state.link.inverse(eta[:, state.parameter_index]), dtype=np.float64)
-        if values.shape != (len(eta),) or not np.all(np.isfinite(values)):
+        if values.shape != (len(eta),):
             raise ValueError(f"inverse link for predictor {state.name!r} produced an invalid chunk")
+        if not np.all(np.isfinite(values)):
+            error = _TrialDerivativeError if _recover_derivative_failure else ValueError
+            raise error(f"inverse link for predictor {state.name!r} produced an invalid chunk")
         theta[:, state.parameter_index] = values
     return theta
 
@@ -482,6 +498,7 @@ def iter_likelihood_chunks(
     chunk_size: ChunkSize,
     curvature_source: CurvatureSource,
     _range_geometry: bool = False,
+    _recover_derivative_failure: bool = False,
     likelihood_cache=None,
 ):
     """Yield bounded predictor derivatives and curvature for each row chunk.
@@ -539,29 +556,79 @@ def iter_likelihood_chunks(
                 sum_slopes_first=True,
             )
             plans = range_plans
-        theta = _theta_chunk(layout, eta)
+        try:
+            theta = _theta_chunk(
+                layout, eta, _recover_derivative_failure=_recover_derivative_failure
+            )
+        except (_TrialDerivativeError, FloatingPointError, OverflowError) as exc:
+            if _recover_derivative_failure:
+                raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
+            raise
         child_plan = _take_likelihood_rows(plan, rows, likelihood_cache)
         if len(child_plan.weights.values) != len(rows.indices):
             raise UnsupportedLikelihoodContractError(
                 "family likelihood slicing returned the wrong number of rows"
             )
-        natural = family.evaluate_natural(
-            response[rows.indices],
-            theta,
-            child_plan,
-            derivative_order=2,
-        )
+        try:
+            with (
+                np.errstate(over="raise", invalid="raise", divide="raise")
+                if _recover_derivative_failure
+                else nullcontext()
+            ):
+                natural = family.evaluate_natural(
+                    response[rows.indices],
+                    theta,
+                    child_plan,
+                    derivative_order=2,
+                )
+        except (
+            _NumericalEvaluationError,
+            FloatingPointError,
+            OverflowError,
+            np.linalg.LinAlgError,
+        ) as exc:
+            if _recover_derivative_failure:
+                raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
+            raise
+        except ValueError as exc:
+            # Only proven parameter-domain failure is numerical here. Unknown
+            # ValueErrors, including malformed source/derivative shapes, stay hard.
+            if _recover_derivative_failure and any(
+                not np.all(spec.support.contains(theta[:, index]))
+                for index, spec in enumerate(family.parameters)
+            ):
+                raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
+            raise
         if natural.derivative_order != 2:
             raise ValueError("family must return exact derivative order 2 for chunk geometry")
         if natural.valid is not None and not np.all(natural.valid):
+            if _recover_derivative_failure:
+                raise _TrialDerivativeError(
+                    "chunk contains an invalid likelihood state", rows=rows, plans=plans
+                )
             raise ValueError("chunk contains an invalid likelihood state")
-        transformed = transform_natural_derivatives(natural, eta, links)
-        if curvature_source == "observed":
-            curvature = transformed.curvature_packed
-        else:
-            assert isinstance(family, ExpectedInformationFamily)
-            information = family.expected_information_natural(theta, child_plan)
-            curvature = transform_natural_information(information, eta, links)
+        try:
+            with (
+                np.errstate(over="raise", invalid="raise", divide="raise")
+                if _recover_derivative_failure
+                else nullcontext()
+            ):
+                transformed = transform_natural_derivatives(natural, eta, links)
+                if curvature_source == "observed":
+                    curvature = transformed.curvature_packed
+                else:
+                    assert isinstance(family, ExpectedInformationFamily)
+                    information = family.expected_information_natural(theta, child_plan)
+                    curvature = transform_natural_information(information, eta, links)
+        except (
+            _NumericalEvaluationError,
+            FloatingPointError,
+            OverflowError,
+            np.linalg.LinAlgError,
+        ) as exc:
+            if _recover_derivative_failure:
+                raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
+            raise
         yield LikelihoodChunk(
             rows=rows,
             plans=plans,
@@ -645,6 +712,68 @@ def assemble_chunked_geometry(
     small_group_panel_byte_budget: int | Literal["auto"] | None = "auto",
     likelihood_cache=None,
 ) -> DenseJointGeometry:
+    """Stream one geometry, retaining the existing geometry-only entry point."""
+    return _assemble_chunked_geometry(
+        family,
+        layout,
+        y,
+        likelihood_plan,
+        coefficients,
+        penalty=penalty,
+        chunk_size=chunk_size,
+        curvature_source=curvature_source,
+        small_group_panel_byte_budget=small_group_panel_byte_budget,
+        likelihood_cache=likelihood_cache,
+    )
+
+
+def _evaluate_chunked_geometry(
+    family,
+    layout,
+    y,
+    likelihood_plan,
+    coefficients,
+    *,
+    penalty,
+    chunk_size,
+    curvature_source,
+    small_group_panel_byte_budget="auto",
+    likelihood_cache=None,
+) -> tuple[DenseJointGeometry, ChunkedLikelihoodSums]:
+    """Return owned geometry and scalar likelihood sums from the same stream."""
+    sums = [0.0, 0.0]
+    geometry = _assemble_chunked_geometry(
+        family,
+        layout,
+        y,
+        likelihood_plan,
+        coefficients,
+        penalty=penalty,
+        chunk_size=chunk_size,
+        curvature_source=curvature_source,
+        small_group_panel_byte_budget=small_group_panel_byte_budget,
+        likelihood_cache=likelihood_cache,
+        _likelihood_sums=sums,
+    )
+    if not all(np.isfinite(value) for value in sums):
+        raise _TrialDerivativeError("chunked likelihood sums must be finite")
+    return geometry, ChunkedLikelihoodSums(*sums)
+
+
+def _assemble_chunked_geometry(
+    family,
+    layout,
+    y,
+    likelihood_plan,
+    coefficients,
+    *,
+    penalty,
+    chunk_size,
+    curvature_source,
+    small_group_panel_byte_budget="auto",
+    likelihood_cache=None,
+    _likelihood_sums=None,
+) -> DenseJointGeometry:
     """Stream likelihood chunks into one coefficient-space geometry.
 
     Automatic execution may accumulate support moments across chunks in the
@@ -685,9 +814,12 @@ def assemble_chunked_geometry(
                     chunk_size=chunk_size,
                     curvature_source=curvature_source,
                     likelihood_cache=likelihood_cache,
+                    _likelihood_sums=_likelihood_sums,
                 )
                 if result is not None:
                     return result
+                if _likelihood_sums is not None:
+                    _likelihood_sums[:] = [0.0, 0.0]
     return _assemble_grouped_chunk_geometry(
         family,
         layout,
@@ -699,6 +831,7 @@ def assemble_chunked_geometry(
         curvature_source=curvature_source,
         panel_byte_budget=panel_byte_budget,
         likelihood_cache=likelihood_cache,
+        _likelihood_sums=_likelihood_sums,
     )
 
 
@@ -714,6 +847,7 @@ def _try_global_geometry(
     chunk_size,
     curvature_source,
     likelihood_cache=None,
+    _likelihood_sums=None,
 ) -> DenseJointGeometry | None:
     """Own one attempt; no exception/stream frame survives into fallback."""
     iterator = None
@@ -729,6 +863,7 @@ def _try_global_geometry(
             chunk_size=chunk_size,
             curvature_source=curvature_source,
             _range_geometry=hasattr(plan, "add_row_range"),
+            **({"_recover_derivative_failure": True} if _likelihood_sums is not None else {}),
             **({"likelihood_cache": likelihood_cache} if likelihood_cache is not None else {}),
         )
         expected_start = 0
@@ -755,11 +890,41 @@ def _try_global_geometry(
             else:
                 # Preserve streams supplied by callers which own child plans.
                 plan.add_chunk(chunk.plans, chunk.score_eta, chunk.curvature_packed)
+            if _likelihood_sums is not None:
+                _likelihood_sums[0] += float(
+                    np.sum(chunk.optimizing_log_likelihood, dtype=np.float64)
+                )
+                _likelihood_sums[1] += float(
+                    np.sum(chunk.parameter_independent_carrier, dtype=np.float64)
+                )
             expected_start = rows.stop
             chunk = None
         if expected_start != n:
             raise ValueError("global moment stream does not cover all observations")
         return plan.finish()
+    except _TrialDerivativeError as exc:
+        if exc.rows is not None and exc.plans is not None and hasattr(plan, "_prepare_chunk"):
+            # A derivative can fail before add_row_range has checked live B/R,
+            # indices and metadata. Preserve hard-source priority on this rare
+            # path using the same preparation checks, without updating moments.
+            rows = exc.rows
+            k = len(layout.predictors)
+            zero = np.zeros(())
+            score = np.broadcast_to(zero, (rows.stop - rows.start, k))
+            curvature = np.broadcast_to(zero, (len(score), k * (k + 1) // 2))
+            row_range = (
+                (rows.start, rows.stop)
+                if all(
+                    p.design is s.design for p, s in zip(exc.plans, layout.predictors, strict=True)
+                )
+                else None
+            )
+            try:
+                plan._prepare_chunk(exc.plans, score, curvature, row_range=row_range)
+            except GlobalMomentRefusalError as refusal:
+                if not refusal.recoverable:
+                    raise
+        raise
     except GlobalMomentRefusalError as exc:
         if not exc.recoverable:
             raise
@@ -787,13 +952,14 @@ def _assemble_grouped_chunk_geometry(
     curvature_source,
     panel_byte_budget,
     likelihood_cache=None,
+    _likelihood_sums=None,
 ) -> DenseJointGeometry:
     accumulator = GroupedGeometryAccumulator(
         layout,
         penalty=penalty,
         coefficients=coefficients,
     )
-    for chunk in iter_likelihood_chunks(
+    iterator = iter_likelihood_chunks(
         family,
         layout,
         y,
@@ -801,29 +967,45 @@ def _assemble_grouped_chunk_geometry(
         coefficients,
         chunk_size=chunk_size,
         curvature_source=curvature_source,
+        **({"_recover_derivative_failure": True} if _likelihood_sums is not None else {}),
         **({"likelihood_cache": likelihood_cache} if likelihood_cache is not None else {}),
-    ):
-        workspace = None
-        if panel_byte_budget is not None:
-            workspace = build_small_group_panels(
-                chunk.plans,
-                slice(0, chunk.plans[0].design.n),
-                byte_budget=panel_byte_budget,
-            ).workspace
-        try:
-            accumulator.add_score(chunk.plans, chunk.score_eta)
-            for channel_index in range(chunk.curvature_packed.shape[1]):
-                accumulator.add_curvature_channel(
+    )
+    chunk = None
+    try:
+        for chunk in iterator:
+            workspace = None
+            if panel_byte_budget is not None:
+                workspace = build_small_group_panels(
                     chunk.plans,
-                    channel_index,
-                    chunk.curvature_packed[:, channel_index],
-                    panel_workspace=workspace,
-                )
-        finally:
-            # Release before requesting another likelihood chunk, including when
-            # score assembly or a later curvature channel raises.
-            if workspace is not None:
-                workspace.close()
+                    slice(0, chunk.plans[0].design.n),
+                    byte_budget=panel_byte_budget,
+                ).workspace
+            try:
+                accumulator.add_score(chunk.plans, chunk.score_eta)
+                for channel_index in range(chunk.curvature_packed.shape[1]):
+                    accumulator.add_curvature_channel(
+                        chunk.plans,
+                        channel_index,
+                        chunk.curvature_packed[:, channel_index],
+                        panel_workspace=workspace,
+                    )
+                if _likelihood_sums is not None:
+                    _likelihood_sums[0] += float(
+                        np.sum(chunk.optimizing_log_likelihood, dtype=np.float64)
+                    )
+                    _likelihood_sums[1] += float(
+                        np.sum(chunk.parameter_independent_carrier, dtype=np.float64)
+                    )
+            finally:
+                # Release before advancing or unwinding the likelihood stream.
+                if workspace is not None:
+                    workspace.close()
+            chunk = None
+    finally:
+        chunk = None
+        close = getattr(iterator, "close", None)
+        if close is not None:
+            close()
     return accumulator.finish()
 
 
