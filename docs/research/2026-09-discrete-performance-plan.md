@@ -72,23 +72,67 @@ score norm-relative difference is 5.65e-16. Twelve independent small numerical,
 scope and exception-restoration checks pass. Defer this policy for the current
 target; no production thread change or complete-fit gain follows.
 
-Run eight fresh complete fits on one frozen source: N=262,144 and 1,048,576,
+Eight fresh complete fits are now complete at `751df3db`: N=262,144 and 1,048,576,
 each at knots four/q102 and knots sixteen/q222, with dense BLAS8/native1 and
 discrete BLAS1/native16. Keep bins256 and alternate route order across cells.
 Record iterations/evaluations, wall/CPU, fit-end highwater, outputs and resolved
 policy; use one separate q222/N=1,048,576 discrete witness for actual execution.
 These are initial diagnostic samples, not confirmations or proof of optimal
 thread settings at every shape. Input draws at different N are not nested.
-Recheck available RAM and cgroup limits before the largest cell.
+Available RAM and cgroup checks pass before every cell. Discrete/dense fit
+times are 5.078/6.783 and 6.161/11.056 seconds at the smaller N for q102/q222,
+and 13.512/21.222 and 17.474/44.792 seconds at the larger N. Iteration counts
+match within each cell but vary across cells. At large q222 discrete has
+2.56 times the speed and 63.86% less fit-end process highwater. The independent
+witness observes the expected 16-worker grouped path and matches all saved
+outputs exactly. Preserve complete metrics and limitations in the report and
+latency receipt.
 
-Add one separate `OMP_WAIT_POLICY=PASSIVE` discrete fit immediately after the
+One separate `OMP_WAIT_POLICY=PASSIVE` discrete fit follows the
 matching default q102/N=1,048,576 fit, holding BLAS1/native16 fixed. Explicitly
 unset `GOMP_SPINCOUNT` in both and record both variables before imports. The
 observed Numba backend uses libgomp; its default waiting policy permits busy
 spinning between short native regions. This is a scheduling hypothesis, not
 proof that the excess CPU causes wall time. Retain the extra arm outside the
 scaling grid and require a wall-time improvement, not merely lower CPU. No
-additional thread-count sweep is planned.
+additional thread-count sweep is planned. The control is negative for latency:
+14.300 versus 13.512 seconds, despite CPU falling from 65.033 to 24.683 seconds.
+All ten output arrays, result records and representation agree exactly.
+Retain the default waiting policy. Earlier campaign inheritance of
+`GOMP_SPINCOUNT` was not established; this explicitly cleared pair must remain
+distinct from those observations.
+
+Next fuse the first trial's value and geometry evaluation. The audit locates
+the duplicate pass in `_evaluate_state_unmeasured` followed by the accepted
+trial's `_measured_geometry`; `iter_likelihood_chunks` already supplies the
+optimizing-likelihood and carrier arrays. The disjoint value predictor, link
+and family owners total about 1.33 diagnostic seconds. A rejected first trial
+adds geometry work, so this is an opportunity rather than a promised saving.
+
+1. In `chunks.py`, collect optimizing-likelihood and carrier scalar sums while
+   completing the existing geometry stream. Keep the current geometry entry
+   point available to existing callers. Reset partial sums on fallback and
+   retain all source validation and workspace cleanup.
+2. In `solver.py`, initially admit exact built-in Gaussian/Gamma contracts
+   for the ordinary solver's first trial. Apply the unchanged Armijo decision
+   to the combined objective and retain the geometry only on acceptance.
+   Later backtrack screens, score-only certification and unsupported families
+   keep their existing paths. A recoverable derivative failure must permit
+   the old value-screen path; hard structural source errors still propagate.
+3. Give the result only the lifetime of that immediate trial and its
+   coefficients, penalty and curvature source. Discard rejected/failed results.
+   Use existing bounded row workspace plus one temporary coefficient-space
+   geometry; introduce no N-row prediction cache.
+4. Add independent signed/cancellation, weights/offsets, objective/geometry,
+   Armijo/convergence, source-mutation and failure/cleanup regressions. Include
+   an unfixed duplicate-pass demonstration, kept separate from numerical
+   correctness. Geometry uses a different predictor addition order than the
+   former value pass: derive backward-error bounds and preserve the real-
+   arithmetic binned model rather than requiring incidental bitwise equality.
+5. Review the combined change, freeze source, then compare complete fitting
+   with its starting baseline using the unchanged clock, numerical, memory
+   and actual-dispatch contract. If it qualifies, use fresh confirmations and
+   fair dense controls for the 12.5-second gate; retain every valid sample.
 
 The user has chosen sequential complete-fit targets of **15 seconds**, then
 **12.5 seconds**, retaining the public million-row Gaussian fixture, q=102,

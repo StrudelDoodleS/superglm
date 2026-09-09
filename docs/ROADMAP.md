@@ -283,10 +283,16 @@ evidence, so defer this route for the current target and retain the workspace
 tradeoff as separate capacity evidence. This is a geometry comparison, not a
 complete-fit result.
 An ordinary-only BLAS8 geometry control also supplies no gain (0.443 versus
-0.427 seconds). Both candidate changes remain outside production. The next
-diagnostic measures complete fits across two N values and two basis widths,
-with a separate fixed-thread OpenMP wait-policy control. The 12.5-second target
-remains open.
+0.427 seconds). Both candidate changes remain outside production. The completed
+N-by-width diagnostic at `751df3db` has discrete/dense times of 13.512/21.222
+seconds at one million rows/q102 and 17.474/44.792 seconds at q222. The latter
+uses 63.86% less fit-end process highwater with discrete execution. Both routes
+use the same iteration counts within each cell; single samples and changing
+iterations across cells limit scaling-law claims. The untimed q222 witness
+confirms actual grouped execution and exactly equal saved outputs. A separate
+PASSIVE OpenMP control lowers CPU but increases fit time, so retain the default
+waiting policy. The 12.5-second target remains open; next inspect duplicated
+accepted-point value/geometry work.
 
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,

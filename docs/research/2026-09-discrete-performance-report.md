@@ -1,5 +1,58 @@
 # Discrete execution performance
 
+## Initial N-by-width complete-fit diagnostic
+
+Eight fresh fits at `751df3db` vary rows and spline width independently, keeping
+the public fragmented Gaussian fixture, 256 bins and the existing fit clock.
+Dense uses BLAS8/native1; discrete uses BLAS1/native16. Each row below contains
+one run per route, with matching coefficient and smoothing iteration counts.
+These are diagnostic samples, not new latency confirmations.
+
+| N | q | Dense fit (s) | Discrete fit (s) | Dense/discrete speed ratio | Inner/smoothing iterations |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 262,144 | 102 | 6.783 | 5.078 | 1.34 | 18 / 7 |
+| 262,144 | 222 | 11.056 | 6.161 | 1.79 | 24 / 10 |
+| 1,048,576 | 102 | 21.222 | 13.512 | 1.57 | 16 / 7 |
+| 1,048,576 | 222 | 44.792 | 17.474 | 2.56 | 23 / 9 |
+
+| N | q | Dense fit-end highwater (MiB) | Discrete fit-end highwater (MiB) | Maximum holdout-parameter difference |
+| ---: | ---: | ---: | ---: | ---: |
+| 262,144 | 102 | 1,279.08 | 801.66 | 7.36e-4 |
+| 262,144 | 222 | 1,740.75 | 849.81 | 8.99e-4 |
+| 1,048,576 | 102 | 3,708.07 | 1,902.55 | 3.23e-4 |
+| 1,048,576 | 222 | 5,537.95 | 2,001.17 | 6.70e-4 |
+
+At the largest cell discrete uses 63.86% less fit-end process highwater and
+is 2.56 times as fast. Increasing width from 102 to 222 coefficients increases
+complete-fit time by 2.11 times for dense and 1.29 times for discrete there.
+This supports the expected practical benefit of moving basis-width work out
+of the observation loop. It does not isolate a fixed-iteration complexity law:
+iterations change across cells, random samples at different N are not nested,
+and the thread settings were screened previously at q102, not optimized anew
+at every shape. All fits reach `practical_plateau`, without strict smoothing
+stationarity certification. Holdout differences measure binning, not execution
+error; the receipt retains all ten numerical-output comparisons.
+
+The separate q222/N=1,048,576 witness observes 384 contiguous native calls,
+zero strided calls, 16 workers and ten paired targets per batch, with
+184,520,736 paired active rows, nine accepted endpoint reuses and 16 digest
+thread IDs. Its ten saved arrays, full result, smoothing/coefficient-fit
+records and representation exactly match the timed discrete reference.
+All source/helper, pool, activity and memory guards pass. Fit-end highwater is
+kept separate from later output/representation highwater throughout.
+
+A ninth timed run tests only `OMP_WAIT_POLICY=PASSIVE` immediately after the
+large q102 default discrete fit. It takes 14.300 versus 13.512 seconds, while
+CPU falls from 65.033 to 24.683 seconds. All saved outputs and result records
+agree exactly. Lower CPU does not supply the requested latency gain, so retain
+the default waiting policy. This campaign explicitly clears `GOMP_SPINCOUNT`
+in both arms; earlier campaigns did not establish its inherited value. Keep
+this control separate from the grid and historical confirmation medians.
+
+The 15-second target remains confirmed by the repeated measurements below;
+12.5 seconds remains open. The grid supplies initial scaling evidence while
+the next optimization targets duplicated accepted-point evaluation work.
+
 ## Current checkpoint: 15 seconds confirmed
 
 At `37f4ecdb`, three fresh discrete complete fits take **14.807, 14.826 and
