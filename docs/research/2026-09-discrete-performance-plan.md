@@ -78,6 +78,42 @@ The next measurement compares the committed `64f8b451` baseline and candidate
 in fresh processes, followed by a separate untimed dispatch witness. Neither
 the 15-second nor 12.5-second target is claimed from unit tests or profiling.
 
+The first fresh pair at baseline `64f8b451` and candidate `b1ca0f6e` gives
+18.140451 and 15.405469 seconds respectively: 15.08% less wall time, with all
+ten numerical arrays, full result and stored representation exactly equal.
+Fit-end process highwater falls from 1927.29 to 1897.48 MiB; CPU time is
+67.878 to 68.493 seconds. An untimed witness observes 1,050 digest calls across
+16 worker thread IDs and all seven reuse attempts accepted. These are single
+screening samples, not confirmations. The planned BLAS-two/native-16 control
+takes 17.180735 seconds, so BLAS one remains selected. Its small BLAS-order
+differences are recorded separately; neither thread count changes binning.
+
+The next candidate removes repeated row work without changing reduction order:
+
+1. Write each ordinary panel column once: fuse dense validation with copying,
+   write complete categorical blocks, and initialize intercepts directly.
+   Preserve every live source guard and hard-error precedence over recoverable
+   numerical refusal; only scratch may change before admission completes.
+2. Pair each support's score and signed diagonal-mass reductions in the existing
+   native batch. Keep each output's original row order, masks and owned storage;
+   extend derivative overlap checks, descriptor accounting and warmup. The
+   million-row fixture then needs ten paired bin scans per chunk instead of
+   twenty separate scans and native calls.
+3. Validate poisoned scratch, partial chunks, cancellation, inactive supports,
+   mutation refusal and exact sequential-reducer agreement before the next
+   complete-fit comparison. Keep the two helper implementations independent;
+   one integrator owns their shared plan changes. The 15-second target is open.
+
+Both changes are implemented and independently reviewed. Focused validation
+passes 491 cases: 162 global geometry/integration checks, 226 reuse/public-warmup
+checks, 53 packing checks, 33 new paired-reducer checks and 17 existing batch
+checks. The integration dispatch test fails on the old separate-vector scans
+and passes on the candidate. Ruff passes; the CI-matched type count remains
+828. Additional warmup signatures carry a startup cost: the isolated paired
+warmup test takes 56.10 seconds when compiling its 36 cold storage variants.
+This is not a complete-fit measurement or a typical first-fit timing. Preserve
+the existing fit clock and report warmup separately in the next campaign.
+
 Status: the fair dense comparison is complete on current source `68bf3cd5`.
 Three new confirmations give medians of 18.379 seconds discrete (Numba 16,
 BLAS 1) and 22.136 seconds dense (BLAS 8, Numba 1): 16.97% less time and 50.79%

@@ -1,6 +1,24 @@
 # Discrete execution performance
 
-## Current checkpoint: fair dense comparison
+## Current checkpoint: pursuing 15 seconds
+
+The first fresh complete-fit comparison of parallel live-source certification
+(`b1ca0f6e`) against its integration baseline (`64f8b451`) improves discrete
+time from **18.140 to 15.405 seconds** on the unchanged public million-row
+fixture: 15.08% less wall time. All ten saved numerical arrays, full fitting
+result and stored representation agree exactly. Fit-end process highwater is
+1927.29 versus 1897.48 MiB; CPU time is 67.878 versus 68.493 seconds.
+
+These are single screening samples. The requested 15-second target and the
+subsequent 12.5-second target remain open. A bounded two-BLAS-thread control
+takes 17.181 seconds, so one BLAS thread and 16 native workers remain selected.
+An untimed witness observes hashing on 16 worker thread IDs and seven accepted
+endpoint reuses. The clock and memory definitions below are unchanged. Further
+work targets repeated ordinary-panel writes and separate score/mass bin scans;
+neither has a complete-fit result yet. Fair dense timing must be refreshed on
+the final candidate before claiming a new route-to-route advantage.
+
+## Confirmed checkpoint: fair dense comparison
 
 On the same production source `68bf3cd5`, the public million-row Gaussian
 location-scale fixture takes **18.379 s discrete versus 22.136 s dense** at

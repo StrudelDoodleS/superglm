@@ -260,6 +260,16 @@ an mgcv comparison or a whole-fit bounded-memory guarantee. Larger-N capacity,
 n-by-q validation and automatic threading remain C1 work. See the
 [thread receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_thread_screen_receipt.json).
 
+The next selected latency targets are 15 seconds, then 12.5 seconds, on this
+same fixture. The C3/C1 implementation is consolidated in
+[PR #379](https://github.com/StrudelDoodleS/superglm/pull/379). A first fresh
+discrete comparison of parallel live-source certification gives 18.140 to
+15.405 seconds with exactly equal saved outputs and representation; this is
+a single screen, and neither new target is confirmed. A two-BLAS-thread
+control is slower. Further work removes repeated ordinary-panel writes and
+pairs support score/mass scans without changing row summation order. Keep
+fair dense confirmation, larger-N capacity and general thread policy distinct.
+
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,
 backend or timing input; `-1` disables intervention rather than selecting an

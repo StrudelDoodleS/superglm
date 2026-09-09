@@ -23,6 +23,13 @@ from superglm.distributional.solver._batched_moments import (
     _BatchedMomentReducers,
     _warmup_batched_moments,
 )
+from superglm.distributional.solver._ordinary_packing import (
+    _copy_dense_checked,
+    _warmup_ordinary_packing,
+)
+from superglm.distributional.solver._ordinary_packing import (
+    _write_categorical_block as _pack_categorical,
+)
 from superglm.distributional.solver.assembly import (
     DenseJointGeometry,
     validated_dense_penalty,
@@ -84,15 +91,6 @@ def _finite_bounded_2d(values):
 
 
 @njit(cache=True)
-def _pack_categorical(panel, codes, start, width):
-    # Codes and panel bounds are checked in Python before this native writer.
-    for i in range(codes.shape[0]):
-        code = codes[i]
-        if code < width:
-            panel[i, start + code] = 1.0
-
-
-@njit(cache=True)
 def _accumulate_vector(out, bins, weights):
     active = 0
     for i in range(bins.shape[0]):
@@ -131,6 +129,7 @@ def _accumulate_directional(out, bins, ordinary, weights):
 def _warmup_global_moments():
     """Compile bounded writer/reducer signatures without constructing a plan."""
     _warmup_batched_moments()
+    _warmup_ordinary_packing()
     for layout in ("C", "F", "A"):
         for readonly in (False, True):
             values = (
@@ -346,7 +345,7 @@ def _workspace_spec(n, p, predictor_meta, support_meta, *, chunk_size, byte_budg
     accumulator_bytes = hist_bytes + mass_bytes + direction_bytes + score_bytes + ordinary_bytes
     coefficient_bytes = 8 * (p * p + p)
     batch_bytes, batch_metadata_reserve = _batch_workspace_bytes(
-        len(hist_specs), len(directional_specs), k
+        len(hist_specs), len(directional_specs), k, vector_count=s
     )
     persistent_bytes = (
         accumulator_bytes
@@ -624,6 +623,11 @@ class GlobalMomentPlan:
             self._bins,
             support_sizes=tuple(support.n_bins for support in self._supports),
             n_channels=len(self._predictors) * (len(self._predictors) + 1) // 2,
+            vectors=tuple(
+                (g, self._supports[g].predictor, channel, self._support_scores[g], mass)
+                for g, channel, mass in self._masses
+            ),
+            n_score_channels=len(self._predictors),
         )
         self._coefficients = np.empty(width)
         self._penalty = np.empty((width, width))
@@ -775,7 +779,6 @@ class GlobalMomentPlan:
             ):
                 raise GlobalMomentRefusalError("chunk predictor layout/type/order mismatch")
             panel = self._ordinary[a][:n]
-            panel.fill(0.0)
             if owned.intercept:
                 panel[:, 0] = 1.0
             for group, meta in zip(live.design.group_matrices, owned.groups, strict=True):
@@ -787,11 +790,10 @@ class GlobalMomentPlan:
                     values = _array(
                         group.M, (source_n, width), np.dtype(np.float64), "dense source"
                     )[selection]
-                    if not _finite_bounded_2d(values):
+                    if not _copy_dense_checked(panel, values, ordinary_start):
                         numerical_refusal = (
                             numerical_refusal or "nonfinite or out-of-domain ordinary value"
                         )
-                    panel[:, ordinary_start : ordinary_start + width] = values
                 elif group_type is CategoricalGroupMatrix:
                     group = cast(CategoricalGroupMatrix, group)
                     if group.n_levels != width:
@@ -905,26 +907,21 @@ class GlobalMomentPlan:
         """Update moments only after complete source and channel validation."""
         try:
             panels = [panel[:n] for panel in self._ordinary]
-            bins = cast(np.ndarray, self._bins)[:, :n]
             for a, panel in enumerate(panels):
                 self._ordinary_scores[a] += panel.T @ score_eta[:, a]
                 self._stats["ordinary_score_products"] += 1
-            for g, support in enumerate(self._supports):
-                _accumulate_vector(
-                    self._support_scores[g], bins[g], score_eta[:, support.predictor]
-                )
-                self._stats["score_update_calls"] += 1
             for a, b, channel, accumulator in self._ordinary_blocks:
                 width = panels[b].shape[1]
                 weighted = cast(np.ndarray, self._weighted)[:n, :width]
                 np.multiply(panels[b], curvature_packed[:, channel, None], out=weighted)
                 accumulator += panels[a].T @ weighted
                 self._stats["ordinary_curvature_products"] += 1
-            for g, channel, accumulator in self._masses:
-                _accumulate_vector(accumulator, bins[g], curvature_packed[:, channel])
-                self._stats["mass_update_calls"] += 1
             batched_moments = cast(_BatchedMomentReducers, self._batched_moments)
-            active, directional_work = batched_moments.accumulate(curvature_packed, n)
+            active, directional_work = batched_moments.accumulate(
+                curvature_packed, n, score=score_eta
+            )
+            self._stats["score_update_calls"] += len(self._supports)
+            self._stats["mass_update_calls"] += len(self._masses)
             self._stats["batched_moment_calls"] += 1
             self._stats["native_moment_workers"] = max(
                 self._stats["native_moment_workers"], batched_moments.last_worker_count

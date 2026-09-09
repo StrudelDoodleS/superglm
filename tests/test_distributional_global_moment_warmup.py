@@ -12,7 +12,7 @@ from superglm.distributional.solver import _global_moments as moments
 from superglm.distributional.solver._batched_moments import _accumulate_batched
 
 kernels = (moments._finite_bounded_1d, moments._finite_bounded_2d,
-           moments._pack_categorical, moments._accumulate_vector,
+           moments._copy_dense_checked, moments._pack_categorical, moments._accumulate_vector,
            moments._accumulate_histogram, moments._accumulate_directional,
            _accumulate_batched)
 assert all(not kernel.nopython_signatures for kernel in kernels)

@@ -297,6 +297,21 @@ def test_zero_channels_preserve_only_the_penalty(api):
     np.testing.assert_array_equal(result.data_curvature, np.zeros_like(fixture.penalty))
 
 
+def test_global_moments_reduce_support_vectors_in_the_native_batch(api, monkeypatch):
+    fixture = make_fixture(cancellation=True)
+
+    def separate_scan(*args, **kwargs):
+        pytest.fail("support vectors still use separate serial bin scans")
+
+    with accepted_plan(api, fixture) as plan:
+        monkeypatch.setattr(api, "_accumulate_vector", separate_scan)
+        result = accumulate(plan, fixture, 8)
+        assert plan.stats["score_update_calls"] == 5 * plan.stats["support_count"]
+        assert plan.stats["mass_update_calls"] == plan.stats["score_update_calls"]
+        assert plan.stats["batched_moment_calls"] == 5
+    assert_geometry(result, fixture)
+
+
 def test_reset_clears_all_moments_without_mutating_published_geometry(api):
     fixture = make_fixture()
     with accepted_plan(api, fixture) as plan:
@@ -665,6 +680,7 @@ def test_structural_failure_takes_precedence_over_same_chunk_domain_refusal(
             supplied[0].design.group_matrices[0].M[0, 0] = 2.0**129
             supplied[1].design.group_matrices[3].bin_idx[-1] = 999
         monkeypatch.setattr(api, "_accumulate_vector", forbidden)
+        monkeypatch.setattr(api._BatchedMomentReducers, "accumulate", forbidden)
         with pytest.raises(api.GlobalMomentRefusalError) as caught:
             plan.add_chunk(supplied, score, curvature)
         assert not caught.value.recoverable, (
@@ -705,6 +721,7 @@ def test_live_activity_length_refuses_before_unbounded_comparison(api, monkeypat
         # old rows[1:] <= rows[:-1] expression exposes an oversized bool vector.
         monkeypatch.setattr(api.np, "any", bounded_any)
         monkeypatch.setattr(api, "_accumulate_vector", forbidden)
+        monkeypatch.setattr(api._BatchedMomentReducers, "accumulate", forbidden)
         with pytest.raises(api.GlobalMomentRefusalError) as caught:
             plan.add_chunk(supplied, score, curvature)
         assert not caught.value.recoverable
