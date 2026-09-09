@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -216,7 +218,9 @@ class DiscretizedSplineCategoricalGroupMatrix:
         self.spline_cat_feature = None
 
     def __getstate__(self):
-        dict_state, slot_state = object.__getstate__(self)
+        dict_state, slot_state = cast(
+            tuple[dict[str, object] | None, dict[str, object]], object.__getstate__(self)
+        )
         slot_state.pop("_row_lookup_certificate", None)
         return dict_state, slot_state
 
@@ -307,7 +311,7 @@ class DiscretizedSplineCategoricalGroupMatrix:
             matched = np.zeros(idx_arr.size, dtype=bool)
             matched[in_bounds] = self._sorted_rows[pos[in_bounds]] == idx_arr[in_bounds]
             pos_sub = np.flatnonzero(matched).astype(np.intp, copy=False)
-            pos_self = self._row_order[pos[matched]]
+            pos_self = cast(NDArray[np.intp], self._row_order)[pos[matched]]
             bin_idx_level = self.bin_idx_level[pos_self]
         else:
             pos_sub = np.empty(0, dtype=np.intp)

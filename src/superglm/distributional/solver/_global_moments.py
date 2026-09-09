@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+from typing import cast
 
 import numpy as np
 from numba import njit
@@ -243,8 +244,10 @@ def _metadata(layout, *, check_values=True):
             columns = tuple(range(offset, offset + width))
             if group_type in _ORDINARY_TYPES:
                 if group_type is DenseGroupMatrix:
+                    group = cast(DenseGroupMatrix, group)
                     _array(group.M, (n, width), np.dtype(np.float64), "dense source")
                 else:
+                    group = cast(CategoricalGroupMatrix, group)
                     if group.n_levels != width:
                         raise GlobalMomentRefusalError("categorical width disagrees with n_levels")
                     _array(group.codes, (n,), np.dtype(np.intp), "categorical source codes")
@@ -252,6 +255,9 @@ def _metadata(layout, *, check_values=True):
                 ordinary_columns.extend(columns)
                 ordinary_start += width
             else:
+                group = cast(
+                    "DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix", group
+                )
                 basis, transform = group.B_unique, group.R_inv
                 if (
                     type(basis) is not np.ndarray
@@ -273,8 +279,10 @@ def _metadata(layout, *, check_values=True):
                     _small_finite(basis, "support basis")
                     _small_finite(transform, "solver map")
                 if group_type is DiscretizedSSPGroupMatrix:
+                    group = cast(DiscretizedSSPGroupMatrix, group)
                     _array(group.bin_idx, (n,), np.dtype(np.intp), "source support bins")
                 else:
+                    group = cast(DiscretizedSplineCategoricalGroupMatrix, group)
                     rows = group.row_idx
                     if type(rows) is not np.ndarray or rows.ndim != 1 or rows.size > n:
                         raise GlobalMomentRefusalError(
@@ -691,7 +699,7 @@ class GlobalMomentPlan:
             if self._state == "closed"
             else self._stats["persistent_allocated_bytes"],
         )
-        result["ordinary_widths"] = list(result["ordinary_widths"])
+        result["ordinary_widths"] = list(cast("list[int]", result["ordinary_widths"]))
         return result
 
     def _refuse(self, reason, *, recoverable=False):
@@ -713,8 +721,8 @@ class GlobalMomentPlan:
             self._refuse(exc.reason, recoverable=exc.recoverable)
         except ValueError as exc:
             self._refuse(str(exc))
-        self._coefficients[:] = coefficients
-        self._penalty[:] = checked_penalty
+        cast(np.ndarray, self._coefficients)[:] = coefficients
+        cast(np.ndarray, self._penalty)[:] = checked_penalty
         for accumulator in self._accumulators:
             accumulator.fill(0.0)
         self._rows = 0
@@ -775,6 +783,7 @@ class GlobalMomentPlan:
                 if type(group) is not group_type or group.shape != (source_n, width):
                     raise GlobalMomentRefusalError("chunk group type/order/width mismatch")
                 if group_type is DenseGroupMatrix:
+                    group = cast(DenseGroupMatrix, group)
                     values = _array(
                         group.M, (source_n, width), np.dtype(np.float64), "dense source"
                     )[selection]
@@ -784,6 +793,7 @@ class GlobalMomentPlan:
                         )
                     panel[:, ordinary_start : ordinary_start + width] = values
                 elif group_type is CategoricalGroupMatrix:
+                    group = cast(CategoricalGroupMatrix, group)
                     if group.n_levels != width:
                         raise GlobalMomentRefusalError("categorical n_levels mismatch")
                     codes = _array(
@@ -792,6 +802,9 @@ class GlobalMomentPlan:
                     _index_values(codes, n, width + 1, "categorical codes")
                     _pack_categorical(panel, codes, ordinary_start, width)
                 else:
+                    group = cast(
+                        "DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix", group
+                    )
                     support = self._supports[slot]
                     basis, transform = support.basis, support.transform
                     _array(group.B_unique, basis.shape, basis.dtype, "live support basis")
@@ -805,14 +818,16 @@ class GlobalMomentPlan:
                             "live support basis or solver map mismatches authority"
                         )
                     self._stats["support_authority_checks"] += 1
-                    target = self._bins[slot, :n]
+                    target = cast(np.ndarray, self._bins)[slot, :n]
                     if group_type is DiscretizedSSPGroupMatrix:
+                        group = cast(DiscretizedSSPGroupMatrix, group)
                         bins = _array(
                             group.bin_idx, (source_n,), np.dtype(np.intp), "source support bins"
                         )[selection]
                         _index_values(bins, n, support.n_bins, "support bins")
                         target[:] = bins
                     else:
+                        group = cast(DiscretizedSplineCategoricalGroupMatrix, group)
                         rows = group.row_idx
                         if type(rows) is not np.ndarray or rows.ndim != 1 or rows.size > source_n:
                             raise GlobalMomentRefusalError(
@@ -890,7 +905,7 @@ class GlobalMomentPlan:
         """Update moments only after complete source and channel validation."""
         try:
             panels = [panel[:n] for panel in self._ordinary]
-            bins = self._bins[:, :n]
+            bins = cast(np.ndarray, self._bins)[:, :n]
             for a, panel in enumerate(panels):
                 self._ordinary_scores[a] += panel.T @ score_eta[:, a]
                 self._stats["ordinary_score_products"] += 1
@@ -901,17 +916,18 @@ class GlobalMomentPlan:
                 self._stats["score_update_calls"] += 1
             for a, b, channel, accumulator in self._ordinary_blocks:
                 width = panels[b].shape[1]
-                weighted = self._weighted[:n, :width]
+                weighted = cast(np.ndarray, self._weighted)[:n, :width]
                 np.multiply(panels[b], curvature_packed[:, channel, None], out=weighted)
                 accumulator += panels[a].T @ weighted
                 self._stats["ordinary_curvature_products"] += 1
             for g, channel, accumulator in self._masses:
                 _accumulate_vector(accumulator, bins[g], curvature_packed[:, channel])
                 self._stats["mass_update_calls"] += 1
-            active, directional_work = self._batched_moments.accumulate(curvature_packed, n)
+            batched_moments = cast(_BatchedMomentReducers, self._batched_moments)
+            active, directional_work = batched_moments.accumulate(curvature_packed, n)
             self._stats["batched_moment_calls"] += 1
             self._stats["native_moment_workers"] = max(
-                self._stats["native_moment_workers"], self._batched_moments.last_worker_count
+                self._stats["native_moment_workers"], batched_moments.last_worker_count
             )
             self._stats["histogram_update_calls"] += len(self._histograms)
             self._stats["histogram_row_visits"] += n * len(self._histograms)
@@ -972,15 +988,17 @@ class GlobalMomentPlan:
                 block = support.solver_support.T @ accumulator
                 put(support.columns, self._predictors[a].ordinary_columns, block)
                 self._stats["directional_finalizations"] += 1
-            score_penalized = score - self._penalty @ self._coefficients
-            penalized = curvature + self._penalty
+            penalty = cast(np.ndarray, self._penalty)
+            coefficients = cast(np.ndarray, self._coefficients)
+            score_penalized = score - penalty @ coefficients
+            penalized = curvature + penalty
             if not all(
                 np.all(np.isfinite(x)) for x in (score, score_penalized, curvature, penalized)
             ):
                 raise GlobalMomentRefusalError(
                     "nonfinite coefficient-space geometry", recoverable=True
                 )
-            result = DenseJointGeometry(score, score_penalized, curvature, self._penalty, penalized)
+            result = DenseJointGeometry(score, score_penalized, curvature, penalty, penalized)
         except GlobalMomentRefusalError as exc:
             self._refuse(exc.reason, recoverable=exc.recoverable)
         except (ValueError, FloatingPointError) as exc:

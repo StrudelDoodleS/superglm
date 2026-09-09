@@ -9,10 +9,12 @@ Refusal leaves the existing grouped contraction available to the caller.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import scipy.sparse as sp
 from numba import njit
+from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_kernels import _tensor_operand_in_reassociation_range
 from superglm.group_matrix import (
@@ -419,7 +421,8 @@ class SmallGroupPanelWorkspace:
     def retained_bytes(self):
         if self._closed:
             return 0
-        return sum(array.nbytes for array in (*self.panels, *self.column_indices, self._scratch))
+        scratch = cast(NDArray, self._scratch)
+        return sum(array.nbytes for array in (*self.panels, *self.column_indices, scratch))
 
     def cross_moment(self, left, right, signed_weights):
         if self._closed:
@@ -429,7 +432,7 @@ class SmallGroupPanelWorkspace:
             raise ValueError(f"signed weights must have shape {(a.shape[0],)}")
         if not _in_range(signed_weights):
             return None
-        weighted = self._scratch[:, : b.shape[1]]
+        weighted = cast(NDArray, self._scratch)[:, : b.shape[1]]
         np.multiply(b, signed_weights[:, None], out=weighted)
         return a.T @ weighted
 

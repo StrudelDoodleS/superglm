@@ -42,13 +42,27 @@ dependency checks, the smoke script and strict documentation build pass.
 Independent reviews found and fixed one released-cap derivative failure: the
 retained fit now returns truthful `derivative_unavailable` nonconvergence.
 
-CI's type check exposes 81 diagnostics introduced by the combined changes
-(828 on the base, 909 on the head under identical CI dependencies). Correct
-these within the changed files; do not raise the existing error budget or mix
-in unrelated typing cleanup. The next numerical job is one selective diagnostic
-profile to separate endpoint certification, predictor replay, materialization
-and Gaussian derivative intermediates. No source edits or other numerical jobs
-may overlap it. The root owns sequencing; benchmark control owns the window.
+All 81 introduced type diagnostics are corrected within the eight changed
+files. Under identical CI dependencies the head now has the same 828 diagnostic
+signatures as the base; the existing backlog limit is unchanged. After the
+typing corrections, 527 focused assembly/reuse tests pass (four skips), and
+17 batched-moment tests pass, including native dispatch and warmup.
+
+The isolated diagnostic profile is complete at `29d6e40e`: 15 live source
+certificates occupy 3.180 s, including 3.069 s in SHA-256 updates; native moment
+accumulation occupies 0.645 s. All ten saved outputs and the representation
+match the prior reference exactly, with 17 global geometries and no refusals.
+These diagnostic intervals are not an authoritative fit-time comparison.
+
+The next bounded candidate preserves every mutable-source read and metadata
+check while computing a private versioned tree of independent SHA-256 array
+digests in parallel. Keep the worker count under the existing native limit,
+pending leaves bounded, and noncontiguous copy scratch at 64 KiB per worker.
+No digest persists between certificates. The root hash commits leaf order;
+serial and parallel results must agree. A separate dense candidate removes an
+unnecessary copy of newly owned predictor storage. Both need full-fit evidence
+before any latency claim. The root owns sequencing; benchmark control owns
+measurement windows.
 
 Status: the fair dense comparison is complete on current source `68bf3cd5`.
 Three new confirmations give medians of 18.379 seconds discrete (Numba 16,

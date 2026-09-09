@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from superglm.distributional._panel_policy import automatic_small_group_panel_budget
-from superglm.distributional.family import _likelihood_reuse_contract
+from superglm.distributional.family import FamilyLikelihoodPlan, _likelihood_reuse_contract
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.weights import ResolvedLikelihoodWeights
 from superglm.group_matrix import (
@@ -42,7 +44,8 @@ def automatic_global_moment_budget(
         contract is None
         or not contract.deterministic_chunk_replay
         or type(likelihood_plan) is not contract.plan_type
-        or type(likelihood_plan.weights) is not ResolvedLikelihoodWeights
+        or type(cast(FamilyLikelihoodPlan, likelihood_plan).weights)
+        is not ResolvedLikelihoodWeights
     ):
         return None
     budget = automatic_small_group_panel_budget(layout)
@@ -60,9 +63,12 @@ def automatic_global_moment_budget(
         for group in state.design.group_matrices:
             if type(group) in _SUPPORT_TYPES:
                 # Dimensions only: no row gathers, equality scans or plans.
-                if len(group.B_unique.shape) != 2:
+                support = cast(
+                    DiscretizedSSPGroupMatrix | DiscretizedSplineCategoricalGroupMatrix, group
+                )
+                if len(support.B_unique.shape) != 2:
                     return None
-                bins, raw_width = group.B_unique.shape
+                bins, raw_width = support.B_unique.shape
                 if not 1 <= bins <= 4096 or not 1 <= raw_width <= 64:
                     return None
                 sizes.append(bins)

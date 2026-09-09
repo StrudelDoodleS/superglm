@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -1144,6 +1144,7 @@ def _cross_gram_factor_smooth_dense(
         return None
     # Check the raw source before indexing: an ndarray subclass can override
     # view creation and return an ordinary array with changed values.
+    basis = cast(NDArray, basis)
     if not factor.is_discrete:
         basis = basis[:, None]
     # The native scan computes (W*basis)*dense, while the legacy transpose

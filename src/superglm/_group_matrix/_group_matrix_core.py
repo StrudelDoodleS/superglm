@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -782,7 +782,9 @@ class SplineCategoricalGroupMatrix:
         self.spline_cat_feature = None
 
     def __getstate__(self):
-        dict_state, slot_state = object.__getstate__(self)
+        dict_state, slot_state = cast(
+            tuple[dict[str, object] | None, dict[str, object]], object.__getstate__(self)
+        )
         slot_state.pop("_row_lookup_certificate", None)
         return dict_state, slot_state
 

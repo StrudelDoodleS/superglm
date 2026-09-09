@@ -9,10 +9,21 @@ Only integer diagnostics are reduced across workers; fastmath is disabled.
 from __future__ import annotations
 
 from bisect import bisect_left
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
-from numba import config, get_num_threads, get_thread_id, njit, prange, types
+from numba import get_num_threads, get_thread_id, njit, types
 from numba.typed import List
+
+if TYPE_CHECKING:
+    from builtins import range as prange
+
+    class _NumbaThreadConfig(Protocol):
+        NUMBA_NUM_THREADS: int
+
+    config: _NumbaThreadConfig
+else:
+    from numba import config, prange
 
 
 @njit(cache=True)

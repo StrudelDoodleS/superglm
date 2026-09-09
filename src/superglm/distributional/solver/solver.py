@@ -6,13 +6,14 @@ import hashlib
 import json
 import weakref
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 import superglm.distributional.solver.chunks as chunking
 from superglm.distributional.family import (
+    ConfigurableDistributionalFamily,
     DistributionalFamily,
     ExpectedInformationFamily,
     FamilyLikelihoodPlan,
@@ -320,7 +321,11 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
             array(values)
         return True
 
-    field(json.dumps(context.family.to_config(), sort_keys=True))
+    field(
+        json.dumps(
+            cast(ConfigurableDistributionalFamily, context.family).to_config(), sort_keys=True
+        )
+    )
     field(context.likelihood_plan.plan_identifier)
     # Some built-in identifiers contain stored weight digests. The evaluator
     # consumes the live contract, so certify it independently of those digests.
@@ -351,9 +356,11 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
             if kind is DenseGroupMatrix:
                 names = ("M",)
             elif kind in (CategoricalGroupMatrix, RandomEffectGroupMatrix):
+                group = cast(CategoricalGroupMatrix | RandomEffectGroupMatrix, group)
                 names = ("codes",)
                 field(group.n_levels)
             elif kind is SparseGroupMatrix:
+                group = cast(SparseGroupMatrix, group)
                 matrix = group.M
                 if type(matrix) is not csr_matrix:
                     return None
@@ -370,6 +377,7 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
                     array(values)
                 continue
             elif kind is FactorSmoothGroupMatrix:
+                group = cast(FactorSmoothGroupMatrix, group)
                 field(
                     (
                         group.n_levels,
@@ -417,6 +425,12 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
                 DiscretizedSplineCategoricalGroupMatrix,
                 SupportCompressedSplineCategoricalGroupMatrix,
             ):
+                group = cast(
+                    SplineCategoricalGroupMatrix
+                    | DiscretizedSplineCategoricalGroupMatrix
+                    | SupportCompressedSplineCategoricalGroupMatrix,
+                    group,
+                )
                 if (
                     type(group.n_rows) is not int
                     or type(group._p_b) is not int
@@ -430,6 +444,7 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
                 field((group.n_rows, group._p_b, group.spline_cat_feature))
                 names = ("R_inv", "row_idx")
                 if kind is SplineCategoricalGroupMatrix:
+                    group = cast(SplineCategoricalGroupMatrix, group)
                     # Subsetting reads full B; matvec reads B_level; sparse
                     # moments read independent buffers. A saturated Gram can
                     # instead read its lazy dense copy. All remain live.
@@ -445,6 +460,11 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
                         return None
                     cache_names = ("_sorted_rows",)
                 else:
+                    group = cast(
+                        DiscretizedSplineCategoricalGroupMatrix
+                        | SupportCompressedSplineCategoricalGroupMatrix,
+                        group,
+                    )
                     if type(group.n_bins) is not int:
                         return None
                     field(group.n_bins)
@@ -461,12 +481,15 @@ def _chunk_reuse_data_certificate(context: _SolverContext) -> str | None:
                 if any(not builtin_array(getattr(group, name)) for name in names):
                     return None
             elif kind in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix):
+                group = cast(DiscretizedSSPGroupMatrix | SupportCompressedSSPGroupMatrix, group)
                 names = ("B_unique", "R_inv", "bin_idx")
                 field(group.n_bins)
             elif kind is DiscretizedSCOPGroupMatrix:
+                group = cast(DiscretizedSCOPGroupMatrix, group)
                 names = ("B_scop_unique", "bin_idx")
                 field(group.n_bins)
             elif kind is DiscretizedTensorGroupMatrix:
+                group = cast(DiscretizedTensorGroupMatrix, group)
                 names = (
                     "B_unique",
                     "R_inv",
