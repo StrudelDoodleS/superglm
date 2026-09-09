@@ -61,8 +61,8 @@ progress, and truthful derivative provenance. The full endgame suite passes
 review found no blocking issue.
 
 The frozen recovery implementation completes the identical NB2 fixture in 11
-outer iterations. The [receipt](../../benchmarks/c3_pragmatic_convergence_receipt.json)
-and [comparison script](../../benchmarks/c3_pragmatic_compare.py) record raw-file
+outer iterations. The [receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_convergence_receipt.json)
+and [comparison script](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_compare.py) record raw-file
 hashes, source provenance, work counts, dispatch, memory and held-out comparisons.
 Timing is unmeasured because numerical work may overlap Headroom/Kompress and
 tests; these NB2 numerical runs support no speed claim.
@@ -92,8 +92,8 @@ range are still refused, and an exact Poisson active face remains unsupported.
 
 ## Finite-NB2 range validation
 
-The [finite-NB2 receipt](../../benchmarks/c3_finite_nb2_receipt.json) and
-[comparison script](../../benchmarks/c3_finite_nb2_compare.py) retain the
+The [finite-NB2 receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_finite_nb2_receipt.json) and
+[comparison script](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_finite_nb2_compare.py) retain the
 controlled before/after numerical evidence and its provenance limitations.
 
 The controlled before/after check uses the same saved coefficients, penalties,
@@ -126,8 +126,8 @@ This change does not introduce a new global certification system.
 The final whole-book fit on frozen source
 `5f994c8f6ac0501606594e2f36bfc0cd24050ec1` reaches `stationary` in nine
 outer iterations, with ten recorded coefficient fits and 34 inner iterations.
-Its [final NB2 receipt](../../benchmarks/c3_pragmatic_nb2_final_receipt.json)
-and [comparison script](../../benchmarks/c3_pragmatic_nb2_final_compare.py)
+Its [final NB2 receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_nb2_final_receipt.json)
+and [comparison script](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_nb2_final_compare.py)
 retain the full numerical comparison and source/configuration checks.
 
 The terminal coefficient solve stops on `objective_and_score`, with relative
@@ -212,8 +212,8 @@ fixed zero/cap penalties through serialization.
 
 ## GPD negative controls
 
-The [GPD receipt](../../benchmarks/c3_pragmatic_gpd_receipt.json) and
-[comparison script](../../benchmarks/c3_pragmatic_gpd_compare.py) preserve the
+The [GPD receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_gpd_receipt.json) and
+[comparison script](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_gpd_compare.py) preserve the
 configurations, input/artifact hashes, source provenance and numerical checks.
 
 The historical synthetic tail fixture has 1,401 excesses and 98 coefficients.
@@ -253,7 +253,7 @@ not reasons to label a practically settled fit unusable.
 
 ## Final complete-fit performance comparison
 
-The [independent performance receipt](../../benchmarks/c3_pragmatic_performance_receipt.json)
+The [independent performance receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_performance_receipt.json)
 compares the released v0.31.0 source `8962c452` with final production source
 `5f994c8f`. The workload is Gaussian log-severity with 449,000 training rows:
 20 repetitions of 22,450 real freMTPL2 severity policies, plus the original
@@ -309,7 +309,7 @@ exact compiled-design regressions and continuous-grid sensitivity at 64, 256
 and 1,024 bins.
 
 The exact executed controller and summary are now tracked in
-[benchmarks/c3_practical](../../benchmarks/c3_practical/README.md), with hashes,
+[benchmarks/c3_practical](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_practical/README.md), with hashes,
 required source/data layout and commands for a fresh window or historical
 replay. Replaying the tracked summary against the retained raw window reproduced
 the existing summary exactly without changing any raw artifact.

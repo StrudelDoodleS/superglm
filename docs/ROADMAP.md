@@ -101,7 +101,7 @@ C1 implementation foundation without claiming constant memory, universal
 speedups or 10⁷–10⁸-row capability. The subsequently requested discrete
 performance gate below remains open within C1.
 
-The final-source [performance receipt](../benchmarks/c3_pragmatic_performance_receipt.json)
+The final-source [performance receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_performance_receipt.json)
 records three serial runs per arm on the replicated 449,000-row severity
 workload: median complete-fit time 25.56 → 20.96 s (18.0% lower), and process
 high-water RSS 1,490.48 → 1,007.39 MiB (32.4% lower). Headroom remained active;
@@ -258,7 +258,7 @@ with screen-selected settings and standard warmup excluded. It establishes a
 moderate time advantage and a larger memory advantage, not a general optimum,
 an mgcv comparison or a whole-fit bounded-memory guarantee. Larger-N capacity,
 n-by-q validation and automatic threading remain C1 work. See the
-[thread receipt](../benchmarks/discrete_thread_screen_receipt.json).
+[thread receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_thread_screen_receipt.json).
 
 The shared BLAS
 controller currently sees only a 1,500-coefficient threshold, with no row-count,

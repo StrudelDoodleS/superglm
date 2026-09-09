@@ -33,10 +33,22 @@ all predecessor branches and the original uncommitted strategy worktree.
    window. Only after the 15-second target is demonstrated start the 12.5-second
    stage; neither target nor larger-N capacity is yet demonstrated.
 
-Numerical benchmarks remain paused while the integration test suite runs.
-Parallel agents own read-only C3/C1 integration review and separate dense and
-discrete cost analysis. The root owns integration and sequencing; benchmark
-control alone owns measurement windows.
+The combined draft is [PR #379](https://github.com/StrudelDoodleS/superglm/pull/379).
+All four duration-balanced test groups pass on the integration source: 12,707
+tests passed, with 176 skipped test cases and two skipped collection modules
+(the latter repeat in each shard's summary). `SUPERGLM_REQUIRE_DATA=1` was set
+and both public freMTPL2 datasets were available. Ruff check/format, lock and
+dependency checks, the smoke script and strict documentation build pass.
+Independent reviews found and fixed one released-cap derivative failure: the
+retained fit now returns truthful `derivative_unavailable` nonconvergence.
+
+CI's type check exposes 81 diagnostics introduced by the combined changes
+(828 on the base, 909 on the head under identical CI dependencies). Correct
+these within the changed files; do not raise the existing error budget or mix
+in unrelated typing cleanup. The next numerical job is one selective diagnostic
+profile to separate endpoint certification, predictor replay, materialization
+and Gaussian derivative intermediates. No source edits or other numerical jobs
+may overlap it. The root owns sequencing; benchmark control owns the window.
 
 Status: the fair dense comparison is complete on current source `68bf3cd5`.
 Three new confirmations give medians of 18.379 seconds discrete (Numba 16,
@@ -110,7 +122,7 @@ All saved discrete arrays agree exactly across tested settings; the difference
 from dense is separately reported as the intended 256-bin approximation.
 Three confirmations per route exclude screening samples, but pair order was
 always dense then discrete. No significance or universal optimum claim follows.
-The [thread receipt](../../benchmarks/discrete_thread_screen_receipt.json) and
+The [thread receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_thread_screen_receipt.json) and
 [report](2026-09-discrete-performance-report.md) contain the complete evidence.
 No production changes or additional solver test run are required for this
 documentation checkpoint. Remaining C1 work must establish gains across n/q
@@ -588,7 +600,7 @@ practical convergence, without claiming strict smoothing certification.
 Automatic panels are observed only in the intended mixed-layout fixture;
 support/tensor and severity controls retain their existing routes. Source,
 helper, thread and activity checks pass. The [report](2026-09-discrete-performance-report.md)
-and [tracked receipt](../../benchmarks/discrete_performance_receipt.json) retain
+and [tracked receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_performance_receipt.json) retain
 complete-fit CPU, process RSS, ranges, numerical comparisons and actual dispatch.
 
 The remaining public mixed-layout gap is explicit: current discrete fitting is

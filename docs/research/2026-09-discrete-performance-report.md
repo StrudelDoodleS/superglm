@@ -91,7 +91,7 @@ See [mgcv gaulss documentation](https://stat.ethz.ch/R-manual/R-devel/library/mg
 No such comparison has been run, so superiority of SuperLSS dense over mgcv
 remains unmeasured.
 
-The [thread receipt](../../benchmarks/discrete_thread_screen_receipt.json)
+The [thread receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_thread_screen_receipt.json)
 preserves all sample rows, source/helper hashes, numerical differences, runtime
 observations and limitations. Raw records are in
 `.benchmark-artifacts/discrete-performance/fair-thread-screen-68bf3cd5/`, with
@@ -178,7 +178,7 @@ the candidate production-tree hash is
 `6ea1435a53b4aa44c663ae4ae996a900033f1b8425df0e0807baa4bcb48efbd9`.
 Raw runs, source pins and exact commands are preserved in
 `.benchmark-artifacts/discrete-performance/parallel-moments-pilot/likelihood-cache-validation/`.
-The tracked [latency receipt](../../benchmarks/discrete_latency_receipt.json)
+The tracked [latency receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_latency_receipt.json)
 contains all timings, memory boundaries, numerical differences, dispatch
 evidence and raw-summary hash
 `e83da925bf97538baa582afc0989623f83bb573cfb8a2eaf3d4360bd421496cf`.
@@ -221,7 +221,7 @@ has the same production source. This is distinct from published v0.31.0 at
 `8962c452`, the earlier C3/C1 release comparison base. Improvements below must
 not be presented as measurements against that release.
 
-The tracked [performance receipt](../../benchmarks/discrete_performance_receipt.json)
+The tracked [performance receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_performance_receipt.json)
 consolidates the size, thread, preparation, tabmat and final default windows
 with raw-summary hashes, source pins, ranges and qualifications. Earlier
 checkpoints below are historical evidence, not measurements of the final source.
@@ -474,7 +474,7 @@ witnesses. Fragmented models have three repetitions per arm; the support and
 insurance controls have two. Arm order reverses between repetitions. Times below
 are complete-fit medians in seconds; RSS is the process high-water mark captured
 at fit completion, in MiB. All individual values and ranges are in the tracked
-[receipt](../../benchmarks/discrete_performance_receipt.json).
+[receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_performance_receipt.json).
 
 | Fixture | Source and representation | Wall | CPU | Fit RSS |
 |---|---|---:|---:|---:|
@@ -657,7 +657,7 @@ discrete and identical stored-discrete dense execution. Three disable panels
 and change only the geometry batch; other passes retain 8,065-row chunks.
 cProfile and integer work witnesses are enabled. These single-run times identify
 mechanisms and do not replace the uninstrumented benchmark estimates above.
-The tracked [receipt](../../benchmarks/discrete_performance_receipt.json) records
+The tracked [receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_performance_receipt.json) records
 the raw manifests, individual hashes, CPU, numerical comparisons and dispatch.
 
 | Diagnostic route | Fit wall (s) | Fit CPU (s) | Geometry phase (s) | Fit RSS (MiB) |

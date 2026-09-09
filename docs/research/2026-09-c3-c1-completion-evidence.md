@@ -10,7 +10,7 @@ preserving the unsuccessful EFS trajectories and unresolved reference probes.
 It does not introduce a new optimizer or a GPD shape penalty.
 
 Selected numerical summaries, timing audits and raw artifact checksums are
-collected in the tracked [complete-fit receipt](../../benchmarks/c3_c1_complete_fit_receipt.json).
+collected in the tracked [complete-fit receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_c1_complete_fit_receipt.json).
 
 The [pragmatic convergence follow-through](2026-09-pragmatic-convergence.md)
 corrects the diagnosis of the NB2 stop recorded below. The old Newton recovery
@@ -28,7 +28,7 @@ requires that capability. Existing signed cross-predictor assembly, likelihood
 weight contracts, coefficient safeguards, terminal curvature decisions and
 smoothing stationarity rules remain authoritative.
 
-The private [row-design adapter](../../src/superglm/distributional/_row_design.py)
+The private [row-design adapter](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/src/superglm/distributional/_row_design.py)
 expands bounded row blocks for smoothing derivatives. Newton, endpoint-related
 validation and optional smoothing-corrected posterior replay can use this
 adapter without retaining a full observation-by-coefficient predictor matrix.
@@ -43,17 +43,17 @@ objects and subclass metadata. The row-cache kernel evidence establishes that
 specific allocation/work change; it is not a complete-fit speed claim.
 
 Focused coverage is in
-[public discrete tests](../../tests/test_superlss_discrete.py),
-[bounded derivative tests](../../tests/test_distributional_bounded_derivatives.py)
-and [categorical row-subset tests](../../tests/test_spline_categorical_row_subset.py).
+[public discrete tests](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/tests/test_superlss_discrete.py),
+[bounded derivative tests](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/tests/test_distributional_bounded_derivatives.py)
+and [categorical row-subset tests](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/tests/test_spline_categorical_row_subset.py).
 These cover observed-family support, signed dispatch, weight semantics,
 interactions, smoothing and serialization, same-design derivative agreement,
 full-design materialization guards, and repeated-subset allocation behavior.
 
 ## Complete-fit receipts and provenance
 
-The [complete-fit harness](../../benchmarks/c3_c1_complete_fit.py) and its
-[reproduction instructions](../../benchmarks/c3_c1_complete_fit.md) describe
+The [complete-fit harness](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_c1_complete_fit.py) and its
+[reproduction instructions](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_c1_complete_fit.md) describe
 fixtures, thread controls, instrumentation and source binding. The summaries
 below are in ignored `.benchmark-artifacts/c3-c1/`. Each identifies raw worker
 JSON/NPZ receipts and hashes. A candidate Git SHA alone is insufficient for a

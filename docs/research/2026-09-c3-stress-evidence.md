@@ -17,7 +17,7 @@ including uncommitted files, as
 `ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af`.
 All 17 refreshed receipts pass source/helper stability and one-thread runtime
 checks. The recovered pure generators in
-[`benchmarks/_c3_c1_fixtures.py`](../../benchmarks/_c3_c1_fixtures.py) preserve the
+[`benchmarks/_c3_c1_fixtures.py`](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/_c3_c1_fixtures.py) preserve the
 original random draw order and were checked for exact array equality against
 AST-extracted original definitions. No old assembler or solver monkeypatch is
 used. The cases are:
@@ -142,7 +142,7 @@ it. No failed probe was converted into a passing check.
 
 ## Durable checks and receipts
 
-[`tests/test_c3_stress_stationarity.py`](../../tests/test_c3_stress_stationarity.py)
+[`tests/test_c3_stress_stationarity.py`](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/tests/test_c3_stress_stationarity.py)
 replays both exact fixtures under strict Newton at start 0.01. It checks fresh
 projected-score and derivative-certificate authority using the configured
 objective-scaled bar, and mutates the published score authority to demonstrate
@@ -153,7 +153,7 @@ source. They are marked `slow` and explicitly run with:
 uv run pytest tests/test_c3_stress_stationarity.py -q -m slow
 ```
 
-[`benchmarks/c3_c1_stress_diagnosis.py`](../../benchmarks/c3_c1_stress_diagnosis.py)
+[`benchmarks/c3_c1_stress_diagnosis.py`](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_c1_stress_diagnosis.py)
 replays either fixture and writes raw JSON, NPZ, and SHA256 receipts. It requires
 `--source /absolute/path/to/checkout` and refuses an imported package outside
 that source tree. Before importing production code, it records the Git HEAD,
@@ -174,7 +174,7 @@ arrays, independent reference rows, and `manifest.sha256.json`. The original
 metadata is archived as `c3-c1-stress-v2-prethreadmeta/` and is not the final
 evidence set. These directories follow the ignored generated-results policy.
 
-[`benchmarks/c3_c1_stress_summary.py`](../../benchmarks/c3_c1_stress_summary.py)
+[`benchmarks/c3_c1_stress_summary.py`](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_c1_stress_summary.py)
 checks artifact hashes, source-tree hashes and stability, imported roots, and
 runtime thread counts without importing SuperGLM. For stationary receipts it
 recomputes the bar from the recorded configuration and objective, then checks
@@ -182,7 +182,7 @@ the published terminal norm and indicators against that bar and verifies the
 selected terminal coefficient fit converged. This checks the reported API
 contract independently; it does not supply a new derivative-error enclosure.
 The compact, source-bound selection is
-[`benchmarks/c3_c1_stress_receipt.json`](../../benchmarks/c3_c1_stress_receipt.json).
+[`benchmarks/c3_c1_stress_receipt.json`](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_c1_stress_receipt.json).
 To reproduce it from the full local receipts:
 
 ```sh
