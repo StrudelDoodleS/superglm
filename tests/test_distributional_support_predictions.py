@@ -113,12 +113,42 @@ def test_support_association_and_geometry_addition_order():
     group.R_inv[:2, :2] = [[1, 1], [1, 0]]
     state.offset.setflags(write=True)
     state.offset[:] = 0
+
+    # Isolate the support contribution: the outer cancellation would hide a
+    # reassociation from B @ (R @ beta) to (B @ R) @ beta.
+    support_only = coefficients.copy()
+    support_only[state.coefficient_slice.start : state.coefficient_slice.start + 2] = 0
+    support_eta, _ = chunking.materialize_terminal_predictions(layout, support_only, chunk_size=7)
+    np.testing.assert_array_equal(support_eta[:, 0], 1)
+    spline_beta = coefficients[state.coefficient_slice.start + 2 : state.coefficient_slice.stop]
+    np.testing.assert_array_equal((group.B_unique @ group.R_inv) @ spline_beta, 0)
+
+    eta, theta = chunking.materialize_terminal_predictions(layout, coefficients, chunk_size=7)
+    optimizing_total = carrier_total = 0.0
     for chunk in iter_likelihood_chunks(*problem, chunk_size=7, curvature_source="observed"):
-        # Slopes sum to -1e16 before adding the intercept. Reassociation to
-        # (B @ R) @ beta or intercept-first accumulation loses this witness.
-        np.testing.assert_array_equal(chunk.eta[:, 0], 0)
-    eta, _ = chunking.materialize_terminal_predictions(layout, coefficients, chunk_size=7)
-    np.testing.assert_array_equal(eta[:, 0], 1)
+        rows = chunk.rows.indices
+        np.testing.assert_array_equal(chunk.eta, eta[rows])
+        np.testing.assert_array_equal(chunk.theta, theta[rows])
+        np.testing.assert_array_equal(
+            chunking._predictor_values(layout, coefficients, chunk.rows, include_offsets=True),
+            chunk.eta,
+        )
+        optimizing_total += float(np.sum(chunk.optimizing_log_likelihood, dtype=np.float64))
+        carrier_total += float(np.sum(chunk.parameter_independent_carrier, dtype=np.float64))
+    likelihood = chunking.evaluate_chunked_log_likelihood(*problem, chunk_size=7)
+    assert likelihood.optimizing_log_likelihood == optimizing_total
+    assert likelihood.parameter_independent_carrier == carrier_total
+
+    # The exact predictor is one. Cancellation prevents a forward-accuracy
+    # requirement, while all consumers must still describe the same state.
+    local = coefficients[state.coefficient_slice]
+    absolute_support = np.abs(group.B_unique) @ (np.abs(group.R_inv) @ np.abs(spline_beta))
+    absolute_terms = abs(local[0]) + np.abs(numeric.M) @ np.abs(local[1:2])
+    absolute_terms += absolute_support[group.bin_idx]
+    operations = 2 * (group.B_unique.shape[1] + group.R_inv.shape[1] + numeric.shape[1]) + 4
+    epsilon = np.finfo(np.float64).eps
+    gamma = operations * epsilon / (1 - operations * epsilon)
+    assert np.all(np.abs(eta[:, 0] - 1) <= gamma * absolute_terms)
 
 
 def test_pass_workspace_is_released_on_close_and_not_shared(monkeypatch):
