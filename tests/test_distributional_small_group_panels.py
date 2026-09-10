@@ -444,15 +444,39 @@ def test_owned_csr_selection_refuses_duplicate_storage():
 
 
 def test_selected_csr_cache_incoherence_refuses_but_unselected_rows_are_not_scanned():
-    group = SparseSSPGroupMatrix(sp.csr_matrix(np.ones((12, 2))), np.eye(2))
+    # Spline-category groups still keep a separate raw-Gram value cache.
+    group = SplineCategoricalGroupMatrix(
+        sp.csr_matrix(np.ones((12, 2))), np.eye(2), np.arange(12, dtype=np.intp)
+    )
     plans = (_plan([group]),)
-    group.B.data[-2:] *= 2
+    group.B_level.data[-2:] *= 2
     selected = _build(plans, slice(0, 4), byte_budget=2**20)
     assert selected.workspace is not None
     selected.workspace.close()
     refused = _build(plans, slice(8, 12), byte_budget=2**20)
     assert refused.workspace is None
     assert refused.reason == "unsupported-group"
+
+
+@pytest.mark.parametrize("mutation", ["public", "private", "replacement"])
+def test_ssp_panels_follow_the_single_owned_value_buffer(mutation):
+    group = SparseSSPGroupMatrix(sp.csr_matrix(np.ones((12, 2))), np.eye(2))
+    if mutation == "public":
+        group.B.data[-2:] *= 2
+    elif mutation == "private":
+        group._data[-2:] *= 2
+    else:
+        group.B.data = group.B.data.copy()
+        group.B.data[-2:] *= 2
+    plans = (_plan([group]),)
+    for rows in (slice(0, 4), slice(8, 12)):
+        built = _build(plans, rows, byte_budget=2**20)
+        assert built.workspace is not None
+        with built.workspace as workspace:
+            expected = np.ones((4, 3))
+            if rows.start == 8:
+                expected[-1, 1:] = 2
+            np.testing.assert_array_equal(workspace.panels[0], expected)
 
 
 def test_materialized_spline_category_gram_cache_conservatively_refuses():
