@@ -579,8 +579,10 @@ def _polished_center(reference: GaussianCoefficientOracle) -> GaussianCoefficien
     direct_limit = float(np.sqrt(polish_limit))
     for _ in range(12):
         current = _oracle_at(reference, center)
-        _, _, kappa = _gradient_roundoff(current)
-        if kappa <= polish_limit:
+        _, roundoff, kappa = _gradient_roundoff(current)
+        # Kappa already includes this allowance; compare the computed score
+        # directly so arithmetic-floor residuals need no further Newton step.
+        if float(np.linalg.norm(current.score_penalized, ord=np.inf)) <= roundoff:
             return current
         direction = np.linalg.solve(
             current.penalized_curvature,
