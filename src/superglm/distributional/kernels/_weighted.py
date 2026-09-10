@@ -22,10 +22,11 @@ def weighted_natural_channel(
 
     ``numerators/denominators`` are its original finite analytic factors;
     the caller owns their validation and any additions forming a factor.
-    Normal unit channels retain ordinary frequency multiplication. For a
-    subnormal/nonfinite unit candidate, bounded binary exponent composition
-    recovers the weighted product instead. Each mantissa operation rounds;
-    a final subnormal rounds once at ldexp, and true overflow stays infinite.
+    Recovery is selected from the precomputed ``unit`` alone; normal unit
+    channels retain ordinary frequency multiplication without inspecting
+    their factors. For a subnormal/nonfinite unit candidate, bounded binary
+    exponent composition recovers the weighted product. Each mantissa operation
+    rounds; a final subnormal rounds once at ldexp, and true overflow stays infinite.
     """
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         result = multiplier * unit
@@ -45,6 +46,10 @@ def weighted_natural_channel(
         try:
             result[index] = _binary_product_divide(numerator, denominator)
         except ValueError:
-            sign = math.prod(math.copysign(1.0, value) for value in (*numerator, *denominator))
-            result[index] = math.copysign(math.inf, sign)
+            factors = (*numerator, *denominator)
+            if any(math.isnan(value) for value in factors):
+                result[index] = np.nan
+            else:
+                sign = math.prod(math.copysign(1.0, value) for value in factors)
+                result[index] = math.copysign(math.inf, sign)
     return result

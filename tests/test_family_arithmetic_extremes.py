@@ -603,3 +603,16 @@ def test_weighted_channel_keeps_true_overflow_and_rounds_final_underflow(sign):
     )
     assert underflow[0] == 0.0
     assert np.signbit(underflow[0]) == (sign < 0.0)
+
+
+@pytest.mark.parametrize("operand", ["multiplier", "numerator", "denominator"])
+@pytest.mark.parametrize("sign", [-1.0, 1.0])
+def test_weighted_channel_keeps_nan_factors_independent_of_their_sign_bit(operand, sign):
+    from superglm.distributional.kernels._weighted import weighted_natural_channel
+
+    values = {name: np.array([1.0]) for name in ("multiplier", "numerator", "denominator")}
+    values[operand][0] = np.copysign(np.nan, sign)
+    actual = weighted_natural_channel(
+        np.array([np.nan]), values["multiplier"], (values["numerator"],), (values["denominator"],)
+    )
+    assert np.isnan(actual[0])

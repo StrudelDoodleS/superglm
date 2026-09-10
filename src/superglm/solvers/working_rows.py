@@ -347,7 +347,6 @@ def pearson_chi2(
     # Its factored denominator retains the weighted statistic in that case.
     repair = ~np.isfinite(variance) & (sample_weight != 0.0) & (y != mu)
     if type(distribution) is NegativeBinomial and np.any(repair):
-        from superglm.distributional.kernels._common import _NumericalEvaluationError
         from superglm.distributional.kernels.gamma import _binary_product_divide
 
         for index in np.flatnonzero(repair):
@@ -357,7 +356,7 @@ def pearson_chi2(
                     (float(sample_weight[index]), delta, delta, float(distribution.theta)),
                     (float(mu[index]), float(mu[index]) + float(distribution.theta)),
                 )
-            except _NumericalEvaluationError:
+            except ValueError:
                 contributions[index] = np.inf
     if type(distribution) in (Gamma, Tweedie):
         # Unfloored reporting can be requested outside the fitted-mean guard.
@@ -369,7 +368,6 @@ def pearson_chi2(
             & (mu > 0.0)
         )
         if np.any(repair):
-            from superglm.distributional.kernels._common import _NumericalEvaluationError
             from superglm.distributional.kernels.gamma import _binary_product_divide
 
             roots = (
@@ -383,7 +381,7 @@ def pearson_chi2(
                     contributions[index] = _binary_product_divide(
                         (float(sample_weight[index]), delta, delta), (float(root), float(root))
                     )
-                except _NumericalEvaluationError:
+                except ValueError:
                     contributions[index] = np.inf
     with np.errstate(over="ignore", invalid="ignore"):
         return float(np.sum(contributions))

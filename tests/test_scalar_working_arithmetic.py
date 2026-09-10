@@ -257,3 +257,17 @@ def test_unfloored_reporting_keeps_a_representable_pearson_sum(family, mean, wei
         power = Decimal(2) if type(family) is Gamma else _d(family.p)
         expected = _d(weight) * (_d(2 * mean) - _d(mean)) ** 2 / _d(mean) ** power
         _assert_bounded(actual, expected)
+
+
+@pytest.mark.parametrize("family", (Gamma(), NegativeBinomial(2.0), Tweedie(1.5)))
+@pytest.mark.parametrize("response,mean", ((1.0, np.inf), (np.inf, 1e250)))
+def test_pearson_reporting_returns_infinity_for_nonfinite_recovery_factors(family, response, mean):
+    with np.errstate(all="ignore"):
+        actual = pearson_chi2(
+            distribution=family,
+            y=np.array([response]),
+            mu=np.array([mean]),
+            sample_weight=np.ones(1),
+            variance_floor=0.0,
+        )
+    assert actual == np.inf
