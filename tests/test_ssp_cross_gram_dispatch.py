@@ -88,14 +88,14 @@ def test_cross_matches_exact_live_factor_target_with_signed_and_zero_weights(kin
     _assert_target(algebra._cross_gram(right, left, weights), right, left, weights)
 
 
-def test_cross_reads_live_B_and_R_instead_of_owned_gram_snapshots():
+def test_cross_reads_live_B_and_R_after_public_and_private_mutations():
     left, right = _pair()
     weights = np.linspace(-0.5, 1.0, 12)
     algebra._cross_gram(left, right, weights)
     left.B.data *= 0.5
     right.B.data *= 2
-    left._data[:] = 0
-    right._data[:] = 0
+    left._data[:] *= 0.5
+    right._data[:] *= 0.5
     left.R_inv[0, 1] = 0.75
     right.R_inv[1, 0] = -0.25
     _assert_target(algebra._cross_gram(left, right, weights), left, right, weights)

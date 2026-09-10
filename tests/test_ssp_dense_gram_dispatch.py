@@ -163,7 +163,7 @@ def test_gram_reads_live_owned_arrays_without_a_retained_dense_copy(monkeypatch)
         dense = original(block)
         references.append(weakref.ref(dense))
         assert np.shares_memory(block.data, group._data)
-        assert not np.shares_memory(block.data, group.B.data)
+        assert np.shares_memory(block.data, group.B.data)
         return dense
 
     monkeypatch.setattr(core, "_dense_if_saturated", observe)
@@ -171,14 +171,12 @@ def test_gram_reads_live_owned_arrays_without_a_retained_dense_copy(monkeypatch)
     _assert_raw_target(group.gram(weights), basis, group.R_inv, weights)
     assert references and all(reference() is None for reference in references)
     group.B.data *= 2
-    # This distinction predates dense dispatch: Gram owns its data snapshot,
-    # while forward and transpose products continue to read B.
-    _assert_raw_target(group.gram(weights), basis, group.R_inv, weights)
+    _assert_raw_target(group.gram(weights), 2 * basis, group.R_inv, weights)
     np.testing.assert_array_equal(group.matvec(np.ones(2)), (2 * basis) @ np.ones(2))
     np.testing.assert_array_equal(group.rmatvec(weights), (2 * basis).T @ weights)
     group._data *= 0.5
     group.R_inv[0, 1] = 0.25
-    _assert_raw_target(group.gram(weights), 0.5 * basis, group.R_inv, weights)
+    _assert_raw_target(group.gram(weights), basis, group.R_inv, weights)
     assert identities == tuple(
         id(getattr(group, name)) for name in ("B", "_data", "_indices", "_indptr")
     )
