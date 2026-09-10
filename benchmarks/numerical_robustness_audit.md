@@ -187,6 +187,9 @@ not with unmodified master or the original failing implementation.
 | Joint SCOP, discrete | 0.3400 | 1.3410 | 3.944 | 375.9 / 377.7 |
 | Sum-to-zero | 0.4144 | 0.5142 | 1.241 | 382.2 / 383.8 |
 
+Both joint SCOP fits stop at the 40-iteration smoothing limit; that row measures
+nonconverged smoothing runs.
+
 Rank fixtures, both Gamma book fits, inactive QP and both SCOP fixtures retain
 bitwise-identical coefficient/prediction and objective outputs across this
 comparison. The tensor prediction difference is at most `3.86e-11`; its
@@ -227,7 +230,8 @@ dense inverse. Coefficient-dependent work remains current.
 A new five-pair comparison isolates this single production-file change:
 `3292dc72` before the cache, `6cd33c35` after it. The single SCOP median falls
 from 0.07564 to 0.03810 seconds; joint discrete SCOP falls from 1.21276 to
-0.33774 seconds, a 72.2% reduction. Peak RSS is essentially unchanged:
+0.33774 seconds, a 72.2% reduction. Both joint runs remain nonconverged at
+the smoothing iteration limit. Peak RSS is essentially unchanged:
 335.57/335.71 MiB and 377.53/377.38 MiB respectively. All ten complete outputs
 per case are identical. This is a separate batch from the 14-case table;
 its before values are freshly measured, not taken from that older batch.

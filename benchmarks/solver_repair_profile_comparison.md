@@ -1,5 +1,9 @@
 # Profile comparison for the numerical repairs
 
+The [PR review follow-up](pr381_review_followup.md) records the later repairs and
+fresh comparisons against the resumed baseline. Earlier measurements below
+retain their original source identities.
+
 The subsequent [family-arithmetic addition](family_arithmetic.md) uses the
 strict candidate below as its baseline and records fresh complete-fit timing,
 profile and dispatch comparisons. The measurements below remain attributed
@@ -186,6 +190,9 @@ accepted cache source `6cd33c35`:
 | --- | ---: | ---: | ---: | ---: |
 | Single SCOP | 0.07564 | 0.03810 | 0.00614 / 0.00367 | 335.57 / 335.71 |
 | Joint SCOP, discrete | 1.21276 | 0.33774 | 0.03713 / 0.02131 | 377.53 / 377.38 |
+
+Both joint SCOP fits stop at the 40-iteration smoothing limit without smoothing
+convergence.
 
 The joint median improves by 72.2% (3.59 times faster); the single median
 improves by 49.6%. Each case's ten complete numerical output payloads are
