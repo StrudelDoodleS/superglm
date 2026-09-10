@@ -21,6 +21,11 @@ from superglm.distributional.smoothing.objective import joint_laplace_objective
 from superglm.features import Spline
 from superglm.reml.penalty_algebra import _compute_penalty_logdet_evaluation
 from superglm.types import LambdaPolicy
+from tests._gaussian_lss_oracles import (
+    GaussianCoefficientOracle,
+    _gradient_roundoff,
+    coefficient_oracle,
+)
 from tests.test_distributional_endpoint_laml import (
     _axis_aligned_projected_face,
     _projected_penalty_problem,
@@ -150,6 +155,66 @@ class _IndependentMode:
     matrices: tuple
 
 
+def _residual_polished_gaussian_mode(
+    reference: GaussianCoefficientOracle,
+) -> GaussianCoefficientOracle:
+    """Polish local score residuals even when objective changes round away."""
+    current = reference
+    for _ in range(8):
+        _, roundoff, _ = _gradient_roundoff(current)
+        residual = np.linalg.norm(current.score_penalized, ord=np.inf)
+        if residual <= roundoff:
+            return current
+        correction = np.linalg.solve(current.penalized_curvature, current.score_penalized)
+        candidate = coefficient_oracle(
+            current.response,
+            current.weights,
+            semantics=current.semantics,
+            location_design=current.location_design,
+            scale_design=current.scale_design,
+            coefficients=current.coefficients + correction,
+            penalty=current.penalty,
+            location_offset=current.location_offset,
+            scale_offset=current.scale_offset,
+            scale_floor=0.0,
+        )
+        _, candidate_roundoff, _ = _gradient_roundoff(candidate)
+        candidate_residual = np.linalg.norm(candidate.score_penalized, ord=np.inf)
+        assert candidate_residual < residual or candidate_residual <= candidate_roundoff, (
+            "independent Gaussian Newton polish did not reduce the score residual"
+        )
+        current = candidate
+    raise AssertionError("independent Gaussian Newton polish missed the score roundoff bound")
+
+
+@pytest.mark.parametrize("displacement", [2.0**-20, 2.0**-29])
+def test_independent_gaussian_polish_uses_residuals_above_and_below_objective_ulp(
+    displacement, monkeypatch
+):
+    # For y=[0, 2], sigma=1 and penalty=2, beta*=1/2 and H=4 exactly.
+    # The exact objective gap 2*d**2 straddles one objective ULP in these cases.
+    reference = coefficient_oracle(
+        np.array([0.0, 2.0]),
+        np.ones(2),
+        semantics="frequency",
+        location_design=np.ones((2, 1)),
+        scale_design=np.empty((2, 0)),
+        coefficients=np.array([0.5 + displacement]),
+        penalty=np.array([[2.0]]),
+        scale_floor=0.0,
+    )
+    objective_ulp = np.spacing(abs(reference.penalized_optimizing_log_likelihood))
+    assert (2 * displacement**2 > objective_ulp) == (displacement == 2.0**-20)
+    polished = _residual_polished_gaussian_mode(reference)
+    _, roundoff, _ = _gradient_roundoff(polished)
+    assert abs(polished.coefficients[0] - 0.5) <= roundoff / 4
+    assert np.linalg.norm(polished.score_penalized, ord=np.inf) <= roundoff
+    with monkeypatch.context() as mutation:
+        mutation.setattr(np.linalg, "solve", lambda matrix, rhs: np.zeros_like(rhs))
+        with pytest.raises(AssertionError, match="did not reduce the score residual"):
+            _residual_polished_gaussian_mode(reference)
+
+
 def _independent_mode(model, kind):
     """Analytic likelihood/observed Hessian and unweighted component roots.
 
@@ -242,7 +307,8 @@ def _independent_mode(model, kind):
     objective = coefficient_objective + 0.5 * (hessian_logdet - penalty_logdet)
     score_bound = gamma * score_scale
     score_threshold = fit.config.tolerance * (1 + abs(coefficient_objective))
-    if np.max(np.abs(score)) > score_threshold + np.max(score_bound):
+    needs_polishing = np.max(np.abs(score)) > score_threshold + np.max(score_bound)
+    if needs_polishing and kind != "gaussian":
         # Check the independent objective-resolution invariant even when the
         # public coefficient solver labels this mode "objective_and_step".
         enclosed_score = np.abs(score) + score_bound
@@ -263,6 +329,23 @@ def _independent_mode(model, kind):
         np.linalg.norm(correction)
         + inverse_norm * (np.linalg.norm(solve_residual) + np.linalg.norm(score_bound))
     )
+    if needs_polishing and kind == "gaussian":
+        # An ordinary coefficient stop need not leave less than one objective
+        # ULP of improvement. Certify a nearby reference root at the score's
+        # arithmetic floor instead; all LAML values and error enclosures below
+        # still use the original public coefficients and their Newton radius.
+        reference = coefficient_oracle(
+            y,
+            np.ones(len(y)),
+            semantics="frequency",
+            location_design=matrices[0],
+            scale_design=matrices[1],
+            coefficients=beta,
+            penalty=penalty,
+            scale_floor=0.0,
+        )
+        polished = _residual_polished_gaussian_mode(reference)
+        assert np.linalg.norm(polished.coefficients - beta) <= radius
     drift_gradient = np.zeros(p)
     drift_norm_bound = 0.0
     for t_index, (matrix, block) in enumerate(zip(matrices, slices)):
