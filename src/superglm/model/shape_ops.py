@@ -15,6 +15,7 @@ from superglm.solvers.dispersion import (
     model_weight_semantics,
     pearson_residual_degrees_of_freedom,
 )
+from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import PenaltyComponent
 
 
@@ -326,7 +327,15 @@ def _profile_repaired_intercept(
             )
             dmu_deta = np.asarray(model._link.deriv_inverse(eta_safe), dtype=np.float64)
             score_rows = weights_arr * (y_arr - mu) * dmu_deta / variance
-            information_rows = weights_arr * dmu_deta**2 / variance
+            information_rows = fisher_working_weights(
+                distribution=model._distribution,
+                link=model._link,
+                mu=mu,
+                eta=eta_safe,
+                sample_weight=weights_arr,
+                dmu_deta=dmu_deta,
+                variance=variance,
+            )
             deviance = float(np.sum(weights_arr * deviance_units, dtype=np.float64))
             score = float(np.sum(score_rows, dtype=np.float64))
             information = float(np.sum(information_rows, dtype=np.float64))

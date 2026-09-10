@@ -59,6 +59,7 @@ from superglm.distributional.results.solver import (
     _assessment_scalar_error_bound,
     _assessment_unpenalized_logdet_term,
     _dense_penalty_fingerprint,
+    _endpoint_revalidation_projection_bound,
     _frozen_endpoint_mapping,
     _frozen_float_mapping,
     _readonly_finite,

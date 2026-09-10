@@ -12,13 +12,14 @@ from numpy.typing import NDArray
 
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.result import DenseSolverResult, DistributionalEFSConfig
+from superglm.distributional.results.solver import _record_penalty_objective
 from superglm.distributional.smoothing.endpoint_laml import evaluate_endpoint_laplace
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.smoothing.proposals import _scaled_proposal
 from superglm.reml.efs_update import EFSComponentState, EFSUpdateResult
 from superglm.reml.penalty_algebra import (
-    compute_logdet_s_derivatives,
-    compute_logdet_s_plus,
+    _compute_penalty_logdet_evaluation,
+    _PenaltyLogdetEvaluation,
     penalty_component_dense_matrix,
 )
 from superglm.types import LambdaPolicy
@@ -46,16 +47,19 @@ def joint_laplace_objective(
     expected_penalty = layout.penalty_matrix(lambdas)
     if not np.array_equal(result.penalty, expected_penalty):
         raise ValueError("result penalty does not match layout and lambdas")
-    penalty_log_pdet = compute_logdet_s_plus(
+    penalty_evaluation = _compute_penalty_logdet_evaluation(
         dict(lambdas),
         list(layout.penalties),
     )
     assert result.penalized_optimizing_log_likelihood is not None
     objective = -result.penalized_optimizing_log_likelihood + 0.5 * (
-        result.terminal_rank.log_pdet - penalty_log_pdet
+        result.terminal_rank.log_pdet - penalty_evaluation.logdet
     )
     if not math.isfinite(objective):
         raise ValueError("joint Laplace objective is non-finite")
+    _record_penalty_objective(
+        layout, result, lambdas=lambdas, evaluation=penalty_evaluation, objective=float(objective)
+    )
     return float(objective)
 
 
@@ -123,11 +127,12 @@ def initialize_distributional_lambdas(
 def _component_states(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
+    *,
+    evaluation: _PenaltyLogdetEvaluation | None = None,
 ) -> tuple[EFSComponentState, ...]:
-    effective_ranks, _ = compute_logdet_s_derivatives(
-        dict(lambdas),
-        list(layout.penalties),
-    )
+    if evaluation is None:
+        evaluation = _compute_penalty_logdet_evaluation(dict(lambdas), list(layout.penalties))
+    effective_ranks = evaluation.gradient
     states: list[EFSComponentState] = []
     for component in layout.penalties:
         # ``EFSComponentState`` demands a dense (width, width) block, but a

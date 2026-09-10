@@ -919,9 +919,19 @@ def _assert_same_basin_then_observables(
     )
 
 
-def test_gamma_two_surface_efs_is_start_stable_and_algorithm_matched(
+@pytest.mark.parametrize(
+    "initial_lambda,outer",
+    [(0.1, "efs"), (None, "efs+newton")],
+    ids=["fixed-start-efs", "information-start-newton"],
+)
+def test_gamma_two_surface_smoothing_is_start_stable_and_algorithm_matched(
     monkeypatch: pytest.MonkeyPatch,
+    initial_lambda: float | None,
+    outer: Literal["efs", "efs+newton"],
 ) -> None:
+    # Hold the EFS penalty start at the original value to isolate coefficient
+    # initialization. Information-scaled starts depend on the initial Fisher
+    # information; exercise those separately with the full-gradient endgame.
     fixture = _gamma_surface_fixture(repetitions=20)
     inner_tolerance = _COMPLETE_FIT_TOLERANCE
     outer_tolerance = _COMPLETE_FIT_TOLERANCE
@@ -945,13 +955,14 @@ def test_gamma_two_surface_efs_is_start_stable_and_algorithm_matched(
         ).fit_reml(
             fixture.frame,
             fixture.response,
+            initial_lambda=initial_lambda,
             max_reml_iter=100,
             reml_tol=outer_tolerance,
             max_inner_iter=100,
             inner_tol=inner_tolerance,
             retain_rows=False,
             practical_reml=False,
-            outer="efs",
+            outer=outer,
         )
 
     reference = fit_model()
@@ -971,7 +982,10 @@ def test_gamma_two_surface_efs_is_start_stable_and_algorithm_matched(
         smoothing = model.smoothing
         assert smoothing is not None
         assert smoothing.converged is True
-        assert smoothing.convergence_reason in {"lambda_change", "objective_plateau"}
+        expected_reasons = (
+            {"lambda_change", "objective_plateau"} if outer == "efs" else {"stationary"}
+        )
+        assert smoothing.convergence_reason in expected_reasons
         assert smoothing.coefficient_converged is True
         assert model.result.convergence_reason in {
             "score",

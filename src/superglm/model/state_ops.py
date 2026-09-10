@@ -7,7 +7,6 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR
 from superglm.group_matrix import DesignMatrix
 from superglm.inference._metrics_design import MappedColumnFactor
 from superglm.inference.covariance import (
@@ -27,6 +26,7 @@ from superglm.solvers.structured import (
     StructuredLinearSystemState,
     centered_operator_coefficient_estimable,
 )
+from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice
 
 
@@ -41,9 +41,13 @@ def _solver_space_working_weights(model) -> NDArray:
         eta = eta + model._fit_offset
     eta = stabilize_eta(eta, model._link)
     mu = clip_mu(model._link.inverse(eta), model._distribution)
-    V = model._distribution.variance(mu)
-    dmu_deta = model._link.deriv_inverse(eta)
-    return model._fit_weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
+    return fisher_working_weights(
+        distribution=model._distribution,
+        link=model._link,
+        mu=mu,
+        eta=eta,
+        sample_weight=model._fit_weights,
+    )
 
 
 def _public_intercept_shift(model, active_groups, p_active: int) -> NDArray:

@@ -384,7 +384,7 @@ def main():
         manifest["status"] = "aborted_preflight"
         manifest["preflight"]["load_guard_failed"] = overloaded
         write_json(manifest_path, manifest)
-        print(f"Preflight rejected activity/headroom; see {manifest_path}", file=sys.stderr)
+        print(f"Preflight rejected concurrent activity; see {manifest_path}", file=sys.stderr)
         return 2
     manifest["status"] = "running"
     write_json(manifest_path, manifest)

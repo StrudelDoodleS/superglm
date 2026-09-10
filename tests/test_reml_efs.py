@@ -101,7 +101,19 @@ class TestREMLSelectionPenaltyContract:
             model.fit_reml(X[["x1"]], y, max_reml_iter=20)
 
 
-def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact() -> None:
+def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact(monkeypatch) -> None:
+    import superglm.reml.efs as efs
+
+    fitted_states = []
+    fit_pirls = efs.fit_pirls
+
+    def record_fit(*args, **kwargs):
+        fitted = fit_pirls(*args, **kwargs, record_diagnostics=True)
+        fitted_states.append((dict(kwargs["lambda2"]), kwargs["X"], fitted))
+        return fitted
+
+    monkeypatch.setattr(efs, "fit_pirls", record_fit)
+
     rng = np.random.default_rng(731)
     x = np.linspace(-1.0, 1.0, 80)
     response = rng.poisson(np.exp(0.25 + 0.4 * np.sin(np.pi * x))).astype(float)
@@ -121,7 +133,7 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact() -> None:
     )
     lambdas, estimated_names = initialize_component_lambdas(penalties, 0.3)
 
-    result, _ = optimize_efs_reml(
+    result, terminal_dm = optimize_efs_reml(
         model._dm,
         model._distribution,
         model._link,
@@ -157,16 +169,12 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact() -> None:
     # component, and the monotone climb from the small initial lambda -- is the
     # portable part of this contract and is asserted exactly.
     #
-    # The values themselves are not bit-reproducible. Every step is the result
-    # of a backward-stable dense factorisation, so it carries an absolute error
-    # of O(eps * ||A||) and its last digits move with the BLAS microkernel.
-    # Sweeping OPENBLAS_CORETYPE over PRESCOTT/NEHALEM/SANDYBRIDGE/HASWELL and
-    # the machine default (thread counts 1..16 made no difference at this size)
-    # spreads every pinned quantity below by at most 3.7e-14 relative, while the
-    # smallest step the EFS iteration actually takes is 3.2e-2 relative. The
-    # tolerance below sits ~2.7e4 above the measured noise floor and ~3e7 below
-    # the smallest genuine behavioural step, so it still fails on any real
-    # regression of the update rule, penalty rank or PIRLS weighting.
+    # This is a behavioral snapshot, separate from the convergence certificate.
+    # Homogeneous PIRLS stopping takes an additional bootstrap iteration and
+    # therefore changes the seeded path. The snapshot reflects that policy;
+    # its comparison tolerance remains unchanged. Check the actual fitted
+    # lambdas and terminal object below so a plausible history cannot conceal
+    # a stale fit or a result that did not satisfy its stopping criterion.
     history_tolerance = 1e-9
     history = result.lambda_history
     assert len(history) == 6
@@ -177,12 +185,12 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact() -> None:
     np.testing.assert_allclose(
         observed_history,
         [
-            0.01626419289939607,
-            0.03495102648399008,
-            0.07976654460262309,
-            0.0895611385114593,
-            0.10670080347116746,
-            0.11008871046488522,
+            0.01626419201225552,
+            0.0349510256012486,
+            0.0797665435665074,
+            0.089561137759222,
+            0.10670080294752798,
+            0.11008871008433999,
         ],
         rtol=history_tolerance,
         atol=0.0,
@@ -195,12 +203,12 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact() -> None:
         beta,
         np.array(
             [
-                -0.1279063044551653,
-                0.36342378532888886,
-                0.9588680928056398,
-                1.030315559481865,
-                0.10048361540442426,
-                0.06796521432687205,
+                -0.12790630403504422,
+                0.36342378567226796,
+                0.9588680925890924,
+                1.030315558978761,
+                0.1004836156927829,
+                0.06796521410878009,
             ]
         ),
         rtol=history_tolerance,
@@ -220,3 +228,14 @@ def test_scalar_efs_seeded_history_and_terminal_fit_remain_exact() -> None:
     )
     assert result.n_reml_iter == 5
     assert result.converged is False
+    assert len(fitted_states) == 7  # Bootstrap, five outer fits, and the final refit.
+    assert history == [values for values, _, _ in fitted_states[1:]]
+    assert result.pirls_result is fitted_states[-1][2]
+    assert terminal_dm is fitted_states[-1][1]
+    for _, _, fitted in fitted_states:
+        assert fitted.converged is True
+        assert fitted.termination_reason == "converged"
+        assert fitted.iteration_log
+        terminal = fitted.iteration_log[-1]
+        assert terminal.convergence_tolerance == 1e-8
+        assert terminal.convergence_value < terminal.convergence_tolerance

@@ -830,10 +830,9 @@ primary; tool completion time is not benchmark time. Fit RSS includes runtime
 and compilation state and is distinct from the later process peak during output
 collection.
 
-The user reports that Headroom and Kompress are now uninstalled. Current
-comparisons do not assume either is running. Earlier policy wording naming
-those services meant that no observed external process was excluded; it is
-not evidence of service presence in every window. Historical raw receipts and
+Current comparisons determine external process presence from observed activity.
+No observed external process is excluded. Process-audit policy is not evidence
+of service presence in every window. Historical raw receipts and
 their process observations remain unchanged.
 
 All size-sweep fit endpoint activity screens passed and source/wrapper stability

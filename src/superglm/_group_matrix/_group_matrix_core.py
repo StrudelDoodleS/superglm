@@ -16,6 +16,7 @@ from superglm.factor_smooth_geometry import (
 from ._group_matrix_discretized import DiscretizedSSPGroupMatrix
 from ._group_matrix_kernels import (
     _csr_weighted_gram,
+    _exact_ssp_moments,
     _factor_smooth_csr_dense_cross,
     _factor_smooth_csr_matvec,
     _factor_smooth_csr_rmatvec,
@@ -25,6 +26,7 @@ from ._group_matrix_kernels import (
     _factor_smooth_support_dense_cross,
     _factor_smooth_support_matvec,
     _factor_smooth_support_rmatvec,
+    _ssp_gram_needs_exact,
 )
 from ._row_lookup import build_row_lookup
 
@@ -673,8 +675,45 @@ class SparseSSPGroupMatrix:
         return self.R_inv.T @ np.asarray(self.B.T @ w).ravel()
 
     def gram(self, W: NDArray) -> NDArray:
-        # R_inv.T @ (B.T @ diag(W) @ B) @ R_inv: numba CSR gram
-        raw_gram = _csr_weighted_gram(self._data, self._indices, self._indptr, W, self._p_b)
+        if _ssp_gram_needs_exact(self._data, self.R_inv, W):
+            return _exact_ssp_moments(self.B, self.R_inv, W)[0]
+        dense = None
+        cells = self.shape[0] * self._p_b
+        if (
+            cells
+            and self._data.size >= _DENSE_LEVEL_SATURATION * cells
+            and isinstance(W, np.ndarray)
+            and W.shape == (self.shape[0],)
+            and W.dtype == self._data.dtype == self.R_inv.dtype == np.dtype(np.float64)
+        ):
+            # Gram reads its owned data snapshot, not B.data. A fresh view
+            # also checks the current indices instead of B's cached flags.
+            raw_basis = sp.csr_matrix(
+                (self._data, self._indices, self._indptr),
+                shape=(self.shape[0], self._p_b),
+                copy=False,
+            )
+            if raw_basis.has_canonical_format:
+                if (
+                    self._data.size == cells
+                    and self._data.flags.c_contiguous
+                    and np.all(np.diff(self._indptr) == self._p_b)
+                    and np.all(self._indices[self._indptr[:-1]] == 0)
+                    and np.all(self._indices[self._indptr[1:] - 1] == self._p_b - 1)
+                ):
+                    # Strictly ordered p-entry rows spanning 0..p-1 already
+                    # store dense B. This view follows live owned values.
+                    dense = self._data.reshape(self.shape[0], self._p_b)
+                else:
+                    dense = _dense_if_saturated(raw_basis)
+        if dense is None:
+            raw_gram = _csr_weighted_gram(self._data, self._indices, self._indptr, W, self._p_b)
+        else:
+            raw_gram = (dense * W[:, None]).T @ dense
+            # Match the CSR kernel's upper-triangle orientation and exact
+            # raw symmetry; copying adds no rounding to the weighted dots.
+            lower = np.tril_indices(self._p_b, -1)
+            raw_gram[lower] = raw_gram.T[lower]
         return self.R_inv.T @ raw_gram @ self.R_inv
 
     def toarray(self) -> NDArray:

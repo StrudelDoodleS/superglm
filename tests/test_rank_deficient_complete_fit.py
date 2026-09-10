@@ -20,7 +20,9 @@ import json
 import resource
 import subprocess
 import sys
-import time
+import threading
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 from benchmarks import rank_deficient_complete_fit as bench
@@ -36,63 +38,6 @@ from benchmarks import rank_deficient_complete_fit as bench
 # 1336, and realizes all 41 levels of both factors. It also satisfies the CLI's
 # coupon-collector row floor, so the fixture and the flag agree.
 TINY = {"levels": 41, "rows": 800, "repeats": 1, "seed": 31337}
-
-# The long side of the footprint comparison. A per-tick store would hold this
-# many entries, so it breaks both bounds below by a wide margin, while the wait
-# stays short: 100 ticks at `interval=0.001` is 0.15 s on an idle machine.
-_LONG_TICKS = 100
-
-# How long a starved sampler is given to reach a tick target before the
-# precondition is reported as unmet. It bounds only the FAILING path. The
-# budget is `_LONG_TICKS` times the worst per-tick cost this could be
-# reproduced at -- 175 ms, under two CPU-bound threads on a four-CPU cgroup,
-# against 1.5 ms idle and the 50 ms of the hosted-runner failure this replaced
-# -- which is 18 s, with the rest as margin for a slower machine.
-_TICK_TIMEOUT = 120.0
-
-
-def _hold_open_until(sampler, target_samples: int, timeout: float = _TICK_TIMEOUT) -> None:
-    """Run `sampler` until it has recorded `target_samples` ticks, then stop it.
-
-    The sampler ticks on a background thread, so "sleep 0.5 s and you will have
-    ten times the ticks of a 0.05 s sleep" is an assumption about the OS
-    scheduler, not a measurement -- and it is false under contention. A hosted
-    runner recorded 25 ticks for the 0.05 s window and 10 for the 0.5 s one
-    (50 ms per tick against 2 ms), inverting the ratio the tests asserted;
-    locally, two CPU-bound threads on a four-CPU cgroup reproduce the inversion
-    in 4 runs out of 4.
-
-    Waiting on the tick COUNT makes the precondition something these tests
-    establish rather than something they hope for. Contention then makes them
-    slower, never wrong, and a sampler that has genuinely stopped ticking is
-    reported as exactly that.
-
-    ONE EXCEPTION, and it is this helper's own overshoot: a target is a LOWER
-    bound, so a waiter that is itself descheduled leaves the sampler ticking
-    past it. `test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures`
-    caps the short side, so there alone contention can make the test wrong
-    rather than slow -- see the ceiling's own comment for the measured margin
-    and the re-take that absorbs an isolated stall. The other three call sites
-    only ever benefit from an overshoot.
-
-    The wait leaves the sampler STOPPED, not merely flagged: `__exit__` joins,
-    so `samples` is frozen once this returns and a caller may read it twice and
-    get the same number. That join carries a 5 s timeout and returns whether or
-    not the thread died, so the freeze is asserted here rather than assumed --
-    once, for all four call sites. It is checked after the count, because a
-    sampler wedged inside `_pool_snapshot()` fails both and "recorded N of M
-    ticks" is the more useful of the two messages.
-    """
-    deadline = time.monotonic() + timeout
-    with sampler:
-        while sampler.samples < target_samples and time.monotonic() < deadline:
-            time.sleep(0.002)
-    assert sampler.samples >= target_samples, (
-        f"sampler recorded {sampler.samples} of {target_samples} ticks in {timeout:.0f}s"
-    )
-    assert sampler._thread is None or not sampler._thread.is_alive(), (
-        "sampler thread outlived its join; `samples` is still moving"
-    )
 
 
 def test_the_fixture_reaches_the_deficient_path_it_claims_to_measure(payload) -> None:
@@ -126,166 +71,312 @@ def payload() -> dict:
     return bench.measure(**TINY)
 
 
-def test_the_sampler_records_every_fit_not_just_the_first() -> None:
-    """`--repeats` defaults to 3 and the sampler is entered once per fit.
-
-    A stop flag set in `__exit__` and never cleared in `__enter__` makes the
-    second and third fits record nothing, silently -- the payload still reports
-    a sample count, just one from the first fit only.  `samples` is cumulative
-    across re-entries, so a sampler that stopped recording never reaches the
-    next target and is reported as stalled rather than as slow.
-    """
-    sampler = bench._DispatchSampler(interval=0.001)
-    counts = []
-    for _ in range(3):
-        # RELATIVE to the count on entry, not an absolute ladder. `samples` is
-        # cumulative, so absolute targets (5, 10, 15) are satisfied on ENTRY by
-        # one overshooting first wait, and the later holds then establish
-        # NOTHING: they skip their `while` body entirely and `counts[i] >
-        # counts[i-1]` is left to whatever the re-entered sampler happens to do
-        # between `__enter__` and `__exit__`. Measured, injecting a single
-        # delayed main-thread wake-up -- the same contention this rewrite exists
-        # to survive -- at `interval=0.001`: with absolute targets, holds 2 and
-        # 3 performed 0 and 0 polls in 12 trials out of 12, at a 40 ms stall and
-        # again at 60 ms; with relative targets, 3 to 4 polls each.
-        #
-        # What that leaves the comparison resting on is measured too, and it is
-        # NOT a zero-tick race: over 300 re-entries whose wait does nothing, the
-        # sampler recorded one tick in 300 and zero ticks in none. `_run` tests
-        # `_stop` BEFORE its first tick, so the flag check -- not the join -- is
-        # what could make a losing thread record nothing, and `__enter__` clears
-        # the flag before starting the thread, so it reliably registers. The
-        # ladder kept passing on exactly that, which is why passing said so
-        # little. Asking each re-entry for five ticks OF ITS OWN is what the
-        # docstring claims and what the assertions below need.
-        _hold_open_until(sampler, sampler.samples + 5)
-        counts.append(sampler.samples)
-    assert counts[0] > 0
-    # each re-entry must add samples, not sit at the first fit's total
-    assert counts[1] > counts[0], f"second fit recorded nothing: {counts}"
-    assert counts[2] > counts[1], f"third fit recorded nothing: {counts}"
-
-
-def test_the_sampler_footprint_does_not_grow_with_the_fit_it_measures() -> None:
-    """Its own retention lands in the peak RSS this benchmark reports.
-
-    Keeping a snapshot per tick makes the sampler's memory proportional to the
-    RUNTIME of the side being measured, so the slower side carries a larger
-    term -- an asymmetry biased toward whichever side is faster, in the one
-    figure the comparison publishes as a memory result.
-
-    The long side is defined by the TICKS it took, not by how long it slept:
-    ticks are what a per-tick store would retain, and a sleep only buys them on
-    an idle machine.
-    """
-    # The ratio has to be ESTABLISHED, not hoped for: `_LONG_TICKS` fixes
-    # `long >= 100` and `short >= 5`, which leaves `long > short * 3` true only
-    # while `short` stays at or under 33, and `short`'s own wait bounds it
-    # below, never above.
-    #
-    # Scaling the long target with `short.samples` would establish it, but at
-    # the cost of making the long side's WORK scale with a quantity that has no
-    # upper bound -- `short.samples` is bounded below by its own wait and not
-    # bounded above at all. That trades a wrong assertion for a misattributed
-    # timeout: the long sampler is failed by `_TICK_TIMEOUT` for a stall on the
-    # short side, while both samplers are behaving. The bound is the point, not
-    # any particular overshoot: at the 50 ms/tick this file documents from a
-    # hosted runner, a short side of merely 800 ticks already exceeds the 120 s
-    # budget.  (A short side in the thousands is reachable only by making a
-    # tick artificially cheap -- forcing it that way is how the branch was
-    # demonstrated -- but nothing has to be reachable for an unbounded target
-    # to be the wrong shape.)
-    #
-    # A short side that overshot a 5-tick target by orders of magnitude is a
-    # broken measurement, not a reason to triple the long side's work, so it is
-    # re-taken instead. 33 is `_LONG_TICKS // 3`, the largest short count the
-    # fixed long target can still dominate: 33 * 3 = 99 < 100.
-    #
-    # The ceiling and the ratio are the same number only because the short
-    # sampler is STOPPED between them: `__exit__` sets `_stop` and then joins,
-    # so `short.samples` is frozen when `_hold_open_until` returns and the guard
-    # below is checking the value the premise below it will use. That join takes
-    # a 5 s timeout and returns whether or not the thread died, so
-    # `_hold_open_until` asserts the thread is really gone rather than trusting
-    # it; without that, a short sampler that outlived its join would keep
-    # ticking through the long side's 100 ticks and fail the premise with the
-    # guard already passed.
-    #
-    # The ceiling is the one place in this file where contention can make a test
-    # WRONG rather than slow, so its margin is measured, not assumed. A tick
-    # costs more than its nominal 1 ms interval -- the snapshot dominates -- so
-    # the sampler runs at 0.65 ticks/ms here, and a single waiter stall has to
-    # reach about 50 ms before one attempt clears 33 (8 trials each: 40 ms gave
-    # 25-28 and no breach, 50 ms gave 33-35 and breached 7 times, 60 ms gave
-    # 39-41 and breached 8). Polling faster does not buy that back: at 0.5 ms
-    # against 2 ms the no-stall exit count moves only from 6 to 5, and the 50 ms
-    # stall still breaches, because what overshoots is the stall and not the
-    # poll. Three independent attempts, each needing its own ~50 ms stall, is
-    # the protection -- and if all three overshoot the failure names the short
-    # side rather than blaming the ratio.
-    ceiling = _LONG_TICKS // 3
-    for _ in range(3):
-        short = bench._DispatchSampler(interval=0.001)
-        _hold_open_until(short, 5)
-        if short.samples <= ceiling:
-            break
-    assert short.samples <= ceiling, (
-        f"short sampler overshot its 5-tick target to {short.samples} on every attempt "
-        f"(ceiling {ceiling}); the poll stalled, so this fixture cannot establish the ratio"
-    )
-    long = bench._DispatchSampler(interval=0.001)
-    _hold_open_until(long, _LONG_TICKS)
-
-    # established by the two waits above, restated as the premise of the rest
-    assert long.samples > short.samples * 3, "fixture did not produce a longer run"
-    # the store is keyed by configuration, so a 20x longer run must not make it
-    # meaningfully bigger
-    assert len(long._dwell) <= len(short._dwell) + 2
-    assert len(long._dwell) < 20
-
-
-def test_the_sampler_reports_dwell_not_just_presence() -> None:
-    """Seen once in twelve thousand samples and seen throughout are not the same claim.
-
-    Discarding the count cannot tell a brief startup window from a
-    configuration that held for the whole fit, which is exactly the
-    distinction this benchmark got wrong once.
-    """
-    sampler = bench._DispatchSampler(interval=0.001)
-    _hold_open_until(sampler, 10)
-    observed = sampler.observed()
-    assert observed
-    for pool in observed:
-        assert pool["samples_seen_in"] >= 1
-        assert 0.0 < pool["fraction_of_samples"] <= 1.0
-        assert pool["samples_seen_in"] <= sampler.samples
-
-
-def test_the_sampler_counts_duplicate_pool_metadata_once_per_tick(monkeypatch) -> None:
-    """Two loaded libraries may report one identical BLAS configuration.
-
-    SciPy 1.18 and NumPy can each load an OpenBLAS library whose selected
-    threadpool metadata is identical.  The sampler reports configuration dwell,
-    not library-instance dwell, so one tick must not count that key twice and
-    produce a fraction greater than one.
-    """
-    pool = {
+def _pool(**changes):
+    return {
         "user_api": "blas",
         "internal_api": "openblas",
         "prefix": "libscipy_openblas",
-        "version": "0.3.31.dev",
+        "version": "test",
         "threading_layer": "pthreads",
         "num_threads": 1,
+        **changes,
     }
-    monkeypatch.setattr(bench, "_pool_snapshot", lambda: [pool.copy(), pool.copy()])
-    sampler = bench._DispatchSampler(interval=0.001)
-    _hold_open_until(sampler, 5)
 
-    observed = sampler.observed()
-    assert sampler.samples > 0
-    assert len(observed) == 1
-    assert observed[0]["samples_seen_in"] == sampler.samples
-    assert observed[0]["fraction_of_samples"] == 1.0
+
+def _unexpected_observer(*_args, **_kwargs):
+    raise AssertionError("Timed fits must not construct or invoke observers.")
+
+
+def test_pool_observations_require_explicit_events_on_the_fitting_thread(monkeypatch):
+    thread = threading.get_ident()
+    snapshots = []
+
+    def snapshot():
+        snapshots.append(threading.get_ident())
+        return [_pool()]
+
+    monkeypatch.setattr(bench, "_pool_snapshot", snapshot)
+    monkeypatch.setattr(threading, "Thread", _unexpected_observer)
+    sampler = bench._DispatchSampler()
+    with sampler:
+        assert sampler.samples == 0
+        sampler.sample("kernel:call")
+        assert snapshots == [thread]
+        with monkeypatch.context() as foreign:
+            foreign.setattr(bench, "get_ident", lambda: thread + 1)
+            with pytest.raises(RuntimeError, match="active fitting thread"):
+                sampler.sample("kernel:return")
+        with pytest.raises(RuntimeError, match="already active"):
+            sampler.__enter__()
+    with pytest.raises(RuntimeError, match="active fitting thread"):
+        sampler.sample("kernel:return")
+    assert snapshots == [thread]
+
+
+def test_pool_sampling_restarts_its_event_schedule_for_each_fit(monkeypatch):
+    monkeypatch.setattr(bench, "_pool_snapshot", lambda: [_pool()])
+    sampler = bench._DispatchSampler()
+    for fit in range(1, 4):
+        with sampler:
+            for _ in range(8):
+                sampler.sample("kernel:call")
+        assert sampler.samples == 4 * fit  # events 1, 2, 4, 8 in each fit
+    observation = bench._native_pool_receipt(sampler)["native_pool_observation"]
+    assert observation["fit_entries"] == observation["fit_entries_with_samples"] == 3
+    assert observation["event_counts"] == {"kernel:call": 24}
+    assert observation["sampled_event_counts"] == {"kernel:call": 12}
+
+
+def test_pool_observation_storage_and_snapshot_attempts_are_bounded(monkeypatch):
+    calls = []
+
+    def snapshot():
+        calls.append(None)
+        return [_pool(num_threads=len(calls))]
+
+    monkeypatch.setattr(bench, "_pool_snapshot", snapshot)
+    sampler = bench._DispatchSampler(max_samples=5, max_configurations=2, max_event_names=2)
+    with sampler:
+        for _ in range(1024):
+            sampler.sample("kernel:call")
+        sampler.sample("kernel:return")
+        for index in range(100):
+            sampler.sample(f"unretained:{index}")
+    observation = bench._native_pool_receipt(sampler)["native_pool_observation"]
+    assert sampler.samples == sampler.sample_attempts == len(calls) == 5
+    assert len(sampler.observed()) == 2
+    assert len(observation["event_counts"]) == 2
+    assert len(observation["sampled_event_counts"]) <= 2
+    assert len(sampler._session_events) <= 2
+    assert observation["dropped_configuration_observations"] == 3
+    assert observation["dropped_event_notifications"] == 100
+    assert observation["eligible_events_skipped_at_sample_cap"] == 7
+
+
+def test_pool_frequency_counts_selected_events_and_deduplicates_metadata(monkeypatch):
+    monkeypatch.setattr(bench, "_pool_snapshot", lambda: [_pool(), _pool()])
+    sampler = bench._DispatchSampler()
+    with sampler:
+        for _ in range(8):
+            sampler.sample("kernel:call")
+    receipt = bench._native_pool_receipt(sampler)
+    assert receipt["native_pool_samples"] == 4
+    assert receipt["native_pool_observation"]["events_seen"] == 8
+    assert "not elapsed-time dwell" in receipt["native_pool_observation"]["semantics"]
+    assert receipt["native_pools_during_fit"] == [
+        {**_pool(), "samples_seen_in": 4, "fraction_of_samples": 1.0}
+    ]
+
+
+def test_failed_pool_enumerations_consume_the_attempt_cap(monkeypatch):
+    attempts = []
+
+    def failure():
+        attempts.append(None)
+        raise RuntimeError("enumeration failed")
+
+    monkeypatch.setattr(bench, "_pool_snapshot", failure)
+    sampler = bench._DispatchSampler(max_samples=3)
+    with sampler:
+        for _ in range(1024):
+            sampler.sample("kernel:call")
+    receipt = bench._native_pool_receipt(sampler)
+    observation = receipt["native_pool_observation"]
+    assert len(attempts) == observation["sample_attempts"] == observation["error_count"] == 3
+    assert observation["eligible_events_skipped_at_sample_cap"] == 8
+    assert receipt["native_pool_samples"] == 0
+    assert observation["status"] == "observer_error"
+    assert observation["errors"] == ["RuntimeError: enumeration failed"] * 3
+
+
+@pytest.mark.parametrize("events", [0, 1])
+def test_missing_pool_evidence_is_reported_explicitly(monkeypatch, events):
+    monkeypatch.setattr(bench, "_pool_snapshot", lambda: [])
+    sampler = bench._DispatchSampler()
+    with sampler:
+        for _ in range(events):
+            sampler.sample("kernel:call")
+    status = bench._native_pool_receipt(sampler)["native_pool_observation"]["status"]
+    assert status == ("no_native_pools_observed" if events else "no_solver_events_observed")
+    assert bench._native_pool_receipt(None) == {
+        "native_pools_during_fit": [],
+        "native_pool_samples": 0,
+        "native_pool_observation": {"status": "not_observed_in_timed_fit"},
+    }
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_pool_profile_observes_actual_kernel_events_and_restores_on_failure(monkeypatch, raises):
+    monkeypatch.setattr(bench, "_pool_snapshot", lambda: [_pool()])
+    sampler = bench._DispatchSampler()
+
+    def kernel():
+        if raises:
+            raise ValueError("kernel failed")
+        return 3
+
+    previous = sys.getprofile()
+    try:
+        with sampler, bench._native_pool_dispatch(sampler, {"kernel": kernel}):
+            if raises:
+                with pytest.raises(ValueError, match="kernel failed"):
+                    kernel()
+            else:
+                assert kernel() == 3
+        assert sys.getprofile() is previous
+    finally:
+        sys.setprofile(previous)
+    assert sampler._events == {"kernel:call": 1, "kernel:return": 1}
+    assert sampler.samples == 2
+
+
+@pytest.mark.parametrize("repeats", [1, 3])
+def test_timed_rank_fit_has_no_observer_and_keeps_first_use_inside_clock(monkeypatch, repeats):
+    events = []
+    clock_active = False
+    initialized = False
+    ticks = iter(float(index) for index in range(2 * repeats))
+    frame = bench.pd.DataFrame({"g": ["a", "b"], "h": ["b", "a"]})
+    response = bench.np.array([1.0, 2.0])
+    decomposition = SimpleNamespace(method="test", rank=1, pivots=None)
+
+    class Model:
+        def __init__(self, **_kwargs):
+            self._dm = SimpleNamespace(p=1)
+            self.result = SimpleNamespace(
+                beta=bench.np.array([1.0]),
+                effective_df=1.0,
+                deviance=2.0,
+                n_iter=1,
+                converged=True,
+                rank_info=SimpleNamespace(
+                    data=decomposition, augmented=decomposition, coefficient=decomposition
+                ),
+            )
+
+        def fit(self, *_args):
+            nonlocal initialized
+            assert clock_active
+            events.append("fit")
+            if not initialized:
+                events.append("first_use")
+                initialized = True
+
+        def predict(self, _frame):
+            assert not clock_active
+            return response
+
+    def clock():
+        nonlocal clock_active
+        clock_active = not clock_active
+        events.append("clock_start" if clock_active else "clock_stop")
+        return next(ticks)
+
+    monkeypatch.setattr(bench, "SuperGLM", Model)
+    monkeypatch.setattr(bench, "_design", lambda *_args: (frame, response))
+    monkeypatch.setattr(bench, "_provenance", lambda: {})
+    monkeypatch.setattr(bench.time, "perf_counter", clock)
+    for name in ("_DispatchSampler", "_native_pool_dispatch", "_pool_snapshot"):
+        monkeypatch.setattr(bench, name, _unexpected_observer)
+    receipt = bench.measure(2, 4, repeats, 1, measure_time=True)
+    assert events == ["clock_start", "fit", "first_use", "clock_stop"] + [
+        "clock_start",
+        "fit",
+        "clock_stop",
+    ] * (repeats - 1)
+    assert receipt["wall_time_status"] == "measured"
+    assert receipt["timing_seconds"] == {"min": 1.0, "median": 1.0, "all": [1.0] * repeats}
+    blas = receipt["backend_dispatch"]["blas"]
+    assert not blas["sampled_during_fit"]
+    assert blas["samples"] == 0 and blas["pools_during_fit"] == []
+    assert blas["observation"]["status"] == "not_observed_in_timed_fit"
+
+
+@pytest.mark.parametrize(
+    ("driver_name", "case", "mode"),
+    [
+        ("multi_penalty_support", "scalar", "fixed"),
+        ("multi_penalty_support", "scalar", "reml"),
+        ("multi_penalty_support", "gamma", "fixed"),
+        ("multi_penalty_support", "gamma", "reml"),
+        ("solver_repair_complete_fit", "qp", "reml"),
+    ],
+)
+def test_timed_complete_fit_drivers_have_no_observer(
+    monkeypatch, tmp_path, driver_name, case, mode
+):
+    from importlib import import_module
+
+    driver = import_module(f"benchmarks.{driver_name}")
+    events = []
+    clock_active = False
+    ticks = iter([10.0, 11.0])
+    frame = bench.pd.DataFrame({"x": [0.0, 1.0]})
+    response = bench.np.array([1.0, 2.0])
+
+    class Model:
+        def fit(self, *_args, **_kwargs):
+            assert clock_active
+            events.extend(["fit", "first_use"])
+
+        fit_reml = fit
+
+        def diagnose(self):
+            return SimpleNamespace(to_dict=lambda: {})
+
+    def clock():
+        nonlocal clock_active
+        clock_active = not clock_active
+        events.append("clock_start" if clock_active else "clock_stop")
+        return next(ticks)
+
+    def outputs(*_args):
+        assert not clock_active
+        events.append("outputs")
+        return {"coefficients": [1.0]}
+
+    def rss(*_args):
+        assert not clock_active
+        events.append("rss")
+        return SimpleNamespace(ru_maxrss=1024.0)
+
+    fixture = (
+        (Model(), frame, response, {})
+        if driver_name == "multi_penalty_support"
+        else (Model(), frame, response, None, None, {})
+    )
+    monkeypatch.setattr(driver, "_fixture", lambda *_args: fixture)
+    monkeypatch.setattr(driver, "_source_identity", lambda: {"source_digest": "test"})
+    monkeypatch.setattr(driver, "_fit_outputs", outputs)
+    monkeypatch.setattr(driver.time, "perf_counter", clock)
+    monkeypatch.setattr(driver.resource, "getrusage", rss)
+    monkeypatch.setattr(driver, "threadpool_limits", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(driver.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(driver, "_DispatchSampler", _unexpected_observer)
+    observer = "_kernel_dispatch" if driver_name == "multi_penalty_support" else "_solver_dispatch"
+    monkeypatch.setattr(driver, observer, _unexpected_observer)
+    monkeypatch.setattr(bench, "_pool_snapshot", _unexpected_observer)
+    path = tmp_path / "receipt.json"
+    argv = [
+        driver.__file__,
+        "--case",
+        case,
+        "--label",
+        "test",
+        "--out",
+        str(path),
+        "--measure-time",
+    ]
+    if driver_name == "multi_penalty_support":
+        argv.extend(["--mode", mode])
+    monkeypatch.setattr(sys, "argv", argv)
+    driver.main()
+    receipt = json.loads(path.read_text())
+    assert events == ["clock_start", "fit", "first_use", "clock_stop", "rss", "outputs"]
+    assert receipt["fit_seconds"] == 1.0  # synthetic clock; no performance measurement
+    assert receipt["native_pool_samples"] == 0 and receipt["native_pools_during_fit"] == []
+    assert receipt["native_pool_observation"]["status"] == "not_observed_in_timed_fit"
+    assert receipt["outputs"] == {"coefficients": [1.0]}
 
 
 def test_peak_memory_records_how_many_fits_it_covers(payload: dict) -> None:
@@ -331,6 +422,13 @@ def test_the_thread_count_was_sampled_during_a_fit(payload: dict) -> None:
     assert blas["sampled_during_fit"] is True
     assert blas["samples"] >= 1
     assert blas["pools_during_fit"], "no BLAS pool observed while the fit ran"
+    observation = blas["observation"]
+    assert observation["status"] == "observed_at_solver_events"
+    assert observation["events_seen"] > 0 and observation["error_count"] == 0
+    assert any(
+        observation["event_counts"].get(f"{name}:call", 0) > 0
+        for name in ("decompose_gram", "decompose_factor")
+    )
 
 
 def test_dispatch_comes_from_a_live_process_not_build_metadata(payload: dict) -> None:
@@ -357,8 +455,8 @@ def test_the_payload_says_what_it_measured_on(payload: dict) -> None:
     assert configuration["train_rows"] == TINY["rows"] // 2
     assert configuration["parameters"] > 0
     assert payload["backend_dispatch"]["python"]
-    assert len(payload["timing_seconds"]["all"]) == TINY["repeats"]
-    assert payload["timing_seconds"]["min"] <= payload["timing_seconds"]["median"]
+    assert payload["wall_time_status"] == "unmeasured"
+    assert payload["timing_seconds"] == {"min": None, "median": None, "all": []}
 
 
 def test_the_numerical_outputs_are_the_ones_a_comparison_would_diff(payload: dict) -> None:
@@ -441,7 +539,7 @@ def test_the_artifact_on_disk_still_satisfies_its_own_invariants() -> None:
         assert side["backend_dispatch"]["blas"]["sampled_during_fit"] is True
         assert side["backend_dispatch"]["blas"]["pools_during_fit"]
         for pool in side["backend_dispatch"]["blas"]["pools_during_fit"]:
-            # dwell is what separates a startup window from a phase that held
+            # Preserve internal counts in this historical observation artifact.
             assert pool["samples_seen_in"] >= 1
             assert 0.0 < pool["fraction_of_samples"] <= 1.0
     # The summary's claims, re-derived from the two sides rather than read back

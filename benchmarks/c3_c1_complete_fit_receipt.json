@@ -1,5 +1,6 @@
 {
   "schema": "superglm-c3-c1-complete-fit-evidence-v1",
+  "label_revision_note": "Obsolete auxiliary-process names and category labels were generalized after recording. Numeric measurements, historical hashes and timing acceptance remain unchanged. Auxiliary-process totals cover the originally selected process subset, not all external activity.",
   "baseline": {
     "version": "0.31.0",
     "sha": "8962c4520cad948aa20c480a238b7bb1e276e9cd"
@@ -1436,7 +1437,7 @@
         "classification": "local_observations_only",
         "timing_benefit": "unmeasured",
         "validated_speedup_ratio": null,
-        "reason": "Uneven concurrent Headroom/tool activity reaches 0.676 core for Headroom and 0.909 external cores in a one-core fit interval. Low machine load does not rule out cache or memory-bandwidth contention; this window is rejected as controlled speed-benefit evidence.",
+        "reason": "Uneven concurrent auxiliary-process/tool activity reaches 0.676 core for auxiliary-process and 0.909 external cores in a one-core fit interval. Low machine load does not rule out cache or memory-bandwidth contention; this window is rejected as controlled speed-benefit evidence.",
         "clocks": "Observed fit seconds are copied exclusively from worker perf_counter receipts; no proxy clocks or phase durations are used.",
         "preflight": {
           "json": "quiet-window.json",
@@ -1482,7 +1483,7 @@
           "warmup": false,
           "instrument": false,
           "measure_time": true,
-          "quiet_profile": "2026-09-08 local C3/C1 serial window; all numerical workers stopped; 10s preflight load0.5 on16 CPUs; Headroom0.006core; per-fit process activity retained",
+          "quiet_profile": "2026-09-08 local C3/C1 serial window; all numerical workers stopped; 10s preflight load0.5 on16 CPUs; auxiliary-process 0.006core; per-fit process activity retained",
           "worker_source": "/home/max/projects/superglm/.worktrees/c3-c1-baseline",
           "worker_output": "/home/max/projects/superglm/.worktrees/c3-c1-completion/.benchmark-artifacts/c3-c1/severity-k12-replicate20-timing/0-baseline/baseline-0.json"
         },
@@ -1594,7 +1595,7 @@
                 "pid": 398801,
                 "name": "python",
                 "categories": [
-                  "headroom",
+                  "auxiliary_process",
                   "python"
                 ],
                 "cpu_ticks": 2072,
@@ -1605,7 +1606,7 @@
               "external_average_cores": 0.18918384661489873,
               "external_average_cores_by_category": {
                 "other_system_and_tools": 0.1722338487968009,
-                "headroom_or_kompress": 0.007654837724302262,
+                "auxiliary_processes": 0.007654837724302262,
                 "node_or_pylance": 0.004374192985315577,
                 "other_python": 0.0049209671084800245
               },
@@ -1677,7 +1678,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 286266,
@@ -2128,7 +2129,7 @@
                 "pid": 398960,
                 "name": "python",
                 "categories": [
-                  "headroom",
+                  "auxiliary_process",
                   "python"
                 ],
                 "cpu_ticks": 1752,
@@ -2138,7 +2139,7 @@
               },
               "external_average_cores": 0.38023992118299554,
               "external_average_cores_by_category": {
-                "headroom_or_kompress": 0.20130348768511527,
+                "auxiliary_processes": 0.20130348768511527,
                 "other_system_and_tools": 0.16841076093918145,
                 "other_python": 0.007236399884105451,
                 "node_or_pylance": 0.003289272674593387
@@ -2148,7 +2149,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 286913,
@@ -2655,7 +2656,7 @@
                 "pid": 399098,
                 "name": "python",
                 "categories": [
-                  "headroom",
+                  "auxiliary_process",
                   "python"
                 ],
                 "cpu_ticks": 1907,
@@ -2665,7 +2666,7 @@
               },
               "external_average_cores": 0.9086414241955684,
               "external_average_cores_by_category": {
-                "headroom_or_kompress": 0.676673441563631,
+                "auxiliary_processes": 0.676673441563631,
                 "other_system_and_tools": 0.2247565427573693,
                 "other_python": 0.004807626583045336,
                 "node_or_pylance": 0.002403813291522668
@@ -2675,7 +2676,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 288134,
@@ -2873,9 +2874,9 @@
                 },
                 {
                   "pid": 286919,
-                  "name": "headroom",
+                  "name": "auxiliary_process",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 269,
@@ -3169,7 +3170,7 @@
                 "pid": 399281,
                 "name": "python",
                 "categories": [
-                  "headroom",
+                  "auxiliary_process",
                   "python"
                 ],
                 "cpu_ticks": 2068,
@@ -3179,7 +3180,7 @@
               },
               "external_average_cores": 0.3357353609439133,
               "external_average_cores_by_category": {
-                "headroom_or_kompress": 0.11244470025264398,
+                "auxiliary_processes": 0.11244470025264398,
                 "other_system_and_tools": 0.2115665687217995,
                 "node_or_pylance": 0.00532913271339545,
                 "other_python": 0.00639495925607454
@@ -3189,7 +3190,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 288349,
@@ -3497,9 +3498,9 @@
                 },
                 {
                   "pid": 308018,
-                  "name": "headroom",
+                  "name": "auxiliary_process",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 292,
@@ -3789,7 +3790,7 @@
                 "pid": 399498,
                 "name": "python",
                 "categories": [
-                  "headroom",
+                  "auxiliary_process",
                   "python"
                 ],
                 "cpu_ticks": 2144,
@@ -3799,7 +3800,7 @@
               },
               "external_average_cores": 0.28483715707782187,
               "external_average_cores_by_category": {
-                "headroom_or_kompress": 0.09632674766631794,
+                "auxiliary_processes": 0.09632674766631794,
                 "other_system_and_tools": 0.17659903738824959,
                 "other_python": 0.006732514621839425,
                 "node_or_pylance": 0.005178857401414942
@@ -3809,7 +3810,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 288537,
@@ -4425,7 +4426,7 @@
                 "pid": 399655,
                 "name": "python",
                 "categories": [
-                  "headroom",
+                  "auxiliary_process",
                   "python"
                 ],
                 "cpu_ticks": 1904,
@@ -4435,7 +4436,7 @@
               },
               "external_average_cores": 0.3730229167930287,
               "external_average_cores_by_category": {
-                "headroom_or_kompress": 0.16961074371980753,
+                "auxiliary_processes": 0.16961074371980753,
                 "other_system_and_tools": 0.19375462182938868,
                 "node_or_pylance": 0.0036215817164371713,
                 "other_python": 0.006035969527395285
@@ -4445,7 +4446,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 288820,
@@ -5268,7 +5269,7 @@
               "external_average_cores": 0.1494725241841135,
               "external_average_cores_by_category": {
                 "other_system_and_tools": 0.13379750292136003,
-                "headroom_or_kompress": 0.005038399691599331,
+                "auxiliary_processes": 0.005038399691599331,
                 "node_or_pylance": 0.003918755315688369,
                 "other_python": 0.006717866255465775
               },
@@ -5349,7 +5350,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 296300,
@@ -5564,9 +5565,9 @@
                 },
                 {
                   "pid": 335887,
-                  "name": "headroom",
+                  "name": "auxiliary_process",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 244,
@@ -5810,7 +5811,7 @@
               "external_average_cores": 0.13742188009099304,
               "external_average_cores_by_category": {
                 "other_system_and_tools": 0.12455973367853551,
-                "headroom_or_kompress": 0.0033847753716993363,
+                "auxiliary_processes": 0.0033847753716993363,
                 "other_python": 0.006092595669058806,
                 "node_or_pylance": 0.003384775371699336
               },
@@ -5900,7 +5901,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 296306,
@@ -6346,7 +6347,7 @@
               "external_average_cores": 0.15255959730742663,
               "external_average_cores_by_category": {
                 "other_system_and_tools": 0.1395203154862791,
-                "headroom_or_kompress": 0.00521571272845903,
+                "auxiliary_processes": 0.00521571272845903,
                 "other_python": 0.00521571272845903,
                 "node_or_pylance": 0.002607856364229515
               },
@@ -6427,7 +6428,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 296315,
@@ -6856,7 +6857,7 @@
               "external_average_cores": 0.15127624684404925,
               "external_average_cores_by_category": {
                 "other_system_and_tools": 0.13695084468078697,
-                "headroom_or_kompress": 0.005730160865304895,
+                "auxiliary_processes": 0.005730160865304895,
                 "other_python": 0.005157144778774406,
                 "node_or_pylance": 0.003438096519182937
               },
@@ -6928,7 +6929,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 296325,
@@ -7390,7 +7391,7 @@
               "external_average_cores": 0.14274307877671938,
               "external_average_cores_by_category": {
                 "other_system_and_tools": 0.1298728011820971,
-                "headroom_or_kompress": 0.002925063089686873,
+                "auxiliary_processes": 0.002925063089686873,
                 "other_python": 0.00643513879731112,
                 "node_or_pylance": 0.0035100757076242475
               },
@@ -7489,7 +7490,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 296347,
@@ -7972,7 +7973,7 @@
               "external_average_cores": 0.15866539765817178,
               "external_average_cores_by_category": {
                 "other_system_and_tools": 0.14449884429583504,
-                "headroom_or_kompress": 0.005666621344934706,
+                "auxiliary_processes": 0.005666621344934706,
                 "node_or_pylance": 0.0042499660087010295,
                 "other_python": 0.0042499660087010295
               },
@@ -8053,7 +8054,7 @@
                   "pid": 288706,
                   "name": "python",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 296355,
@@ -8290,9 +8291,9 @@
                 },
                 {
                   "pid": 373943,
-                  "name": "headroom",
+                  "name": "auxiliary_process",
                   "categories": [
-                    "headroom",
+                    "auxiliary_process",
                     "python"
                   ],
                   "cpu_ticks": 238,

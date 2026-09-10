@@ -41,7 +41,7 @@ penalties are invalid.
   inward/outward tests and distributional prediction/uncertainty regressions.
 - [x] Refit the exact insurance workload, compare numerical outputs and actual
 work/dispatch, and retain raw artifacts. Clock claims require a separately
-  recorded run because Headroom/Kompress may contend with numerical work.
+  recorded run because external processes may contend with numerical work.
 - [x] Investigate and, if supported by independent numerical evidence, repair
   the finite-NB2 numerical guard that blocks coefficient movement on a
   low-mean policy. Preserve the separate exact-Poisson limit behavior.
@@ -96,8 +96,8 @@ tables, respectively; neither is a reason to reject a practically settled fit.
   script passed. Production source remained unchanged afterward.
 - Six fresh serial timing workers compared released dense and final discrete
   severity fits. Independent review supports local observed reductions of 18.0%
-  in median complete-fit time and 32.4% in process high-water RSS, with active
-  Headroom and other background activity recorded. This is not quiet-machine
+  in median complete-fit time and 32.4% in process high-water RSS, with
+  background activity recorded. This is not quiet-machine
   approval, a pure backend comparison or a universal speed guarantee.
 - Public guidance, roadmap, numerical receipts and the
   [follow-through report](../../research/2026-09-pragmatic-convergence.md)

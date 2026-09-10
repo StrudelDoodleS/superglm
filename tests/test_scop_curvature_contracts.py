@@ -181,7 +181,27 @@ def test_qp_curvature_constraints_reject_a_repeated_interior_knot(degree):
         build_curvature_difference_constraints(knots, degree, "convex", domain=(0.0, 1.0))
 
 
-def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum():
+@pytest.mark.parametrize("penalty", ["ssp", "none"])
+def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum(penalty, monkeypatch):
+    from superglm.solvers import irls_direct
+    from superglm.solvers.rank import decompose_gram
+
+    real_solve = irls_direct.solve_constrained_qp
+    terminal_qp = {}
+
+    def record_working_qp(H, g, A, b, **kwargs):
+        result = real_solve(H, g, A, b, **kwargs)
+        terminal_qp.update(
+            H=H.copy(),
+            g=g.copy(),
+            A=A.copy(),
+            b=b.copy(),
+            active=result.active_set,
+            tol=kwargs.get("tol", 1e-12),
+        )
+        return result
+
+    monkeypatch.setattr(irls_direct, "solve_constrained_qp", record_working_qp)
     _assert_first_interior_knot_is_on_the_boundary(CubicRegressionSpline)
     x, rng = _point_mass_at_minimum()
     y = 2.0 * x**2 + 0.5 * x + rng.normal(0.0, 0.05, x.size)
@@ -194,6 +214,7 @@ def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum():
             "x": CubicRegressionSpline(
                 n_knots=N_KNOTS,
                 knot_strategy="quantile_rows",
+                penalty=penalty,
                 constraint=Constraint.fit.convex,
             )
         },
@@ -203,7 +224,38 @@ def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum():
     r_squared = 1.0 - np.sum((y - fitted) ** 2) / np.sum((y - y.mean()) ** 2)
     grid = pd.DataFrame({"x": np.linspace(x.min(), x.max(), 501)})
 
-    assert model.result.converged
+    # A boundary knot makes the SSP coordinates nearly dependent. A retained
+    # solution may fit the curve accurately while failing the original score;
+    # only its actual certificate can authorize a convergence claim.
+    assert terminal_qp["active"] == []
+    beta = np.asarray(model.result.beta, dtype=np.longdouble)
+    H = np.asarray(terminal_qp["H"], dtype=np.longdouble)
+    g = np.asarray(terminal_qp["g"], dtype=np.longdouble)
+    A = np.asarray(terminal_qp["A"], dtype=np.longdouble)
+    b = np.asarray(terminal_qp["b"], dtype=np.longdouble)
+    tol = terminal_qp["tol"]
+    unit = np.finfo(float).eps / 2
+    gamma = (len(beta) + 2) * unit / (1 - (len(beta) + 2) * unit)
+    h_action = np.abs(H) @ np.abs(beta)
+    g_action = np.abs(g)
+    score_allowance = tol * np.maximum(h_action, g_action) + gamma * (h_action + g_action)
+    score_certified = bool(np.all(np.abs(H @ beta - g) <= score_allowance))
+    row_action = np.abs(A) @ np.abs(beta)
+    primal_allowance = (tol + gamma) * np.maximum(row_action, np.abs(b))
+    assert np.all(A @ beta - b >= -primal_allowance)
+    assert model.result.converged == score_certified
+    assert model.result.termination_reason == (
+        "converged" if score_certified else "constraint_kkt_incomplete"
+    )
+    if penalty == "none":
+        # The raw-coordinate control retains a well-conditioned representative
+        # on the same boundary-knot layout and must finish with a certificate.
+        retained = decompose_gram(terminal_qp["H"]).active_columns
+        retained_H = terminal_qp["H"][np.ix_(retained, retained)]
+        scale = np.sqrt(np.diag(retained_H))
+        condition = np.linalg.cond(retained_H / scale[:, None] / scale[None, :])
+        assert condition * gamma < tol
+        assert model.result.converged
     assert r_squared > 0.99
     assert _minimum_second_difference(model.predict(grid)) >= -1e-8
 

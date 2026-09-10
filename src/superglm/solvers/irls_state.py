@@ -120,6 +120,7 @@ def _evaluate_irls_state(
 
 StateInvalid = Callable[[_IRLSState], bool]
 MeritDelta = Callable[[_IRLSState, _IRLSState], float]
+MeritRoundoff = Callable[[_IRLSState, _IRLSState], float]
 
 
 def _stable_penalized_deviance_delta(
@@ -226,7 +227,19 @@ def _irls_objective_relative_change(
     # prematurely for genuinely tiny sqrt-link means.  Response mass carries
     # the same units and makes this stopping rule scale-equivariant.  Callers
     # compute this fit-invariant scale once and reuse it for every iteration.
-    return abs(objective - previous) / (abs(previous) + objective_scale)
+    reference = max(abs(objective), abs(previous), objective_scale)
+    if reference == 0.0:
+        return 0.0
+    change = abs(objective - previous)
+    change = (
+        change / reference
+        if np.isfinite(change)
+        else abs(objective / reference - previous / reference)
+    )
+    scale = abs(previous) / reference + objective_scale / reference
+    if scale == 0.0:
+        return 0.0 if change == 0.0 else float("inf")
+    return change / scale
 
 
 def _poisson_sqrt_halving_budget(
@@ -289,6 +302,7 @@ def _irls_trial_is_unsafe(
     invalid_state: StateInvalid | None = None,
     merit_delta: MeritDelta | None = None,
     merit_scale: float = 1.0,
+    merit_roundoff: MeritRoundoff | None = None,
 ) -> bool:
     """Reject invalid states or a material increase in the fitted objective."""
     if not _state_is_finite(candidate):
@@ -302,15 +316,16 @@ def _irls_trial_is_unsafe(
     committed_merit = _state_merit(committed)
     if not np.isfinite(committed_merit):
         return False
-    roundoff = (
-        64.0
-        * np.finfo(float).eps
-        * max(
-            merit_scale,
-            abs(candidate_merit),
-            abs(committed_merit),
+    if merit_roundoff is not None:
+        roundoff = float(merit_roundoff(candidate, committed))
+        if not np.isfinite(roundoff) or roundoff < 0.0:
+            return True
+    else:
+        roundoff = (
+            64.0
+            * np.finfo(float).eps
+            * max(merit_scale, abs(candidate_merit), abs(committed_merit))
         )
-    )
     if merit_delta is not None:
         delta = float(merit_delta(candidate, committed))
         return not np.isfinite(delta) or bool(delta > roundoff)
@@ -327,6 +342,7 @@ def _select_irls_trial(
     extended_max_halving: Callable[[], int] | None = None,
     merit_delta: MeritDelta | None = None,
     merit_scale: float = 1.0,
+    merit_roundoff: MeritRoundoff | None = None,
 ) -> _IRLSStepDecision:
     """Return the largest safe fixed-endpoint trial, or reject atomically.
 
@@ -342,6 +358,7 @@ def _select_irls_trial(
         invalid_state,
         merit_delta,
         merit_scale,
+        merit_roundoff,
     ):
         return _IRLSStepDecision(1.0, 0, False, trials_attempted=1)
 
@@ -358,6 +375,7 @@ def _select_irls_trial(
             invalid_state,
             merit_delta,
             merit_scale,
+            merit_roundoff,
         ):
             return _IRLSStepDecision(alpha, depth, False, trials_attempted=depth + 1)
 
@@ -382,6 +400,7 @@ def _select_irls_trial(
                 invalid_state,
                 merit_delta,
                 merit_scale,
+                merit_roundoff,
             ):
                 return _IRLSStepDecision(
                     alpha,

@@ -282,7 +282,7 @@ def test_the_policy_version_records_that_the_deficient_answer_changed() -> None:
     driver ever does move it, the failure says so instead of surfacing as a
     confusing selection mismatch.
     """
-    assert SHARED_RANK_POLICY.version == 3
+    assert SHARED_RANK_POLICY.version == 4
 
     design = _near_alias(1e-4)
     gram = design.T @ design
@@ -297,7 +297,7 @@ def test_the_policy_version_records_that_the_deficient_answer_changed() -> None:
     assert walked is not None and walked.tolist() == [0, 1]
 
     assert decomposition.active_columns.tolist() == [0, 2]
-    assert decomposition.policy_version == 3
+    assert decomposition.policy_version == 4
 
 
 def test_the_walk_fails_where_the_read_off_succeeds_at_a_stable_rate() -> None:

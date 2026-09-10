@@ -2,19 +2,141 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
 
 
 @njit(cache=True)
 def _tensor_operand_in_reassociation_range(values):
-    """Check exponent headroom without allocating absolute-value/mask arrays."""
+    """Check the exponent interval without allocating absolute-value/mask arrays."""
     for row in range(values.shape[0]):
         for col in range(values.shape[1]):
             value = values[row, col]
             if value != 0.0 and not 2.0**-128 <= abs(value) <= 2.0**128:
                 return False
     return True
+
+
+def _ssp_gram_needs_exact(*operands) -> bool:
+    """Select exceptional binary64 arithmetic before raw moments lose range.
+
+    The Gram sandwich has five input factors and at most four reductions,
+    including bin aggregation. With operands in [2**-128, 2**128] and 63-bit
+    addressable reductions, non-cancelling magnitudes stay below 2**892 and
+    individual products stay above the underflow range. This selects
+    arithmetic, not rank. Complex and wider dtypes keep their NumPy route.
+    """
+    arrays = [np.asarray(operand) for operand in operands]
+    if any(array.dtype.kind not in "bifu" or array.dtype.itemsize > 8 for array in arrays):
+        return False
+    for array in arrays:
+        # Numba cannot scan float16 arrays. Promotion is exact and affects
+        # only classification; the native moment path keeps its operands.
+        if array.dtype == np.float16:
+            array = array.astype(np.float64)
+        values = array if array.ndim == 2 else array.reshape(-1, 1)
+        if not _tensor_operand_in_reassociation_range(values):
+            return True
+    return False
+
+
+def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indices=None):
+    """Round the requested source-factor moments once on exceptional inputs.
+
+    Finite binary64 entries are exact dyadic rationals. Accumulating B R,
+    X' W X and optional X' W / X' Wz over those entries avoids an overflowing
+    raw Gram, reciprocal basis or bin mass. No rank or regularization decision
+    is made here. The target is the represented source product B R, before
+    floating-point matrix multiplication rounds that product.
+
+    Only one effective row and the requested output are retained. Sparse B
+    stays sparse outside the current row; discrete weights are aggregated
+    exactly before visiting their support rows. Ordinary operands never use
+    rational arithmetic.
+    """
+    weights = np.asarray(weights)
+    if bin_indices is None:
+        n_observations = basis.shape[0]
+    else:
+        bin_indices = np.asarray(bin_indices)
+        if (
+            bin_indices.ndim != 1
+            or bin_indices.dtype.kind not in "iu"
+            or np.any(bin_indices < 0)
+            or np.any(bin_indices >= basis.shape[0])
+        ):
+            raise ValueError("SSP bins must be one-dimensional support-row indices.")
+        n_observations = bin_indices.size
+    if weights.shape != (n_observations,):
+        raise ValueError("SSP moments require one weight per observation.")
+    if weighted_rhs is not None:
+        weighted_rhs = np.asarray(weighted_rhs)
+        if weighted_rhs.shape != weights.shape:
+            raise ValueError("SSP moments require one weighted RHS per observation.")
+    zero = Fraction(0)
+
+    def exact(value):
+        try:
+            return Fraction.from_float(float(value))
+        except (ValueError, OverflowError) as error:
+            raise np.linalg.LinAlgError("SSP moments require finite source factors.") from error
+
+    coefficients = [[exact(value) for value in row] for row in np.asarray(transform)]
+    width = transform.shape[1]
+    gram = [[zero for _ in range(width)] for _ in range(width)]
+    xtw = [zero for _ in range(width)] if weighted_rhs is not None else None
+    xtrhs = [zero for _ in range(width)] if weighted_rhs is not None else None
+    if bin_indices is None:
+        masses = [exact(value) for value in weights]
+        rhs_masses = None if weighted_rhs is None else [exact(value) for value in weighted_rhs]
+    else:
+        masses = [zero for _ in range(basis.shape[0])]
+        rhs_masses = None if weighted_rhs is None else [zero for _ in range(basis.shape[0])]
+        for row, index in enumerate(bin_indices):
+            masses[index] += exact(weights[row])
+            if rhs_masses is not None:
+                rhs_masses[index] += exact(weighted_rhs[row])
+
+    for row, mass in enumerate(masses):
+        rhs_mass = zero if rhs_masses is None else rhs_masses[row]
+        if mass == 0 and rhs_mass == 0:
+            continue
+        if getattr(basis, "format", None) == "csr":
+            # Convert each stored term before summing duplicate columns.
+            # Densifying or canonicalizing first can lose their exact sum.
+            nonzero = [
+                (basis.indices[index], exact(basis.data[index]))
+                for index in range(basis.indptr[row], basis.indptr[row + 1])
+                if basis.data[index] != 0
+            ]
+        else:
+            raw = np.asarray(basis[row]).ravel()
+            nonzero = [(index, exact(value)) for index, value in enumerate(raw) if value != 0]
+        effective = [
+            sum((value * coefficients[index][column] for index, value in nonzero), zero)
+            for column in range(width)
+        ]
+        for left, value in enumerate(effective):
+            weighted = mass * value
+            for right in range(left, width):
+                gram[left][right] += weighted * effective[right]
+            if xtw is not None and xtrhs is not None:
+                xtw[left] += weighted
+                xtrhs[left] += rhs_mass * value
+    for left in range(width):
+        for right in range(left):
+            gram[left][right] = gram[right][left]
+    try:
+        rounded_gram = np.array([[float(value) for value in row] for row in gram]).reshape(
+            width, width
+        )
+        rounded_xtw = None if xtw is None else np.array([float(value) for value in xtw])
+        rounded_rhs = None if xtrhs is None else np.array([float(value) for value in xtrhs])
+    except OverflowError as error:
+        raise np.linalg.LinAlgError("Requested SSP moment is not representable.") from error
+    return rounded_gram, rounded_xtw, rounded_rhs
 
 
 @njit(cache=True)

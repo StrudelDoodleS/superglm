@@ -128,7 +128,7 @@ and report; documentation/roadmap owned by root.
   subprocess tests. All 50 targeted checks pass after removing that variable;
   no production or test changes were needed. The frozen baseline non-slow suite
   completed with 10,913 passing tests using one numerical thread.
-- User measurement constraint: Headroom passthrough runs Kompress v2 and may
+- User measurement constraint: external tools may
   transform tool output or contend for CPU. Raw in-process JSON/NPZ artifacts
   and checksums are authoritative; tool latency/output are not receipts. Record
   proxy activity and load, and mark elapsed-time evidence unmeasured if contention
@@ -156,9 +156,9 @@ and report; documentation/roadmap owned by root.
   predictions/covariance. The separate 610,212-row real NB2 comparison stops
   `objective_rejected` in both versions; its memory reduction is not evidence of
   a solved smoothing optimum.
-- The first serial timing window is excluded from speed claims because Headroom
+- The first serial timing window is excluded from speed claims because auxiliary-process
   activity reached 0.676 CPU core during a fit. With all agents idle and root
-  tool traffic paused, the second window had Headroom below 0.006 core.
+  tool traffic paused, the second window had the auxiliary process below 0.006 core.
   Three fresh processes per arm give median fit time 17.427 to 14.750 seconds
   (15.36% lower) and median peak process RSS 1,514.84 to 1,015.93 MiB (32.93%
   lower). These are qualified local results for the replicated severity

@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, Gamma, Gaussian, Poisson, Tweedie, clip_mu
+from superglm.distributions import Gamma, Gaussian, Poisson, Tweedie, clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.penalty_algebra import (
@@ -38,6 +38,7 @@ from superglm.solvers.dispersion import dispersion_likelihood_size, validate_wei
 from superglm.solvers.pirls import PIRLSResult
 from superglm.solvers.rank import decompose_gram
 from superglm.solvers.structured import SymmetricBlockOperator
+from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -137,9 +138,13 @@ def reml_laml_objective(
     if XtWX is None and not retained_geometry_complete:
         eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset_arr, link)
         mu = clip_mu(link.inverse(eta), distribution)
-        V = distribution.variance(mu)
-        dmu_deta = link.deriv_inverse(eta)
-        W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
+        W = fisher_working_weights(
+            distribution=distribution,
+            link=link,
+            mu=mu,
+            eta=eta,
+            sample_weight=sample_weight,
+        )
         moments = dm.execution_plan.moments(W, include_xtw=True)
         XtWX = moments.gram
         XtW1 = moments.xtw

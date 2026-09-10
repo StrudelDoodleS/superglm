@@ -58,7 +58,7 @@ class DistributionalEFSConfig:
     max_backtracks: int = 8
     backtrack_factor: float = 0.5
     objective_tolerance: float = 1.0e-9
-    initial_lambda: float = 0.1
+    initial_lambda: float | None = 0.1
     plateau_tolerance: float = 1.0e-7
     plateau_iterations: int = 3
     practical_convergence: bool = False
@@ -125,9 +125,12 @@ class DistributionalEFSConfig:
             "max_log_step",
             "minimum_lambda",
             "maximum_lambda",
-            "initial_lambda",
         ):
             object.__setattr__(self, name, _finite_positive(getattr(self, name), name=name))
+        if self.initial_lambda is not None:
+            object.__setattr__(
+                self, "initial_lambda", _finite_positive(self.initial_lambda, name="initial_lambda")
+            )
         object.__setattr__(
             self,
             "objective_tolerance",
@@ -150,7 +153,9 @@ class DistributionalEFSConfig:
         )
         if self.maximum_lambda < self.minimum_lambda:
             raise ValueError("maximum_lambda must not be smaller than minimum_lambda")
-        if not self.minimum_lambda <= self.initial_lambda <= self.maximum_lambda:
+        if self.initial_lambda is not None and not (
+            self.minimum_lambda <= self.initial_lambda <= self.maximum_lambda
+        ):
             raise ValueError("initial_lambda must lie inside the configured lambda bounds")
         if not math.isfinite(self.boundary_saturation) or not 0.0 < self.boundary_saturation <= 1.0:
             raise ValueError("boundary_saturation must lie in (0, 1]")
@@ -477,6 +482,7 @@ class DistributionalEFSIteration:
             "cap_not_stationary",
             "endpoint_not_converged",
             "endpoint_not_stationary",
+            "endpoint_state_changed",
             "provenance_changed",
             "analytic_unavailable",
         }
@@ -497,10 +503,11 @@ class DistributionalEFSIteration:
                     "evidence"
                 )
             if deactivated and (
-                len(deactivated) < 2 or assessment_failure not in joint_assessment_failures
+                (len(deactivated) == 1 and assessment_failure != "endpoint_state_changed")
+                or (len(deactivated) > 1 and assessment_failure not in joint_assessment_failures)
             ):
                 raise ValueError(
-                    "only a joint deactivation may retain a joint assessment failure reason"
+                    "only endpoint-state or joint assessment failures may accompany deactivation"
                 )
         if (activated or deactivated or revalidated) and not self.accepted:
             raise ValueError("an exact-face transition must publish its accepted coefficient fit")

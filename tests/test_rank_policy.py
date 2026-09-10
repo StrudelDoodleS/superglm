@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from fractions import Fraction
 from itertools import combinations
 from types import SimpleNamespace
 
@@ -2262,7 +2263,13 @@ def test_symmetric_part_is_finite_wherever_the_input_is() -> None:
     ):
         symmetrized = _symmetric_part(matrix)
         assert np.isfinite(symmetrized).all(), f"{matrix} symmetrized to {symmetrized}"
-        np.testing.assert_allclose(symmetrized, 0.5 * (matrix / 2.0 + matrix.T / 2.0) * 2.0)
+        expected = np.array(
+            [
+                float((Fraction(float(matrix[i, j])) + Fraction(float(matrix[j, i]))) / 2)
+                for i, j in np.ndindex(matrix.shape)
+            ]
+        ).reshape(matrix.shape)
+        np.testing.assert_array_equal(symmetrized, expected)
 
 
 def _gram(values: np.ndarray) -> np.ndarray:

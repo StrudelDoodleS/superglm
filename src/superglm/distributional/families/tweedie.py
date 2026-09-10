@@ -43,6 +43,42 @@ from superglm.distributional.weights import (
 from superglm.links import Link, LogLink
 
 
+def _tweedie_variance(
+    values: NDArray[np.float64], weights: NDArray[np.float64] | None = None
+) -> NDArray[np.float64]:
+    mean, dispersion, power = values.T
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        mean_power = mean**power
+        unweighted = dispersion * mean_power
+        result = unweighted if weights is None else unweighted / weights
+    tiny = np.finfo(float).tiny
+    unsafe = (
+        ~np.isfinite(mean_power)
+        | (mean_power < tiny)
+        | ~np.isfinite(unweighted)
+        | (unweighted < tiny)
+    )
+    for index in np.flatnonzero(unsafe):
+        # Raise only a bounded mantissa to the fractional power, then combine
+        # dispersion and weight exponents before the final range rounding.
+        mean_mantissa, mean_exponent = math.frexp(mean[index])
+        fraction, exponent = math.modf(mean_exponent * power[index])
+        dispersion_mantissa, dispersion_exponent = math.frexp(dispersion[index])
+        weight_mantissa, weight_exponent = (
+            (1.0, 0) if weights is None else math.frexp(weights[index])
+        )
+        mantissa = (
+            mean_mantissa ** power[index] * 2.0**fraction * dispersion_mantissa / weight_mantissa
+        )
+        try:
+            result[index] = math.ldexp(
+                mantissa, int(exponent) + dispersion_exponent - weight_exponent
+            )
+        except OverflowError:
+            result[index] = math.inf
+    return readonly(result)
+
+
 def _finite_wall(value: float, *, name: str) -> float:
     if isinstance(value, bool):
         raise ValueError("power walls must be finite and strictly ordered inside (1, 2)")
@@ -721,13 +757,13 @@ class TweedieLSS:
     def variance(self, theta: NDArray) -> NDArray[np.float64]:
         """``Var(Y) = phi mu^p`` per row at unit prior weight."""
         values = self._distribution_parameters(theta)
-        return readonly(values[:, 1] * values[:, 0] ** values[:, 2])
+        return _tweedie_variance(values)
 
     def variance_prior_weighted(self, theta: NDArray, weights: NDArray) -> NDArray[np.float64]:
         """``Var(Y) = phi mu^p / w`` per row: the prior weight enters as ``phi / w``."""
         values = self._distribution_parameters(theta)
         resolved = _prior_weight_vector(weights, len(values))
-        return readonly(values[:, 1] * values[:, 0] ** values[:, 2] / resolved)
+        return _tweedie_variance(values, resolved)
 
     def _distribution_parameters(self, theta: NDArray) -> NDArray[np.float64]:
         return _validated_parameter_matrix(

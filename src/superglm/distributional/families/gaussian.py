@@ -19,6 +19,7 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -477,7 +478,14 @@ class GaussianLS:
             theta, n_observations=None, parameters=self.parameters, family_name="GaussianLS"
         )
         law = _prior_weight_vector(weights, len(values))
-        return readonly(values[:, 1] * values[:, 1] / law)
+        scale = values[:, 1]
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            square = scale * scale
+            result = square / law
+        unsafe = ~np.isfinite(square) | (square < np.finfo(float).tiny)
+        for index in np.flatnonzero(unsafe):
+            result[index] = _variance_product((scale[index], scale[index]), (law[index],))
+        return readonly(result)
 
     def cdf_prior_weighted(
         self, y: NDArray, theta: NDArray, weights: NDArray

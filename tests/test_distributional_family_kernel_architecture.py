@@ -96,17 +96,18 @@ def test_kernels_import_no_distributional_module_or_contract() -> None:
     assert expected <= {path.name for path in KERNELS.glob("*.py")}
 
     allowed = {
-        "gaussian.py": {"kernels._common"},
+        "_weighted.py": {"kernels.gamma"},
+        "gaussian.py": {"kernels._common", "kernels._weighted"},
         "gamma.py": {"kernels._common"},
         "generalized_gamma.py": {
             "kernels._common",
             "kernels.gamma",
             "kernels.log_normal",
         },
-        "generalized_pareto.py": {"kernels._common"},
+        "generalized_pareto.py": {"kernels._common", "kernels._weighted"},
         "log_normal.py": {"kernels._common", "kernels.gaussian"},
         "negative_binomial.py": {"kernels._common"},
-        "two_piece.py": {"kernels._common"},
+        "two_piece.py": {"kernels._common", "kernels._weighted"},
         "tweedie.py": {"kernels._tweedie_numba", "kernels._common"},
     }
     offenders = {
@@ -152,8 +153,21 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
         ROOT / "family.py": {"weights"},
         ROOT / "weights.py": set(),
         ADAPTERS / "_base.py": {"weights"},
-        ADAPTERS / "gaussian.py": {"family", "weights", "kernels.gaussian", "families._base"},
-        ADAPTERS / "gamma.py": {"family", "weights", "kernels.gamma", "families._base"},
+        ADAPTERS / "gaussian.py": {
+            "family",
+            "weights",
+            "kernels.gaussian",
+            "families._base",
+            "families._variance",
+        },
+        ADAPTERS / "gamma.py": {
+            "family",
+            "weights",
+            "kernels.gamma",
+            "families._base",
+            "families._variance",
+        },
+        ADAPTERS / "_variance.py": {"kernels._common", "kernels.gamma"},
         ADAPTERS / "generalized_gamma.py": {
             "family",
             "weights",
@@ -188,6 +202,7 @@ def test_contracts_and_family_adapters_follow_the_one_way_edge_table() -> None:
             "weights",
             "kernels.log_normal",
             "families._base",
+            "families._variance",
             "families.gaussian",
         },
         ADAPTERS / "_links.py": set(),

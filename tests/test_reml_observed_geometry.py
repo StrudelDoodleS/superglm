@@ -3344,9 +3344,8 @@ class TestModeCertifiesAtTheRoundOffFloor:
         naturally moves with the numeric stack: the round-off floor shifts
         with numpy and the BLAS, so a draw that exercised the defect on one
         stack can certify on the next. The deferral is therefore regressed
-        by driving budget exhaustion deterministically (a sub-convergence
-        ``max_pirls_iter``) rather than by counting which draws happen to
-        reach their natural floor.
+        by pinning a budget-exhausted verdict on a real coefficient fit and
+        checking its actual stationarity certificate.
 
         Three gates defer to the certificate and each reads a DIFFERENT
         module-level ``fit_irls_direct``: ``reml/direct.py`` holds the
@@ -3399,29 +3398,32 @@ class TestModeCertifiesAtTheRoundOffFloor:
         assert model.reml_diagnostics()["converged"] is True
         assert np.all(np.isfinite(model.predict(frame, offset=offset)))
 
-    def test_budget_exhausted_pirls_defers_to_the_certificate(self):
-        """The gate's deferral, engaged deterministically on every stack.
+    def test_budget_exhausted_pirls_defers_to_the_certificate(self, monkeypatch):
+        """A budget verdict cannot veto a coefficient mode that certifies.
 
-        The natural round-off stall has no stack-invariant operating point:
-        whether a draw's attainable floor sits above the 1e-10 step ceiling
-        is decided by the numeric stack and by the lambda path the criterion
-        walks (measured 6-of-8 stalling draws on one pinned stack and
-        2-of-8 on another at the same fixture scale, and 4-6 of 8 with the
-        stalling set shuffling across a 100x response-scale ladder). A count
-        of natural stalls is therefore a coin flip, not a regression test.
-
-        This test forces the same terminal state the floor produces —
-        PIRLS exhausting its budget with the step test never having fired —
-        by running the fit under a sub-convergence iteration budget. The
-        margins are arithmetic, not floating-point: the cold-start candidate
-        PIRLS needs ~100 iterations on this fixture, so a budget of 8
-        exhausts it with a >10x margin on any stack, while the warm-started
-        line-search and terminal calls converge in 1-4 iterations, leaving
-        the published mode certifiable (terminal KKT residual ~1e-15
-        against the 1e-9 bar, seven orders of margin). Reverting the fix —
-        letting the step-length flag veto the mode instead of deferring to
-        the certificate — fails this on every stack, every run.
+        Range-safe working weights let this fixture converge within the old
+        eight-iteration budget. Pin the candidate verdict instead of requiring
+        a particular iteration count. Coefficients and KKT evidence remain
+        those of the real fit, as in the terminal-publication control below.
+        The mutation at the end proves that removing deferral refuses the fit.
         """
+        import superglm.reml.direct as direct_module
+        from superglm.reml.observed_geometry import (
+            ObservedModeNotConvergedError,
+            observed_mode_certification_bar,
+        )
+
+        original = direct_module.fit_irls_direct
+
+        def exhausted_candidate(*args, **kwargs):
+            output = original(*args, **kwargs)
+            if kwargs.get("trace_purpose") != "reml_candidate":
+                return output
+            result = output[0] if isinstance(output, tuple) else output
+            stamped = replace(result, converged=False, termination_reason="max_iter")
+            return (stamped, *output[1:]) if isinstance(output, tuple) else stamped
+
+        monkeypatch.setattr(direct_module, "fit_irls_direct", exhausted_candidate)
         frame, y, weight, offset = self._burn_cost_fixture(seed=0)
         with self._recording_pirls() as records:
             model = self._model()
@@ -3431,20 +3433,21 @@ class TestModeCertifiesAtTheRoundOffFloor:
                 sample_weight=weight,
                 offset=offset,
                 max_reml_iter=30,
-                max_pirls_iter=8,
             )
 
         stalled_purposes = {purpose for purpose, reason in records if reason == "max_iter"}
         assert "reml_candidate" in stalled_purposes, (
-            "the sub-convergence budget must exhaust the cold-start candidate "
+            "the candidate verdict must exercise budget-exhaustion deferral; "
             f"PIRLS; budget-exhausted purposes: {sorted(stalled_purposes)}"
         )
         assert model.reml_diagnostics()["converged"] is True
         assert np.all(np.isfinite(model.predict(frame, offset=offset)))
-        from superglm.reml.observed_geometry import observed_mode_certification_bar
-
         residual = model._reml_profile["reml_terminal_observed_mode_residual"]
         assert residual <= observed_mode_certification_bar()
+
+        monkeypatch.setattr(direct_module, "stopped_on_iteration_budget", lambda result: False)
+        with pytest.raises(ObservedModeNotConvergedError):
+            self._model().fit_reml(frame, y, sample_weight=weight, offset=offset, max_reml_iter=30)
 
     def test_the_recorder_watches_every_gate_that_defers(self):
         """The terminal publication refit is a gate too, with its own binding.

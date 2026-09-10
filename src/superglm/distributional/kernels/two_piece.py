@@ -37,6 +37,7 @@ from superglm.distributional.kernels._common import (
     readonly_bool,
     validated_derivative_order,
 )
+from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 Parametrisation = Literal["mean", "location"]
 
@@ -181,15 +182,25 @@ def location_rows(
             score[:, 1] = (u2 - 1.0) / sigma
             score[:, 2] = u2 * e / s
             if order == 2:
-                sigma2 = sigma * sigma
                 hessian = np.empty((len(t), 6), dtype=_FLOAT)
-                hessian[:, 0] = -1.0 / (sigma * s) ** 2
-                hessian[:, 1] = -2.0 * u / (sigma2 * s)
-                hessian[:, 2] = -2.0 * u * e / (sigma * s * s)
-                hessian[:, 3] = (1.0 - 3.0 * u2) / sigma2
-                hessian[:, 4] = -2.0 * u2 * e / (sigma * s)
+                hessian[:, 0] = ((-1.0 / s) / sigma / s) / sigma
+                hessian[:, 1] = ((-2.0 * u / s) / sigma) / sigma
+                hessian[:, 2] = ((-2.0 * u * e / s) / s) / sigma
+                hessian[:, 3] = ((1.0 - 3.0 * u2) / sigma) / sigma
+                hessian[:, 4] = (-2.0 * u2 * e / s) / sigma
                 hessian[:, 5] = -3.0 * u2 / (s * s)
-                hessian *= m[:, None]
+                factors = (
+                    ((-1.0,), (sigma, s, sigma, s)),
+                    ((-2.0, u), (sigma, sigma, s)),
+                    ((-2.0, u, e), (sigma, s, s)),
+                    ((1.0 - 3.0 * u2,), (sigma, sigma)),
+                    ((-2.0, u2, e), (sigma, s)),
+                    ((-3.0, u2), (s, s)),
+                )
+                for column, (numerators, denominators) in enumerate(factors):
+                    hessian[:, column] = weighted_natural_channel(
+                        hessian[:, column], m, numerators, denominators
+                    )
             score *= m[:, None]
     return _placeholders_where_invalid(optimizing, score, hessian, np.isfinite(u2))
 

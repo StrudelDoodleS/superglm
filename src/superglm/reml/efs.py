@@ -36,7 +36,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+from superglm.distributions import clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.objective import reml_laml_objective
@@ -51,6 +51,7 @@ from superglm.reml.penalty_algebra import (
 from superglm.reml.result import REMLResult, _map_beta_between_bases
 from superglm.solvers.irls_direct import _safe_decompose_H
 from superglm.solvers.pirls import fit_pirls
+from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -140,9 +141,13 @@ def optimize_efs_reml(
         link,
     )
     boot_mu = clip_mu(link.inverse(boot_eta), distribution)
-    boot_V = distribution.variance(boot_mu)
-    boot_dmu = link.deriv_inverse(boot_eta)
-    boot_W = sample_weight * boot_dmu**2 / np.maximum(boot_V, _VARIANCE_FLOOR)
+    boot_W = fisher_working_weights(
+        distribution=distribution,
+        link=link,
+        mu=boot_mu,
+        eta=boot_eta,
+        sample_weight=sample_weight,
+    )
     boot_xtwx = dm.execution_plan.moments(boot_W).gram
 
     # Estimate phi for estimated-scale families
@@ -239,9 +244,13 @@ def optimize_efs_reml(
             # Compute IRLS weights and cache X'WX
             eta = stabilize_eta(dm.matvec(beta) + intercept + offset_arr, link)
             mu = clip_mu(link.inverse(eta), distribution)
-            V = distribution.variance(mu)
-            dmu_deta = link.deriv_inverse(eta)
-            W = sample_weight * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
+            W = fisher_working_weights(
+                distribution=distribution,
+                link=link,
+                mu=mu,
+                eta=eta,
+                sample_weight=sample_weight,
+            )
 
             cached_xtwx = dm.execution_plan.moments(W).gram
 

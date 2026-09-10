@@ -87,7 +87,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 from superglm._frame import as_eager_frame
-from superglm.distributions import _VARIANCE_FLOOR, Tweedie, validate_response
+from superglm.distributions import Tweedie, validate_response
 from superglm.features.categorical import (
     Categorical,
     _codes_against,
@@ -881,9 +881,15 @@ def screen_interactions(
     eta = np.asarray(model._predict_eta_exact(X, offset), dtype=np.float64)
     mu = np.asarray(link.inverse(eta), dtype=np.float64)
     score = working_score(y, mu, eta, weights, distribution, link)
-    dmu_deta = link.deriv_inverse(eta)
-    var_mu = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
-    working_weights = weights * dmu_deta**2 / var_mu
+    from superglm.solvers.working_rows import fisher_working_weights, pearson_chi2
+
+    working_weights = fisher_working_weights(
+        distribution=distribution,
+        link=link,
+        mu=mu,
+        eta=eta,
+        sample_weight=weights,
+    )
 
     # Use the exact same family-specific residual-d.f. contract as fitting.
     # A different denominator here changes every T / phi score even though the
@@ -898,7 +904,9 @@ def screen_interactions(
             resolved_edf,
             weight_semantics=model_weight_semantics(model),
         )
-        phi_hat = float(np.sum(weights * (y - mu) ** 2 / var_mu)) / max(denom, 1.0)
+        phi_hat = pearson_chi2(distribution=distribution, y=y, mu=mu, sample_weight=weights) / max(
+            denom, 1.0
+        )
         phi_hat = max(phi_hat, float(np.finfo(np.float64).tiny))
 
     support_cache: dict[tuple[str, bool], dict] = {}

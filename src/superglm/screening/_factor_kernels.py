@@ -36,6 +36,8 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
+from superglm.solvers.rank import _symmetric_part
+
 
 def _rank_floor(n: int) -> float:
     """Share of the largest eigenvalue below which a direction is ROUND-OFF.
@@ -396,7 +398,17 @@ def _penalty_spectrum(S_a: NDArray) -> tuple[NDArray, NDArray, float, float]:
             0.0,
             0.0,
         )
-    w, Q = np.linalg.eigh(0.5 * (S_a + S_a.T))
+    symmetric = _symmetric_part(S_a)
+    diagonal = np.diag(symmetric)
+    if np.count_nonzero(symmetric) == np.count_nonzero(diagonal):
+        # The diagonal spectrum is known exactly. Eigh may internally scale
+        # the whole matrix and erase a subnormal entry beside a large one.
+        # Preserve the same sorted spectral convention without that scaling.
+        order = np.argsort(diagonal)
+        w = diagonal[order]
+        Q = np.eye(n)[:, order]
+    else:
+        w, Q = np.linalg.eigh(symmetric)
     unresolved = float(float(n) * np.finfo(np.float64).eps * float(np.max(np.abs(w), initial=0.0)))
     lifted = np.where(w >= -unresolved, np.abs(w), 0.0)
     # The spectral-norm distance to the cone contributed by the CERTIFIED

@@ -132,6 +132,7 @@ jobs:
           tests/test_realdata_parity.py
           tests/test_screening_guide_numbers.py
           tests/test_mixed_interaction_screening.py
+          tests/test_distributional_fremtpl_convergence.py
 
       # Only reachable when the download itself failed, because the step above
       # is then skipped and no assertion in superglm was ever evaluated.  A red

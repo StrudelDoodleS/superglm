@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.family import NaturalLikelihoodEvaluation
+from superglm.distributional.kernels._common import _NumericalEvaluationError
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.links import Link
 
@@ -119,6 +121,61 @@ def _inverse_link_derivatives(
     return first, second
 
 
+def _scaled_triple_product(
+    left: NDArray[np.float64],
+    middle: NDArray[np.float64],
+    right: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Multiply finite row vectors without losing range in an intermediate.
+
+    Normal mantissa products incur at most the usual two-multiply relative
+    error. Exact rounding at the exponent boundaries preserves subnormals and
+    distinguishes final overflow without assuming a wider floating dtype.
+    """
+    tiny = np.finfo(np.float64).tiny
+    upper_boundary = np.finfo(np.float64).max / 2.0
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        intermediate = left * middle
+        result = intermediate * right
+    nonzero = (left != 0.0) & (middle != 0.0) & (right != 0.0)
+    result[~nonzero] = 0.0
+    exceptional = nonzero & (
+        ~np.isfinite(intermediate)
+        | (np.abs(intermediate) < tiny)
+        | ~np.isfinite(result)
+        | (np.abs(result) < tiny)
+        | (np.abs(result) >= upper_boundary)
+    )
+    if not np.any(exceptional):
+        return result
+
+    left_values = left[exceptional]
+    middle_values = middle[exceptional]
+    right_values = right[exceptional]
+    left_mantissa, left_exponent = np.frexp(left_values)
+    middle_mantissa, middle_exponent = np.frexp(middle_values)
+    right_mantissa, right_exponent = np.frexp(right_values)
+    mantissa = left_mantissa * middle_mantissa * right_mantissa
+    exponent = left_exponent + middle_exponent + right_exponent
+    with np.errstate(over="ignore", under="ignore"):
+        scaled = np.ldexp(mantissa, exponent)
+    boundary = ~np.isfinite(scaled) | (np.abs(scaled) < tiny) | (np.abs(scaled) >= upper_boundary)
+    for index in np.flatnonzero(boundary):
+        exact = (
+            Fraction.from_float(float(left_values[index]))
+            * Fraction.from_float(float(middle_values[index]))
+            * Fraction.from_float(float(right_values[index]))
+        )
+        try:
+            scaled[index] = float(exact)
+        except OverflowError as exc:
+            raise _NumericalEvaluationError(
+                "inverse-link derivative product has no finite floating-point result"
+            ) from exc
+    result[exceptional] = scaled
+    return result
+
+
 def transform_natural_derivatives(
     evaluation: NaturalLikelihoodEvaluation,
     eta: NDArray,
@@ -156,7 +213,9 @@ def transform_natural_derivatives(
     score_eta = evaluation.score * first
     hessian_eta = np.empty_like(evaluation.hessian_packed)
     for packed_index, (left, right) in enumerate(packed_pairs(k_parameters)):
-        transformed = evaluation.hessian_packed[:, packed_index] * first[:, left] * first[:, right]
+        transformed = _scaled_triple_product(
+            evaluation.hessian_packed[:, packed_index], first[:, left], first[:, right]
+        )
         if left == right:
             transformed = transformed + evaluation.score[:, left] * second[:, left]
         hessian_eta[:, packed_index] = transformed
@@ -210,7 +269,7 @@ def transform_natural_information(
 
     transformed = np.empty_like(information)
     for packed_index, (left, right) in enumerate(packed_pairs(k_parameters)):
-        transformed[:, packed_index] = (
-            information[:, packed_index] * first[:, left] * first[:, right]
+        transformed[:, packed_index] = _scaled_triple_product(
+            information[:, packed_index], first[:, left], first[:, right]
         )
     return _readonly_float_array(transformed, name="predictor_information_packed")

@@ -29,7 +29,7 @@ from typing import Any, Literal, cast
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy import stats
+from scipy import linalg, stats
 
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.distributional._row_design import bounded_predictor_matrices
@@ -49,7 +49,17 @@ from superglm.distributional.model import _prediction_offsets
 from superglm.distributional.prediction_design import build_joint_prediction_design
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
 from superglm.distributional.solver.assembly import dense_predictor_matrices
+from superglm.reml.multi_penalty import (
+    _LD,
+    _U_LD,
+    _gamma,
+    _matmul_enclosed,
+    _norm_upper,
+    _positive_product,
+    _upper,
+)
 from superglm.reml.penalty_algebra import penalty_component_dense_matrix
+from superglm.reml.penalty_support import PenaltyNumericalError
 
 CovarianceKind = Literal["fixed", "corrected"]
 #: A quantity is a name, a name with one argument, or a callable on ``theta``.
@@ -227,6 +237,79 @@ def _authenticated_terminal_fit(fitted: Any, smoothing: Any) -> tuple[Any, Any]:
     return state, terminal
 
 
+def _posterior_bound_sum(*terms: NDArray) -> NDArray:
+    """Add nonnegative bounds without losing their outward direction."""
+    total = np.sum(np.asarray(terms, dtype=_LD), axis=0, dtype=_LD)
+    return _upper(total / (1 - _gamma(len(terms) + 2, _U_LD)))
+
+
+def _binary_congruence(matrix: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """Equilibrate positive variances by exact powers of two.
+
+    Normal exponent scaling is exact. A subnormal result can lose at most
+    half a float64 subnormal; one whole subnormal encloses that loss, including
+    a nonzero entry which scales to zero. No largest-eigenvalue scale is used.
+    """
+    diagonal = np.diag(matrix)
+    if np.any(diagonal <= 0.0):
+        raise ValueError("positive diagonal entries are required for posterior scaling")
+    powers = np.frexp(diagonal)[1] // 2
+    shifts = -powers[:, None] - powers[None, :]
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        scaled = np.ldexp(matrix, shifts)
+    if not np.all(np.isfinite(scaled)):
+        raise ValueError("posterior matrix scaling is numerically unresolved")
+    error = np.where(
+        (matrix != 0.0) & (np.abs(scaled) < np.finfo(float).tiny),
+        np.nextafter(0.0, 1.0),
+        0.0,
+    )
+    return scaled, error, powers
+
+
+def _smoothing_cholesky(matrix: NDArray) -> tuple[NDArray, NDArray, NDArray, NDArray]:
+    scaled, scaling_error, powers = _binary_congruence(matrix)
+    factor = linalg.cholesky(scaled, lower=True, check_finite=False)
+    if not np.all(np.isfinite(factor)):
+        raise ValueError("the smoothing Hessian factor is nonfinite")
+    return scaled, scaling_error, powers, factor
+
+
+def _certify_smoothing_invertibility(matrix: NDArray, bound: NDArray) -> None:
+    """Prove positivity of every symmetric matrix in the input enclosure.
+
+    For any computed square X, ||X (G + delta) X.T - I||_2 < 1 implies
+    positive definiteness of G + delta and nonsingularity of X. Bounded
+    products check this congruence without assuming an exact Cholesky factor
+    or triangular inverse. The Frobenius norm bounds the spectral norm.
+    """
+    scaled, scaling_error, powers, factor = _smoothing_cholesky(matrix)
+    inverse_factor = linalg.solve_triangular(
+        factor, np.eye(len(matrix)), lower=True, check_finite=False
+    )
+    if not np.all(np.isfinite(inverse_factor)):
+        raise ValueError("the smoothing Hessian inverse factor is nonfinite")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        scaled_bound = np.ldexp(bound, -powers[:, None] - powers[None, :])
+        scaled_bound = np.where(bound == 0.0, 0.0, np.nextafter(scaled_bound, np.inf))
+    if not np.all(np.isfinite(scaled_bound)):
+        raise ValueError("the smoothing Hessian certificate scaling is unresolved")
+    input_error = _posterior_bound_sum(scaling_error, scaled_bound)
+    first, first_error = _matmul_enclosed(inverse_factor, scaled)
+    metric, metric_error = _matmul_enclosed(first, inverse_factor.T)
+    propagated = _positive_product(
+        _positive_product(np.abs(inverse_factor), input_error), np.abs(inverse_factor.T)
+    )
+    defect = _posterior_bound_sum(
+        np.abs(metric.astype(_LD) - np.eye(len(matrix), dtype=_LD)),
+        metric_error,
+        _positive_product(first_error, np.abs(inverse_factor.T)),
+        propagated,
+    )
+    if not _norm_upper(defect) < 1.0:
+        raise ValueError("the smoothing Hessian certificate does not prove positive invertibility")
+
+
 def _trusted_smoothing_hessian(
     hessian: NDArray | None,
     certificate: NDArray | None,
@@ -235,7 +318,7 @@ def _trusted_smoothing_hessian(
     certificate_fraction: float,
     replayed: bool,
 ) -> NDArray[np.float64]:
-    """Apply the Newton endgame's positive-definite certificate trust gate."""
+    """Apply the trust fraction and certify positive invertibility of its enclosure."""
     if hessian is None or certificate is None:
         if replayed:
             raise RuntimeError(
@@ -257,13 +340,9 @@ def _trusted_smoothing_hessian(
         or np.any(bound < 0.0)
     ):
         raise RuntimeError("the smoothing Hessian and its certificate are not finite and valid")
-    try:
-        minimum_eigenvalue = float(np.min(np.linalg.eigvalsh(matrix)))
-    except np.linalg.LinAlgError as exc:
-        raise RuntimeError(
-            "the smoothing Hessian positive-definite check could not be resolved"
-        ) from exc
-    if minimum_eigenvalue <= 0.0:
+    if count == 0:
+        return matrix
+    if np.any(np.diag(matrix) <= 0.0):
         raise RuntimeError("the smoothing Hessian is not positive definite")
     trust_bar = float(certificate_fraction) * float(np.min(np.diag(matrix)))
     maximum_certificate = float(np.max(bound))
@@ -271,6 +350,12 @@ def _trusted_smoothing_hessian(
         raise RuntimeError(
             "the smoothing Hessian certificate is too large for corrected covariance"
         )
+    try:
+        _certify_smoothing_invertibility(matrix, bound)
+    except (ValueError, np.linalg.LinAlgError, PenaltyNumericalError) as exc:
+        raise RuntimeError(
+            "the smoothing Hessian certificate does not establish positive invertibility"
+        ) from exc
     return matrix
 
 
@@ -407,6 +492,41 @@ def _resolved_smoothing_hessian(
     )
 
 
+def _add_covariance_correction(covariance: NDArray, root: NDArray) -> NDArray:
+    """Add a root Gram without losing a sum of tiny positive products.
+
+    Only uniformly tiny rows scale up; large rows keep every small operand.
+    Binary scaling up is exact, and each scaled row has maximum below one.
+    Affected Gram entries and fixed covariance are added at a common exponent
+    before final materialization. This also retains a half-minsub correction
+    which changes the correctly rounded sum with an existing minsub variance.
+    """
+    maximum = np.max(np.abs(root), axis=1, initial=0.0)
+    tiny = (maximum > 0.0) & (maximum < np.sqrt(np.finfo(float).tiny))
+    powers = np.where(tiny, np.frexp(maximum)[1], 0)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        if not np.any(tiny):
+            return covariance + root @ root.T
+        scaled_root = np.ldexp(root, -powers[:, None])
+        gram = scaled_root @ scaled_root.T
+        if not np.all(np.isfinite(gram)):
+            raise ValueError("the corrected covariance Gram is nonfinite")
+        shifts = powers[:, None] + powers[None, :]
+        changed = shifts != 0
+        fixed = covariance[changed]
+        correction = gram[changed]
+        shift = shifts[changed]
+        fixed_exponent = np.frexp(fixed)[1]
+        correction_exponent = np.frexp(correction)[1] + shift
+        common = np.maximum(fixed_exponent, correction_exponent)
+        common = np.where(fixed == 0.0, correction_exponent, common)
+        common = np.where(correction == 0.0, fixed_exponent, common)
+        total = np.ldexp(fixed, -common) + np.ldexp(correction, shift - common)
+        result = covariance + gram
+        result[changed] = np.ldexp(total, common)
+    return result
+
+
 def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDArray[np.float64]:
     """Return the posterior coefficient covariance in global coordinates.
 
@@ -457,11 +577,29 @@ def posterior_covariance(fitted: Any, *, kind: CovarianceKind = "fixed") -> NDAr
         block = component.group_sl
         rhs[block] = float(smoothing.lambdas[name]) * (omega @ beta[block])
         columns.append(-np.asarray(fitted.result.solve_terminal(rhs), dtype=np.float64))
+    if not columns:
+        return covariance
     jacobian = np.column_stack(columns)
 
-    rho_covariance = np.linalg.pinv(rho_hessian, hermitian=True)
-    corrected = covariance + jacobian @ rho_covariance @ jacobian.T
-    return 0.5 * (corrected + corrected.T)
+    # Apply every admitted smoothing direction. Forming H^-1 separately both
+    # introduces an unrelated pinv cutoff and can overflow an unused inverse
+    # even when the covariance correction itself is representable.
+    try:
+        _, _, powers, factor = _smoothing_cholesky(rho_hessian)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            scaled_jacobian = np.ldexp(jacobian.T, -powers[:, None])
+            restored = np.ldexp(scaled_jacobian, powers[:, None])
+        if not np.all(np.isfinite(scaled_jacobian)) or not np.array_equal(restored, jacobian.T):
+            raise ValueError("the smoothing Jacobian scaling is unresolved")
+        correction_root = linalg.solve_triangular(
+            factor, scaled_jacobian, lower=True, check_finite=False
+        ).T
+        corrected = _add_covariance_correction(covariance, correction_root)
+        if not np.all(np.isfinite(corrected)):
+            raise ValueError("the corrected posterior covariance is nonfinite")
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        raise RuntimeError("the corrected posterior covariance could not be represented") from exc
+    return _posterior_symmetric_matrix(corrected)
 
 
 def _posterior_draw_count(n_draws: int) -> int:
@@ -469,6 +607,76 @@ def _posterior_draw_count(n_draws: int) -> int:
     if count < 2:
         raise ValueError("n_draws must be at least 2 to summarise a posterior")
     return count
+
+
+def _posterior_symmetric_matrix(matrix: NDArray) -> NDArray:
+    """Preserve equal entries and average only unequal off-diagonal pairs."""
+    symmetric = np.array(matrix, dtype=np.float64, copy=True)
+    if not np.all(np.isfinite(symmetric)):
+        raise ValueError("the posterior covariance must be finite")
+    rows, columns = np.triu_indices(len(symmetric), k=1)
+    left, right = symmetric[rows, columns], symmetric[columns, rows]
+    changed = left != right
+    safe = np.maximum(np.abs(left), np.abs(right)) <= np.finfo(float).max / 2
+    values = left.copy()
+    values[changed & safe] = (left[changed & safe] + right[changed & safe]) * 0.5
+    values[changed & ~safe] = left[changed & ~safe] * 0.5 + right[changed & ~safe] * 0.5
+    symmetric[rows, columns] = symmetric[columns, rows] = values
+    return symmetric
+
+
+def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
+    """A PSD root checked in diagonal power-of-two coordinates.
+
+    All positive computed eigenvalues are retained. A negative mode may be
+    clipped only if the resulting factor reconstructs the supplied covariance
+    at arithmetic resolution. The target gamma_(4n+8) times the larger of
+    ||G||_F and ||abs(F) abs(F.T)||_F counts two length-n products plus
+    root/bound formation at their actual operation scale. It is an admission
+    criterion, not an assumed guarantee from the eigensolver. The observed
+    defect and its product/scaling enclosures must both fit it.
+    """
+    resolved = _posterior_symmetric_matrix(matrix)
+    diagonal = np.diag(resolved)
+    if np.any(diagonal < 0.0):
+        raise ValueError("the posterior covariance has a negative marginal variance")
+    active = np.flatnonzero(diagonal > 0.0)
+    if np.any(resolved[diagonal == 0.0] != 0.0):
+        raise ValueError("the posterior covariance is not positive semidefinite at zero variance")
+    result = np.zeros_like(resolved)
+    if not len(active):
+        return result
+    try:
+        scaled, scaling_error, powers = _binary_congruence(resolved[np.ix_(active, active)])
+        values, vectors = np.linalg.eigh(scaled)
+        root = vectors * np.sqrt(np.maximum(values, 0.0))
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            original_root = np.ldexp(root, powers[:, None])
+            restored = np.ldexp(original_root, -powers[:, None])
+        if not np.all(np.isfinite(original_root)) or not np.array_equal(restored, root):
+            raise ValueError("the posterior covariance root scaling is unresolved")
+        reconstruction, reconstruction_error = _matmul_enclosed(root, root.T)
+        error = _norm_upper(
+            _posterior_bound_sum(
+                np.abs(reconstruction.astype(_LD) - scaled.astype(_LD)),
+                reconstruction_error,
+                scaling_error,
+            )
+        )
+        operation_scale = max(
+            _norm_upper(scaled),
+            _norm_upper(_positive_product(np.abs(root), np.abs(root.T))),
+        )
+        target = _gamma(4 * len(active) + 8) * operation_scale
+        if not error <= target:
+            raise ValueError(
+                "the posterior covariance is not positive semidefinite at arithmetic resolution; "
+                "its square root reconstruction is unresolved"
+            )
+    except (np.linalg.LinAlgError, PenaltyNumericalError) as exc:
+        raise ValueError("the posterior covariance square root is numerically unresolved") from exc
+    result[np.ix_(active, active)] = original_root
+    return result
 
 
 def _posterior_draws_from_covariance(
@@ -485,13 +693,7 @@ def _posterior_draws_from_covariance(
     if resolved.shape != (len(beta), len(beta)):
         raise ValueError("the posterior covariance does not match the fitted coefficients")
 
-    eigenvalues, vectors = np.linalg.eigh(0.5 * (resolved + resolved.T))
-    tolerance = float(fitted.inference.reconciliation_tolerance) * max(
-        float(np.max(eigenvalues, initial=0.0)), 0.0
-    )
-    if np.any(eigenvalues < -tolerance):
-        raise ValueError("the posterior covariance has a materially negative eigenvalue")
-    factor = vectors * np.sqrt(np.where(eigenvalues < tolerance, 0.0, eigenvalues))
+    factor = _posterior_covariance_factor(resolved)
 
     rng = np.random.default_rng(seed)
     normals = rng.standard_normal((count, len(beta)))
@@ -511,13 +713,16 @@ def posterior_draws(
     covariance: CovarianceKind = "fixed",
     seed: int = 42,
 ) -> PosteriorDraws:
-    """Draw coefficients from ``N(beta_hat, V)`` with a symmetric eigen square root.
+    """Draw coefficients from ``N(beta_hat, V)`` with a checked eigen square root.
 
-    ``V`` is a pseudo-inverse and may be rank deficient: eigenvalues below
-    ``reconciliation_tolerance * lambda_max`` are set to zero, while a
-    materially negative one is an error rather than a clip.  Every draw is made
-    from one ``default_rng(seed)`` stream, so the result never depends on how a
-    later pushforward chunks its rows.
+    ``V`` may be rank deficient. Exact zero-variance rows stay zero; all
+    positive computed modes are retained after diagonal power-of-two scaling.
+    A negative mode is clipped only when a bounded reconstruction proves the
+    resulting covariance agrees at arithmetic resolution, otherwise it is an
+    error. This criterion preserves uncertainty under representable power-of-two
+    changes of coefficient units instead of using EDF reconciliation tolerance as a
+    variance cutoff. Every draw uses one ``default_rng(seed)`` stream, so the
+    result never depends on how a later pushforward chunks its rows.
     """
     count = _posterior_draw_count(n_draws)
     matrix = posterior_covariance(fitted, kind=covariance)

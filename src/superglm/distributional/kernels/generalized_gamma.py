@@ -386,16 +386,25 @@ class GeneralizedGammaKernelEvaluation:
 
 def _shape_terms(
     shape: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """Return ``(k, S(k), k^2 S'(k), k^3 S''(k))`` with the exact ``Q = 0`` limits."""
-    zero = np.abs(shape) < _ZERO_SHAPE
-    safe = np.where(zero, 1.0, shape)
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Return ``(S(k), k^2 S'(k), k^3 S''(k))``, including ``Q = 0``.
+
+    For small finite Q, S(Q^-2) = Q^2/12 + R, |R| <= |Q|^6/360
+    (DLMF 5.11.1 and 5.11(ii)). Binet's integral (DLMF 5.9.10) bounds
+    the scaled derivative corrections by Q^4/120 and Q^4/30, below
+    float64 rounding at this switch.
+    Forming the scaled combinations directly also avoids an overflowing k
+    or an underflowing S' when their product remains finite.
+    """
+    small = np.abs(shape) < _ZERO_SHAPE
+    safe = np.where(small, 1.0, shape)
     k = 1.0 / (safe * safe)
     s0_all, s1_all, s2_all = _stirling_triplet(k)
-    s0 = np.where(zero, 0.0, s0_all)
-    k2s1 = np.where(zero, -1.0 / 12.0, k * k * s1_all)
-    k3s2 = np.where(zero, 1.0 / 6.0, k * k * k * s2_all)
-    return k, s0, k2s1, k3s2
+    s0 = s0_all.copy()
+    s0[small] = shape[small] * shape[small] / 12.0
+    k2s1 = np.where(small, -1.0 / 12.0, k * k * s1_all)
+    k3s2 = np.where(small, 1.0 / 6.0, k * k * k * s2_all)
+    return s0, k2s1, k3s2
 
 
 def _finite_or_raise(name: str, values: NDArray | None) -> None:
@@ -428,9 +437,11 @@ def location_rows(
     order = validated_derivative_order(derivative_order)
 
     w = (np.log(y) - mu_values) / sigma_values
-    zero = np.abs(q) < _ZERO_SHAPE
-    u = np.where(zero, 0.0, q * w)
-    _, s0, k2s1, k3s2 = _shape_terms(q)
+    # Q alone does not bound the finite-shape correction: a large w can
+    # keep Q*w appreciable. The existing series retain this product and
+    # take their exact continuous limits only when the product is zero.
+    u = q * w
+    s0, k2s1, k3s2 = _shape_terms(q)
     score = None
     hessian = None
     with np.errstate(over="ignore", invalid="ignore"):

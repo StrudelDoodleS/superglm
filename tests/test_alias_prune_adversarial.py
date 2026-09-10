@@ -172,6 +172,29 @@ def _ab(X, y, sample_weight=None, score_on=None, **kwargs):
     return pruned, unpruned, pruned.predict(target), unpruned.predict(target)
 
 
+def _assert_categorical_prediction_roundoff(pruned, unpruned, X):
+    """Compare these Gaussian categorical fits at their scoring resolution.
+
+    Each term gathers at most one coefficient, then scoring adds the terms
+    to the intercept.  With m additions, the summation bound is gamma_m
+    times the sum of absolute contributions.  Group infinity norms bound
+    those contributions for every row, including cancellation.  This is a
+    prediction arithmetic allowance, not an optimizer convergence bound.
+    """
+    allowance = 0.0
+    for model in (pruned, unpruned):
+        u = np.finfo(model.result.beta.dtype).eps / 2
+        m = len(model._groups)
+        gamma = np.nextafter(m * u / (1 - m * u), np.inf)
+        magnitude = abs(model.result.intercept)
+        for group in model._groups:
+            term_bound = np.max(np.abs(model.result.beta[group.sl]), initial=0.0)
+            magnitude = np.nextafter(magnitude + term_bound, np.inf)
+        bound = np.nextafter(gamma * magnitude, np.inf)
+        allowance = np.nextafter(allowance + bound, np.inf)
+    np.testing.assert_allclose(pruned.predict(X), unpruned.predict(X), rtol=0, atol=allowance)
+
+
 # Level tables used repeatedly.  Base levels are "A"/"X" (base="first").
 EMPTY_ONLY = [
     ("A", "X"),
@@ -627,8 +650,8 @@ class TestAliasDropVersusEmptyDrop:
         carrying less df, moving ``phi`` and every information criterion on
         what is supposed to be a reparametrisation.
 
-        The predictions are bit-identical here -- ``SparseGroupLasso`` never
-        reads ``group.size`` -- so nothing but the df ledger can fail this.
+        The predictions must agree within their scoring roundoff allowance;
+        the block step size can change with the emitted width by roundoff.
         Spanned pricing is the mode under which that ledger must not move;
         the default rank pricing prices the emitted width instead.
         """
@@ -651,7 +674,7 @@ class TestAliasDropVersusEmptyDrop:
         assert g_pruned.size < g_unpruned.size
         assert g_pruned.penalty_size == g_unpruned.penalty_size
         assert g_pruned.weight == pytest.approx(g_unpruned.weight)
-        np.testing.assert_allclose(pruned.predict(X), unpruned.predict(X), rtol=0, atol=0)
+        _assert_categorical_prediction_roundoff(pruned, unpruned, X)
 
         df_pruned = pruned._group_edf["c1:c2"]
         df_unpruned = unpruned._group_edf["c1:c2"]
@@ -699,7 +722,7 @@ class TestAliasDropVersusEmptyDrop:
         g_unpruned = next(g for g in unpruned._groups if g.feature_name == "c1:c2")
         assert pruned._interaction_specs["c1:c2"]._pruned_pairs
         assert g_pruned.size < g_unpruned.size
-        np.testing.assert_allclose(pruned.predict(X), unpruned.predict(X), rtol=0, atol=0)
+        _assert_categorical_prediction_roundoff(pruned, unpruned, X)
         assert pruned._group_edf["c1:c2"] == pytest.approx(float(g_pruned.penalty_size))
         assert pruned._group_edf["c1:c2"] == pytest.approx(unpruned._group_edf["c1:c2"])
         assert pruned.result.effective_df == pytest.approx(unpruned.result.effective_df, rel=1e-12)

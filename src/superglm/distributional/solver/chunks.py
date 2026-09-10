@@ -595,7 +595,9 @@ def iter_likelihood_chunks(
                 raise _TrialDerivativeError(str(exc), rows=rows, plans=plans) from exc
             raise
         if natural.derivative_order != 2:
-            raise ValueError("family must return exact derivative order 2 for chunk geometry")
+            raise UnsupportedLikelihoodContractError(
+                "family must return exact derivative order 2 for chunk geometry"
+            )
         if natural.valid is not None and not np.all(natural.valid):
             if _recover_derivative_failure:
                 raise _TrialDerivativeError(
@@ -683,7 +685,9 @@ def evaluate_chunked_log_likelihood(
             derivative_order=0,
         )
         if natural.derivative_order != 0:
-            raise ValueError("family must return exact derivative order 0 for chunk values")
+            raise UnsupportedLikelihoodContractError(
+                "family must return exact derivative order 0 for chunk values"
+            )
         if natural.valid is not None and not np.all(natural.valid):
             raise ValueError("chunk contains an invalid likelihood state")
         optimizing_total += float(np.sum(natural.optimizing_log_likelihood, dtype=np.float64))

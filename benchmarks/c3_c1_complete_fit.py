@@ -64,7 +64,7 @@ def environment_snapshot():
             command = (entry / "cmdline").read_bytes().lower()
             categories = [
                 label
-                for label in ("headroom", "kompress", "pylance", "pytest", "node", "python")
+                for label in ("pylance", "pytest", "node", "python")
                 if label.encode() in command
             ]
             stat = (entry / "stat").read_text().split(")", 1)[1].split()

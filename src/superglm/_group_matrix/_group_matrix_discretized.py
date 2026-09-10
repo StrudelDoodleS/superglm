@@ -9,9 +9,11 @@ from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
     _disc_disc_2d_hist,
+    _exact_ssp_moments,
     _fused_2d_bincount_2,
     _fused_bincount_2,
     _indexed_row_dot,
+    _ssp_gram_needs_exact,
     _tensor_operand_in_reassociation_range,
 )
 from ._row_lookup import build_row_lookup
@@ -63,6 +65,8 @@ class DiscretizedSSPGroupMatrix:
 
     def gram(self, W: NDArray) -> NDArray:
         # Aggregate W by bin, then dense gram, then sandwich with R_inv
+        if _ssp_gram_needs_exact(self.B_unique, self.R_inv, W):
+            return _exact_ssp_moments(self.B_unique, self.R_inv, W, bin_indices=self.bin_idx)[0]
         W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
         BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])
         return self.R_inv.T @ BtWB @ self.R_inv
@@ -72,6 +76,11 @@ class DiscretizedSSPGroupMatrix:
 
         Returns (gram, XtW, XtWz) — single O(n) pass for both aggregations.
         """
+        if _ssp_gram_needs_exact(self.B_unique, self.R_inv, W, Wz):
+            gram, xtw, xtwz = _exact_ssp_moments(
+                self.B_unique, self.R_inv, W, Wz, bin_indices=self.bin_idx
+            )
+            return gram, cast(NDArray, xtw), cast(NDArray, xtwz)
         W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
         BtW_agg = self.B_unique.T @ W_agg  # (K,)
         BtWz_agg = self.B_unique.T @ Wz_agg  # (K,)

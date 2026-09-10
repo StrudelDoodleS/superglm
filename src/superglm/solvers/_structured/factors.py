@@ -80,29 +80,41 @@ def _reject_coupled_schur_null_space(
     non-orthogonal block elimination, so multiplying local determinants by a
     Schur pseudo-determinant would publish the wrong REML geometry.
 
-    The tolerance is calibrated to the quantity the refusal protects.  With
-    ``H = L' diag(Q, D) L`` for the unimodular ``L = [[I, 0], [F, I]]``, a
-    truncated Schur direction ``u`` with coupling ``c = ||F u||`` perturbs the
-    published log pseudo-determinant by exactly ``log1p(c^2) <= c^2`` (the
-    null vector of ``H`` is ``(u, -F u)`` with squared volume ``1 + c^2``).
-    Coupling below ``sqrt(eps) * max(1, ||F||)`` therefore moves the REML
-    geometry by at most round-off, while a structural alias (a small-block
-    column reproduced by the local blocks) produces ``c = O(||F||)``, several
-    orders above.  An eps-scale tolerance here would instead test whether the
-    coupling is distinguishable from exact zero, refusing harmless geometry:
-    an unpenalized separated level whose working-Gram column is mid-collapse
-    couples at ``eps``-to-``sqrt(eps)`` scale without carrying any structure.
+    For an orthonormal null basis Z the omitted log volume is
+    ``logdet(I + (F Z)' F Z) <= ||F Z||_F**2``.  It is an absolute contribution;
+    an unrelated large retained column of F cannot enlarge its allowance.
+    The product-error enclosure is added to the coupling, not the allowance.
+    Unresolved cancellation therefore refuses the factor too.
     """
     if np.all(positive):
         return
     null_basis = Vh[~positive].T
     flat_F = np.asarray(F, dtype=np.float64).reshape(-1, F.shape[-1])
     coupling = flat_F @ null_basis
-    reference = max(float(np.linalg.norm(flat_F, ord=2)), 1.0)
-    tolerance = float(np.sqrt(np.finfo(np.float64).eps)) * reference
-    if float(np.linalg.norm(coupling, ord=2)) > tolerance:
+    eps = np.finfo(np.float64).eps
+    product_width = flat_F.shape[1]
+    gamma = product_width * eps / (1.0 - product_width * eps)
+    with np.errstate(over="ignore", invalid="ignore"):
+        product_bound = gamma * (np.abs(flat_F) @ np.abs(null_basis))
+        enclosed = np.abs(coupling) + product_bound
+    # A nullity-r block permits at most r*eps of omitted log volume.  Scale
+    # first so the norm calculation cannot overflow before the refusal.
+    tolerance = float(np.sqrt(eps * null_basis.shape[1]))
+    maximum = float(np.max(enclosed, initial=0.0))
+    coupled = not np.isfinite(maximum) or maximum > tolerance
+    if not coupled and maximum:
+        coupled = maximum * float(np.linalg.norm(enclosed / maximum)) > tolerance
+    if coupled:
         raise np.linalg.LinAlgError(
             f"Structured term {term_name!r} has a coupled rank-deficient Schur null space."
+        )
+
+
+def _reject_negative_schur_curvature(Q: NDArray, cutoff: float, *, term_name: str) -> None:
+    """Preserve inertia before an unsigned SVD is used for the PSD fallback."""
+    if float(np.linalg.eigvalsh(Q)[0]) < -cutoff:
+        raise np.linalg.LinAlgError(
+            f"Structured term {term_name!r} has materially negative Schur curvature."
         )
 
 
@@ -168,8 +180,14 @@ class ScalarSchurFactor:
         self._small_position[self.small_indices] = np.arange(q)
         self._structured_position = np.full(self.shape[0], -1, dtype=np.intp)
         self._structured_position[self.structured_indices] = np.arange(k)
-        self._d_inv = 1.0 / self.d
-        self._F = self._d_inv[:, None] * self.C
+        with np.errstate(over="ignore", divide="ignore"):
+            self._d_inv_cache = 1.0 / self.d
+        self._finite_local_inverse = bool(np.all(np.isfinite(self._d_inv_cache)))
+        self._F = self._local_solve(self.C)
+        if not np.all(np.isfinite(self._F)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {term_name!r} has non-finite local elimination."
+            )
         eliminated = self.C.T @ self._F
         Q = self.A - eliminated
         self._Q = 0.5 * (Q + Q.T)
@@ -229,6 +247,7 @@ class ScalarSchurFactor:
                 self._Q_cholesky = None
                 self.used_dense_fallback = True
                 self.fallback_reason = f"Schur Cholesky fallback: {error}"
+                _reject_negative_schur_curvature(self._Q, absolute_cutoff, term_name=term_name)
                 U, singular_values, Vh = np.linalg.svd(self._Q, full_matrices=False)
                 threshold = (
                     max(singular_values[0] * 1e-10, absolute_cutoff)
@@ -263,6 +282,21 @@ class ScalarSchurFactor:
         self._Q_inverse_cache: NDArray | None = None
         self._inverse_dlr_cache: _DiagonalLowRank | None = None
 
+    @property
+    def _d_inv(self) -> NDArray:
+        """Require a representable full inverse only for inverse-based actions."""
+        if not self._finite_local_inverse:
+            raise np.linalg.LinAlgError(
+                f"Structured term {self.term_name!r} local inverse is not representable."
+            )
+        return self._d_inv_cache
+
+    def _local_solve(self, rhs: NDArray) -> NDArray:
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            if self._finite_local_inverse:
+                return self._d_inv_cache[:, None] * rhs
+            return rhs / self.d[:, None]
+
     def _Q_solve(self, rhs: NDArray) -> NDArray:
         """Solve the dense-small Schur system using the cached robust factor."""
         values = np.asarray(rhs, dtype=np.float64)
@@ -293,13 +327,17 @@ class ScalarSchurFactor:
 
         rhs_a = values[self.small_indices]
         rhs_b = values[self.structured_indices]
-        d_inv_rhs_b = self._d_inv[:, None] * rhs_b
+        d_inv_rhs_b = self._local_solve(rhs_b)
         schur_rhs = rhs_a - self.C.T @ d_inv_rhs_b
         solution_a = self._Q_solve(schur_rhs)
         solution_b = d_inv_rhs_b - self._F @ solution_a
         solution = np.empty_like(values)
         solution[self.small_indices] = solution_a
         solution[self.structured_indices] = solution_b
+        if not np.all(np.isfinite(solution)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {self.term_name!r} solve is not representable."
+            )
         return solution[:, 0] if vector_rhs else solution
 
     def coefficient_estimable(self) -> NDArray:
@@ -357,13 +395,17 @@ class ScalarSchurFactor:
         if len(structured_position):
             F_selected = self._F[structured_position]
             structured_block = F_selected @ Q_inverse @ F_selected.T + np.diag(
-                self._d_inv[structured_position]
+                self._d_inv_cache[structured_position]
             )
             inverse[np.ix_(structured_output, structured_output)] = structured_block
         if len(small_position) and len(structured_position):
             structured_small = -self._F[structured_position] @ Q_inverse[:, small_position]
             inverse[np.ix_(structured_output, small_output)] = structured_small
             inverse[np.ix_(small_output, structured_output)] = structured_small.T
+        if not np.all(np.isfinite(inverse)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {self.term_name!r} selected inverse is not representable."
+            )
         return inverse
 
     def selected_inverse_diagonal(self, indices: NDArray) -> NDArray:
@@ -377,9 +419,13 @@ class ScalarSchurFactor:
         if np.any(~small_mask):
             structured_position = self._structured_position[selected[~small_mask]]
             F_selected = self._F[structured_position]
-            diagonal[~small_mask] = self._d_inv[structured_position] + np.sum(
+            diagonal[~small_mask] = self._d_inv_cache[structured_position] + np.sum(
                 (F_selected @ self._Q_inverse()) * F_selected,
                 axis=1,
+            )
+        if not np.all(np.isfinite(diagonal)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {self.term_name!r} selected inverse is not representable."
             )
         return diagonal
 
@@ -646,25 +692,44 @@ class BlockSchurFactor:
             )
         try:
             self._D_cholesky = np.linalg.cholesky(self.D)
-            self._D_inv = np.linalg.inv(self.D)
+            with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+                self._D_inv_cache = np.linalg.inv(self.D)
         except np.linalg.LinAlgError as error:  # pragma: no cover - eigenvalue guard above
             raise np.linalg.LinAlgError(
                 f"Structured term {term_name!r} failed local block factorization: {error}"
             ) from error
-        local_residual = np.max(
-            np.linalg.norm(
-                np.einsum("kij,kjl->kil", self.D, self._D_inv, optimize=True)
-                - np.eye(self.block_size)[None, :, :],
-                axis=(1, 2),
+        self._finite_local_inverse = bool(np.all(np.isfinite(self._D_inv_cache)))
+        self._D_scale_exponents = np.zeros((self.n_levels, self.block_size), dtype=np.int64)
+        if self._finite_local_inverse:
+            local_residual = np.max(
+                np.linalg.norm(
+                    np.einsum("kij,kjl->kil", self.D, self._D_inv_cache, optimize=True)
+                    - np.eye(self.block_size)[None, :, :],
+                    axis=(1, 2),
+                )
             )
-        )
-        if not np.isfinite(local_residual) or local_residual >= 1e-6:
-            raise np.linalg.LinAlgError(
-                f"Structured term {term_name!r} local inverse residual "
-                f"{local_residual:.3g} exceeds 1e-6."
-            )
+            if not np.isfinite(local_residual) or local_residual >= 1e-6:
+                raise np.linalg.LinAlgError(
+                    f"Structured term {term_name!r} local inverse residual "
+                    f"{local_residual:.3g} exceeds 1e-6."
+                )
+        else:
+            # Subnormal local products can round a Cholesky pivot by an
+            # order-one fraction. Normalize each coordinate with an exact
+            # power of two before factoring; a global scale would erase a
+            # subnormal diagonal beside a large ordinary coordinate.
+            exceptional = ~np.all(np.isfinite(self._D_inv_cache), axis=(1, 2))
+            diagonal = np.diagonal(self.D, axis1=1, axis2=2)
+            self._D_scale_exponents[exceptional] = np.frexp(diagonal[exceptional])[1] // 2
+            shifts = self._D_scale_exponents
+            normalized = np.ldexp(self.D, -shifts[:, :, None] - shifts[:, None, :])
+            self._D_cholesky = np.linalg.cholesky(normalized)
 
-        self._F = np.einsum("kij,kjq->kiq", self._D_inv, self.C, optimize=True)
+        self._F = self._local_solve(self.C)
+        if not np.all(np.isfinite(self._F)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {term_name!r} has non-finite local elimination."
+            )
         eliminated = np.einsum("kiq,kir->qr", self.C, self._F, optimize=True)
         Q = self.A - eliminated
         self._Q = 0.5 * (Q + Q.T)
@@ -724,6 +789,7 @@ class BlockSchurFactor:
                 self._Q_cholesky = None
                 self.used_dense_fallback = True
                 self.fallback_reason = f"Schur Cholesky fallback: {error}"
+                _reject_negative_schur_curvature(self._Q, absolute_cutoff, term_name=term_name)
                 U, singular_values, Vh = np.linalg.svd(self._Q, full_matrices=False)
                 threshold = (
                     max(singular_values[0] * 1e-10, absolute_cutoff)
@@ -753,11 +819,37 @@ class BlockSchurFactor:
                 logdet_Q = float(np.sum(np.log(singular_values[positive])))
 
         local_logdet = 2.0 * float(np.sum(np.log(np.diagonal(self._D_cholesky, axis1=1, axis2=2))))
+        local_logdet += 2.0 * float(np.sum(self._D_scale_exponents)) * np.log(2.0)
         self._logdet = local_logdet + logdet_Q
         self.rank = int(self.n_levels * self.block_size + self._Q_rank)
         self.rank_truncated = self.rank < self.shape[0]
         self._Q_inverse_cache: NDArray | None = None
         self._inverse_bdlr_cache: _BlockDiagonalLowRank | None = None
+
+    @property
+    def _D_inv(self) -> NDArray:
+        """Keep inverse-only consumers separate from finite local solves."""
+        if not self._finite_local_inverse:
+            raise np.linalg.LinAlgError(
+                f"Structured term {self.term_name!r} local inverse is not representable."
+            )
+        return self._D_inv_cache
+
+    def _local_solve(self, rhs: NDArray) -> NDArray:
+        if self._finite_local_inverse:
+            return np.einsum("kij,kjm->kim", self._D_inv_cache, rhs, optimize=True)
+        if rhs.shape[-1] == 0:
+            return np.zeros_like(rhs)
+        # D=diag(2**s) E diag(2**s). Apply the normalized factor of E and
+        # restore both coordinate scales without ever materializing D^-1.
+        scaled_rhs = np.ldexp(rhs, -self._D_scale_exponents[:, :, None])
+        scaled_solution = np.stack(
+            [
+                scipy.linalg.cho_solve((root, True), values, check_finite=False)
+                for root, values in zip(self._D_cholesky, scaled_rhs, strict=True)
+            ]
+        )
+        return np.ldexp(scaled_solution, -self._D_scale_exponents[:, :, None])
 
     def _Q_solve(self, rhs: NDArray) -> NDArray:
         values = np.asarray(rhs, dtype=np.float64)
@@ -792,12 +884,7 @@ class BlockSchurFactor:
             )
         rhs_small = values[self.small_indices]
         rhs_structured = values[self.structured_indices]
-        D_inv_rhs = np.einsum(
-            "kij,kjm->kim",
-            self._D_inv,
-            rhs_structured,
-            optimize=True,
-        )
+        D_inv_rhs = self._local_solve(rhs_structured)
         schur_rhs = rhs_small - np.einsum(
             "kiq,kim->qm",
             self.C,
@@ -814,6 +901,10 @@ class BlockSchurFactor:
         solution = np.empty_like(values)
         solution[self.small_indices] = solution_small
         solution[self.structured_indices] = solution_structured
+        if not np.all(np.isfinite(solution)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {self.term_name!r} solve is not representable."
+            )
         return solution[:, 0] if vector_rhs else solution
 
     def coefficient_estimable(self) -> NDArray:
@@ -868,7 +959,7 @@ class BlockSchurFactor:
             coordinates = structured_position % self.block_size
             for row in range(len(structured_position)):
                 same_level = np.flatnonzero(levels == levels[row])
-                structured_block[row, same_level] += self._D_inv[
+                structured_block[row, same_level] += self._D_inv_cache[
                     levels[row],
                     coordinates[row],
                     coordinates[same_level],
@@ -879,6 +970,10 @@ class BlockSchurFactor:
             structured_small = -F_flat[structured_position] @ Q_inverse[:, small_position]
             inverse[np.ix_(structured_output, small_output)] = structured_small
             inverse[np.ix_(small_output, structured_output)] = structured_small.T
+        if not np.all(np.isfinite(inverse)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {self.term_name!r} selected inverse is not representable."
+            )
         return inverse
 
     def selected_inverse_diagonal(self, indices: NDArray) -> NDArray:
@@ -895,8 +990,12 @@ class BlockSchurFactor:
             coordinates = positions % self.block_size
             F_flat = self._F.reshape(self.n_levels * self.block_size, -1)
             F_selected = F_flat[positions]
-            diagonal[~small_mask] = self._D_inv[levels, coordinates, coordinates] + np.sum(
+            diagonal[~small_mask] = self._D_inv_cache[levels, coordinates, coordinates] + np.sum(
                 (F_selected @ Q_inverse) * F_selected, axis=1
+            )
+        if not np.all(np.isfinite(diagonal)):
+            raise np.linalg.LinAlgError(
+                f"Structured term {self.term_name!r} selected inverse is not representable."
             )
         return diagonal
 

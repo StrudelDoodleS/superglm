@@ -246,10 +246,14 @@ def _compute() -> dict[str, dict[str, object]]:
             frame, y, lambdas={key: 1.0 for key in _wiggle_names(predictors)}
         )
         out[f"{name}:fixed"] = _record(fixed)
-        reml = SuperLSS(family=family, predictors=predictors).fit_reml(frame, y, outer="efs")
+        # The record predates automatic initialization. Keep its numerical
+        # configuration fixed; default-start behavior has its own regressions.
+        reml = SuperLSS(family=family, predictors=predictors).fit_reml(
+            frame, y, outer="efs", initial_lambda=0.1
+        )
         out[f"{name}:reml"] = _record(reml)
         newton = SuperLSS(family=family, predictors=predictors).fit_reml(
-            frame, y, outer="efs+newton"
+            frame, y, outer="efs+newton", initial_lambda=0.1
         )
         out[f"{name}:reml+newton"] = _record(newton)
     return out

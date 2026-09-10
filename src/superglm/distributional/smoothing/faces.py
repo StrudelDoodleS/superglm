@@ -23,6 +23,7 @@ from superglm.distributional.result import (
     EndpointAssessmentFailureReason,
     JointEndpointDirectionEvidence,
     _assessment_is_numerically_stationary,
+    _endpoint_revalidation_projection_bound,
 )
 from superglm.distributional.smoothing.authority import (
     _endpoint_candidate_refit_bound,
@@ -228,26 +229,41 @@ def _check_face_direction(
         endpoint_fit.coefficients,
         endpoint_initial,
     ):
-        if cap_stationary or not allow_nonstationary_cap:
-            return refused("endpoint_state_changed", cap_fit, endpoint_fit)
-        endpoint_bound = _endpoint_candidate_refit_bound(
-            np.asarray(endpoint_initial),
-            endpoint_fit,
-            tolerance=authority_config.tolerance,
-        )
         with np.errstate(over="ignore", invalid="ignore"):
             endpoint_movement = float(
-                np.max(
-                    np.abs(endpoint_fit.coefficients - endpoint_initial),
-                    initial=0.0,
-                )
+                np.linalg.norm(endpoint_fit.coefficients - endpoint_initial, ord=2)
             )
-        if (
-            endpoint_bound is None
-            or not math.isfinite(endpoint_movement)
-            or endpoint_movement > endpoint_bound
-        ):
-            return refused("endpoint_state_changed", cap_fit, endpoint_fit)
+        if cap_stationary:
+            try:
+                projected_initial = endpoint_face.project(endpoint_initial)
+            except ValueError:
+                return refused("endpoint_state_changed", cap_fit, endpoint_fit)
+            projection_bound = _endpoint_revalidation_projection_bound(
+                endpoint_face,
+                np.asarray(endpoint_initial),
+            )
+            if (
+                endpoint_fit.iterations != 0
+                or not np.array_equal(endpoint_fit.coefficients, projected_initial)
+                or projection_bound is None
+                or not math.isfinite(endpoint_movement)
+                or endpoint_movement > projection_bound
+            ):
+                return refused("endpoint_state_changed", cap_fit, endpoint_fit)
+        else:
+            if not allow_nonstationary_cap:
+                return refused("endpoint_state_changed", cap_fit, endpoint_fit)
+            endpoint_bound = _endpoint_candidate_refit_bound(
+                np.asarray(endpoint_initial),
+                endpoint_fit,
+                tolerance=authority_config.tolerance,
+            )
+            if (
+                endpoint_bound is None
+                or not math.isfinite(endpoint_movement)
+                or endpoint_movement > endpoint_bound
+            ):
+                return refused("endpoint_state_changed", cap_fit, endpoint_fit)
     with measure_phase(phase_recorder, "efs_update_backtracking"):
         resolved_endpoint_objective = _laplace_objective(
             endpoint_fit,
@@ -705,7 +721,15 @@ def _recheck_exact_face(
                         if check is not None and check.direction.decision != "endpoint"
                         else None
                     ),
-                    failure_reason=None,
+                    failure_reason=(
+                        attempt.failure_reason
+                        if (
+                            attempt is not None
+                            and len(face.component_names) == 1
+                            and attempt.failure_reason == "endpoint_state_changed"
+                        )
+                        else None
+                    ),
                     coefficient_tolerance=authority_config.tolerance,
                     assessment_fits=(*failed_assessments, cap_fit),
                 ),

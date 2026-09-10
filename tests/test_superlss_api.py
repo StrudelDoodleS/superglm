@@ -502,7 +502,7 @@ def test_public_reml_defaults_to_practical_convergence_with_a_strict_opt_out(
     assert captured[1].maximum_lambda == 123.0
 
 
-def test_public_reml_places_its_implicit_start_inside_a_small_lambda_cap(
+def test_public_reml_preserves_automatic_start_with_a_small_lambda_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured = []
@@ -520,7 +520,7 @@ def test_public_reml_places_its_implicit_start_inside_a_small_lambda_cap(
 
     model.fit_reml(frame, response, max_lambda=0.05)
 
-    assert captured[0].initial_lambda == 0.05
+    assert captured[0].initial_lambda is None
     assert captured[0].maximum_lambda == 0.05
 
 

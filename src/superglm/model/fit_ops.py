@@ -64,6 +64,7 @@ from superglm.model.reml_setup import (
 from superglm.solvers.dispersion import dispersion_likelihood_size, model_weight_semantics
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import fit_pirls
+from superglm.solvers.working_rows import pearson_chi2
 from superglm.types import FitStats
 
 logger = logging.getLogger(__name__)
@@ -537,7 +538,6 @@ def _compute_fit_stats(
     if isinstance(distribution, Tweedie):
         from superglm.profiling.tweedie import (
             _tweedie_logpdf_pair,
-            _tweedie_pearson_contributions,
         )
 
         # The prior contract puts the weight inside the compound-Poisson
@@ -558,7 +558,6 @@ def _compute_fit_stats(
             null_logpdf = weights * null_logpdf
         ll = float(np.sum(fitted_logpdf))
         null_ll = float(np.sum(null_logpdf))
-        pearson = float(np.sum(weights * _tweedie_pearson_contributions(y, mu, distribution.p)))
     else:
         ll = weighted_log_likelihood(
             distribution, y, mu, weights, phi, weight_semantics=weight_semantics
@@ -566,8 +565,9 @@ def _compute_fit_stats(
         null_ll = weighted_log_likelihood(
             distribution, y, null_mu, weights, phi, weight_semantics=weight_semantics
         )
-        V = distribution.variance(mu)
-        pearson = float(np.sum(weights * (y - mu) ** 2 / V))
+    pearson = pearson_chi2(
+        distribution=distribution, y=y, mu=mu, sample_weight=weights, variance_floor=0.0
+    )
     null_dev = float(np.sum(weights * distribution.deviance_unit(y, null_mu)))
     dev = float(np.sum(weights * distribution.deviance_unit(y, mu)))
     expl_dev = _explained_deviance(dev, null_dev, y, null_mu, weights)

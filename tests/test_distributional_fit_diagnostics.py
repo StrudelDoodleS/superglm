@@ -23,8 +23,12 @@ from superglm.distributional.fit_diagnostics import (
 from superglm.distributional.model import DenseDistributionalModel, fit_dense_distributional
 from superglm.distributional.predictor import Predictor
 from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
+from superglm.distributional.results.solver import _validate_objective_and_step_certificate
+from superglm.distributional.telemetry import CurvatureTelemetry
 from superglm.distributional.weights import WeightContract
 from superglm.features import Numeric, RandomEffect, Spline
+
+from .test_distributional_endpoint_laml import _UnitGaussian
 
 
 def _fixed_model(*, retain_rows: bool = False):
@@ -216,6 +220,50 @@ def certified_model():
     model = _fit_smooth(inner_iterations=100, outer_iterations=30, tolerance=1.0e-3)
     assert model.smoothing is not None
     assert model.smoothing.matched_certified is True
+    return model
+
+
+class _DiagnosticUnitGaussian(_UnitGaussian):
+    def to_config(self) -> dict[str, str | float]:
+        return {"type": type(self).__name__, "variance": 1.0, "carrier": 0.375}
+
+
+@pytest.fixture(scope="module")
+def score_certified_model():
+    """A quadratic likelihood keeps fallback reporting independent of curvature."""
+    x = np.linspace(-1.0, 1.0, 48)
+    response = (
+        0.4
+        + 0.6 * x
+        + 2.0 * np.sin(3.0 * x)
+        + np.random.default_rng(23).normal(scale=0.25, size=48)
+    )
+    model = fit_dense_distributional(
+        pd.DataFrame({"x": x}),
+        response,
+        family=_DiagnosticUnitGaussian(),
+        predictors=(Predictor("mean", {"x": Spline(kind="cr", n_knots=5)}),),
+        weight_contract=WeightContract("prior"),
+        lambdas={"mean:x#wiggle": 0.3},
+        config=DenseSolverConfig(tolerance=1.0e-9, max_iterations=100),
+        efs_config=DistributionalEFSConfig(
+            outer="efs",
+            tolerance=1.0e-3,
+            max_iterations=30,
+            plateau_tolerance=0.0,
+            plateau_iterations=30,
+        ),
+        retain_rows=False,
+    )
+    smoothing = model.smoothing
+    assert smoothing is not None and smoothing.matched_certified
+    assert smoothing.terminal_fit_index > 0
+    for fit in smoothing.coefficient_fits:
+        retained_kkt = float(np.max(np.abs(fit.terminal_score), initial=0.0)) / (
+            1.0 + abs(fit.penalized_optimizing_log_likelihood)
+        )
+        assert fit.coefficient_face is None
+        assert fit.converged and retained_kkt <= fit.config.tolerance
     return model
 
 
@@ -735,18 +783,18 @@ def test_non_expected_information_family_reports_penalized_curvature_provenance(
     [({-1: 1}, 1, "fallback"), ({0: 1, -1: 2}, 3, "fallbacks")],
 )
 def test_curvature_fallbacks_make_converged_result_uncertified_and_report_sources(
-    certified_model,
+    score_certified_model,
     counts: dict[int, int],
     expected_count: int,
     fallback_word: str,
 ) -> None:
-    smoothing = certified_model.smoothing
+    smoothing = score_certified_model.smoothing
     assert smoothing is not None
     resolved_counts = {
         (smoothing.terminal_fit_index if index == -1 else index): count
         for index, count in counts.items()
     }
-    model = _with_curvature_fallbacks(certified_model, resolved_counts)
+    model = _with_curvature_fallbacks(score_certified_model, resolved_counts)
 
     report = diagnose_distributional_fit(model)
 
@@ -765,6 +813,42 @@ def test_curvature_fallbacks_make_converged_result_uncertified_and_report_source
     assert evidence["requested_sources"] == ("observed",)
     assert evidence["actual_sources"] == ("fisher",)
     assert f"{expected_count} curvature {fallback_word}" in fallback.observed
+
+
+def test_fallback_cannot_replace_the_only_objective_and_step_certificate() -> None:
+    config = DenseSolverConfig(tolerance=1.0e-9)
+    # For l(beta) = -1 - beta**2/2 at beta = -4*tol, the score exceeds
+    # its tolerance while the observed Newton decrement is much smaller.
+    score = np.array([4.0 * config.tolerance])
+    objective = -1.0 - 0.5 * float(score @ score)
+    assert float(np.max(np.abs(score))) / (1.0 + abs(objective)) > config.tolerance
+    observed = CurvatureTelemetry(
+        requested_source="observed",
+        actual_source="observed",
+        reason=None,
+        minimum_eigenvalue=1.0,
+        rank=1,
+        condition_estimate=1.0,
+        fallback_count=0,
+        matrix_kind="penalized",
+    )
+    inputs = dict(
+        config=config,
+        converged=True,
+        score=score,
+        penalized_curvature=np.eye(1),
+        penalized_objective=objective,
+        face=None,
+    )
+    _validate_objective_and_step_certificate(terminal_curvature=observed, **inputs)
+    fallback = replace(
+        observed,
+        actual_source="fisher",
+        reason="observed_curvature_not_usable",
+        fallback_count=1,
+    )
+    with pytest.raises(ValueError, match="retained score or unfallbacked observed curvature"):
+        _validate_objective_and_step_certificate(terminal_curvature=fallback, **inputs)
 
 
 def test_lambda_cap_unresolved_is_per_qualified_component_with_refusal_evidence(

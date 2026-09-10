@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from fractions import Fraction
 from typing import Literal
 
 import numpy as np
@@ -99,7 +101,12 @@ SHARED_RANK_POLICY = RankPolicy(
     # normal-equation boundary they pin is still `lambda = sigma^2`, and the
     # floor binds only where that boundary asks for a decision the arithmetic
     # cannot supply.  See issue #356.
-    version=3,
+    # Version 4. Safe factor norms preserve columns previously erased by
+    # underflow or overflow. Signed row-magnitude scaling preserves modes
+    # previously lost beside epsilon-amplified zero-diagonal blocks. Both can
+    # change rank or representatives for identical input without changing the
+    # threshold fields, so stored decompositions must distinguish this rule.
+    version=4,
     factor_rcond=float(np.sqrt(_EPS)),
     gram_rcond=float(_EPS),
     certification_band=32.0,
@@ -242,46 +249,46 @@ def _eigensolver_relative_bar(order: int) -> float:
 # Largest entry magnitude for which ``M + M.T`` provably cannot overflow: the
 # sum is bounded entrywise by twice this.  See ``_symmetric_part``.
 _HALF_MAX = float(np.finfo(float).max) / 2.0
+# This rounds down to 2**-1024, whose reciprocal still overflows. Include the
+# endpoint when deciding whether to defer inverse coordinate scales.
+_MIN_RECIPROCAL_SCALE = 1.0 / float(np.finfo(float).max)
 
 
 def _symmetric_part(values: NDArray) -> NDArray:
-    """``0.5 * (M + M.T)``, computed so a finite ``M`` cannot overflow to ``inf``.
+    """Average binary64 transposed pairs without overflow or premature halving.
 
-    ``M + M.T`` is formed at full magnitude, so a finite ``M`` whose entries
-    exceed half the float range overflows before the halving can bring it back.
-    ``[[1e308]]`` sums to ``inf``; ``decompose_gram`` then either refuses the
-    matrix outright or -- once the caller has pre-symmetrized -- equilibrates
-    ``inf / inf`` to ``nan`` and returns a silently wrong answer.  Halving each
-    operand first, ``0.5 * M + 0.5 * M.T``, cannot overflow at all: both terms
-    are bounded by ``max / 2``, so their sum is bounded by ``max``.
+    Add before halving when both magnitudes are at most half the finite
+    maximum. This preserves subnormal pairs, including an exactly symmetric
+    least-subnormal diagonal. Larger pairs need the split form to keep their
+    average finite. Choose per pair: a large entry elsewhere in the matrix
+    must not force premature rounding of the small entries.
 
-    The two forms are **not** interchangeable, which is why this is a branch
-    rather than a rewrite.  Halving is exact only while the halved value stays
-    normal, so the split form rounds where the joint form does not.  Swept over
-    1.05e6 exhaustive subnormal pairs, 1.05e6 pairs straddling the
-    normal/subnormal boundary, 8e3 random subnormal pairs and 1e4 random normal
-    pairs spanning the full exponent range, the two forms differ on 393726,
-    393728, 2866 and **0** of those respectively.  The normal-range count is the
-    load-bearing one -- the forms agree bitwise whenever both operands are
-    normal and the sum does not overflow -- but the subnormal disagreement is
-    real, and it costs the guarantee that an exactly symmetric ``M`` is
-    reproduced bitwise: at ``M = [[3 * 5e-324]]`` the split form returns
-    ``4 * 5e-324`` because ``0.5 * M`` rounds to even, while the joint form is
-    exact.
-
-    So the joint form is kept verbatim wherever it is provably safe --
-    ``max|M| <= max / 2`` bounds ``|M + M.T|`` by ``max`` entrywise -- and the
-    split form is taken only in the regime the joint form cannot represent.
-    Every in-tree Gram matrix (``XtWX + S``, ``X'X + lambda*P``) is many orders
-    below that bound, so this is bitwise inert for all of them.
-
-    Non-finite input needs no special handling: ``max|M|`` is then ``inf`` or
-    ``nan``, neither of which satisfies the bound, and the split form
-    propagates the ``inf``/``nan`` exactly as the joint form does.
+    The large operand halves exactly. Halving the other operand can round
+    only near underflow, too far below the large operand to affect the sum.
+    Non-finite values retain the usual addition semantics.
     """
-    if float(np.abs(values).max(initial=0.0)) <= _HALF_MAX:
+    magnitude = np.abs(values)
+    if float(magnitude.max(initial=0.0)) <= _HALF_MAX:
         return 0.5 * (values + values.T)
-    return 0.5 * values + 0.5 * values.T
+    small = (magnitude <= _HALF_MAX) & (magnitude.T <= _HALF_MAX)
+    result = np.empty_like(values)
+    result[small] = 0.5 * (values[small] + values.T[small])
+    large = ~small
+    result[large] = 0.5 * values[large] + 0.5 * values.T[large]
+    return result
+
+
+def _safe_column_norms(matrix: NDArray) -> NDArray:
+    """Return finite column 2-norms without squaring the input magnitudes."""
+    maximum = np.max(np.abs(matrix), axis=0, initial=0.0)
+    scaled = np.zeros_like(matrix)
+    np.divide(matrix, maximum, out=scaled, where=maximum[None, :] > 0.0)
+    squared_norm = np.einsum("ij,ij->j", scaled, scaled, optimize=True)
+    with np.errstate(over="ignore"):
+        norms = maximum * np.sqrt(squared_norm)
+    if np.any(~np.isfinite(norms)):
+        raise ValueError("factor column norm is not representable")
+    return norms
 
 
 def diagonal_of_square(matrix: NDArray) -> NDArray:
@@ -351,13 +358,13 @@ def streamed_weighted_factor_rhs(
 def _certification_required(
     *,
     method: str,
-    width: int,
+    active_width: int,
     rank: int,
     pre_truncation_condition: float,
     resolution_limited: bool,
     policy: RankPolicy,
 ) -> bool:
-    """The certification predicate, over the five fields that decide it.
+    """The certification predicate over the fields that decide it.
 
     ``decompose_gram`` knows all five before it builds the retained subspace,
     so the predicate is kept callable without a decomposition in hand --
@@ -371,10 +378,10 @@ def _certification_required(
         return False
     certification_condition = policy.warning_condition / np.sqrt(policy.certification_band)
     return bool(
-        width > 0
+        active_width > 0
         and (
-            (rank == width and pre_truncation_condition >= certification_condition)
-            or (rank < width and resolution_limited)
+            (rank == active_width and pre_truncation_condition >= certification_condition)
+            or (rank < active_width and resolution_limited)
         )
     )
 
@@ -425,7 +432,7 @@ def needs_factor_certification(
     """
     return _certification_required(
         method=decomposition.method,
-        width=decomposition.width,
+        active_width=int(np.count_nonzero(decomposition.column_scale > 0.0)),
         rank=decomposition.rank,
         pre_truncation_condition=decomposition.pre_truncation_condition,
         resolution_limited=decomposition.resolution_limited,
@@ -437,6 +444,106 @@ def _freeze(values: NDArray, *, dtype=float) -> NDArray:
     result = np.array(values, dtype=dtype, copy=True)
     result.setflags(write=False)
     return result
+
+
+def _scaled_coordinate_columns(
+    values: NDArray, scale: NDArray, *, inverse: bool = True
+) -> tuple[NDArray, NDArray]:
+    """Apply coordinate scales for a homogeneous norm comparison.
+
+    A common column exponent can round small entries away. Do not use this
+    representation for linear actions or for constructing a column span.
+    """
+    mantissa, exponent = np.frexp(values)
+    scale_mantissa, scale_exponent = np.frexp(scale)
+    if inverse:
+        mantissa = mantissa / scale_mantissa[:, None]
+        exponent = exponent - scale_exponent[:, None]
+    else:
+        mantissa = mantissa * scale_mantissa[:, None]
+        exponent = exponent + scale_exponent[:, None]
+    nonzero = values != 0.0
+    column_exponent = np.max(np.where(nonzero, exponent, np.iinfo(exponent.dtype).min), axis=0)
+    column_exponent = np.where(np.any(nonzero, axis=0), column_exponent, 0)
+    return np.ldexp(mantissa, exponent - column_exponent[None, :]), column_exponent
+
+
+def _restore_coordinate_scale(
+    values: NDArray, scale: NDArray, exponent: int | NDArray = 0
+) -> NDArray:
+    """Return ``values * 2**exponent / scale`` without a reciprocal intermediate."""
+    mantissa, value_exponent = np.frexp(values)
+    scale_mantissa, scale_exponent = np.frexp(scale)
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = np.ldexp(mantissa / scale_mantissa, value_exponent - scale_exponent + exponent)
+    if np.any(~np.isfinite(result)):
+        raise ValueError("requested result is not representable")
+    return result
+
+
+def _exact_array(values: NDArray) -> NDArray:
+    """Represent stored floats exactly, only on the deferred tiny-factor path."""
+    values = np.asarray(values)
+    return np.array(
+        [Fraction.from_float(float(value)) for value in values.flat], dtype=object
+    ).reshape(values.shape)
+
+
+def _exact_to_float(values: NDArray) -> NDArray:
+    """Round a requested result once, refusing magnitude outside binary64."""
+    if np.any(np.abs(values) > np.finfo(float).max):
+        raise ValueError("requested result is not representable")
+    return np.asarray(values, dtype=float)
+
+
+def _exact_triangular_solve(triangular: NDArray, rhs: NDArray, *, lower: bool) -> NDArray:
+    """Substitute over exact stored entries without rounding an intermediate."""
+    result = rhs.copy()
+    order = len(result)
+    indices = range(order) if lower else range(order - 1, -1, -1)
+    for index in indices:
+        known = slice(None, index) if lower else slice(index + 1, None)
+        result[index] = (result[index] - triangular[index, known] @ result[known]) / triangular[
+            index, index
+        ]
+    return result
+
+
+def _log_positive_fraction(value: Fraction) -> float:
+    """Logarithm using a bounded ratio and its exact binary exponent."""
+    exponent = value.numerator.bit_length() - value.denominator.bit_length()
+    if exponent >= 0:
+        mantissa = Fraction(value.numerator, value.denominator << exponent)
+    else:
+        mantissa = Fraction(value.numerator << -exponent, value.denominator)
+    return math.log(float(mantissa)) + exponent * math.log(2.0)
+
+
+def _exact_orthogonal_columns(coordinates: NDArray) -> tuple[NDArray, float]:
+    """Preserve an exceptional coordinate span before rounding its basis.
+
+    Exact Gram-Schmidt cannot lose a direction through cancellation or
+    exponent range. Normalize each residual by its largest entry before
+    converting it, so the float vector is bounded and has norm at least one.
+    This evaluates the stored coordinate subspace, including its existing
+    decomposition error; it does not refine or change the rank decision.
+    """
+    basis = np.empty(coordinates.shape)
+    orthogonal: list[tuple[NDArray, Fraction]] = []
+    log_norms: list[float] = []
+    for column in range(coordinates.shape[1]):
+        residual = coordinates[:, column].copy()
+        for previous, squared_norm in orthogonal:
+            residual -= ((previous @ residual) / squared_norm) * previous
+        maximum = max(abs(residual))
+        if maximum == 0:
+            raise ValueError("retained coordinate basis is not full rank")
+        normalized = residual / maximum
+        squared_norm = normalized @ normalized
+        orthogonal.append((normalized, squared_norm))
+        basis[:, column] = np.asarray(normalized, dtype=float) / math.sqrt(float(squared_norm))
+        log_norms.append(2.0 * _log_positive_fraction(maximum) + math.log(float(squared_norm)))
+    return basis, math.fsum(log_norms)
 
 
 @dataclass(frozen=True)
@@ -461,10 +568,30 @@ class RankDecomposition:
     retained_values: NDArray | None = None
     factor_rhs_left_basis: NDArray | None = None
     factor_rhs_triangular: NDArray | None = None
+    # Tiny factors can have finite actions but unrepresentable inverse-scale
+    # bases. Keep their bounded coordinates separate until an action is asked.
+    equilibrated_solution_basis: NDArray | None = None
+    equilibrated_null_basis: NDArray | None = None
 
     @property
     def width(self) -> int:
         return int(self.column_scale.size)
+
+    def _solve_deferred(self, rhs: NDArray) -> NDArray:
+        """Evaluate the stored Gram action with exact exceptional intermediates."""
+        active = self.active_columns
+        scale = _exact_array(self.column_scale[active, None])
+        scaled_rhs = _exact_array(rhs[active]) / scale
+        if self.cholesky_factor is not None:
+            lower = _exact_array(self.cholesky_factor)
+            forward = _exact_triangular_solve(lower, scaled_rhs, lower=True)
+            solved = _exact_triangular_solve(lower.T, forward, lower=False)
+        else:
+            basis = _exact_array(self.equilibrated_solution_basis[active])
+            solved = basis @ ((basis.T @ scaled_rhs) / _exact_array(self.retained_values[:, None]))
+        result = np.zeros((self.width, rhs.shape[1]))
+        result[active] = _exact_to_float(solved / scale)
+        return result
 
     def solve(self, rhs: NDArray) -> NDArray:
         rhs = np.asarray(rhs, dtype=float)
@@ -472,6 +599,8 @@ class RankDecomposition:
             raise ValueError("rhs width does not match decomposition")
         if self.rank == 0:
             return np.zeros_like(rhs)
+        if self.equilibrated_solution_basis is not None:
+            return self._solve_deferred(rhs[:, None])[:, 0]
         if self.cholesky_factor is not None:
             active_rhs = rhs[self.active_columns] / self.column_scale[self.active_columns]
             active_solution = scipy.linalg.cho_solve(
@@ -498,6 +627,20 @@ class RankDecomposition:
             raise ValueError("transformed RHS length does not match the certified factor")
         if self.rank == 0:
             return np.zeros(self.width)
+        if self.equilibrated_solution_basis is not None:
+            projected_rhs = _exact_array(self.factor_rhs_left_basis.T) @ _exact_array(
+                transformed_rhs
+            )
+            active = self.active_columns
+            if self.cholesky_factor is not None:
+                solved = _exact_triangular_solve(
+                    _exact_array(self.cholesky_factor.T), projected_rhs, lower=False
+                )
+            else:
+                solved = _exact_array(self.equilibrated_solution_basis[active]) @ projected_rhs
+            result = np.zeros(self.width)
+            result[active] = _exact_to_float(solved / _exact_array(self.column_scale[active]))
+            return result
         projected_rhs = self.factor_rhs_left_basis.T @ transformed_rhs
         if self.factor_rhs_triangular is not None:
             active_solution = scipy.linalg.solve_triangular(
@@ -516,6 +659,8 @@ class RankDecomposition:
     def pseudo_inverse(self) -> NDArray:
         if self.rank == 0:
             return np.zeros((self.width, self.width))
+        if self.equilibrated_solution_basis is not None:
+            return _symmetric_part(self._solve_deferred(np.eye(self.width)))
         if self.cholesky_factor is not None:
             inverse_equilibrated = scipy.linalg.cho_solve(
                 (self.cholesky_factor, True),
@@ -527,13 +672,20 @@ class RankDecomposition:
             inverse[np.ix_(self.active_columns, self.active_columns)] = (
                 inverse_equilibrated / np.outer(scale, scale)
             )
-            return 0.5 * (inverse + inverse.T)
+            return _symmetric_part(inverse)
         if self.solution_basis is None or self.retained_values is None:
             raise RuntimeError("retained spectral basis is unavailable")
         inverse = (self.solution_basis / self.retained_values) @ self.solution_basis.T
-        return 0.5 * (inverse + inverse.T)
+        return _symmetric_part(inverse)
 
     def retained_parameter_basis(self) -> NDArray:
+        if self.equilibrated_solution_basis is not None:
+            active = self.active_columns
+            basis = np.zeros((self.width, self.rank))
+            basis[active] = _restore_coordinate_scale(
+                self.equilibrated_solution_basis[active], self.column_scale[active, None]
+            )
+            return basis
         if self.solution_basis is not None:
             return self.solution_basis.copy()
         basis = np.zeros((self.width, self.rank))
@@ -551,6 +703,26 @@ class RankDecomposition:
         if contrast.shape != (self.width,):
             raise ValueError("contrast width does not match decomposition")
         scaled_columns = self.column_scale > 0.0
+        if self.equilibrated_null_basis is not None:
+            # Normalizing parameter-null columns changes their magnitudes.
+            # Use the original bounded null coordinates and a homogeneous
+            # contrast scaling, with the same estimability tolerance.
+            maximum = float(np.max(np.abs(contrast), initial=0.0))
+            if maximum == 0.0:
+                return True
+            normalized_contrast = contrast / maximum
+            tolerance = SHARED_RANK_POLICY.factor_rcond * np.linalg.norm(normalized_contrast)
+            if np.linalg.norm(normalized_contrast[~scaled_columns]) > tolerance:
+                return False
+            scaled_contrast, _ = _scaled_coordinate_columns(
+                contrast[scaled_columns, None], self.column_scale[scaled_columns]
+            )
+            scaled_contrast = scaled_contrast[:, 0]
+            projection = scaled_contrast @ self.equilibrated_null_basis[scaled_columns]
+            tolerance = SHARED_RANK_POLICY.factor_rcond * max(
+                float(np.linalg.norm(scaled_contrast)), np.finfo(float).tiny
+            )
+            return bool(np.linalg.norm(projection) <= tolerance)
         contrast_norm = float(np.linalg.norm(contrast))
         structural_tolerance = SHARED_RANK_POLICY.factor_rcond * max(
             contrast_norm,
@@ -584,6 +756,12 @@ class RankDecomposition:
         """Return all unit-coordinate estimability decisions in one projection."""
         scaled_columns = self.column_scale > 0.0
         result = np.zeros(self.width, dtype=bool)
+        if self.equilibrated_null_basis is not None:
+            result[scaled_columns] = (
+                np.linalg.norm(self.equilibrated_null_basis[scaled_columns], axis=1)
+                <= SHARED_RANK_POLICY.factor_rcond
+            )
+            return result
         null = self.null_basis()
         if null.shape[1] == 0:
             result[scaled_columns] = True
@@ -667,22 +845,43 @@ def _equilibrate_gram(
         raise ValueError("matrix must be finite")
     symmetric = _symmetric_part(values)
     diagonal = np.diag(symmetric)
-    scale_reference = max(float(np.max(np.abs(diagonal), initial=0.0)), 1.0)
-    if not allow_indefinite and np.any(diagonal < -100.0 * _EPS * scale_reference):
+    scale_reference = float(np.max(np.abs(diagonal), initial=0.0))
+    # Compare dimensionless diagonals: an absolute unit floor can turn an
+    # indefinite matrix into a structural zero merely by rescaling it. Divide
+    # before testing so the relative allowance does not itself underflow.
+    if (
+        not allow_indefinite
+        and scale_reference > 0.0
+        and np.any(diagonal / scale_reference < -100.0 * _EPS)
+    ):
         raise ValueError("matrix has a materially negative diagonal")
     if allow_indefinite:
-        row_scale = np.max(np.abs(symmetric), axis=1, initial=0.0)
-        diagonal_scale = np.maximum(np.abs(diagonal), _EPS * row_scale)
+        # With r_i = max_j |A_ij|, symmetry gives |A_ij| <= sqrt(r_i r_j).
+        # This bounds every scaled entry by one even on a zero diagonal.
+        diagonal_scale = np.max(np.abs(symmetric), axis=1, initial=0.0)
     else:
         diagonal_scale = np.maximum(diagonal, 0.0)
+        zero_diagonal = diagonal_scale == 0.0
+        if np.any(zero_diagonal):
+            off_diagonal = symmetric.copy()
+            np.fill_diagonal(off_diagonal, 0.0)
+            if np.any(off_diagonal[zero_diagonal] != 0.0):
+                raise ValueError("matrix has nonzero offdiagonal entry on a zero diagonal")
     active_columns = np.flatnonzero(diagonal_scale > 0.0)
     column_scale = np.zeros(len(diagonal))
     column_scale[active_columns] = np.sqrt(diagonal_scale[active_columns])
     if active_columns.size:
         active_scale = column_scale[active_columns]
-        equilibrated = symmetric[np.ix_(active_columns, active_columns)] / np.outer(
-            active_scale, active_scale
-        )
+        active_matrix = symmetric[np.ix_(active_columns, active_columns)]
+        if allow_indefinite:
+            # Dividing by the smaller scale first avoids both a rounded
+            # subnormal product and premature underflow in one triangle.
+            # The first quotient is bounded by sqrt(min(r_i, r_j)).
+            smaller_scale = np.minimum(active_scale[:, None], active_scale[None, :])
+            larger_scale = np.maximum(active_scale[:, None], active_scale[None, :])
+            equilibrated = (active_matrix / smaller_scale) / larger_scale
+        else:
+            equilibrated = active_matrix / np.outer(active_scale, active_scale)
         equilibrated = 0.5 * (equilibrated + equilibrated.T)
     else:
         equilibrated = np.zeros((0, 0))
@@ -712,7 +911,12 @@ def _null_basis(
     pieces: list[NDArray] = []
     if discarded_vectors.shape[1]:
         discarded = np.zeros((width, discarded_vectors.shape[1]))
-        discarded[active_columns, :] = discarded_vectors / active_scale[:, None]
+        if np.any(active_scale <= _MIN_RECIPROCAL_SCALE):
+            discarded[active_columns, :], _ = _exact_orthogonal_columns(
+                _exact_array(discarded_vectors) / _exact_array(active_scale[:, None])
+            )
+        else:
+            discarded[active_columns, :] = discarded_vectors / active_scale[:, None]
         pieces.append(discarded)
     inactive = np.setdiff1d(np.arange(width), active_columns, assume_unique=True)
     if inactive.size:
@@ -1417,6 +1621,18 @@ def _retained_log_pdet(
     #
     # Evaluate whichever side has fewer columns; this is both cheaper and more
     # accurate for the common one-alias case.
+    if np.any(active_scale <= _MIN_RECIPROCAL_SCALE):
+        use_retained = retained_vectors.shape[1] <= discarded_vectors.shape[1]
+        scale = _exact_array(active_scale[:, None])
+        coordinates = (
+            _exact_array(retained_vectors) * scale
+            if use_retained
+            else _exact_array(discarded_vectors) / scale
+        )
+        _, coordinate_logdet = _exact_orthogonal_columns(coordinates)
+        if not use_retained:
+            coordinate_logdet += 2.0 * float(np.sum(np.log(active_scale)))
+        return coordinate_logdet + float(np.sum(np.log(np.abs(retained_values))))
     if retained_vectors.shape[1] <= discarded_vectors.shape[1]:
         coordinate_logdet = _scaled_subspace_logdet(active_scale[:, None] * retained_vectors)
     else:
@@ -1564,8 +1780,8 @@ def _decompose_gram(
     # SHOWING rather than asserting because widening a definiteness test looks
     # like it should flip semantics.  `eigenvalues[0]` is the MINIMUM, so
     # admitting it means every negative eigenvalue satisfies `|w| <= n eps *
-    # max(max_abs, 1)`; the equilibrated matrix has a unit diagonal, so
-    # `max_abs >= 1` and that factor is just `max_abs`.  Every such eigenvalue
+    # max(max_abs, 1)`; some equilibrated entry has magnitude one, so
+    # `max_abs >= 1` and that factor is just `max_abs`. Every such eigenvalue
     # is therefore at or under the cutoff below and is dropped under either
     # semantics.  Nothing retained as indefinite stops being retained.
     negative_tolerance = max(100.0 * _EPS, _eigensolver_relative_bar(len(active_columns))) * max(
@@ -1666,7 +1882,7 @@ def _decompose_gram(
     # against the observation factor, none of that work can be read back.
     if omit_uncertifiable and _certification_required(
         method="gram_eigh",
-        width=width,
+        active_width=int(active_columns.size),
         rank=rank,
         pre_truncation_condition=condition,
         resolution_limited=resolution_limited,
@@ -1849,7 +2065,7 @@ def decompose_factor(
     if factor.ndim != 2 or not np.all(np.isfinite(factor)):
         raise ValueError("factor must be a finite matrix")
     width = factor.shape[1]
-    column_scale = np.linalg.norm(factor, axis=0)
+    column_scale = _safe_column_norms(factor)
     active_columns = np.flatnonzero(column_scale > 0.0)
     if active_columns.size == 0:
         decomposition = decompose_gram(np.zeros((width, width)), policy=policy)
@@ -1874,9 +2090,18 @@ def decompose_factor(
     rank = int(np.count_nonzero(retained_mask))
     retained_vectors = Vh[: len(singular_values), :].T[:, retained_mask]
     discarded_vectors = Vh.T[:, rank:]
-    solution_basis = np.zeros((width, rank))
+    defer_inverse_scale = bool(np.any(active_scale <= _MIN_RECIPROCAL_SCALE))
+    solution_basis = None if defer_inverse_scale else np.zeros((width, rank))
+    equilibrated_solution_basis = None
+    equilibrated_null_basis = None
+    if defer_inverse_scale:
+        equilibrated_solution_basis = np.zeros((width, rank))
+        equilibrated_solution_basis[active_columns] = retained_vectors
+        equilibrated_null_basis = np.zeros((width, discarded_vectors.shape[1]))
+        equilibrated_null_basis[active_columns] = discarded_vectors
+    else:
+        solution_basis[active_columns, :] = retained_vectors / active_scale[:, None]
     estimable_basis = np.zeros((width, rank))
-    solution_basis[active_columns, :] = retained_vectors / active_scale[:, None]
     estimable_basis[active_columns, :] = retained_vectors * active_scale[:, None]
     null = _null_basis(width, active_columns, active_scale, discarded_vectors)
     retained_values = singular_values[retained_mask] ** 2
@@ -1941,10 +2166,15 @@ def decompose_factor(
             if representative_geometry is not None:
                 compact_left, representative_upper = representative_geometry
                 representative_factor = representative_upper.T
-                representative_basis = np.zeros((width, rank))
-                representative_basis[representative_columns, np.arange(rank)] = (
-                    1.0 / column_scale[representative_columns]
-                )
+                representative_basis = None
+                if defer_inverse_scale:
+                    equilibrated_solution_basis = np.zeros((width, rank))
+                    equilibrated_solution_basis[representative_columns, np.arange(rank)] = 1.0
+                else:
+                    representative_basis = np.zeros((width, rank))
+                    representative_basis[representative_columns, np.arange(rank)] = (
+                        1.0 / column_scale[representative_columns]
+                    )
                 representative_aliases = np.ones(width, dtype=bool)
                 representative_aliases[representative_columns] = False
                 representative_rhs_left_basis = None
@@ -1953,9 +2183,10 @@ def decompose_factor(
                     representative_rhs_left_basis = (
                         left_vectors[:, : len(singular_values)] @ compact_left
                     )
-                    representative_rhs_triangular = (
-                        representative_upper * column_scale[representative_columns][None, :]
-                    )
+                    if not defer_inverse_scale:
+                        representative_rhs_triangular = (
+                            representative_upper * column_scale[representative_columns][None, :]
+                        )
                 return RankDecomposition(
                     policy_version=policy.version,
                     method="qr_svd",
@@ -1970,7 +2201,9 @@ def decompose_factor(
                     log_pdet=log_pdet,
                     cholesky_factor=_freeze(representative_factor),
                     pivots=_freeze(representative_columns, dtype=int),
-                    solution_basis=_freeze(representative_basis),
+                    solution_basis=(
+                        None if representative_basis is None else _freeze(representative_basis)
+                    ),
                     parameter_null_basis=_freeze(null),
                     estimable_functional_basis=_freeze(estimable_basis),
                     structural_aliases=_freeze(representative_aliases, dtype=bool),
@@ -1985,6 +2218,16 @@ def decompose_factor(
                         if representative_rhs_triangular is None
                         else _freeze(representative_rhs_triangular)
                     ),
+                    equilibrated_solution_basis=(
+                        None
+                        if equilibrated_solution_basis is None
+                        else _freeze(equilibrated_solution_basis)
+                    ),
+                    equilibrated_null_basis=(
+                        None
+                        if equilibrated_null_basis is None
+                        else _freeze(equilibrated_null_basis)
+                    ),
                 )
     return RankDecomposition(
         policy_version=policy.version,
@@ -1998,13 +2241,19 @@ def decompose_factor(
         used_svd_fallback=True,
         resolution_limited=bool(np.any((singular_values > 0.0) & ~retained_mask)),
         log_pdet=log_pdet,
-        solution_basis=_freeze(solution_basis),
+        solution_basis=None if solution_basis is None else _freeze(solution_basis),
         parameter_null_basis=_freeze(null),
         estimable_functional_basis=_freeze(estimable_basis),
         structural_aliases=_freeze(column_scale == 0.0, dtype=bool),
         retained_values=_freeze(retained_values),
         factor_rhs_left_basis=(
             None if factor_rhs_left_basis is None else _freeze(factor_rhs_left_basis)
+        ),
+        equilibrated_solution_basis=(
+            None if equilibrated_solution_basis is None else _freeze(equilibrated_solution_basis)
+        ),
+        equilibrated_null_basis=(
+            None if equilibrated_null_basis is None else _freeze(equilibrated_null_basis)
         ),
     )
 

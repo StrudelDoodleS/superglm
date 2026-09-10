@@ -21,6 +21,7 @@ from superglm.distributional.model import _readonly_default_prediction
 from superglm.distributional.null_model import NullModelFitError
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric
+from tests._generalized_gamma_lss_oracles import mp_log_density
 from tests._r_harness import ROOT, r_environment, require_r_harness
 
 
@@ -154,16 +155,48 @@ def test_generalized_gamma_reduces_to_lognormal_and_weibull_densities():
     y = np.array([0.4, 1.3, 2.8, 7.5])
     mu, sigma = 0.3, 0.8
     carrier = -np.log(y) - 0.5 * math.log(2 * math.pi)
-    tiny = gg.location_rows(
-        y, np.full(4, mu), np.full(4, sigma), np.full(4, 1e-10), np.ones(4), derivative_order=0
+    zero = gg.location_rows(
+        y, np.full(4, mu), np.full(4, sigma), np.zeros(4), np.ones(4), derivative_order=0
     )
     lognormal = stats.lognorm(s=sigma, scale=math.exp(mu)).logpdf(y)
-    assert np.allclose(tiny.optimizing_log_likelihood + carrier, lognormal, rtol=0, atol=1e-12)
+    assert np.allclose(zero.optimizing_log_likelihood + carrier, lognormal, rtol=0, atol=1e-12)
     one = gg.location_rows(
         y, np.full(4, mu), np.full(4, sigma), np.ones(4), np.ones(4), derivative_order=0
     )
     weibull = stats.weibull_min(c=1.0 / sigma, scale=math.exp(mu)).logpdf(y)
     assert np.allclose(one.optimizing_log_likelihood + carrier, weibull, rtol=0, atol=1e-12)
+
+
+def test_generalized_gamma_tiny_nonzero_shape_retains_the_finite_shape_density():
+    pytest.importorskip("mpmath")
+    y = np.array([0.4, 1.3, 2.8, 7.5])
+    mu, sigma = 0.3, 0.8
+    carrier = -np.log(y) - 0.5 * math.log(2 * math.pi)
+    q = 1e-10
+    tiny = gg.location_rows(
+        y, np.full(4, mu), np.full(4, sigma), np.full(4, q), np.ones(4), derivative_order=0
+    )
+    expected = np.array([float(mp_log_density(value, mu, sigma, q, dps=100)) for value in y])
+    w = (np.log(y) - mu) / sigma
+    # Finite Q has an O(Q*w**3) density correction. The independent density
+    # oracle retains it. Bound rounding by 48 Horner operations plus coefficient,
+    # argument and final-channel rounding; include the w-input condition scale.
+    operations = 2 * 25 + 32
+    unit_roundoff = np.finfo(np.float64).eps / 2
+    gamma = operations * unit_roundoff / (1 - operations * unit_roundoff)
+    scale = (
+        1
+        + abs(math.log(sigma))
+        + abs(np.log(y))
+        + w * w
+        + abs(w) * (abs(np.log(y)) + abs(mu)) / sigma
+    )
+    # First omitted Stirling term and the exponential Taylor remainder.
+    u = abs(q * w)
+    truncation = q**6 / 360 + w * w * np.exp(u) * u**25 / math.factorial(27)
+    assert np.all(
+        abs(tiny.optimizing_log_likelihood + carrier - expected) <= gamma * scale + truncation
+    )
 
 
 def test_infinite_mean_data_either_diagnose_or_stop_at_the_boundary():

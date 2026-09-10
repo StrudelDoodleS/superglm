@@ -54,7 +54,7 @@ def snapshot():
             name = (entry / "comm").read_text().strip()
             command = (entry / "cmdline").read_bytes().lower()
             categories = [
-                label for label in ("headroom", "kompress", "pylance", "pytest", "node", "python")
+                label for label in ("pylance", "pytest", "node", "python")
                 if label.encode() in command
             ]
             stat = (entry / "stat").read_text().rsplit(")", 1)[1].split()
@@ -74,8 +74,6 @@ def snapshot():
 
 def primary_category(process):
     categories = set(process["categories"])
-    if categories & {"headroom", "kompress"}:
-        return "headroom_or_kompress"
     if "pytest" in categories:
         return "pytest"
     if categories & {"node", "pylance"}:

@@ -541,7 +541,7 @@ No new capability is promoted merely because a microbenchmark improves.
   discrete fit time increased from 1.912 s to 2.087 s with unchanged iteration
   counts. Raw receipts remain under
   `.benchmark-artifacts/discrete-performance/timing-gaussian/`. Background CPU
-  was audited; these are local measurements with Headroom active.
+  was audited; these are local measurements with an auxiliary process active.
 - Kernel diagnostics explain the rejection: gathering and weighting row
   panels costs much more than the initial arithmetic count represented.
   Dispatch tests must use independently demonstrated favorable cases, rather
@@ -952,9 +952,8 @@ fit-end RSS before saved outputs, work/status, numerical outputs, representation
 hashes and native execution. Keep the prototype outside production until this
 evidence and the code review support promotion.
 
-Environment correction: the user reports that Headroom and Kompress have been
-uninstalled. Current comparisons do not assume their presence or depend on
-their tools. Serial workers, fixed numerical thread counts, process activity
+Current comparisons determine external process presence from observed activity.
+Serial workers, fixed numerical thread counts, process activity
 screens and raw worker wall/CPU/RSS evidence remain unchanged. Historical raw
 receipts are preserved; inclusion in a process-audit policy does not establish
 that a particular service was running.

@@ -23,6 +23,7 @@ from superglm.distributional.result import (
     _maximum_relative_natural_parameter_change,
 )
 from superglm.distributional.results.smoothing import _practical_outward_window
+from superglm.distributional.results.solver import _PenaltyAssessmentContext
 from superglm.distributional.smoothing.acceleration import WindowedTypeIIAnderson
 from superglm.distributional.smoothing.authority import (
     _face_authority_config,
@@ -30,7 +31,10 @@ from superglm.distributional.smoothing.authority import (
     _fit_fixed_state,
     _optional_penalty_face,
 )
-from superglm.distributional.smoothing.endpoint_laml import EndpointDirectionEvidence
+from superglm.distributional.smoothing.endpoint_laml import (
+    EndpointDirectionEvidence,
+    EndpointLaplaceError,
+)
 from superglm.distributional.smoothing.evidence import (
     _fresh_raw_evidence,
     _FreshRawEvidence,
@@ -54,6 +58,7 @@ from superglm.distributional.smoothing.faces import (
     _try_exact_face,
     _try_joint_exact_face,
 )
+from superglm.distributional.smoothing.initialization import prepare_distributional_initialization
 from superglm.distributional.smoothing.newton import (
     BracketAttempt,
     BracketRelease,
@@ -68,7 +73,6 @@ from superglm.distributional.smoothing.objective import (
     _complete_mapping,
     _laplace_objective,
     _maximum_step,
-    initialize_distributional_lambdas,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace, PenaltyFaceError
 from superglm.distributional.smoothing.proposals import (
@@ -81,10 +85,30 @@ from superglm.distributional.smoothing.proposals import (
 from superglm.distributional.solver.chunks import ChunkSize
 from superglm.distributional.solver.solver import _DenseObservedReuseSession, fit_dense_fixed_lambda
 from superglm.distributional.timing import FitPhaseRecorder, measure_phase
+from superglm.reml.penalty_support import PenaltyNumericalError
+
+
+def _trial_laplace_objective(
+    result: DenseSolverResult,
+    *,
+    layout: StackedLayout,
+    lambdas: Mapping[str, float],
+    face: PenaltyFace | None,
+) -> float | None:
+    """Reject an uncertifiable penalty trial without changing accepted state."""
+    try:
+        return _laplace_objective(result, layout=layout, lambdas=lambdas, face=face)
+    except PenaltyNumericalError:
+        return None
+    except EndpointLaplaceError as exc:
+        if isinstance(exc.__cause__, PenaltyNumericalError):
+            return None
+        raise
 
 
 def _efs_result(
     *,
+    layout: StackedLayout,
     config: DistributionalEFSConfig,
     initial_lambdas: Mapping[str, float],
     lambdas: Mapping[str, float],
@@ -148,6 +172,12 @@ def _efs_result(
         newton_iterations=sum(item.stage == "newton" for item in history),
         bfgs_fallback_iterations=sum(item.step_source == "bfgs" for item in history),
         beyond_cap_components=tuple(beyond_cap_components),
+        _penalty_assessment_context=_PenaltyAssessmentContext.from_layout(
+            layout,
+            faces=tuple(
+                fit.coefficient_face for fit in coefficient_fits if fit.coefficient_face is not None
+            ),
+        ),
     )
 
 
@@ -174,7 +204,19 @@ def fit_distributional_efs(
     reuse_session = _DenseObservedReuseSession()
 
     with measure_phase(phase_recorder, "layout_penalty_assembly"):
-        current_lambdas = initialize_distributional_lambdas(layout, lambdas, outer_config)
+        current_lambdas, initial = prepare_distributional_initialization(
+            family,
+            layout,
+            y,
+            likelihood_plan,
+            supplied=lambdas,
+            config=outer_config,
+            solver_config=inner_config,
+            initial=initial,
+            chunk_size=chunk_size,
+            reuse_session=reuse_session,
+            phase_recorder=phase_recorder,
+        )
         initial_penalty = layout.penalty_matrix(current_lambdas)
     initial_lambdas = dict(current_lambdas)
     initial_fit = fit_dense_fixed_lambda(
@@ -214,6 +256,7 @@ def fit_distributional_efs(
 
     if not estimated_names:
         return _efs_result(
+            layout=layout,
             config=outer_config,
             initial_lambdas=initial_lambdas,
             lambdas=current_lambdas,
@@ -228,6 +271,7 @@ def fit_distributional_efs(
         )
     if not current_fit.converged:
         return _efs_result(
+            layout=layout,
             config=outer_config,
             initial_lambdas=initial_lambdas,
             lambdas=current_lambdas,
@@ -260,6 +304,7 @@ def fit_distributional_efs(
         terminal_endpoint_directions: Mapping[str, EndpointDirectionEvidence] | None = None,
     ) -> DistributionalEFSResult:
         return _efs_result(
+            layout=layout,
             config=outer_config,
             initial_lambdas=initial_lambdas,
             lambdas=current_lambdas,
@@ -1139,14 +1184,15 @@ def fit_distributional_efs(
             any_converged_trial = any_converged_trial or trial_stationary
             if trial_stationary:
                 with measure_phase(phase_recorder, "efs_update_backtracking"):
-                    trial_objective = _laplace_objective(
+                    trial_objective = _trial_laplace_objective(
                         trial_fit,
                         layout=layout,
                         lambdas=trial_lambdas,
                         face=current_face,
                     )
                 if (
-                    _acceleration_provenance(estimated_names, trial_fit) == provenance
+                    trial_objective is not None
+                    and _acceleration_provenance(estimated_names, trial_fit) == provenance
                     and trial_objective <= objective_ceiling
                 ):
                     accepted_fit = trial_fit
@@ -1205,13 +1251,13 @@ def fit_distributional_efs(
                 if not trial_stationary:
                     continue
                 with measure_phase(phase_recorder, "efs_update_backtracking"):
-                    trial_objective = _laplace_objective(
+                    trial_objective = _trial_laplace_objective(
                         trial_fit,
                         layout=layout,
                         lambdas=trial_lambdas,
                         face=current_face,
                     )
-                if trial_objective <= objective_ceiling:
+                if trial_objective is not None and trial_objective <= objective_ceiling:
                     accepted_fit = trial_fit
                     accepted_fit_index = fit_index
                     accepted_lambdas = trial_lambdas

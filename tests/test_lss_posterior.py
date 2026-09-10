@@ -772,11 +772,16 @@ def test_a_negative_eigenvalue_is_an_error_and_a_null_direction_is_a_clip() -> N
     assert np.all(rank_deficient.coefficients[:, 1] == 0.0)
     assert float(rank_deficient.coefficients[:, 0].std()) > 0.0
 
-    # An eigenvalue inside the tolerance is set to zero, never reflected: a
-    # round-off negative direction must carry no posterior spread at all.
-    round_off = posterior_draws(_covariance_shim(np.diag([1.0, -1.0e-9])), 64, seed=13)
-    assert np.all(round_off.coefficients[:, 1] == 0.0)
-    assert np.array_equal(round_off.coefficients, rank_deficient.coefficients)
+    # A rounding-scale negative eigenvalue with positive marginal variances
+    # can be clipped if the PSD root reconstructs the covariance. Negative
+    # marginal variance has no unit-invariant reconciliation floor.
+    epsilon = np.finfo(float).eps
+    rounded_covariance = np.array([[1.0, 1.0 + epsilon], [1.0 + epsilon, 1.0]])
+    round_off = posterior_draws(_covariance_shim(rounded_covariance), 64, seed=13)
+    assert np.max(np.abs(round_off.coefficients[:, 0] - round_off.coefficients[:, 1])) <= (
+        4 * epsilon * np.max(np.abs(round_off.coefficients))
+    )
+    assert float(round_off.coefficients[:, 0].std()) > 0.0
 
 
 def _corrected_shim(*, lambdas, gradient, hessian, penalties=()) -> SimpleNamespace:

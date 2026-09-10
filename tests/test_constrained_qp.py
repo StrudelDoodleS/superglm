@@ -1,6 +1,5 @@
 """Tests for the active-set constrained penalized least-squares solver."""
 
-import functools
 import inspect
 
 import numpy as np
@@ -1013,20 +1012,13 @@ class TestProjectionSelectsTheWorstViolation:
         assert int(np.argmin(scaled)) == 0
 
     def test_the_two_orderings_agree_when_every_row_shares_one_scale(self):
-        """Control: the reordering is the scale, not a coincidence of the fixture.
-
-        When every row's dot-product scale falls under the ``max(1, .)`` floor
-        the scale is 1 throughout, the slack is the raw violation, and the two
-        selections coincide.  That is the well-scaled case the relative test is
-        documented to leave alone.
-        """
+        """A common action denominator preserves the raw violation ordering."""
         A = np.eye(3)
-        b = np.zeros(3)
-        beta = np.array([-0.3, -0.5, -0.2])
-        np.testing.assert_array_equal(np.abs(A) @ np.abs(beta), [0.3, 0.5, 0.2])
+        b = np.array([0.0, 0.25, 0.0])
+        beta = np.full(3, -0.5)
         raw = A @ beta - b
         scaled = _feasibility_slack(A, beta, b)
-        np.testing.assert_array_equal(raw, scaled)
+        np.testing.assert_array_equal(scaled, 2.0 * raw)
         assert int(np.argmin(raw)) == int(np.argmin(scaled)) == 1
 
     def test_the_sweep_budget_is_spent_on_the_worst_row(self):
@@ -1065,7 +1057,7 @@ class TestProjectionSelectsTheWorstViolation:
         raw = A @ beta - b
         scaled = _feasibility_slack(A, beta, b)
         np.testing.assert_array_equal(raw, [-0.5, -1.0])
-        np.testing.assert_allclose(scaled, [-0.5, -0.001], rtol=0, atol=0)
+        np.testing.assert_allclose(scaled, [-1.0, -0.001], rtol=0, atol=0)
         assert int(np.argmin(raw)) == 1 and int(np.argmin(scaled)) == 0
 
         projected = _project_feasible(beta, A, b, 0.01)
@@ -1073,83 +1065,20 @@ class TestProjectionSelectsTheWorstViolation:
             f"projection returned {projected}, which its own caller calls infeasible"
         )
 
-    @staticmethod
-    def _master_project_feasible(beta, A, b):
-        """``master``'s projection, transcribed verbatim from ``git show
-        master:src/superglm/solvers/constrained_qp.py``.
-
-        A reference implementation rather than a recorded array: the claim
-        under test is that the shipped body *is* this one at ``b = 0``, and an
-        argument stays true as fixtures move where a stored number does not.
-        """
-        beta = beta.copy()
-        for _ in range(100):
-            violations = A @ beta - b
-            worst = np.argmin(violations)
-            if violations[worst] >= -1e-12:
-                break
-            a = A[worst]
-            deficit = b[worst] - a @ beta
-            beta += deficit / (a @ a) * a
-        return beta
-
-    def test_the_projection_stops_no_later_than_the_absolute_predicate(self):
-        """#359 made the stopping test weaker, and it must be weaker ONLY.
-
-        This test used to require the projection to be bitwise the absolute
-        implementation at ``b = 0``.  That is deliberately no longer true: the
-        scale is now ``|A_i| @ |beta|``, which dominates ``|A_i @ beta|``, so a
-        cancelling row is measured against the accuracy its dot product
-        actually has and the stopping test accepts points the absolute one
-        refused.  ``test_a_cancelling_row_is_measured_against_its_own_bound``
-        pins that gain directly.
-
-        What must still hold is the *direction* of the change.  The scale only
-        ever grows, so every normalized violation moves toward zero and the
-        shipped projection can only stop at or before the absolute one -- never
-        after.  Requiring the shipped result to be feasible under the absolute
-        predicate wherever the reference is states exactly that, and would fail
-        for any scale that shrank a row instead of growing it.
-        """
-        rng = np.random.default_rng(2026)
-        checked = repaired = 0
-        for _ in range(400):
-            p = int(rng.integers(2, 10))
-            shape = rng.integers(0, 4)
-            if shape == 0:
-                A = np.diff(np.eye(p), axis=0)
-            elif shape == 1:
-                A = np.eye(p)
-            elif shape == 2:
-                A = np.diff(np.eye(p), n=2, axis=0)
-            else:
-                # ``D @ P``, the in-tree shape: unequal row norms, so a
-                # selection normalized by the row norm reorders the sweep.
-                A = np.diff(np.eye(p), axis=0) @ np.linalg.qr(rng.standard_normal((p, p)))[0]
-            if A.shape[0] == 0:
-                continue
-            A = A * 10.0 ** rng.uniform(-3, 3)
-            b = np.zeros(A.shape[0])
-            beta = rng.standard_normal(p) * 10.0 ** rng.uniform(-2, 4)
-
-            shipped = _project_feasible(beta, A, b, 1e-12)
-            reference = self._master_project_feasible(beta, A, b)
-            # Wherever the absolute predicate is satisfied by its own result,
-            # the shipped one must be too: a scale that only grows can stop
-            # earlier, never later.
-            if np.all(A @ reference - b >= -1e-12):
-                assert _is_feasible(A, shipped, b, 1e-12), (
-                    f"shipped projection stopped LATER than the absolute one, which a "
-                    f"dominating scale cannot do: {shipped} vs {reference}"
-                )
-            checked += 1
-            if not np.all(A @ beta - b >= -1e-12):
-                repaired += 1
-
-        assert checked >= 350, f"only {checked} fixtures were built"
-        assert repaired >= 100, (
-            f"only {repaired} fixtures started infeasible; the comparison is mostly vacuous"
-        )
+    def test_projection_is_invariant_to_a_common_constraint_unit(self):
+        """Projection's budget and row actions survive a common rescaling."""
+        A = np.diff(np.eye(3), axis=0)
+        b = np.zeros(2)
+        beta = np.array([3.0, 0.0, -3.0])
+        reference = _project_feasible(beta, A, b, 1e-12)
+        # Each sweep is a nonexpansive orthogonal projection. Propagate
+        # dot-product/update arithmetic across the fixed 100-sweep budget.
+        ku = 100 * (A.shape[1] + 8) * np.finfo(float).eps / 2
+        allowance = ku / (1 - ku) * np.linalg.norm(beta)
+        for unit in (1e-14, 1.0, 1e14):
+            result = _project_feasible(beta, unit * A, unit * b, 1e-12)
+            np.testing.assert_allclose(result, reference, rtol=0.0, atol=allowance)
+            assert np.max(np.abs(result)) <= allowance
 
     def test_a_cancelling_row_is_measured_against_its_own_bound(self):
         """The gain #359 buys, on a row built to cancel.
@@ -1248,27 +1177,24 @@ class TestStructuralAliasConsistency:
             solve_constrained_qp(H, g, np.zeros((0, 4)), np.zeros(0))
 
     @pytest.mark.parametrize("retained_condition", [1e10, 1e11, 1e13])
-    def test_consistent_system_with_a_structural_alias_still_solves(self, retained_condition):
-        """The tight structural floor must not over-fire on a consistent g.
+    def test_exact_alias_consistency_and_nonzero_null_score_have_distinct_certificates(
+        self, retained_condition
+    ):
+        """The former nonzero 1e-17 score on an exact zero row was unbounded.
 
-        A real caller's structural entry is *exactly* zero -- an identically
-        zero design column gives an identically zero inner product -- so the
-        floor's slack is defensive rather than load-bearing.  The probe uses a
-        roundoff-scale ``1e-17`` instead of exact zero so that the assertion
-        actually exercises the slack: at a floor of 0 this would be refused.
+        Null-score admission may yield a finite candidate, but a nonzero score
+        on a structural zero cannot satisfy componentwise stationarity.
         """
-        H, g = self._structural_alias_with_ill_conditioned_block(
-            retained_condition, structural_mass=1e-17
-        )
-        decomposition = decompose_gram(H)
-        assert decomposition.rank < decomposition.width, "gate not reached"
-        structural, _ = _null_space_mass(decomposition, g)
-        assert 0.0 < structural < 1e-15, f"probe mass {structural:.2e} is not roundoff-scale"
-
-        result = solve_constrained_qp(H, g, np.zeros((0, 4)), np.zeros(0))
-
-        assert np.all(np.isfinite(result.beta))
-        assert result.converged
+        for structural_mass in (0.0, 1e-17):
+            H, g = self._structural_alias_with_ill_conditioned_block(
+                retained_condition, structural_mass=structural_mass
+            )
+            assert decompose_gram(H).rank < H.shape[0]
+            result = solve_constrained_qp(H, g, np.zeros((0, 4)), np.zeros(0))
+            assert np.all(np.isfinite(result.beta))
+            assert result.converged == (structural_mass == 0.0)
+            if structural_mass:
+                assert g[-1] != 0.0 and np.all(H[-1] == 0.0)
 
 
 class TestLoopFeasibilityRouting:
@@ -1362,26 +1288,8 @@ class TestLoopFeasibilityRouting:
 
         assert saw_infeasible, "no fixture returned an infeasible point; the implication is vacuous"
 
-    def test_zero_rhs_is_inert_only_where_the_row_mass_is_under_one(self):
-        """``b = 0`` is not sufficient for inertness, and #359 is why.
-
-        **The claim this test used to carry has been withdrawn, not weakened.**
-        It said the scaling was "exactly inert" at ``b = 0`` because the per-row
-        scale was ``max(1, |A_i @ beta|)`` and a 189-row measurement put the
-        worst ``|A_i @ beta|`` at 0.72.  The scale is now
-        ``max(1, |A_i| @ |beta|)``, so that measurement is of the wrong
-        quantity, and re-running it on the right one over the monotone and
-        constraint fit suites gives **4003 of 8697 constraint rows -- 46% --
-        with a scale above 1**, worst 23.3.  Inertness at ``b = 0`` is
-        therefore false in general.
-
-        What is still true, and is what this pins, is the condition for it:
-        the scale is 1 exactly when the row's own coefficient mass is, so the
-        guard below is on ``|A| @ |beta|`` and not on ``|A @ beta|``.  Those
-        differ by exactly the dominance this change is about, so guarding the
-        weaker one would let a BLAS change report the fixture healthy while
-        the assertion failed for an unrelated-looking reason.
-        """
+    def test_zero_rhs_uses_its_actual_row_action_below_one(self):
+        """A small row action is retained rather than replaced by unit scale."""
         rng = np.random.default_rng(3)
         p = 5
         M = rng.standard_normal((p, p))
@@ -1389,21 +1297,14 @@ class TestLoopFeasibilityRouting:
         g = rng.standard_normal(p)
         A = np.diff(np.eye(p), axis=0)
         b = np.zeros(p - 1)
-
         result = solve_constrained_qp(H, g, A, b)
-
         products = A @ result.beta
         magnitude = np.abs(A) @ np.abs(result.beta)
-        assert np.max(magnitude) <= 1.0, (
-            f"fixture no longer exercises scale == 1: worst row mass "
-            f"{np.max(magnitude):.4g} (the products alone reach only "
-            f"{np.max(np.abs(products)):.4g}, which is the quantity this guard "
-            "used to check and is strictly weaker)"
-        )
+        assert np.all((magnitude > 0.0) & (magnitude < 1.0))
         np.testing.assert_array_equal(
-            _feasibility_scale(products, b, abs_products=magnitude), np.ones(p - 1)
+            _feasibility_scale(products, b, abs_products=magnitude), magnitude
         )
-        np.testing.assert_array_equal(_feasibility_slack(A, result.beta, b), products - b)
+        np.testing.assert_array_equal(_feasibility_slack(A, result.beta, b), products / magnitude)
 
 
 class TestConstraintBoundedInconsistentSystem:
@@ -2018,159 +1919,72 @@ class TestStationarityIsRealNotATruncationArtifact:
 
 
 class TestInfeasibleEarlyReturnIsProjected:
-    """The stationary-point early return repairs the point it is about to return.
-
-    The loop can stop at a stationary point on a *subset* active set with
-    another row materially violated.  ``converged=False`` disclosed that but did
-    not fix it, and the ``irls_direct`` call site takes ``beta`` unconditionally
-    -- so an infeasible answer meant a fitted model that was not monotone.
-    Projecting at the return converts those into feasible, possibly suboptimal
-    answers.
-
-    The guard is precisely today's ``converged=False`` condition, so every solve
-    that currently returns a feasible point is untouched by construction rather
-    than by measurement.
-    """
+    """A return-side projection repairs feasibility, then requires a new certificate."""
 
     @staticmethod
-    @functools.cache
-    def _rank_deficient_population(n=2700, seed=20260730):
-        """Rank-deficient QPs shaped like the in-tree callers: ``b = 0``, structured ``A``.
-
-        ``x = 0`` is feasible for every one of them, so an infeasible answer is
-        a solver defect rather than an infeasible problem.
-
-        **The ensemble grew from 900 to 2700 for #359, and the bars below did
-        not move.**  Correcting the feasibility scale to the dot product's own
-        error bound made fewer solves read as infeasible, which shrank the
-        defect population this class samples: at ``n = 900`` it fell to 26
-        firing and 4 repaired, under bars of 30 and 10.  Lowering the bars would
-        have recorded the improvement as a weaker test.  Tripling the sample
-        restores them with margin instead -- measured 93 firing and 34 repaired,
-        3.1x and 3.4x -- so the assertions still mean what they meant.
-        """
-        rng = np.random.default_rng(seed)
-        cases = []
-        while len(cases) < n:
-            p = int(rng.integers(3, 13))
-            rank = int(rng.integers(1, p))
-            basis = np.linalg.qr(rng.standard_normal((p, p)))[0]
-            spectrum = np.zeros(p)
-            spectrum[:rank] = 10.0 ** rng.uniform(-2, 2, rank)
-            H = basis @ np.diag(spectrum) @ basis.T
-            H = 0.5 * (H + H.T)
-            if rng.random() < 0.45:
-                zero = int(rng.integers(0, p))
-                H[zero, :] = 0.0
-                H[:, zero] = 0.0
-            H = H * 10.0 ** rng.uniform(-6, 6)
-            g = H @ rng.standard_normal(p)  # in range(H) by construction
-            shape = rng.random()
-            if shape < 0.4:
-                A = np.diff(np.eye(p), axis=0)
-            elif shape < 0.7:
-                A = np.eye(p)
-            else:
-                A = np.diff(np.eye(p), n=2, axis=0)
-            A = A * 10.0 ** rng.uniform(-3, 3)
-            if A.shape[0] == 0:
-                continue
-            b = np.zeros(A.shape[0])
-            try:
-                if decompose_gram(H).rank >= p:
-                    continue
-                solve_constrained_qp(H, g, A, b, max_iter=1)
-            except ValueError:
-                continue  # inconsistent normal equations: refused by design
-            cases.append((H, g, A, b))
-        return cases
-
-    def test_an_infeasible_early_return_is_repaired_where_the_projection_reaches(self):
-        """Counted, not snapshotted: without the projection this count is 0.
-
-        Every case here reaches the early return with a row still violated, so
-        before the repair *none* of them was feasible on return.  The bound is
-        deliberately far below the measured rate -- 223 of 420 across the two
-        full 3950-case ensembles -- because the point being pinned is that the
-        repair happens at all, not the exact share the sweep budget reaches.
-        """
-        fired = repaired = 0
-        for H, g, A, b in self._rank_deficient_population():
-            result = solve_constrained_qp(H, g, A, b)
-            if result.converged or result.n_iter >= 200:
-                continue  # not the early-return-infeasible population
-            fired += 1
-            if _is_feasible(A, result.beta, b, 1e-12):
-                repaired += 1
-
-        assert fired >= 30, f"only {fired} solves reached the early return infeasibly"
-        assert repaired >= 10, (
-            f"{repaired} of {fired} infeasible early returns came back feasible; "
-            "without the projection at the return this is 0 by construction"
-        )
-
-    def test_a_repaired_point_is_still_not_reported_converged(self):
-        """Feasible is not certified, and the flag must not start saying it is.
-
-        ``converged`` reports the feasibility of the point the *loop* found,
-        taken before the projection runs.  Reporting post-projection feasibility
-        instead would flip exactly the repaired population to ``True`` -- a
-        point that satisfies the constraints but is not a KKT point, which is
-        the over-claim the flag exists to prevent.
-        """
-        checked = 0
-        for H, g, A, b in self._rank_deficient_population():
-            result = solve_constrained_qp(H, g, A, b)
-            if result.converged or result.n_iter >= 200:
-                continue
-            if not _is_feasible(A, result.beta, b, 1e-12):
-                continue  # the projection ran out of budget; nothing to over-claim
-            checked += 1
-            assert not result.converged, (
-                "a projected point was reported converged: the flag has been "
-                "moved to post-projection feasibility"
-            )
-        assert checked >= 10, f"only {checked} repaired points to check"
-
-    def test_the_projection_does_not_run_again_on_a_feasible_solve(self, monkeypatch):
-        """The inertness mechanism, witnessed rather than inferred.
-
-        Every constrained solve runs ``_project_feasible`` once before the loop.
-        A solve that returns a feasible point must not run it a second time --
-        that is what makes this change bitwise inert on the currently-good
-        population, and counting the calls witnesses it directly instead of
-        re-deriving the guard's condition, which would agree by construction.
-        """
-        calls = {"n": 0}
+    def _exhaust_initial_projection(monkeypatch):
+        calls = []
         original = _project_feasible
 
-        def counting(*args, **kwargs):
-            calls["n"] += 1
-            return original(*args, **kwargs)
+        def project(beta, A, b, tol):
+            calls.append(beta.copy())
+            if len(calls) == 1:
+                # A zero initial sweep budget leaves the unconstrained point.
+                # This directly exercises the same boundary as budget exhaustion,
+                # without counting a changing population of LAPACK roundoff.
+                return beta.copy()
+            return original(beta, A, b, tol)
 
-        monkeypatch.setattr("superglm.solvers.constrained_qp._project_feasible", counting)
+        monkeypatch.setattr("superglm.solvers.constrained_qp._project_feasible", project)
+        H = np.array([[2.0, 1.0], [1.0, 2.0]])
+        g = np.array([-1.0, 1.0])
+        result = solve_constrained_qp(H, g, np.eye(2), np.zeros(2))
+        return result, calls, H, g
 
+    def test_an_infeasible_early_return_is_repaired_where_the_projection_reaches(self, monkeypatch):
+        result, calls, _, _ = self._exhaust_initial_projection(monkeypatch)
+        assert len(calls) == 2
+        assert np.min(calls[-1]) < -0.5
+        assert np.all(result.beta >= 0.0)
+        np.testing.assert_allclose(result.beta, [0.0, 1.0], rtol=16 * np.finfo(float).eps)
+
+    def test_a_repaired_point_requires_stationarity_before_success(self, monkeypatch):
+        result, calls, H, g = self._exhaust_initial_projection(monkeypatch)
+        assert len(calls) == 2
+        assert np.all(result.beta >= 0.0)
+        # Euclidean projection gives (0,1), whereas this coupled QP's optimum
+        # is (0,1/2). A feasible point alone is therefore a false certificate.
+        optimum = np.array([0.0, 0.5])
+        gap = 0.5 * result.beta @ H @ result.beta - g @ result.beta
+        gap -= 0.5 * optimum @ H @ optimum - g @ optimum
+        assert gap > 0.2
+        assert not result.converged
+
+    def test_return_projection_only_receives_an_infeasible_point(self, monkeypatch):
+        calls = []
+        original = _project_feasible
+
+        def recording(beta, A, b, tol):
+            calls.append(_is_feasible(A, beta, b, tol))
+            return original(beta, A, b, tol)
+
+        monkeypatch.setattr("superglm.solvers.constrained_qp._project_feasible", recording)
         rng = np.random.default_rng(11)
         converged_solves = 0
         for _ in range(120):
             p = int(rng.integers(2, 9))
             M = rng.standard_normal((p, p))
-            H = M.T @ M + (0.1 + rng.random()) * np.eye(p)  # full rank
+            H = M.T @ M + (0.1 + rng.random()) * np.eye(p)
             g = rng.standard_normal(p) * float(rng.choice([1.0, 1e2, 1e4]))
             A = np.diff(np.eye(p), axis=0) if rng.random() < 0.5 else np.eye(p)
             b = np.zeros(A.shape[0])
-
-            calls["n"] = 0
+            calls.clear()
             result = solve_constrained_qp(H, g, A, b)
-            if not result.converged:
-                continue
-            converged_solves += 1
-            assert calls["n"] <= 1, (
-                f"a converged solve ran _project_feasible {calls['n']} times; "
-                "the return-side projection fired on a feasible point"
-            )
-
-        assert converged_solves >= 60, f"only {converged_solves} converged solves swept"
+            assert not any(calls[1:]), "return-side projection received a feasible point"
+            if result.converged:
+                converged_solves += 1
+                assert _is_feasible(A, result.beta, b, 1e-12)
+        assert converged_solves >= 60
 
 
 class TestKKTEquilibration:

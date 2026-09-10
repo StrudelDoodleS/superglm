@@ -27,7 +27,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.solvers.rank import _EPS, RankDecomposition, _symmetric_part, decompose_gram
+from superglm.solvers.rank import (
+    _EPS,
+    RankDecomposition,
+    _symmetric_part,
+    decompose_factor,
+    decompose_gram,
+)
 
 # Headroom on the normal-equation consistency floor (see ``_consistency_floor``).
 # The floor estimates the accuracy of the *computed null basis*, and this is the
@@ -67,17 +73,10 @@ _STRUCTURAL_CONSISTENCY_FLOOR = _STRUCTURAL_NORM_ROUNDING_SLACK * _EPS
 class QPResult:
     """Result of a constrained QP solve.
 
-    ``converged`` means the full KKT certificate holds for ``beta``: the
-    active-set loop reached its own termination test (a stationary step with
-    no negative multiplier) *and* the certified candidate is feasible.  It is
-    ``False`` whenever the solver did not complete that certificate, including
-    when the loop exhausted ``max_iter`` or a stationary candidate failed its
-    primal-feasibility check.  In the latter case a subsequent projection may
-    make the returned ``beta`` feasible, but it does not re-establish
-    stationarity or dual feasibility; projection can also fail to repair an
-    infeasible system.  Thus ``converged=False`` does not imply that the
-    returned ``beta`` is infeasible.  It is the best available point, not a
-    certified solution.
+    ``converged`` means the returned beta passed primal feasibility, dual
+    feasibility, stationarity and complementarity. A projection creates a new
+    candidate and requires the whole certificate again. Exhaustion or an
+    incomplete certificate returns ``False`` even if the point is feasible.
 
     A mutually infeasible constraint system is one way for the candidate
     feasibility check to fail, but not the only one and not the common one:
@@ -282,6 +281,36 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
     )
 
 
+def _constraint_products(
+    A: NDArray, beta: NDArray, abs_A: NDArray | None = None
+) -> tuple[NDArray, NDArray]:
+    """Signed and absolute row actions without losing intermediate range.
+
+    Keep ordinary float matvecs; reevaluate only subnormal, overflowing, or
+    nonstructural zero actions in extended range. A computed zero is structural
+    only when every product has an exactly zero operand.
+    """
+    A = np.asarray(A, dtype=float)
+    beta = np.asarray(beta, dtype=float)
+    abs_A = np.abs(A) if abs_A is None else np.asarray(abs_A, dtype=float)
+    magnitude_beta = np.abs(beta)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        products = A @ beta
+        magnitude = abs_A @ magnitude_beta
+    unsafe = ((magnitude > 0.0) & (magnitude < np.finfo(float).tiny)) | ~np.isfinite(magnitude)
+    zeros = magnitude == 0.0
+    if np.any(zeros):
+        unsafe[zeros] |= np.any((abs_A[zeros] != 0.0) & (magnitude_beta != 0.0), axis=1)
+    if np.any(unsafe):
+        products = products.astype(np.longdouble)
+        magnitude = magnitude.astype(np.longdouble)
+        rows = np.asarray(A[unsafe], dtype=np.longdouble)
+        values = np.asarray(beta, dtype=np.longdouble)
+        products[unsafe] = rows @ values
+        magnitude[unsafe] = np.abs(rows) @ np.abs(values)
+    return products, magnitude
+
+
 def _feasibility_slack(
     A: NDArray,
     beta: NDArray,
@@ -290,41 +319,20 @@ def _feasibility_slack(
     abs_b: NDArray | None = None,
     abs_A: NDArray | None = None,
 ) -> NDArray:
-    """Return ``A @ beta - b`` measured against a scale-aware tolerance.
+    """Return the primal slack in homogeneous row-action units.
 
-    A step that lands *on* a constraint reproduces ``b_i`` only to within the
-    error of the dot product that computed it, so a fixed absolute tolerance
-    turns a genuine KKT point into a violation as soon as the constraint row is
-    large.  Dividing by a per-row scale keeps the test meaningful under
-    rescaling, and is identical to the absolute test for the well-scaled
-    problems where that scale is 1.
+    The denominator is max(|b_i|, |A_i| @ |beta|). A positive rescaling
+    of one constraint leaves this ratio unchanged. The absolute dot-product
+    terms account for cancellation; a zero denominator means an exactly zero
+    constraint action and has zero slack. Callers add their requested relative
+    tolerance and the dimension-dependent dot-product rounding allowance.
 
-    **The scale is the sum of absolute terms, not the magnitude of their sum.**
-    The standard bound is ``|fl(x'y) - x'y| <= gamma_n sum_i |x_i y_i|`` --
-    Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed. (SIAM
-    2002), sec. 3.1 -- and the two differ by exactly the dot product's
-    cancellation.  Using ``|A_i @ beta|`` was reading the OUTPUT where the error
-    is set by the INPUTS, so a row that cancels reported a scale far under the
-    accuracy it actually had, and the test on it silently became absolute via
-    the ``max(1, ...)`` floor.  Issue #359: a constraint row cancelling by
-    ``1.1e17`` -- output ``3.5e-13`` against ``|A_i| @ |beta| = 3.9e+04`` --
-    read a scale of ``1.0`` and refused a point whose violation was ``0.0044``
-    of its own dot-product bound.
-
-    ``|A_i| @ |beta| >= |A_i @ beta|`` by the triangle inequality, so this scale
-    always dominates the previous one and every bound stated against that one
-    still holds: the normalized slack moves strictly toward zero, never away.
-
-    Returns the slack already divided by its per-row scale, so callers can
-    compare it against a bare ``-tol``.
-
-    ``abs_b`` and ``abs_A`` let a caller in a loop pass ``np.abs(b)`` and
-    ``np.abs(A)`` once instead of paying for them every sweep; they must equal
-    those values.
+    Optional abs_b and abs_A cache those exact input magnitudes.
     """
-    products = A @ beta
-    magnitude = (np.abs(A) if abs_A is None else abs_A) @ np.abs(beta)
-    return (products - b) / _feasibility_scale(products, b, abs_b=abs_b, abs_products=magnitude)
+    products, magnitude = _constraint_products(A, beta, abs_A)
+    scale = _feasibility_scale(products, b, abs_b=abs_b, abs_products=magnitude)
+    slack = products - b
+    return np.divide(slack, scale, out=np.zeros_like(slack), where=scale > 0.0)
 
 
 def _feasibility_scale(
@@ -334,33 +342,95 @@ def _feasibility_scale(
     abs_b: NDArray | None = None,
     abs_products: NDArray | None = None,
 ) -> NDArray:
-    """Per-row scale for the relative feasibility test: ``max(1, |b|, |A| @ |beta|)``.
+    """Return max(|b|, |A| @ |beta|), without an additive unit floor.
 
-    Exposed separately so the active-set loop can divide *both* its slack and
-    its directional derivative by the same factor.  Scaling both leaves the
-    step ratio ``slack / -a_step`` numerically unchanged while making the
-    decisions built on them -- "is this row already satisfied", "does this step
-    move the row at all" -- agree with ``_is_feasible``.
-
-    ``abs_products`` is ``|A| @ |beta|``, the dot-product error scale
-    :func:`_feasibility_slack` documents.  **Every production call site passes
-    it, and the fallback exists for tests that deliberately assert the
-    pre-#359 scale.**  Omitting it silently restores exactly the behaviour
-    #359 removed -- it is a lower bound on the correct scale, so it is
-    conservative and can only refuse a point the full scale would accept -- but
-    conservative here means "reintroduces the defect", so a new caller that
-    reaches this branch is a mistake rather than a trade-off.
+    Production callers provide abs_products, the sum of absolute input terms.
+    The products-only fallback remains for direct callers of this helper.
+    Zero actions stay zero and must be handled explicitly by the caller.
     """
     magnitude = np.abs(products) if abs_products is None else abs_products
-    # ``|A| @ |beta|`` can overflow to ``inf`` where the signed ``A @ beta``
-    # stays finite -- perfect cancellation of terms near the float ceiling.  An
-    # infinite scale makes every slack ``-0.0`` and declares the row feasible
-    # whatever it is violated by, so the scale falls back to the row's own
-    # magnitude there.  Not reachable in-tree (it needs terms at ~1e308 and the
-    # largest drift this module has measured is 4e43), and the pre-#359 scale
-    # had no such branch because ``|A @ beta|`` finite meant a finite scale.
-    magnitude = np.where(np.isfinite(magnitude), magnitude, np.abs(products))
-    return np.maximum(1.0, np.maximum(np.abs(b) if abs_b is None else abs_b, magnitude))
+    return np.maximum(np.abs(b) if abs_b is None else abs_b, magnitude)
+
+
+def _roundoff_tolerance(width: int) -> float:
+    """A dot-product allowance in relative action units, with no magnitude floor."""
+    unit = np.finfo(float).eps / 2.0
+    product = (width + 2) * unit
+    if product >= 1.0:
+        raise ValueError("QP dimensions do not admit a dot-product error bound")
+    return product / (1.0 - product)
+
+
+def _scaled_constraint_step(
+    A: NDArray, beta: NDArray, step: NDArray, b: NDArray, abs_A: NDArray
+) -> tuple[NDArray, NDArray]:
+    """Normalize a directional action, including motion off an exact zero row."""
+    products, magnitude = _constraint_products(A, beta, abs_A)
+    action, step_magnitude = _constraint_products(A, step, abs_A)
+    scale = np.maximum(_feasibility_scale(products, b, abs_products=magnitude), step_magnitude)
+    return np.divide(action, scale, out=np.zeros_like(action), where=scale > 0.0), scale
+
+
+def _stationarity_certificate(
+    H: NDArray, g: NDArray, beta: NDArray, active_matrix: NDArray, tol: float
+) -> tuple[bool, int | None, NDArray]:
+    """Certify a nonnegative dual force in homogeneous stationarity units.
+
+    Normalize each constraint row before finding its multiplier, and normalize
+    the objective by the absolute actions of H beta and g. With M=A_active.T
+    in those coordinates, |M^+| maps score-action uncertainty to multiplier
+    uncertainty. A multiplier below that allowance releases its constraint.
+    The clipped, nonnegative multipliers must then reproduce stationarity;
+    an uncertain sign alone never supplies a success certificate.
+    """
+    extended = np.longdouble
+    active_matrix = np.asarray(active_matrix, dtype=float)
+    h_values = np.asarray(H, dtype=extended)
+    beta_values = np.asarray(beta, dtype=extended)
+    g_values = np.asarray(g, dtype=extended)
+    h_action = np.abs(h_values) @ np.abs(beta_values)
+    g_action = np.abs(g_values)
+    objective_scale = max(np.max(h_action, initial=0.0), np.max(g_action, initial=0.0))
+    if objective_scale == 0.0:
+        return True, None, np.zeros(len(active_matrix))
+    if not np.isfinite(objective_scale):
+        return False, None, np.zeros(len(active_matrix))
+    residual = np.asarray((h_values @ beta_values - g_values) / objective_scale, dtype=float)
+    h_action = np.asarray(h_action / objective_scale, dtype=float)
+    g_action = np.asarray(g_action / objective_scale, dtype=float)
+    row_scale = np.max(np.abs(active_matrix), axis=1, initial=0.0)
+    rows = np.divide(
+        active_matrix,
+        row_scale[:, None],
+        out=np.zeros_like(active_matrix),
+        where=row_scale[:, None] > 0.0,
+    )
+    arithmetic = _roundoff_tolerance(len(beta) + len(rows))
+    if len(rows):
+        inverse_action = np.linalg.lstsq(rows.T, np.eye(len(beta)), rcond=None)[0]
+        multipliers = inverse_action @ residual
+        dual_action = np.abs(rows.T) @ np.abs(multipliers)
+        score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
+        score_error = arithmetic * (h_action + g_action + dual_action)
+        multiplier_allowance = np.abs(inverse_action) @ (tol * score_scale + score_error)
+        multiplier_allowance += arithmetic * np.abs(multipliers)
+        if not np.all(np.isfinite(multipliers)) or not np.all(np.isfinite(multiplier_allowance)):
+            return False, None, multipliers
+        violating = multipliers < -multiplier_allowance
+        if np.any(violating):
+            worst = int(np.argmin(np.where(violating, multipliers, np.inf)))
+            return False, worst, multipliers
+        multipliers = np.maximum(multipliers, 0.0)
+        dual = rows.T @ multipliers
+        dual_action = np.abs(rows.T) @ multipliers
+    else:
+        multipliers = np.empty(0)
+        dual = np.zeros_like(residual)
+        dual_action = np.zeros_like(residual)
+    score_scale = np.maximum(np.maximum(h_action, g_action), dual_action)
+    allowance = tol * score_scale + arithmetic * (h_action + g_action + dual_action)
+    stationary = bool(np.all(np.abs(residual - dual) <= allowance))
+    return stationary, None, multipliers
 
 
 def _is_feasible(
@@ -374,7 +444,54 @@ def _is_feasible(
     constraint system two to three times per IRLS iteration plus once per
     line-search halving.
     """
-    return bool(np.all(_feasibility_slack(A, beta, b, abs_A=abs_A) >= -tol))
+    return bool(
+        np.all(
+            _feasibility_slack(A, beta, b, abs_A=abs_A) >= -tol - _roundoff_tolerance(A.shape[1])
+        )
+    )
+
+
+def _complementarity_certificate(
+    H: NDArray,
+    g: NDArray,
+    beta: NDArray,
+    active_matrix: NDArray,
+    active_bounds: NDArray,
+    multipliers: NDArray,
+    tol: float,
+) -> bool:
+    """Measure dual-weighted slack against the represented objective actions.
+
+    Complementarity has objective units. A positive rounding residue on a
+    binding coordinate need not have small *relative primal slack*: its dual
+    product must instead be small relative to the quadratic and linear actions.
+    The multipliers use the normalized units of _stationarity_certificate.
+    """
+    if not len(multipliers):
+        return True
+    extended = np.longdouble
+    h = np.asarray(H, dtype=extended)
+    x = np.asarray(beta, dtype=extended)
+    score = np.asarray(g, dtype=extended)
+    rows = np.asarray(active_matrix, dtype=extended)
+    row_scale = np.max(np.abs(rows), axis=1, initial=0.0)
+    row_scale = np.where(row_scale > 0.0, row_scale, 1.0)
+    rows = rows / row_scale[:, None]
+    bounds = np.asarray(active_bounds, dtype=extended) / row_scale
+    dual = np.asarray(multipliers, dtype=extended)
+    h_action = np.abs(h) @ np.abs(x)
+    objective_scale = max(np.max(h_action, initial=0.0), np.max(np.abs(score), initial=0.0))
+    if objective_scale == 0.0:
+        return bool(np.all(dual == 0.0))
+    row_action = np.abs(rows) @ np.abs(x) + np.abs(bounds)
+    energy = max(
+        np.abs(x) @ (h_action / objective_scale),
+        np.abs(x) @ (np.abs(score) / objective_scale),
+        dual @ row_action,
+    )
+    error = _roundoff_tolerance(len(beta) + len(dual)) * (dual @ row_action)
+    gap = dual @ np.abs(rows @ x - bounds)
+    return bool(np.isfinite(gap) and gap <= tol * energy + error)
 
 
 def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
@@ -533,93 +650,13 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
 
 
 def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDArray:
-    """Project beta onto the feasible set {x : A @ x >= b}.
+    """Repair the largest raw half-space violation, for at most 100 sweeps.
 
-    Uses iterative constraint-by-constraint projection (Dykstra-like).
-
-    Each sweep repairs only the single worst violation, so the 100-sweep
-    budget can be exhausted with the point still infeasible -- either because
-    the constraints are mutually infeasible, or merely because there are more
-    violated constraints than sweeps.  Those two cases are not distinguishable
-    here and the active-set loop often recovers from the second, so the caller
-    must test the feasibility of the point it finally returns rather than
-    treating the starting point's status as the answer.
-
-    Uses the same scale-aware stopping test as the caller's convergence check,
-    so the two cannot disagree about what "feasible" means -- but takes the
-    *selection* from the raw violations.  Those are two different orderings and
-    the docstring below says where they part.
-
-    **Issue #359 changed the scale under this argument, and the paragraphs it
-    replaced are worth stating because the new behaviour is the point.**  The
-    per-row scale was ``max(1, |b|, |A @ beta|)``, so at ``b = 0`` the slack was
-    the clamp ``x / max(1, |x|)`` -- a monotone nondecreasing function of the
-    raw violation.  That made the raw ``argmin`` attain the minimum scaled slack
-    as well, and made ``slack.min() >= -tol`` the same predicate as
-    ``violations.min() >= -tol`` for ``tol`` in ``(0, 1)``.  It is now
-    ``max(1, |b|, |A| @ |beta|)``, the dot-product error scale, and neither
-    property survives:
-
-    * The scale no longer depends on the violation's own magnitude, so it is
-      **not** a clamp and the two orderings can genuinely disagree.  The sweep
-      still repairs the raw-worst row, which is always a real violation and
-      always a valid repair -- but it is no longer guaranteed to be the row
-      with the worst *scaled* slack.  The loop re-tests the scaled slack after
-      every sweep, so this changes which path it takes, not what it accepts.
-    * The stopping test is strictly **weaker** than the raw one, because
-      ``|A| @ |beta| >= |A @ beta|`` makes the new scale dominate the old and
-      every normalized violation move toward zero.  That is the fix, not a
-      side effect: a row whose dot product cancels had its accuracy read off
-      the cancelled output, so the old test refused points that were feasible
-      to every digit the arithmetic had.
-
-    So this is **no longer bitwise ``master``'s projection**, and the table that
-    argued it was has been removed rather than qualified.  What still holds
-    term for term is the repair body, and ``products - b`` at ``b = 0`` being
-    bitwise ``products``, signed zeros included.
-
-    The ``tol`` domain still matters here for the reason it always did: at
-    ``tol >= 1`` the scaled test accepts violations the raw one rejects, which
-    is the vacuity the boundary check exists to refuse.
-    ``test_the_projection_stops_no_later_than_the_absolute_predicate`` pins what
-    survives -- the direction of the change -- against a hand-written reference
-    rather than against a recorded number.
-
-    Plain raw violation rather than raw over row norm, though the latter is the
-    true Euclidean distance to the hyperplane (the sweep moves ``|violation| /
-    ||a||``).  Three reasons, in order of weight.  It is what ``master``
-    selected on, so this stays a repair of a defect this branch introduced
-    rather than a new selection policy smuggled into a patch.  It is far
-    narrower: over 480 constrained fits / 1285 projections / 24300 sweeps the
-    raw and clamped orders differ on 4 sweeps, while raw and row-normalized
-    differ on 3022 -- in-tree rows are ``D @ P``, not ``D``, with norms
-    spanning 0.039 to 0.594, so row normalization would reroute 12% of all
-    sweeps to repair 0.016% of them.  And an all-zero constraint row divides
-    0 by 0 under normalization, which ``argmin`` then selects, where the raw
-    order never picks a row whose *raw* violation is not the worst.
-
-    That last clause is about raw violation only, not about the shared
-    predicate: the two come apart whenever a row's scale differs from its
-    violation.  With ``b = (0, 1000)``, ``beta = (-0.5, 999)`` and
-    ``tol = 0.01``, row 1 is the worse raw violation (``-1`` against ``-0.5``)
-    yet is already satisfied against its row scale of 1000, so the sweep spends
-    budget repairing a row ``_is_feasible`` accepts.
-
-    **Since #359 that case is reachable at ``b = 0`` too, which is every
-    in-tree caller, and the previous wording -- "unreachable at ``b = 0``,
-    where the two orders coincide" -- is exactly what this change reverses.**
-    The scale no longer depends on the violation, so a row violated worst can
-    carry the largest scale and be accepted while a less-violated row with a
-    unit scale is not; ``TestProjectionSelectsTheWorstViolation`` demonstrates
-    it with ``b = 0``.  Measured over the monotone and constraint fit suites --
-    8697 constraint rows -- **46% carry a scale above 1**, worst 23.3, so this
-    is an ordinary path rather than a corner.
-
-    It stays self-limiting: the stopping test is the scaled one, so the sweep
-    exits as soon as every row is satisfied, the selection is unchanged from
-    before this branch, and the repair body never reads the scale -- so the
-    iterates are what they were and only the ``break`` moved.
-    ``test_the_stopping_test_still_means_every_row`` pins that behaviour.
+    Termination uses the same homogeneous primal predicate as the QP. Each
+    repaired row is normalized before its squared norm is formed, preserving
+    the projection under tiny or large constraint units. A violated zero row
+    is impossible to repair and leaves an uncertified candidate. Exhaustion
+    also requires the caller to check feasibility; neither case is success.
     """
     beta = beta.copy()
     # Loop-invariant: only ``A @ beta`` changes between sweeps.
@@ -628,18 +665,21 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     for _ in range(100):
         # Inlined rather than calling ``_feasibility_slack``, which would
         # recompute the matvec; the arithmetic is identical term for term.
-        products = A @ beta
+        products, magnitude = _constraint_products(A, beta, abs_A)
         violations = products - b
-        slack = violations / _feasibility_scale(
-            products, b, abs_b=abs_b, abs_products=abs_A @ np.abs(beta)
-        )
-        if slack.min() >= -tol:
+        scale = _feasibility_scale(products, b, abs_b=abs_b, abs_products=magnitude)
+        slack = np.divide(violations, scale, out=np.zeros_like(violations), where=scale > 0.0)
+        if slack.min() >= -tol - _roundoff_tolerance(A.shape[1]):
             break
         worst = int(np.argmin(violations))
         # Project onto the violated constraint: a^T x >= b_i
         a = A[worst]
-        deficit = b[worst] - a @ beta
-        beta += deficit / (a @ a) * a
+        row_scale = float(np.max(np.abs(a), initial=0.0))
+        if row_scale == 0.0:
+            break  # A violated structurally zero row cannot be repaired.
+        normalized = a / row_scale
+        deficit = b[worst] / row_scale - normalized @ beta
+        beta += deficit / (normalized @ normalized) * normalized
     return beta
 
 
@@ -654,6 +694,7 @@ def _emit_blocking_decision(
     b: NDArray,
     beta: NDArray,
     beta_new: NDArray,
+    step: NDArray,
     tol: float,
     products: NDArray,
     raw_step: NDArray,
@@ -673,8 +714,13 @@ def _emit_blocking_decision(
     in its own considered set.
     """
     assert trace_run is not None  # narrowed by the caller's `tracing` guard
-    derived_scale = _feasibility_scale(products, b, abs_products=np.abs(A) @ np.abs(beta))
-    derived_scaled_step = raw_step / derived_scale
+    _, magnitude = _constraint_products(A, beta)
+    _, direction_magnitude = _constraint_products(A, step)
+    derived_scale = _feasibility_scale(products, b, abs_products=magnitude)
+    direction_scale = np.maximum(derived_scale, direction_magnitude)
+    derived_scaled_step = np.divide(
+        raw_step, direction_scale, out=np.zeros_like(raw_step), where=direction_scale > 0.0
+    )
     considered = [
         index
         for index in range(A.shape[0])
@@ -697,10 +743,14 @@ def _emit_blocking_decision(
             "row_scaled_slack": tuple(float(scaled_slack[i]) for i in considered),
             # The per-row scale the slack was divided by.  Recorded because it
             # is no longer recoverable from `row_products` and `row_b`: since
-            # #359 it is `max(1, |b|, |A_i| @ |beta|)`, which depends on the
+            # it is `max(|b|, |A_i| @ |beta|)`, which depends on the
             # row's inputs rather than on the product they produced, so a
             # reader cannot rebuild it from the recorded output alone.
             "row_scale": tuple(float(derived_scale[i]) for i in considered),
+            "direction_scale": tuple(float(direction_scale[i]) for i in considered),
+            # These dimensionless actions remain representable even when the
+            # original-unit diagnostic floats above underflow during export.
+            "row_scaled_step": tuple(float(derived_scaled_step[i]) for i in considered),
             "blocking_row": int(blocking),
             # Independently derived: a row the scaled gate excludes must never
             # be the one blocked on.
@@ -729,104 +779,24 @@ def solve_constrained_qp(
     *,
     _trace_run: TraceRun | None = None,
 ) -> QPResult:
-    """Solve a convex QP with linear inequality constraints.
+    """Solve a convex quadratic subject to A @ beta >= b.
 
-    Parameters
-    ----------
-    H : (p, p) NDArray
-        Positive semidefinite Hessian. It is decomposed once through the
-        shared rank policy, so a rank-deficient H is truncated rather than
-        raising, provided g lies in ``range(H)``.
+    H is symmetrized once, then decomposed by the shared PSD rank authority.
+    A rank-deficient H is admitted only when g is consistent with its retained
+    range. Material negative curvature and unresolved incompatible null scores
+    are refused; constraints bounding an otherwise unbounded null direction
+    remain outside this solver's capabilities.
 
-        Three inputs raise ``ValueError`` rather than returning a plausible
-        wrong answer: a materially indefinite H (the problem is then not the
-        convex QP this solver assumes); a rank-deficient H whose g has a
-        component outside ``range(H)`` (the objective is unbounded below along
-        a null direction, and no search direction this method forms can follow
-        it); and an H the rank policy cannot equilibrate.
+    tol must lie in (0, 1). Primal feasibility uses the row-action scale
+    max(|b_i|, |A_i| @ |beta|), plus a dimension-dependent rounding allowance.
+    Dual signs and stationarity use normalized constraint rows and objective
+    actions, so positive objective and constraint-unit changes preserve their
+    meaning. Short coefficient steps trigger the complete certificate rather
+    than establish it. An exhausted or uncertified candidate is not converged.
 
-        H is symmetrized once as ``0.5 * (H + H.T)`` and that symmetric part is
-        used throughout -- decomposition, KKT blocks, residual and multiplier
-        test alike -- so an asymmetric H is solved consistently as its
-        symmetric part rather than as two different quadratics on the two
-        paths. For an exactly symmetric H whose entries are normal the
-        symmetrization is bitwise identity; see ``_symmetric_part`` for the
-        overflow branch and for the subnormal case where it is not. Every
-        in-tree caller builds H symmetric by construction (``XtWX + S``,
-        ``X'X + lambda*P``).
-    g : (p,) NDArray
-        Linear term (gradient at zero, with sign: objective is
-        0.5 * beta^T H beta - g^T beta).
-    A : (m, p) NDArray
-        Constraint matrix. Constraints are A @ beta >= b.
-    b : (m,) NDArray
-        Constraint right-hand side.
-    active_set_init : list[int] | None
-        Warm-start active set from previous solve.
-    max_iter : int
-        Maximum active-set iterations.
-    tol : float
-        Tolerance for constraint satisfaction and multiplier signs, required
-        to lie in ``(0, 1)``; anything else raises ``ValueError``. The
-        constraint test is relative: row ``i`` is satisfied when
-        ``A_i @ beta - b_i >= -tol * max(1, |b_i|, |A_i| @ |beta|)``, so a
-        badly scaled constraint system does not read as infeasible purely
-        because its rows are large. The scale is the **sum of absolute terms**
-        of the dot product rather than the magnitude of their sum, which is the
-        error bound that dot product actually satisfies; see
-        :func:`_feasibility_slack` and issue #359. At ``b_i == 0`` the test is
-        no longer algebraically identical to the absolute one -- it is strictly
-        weaker by the row's cancellation -- and every in-tree caller passes
-        ``b = 0``, so that is the case it changed.
-
-        ``(0, 1)`` is the predicate's actual domain, not a house style, and the
-        scale change strengthens the argument rather than weakening it. The
-        normalized slack still cannot exceed 1 in magnitude, now for a reason
-        that needs no ``max(1, .)`` analysis: ``|A_i @ beta| <= |A_i| @ |beta|``
-        by the triangle inequality, so the numerator is bounded by its own
-        denominator at ``b = 0``. At ``tol >= 1`` the test is
-        ``x >= -tol * scale`` with ``scale >= |x|``, i.e. ``x >= -|x|``, which
-        every violation satisfies -- so the solve returns its unconstrained
-        answer with ``converged=True``. Measured on ``H = [[1]]``,
-        ``g = [-100]``, ``beta >= 0``: ``tol = 0.999999`` returns ``beta = 0``,
-        ``tol = 1.0`` returns ``beta = -100`` and calls it converged. That
-        fixture is a single row with one term, where cancellation is impossible
-        and the two scales coincide, so the measurement is unaffected by the
-        change it is quoted beneath.
-
-        Rejecting the value rather than reformulating the predicate is
-        deliberate. The vacuity is algebraic, not a rounding artifact: written
-        without the division, the test is ``x >= -tol * max(1, |x|)``, and at
-        ``tol = 1`` that is ``x >= -|x|``, which holds for every ``x <= 0``
-        however it is spelled. The only formulation that cannot saturate is one
-        whose scale excludes the row's own magnitude -- which is precisely the
-        term this test grew in order to stop reading an exactly-active large
-        constraint row as violated. So a non-vacuous formulation is not a
-        reformulation but a revert. Validation is also honest about the other
-        two jobs this one parameter does: it is the component-scaled step-norm
-        convergence threshold
-        (``||step / max(1, |beta|)|| < tol``) and the multiplier-sign
-        threshold (``min lambda >= -tol``), and neither is meaningful at 1
-        either -- the first declares stationarity for any relatively short
-        step, the second accepts a materially negative multiplier. No in-tree
-        caller passes ``tol`` at all, so the domain restriction is not a
-        breaking change.
-    _trace_run : TraceRun | None
-        Internal seam, default off. When given an *enabled* ``TraceRun`` the
-        active-set loop emits one ``step_decision`` event per blocking
-        decision on the ``constrained_qp_blocking`` channel, so a test can
-        assert the mechanism -- which rows were considered, whether the
-        convergence test accepts them, which was blocked on, and the alpha
-        taken -- instead of a numeric outcome whose value depends on BLAS.
-        Underscore-prefixed and keyword-only because ``solve_constrained_qp``
-        is re-exported from ``superglm.solvers`` and this is not public API.
-        The default path is bitwise unchanged: the flag is resolved once
-        before the loop and the payload is never constructed.
-
-    Returns
-    -------
-    QPResult
-        Solution with beta, active_set, iteration count, convergence flag.
+    active_set_init supplies a warm active set. The optional _trace_run emits
+    blocking decisions only when explicitly enabled. Result rank metadata
+    describes the shared H decomposition; no ridge is added.
     """
     # Checked at the public boundary rather than at each use: every predicate
     # below reads ``tol``, and a vacuous one is not detectable from the result.
@@ -858,6 +828,9 @@ def solve_constrained_qp(
     # this path carry the same envelope.
     H_asarray = np.asarray(H, dtype=float)
     H_sym = _symmetric_part(H_asarray)
+    A = np.asarray(A, dtype=float)
+    b = np.asarray(b, dtype=float)
+    g = np.asarray(g, dtype=float)
 
     # Route the pure-H solves through the shared rank policy so a singular or
     # near-singular H is rank-truncated the way it is everywhere else in the
@@ -929,12 +902,15 @@ def solve_constrained_qp(
                 "example add a ridge term) or drop the aliased columns."
             )
 
+    unconstrained_stationary, _, _ = _stationarity_certificate(
+        H_sym, g, beta_unc, np.empty((0, p)), tol
+    )
     if m == 0:
         # No constraints: the unconstrained solve above is already the answer.
-        return _result(beta_unc, [], 0)
+        return _result(beta_unc, [], 0, converged=unconstrained_stationary)
 
     if _is_feasible(A, beta_unc, b, tol):
-        return _result(beta_unc, [], 0)
+        return _result(beta_unc, [], 0, converged=unconstrained_stationary)
 
     # --- Initialize active set ---
     if active_set_init is not None:
@@ -1042,6 +1018,7 @@ def solve_constrained_qp(
     # iteration; only the ``|beta|`` matvec is per-iteration.  See
     # ``_feasibility_slack``.
     abs_A = np.abs(A)
+    zero_face_cache: dict[tuple[int, ...], bool] = {}
 
     for it in range(max_iter):
         # --- Equality-constrained subproblem on active set ---
@@ -1052,44 +1029,65 @@ def solve_constrained_qp(
         else:
             A_eq = A[active]  # (|active|, p)
             b_eq = b[active]  # (|active|,)
+            # Equality rows express geometry, not objective units. Normalize
+            # before the saddle solve so equivalent constraint scaling does
+            # not manufacture a primal residual on an active boundary.
+            constraint_scale = np.max(np.abs(A_eq), axis=1, initial=0.0)
+            constraint_scale = np.where(constraint_scale > 0.0, constraint_scale, 1.0)
+            A_eq = A_eq / constraint_scale[:, None]
+            b_eq = b_eq / constraint_scale
 
-            # Solve KKT system:
-            # [H    -A_eq^T] [step  ] = [g - H @ beta]
-            # [A_eq  0     ] [lambda] = [b_eq - A_eq @ beta]
             n_eq = len(active)
-            KKT = np.zeros((p + n_eq, p + n_eq))
-            KKT[:p, :p] = H_sym
-            KKT[:p, p:] = -A_eq.T
-            KKT[p:, :p] = A_eq
-
-            rhs = np.zeros(p + n_eq)
-            rhs[:p] = g - H_sym @ beta
-            rhs[p:] = b_eq - A_eq @ beta
-
-            if kkt_may_be_singular:
-                # A truncated H can leave the KKT system with a
-                # constraint-tangent null direction.  np.linalg.solve
-                # *numerically succeeds* on such a system rather than raising,
-                # so the LinAlgError fallback below never fires and the step
-                # drifts along the flat direction -- measured reaching
-                # |beta| ~ 4e43 while violating the constraint it was meant to
-                # respect.  Take the minimum-norm solution directly instead of
-                # waiting for an exception that does not come.
-                sol = _solve_saddle_least_squares(KKT, rhs)
+            zero_face = False
+            if n_eq >= p and np.all(b[active] == 0.0):
+                # A full-column-rank homogeneous active face is exactly {0}.
+                # Construct that point rather than a cancellation residue from
+                # beta + step. Check the original bounds: normalization must
+                # not erase a nonzero affine right-hand side into this branch.
+                key = tuple(active)
+                if key not in zero_face_cache:
+                    zero_face_cache[key] = decompose_factor(A_eq).rank == p
+                zero_face = zero_face_cache[key]
+            if zero_face:
+                beta = np.zeros_like(beta)
+                step = np.zeros_like(beta)
             else:
-                try:
-                    sol = np.linalg.solve(KKT, rhs)
-                except np.linalg.LinAlgError:
-                    # Singular KKT — use least-squares.  Same equilibration as
-                    # the branch above: this is the identical solve on an
-                    # identically scaled saddle matrix, and an unscaled cutoff
-                    # would discard the constraint block here for exactly the
-                    # reason it does there.  The direct solve above is
-                    # untouched, so the full-rank path still reaches this line
-                    # only after ``np.linalg.solve`` has already refused.
-                    sol = _solve_saddle_least_squares(KKT, rhs)
+                # Solve KKT system:
+                # [H    -A_eq^T] [step  ] = [g - H @ beta]
+                # [A_eq  0     ] [lambda] = [b_eq - A_eq @ beta]
+                KKT = np.zeros((p + n_eq, p + n_eq))
+                KKT[:p, :p] = H_sym
+                KKT[:p, p:] = -A_eq.T
+                KKT[p:, :p] = A_eq
 
-            step = sol[:p]
+                rhs = np.zeros(p + n_eq)
+                rhs[:p] = g - H_sym @ beta
+                rhs[p:] = b_eq - A_eq @ beta
+
+                if kkt_may_be_singular:
+                    # A truncated H can leave the KKT system with a
+                    # constraint-tangent null direction.  np.linalg.solve
+                    # *numerically succeeds* on such a system rather than raising,
+                    # so the LinAlgError fallback below never fires and the step
+                    # drifts along the flat direction -- measured reaching
+                    # |beta| ~ 4e43 while violating the constraint it was meant to
+                    # respect.  Take the minimum-norm solution directly instead of
+                    # waiting for an exception that does not come.
+                    sol = _solve_saddle_least_squares(KKT, rhs)
+                else:
+                    try:
+                        sol = np.linalg.solve(KKT, rhs)
+                    except np.linalg.LinAlgError:
+                        # Singular KKT — use least-squares.  Same equilibration as
+                        # the branch above: this is the identical solve on an
+                        # identically scaled saddle matrix, and an unscaled cutoff
+                        # would discard the constraint block here for exactly the
+                        # reason it does there.  The direct solve above is
+                        # untouched, so the full-rank path still reaches this line
+                        # only after np.linalg.solve has already refused.
+                        sol = _solve_saddle_least_squares(KKT, rhs)
+
+                step = sol[:p]
 
         # --- Check step feasibility ---
         # Judge movement relative to the current coefficient scale, coordinate
@@ -1105,203 +1103,33 @@ def solve_constrained_qp(
         # Euclidean test exactly while every ``|beta_i| <= 1``.
         relative_step = step / np.maximum(1.0, np.abs(beta))
         if np.linalg.norm(relative_step) < tol:
-            # At a stationary point.  With an empty active set that is already
-            # the whole dual condition; otherwise the multipliers decide first.
-            #
-            # A small ``step`` means stationarity only because the saddle system
-            # is *solvable*, and on the ``kkt_may_be_singular`` path that needs
-            # an argument: ``step`` there is the **minimum-norm** least-squares
-            # solution, which is small by construction whenever ``lstsq``
-            # discards a direction the right-hand side needed.  The argument is
-            # below the loop, at the return.
-            if len(active) != 0:
-                # Recompute multipliers at current point.
-                # KKT stationarity: H*beta - g = A_eq' * lambda, lambda >= 0
-                # => lambda = (A_eq @ A_eq^T)^{-1} @ A_eq @ (H @ beta - g)
-                A_eq = A[active]
-                residual = H_sym @ beta - g
-                try:
-                    multipliers = np.linalg.solve(A_eq @ A_eq.T, A_eq @ residual)
-                except np.linalg.LinAlgError:
-                    multipliers = np.linalg.lstsq(A_eq @ A_eq.T, A_eq @ residual, rcond=None)[0]
-
-                # Drop most negative multiplier (constraint wants to be
-                # inactive).  Spelled as ``not (min_mult >= -tol)`` rather than
-                # ``min_mult < -tol`` so a NaN multiplier still takes the drop
-                # branch, exactly as it did when this was a single comparison.
-                min_mult = np.min(multipliers)
-                if not min_mult >= -tol:
-                    drop_idx = np.argmin(multipliers)
-                    active.pop(drop_idx)
-                    continue
-
-            # Stationarity and dual feasibility hold; primal feasibility
-            # completes the KKT certificate.
-            #
-            # **Why stationarity holds even though ``step`` may come from
-            # ``lstsq``.**  The termination test above is
-            # ``||step / max(1, |beta|)|| < tol``, and reading a small relative
-            # step as stationarity is immediate for
-            # ``np.linalg.solve``, which either returns *the* solution or
-            # raises.  It is not immediate for ``_solve_saddle_least_squares``:
-            # a minimum-norm least-squares solution is small exactly when
-            # ``lstsq`` truncates a direction ``rhs`` needed, so on that path a
-            # small step could in principle be a truncation artifact rather
-            # than a KKT point, and every early return with a non-empty active
-            # set on a rank-deficient ``H`` arrives through it.  It is not an
-            # artifact, and the reason is structural rather than empirical:
-            #
-            # The system is ``[[H, -A_eq^T], [A_eq, 0]] z = [u; v]`` with
-            # ``u = g - H beta`` and ``v = b_eq - A_eq beta``.  Solving the
-            # second block needs ``v`` in ``range(A_eq)``; what is then left is
-            # ``P (u - H x_p)`` in ``range(P H P)``, where ``P`` projects onto
-            # ``null(A_eq)`` and ``x_p`` is any particular solution.  Write the
-            # PSD ``H`` as ``L L^T``.  Then ``range(P H P) = range(P L)``, and
-            # ``P H Q = (P L)(L^T Q)`` has its range inside ``range(P L)`` as
-            # well -- so for any ``u`` in ``range(H)`` both ``P u`` and
-            # ``P H x_p`` land in ``range(P H P)`` and the condition holds.
-            # **The saddle system is consistent for every PSD ``H``, whatever
-            # its rank**, given only that ``u`` is in ``range(H)`` and ``v`` is
-            # in ``range(A_eq)``.
-            #
-            # Both hypotheses are discharged here rather than assumed.  ``u`` is
-            # in ``range(H)`` because ``g`` is: the consistency gate above the
-            # loop refuses any other ``g`` outright, and ``H beta`` is in
-            # ``range(H)`` trivially.  ``v`` is in ``range(A_eq)`` whenever
-            # ``b_eq`` is, which is automatic at ``b = 0`` -- every in-tree
-            # caller.  So on this code path ``lstsq`` is never asked to discard
-            # a direction the right-hand side needs.
-            #
-            # Measured, at 33705 early returns with a non-empty active set --
-            # the two 3950-case rank-deficient ensembles, the full-rank
-            # byte-identity corpus, and a 26143-solve hunt seeded with
-            # positively dependent constraint rows and nonzero ``b`` -- the
-            # number whose gradient ``H beta - g`` is both materially nonzero
-            # and materially outside ``range(A_eq^T)`` is **0**.  A runtime
-            # residual check was written and measured against this population
-            # and fires on none of it, so it is not shipped: it would be a
-            # guard that no in-tree caller can reach and that no path exercises.
-            # ``test_a_converged_result_satisfies_the_kkt_conditions`` verifies
-            # the certificate from outside instead, on the public result.
-            #
-            # What the argument does *not* cover is ``b_eq`` outside
-            # ``range(A_eq)``, which needs positively dependent active rows
-            # *and* a nonzero ``b``.  Brute-forced over 40000 random PSD
-            # saddles, that is the only way to make the system inconsistent
-            # (worst relative residual ``0.97`` there, against ``26.7 * eps``
-            # with ``v`` in range), and the 26143-solve hunt did not reach it
-            # through the loop's own dynamics.  Filed, not guarded: it is a
-            # property of the caller's constraint system, and belongs at the
-            # boundary rather than inside the iteration if it ever matters.
-            #
-            # **Known gap, repaired at the return below rather than in the
-            # loop.**  The loop can reach this return on a subset active set
-            # while another row is materially violated, and it then returns
-            # that point.  Over a 3950-case rank-deficient ensemble this fires
-            # on 265 cases (production-shaped: ``b = 0``, structured ``A``, so
-            # ``x = 0`` is feasible and the problem is not the constraints) and
-            # 155 adversarial ones, with slacks saturating at ``-1.0``.
-            #
-            # It is **not** confined to the rank-deficient population, and that
-            # correction matters for who owns the defect.  Over the 600
-            # full-rank cold solves of the byte-identity corpus -- ``H`` built
-            # as ``M^T M + c I``, so ``np.linalg.solve`` runs on both arms and
-            # nothing about this branch's routing applies -- ``master`` returns
-            # an infeasible early return on **92** and this branch on **93**.
-            # The phenomenon and its rate are master's; only which specific
-            # cases land on it moved (67 overlap, 4 byte-identically), because
-            # the QP initialisation moved.  So the rank-deficient half below is
-            # new to this branch and the full-rank half is inherited.
-            #
-            # ``converged`` is the inner KKT certificate, while ``beta`` remains
-            # the best finite iterate.  ``irls_direct`` deliberately consumes
-            # that iterate so a later outer iteration can recover, but attaches
-            # the certificate to the retained coefficient state: an incomplete
-            # certificate blocks outer convergence and, if still incomplete at
-            # termination, produces ``constraint_kkt_incomplete`` plus a
-            # warning.  Fixed-lambda and automatic constrained REML reject that
-            # terminal reason before publication.  Projection is still needed
-            # here because consuming a finite iterate is safe only when the
-            # hard constraints are satisfied; the certificate alone does not
-            # make an infeasible coefficient vector admissible.  For the
-            # rank-deficient half the population is this branch's own: on
-            # ``master`` ``np.linalg.solve(H, g)`` ran before the loop, so a
-            # singular ``H`` raised ``LinAlgError`` and the loop never ran at
-            # all -- measured, ``master`` refuses 2181 of those same 3950 cases
-            # outright, and 165 of them are cases where this branch instead
-            # returns an infeasible ``beta``.  Loud refusal to silent
-            # infeasibility, which is the same correction round 6 already
-            # accepted for its own P1.
-            #
-            # The obvious repair -- add the worst violated inactive row and
-            # continue -- was implemented and measured, and is **not** shipped.
-            # It repairs 123 of the 265 and regresses no feasibility outcome,
-            # but the loop has no anti-cycling rule and this is precisely the
-            # manoeuvre that cycles: 9 cases that terminated in 3 to 16
-            # iterations then run to ``max_iter``, and 5 of those still do at
-            # ``max_iter=4000``, in traced two-state cycles (``drop 3`` /
-            # ``block-add 3``, forever).  Bounding re-activations does not
-            # close it -- the cycle it steers into never revisits this branch,
-            # because the multiplier test drops first every time -- so the
-            # bounded variant leaves the same 5 non-terminating.  The residual
-            # 142 are not reachable by it at all: in **all** of them the worst
-            # violated row is already *active*, so what is left needs the
-            # equality block enforced, which is the active-set redesign.  It
-            # also moves the full-rank path: 37 corpus records over 8 of 120
-            # full-rank seeds, including one that goes from ``n_iter=41`` to
-            # exhaustion.
-            #
-            # So the point is repaired here instead, where the repair cannot
-            # cycle.  Feasibility is what the constraint is *for*: at
-            # ``irls_direct.py:1614`` an infeasible ``beta`` means the fitted
-            # model is not monotone, while a projected one is monotone and
-            # merely worse in objective -- and that call site takes ``beta``
-            # unconditionally, so the real choice is between shipping a
-            # violated constraint and shipping a suboptimal coefficient.
-            #
-            # **Inert on the currently-feasible population by construction, not
-            # by measurement.**  The guard is *precisely* the condition under
-            # which ``converged`` is already ``False`` today, so no solve that
-            # currently returns a feasible point takes either the projection or
-            # a changed flag.  Measured to confirm the construction rather than
-            # to establish it: over the 1440 solves of the byte-identity corpus
-            # 1295 are byte-identical, all 145 that move were returning an
-            # infeasible point, **0** that were returning a feasible one move,
-            # and 0 move from an exhaustion return.  All eight end-to-end
-            # constrained fits are byte-identical.  It terminates by
-            # construction too -- ``_project_feasible`` is 100 bounded sweeps
-            # and cannot cycle -- which the loop-side repair could not promise.
-            #
-            # Reach and cost.  It repairs 146 of the 265 production-shaped and
-            # 77 of the 155 adversarial cases, and 51 of the full-rank corpus's
-            # cold solves.  The rest exhaust the 100-sweep budget still
-            # infeasible, so this is a partial repair by design: what is left
-            # needs the equality block enforced, which is the redesign.  The
-            # objective is paid for it -- median relative change ``2.4e-13``,
-            # but ``1.1`` at the 99th percentile and ``1.9`` at worst -- which
-            # is the trade being made and not a defect: those points were
-            # outside the feasible set, so their objective was never admissible.
-            #
-            # ``converged`` deliberately reports the feasibility of the point
-            # the loop *found*, taken before the projection runs, and this is
-            # not a concession to the sweep budget.  It is the stronger reading:
-            # projecting moves ``beta`` off the stationary point, so the KKT
-            # certificate does not hold for the projected point even when the
-            # projection fully succeeds.  Reporting post-projection feasibility
-            # would flip exactly the 223 repaired cases to ``converged=True`` --
-            # feasible, but demonstrably not a KKT point -- which is the
-            # over-claim the flag exists to prevent.  The budget does also run
-            # out, on 119 and 78 of those two populations, so on those the two
-            # readings agree; they agree for a reason that does not survive the
-            # repair succeeding, which is why the pre-projection one is taken.
-            #
-            # ``active_set`` is returned unchanged and still describes the
-            # pre-projection point.  It is a warm start, not a claim about
-            # ``beta``, and narrowing it is the loop work rather than this.
+            stationary, drop_idx, multipliers = _stationarity_certificate(
+                H_sym, g, beta, A[active], tol
+            )
+            if drop_idx is not None:
+                active.pop(drop_idx)
+                continue
             feasible = _is_feasible(A, beta, b, tol)
             if not feasible:
                 beta = _project_feasible(beta, A, b, tol)
-            return _result(beta, active, it + 1, converged=feasible)
+                feasible = _is_feasible(A, beta, b, tol)
+                # A repair is a new candidate: recheck its full dual and
+                # stationarity certificate before assigning convergence.
+                stationary, drop_idx, multipliers = _stationarity_certificate(
+                    H_sym, g, beta, A[active], tol
+                )
+                if drop_idx is not None:
+                    active.pop(drop_idx)
+                    continue
+            complementary = _complementarity_certificate(
+                H_sym, g, beta, A[active], b[active], multipliers, tol
+            )
+            if feasible and stationary and complementary:
+                return _result(beta, active, it + 1, converged=True)
+            if not feasible or not np.any(step != 0.0):
+                return _result(beta, active, it + 1, converged=False)
+            # A small but uncertified direction can still encounter a
+            # blocking row; coefficient units cannot complete a dual solve.
 
         # --- Step ratio: find blocking constraint ---
         # Both tests below go through the same per-row scale the convergence
@@ -1319,13 +1147,11 @@ def solve_constrained_qp(
             alpha_min = 1.0
             blocking = -1
 
-            products = A @ beta
-            raw_step = A @ step
+            products, _ = _constraint_products(A, beta, abs_A)
+            raw_step, _ = _constraint_products(A, step, abs_A)
             # Same scale ``_is_feasible`` uses, which is what makes "does this
             # step move the row" agree with "is this row satisfied".
-            scaled_step = raw_step / _feasibility_scale(
-                products, b, abs_products=abs_A @ np.abs(beta)
-            )
+            scaled_step, _ = _scaled_constraint_step(A, beta, step, b, abs_A)
             # Set membership, not ``i in active``: the list scan is O(|active|)
             # per row and dominated the rest of this now-vectorized block.
             # ``active`` is only mutated after this loop finishes.
@@ -1344,7 +1170,7 @@ def solve_constrained_qp(
                     # the two answers differ by up to an ulp, which would put
                     # an ulp of drift into `beta += alpha_min * step` for no
                     # gain -- the gate is what needed to change, not the ratio.
-                    alpha = (products[i] - b[i]) / -raw_step[i]
+                    alpha = float((products[i] - b[i]) / -raw_step[i])
                     if alpha < alpha_min:
                         alpha_min = alpha
                         blocking = i
@@ -1360,6 +1186,7 @@ def solve_constrained_qp(
                     b=b,
                     beta=beta,
                     beta_new=beta_new,
+                    step=step,
                     tol=tol,
                     products=products,
                     raw_step=raw_step,

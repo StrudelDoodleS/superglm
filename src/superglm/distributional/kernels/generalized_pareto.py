@@ -37,6 +37,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm.distributional.kernels._common import readonly, readonly_bool
+from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 _FLOAT = np.float64
 _Z_SERIES_RADIUS = 0.5
@@ -173,22 +174,59 @@ def scale_rows(
         z = xi * t
     support = 1.0 + z
     inside = np.isfinite(support) & (support > 0.0)
+    # Positive shape has no finite right endpoint. Use bounded ratios in
+    # that tail instead of materializing y/psi, its square or its cube.
+    positive_tail = (xi > 0.0) & (z >= _Z_SERIES_RADIUS)
+    inside |= positive_tail
     n = len(y)
     optimizing = np.zeros(n, dtype=_FLOAT)
     score = np.zeros((n, 2), dtype=_FLOAT) if derivative_order >= 1 else None
     hessian = np.zeros((n, 3), dtype=_FLOAT) if derivative_order == 2 else None
-    if np.any(inside):
-        ti, zi, si = t[inside], z[inside], support[inside]
-        pi, wi = psi[inside], weight[inside]
-        optimizing[inside] = wi * (-np.log(pi) - ti * series_l1(zi) - np.log1p(zi))
+    ordinary = inside & ~positive_tail
+    if np.any(ordinary):
+        ti, zi, si = t[ordinary], z[ordinary], support[ordinary]
+        pi, wi = psi[ordinary], weight[ordinary]
+        optimizing[ordinary] = wi * (-np.log(pi) - ti * series_l1(zi) - np.log1p(zi))
         if score is not None:
-            score[inside, 0] = wi * (ti - 1.0) / (pi * si)
-            score[inside, 1] = wi * (ti * ti * series_d(zi) - ti / si)
+            score[ordinary, 0] = wi * (ti - 1.0) / (pi * si)
+            score[ordinary, 1] = wi * (ti * ti * series_d(zi) - ti / si)
         if hessian is not None:
             s2 = si * si
-            hessian[inside, 0] = wi * (1.0 - ti * (2.0 + zi)) / (pi * pi * s2)
-            hessian[inside, 1] = -wi * ti * (ti - 1.0) / (pi * s2)
-            hessian[inside, 2] = wi * (ti**3 * series_e(zi) + ti * ti / s2)
+            hessian[ordinary, 0] = wi * (1.0 - ti * (2.0 + zi)) / (pi * pi * s2)
+            hessian[ordinary, 1] = -wi * ti * (ti - 1.0) / (pi * s2)
+            hessian[ordinary, 2] = wi * (ti**3 * series_e(zi) + ti * ti / s2)
+    if np.any(positive_tail):
+        yi, pi, xi_i, wi = (value[positive_tail] for value in (y, psi, xi, weight))
+        inverse_t = pi / yi
+        # L=log(1+xi*t), v=t/(1+xi*t), a=1/(1+xi*t).
+        # Retain log1p for a represented argument. Only the exceptional
+        # tail needs the log sum, which remains finite when t overflows.
+        zi = z[positive_tail]
+        log_support = np.log1p(zi)
+        overflowed = ~np.isfinite(zi)
+        if np.any(overflowed):
+            log_support[overflowed] = (
+                np.log(xi_i[overflowed])
+                + np.log(yi[overflowed])
+                - np.log(pi[overflowed])
+                + np.log1p(inverse_t[overflowed] / xi_i[overflowed])
+            )
+        v = 1.0 / (xi_i + inverse_t)
+        a = inverse_t * v
+        optimizing[positive_tail] = wi * (-np.log(pi) - log_support - log_support / xi_i)
+        if score is not None:
+            score[positive_tail, 0] = wi * ((v - a) / pi)
+            score[positive_tail, 1] = wi * (((log_support - xi_i * v) / xi_i) / xi_i - v)
+        if hessian is not None:
+            scale_numerator = a * a - v * (1.0 + a)
+            hessian[positive_tail, 0] = weighted_natural_channel(
+                (scale_numerator / pi) / pi, wi, (scale_numerator,), (pi, pi)
+            )
+            hessian[positive_tail, 1] = wi * ((-v * (v - a)) / pi)
+            u = xi_i * v
+            hessian[positive_tail, 2] = wi * (
+                (((-2.0 * log_support + 2.0 * u + u * u) / xi_i) / xi_i) / xi_i + v * v
+            )
     for name, values in (("likelihood", optimizing), ("score", score), ("Hessian", hessian)):
         if values is not None and not np.all(np.isfinite(values)):
             raise GeneralizedParetoDomainError(f"generalized Pareto {name} is not representable")

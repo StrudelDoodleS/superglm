@@ -850,8 +850,6 @@ def _certify_structural_penalty_logdet(
     )
     log_lambda = np.log(lambda_value)
     recomputed_logdet = component.rank * log_lambda + component.log_det_omega_plus
-    if production_logdet != recomputed_logdet:
-        raise AssertionError("production structural-S formula replay changed")
     formula_bound = _up(
         gamma(max(32 * declared_rank, 1))
         * max(
@@ -866,6 +864,14 @@ def _certify_structural_penalty_logdet(
         omega_logdet_bound,
         matrix_logdet.total_bound,
         operations=max(64 * width, 1),
+    )
+    # The consumer now factors the checked component representative, so its
+    # base log determinant need not replay cached spectral logs bit for bit.
+    # Keep the independently derived enclosure and matrix comparison below.
+    _assert_zero_centered(
+        production_logdet - recomputed_logdet,
+        total,
+        label="production structural-S checked formula",
     )
     _assert_zero_centered(
         production_logdet - matrix_logdet.candidate.logdet,

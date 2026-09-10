@@ -1,13 +1,17 @@
 # Recorded C3/C1 performance window
 
-These two scripts are byte-identical snapshots of the controller and summary
-used for the final-source benchmark. They retain the original formatting and
-two inherited Ruff style diagnostics (UP017 and I001) so the recorded script
-hashes and authenticated historical replay remain valid. They are benchmark
-evidence, outside the production package.
+These scripts derive from the controller and summary used for the final-source
+benchmark. The controller now audits external processes without special categories
+for obsolete tools. Its current bytes differ from the historical controller.
+The summary script is unchanged, but imports the updated controller's audit logic.
+Historical receipts retain their original hashes and measurements; their auxiliary
+process names and category labels have been generalized. These historical category
+totals describe a subset of external processes, not all external activity.
 
-- `run_timing_final.py` SHA256:
+- Historical `run_timing_final.py` SHA256, not the current script:
   `7f48497ec3f79d6e50ea0e143e796553f009d808f8a321a2d891d8a446b51f0b`
+- Current `run_timing_final.py` SHA256:
+  `93e2deb3d8097be26bcc5df0e60433f5eba7f76295d3f8b0f02a4eb80666faaf`
 - `summarize_final_timing_window.py` SHA256:
   `a15df5d8bc52495e4ff0f384ba32dacd287469dce49c1cfc36e7fdf58afa798d`
 
@@ -22,7 +26,7 @@ Use a new output directory; the controller refuses to reuse one. It launches
 six serial workers with numerical threads set to one. Coordinate other
 numerical agents and tests before timing. The 0.25-core preflight below
 reproduces the second recorded window's screening threshold; it is not
-quiet-machine approval. Headroom may remain active and its sampled CPU is
+quiet-machine approval. All observed external processes have their sampled CPU
 recorded. Review each window independently.
 
 ```bash
@@ -34,8 +38,9 @@ uv run python benchmarks/c3_practical/summarize_final_timing_window.py \
   --out /tmp/c3-new-window-summary.json
 ```
 
-The tracked summary reproduces the existing window's summary exactly when
-given its retained raw artifacts. The neutral summary deliberately does not
+The current summary requires a controller hash matching the current script, so
+historical replay requires the historical controller from repository history.
+New runs use the updated external-process categories. The summary does not
 approve timing claims automatically. See the
 [independent receipt](../c3_pragmatic_performance_receipt.json) and
 [evidence report](../../docs/research/2026-09-pragmatic-convergence.md) for the

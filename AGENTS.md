@@ -49,6 +49,34 @@ regression tests. Performance-sensitive work must compare complete-fit timing,
 memory, numerical outputs, and actual backend dispatch against the relevant
 baseline.
 
+## Solver performance and reuse
+
+Changes to solver logic, REML, numerical kernels, or other code that can affect
+time to fit require a performance and reuse review alongside correctness.
+
+- Use representative complete fits and existing diagnostics, including
+  `SuperLSS.diagnose()` where applicable. Inspect phase timings, iterations,
+  retries and refits to explain where the work comes from.
+- Use `cProfile` and hot-path caller/callee analysis to identify expensive
+  operations and their call counts. Keep profiling separate from uninstrumented
+  timing comparisons.
+- Trace expensive results from producer to consumer. Check for discarded and
+  recomputed results, repeated factorizations or products, unnecessary matrix
+  materialization, and opportunities for reuse, caching or memoization within
+  and across iterations. Build on existing caches and workspaces.
+- For proposed reuse, establish ownership, lifetime and exact invalidation
+  conditions, including changes to weights, parameters, basis, penalty target
+  or numerical precision. Preserve rank decisions, error bounds and validation
+  evidence. Include retained memory in the cost comparison.
+- Record the findings and measured effect on complete-fit time, memory,
+  numerical outputs and actual backend dispatch. Explain remaining regressions
+  and tradeoffs; a microbenchmark alone does not establish a fit improvement.
+
+The requirement is to investigate reuse; add a cache only when the evidence
+justifies it. Keep the investigation proportional to the affected paths, reuse
+applicable prior evidence, and repeat checks when changes or unresolved
+findings warrant them.
+
 ## Project direction
 
 Read [docs/ROADMAP.md](docs/ROADMAP.md) when proposing substantial new
