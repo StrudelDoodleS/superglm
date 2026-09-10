@@ -1873,6 +1873,68 @@ def _assert_all_one_exact_terminal_math(
     )
 
 
+def _local_likelihood_movement_bound(center, center_bounds, radius, coefficient_bound) -> float:
+    width = len(center.coefficients)
+    data_drift = _hessian_drift_bound(center, radius)
+    data_norm_on_ball = _bound_sum(_spectral_upper(center.data_curvature), data_drift)
+    score_norm_on_ball = _bound_sum(
+        float(np.linalg.norm(center.score_data, ord=2)),
+        data_norm_on_ball * radius,
+        math.sqrt(width) * center_bounds.score_roundoff,
+        operations=max(64 * len(center.response) + 32 * width, 1),
+    )
+    return score_norm_on_ball * coefficient_bound
+
+
+def _assert_local_root_likelihood_movement_channel() -> None:
+    # With y=[0, 2], sigma=1 and penalty=2, the penalized mode is beta=1/2.
+    # A displacement d changes the unpenalized likelihood by exactly d-d**2.
+    # Choose a binary step below the direct KKT limit, not from solver noise.
+    direct_limit = math.sqrt(gamma(64 * 2 + 32))
+    displacement = math.ldexp(1.0, math.frexp(direct_limit)[1] - 5)
+
+    def at(beta):
+        return coefficient_oracle(
+            np.array([0.0, 2.0]),
+            np.ones(2),
+            semantics="frequency",
+            location_design=np.ones((2, 1)),
+            scale_design=np.empty((2, 0)),
+            coefficients=np.array([beta]),
+            penalty=np.array([[2.0]]),
+            scale_floor=0.0,
+        )
+
+    left, right = at(0.5), at(0.5 + displacement)
+    common = local_root_certificate(left, np.vstack((left.coefficients, right.coefficients)))
+    center = at(common.center[0])
+    left_bounds, right_bounds = oracle_bounds(left), oracle_bounds(right)
+    arithmetic_only = _bound_sum(left_bounds.likelihood_sum, right_bounds.likelihood_sum)
+    difference = right.optimizing_log_likelihood - left.optimizing_log_likelihood
+    _assert_zero_centered(
+        difference - (displacement - displacement**2),
+        arithmetic_only,
+        label="analytic Gaussian likelihood displacement",
+    )
+    movement = _local_likelihood_movement_bound(
+        center,
+        oracle_bounds(center),
+        common.radius,
+        _up(float(np.sum(common.candidate_errors, dtype=np.float64))),
+    )
+    _assert_zero_centered(
+        difference,
+        _bound_sum(arithmetic_only, movement),
+        label="complete common-local-root likelihood movement",
+    )
+    with pytest.raises(AssertionError, match="zero-centered"):
+        _assert_zero_centered(
+            difference,
+            arithmetic_only,
+            label="missing common-local-root likelihood movement",
+        )
+
+
 def _assert_terminal_parity(
     left_model,
     right_model,
@@ -1988,16 +2050,10 @@ def _assert_terminal_parity(
             label=f"canonical-center {name}",
         )
 
-    data_drift = _hessian_drift_bound(center_left, common.radius)
-    data_norm_on_ball = _bound_sum(_spectral_upper(center_left.data_curvature), data_drift)
-    score_norm_on_ball = _bound_sum(
-        float(np.linalg.norm(center_left.score_data, ord=2)),
-        data_norm_on_ball * common.radius,
-        math.sqrt(width) * center_left_bounds.score_roundoff,
-        operations=max(64 * len(left_oracle.response) + 32 * width, 1),
-    )
     likelihood_bound = _bound_sum(
-        score_norm_on_ball * coefficient_bound,
+        _local_likelihood_movement_bound(
+            center_left, center_left_bounds, common.radius, coefficient_bound
+        ),
         left.fixed.bounds.likelihood_sum,
         right.fixed.bounds.likelihood_sum,
         center_sum_bound,
@@ -2242,6 +2298,7 @@ def test_frequency_efs_is_literal_replication_and_all_one_contracts_agree(
     """Kills frequency rebinding and prior/frequency all-one branch drift."""
 
     _assert_two_matvec_roundoff_channels()
+    _assert_local_root_likelihood_movement_channel()
     fixture = _semantic_efs_fixture()
     frequency_config = _semantic_efs_config(
         tolerance=1.0e-3,
@@ -2288,17 +2345,6 @@ def test_frequency_efs_is_literal_replication_and_all_one_contracts_agree(
             semantics="frequency",
         ),
     )
-    arithmetic_only = _bound_sum(
-        compressed_certificate.fixed.bounds.likelihood_sum,
-        expanded_certificate.fixed.bounds.likelihood_sum,
-    )
-    with pytest.raises(AssertionError, match="zero-centered"):
-        _assert_zero_centered(
-            compressed_certificate.fixed.oracle.optimizing_log_likelihood
-            - expanded_certificate.fixed.oracle.optimizing_log_likelihood,
-            arithmetic_only,
-            label="missing common-local-root likelihood mutant",
-        )
     compressed_prediction = compressed.predict_parameters(fixture.frame)
     expanded_prediction = expanded.predict_parameters(fixture.frame)
 
