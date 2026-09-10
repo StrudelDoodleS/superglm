@@ -7,7 +7,7 @@ to their listed sources.
 
 ## Final tensor candidate
 
-The final strict candidate `c7ee4477` takes 12.10698 seconds against the resumed
+The strict candidate `c7ee4477` takes 12.10698 seconds against the resumed
 baseline `167873e1` at 11.27126 seconds. These are medians of five alternating
 pairs in fresh processes with one native thread. The remaining difference is
 0.83572 seconds, or 7.41%. Median absolute deviations are 0.36405 and 0.21715
@@ -16,9 +16,9 @@ seconds respectively. Median process peak RSS is 446.76 versus 404.67 MiB.
 All ten fits converge in twelve smoothing iterations. The maximum prediction
 difference is `4.14e-11`; relative objective difference is `4.37e-10`. Each side
 has identical complete numerical output payloads across its five repetitions.
-The final profile also reproduces every candidate payload exactly, with matching
-source, driver, helper and fixture hashes. Profile times include instrumentation
-and are not the reported performance measurement.
+The profile reproduces every candidate result exactly, with matching source,
+driver, helper and fixture hashes. The reported fit times come from separate
+uninstrumented runs.
 
 | Work in final profile | Calls | Cumulative seconds |
 | --- | ---: | ---: |
@@ -33,8 +33,8 @@ and are not the reported performance measurement.
 | Group cross-Grams | 282 | 0.438 |
 | Coefficient fits | 14 | 1.184 |
 
-Cumulative entries overlap and must not be added. Strict certification remains
-the main cost. The iteration count has not increased. The accepted changes are:
+Cumulative entries overlap. Strict certification remains the main cost;
+the iteration count is unchanged. The changes are:
 
 - Authenticate and reuse raw penalty support and the matching final summary
   across optimizer/finalizer contexts. Coordinate transport remains fresh.
@@ -55,9 +55,9 @@ the main cost. The iteration count has not increased. The accepted changes are:
 - Request only the triangular QR result where its orthogonal factor was
   discarded. No transformed observation design is retained as a new cache.
 
-The native proposal does not relax the error bound. The wider-error experiments
-remain outside production. The final cost is near the original runtime but is
-still higher, and process peak memory is about 42 MiB higher on this fixture.
+The native proposal uses the original error bound. Experiments with a wider
+bound were not adopted. This fixture still takes 0.84 seconds longer and uses
+about 42 MiB more peak process memory than the resumed baseline.
 The fixture explicitly uses REML tolerance `1e-6`; these times do not describe
 the default `1e-9` tolerance or every model size.
 

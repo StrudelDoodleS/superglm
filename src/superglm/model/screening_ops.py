@@ -210,14 +210,12 @@ _INTERMEDIATE_BUDGET_FACTOR = 4
 # Measured after that change, at k = 1709, one BLAS thread: 1.6e-10 s/k^3
 # unpenalized against 2.7e-10 for the entire four-rung penalized ladder --
 # a ratio of 1.65, not 25.  End to end on a bisecting 28x28-knot ti the same
-# change is 4.20 s -> 0.54 s.  The multiplier was set to 2 rather than 1.65 to
-# keep headroom for the pseudo-inverse branch, which either path could take.
-# That branch is gone with the rest of the moment route: a rank-deficient
-# overlap now costs the pencil a TALLER stacked-back block inside the same
-# pivoted QR rather than a different decomposition, so what the headroom
-# covers is no longer what it was sized against.  The 2 is left where it is,
-# because moving it would move admissions; re-sizing it against the factor
-# route's own spread is part of the refit above.
+# change is 4.20 s -> 0.54 s. The multiplier of 2 included the cost of the
+# pseudo-inverse branch, which either path could take. That branch is gone
+# with the moment route. A rank-deficient overlap now adds rows to the
+# stacked-back block within the same pivoted QR. The multiplier remains 2
+# because changing it changes admissions; recalibrating it against the factor
+# route's measured spread is part of the refit above.
 #
 # At the default max_cells this admits k <= 1709 unpenalized and k <= 1357
 # penalized, measured there at 0.81 s and 0.67 s ON THE MOMENT ROUTE -- both

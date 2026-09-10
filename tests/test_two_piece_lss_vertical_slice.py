@@ -256,7 +256,7 @@ def test_real_line_family_matches_gamlss_sn2_at_a_parametric_specification():
     # cycle and our Newton fit stop at different points of the same flat
     # optimum; 1e-5 is the bound the larger two force.  The log-likelihood,
     # which is what the two optimisers actually agree on, stays within 1e-8
-    # with four orders of headroom (measured 1.792e-12).
+    # with a measured difference of 1.792e-12.
     assert abs(ours_intercept - reference["mu"][0]) <= 1e-5 * (1 + abs(reference["mu"][0]))
     assert abs(ours_slope - reference["mu"][1]) <= 1e-5 * (1 + abs(reference["mu"][1]))
     # SN2 links: sigma log, nu log; our mapping is nu^2 = (1+eps)/(1-eps),

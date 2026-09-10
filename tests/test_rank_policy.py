@@ -254,7 +254,7 @@ def test_reflecting_the_residues_sign_moves_neither_the_rank_nor_the_covariance(
 
     Against the bar the same residue runs **0.017x to 0.488x** over the same
     fourteen and never approaches it, so the direction drops on all of them --
-    worst reading 0.488x, i.e. **2.05x of headroom**, against a min of 0.017x.
+    worst reading 0.488x, against a min of 0.017x.
 
     **THE TWO ARMS ARE DIFFERENT MATRICES, SO THE ASSERTION IS AGREEMENT AND
     NOT IDENTITY.**  ``H`` and ``H - 2 w0 v v'`` differ, and the pseudo-

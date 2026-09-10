@@ -1842,7 +1842,7 @@ Dispositions for Task 8's docs (SUPERSEDED — see round 2 below):
   and df=3 (5.71), and the `numeric_numeric` kind in its entirety. The
   benchmark carries a 2-level factor and a second `Numeric` precisely
   because the pins do not.
-- **Caution the release gate's headroom.** The pins bound `z < 10` and the
+- **The measured maximum depends on sweep width.** The pins bound `z < 10` and the
   battery reached 7.64 over 3520 rows. The floor rises with sweep width, so
   a wide book screened in one pass draws more null rows than this whole
   battery; 10 is generous for a handful of pairs and thinner for hundreds.
@@ -1966,7 +1966,7 @@ Dispositions, revised against the on-contract numbers:
   are measured but not gated" is therefore retired. Measured over the pins'
   own 8 sweeps: Poisson max 4.27, Gaussian max 4.58, against the `z < 10`
   bound.
-- **The gate's headroom caution stands** on the new number: the pins bound
+- **The sweep-width limit still applies.** The pins bound
   `z < 10` and the battery reached 7.53 over 3520 rows. A floor is a maximum,
   so it grows with sweep width — 10 is generous for a handful of pairs and
   thinner for hundreds.

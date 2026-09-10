@@ -1,8 +1,8 @@
 # Numerical robustness audit
 
-This audit follows the Gamma convergence repair. It examines shared numerical
-decomposition authority and the thresholds used by callers. It does not claim
-that all numerical failure modes have been covered.
+This audit records the rank and arithmetic failures reproduced during the
+Gamma convergence repair. It explains the fixes, their tests and their measured
+cost. Coverage limits are stated beside the relevant results.
 
 The [final family-arithmetic addition](family_arithmetic.md) records the scalar
 working-weight and Pearson fixes, four LSS variance fixes, current verification
@@ -96,10 +96,9 @@ version and analytic baseline, range and dispatch replays.
 
 ## Broader audited paths
 
-The expanded audit reproduced failures beyond the original convergence and
-rank callers. The following repairs have focused regressions and independent
-acceptance, including the final SZ public-rank admission correction.
-Final integration and complete-fit performance remain separate requirements.
+The following repairs have focused regressions and independent review,
+including the SZ check against the public operator's rank. Integration results
+and complete-fit measurements identify the source snapshots they cover.
 
 | Path | Reproduced failure and correction |
 | --- | --- |
@@ -112,12 +111,11 @@ Final integration and complete-fit performance remain separate requirements.
 | Posterior calculations | Error trust failed to cover the full Hessian, and unit-dependent cutoffs dropped positive modes. The repair checks the full enclosure and preserves representable inverse and sampling actions. |
 | Penalty consumers | Copying and endpoint extraction discarded retained target/error evidence; assessments could substitute a different target or lose an earlier objective's uncertainty. Explicit ownership and original-error receipts now preserve that evidence. |
 
-The audit also records boundaries without claiming a demonstrated repaired
-public-fit failure: extreme Hessian cross-traces outside ordinary REML bounds,
-duplicated generic Gamma expressions, and a source-only negative-binomial
-profiling formula. The result-lifetime inventory identifies further possible
-reuse; it does not establish a speed benefit without an executed comparison.
-This work does not certify every numerical branch or every possible input.
+The audit also noted extreme Hessian cross-traces outside ordinary REML bounds
+and a negative-binomial profiling formula found by source inspection. Neither
+had a reproduced public-fit failure. Duplicated scalar Gamma expressions were
+subsequently routed through the shared working-arithmetic helper. Further reuse
+ideas still need complete-fit measurements before a speed benefit can be claimed.
 
 ## Executed comparisons with other libraries
 
@@ -140,10 +138,10 @@ Eleven public pyGAM fits and five matching SuperGLM linear fits were executed.
 The five SuperGLM prediction errors were at most `6.67e-16` on those controls.
 pyGAM's fixed-lambda coefficient fit **passes** the ratio-51 geometry control;
 it has no matching LAML determinant-derivative API in the inspected paths.
-These experiments distinguish changing a requested problem, inaccurate
-arithmetic and honest refusal. They do not establish a general library ranking
-or identical failures in full distributional models. The methods were derived
-independently; no library implementation was copied or translated.
+These experiments distinguish changed objectives, arithmetic errors and
+explicit refusals. Their results apply to the listed cases. They do not rank
+the libraries overall or establish identical failures in full distributional
+models. The implementations were derived independently of the library code.
 
 The SZ comparison executes eight fixed objectives through each mgcv interface:
 the original 480-by-70 fixture, its moderate-weight control, and six two-level
@@ -450,20 +448,19 @@ lambda preserves the statistical objective and root in log-ratio coordinates,
 but rescales phi. This demonstrates a bracket-policy defect; it does not by
 itself establish a particular complete fit's false stationarity.
 
-Other findings remain policy or coverage concerns. The distributional penalty
-symmetry tolerance has an absolute floor and therefore unit-dependent input
-acceptance. Symmetrizing a supplied matrix preserves its quadratic form, so
+Other findings at that checkpoint were policy or coverage concerns. The
+distributional penalty symmetry tolerance has an absolute floor and therefore
+unit-dependent input acceptance. Symmetrizing a supplied matrix preserves its quadratic form, so
 this is not a demonstrated model change. Dense/chunked initialization authority,
-the constrained KKT gate and SCOP absolute objective checks need targeted
-evidence before changing behavior.
+the constrained KKT gate and SCOP absolute objective checks still needed
+targeted tests. The later repairs are listed above.
 
 ## Candidate repair review
 
-The first four decomposition corrections pass 225 focused tests. The new eight
-tests yield seven failures and one pass against the unmodified rank module.
-Those are executed red/green results, not a claim of complete robustness.
+The first four decomposition corrections passed 225 focused tests. Of the eight
+new tests, seven failed against the unmodified rank module.
 
-Astra review required an internal rank-policy version update because safe
+Review required an internal rank-policy version update because safe
 norms change the retained columns on an identical deficient input. This is
 now internal policy version four; the package version remains untouched.
 
@@ -530,10 +527,9 @@ coefficient. Receipts and LSS predictions are in
 `/tmp/superglm-rank-robustness.gRMtsc/`. Fresh Ruff and format checks passed,
 and `git diff --check` found no whitespace errors.
 
-The user approved the numerical blueprint and requested Astra max for
-implementation and independent review. That work corrected the signed case,
-internal policy version, scalar block normalization and consistent
-multi-penalty calculations. All candidate edits remain uncommitted.
+Subsequent changes corrected signed scaling and scalar block normalization,
+updated the internal rank policy and made multi-penalty support decisions
+consistent. The current verification is linked at the top of this report.
 
 ## Rank review and scalar design follow-up
 
@@ -559,5 +555,5 @@ explicit arithmetic allowance. A unit-floor denominator was rejected in the
 design stage because it accepted mapped coefficients `[1, 0.6]` instead of
 `[0.6, 0.8]` after response and threshold scaling. A purely relative check was
 also rejected because it exhausted iterations on a well-conditioned
-zero-signal problem whose remaining score was assembly roundoff. The approved
-bounded implementation plan covers both cases and the custom proximal path.
+zero-signal problem whose remaining score was assembly roundoff. The resulting
+bounded stopping rule covers both cases and custom proximal operators.

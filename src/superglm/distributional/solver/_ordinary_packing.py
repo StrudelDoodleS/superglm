@@ -6,8 +6,8 @@ import numpy as np
 from numba import njit
 
 # Match the original global-moment operand predicate exactly. Zeros, including
-# negative zero, are permitted; nonzero magnitudes must retain normal-range
-# headroom for the separately bounded degree-three moment products.
+# negative zero, are permitted. Nonzero magnitudes keep the separately bounded
+# degree-three moment products within the normal exponent range.
 _MIN_FACTOR = 2.0**-128
 _MAX_FACTOR = 2.0**128
 

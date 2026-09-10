@@ -62,7 +62,7 @@ def _prediction_rtol(n_cols: int) -> float:
     Both sides build ``eta`` as an intercept plus a dot product over ``n_cols``
     piecewise columns plus two other term contributions, then exponentiate:
     ``2 * n_cols + 6`` roundings each.  Doubling covers both sides and the
-    factor of 8 leaves headroom for a differently ordered BLAS.  A relative
+    factor of 8 allows for BLAS operation ordering. A relative
     error on the response equals an absolute error on ``eta``, and every
     log-scale quantity here is order 1, so nothing inflates this beyond the
     flop count.

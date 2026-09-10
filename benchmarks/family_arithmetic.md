@@ -1,10 +1,10 @@
 # Scalar working arithmetic and LSS variances
 
-This is the final family-arithmetic addition to the convergence and rank
-repair. The quick scan found representable Fisher weights and Pearson
-contributions lost by intermediate products, plus four public LSS variance
-methods with the same problem. It did not find a common failure across the
-nine LSS fitting kernels. This change addresses those demonstrated cases.
+Intermediate products could overflow or underflow even when a scalar Fisher
+weight, Pearson contribution or LSS variance was representable. This addition
+to the convergence and rank repair fixes those cases. The scan found failures
+in four public LSS variance methods; selected fitting-kernel checks passed
+across all nine LSS families.
 
 ## Scalar calculation
 
@@ -22,11 +22,11 @@ exact built-in family/link pairs:
 | Negative binomial, log | `w * min(mu, theta) / (1 + min(mu, theta)/max(mu, theta))` |
 | Tweedie, log | `w * mu**(2-p)` |
 
-For Binomial/logit, the fitted mean can be clipped independently of the
-inverse-link derivative. Its calculation therefore retains that derivative
-and evaluates `w * (d * (d / V))`. Alternate links and subclass overrides use
-their actual derivative and variance. The alternate Binomial/log regression
-demonstrates why the fitted mean cannot replace every log-link derivative.
+For Binomial/logit, clipping can change the fitted mean without changing the
+inverse-link derivative. The helper uses that derivative and evaluates
+`w * (d * (d / V))`. Alternate links and subclass overrides use their own
+derivative and variance. The Binomial/log regression catches an incorrect
+substitution of the clipped mean for the derivative.
 
 Other family/link pairs retain the generic expression. Only entries with
 unsafe intermediate products use the existing binary product/quotient
@@ -46,8 +46,8 @@ TweedieLSS change in this addition. Their ordinary vector calculations remain
 in place. Entries with unsafe squares, powers or products use binary scaling;
 the log-normal exceptional path also uses a log expression when its
 exponential factor would overflow. True final overflow still returns infinity.
-The fitting kernels, parameter bounds and optimizer stopping rules do not
-change in this addition.
+These methods report moments; this addition leaves the LSS fitting kernels,
+parameter bounds and stopping rules unchanged.
 
 ## Regression evidence and limits
 
@@ -58,21 +58,28 @@ roundings, gradual underflow and, where needed, transcendental conditioning.
 The tests cover zero and extreme weights, custom family overrides, clipped
 means, alternate links and true final overflow.
 
-The original 318-case scalar scan failed 48 cases on the pre-addition source.
-Expanded scalar tests subsequently reproduced five more failures. Four further
-unfloored Pearson cases and the alternate-link compatibility regression were
-also executed before their fixes. The LSS suite reproduced 17 failing cases
-before its fixes. These are parameterized cases, not counts of independent
-defects. The prior scan's 35 weighted likelihood-law comparisons and selected
-kernel/oracle tests cover all nine LSS families; they do not certify arbitrary
-inputs or every tail of every family.
+The scalar suite reproduces failures before each fix: 48 in the original
+318-case scan, five in its first extension, four unfloored Pearson cases and
+the alternate-link case. The LSS suite reproduces 17 failures before its fixes.
+Several parameterized cases exercise the same defect. The earlier scan also
+passed 35 weighted likelihood-law comparisons and selected kernel/oracle tests
+across all nine LSS families.
+
+The 88 real-data checks use freMTPL2. They do not measure the failure rate on
+unrelated datasets. Shared arithmetic and rank corrections apply across
+datasets, but selected kernel tests are not equivalent to complete real-data
+fits for every LSS family. A fit can also have an unidentifiable or unbounded
+optimum. In the reproduced weak-start Gamma case, the repaired solver reports
+nonconvergence instead of accepting the unresolved score. Broader real-data
+coverage remains a gap; the checks here cannot guarantee every failure will
+be detected.
 
 ## Reuse and performance method
 
 The exact log-family pairs reuse the fitted mean as their derivative. The
-negative-binomial calculation owns and reuses two temporary arrays. Existing
-SCOP and fit-state caches remain in use. Working weights depend on the current
-fit and do not gain a persistent cache with ambiguous invalidation.
+negative-binomial calculation reuses two temporary arrays. Existing SCOP and
+fit-state caches remain in use. Working weights are recalculated when the fit
+changes.
 
 `family_arithmetic_complete_fit.py` runs six 12,000-row complete fits with
 frequency weights, spline and numeric terms. Each case has a 300-row warmup
@@ -90,11 +97,11 @@ rank/penalty, mgcv and pyGAM comparisons and their narrower conclusions.
 
 ## Final measurements
 
-The candidate source digest is
+The timed candidate's source digest is
 `9a813cd7ce25ffac15cd6041cd4c916f152ed56309ffce39c6fac62524ce4d0a`.
 The baseline is
 `c7ee44778b9bf8cd424b48a21dbca6ba6ffeb8c88ef982ec0f743d86668c7aaf`.
-These comparisons isolate this addition, not the entire repair against master.
+This comparison measures the addition against the accepted strict repair.
 
 | Complete fit | Before, seconds | After, seconds | Change |
 | --- | ---: | ---: | ---: |
@@ -106,7 +113,7 @@ These comparisons isolate this addition, not the entire repair against master.
 | Tweedie | 0.09433 | 0.09608 | +1.86% |
 | Scalar tensor REML | 11.71413 | 12.02343 | +2.64% |
 
-All ordinary fits retain their iteration counts and `gram` backend, with no
+All ordinary fits use the same iteration counts and `gram` backend, with no
 fallback. Their largest prediction difference is `1.25e-14`; Gaussian and Gamma
 predictions are identical. Median process high-water memory differs by less
 than 0.12 MiB at each family checkpoint. These small fixtures do not establish
@@ -115,14 +122,14 @@ a general speed improvement.
 All six tensor fits converge in twelve smoothing iterations with rank 255/255.
 Maximum prediction difference is `4.60e-11`, and relative objective difference
 is `4.13e-10`. Median peak RSS is 447.12 MiB before and 446.51 MiB after. The
-2.64% timing difference is a small additional cost on this measurement; it does
-not erase the earlier repair's measured cost against its older baseline.
+2.64% timing difference is an additional cost on this measurement. The earlier
+repair's comparison with its own baseline remains in the numerical audit.
 
-All twelve ordinary profiles reproduce every corresponding timed result
-exactly. Each executes one direct fit. Working-row call counts and backend
-selection are unchanged; no exceptional binary-product repair runs on these
-ordinary fixtures. Estimated-scale fits retain two Pearson consumers, the
-solver's floored dispersion statistic and unfloored reporting. Routing both
+All twelve ordinary profiles reproduce their timed results exactly. Each
+executes one direct fit, with the same working-row call counts and backend.
+No exceptional binary-product repair runs on these fixtures. Estimated-scale
+fits have two Pearson consumers, the solver's floored dispersion statistic
+and unfloored reporting. Routing both
 through the shared helper does not add those passes: the old reporting path
 calculated its expression directly.
 
@@ -130,7 +137,8 @@ The untimed tensor observer also reproduces all three candidate fits exactly.
 It records 16 penalty summaries, 2,448 strict float64 slice products, 46 wide
 products, twelve native factor proposals, 94 dense tensor Grams and 282
 batched cross-Grams. Native pool samples report one thread and no observer
-errors. This records executed operations; it does not intercept BLAS symbols.
+errors. The observer records executed operations without intercepting BLAS
+symbols.
 The observer differs from the preserved earlier version only in the expected
 module hash after an annotation-only correction.
 
@@ -151,9 +159,20 @@ pins the candidate's budget verdict, and proves by mutation that removing
 certificate deferral refuses the fit. All 494 tests in the four affected files
 then pass; both 16-worker controls also pass separately.
 
-The only production changes after the full run are two verified annotation-only
-corrections admitting the scalar and long-double values already accepted by
-their numerical bodies. The independent reviewer accepted both test updates.
+After the full run, two production annotations were corrected to admit the
+scalar and long-double values already accepted by their numerical bodies.
+The independent reviewer accepted both test updates.
 Ruff, formatting, lock/environment consistency and the public smoke fit pass.
-The CI type check reports 890 diagnostics, below its existing 903-diagnostic
-limit; this is backlog compliance, not a claim of a clean type check.
+The CI type check reports 890 diagnostics against its existing limit of 903.
+
+Python 3.12 CI then exposed a brittle replication-test control. It required
+two equivalent fits to differ by more than arithmetic roundoff, although closer
+agreement is valid. The replacement uses an analytic Gaussian likelihood
+change between two candidates in the same certified local neighborhood.
+Omitting the coefficient-movement term fails the control; the actual fit-parity
+bounds are unchanged. All 55 tests in `test_distributional_efs.py` pass on
+Python 3.12, and the affected test also passes on Python 3.13.
+
+The later prose cleanup changes production comments and docstrings only.
+Comparison of the executable syntax trees confirms no solver-logic changes.
+The strict documentation build passes after correcting a benchmark link.

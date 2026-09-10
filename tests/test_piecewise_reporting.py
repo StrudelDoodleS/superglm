@@ -36,7 +36,7 @@ _EPS = float(np.finfo(np.float64).eps)
 # two-point interpolation (5), an exp (1), a power (3) and three products (3).
 # Model: the hat weight (3), a two-term dot product (3), three additive term
 # contributions (3) and an exp (1).  Twenty-two, plus the comparison's own two,
-# rounded up to 32 for headroom on a differently-ordered BLAS.  Terms in the
+# rounded up to 32 to allow for BLAS operation ordering. Terms in the
 # log-scale sum are of similar magnitude, so there is no cancellation to
 # inflate this beyond a flop count.
 _RECONSTRUCTION_OPS = 32

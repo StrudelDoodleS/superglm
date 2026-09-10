@@ -28,7 +28,7 @@
 3. **Codebase note that resizes the whole idea:** `reml/discrete.py::optimize_discrete_reml_cached_w` already
    implements cached-W — λ trials cost O(p³) with **no data pass**. So the ~14 measured passes are **W
    refreshes, not λ trials**. The right question is "how many times must W be rebuilt", not "how many λ trials".
-   This reduces frozen-λ headroom and raises the value of better starting points and looser convergence.
+   Less work remains to remove from frozen-λ trials. Better starting points and looser convergence may save more time.
 
 ## Key literature
 

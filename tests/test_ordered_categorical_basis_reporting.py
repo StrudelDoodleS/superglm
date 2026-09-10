@@ -422,8 +422,8 @@ def test_a_grouped_display_band_brackets_the_curve_it_is_drawn_around() -> None:
     strictly outside, which a renderer draws as the line leaving its own
     ribbon.
 
-    The tolerance is the round-trip error of that construction, not observed
-    headroom: ``relativity`` and the two edges each come from one ``exp`` of a
+    The tolerance bounds the round-trip error of that construction.
+    ``relativity`` and the two edges each come from one ``exp`` of a
     quantity carrying at most a couple of rounding errors, so 8 ulp of the
     larger magnitude bounds any legitimate crossing. It is a null allowance
     against the failure it is here for, which is 1.4e14 ulp.
@@ -745,7 +745,7 @@ def test_grouped_polynomial_display_curve_is_the_fitted_polynomial() -> None:
     spacing_tolerance = 8 * np.finfo(np.float64).eps * float(np.abs(curve_x).max())
     assert np.ptp(np.diff(curve_x)) < spacing_tolerance
     second = np.diff(curve_y, 2)
-    # Tolerance from the arithmetic, not from headroom: the (1, -2, 1) stencil
+    # The tolerance follows from the arithmetic. The (1, -2, 1) stencil
     # magnifies each entry's error at most fourfold, and allowing a handful of
     # ulp for the reconstruction that produced the entries gives
     # 16 * eps * max|curve_y|. Measured spread 2.8e-16 against a bound of

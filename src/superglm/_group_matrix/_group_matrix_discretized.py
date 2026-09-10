@@ -415,7 +415,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         # promotion. Keep the original arithmetic for other operand dtypes.
         float64_inputs = B1.dtype == B2.dtype == w_grid.dtype == np.float64
         # Five original factors contribute to each raw Gram term. Bounding
-        # nonzero magnitudes by 2**(+/-128) leaves exponent headroom even for
+        # nonzero magnitudes by 2**(+/-128) prevents exponent overflow even for
         # two sums with 64-bit index-sized dimensions (640 + 126 < 1024).
         # This prevents new range failures from reassociation; cancellation
         # still follows ordinary floating-point arithmetic. Extreme inputs

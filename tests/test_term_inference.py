@@ -276,8 +276,8 @@ class TestTermInferencePolynomialResolution:
         points.  (200 and 50 are not such a pair -- 199 is prime -- which is
         why the sizes here are not the defaults.)  The two spellings of each
         point differ only by the float64 rounding of ``lo + i*(hi-lo)/n``, so
-        one cubic on one coefficient vector must agree to round-off; the
-        tolerance is that, not headroom.
+        one cubic on one coefficient vector must agree to roundoff. The
+        tolerance bounds that arithmetic error.
         """
         fine = poly_model.term_inference("age", n_points=397)
         coarse = poly_model.term_inference("age", n_points=100)

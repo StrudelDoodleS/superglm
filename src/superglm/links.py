@@ -454,8 +454,8 @@ _SQRT_LINK_ETA_MAX = 0.5 * float(np.sqrt(np.finfo(np.float64).max))
 _CAUCHIT_PROBABILITY_EPS = 1e-15
 _CAUCHIT_LINK_ETA_MAX = float(abs(CauchitLink().link(np.array([_CAUCHIT_PROBABILITY_EPS]))[0]))
 # ``clip_mu`` clamps binomial means to [_BINOMIAL_CLIP_MU_EPS, 1 - _BINOMIAL_CLIP_MU_EPS].
-# Cloglog's cap must sit strictly inside that band (see _cloglog_eta), so keep one
-# factor of two of headroom above the family's own floor.
+# Cloglog's cap must sit strictly inside that band (see _cloglog_eta), so use
+# twice the family's floor.
 _BINOMIAL_CLIP_MU_EPS = 1e-7
 _CLOGLOG_PROBABILITY_EPS = 2.0 * _BINOMIAL_CLIP_MU_EPS
 _CLOGLOG_LINK_ETA_MAX = float(CloglogLink().link(np.array([1.0 - _CLOGLOG_PROBABILITY_EPS]))[0])

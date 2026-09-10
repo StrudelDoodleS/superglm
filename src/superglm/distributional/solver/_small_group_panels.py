@@ -182,7 +182,7 @@ def _in_range(values):
     """Bound exponents, including nonfinite values, without large temporaries.
 
     Five original factors (two bases, two maps, and weights), each within
-    2**[-128, 128], leave ample normal-range headroom for reassociation.
+    2**[-128, 128], keep products in the normal exponent range after reassociation.
     Dimensions are additionally bounded by 2**20 below. This is deliberately
     conservative: cancellation is allowed, unsafe input ranges fall back.
     """

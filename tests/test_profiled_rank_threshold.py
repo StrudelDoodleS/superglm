@@ -143,7 +143,7 @@ def test_the_rank_reference_is_blind_to_the_overlap_s_units_and_tracks_the_probe
     ABOVE probe mass, where an unbalanced reference is set by the overlap and
     cuts away a probe direction the overlap's scale never justified.
 
-    THE BAR IS THE MODULE'S OWN ROUND-OFF FLOOR, NOT AN OBSERVED HEADROOM.
+    The threshold uses the module's roundoff floor.
     ``numpy.linalg.norm(., 2)`` is an SVD, whose largest singular value is
     computed to a modest polynomial in the dimensions times ``eps`` (the
     *LAPACK Users' Guide*'s own SVD error bound), and ``_rank_floor``'s

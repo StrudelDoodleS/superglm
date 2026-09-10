@@ -679,7 +679,7 @@ def test_spline_cat_compression_leaves_every_fitted_quantity_unchanged(monkeypat
     fail on a different BLAS".  numpy 2.5.2 moves ``np.linalg.qr`` at the last
     bits, and on this fixture the reordered sum then moves beta by up to
     1.099e-05 -- about 3000x the original measurement, and 110x the bound that
-    was supposed to carry the BLAS headroom.
+    was supposed to allow for BLAS variation.
 
     What did NOT move is the fit.  Over the same sweep the DEVIANCE agrees to
     **3.805e-09 to 6.658e-09** relative -- 3412.135495 against 3412.135518, or
@@ -742,7 +742,7 @@ def test_spline_cat_compression_leaves_every_fitted_quantity_unchanged(monkeypat
     #   predictions                               rel 5.494e-07 .. 9.615e-07
     #   effective_df                              rel 1.106e-06 .. 1.935e-06
     #
-    # Headroom, per bound and stated honestly rather than as one range: the
+    # Ratios of each bound to the largest measured difference: the
     # deviance clears by 3.00x, the predictions by 3.12x and ``effective_df``
     # by 3.10x.  beta's two components clear by 2.73x (atol) and 2.76x (rtol)
     # individually -- both a little under this file's 2.8x convention -- while
