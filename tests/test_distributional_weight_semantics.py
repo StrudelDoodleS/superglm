@@ -25,6 +25,7 @@ from superglm.distributional.weights import (
 )
 from superglm.features import Categorical, Numeric
 
+from . import _gaussian_lss_oracles as gaussian_oracles
 from ._gaussian_lss_oracles import (
     assert_gaussian_fit_parity,
     certify_gaussian_result,
@@ -504,6 +505,55 @@ def test_prior_scale_score_mutation_point_is_three_not_frequency_zero() -> None:
         prior.observed_link_curvature_packed,
         frequency.observed_link_curvature_packed,
     )
+
+
+def _polish_floor_fixture(displacement: float):
+    # The fixed-unit-scale quadratic has beta*=0, H=2 and score=-2*beta.
+    # At its mode the absolute score accumulation is exactly 7.5; dividing
+    # gamma(160)*7.5 by 7.5 rounds above gamma(160) in binary64.
+    return gaussian_oracles.coefficient_oracle(
+        np.array([-3.75, 3.75]),
+        np.ones(2),
+        semantics="frequency",
+        location_design=np.ones((2, 1)),
+        scale_design=np.empty((2, 0)),
+        coefficients=np.array([displacement]),
+        penalty=np.zeros((1, 1)),
+    )
+
+
+@pytest.mark.parametrize("displacement", [0.0, 2.0**-50])
+def test_gaussian_oracle_polish_stops_at_the_score_roundoff_floor(displacement, monkeypatch):
+    reference = _polish_floor_fixture(displacement)
+    np.testing.assert_array_equal(reference.score_penalized, [-2.0 * displacement])
+    _, allowance, _ = gaussian_oracles._gradient_roundoff(reference)
+    assert 2.0 * displacement <= allowance
+    solve = np.linalg.solve
+
+    def no_newton_solve(matrix, rhs):
+        # Reconstructing an oracle still solves against the covariance identity.
+        assert rhs.ndim == 2, "arithmetic-floor score must not trigger a Newton solve"
+        return solve(matrix, rhs)
+
+    monkeypatch.setattr(np.linalg, "solve", no_newton_solve)
+    polished = gaussian_oracles._polished_center(reference)
+    np.testing.assert_array_equal(polished.coefficients, reference.coefficients)
+
+
+def test_gaussian_oracle_polish_still_corrects_a_resolved_score(monkeypatch):
+    reference = _polish_floor_fixture(2.0**-20)
+    _, allowance, _ = gaussian_oracles._gradient_roundoff(reference)
+    assert np.linalg.norm(reference.score_penalized, ord=np.inf) > allowance
+    polished = gaussian_oracles._polished_center(reference)
+    np.testing.assert_array_equal(polished.coefficients, [0.0])
+    solve = np.linalg.solve
+
+    def broken_correction(matrix, rhs):
+        return np.zeros_like(rhs) if rhs.ndim == 1 else solve(matrix, rhs)
+
+    monkeypatch.setattr(np.linalg, "solve", broken_correction)
+    with pytest.raises(AssertionError, match="lacks an ascent direction"):
+        gaussian_oracles._polished_center(reference)
 
 
 def _no_scale_intercept_fit(
