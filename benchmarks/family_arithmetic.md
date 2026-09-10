@@ -1,5 +1,8 @@
 # Scalar working arithmetic and LSS variances
 
+The subsequent [PR review follow-up](pr381_review_followup.md) records the
+reporting, SSP ownership and exceptional-arithmetic fixes made after this batch.
+
 Intermediate products could overflow or underflow even when a scalar Fisher
 weight, Pearson contribution or LSS variance was representable. This addition
 to the convergence and rank repair fixes those cases. The scan found failures
