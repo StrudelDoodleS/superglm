@@ -51,10 +51,14 @@ def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indi
     is made here. The target is the represented source product B R, before
     floating-point matrix multiplication rounds that product.
 
+    A shared binary scale per source operand makes every inner operation an
+    integer operation. Binary64's finite exponent span bounds integer widths,
+    apart from logarithmic growth with reduction length; no inner product
+    needs rational normalization. Only final outputs use Fraction rounding.
     Only one effective row and the requested output are retained. Sparse B
     stays sparse outside the current row; discrete weights are aggregated
     exactly before visiting their support rows. Ordinary operands never use
-    rational arithmetic.
+    this path.
     """
     weights = np.asarray(weights)
     if bin_indices is None:
@@ -75,47 +79,72 @@ def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indi
         weighted_rhs = np.asarray(weighted_rhs)
         if weighted_rhs.shape != weights.shape:
             raise ValueError("SSP moments require one weighted RHS per observation.")
-    zero = Fraction(0)
 
-    def exact(value):
+    def binary_scale(values):
+        values = np.asarray(values, dtype=np.float64)
+        _, exponents = np.frexp(values)
+        # A binary64 value with frexp exponent e is an integer times 2**(e-53).
+        # Including nonfinite values in this scan is harmless: conversion
+        # below validates all weights/transforms, but only active basis rows.
+        return int(np.min(exponents, where=values != 0, initial=1024)) - 53
+
+    def exact(value, scale):
         try:
-            return Fraction.from_float(float(value))
+            numerator, denominator = float(value).as_integer_ratio()
         except (ValueError, OverflowError) as error:
             raise np.linalg.LinAlgError("SSP moments require finite source factors.") from error
+        shift = 1 - denominator.bit_length() - scale
+        # The chosen scale divides every represented source value exactly,
+        # including when large integral inputs require a right shift.
+        return numerator << shift if shift >= 0 else numerator >> -shift
 
-    coefficients = [[exact(value) for value in row] for row in np.asarray(transform)]
+    def rounded(value, scale):
+        return float(value << scale) if scale >= 0 else float(Fraction(value, 1 << -scale))
+
+    sparse = getattr(basis, "format", None) == "csr"
+    basis_scale = binary_scale(basis.data if sparse else basis)
+    transform_scale = binary_scale(transform)
+    weight_scale = binary_scale(weights)
+    rhs_scale = 0 if weighted_rhs is None else binary_scale(weighted_rhs)
+    coefficients = [
+        [exact(value, transform_scale) for value in row] for row in np.asarray(transform)
+    ]
     width = transform.shape[1]
-    gram = [[zero for _ in range(width)] for _ in range(width)]
-    xtw = [zero for _ in range(width)] if weighted_rhs is not None else None
-    xtrhs = [zero for _ in range(width)] if weighted_rhs is not None else None
+    gram = [[0 for _ in range(width)] for _ in range(width)]
+    xtw = [0 for _ in range(width)] if weighted_rhs is not None else None
+    xtrhs = [0 for _ in range(width)] if weighted_rhs is not None else None
     if bin_indices is None:
-        masses = [exact(value) for value in weights]
-        rhs_masses = None if weighted_rhs is None else [exact(value) for value in weighted_rhs]
+        masses = [exact(value, weight_scale) for value in weights]
+        rhs_masses = (
+            None if weighted_rhs is None else [exact(value, rhs_scale) for value in weighted_rhs]
+        )
     else:
-        masses = [zero for _ in range(basis.shape[0])]
-        rhs_masses = None if weighted_rhs is None else [zero for _ in range(basis.shape[0])]
+        masses = [0 for _ in range(basis.shape[0])]
+        rhs_masses = None if weighted_rhs is None else [0 for _ in range(basis.shape[0])]
         for row, index in enumerate(bin_indices):
-            masses[index] += exact(weights[row])
+            masses[index] += exact(weights[row], weight_scale)
             if rhs_masses is not None:
-                rhs_masses[index] += exact(weighted_rhs[row])
+                rhs_masses[index] += exact(weighted_rhs[row], rhs_scale)
 
     for row, mass in enumerate(masses):
-        rhs_mass = zero if rhs_masses is None else rhs_masses[row]
+        rhs_mass = 0 if rhs_masses is None else rhs_masses[row]
         if mass == 0 and rhs_mass == 0:
             continue
-        if getattr(basis, "format", None) == "csr":
+        if sparse:
             # Convert each stored term before summing duplicate columns.
             # Densifying or canonicalizing first can lose their exact sum.
             nonzero = [
-                (basis.indices[index], exact(basis.data[index]))
+                (basis.indices[index], exact(basis.data[index], basis_scale))
                 for index in range(basis.indptr[row], basis.indptr[row + 1])
                 if basis.data[index] != 0
             ]
         else:
             raw = np.asarray(basis[row]).ravel()
-            nonzero = [(index, exact(value)) for index, value in enumerate(raw) if value != 0]
+            nonzero = [
+                (index, exact(value, basis_scale)) for index, value in enumerate(raw) if value != 0
+            ]
         effective = [
-            sum((value * coefficients[index][column] for index, value in nonzero), zero)
+            sum(value * coefficients[index][column] for index, value in nonzero)
             for column in range(width)
         ]
         for left, value in enumerate(effective):
@@ -128,12 +157,21 @@ def _exact_ssp_moments(basis, transform, weights, weighted_rhs=None, *, bin_indi
     for left in range(width):
         for right in range(left):
             gram[left][right] = gram[right][left]
+    effective_scale = basis_scale + transform_scale
     try:
-        rounded_gram = np.array([[float(value) for value in row] for row in gram]).reshape(
-            width, width
+        rounded_gram = np.array(
+            [[rounded(value, weight_scale + 2 * effective_scale) for value in row] for row in gram]
+        ).reshape(width, width)
+        rounded_xtw = (
+            None
+            if xtw is None
+            else np.array([rounded(value, weight_scale + effective_scale) for value in xtw])
         )
-        rounded_xtw = None if xtw is None else np.array([float(value) for value in xtw])
-        rounded_rhs = None if xtrhs is None else np.array([float(value) for value in xtrhs])
+        rounded_rhs = (
+            None
+            if xtrhs is None
+            else np.array([rounded(value, rhs_scale + effective_scale) for value in xtrhs])
+        )
     except OverflowError as error:
         raise np.linalg.LinAlgError("Requested SSP moment is not representable.") from error
     return rounded_gram, rounded_xtw, rounded_rhs
