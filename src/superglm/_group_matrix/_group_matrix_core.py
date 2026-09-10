@@ -635,13 +635,11 @@ class SparseSSPGroupMatrix:
     """Factored SSP group matrix: stores sparse B + dense R_inv separately.
 
     Effective matrix is B @ R_inv, but we never form it explicitly.
+    B owns the float64 values; every operation reads its current buffers.
     """
 
     __slots__ = (
         "B",
-        "_data",
-        "_indices",
-        "_indptr",
         "_p_b",
         "R_inv",
         "shape",
@@ -654,9 +652,7 @@ class SparseSSPGroupMatrix:
 
     def __init__(self, B_csr: sp.spmatrix, R_inv: NDArray):
         self.B = sp.csr_matrix(B_csr)
-        self._data = self.B.data.astype(np.float64)
-        self._indices = self.B.indices
-        self._indptr = self.B.indptr
+        self.B.data = self.B.data.astype(np.float64)
         self._p_b = self.B.shape[1]
         self.R_inv = np.asarray(R_inv)
         self.shape = (self.B.shape[0], self.R_inv.shape[1])
@@ -665,6 +661,30 @@ class SparseSSPGroupMatrix:
         self.omega_components = None  # list[(suffix, omega)] for multi-penalty, set externally
         self.component_types = None  # dict[suffix, type] for multi-penalty, set externally
         self.lambda_policies = None  # dict[suffix, LambdaPolicy] for multi-penalty, set externally
+
+    @property
+    def _data(self) -> NDArray:
+        return self.B.data
+
+    @_data.setter
+    def _data(self, value: NDArray) -> None:
+        self.B.data = value
+
+    @property
+    def _indices(self) -> NDArray:
+        return self.B.indices
+
+    @_indices.setter
+    def _indices(self, value: NDArray) -> None:
+        self.B.indices = value
+
+    @property
+    def _indptr(self) -> NDArray:
+        return self.B.indptr
+
+    @_indptr.setter
+    def _indptr(self, value: NDArray) -> None:
+        self.B.indptr = value
 
     def matvec(self, v: NDArray) -> NDArray:
         # B @ (R_inv @ v): tiny dense first, then sparse matvec
@@ -676,7 +696,12 @@ class SparseSSPGroupMatrix:
 
     def gram(self, W: NDArray) -> NDArray:
         if _ssp_gram_needs_exact(self._data, self.R_inv, W):
-            return _exact_ssp_moments(self.B, self.R_inv, W)[0]
+            raw_basis = sp.csr_matrix(
+                (self._data, self._indices, self._indptr),
+                shape=(self.shape[0], self._p_b),
+                copy=False,
+            )
+            return _exact_ssp_moments(raw_basis, self.R_inv, W)[0]
         dense = None
         cells = self.shape[0] * self._p_b
         if (
@@ -686,8 +711,8 @@ class SparseSSPGroupMatrix:
             and W.shape == (self.shape[0],)
             and W.dtype == self._data.dtype == self.R_inv.dtype == np.dtype(np.float64)
         ):
-            # Gram reads its owned data snapshot, not B.data. A fresh view
-            # also checks the current indices instead of B's cached flags.
+            # A fresh view checks the current indices instead of trusting
+            # B's cached canonical-format flag after an in-place mutation.
             raw_basis = sp.csr_matrix(
                 (self._data, self._indices, self._indptr),
                 shape=(self.shape[0], self._p_b),

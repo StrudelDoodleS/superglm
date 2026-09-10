@@ -1223,7 +1223,7 @@ def _cross_gram_sparse_ssp(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> 
         for value in (W[:, None], B_i.data[:, None], B_j.data[:, None], R_i, R_j)
     ):
         return None
-    # Public matvec/rmatvec read live B, not the separate Gram data snapshot.
+    # Every SSP operation reads the same live B buffers.
     # Fresh views also avoid cached canonical flags after index mutations.
     left = sp.csr_matrix((B_i.data, B_i.indices, B_i.indptr), shape=B_i.shape, copy=False)
     right = sp.csr_matrix((B_j.data, B_j.indices, B_j.indptr), shape=B_j.shape, copy=False)
