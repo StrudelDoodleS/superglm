@@ -24,6 +24,7 @@ from superglm.solvers.structured import (
     StructuredLevelSupport,
     StructuredLinearSystemState,
 )
+from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice
 
 _LAMBDA_LOWER_BOUND = 1.0e-6
@@ -138,7 +139,15 @@ def vectorized_conditional_unpooled_effect(
         )
         information = np.bincount(
             codes,
-            weights=sample_weight * derivative**2 / variance,
+            weights=fisher_working_weights(
+                distribution=distribution,
+                link=link,
+                mu=mu,
+                eta=eta,
+                sample_weight=sample_weight,
+                dmu_deta=derivative,
+                variance=variance,
+            ),
             minlength=n_levels,
         )
         valid = informed & np.isfinite(score) & np.isfinite(information) & (information > 0.0)

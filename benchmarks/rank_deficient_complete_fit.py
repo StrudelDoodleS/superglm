@@ -24,9 +24,8 @@ a reader, because each was got wrong once:
   runs only when both took the same number of fits -- `peak_rss_measures_fits`
   records that, and its unit differs by platform, so `ru_maxrss_unit` records
   that too;
-* BLAS thread counts are changed inside the solver and restored on the way out,
-  so the dispatch reading is sampled from a background thread WHILE a fit runs
-  rather than around it.
+* Native pools are observed synchronously at solver events in a separate
+  untimed run. Timed runs have no observer and retain first-use work in the fit.
 
 `tests/test_rank_deficient_complete_fit.py` asserts those invariants of the
 payload, which is what nothing was doing while five defects went by.
@@ -35,15 +34,18 @@ payload, which is what nothing was doing while five defects went by.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import platform
 import resource
 import subprocess
 import sys
-import threading
 import time
+from collections import Counter
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from threading import get_ident
 
 import numpy as np
 import pandas as pd
@@ -92,73 +94,86 @@ def _pool_snapshot() -> list[dict[str, object]]:
 
 
 class _DispatchSampler:
-    """Read the loaded BLAS pools WHILE a fit runs, not after it.
+    """Bounded native-pool snapshots at explicit fitting-thread events.
 
-    `np.show_config()` answers "what was this wheel built against", which is the
-    same string on a machine dispatching elsewhere.  Reading `threadpool_info()`
-    fixes that, but reading it after the fit reports the ambient process:
-    superglm caps BLAS to one thread on fit entry and releases the cap again for
-    a wide design, so what was configured during the fit is only visible from
-    inside.
-
-    Three properties this has to have, each of which it once lacked:
-
-    * REUSABLE.  `--repeats` defaults to 3, and a sampler whose stop flag is
-      never cleared samples the first fit and silently records nothing for the
-      rest.  `__enter__` clears it.
-    * BOUNDED.  Retaining a snapshot per tick makes the sampler's own footprint
-      proportional to the RUNTIME of the side being measured, which lands in the
-      peak RSS this benchmark reports and biases it toward the faster side.
-      Configurations are folded in as they arrive, so the store is
-      O(distinct configurations) -- three or four -- rather than O(duration).
-    * DWELL-COUNTING.  A configuration seen once in twelve thousand samples and
-      one seen throughout are completely different claims, and discarding the
-      count cannot tell them apart.  Each distinct configuration carries the
-      number of samples that saw it.
+    Event counts 1, 2, 4, ... for each label and fit request a snapshot, up to
+    a total cap. Frequencies describe those selected events, never time dwell.
+    No thread is started: concurrent library enumeration can deadlock against
+    first-use native module loading on the fitting thread.
     """
 
-    def __init__(self, interval: float = 0.02) -> None:
-        self._interval = interval
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        # configuration -> samples that saw it; folded in as they arrive so the
-        # store cannot grow with the duration of the fit
-        self._dwell: dict[tuple, int] = {}
+    def __init__(self, max_samples=256, max_configurations=64, max_event_names=64):
+        if min(max_samples, max_configurations, max_event_names) < 1:
+            raise ValueError("Native-pool observation limits must be positive.")
+        self.max_samples = max_samples
+        self.max_configurations = max_configurations
+        self.max_event_names = max_event_names
+        self._thread_id = None
+        self._counts: dict[tuple, int] = {}
+        self._events = Counter()
+        self._sampled_events = Counter()
+        self._session_events = Counter()
         self.samples = 0
+        self.sample_attempts = 0
+        self.events_seen = 0
+        self.skipped_at_sample_cap = 0
+        self.dropped_event_notifications = 0
+        self.dropped_configuration_observations = 0
+        self.error_count = 0
+        self.errors = []
+        self.fit_entries = 0
+        self.fit_entries_with_samples = 0
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            # NumPy and SciPy wheels may load separate BLAS libraries carrying
-            # identical reported configuration.  One sampling tick saw one
-            # configuration, however many library records describe it; counting
-            # duplicate keys twice can make dwell exceed the number of samples.
+    def sample(self, event: str) -> None:
+        if self._thread_id != get_ident():
+            raise RuntimeError("Native pools must be sampled on the active fitting thread.")
+        self.events_seen += 1
+        if event not in self._events and len(self._events) >= self.max_event_names:
+            self.dropped_event_notifications += 1
+            return
+        self._events[event] += 1
+        self._session_events[event] += 1
+        count = self._session_events[event]
+        if count & (count - 1):
+            return
+        if self.sample_attempts >= self.max_samples:
+            self.skipped_at_sample_cap += 1
+            return
+        self.sample_attempts += 1
+        try:
             keys = {
                 tuple(sorted(pool.items(), key=lambda item: item[0])) for pool in _pool_snapshot()
             }
-            for key in keys:
-                self._dwell[key] = self._dwell.get(key, 0) + 1
-            self.samples += 1
-            self._stop.wait(self._interval)
+        except Exception as error:
+            self.error_count += 1
+            if len(self.errors) < 8:
+                self.errors.append(f"{type(error).__name__}: {error}")
+            return
+        self.samples += 1
+        self._sampled_events[event] += 1
+        for key in keys:
+            if key not in self._counts and len(self._counts) >= self.max_configurations:
+                self.dropped_configuration_observations += 1
+            else:
+                self._counts[key] = self._counts.get(key, 0) + 1
 
     def __enter__(self) -> _DispatchSampler:
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        if self._thread_id is not None:
+            raise RuntimeError("Native-pool observation is already active.")
+        self._thread_id = get_ident()
+        self._session_events.clear()
+        self._entry_samples = self.samples
+        self.fit_entries += 1
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
+        self.fit_entries_with_samples += self.samples > self._entry_samples
+        self._thread_id = None
 
     def observed(self) -> list[dict[str, object]]:
-        """Distinct pool configurations seen during the fits, with their dwell.
-
-        `samples_seen_in` is what distinguishes a configuration that held for
-        the whole fit from one caught during a brief setup window.
-        """
+        """Configuration frequencies among sampled events, not elapsed time."""
         rows = []
-        for key, count in self._dwell.items():
+        for key, count in self._counts.items():
             row = dict(key)
             row["samples_seen_in"] = count
             row["fraction_of_samples"] = round(count / max(self.samples, 1), 4)
@@ -166,22 +181,93 @@ class _DispatchSampler:
         return sorted(rows, key=lambda pool: (str(pool["prefix"]), str(pool["version"])))
 
 
-def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object]:
+def _native_pool_receipt(sampler):
+    if sampler is None:
+        return {
+            "native_pools_during_fit": [],
+            "native_pool_samples": 0,
+            "native_pool_observation": {"status": "not_observed_in_timed_fit"},
+        }
+    pools = sampler.observed()
+    status = (
+        "observer_error"
+        if sampler.error_count
+        else "no_solver_events_observed"
+        if not sampler.events_seen or not sampler.samples
+        else "no_native_pools_observed"
+        if not pools
+        else "observed_at_solver_events"
+    )
+    return {
+        "native_pools_during_fit": pools,
+        "native_pool_samples": sampler.samples,
+        "native_pool_observation": {
+            "status": status,
+            "semantics": "synchronous selected-event frequencies, not elapsed-time dwell",
+            "sampling_policy": "event counts 1,2,4,... per label and fit, capped snapshot attempts",
+            "events_seen": sampler.events_seen,
+            "event_counts": dict(sampler._events),
+            "sampled_event_counts": dict(sampler._sampled_events),
+            "max_samples": sampler.max_samples,
+            "sample_attempts": sampler.sample_attempts,
+            "eligible_events_skipped_at_sample_cap": sampler.skipped_at_sample_cap,
+            "max_configurations": sampler.max_configurations,
+            "dropped_configuration_observations": sampler.dropped_configuration_observations,
+            "max_event_names": sampler.max_event_names,
+            "dropped_event_notifications": sampler.dropped_event_notifications,
+            "error_count": sampler.error_count,
+            "errors": sampler.errors,
+            "fit_entries": sampler.fit_entries,
+            "fit_entries_with_samples": sampler.fit_entries_with_samples,
+        },
+    }
+
+
+@contextmanager
+def _native_pool_dispatch(sampler, targets):
+    """Observe existing numerical call/return events without replacing functions."""
+    codes = {function.__code__: name for name, function in targets.items()}
+
+    def observe(frame, event, _result):
+        if event in {"call", "return"} and frame.f_code in codes:
+            sampler.sample(f"{codes[frame.f_code]}:{event}")
+
+    previous = sys.getprofile()
+    sys.setprofile(observe)
+    try:
+        yield
+    finally:
+        sys.setprofile(previous)
+
+
+def measure(
+    levels: int, rows: int, repeats: int, seed: int, *, measure_time=False
+) -> dict[str, object]:
     """One complete-fit measurement, as the payload the artifact records."""
     frame, response = _design(levels, rows, seed)
     walls: list[float] = []
     model = None
-    sampler = _DispatchSampler()
+    sampler = None if measure_time else _DispatchSampler()
     for _ in range(repeats):
         model = SuperGLM(
             family="gaussian",
             features={"g": Categorical(), "h": Categorical()},
             interactions=[("g", "h")],
         )
-        started = time.perf_counter()
-        with sampler:
+        if sampler is None:
+            observer = nullcontext()
+        else:
+            from superglm.solvers import rank
+
+            observer = _native_pool_dispatch(
+                sampler,
+                {"decompose_gram": rank.decompose_gram, "decompose_factor": rank.decompose_factor},
+            )
+        with sampler if sampler is not None else nullcontext(), observer:
+            started = time.perf_counter() if measure_time else None
             model.fit(frame, response)
-        walls.append(time.perf_counter() - started)
+            if started is not None:
+                walls.append(time.perf_counter() - started)
 
     if model is None:  # pragma: no cover - guarded at the flag
         raise SystemExit("no fit was run")
@@ -189,7 +275,9 @@ def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object
     info = result.rank_info
     beta = np.asarray(result.beta, dtype=float)
     zeros = np.flatnonzero(beta == 0.0)
+    pool_receipt = _native_pool_receipt(sampler)
     return {
+        "wall_time_status": "measured" if measure_time else "unmeasured",
         "configuration": {
             "levels": levels,
             # What the design actually contains, which is <= `levels` whenever
@@ -204,10 +292,13 @@ def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object
             "parameters": int(model._dm.p),
             "repeats": repeats,
             "seed": seed,
+            "data_sha256": hashlib.sha256(
+                frame.to_csv(index=False, float_format="%.17g").encode() + response.tobytes()
+            ).hexdigest(),
         },
         "timing_seconds": {
-            "min": round(min(walls), 4),
-            "median": round(float(np.median(walls)), 4),
+            "min": round(min(walls), 4) if walls else None,
+            "median": round(float(np.median(walls)), 4) if walls else None,
             "all": [round(wall, 4) for wall in walls],
         },
         "memory": {
@@ -225,6 +316,13 @@ def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object
             "zero_index_sum": int(zeros.sum()),
             "n_iter": int(result.n_iter),
         },
+        "full_outputs": {
+            "coefficients": beta.tolist(),
+            "prediction": np.asarray(model.predict(frame)).tolist(),
+            "effective_df": float(result.effective_df),
+            "deviance": float(result.deviance),
+            "converged": bool(result.converged),
+        },
         # "backend dispatch" is two things: which decomposition route each
         # retained system took -- the branch this work replaced -- and which
         # BLAS actually serviced it.
@@ -238,9 +336,10 @@ def measure(levels: int, rows: int, repeats: int, seed: int) -> dict[str, object
             "augmented_representative": info.augmented.pivots is not None,
             "blas": {
                 "numpy": np.__version__,
-                "sampled_during_fit": sampler.samples > 0,
-                "samples": sampler.samples,
-                "pools_during_fit": sampler.observed(),
+                "sampled_during_fit": pool_receipt["native_pool_samples"] > 0,
+                "samples": pool_receipt["native_pool_samples"],
+                "pools_during_fit": pool_receipt["native_pools_during_fit"],
+                "observation": pool_receipt["native_pool_observation"],
             },
             "python": platform.python_version(),
         },
@@ -259,11 +358,20 @@ def _provenance() -> dict[str, object]:
     flag, so a mislabelled comparison is not merely discouraged but unavailable.
     """
     head, dirty = _git_state()
+    package = Path(superglm.__file__).resolve().parent
+    source_hashes = {
+        str(path.relative_to(package)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(package.rglob("*.py"))
+    }
     return {
         "superglm_version": _superglm_version(),
         "superglm_path": str(Path(superglm.__file__).resolve().parent),
         "git_commit": head,
         "git_dirty": dirty,
+        "source_digest": hashlib.sha256(
+            json.dumps(source_hashes, sort_keys=True).encode()
+        ).hexdigest(),
+        "driver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     }
 
 
@@ -301,6 +409,7 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed", type=int, default=31337)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--measure-time", action="store_true")
     args = parser.parse_args()
     for name, value, minimum in (
         ("--levels", args.levels, 2),
@@ -331,7 +440,9 @@ def main() -> None:
             f"levels={args.levels} for a smaller realized design."
         )
 
-    payload = measure(args.levels, args.rows, args.repeats, args.seed)
+    payload = measure(
+        args.levels, args.rows, args.repeats, args.seed, measure_time=args.measure_time
+    )
     text = json.dumps(payload, indent=1, sort_keys=True)
     if args.out:
         with open(args.out, "w") as handle:

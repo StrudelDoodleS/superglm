@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "label_revision_note": "Obsolete auxiliary-process names and category labels were generalized after recording. Numeric measurements, historical hashes and timing acceptance remain unchanged. Auxiliary-process totals cover the originally selected process subset, not all external activity.",
   "independent_assessment": "qualified_local_observation",
   "quiet_machine_approval": false,
   "historical_approval_inherited": false,
@@ -7,7 +8,7 @@
   "permitted_statement": "In this six-run serial fresh-process window with retained caches and recorded nonzero background CPU, the candidate observed 18.0% lower median fit elapsed time and 32.4% lower median process high-water RSS than the baseline.",
   "limits": [
     "Three runs per arm in fixed BCCBBC order; no randomization or confidence interval. This is a local observation, not a general speed guarantee.",
-    "Headroom remained active. Other Codex/tmux/btop/system processes consumed CPU. All benchmark workers were serial; agent/test idleness is session context, not a guarantee about every other workspace.",
+    "An auxiliary process remained active. Other Codex/tmux/btop/system processes consumed CPU. All benchmark workers were serial; agent/test idleness is session context, not a guarantee about every other workspace.",
     "The initial 0.1-core preflight screen failed; a second screen used an explicitly raised 0.25-core threshold to admit the recorded modest background activity. Neither threshold constitutes quietness approval.",
     "Endpoint CPU samples exclude only the exact recorded worker PID and miss short-lived processes, contention peaks, memory-bandwidth/cache/I/O interference, scheduling placement, and undetectable PID reuse. Categories are command-name heuristics.",
     "Caches retained, fresh worker processes, no warmup or cache flush; cold-cache and warmed steady-state performance were not separately measured.",
@@ -141,12 +142,12 @@
     "initial_status": "obvious_contention_refused_before_workers",
     "initial_raw_sha256": "9432b4c7cd323e5a646a2af0e42edaeacaaf2caf8c306c34a6289f527968755d",
     "initial_external_average_cores": 0.16471650870642485,
-    "initial_headroom_average_cores": 0.03294330174128497,
+    "initial_auxiliary_process_average_cores": 0.03294330174128497,
     "second_threshold": 0.25,
     "second_status": "screen_passed_not_quietness_approval",
     "second_raw_sha256": "332c2d993952c87184d4f074eca6a500a2ccbde5689c06c533739d01e56d7ed3",
     "second_external_average_cores": 0.1787043477920919,
-    "second_headroom_average_cores": 0.028952101038942264
+    "second_auxiliary_process_average_cores": 0.028952101038942264
   },
   "observations": {
     "baseline": {
@@ -185,7 +186,7 @@
         "median": 0.16346156615993307,
         "max": 0.2088620637870266
       },
-      "headroom_or_kompress_average_cores": {
+      "auxiliary_processes_average_cores": {
         "min": 0.01641939321180139,
         "median": 0.02731153349804368,
         "max": 0.05620288261905443
@@ -237,7 +238,7 @@
         "median": 0.1462426235540585,
         "max": 0.20450275178047125
       },
-      "headroom_or_kompress_average_cores": {
+      "auxiliary_processes_average_cores": {
         "min": 0.01808138369734681,
         "median": 0.020597552613247676,
         "max": 0.062447227233663714
@@ -376,7 +377,7 @@
         "exact_worker_pid_excluded": 109118,
         "worker_average_cores": 0.9925908069811399,
         "external_average_cores": 0.16346156615993307,
-        "headroom_or_kompress_average_cores": 0.02731153349804368,
+        "auxiliary_processes_average_cores": 0.02731153349804368,
         "other_process_average_cores": 0.13615003266188938,
         "external_process_deltas": [
           {
@@ -397,7 +398,7 @@
             "pid": 19666,
             "name": "python",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 66,
@@ -496,9 +497,9 @@
           },
           {
             "pid": 23321,
-            "name": "headroom",
+            "name": "auxiliary_process",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 1,
@@ -632,7 +633,7 @@
         "exact_worker_pid_excluded": 109374,
         "worker_average_cores": 0.9974364852965187,
         "external_average_cores": 0.1462426235540585,
-        "headroom_or_kompress_average_cores": 0.020597552613247676,
+        "auxiliary_processes_average_cores": 0.020597552613247676,
         "other_process_average_cores": 0.12564507094081084,
         "external_process_deltas": [
           {
@@ -660,7 +661,7 @@
             "pid": 19666,
             "name": "python",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 39,
@@ -745,9 +746,9 @@
           },
           {
             "pid": 103321,
-            "name": "headroom",
+            "name": "auxiliary_process",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 1,
@@ -831,14 +832,14 @@
         "exact_worker_pid_excluded": 109559,
         "worker_average_cores": 0.9948653682187494,
         "external_average_cores": 0.20450275178047125,
-        "headroom_or_kompress_average_cores": 0.062447227233663714,
+        "auxiliary_processes_average_cores": 0.062447227233663714,
         "other_process_average_cores": 0.14205552454680753,
         "external_process_deltas": [
           {
             "pid": 19666,
             "name": "python",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 130,
@@ -930,9 +931,9 @@
           },
           {
             "pid": 81014,
-            "name": "headroom",
+            "name": "auxiliary_process",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 1,
@@ -1043,7 +1044,7 @@
         "exact_worker_pid_excluded": 109785,
         "worker_average_cores": 0.9941551651812128,
         "external_average_cores": 0.13643733883139728,
-        "headroom_or_kompress_average_cores": 0.01641939321180139,
+        "auxiliary_processes_average_cores": 0.01641939321180139,
         "other_process_average_cores": 0.12001794561959589,
         "external_process_deltas": [
           {
@@ -1071,7 +1072,7 @@
             "pid": 19666,
             "name": "python",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 42,
@@ -1236,7 +1237,7 @@
         "exact_worker_pid_excluded": 110018,
         "worker_average_cores": 0.9919049283849336,
         "external_average_cores": 0.2088620637870266,
-        "headroom_or_kompress_average_cores": 0.05620288261905443,
+        "auxiliary_processes_average_cores": 0.05620288261905443,
         "other_process_average_cores": 0.15265918116797217,
         "external_process_deltas": [
           {
@@ -1250,7 +1251,7 @@
             "pid": 19666,
             "name": "python",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 147,
@@ -1370,9 +1371,9 @@
           },
           {
             "pid": 104526,
-            "name": "headroom",
+            "name": "auxiliary_process",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 1,
@@ -1494,7 +1495,7 @@
         "exact_worker_pid_excluded": 110298,
         "worker_average_cores": 0.9973310586747085,
         "external_average_cores": 0.13037629297560596,
-        "headroom_or_kompress_average_cores": 0.01808138369734681,
+        "auxiliary_processes_average_cores": 0.01808138369734681,
         "other_process_average_cores": 0.11229490927825915,
         "external_process_deltas": [
           {
@@ -1522,7 +1523,7 @@
             "pid": 19666,
             "name": "python",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 37,
@@ -1586,9 +1587,9 @@
           },
           {
             "pid": 62702,
-            "name": "headroom",
+            "name": "auxiliary_process",
             "categories": [
-              "headroom",
+              "auxiliary_process",
               "python"
             ],
             "delta_cpu_ticks": 1,

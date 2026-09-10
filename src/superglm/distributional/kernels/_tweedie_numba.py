@@ -582,6 +582,22 @@ def _row_failure(status: int):
 
 
 @njit(cache=True)
+def _natural_scale_hessian(hessian_log_scale: float, score_log_scale: float, scale: float):
+    """Apply (H_log-scale - s_log-scale)/scale² without losing the square."""
+    difference = hessian_log_scale - score_log_scale
+    scale_squared = scale * scale
+    if (
+        math.isfinite(scale_squared)
+        and scale_squared >= np.finfo(np.float64).tiny
+        and math.isfinite(difference)
+    ):
+        return difference / scale_squared
+    if math.isfinite(difference):
+        return (difference / scale) / scale
+    return (hessian_log_scale / scale) / scale - (score_log_scale / scale) / scale
+
+
+@njit(cache=True)
 def _zero_row(
     mean: float,
     modeled_phi: float,
@@ -646,10 +662,9 @@ def _zero_row(
     hessian_pp = -lam * (1.0 / (s * s) + (-log_mean + 1.0 / s) ** 2)
     hessian_mu_phi = -mean_score / modeled_phi
     hessian_mu_p = -log_mean * mean_score
-    modeled_phi_squared = modeled_phi * modeled_phi
-    if modeled_phi_squared == 0.0:
+    hessian_phi_phi = _natural_scale_hessian(hessian_rho_rho, score_rho, modeled_phi)
+    if modeled_phi * modeled_phi == 0.0 and not math.isfinite(hessian_phi_phi):
         return _row_failure(KERNEL_REQUIRED_WORK)
-    hessian_phi_phi = (hessian_rho_rho - score_rho) / modeled_phi_squared
     hessian_phi_p = hessian_rho_p / modeled_phi
     return (
         KERNEL_OK,
@@ -822,10 +837,9 @@ def _positive_row(
     hessian_pp = _sum3(b_pp, mean_q_pp, variance_q_p)
     hessian_mu_phi = -mean_score / modeled_phi
     hessian_mu_p = -log_mean * mean_score
-    modeled_phi_squared = modeled_phi * modeled_phi
-    if modeled_phi_squared == 0.0:
+    hessian_phi_phi = _natural_scale_hessian(hessian_rho_rho, score_rho, modeled_phi)
+    if modeled_phi * modeled_phi == 0.0 and not math.isfinite(hessian_phi_phi):
         return _row_failure(KERNEL_REQUIRED_WORK)
-    hessian_phi_phi = (hessian_rho_rho - score_rho) / modeled_phi_squared
     hessian_phi_p = hessian_rho_p / modeled_phi
     if not (
         math.isfinite(mean_score)

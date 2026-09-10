@@ -46,8 +46,8 @@ from superglm.distributional.smoothing.endpoint_direction import (
     _unit_directions,
 )
 from superglm.distributional.smoothing.endpoint_laml import (
-    _projected_finite_penalty_inputs,
-    _projected_penalty_group_indices,
+    EndpointLaplaceError,
+    _projected_finite_penalty_evaluation,
 )
 from superglm.distributional.smoothing.face_efs import projected_component_states
 from superglm.distributional.smoothing.objective import _component_states, _estimated_names
@@ -55,8 +55,10 @@ from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.solver.packing import packed_pairs
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.reml.efs_update import EFSComponentState
-from superglm.reml.multi_penalty import logdet_s_hessian, similarity_transform_logdet
-from superglm.reml.penalty_algebra import compute_logdet_s_derivatives
+from superglm.reml.penalty_algebra import (
+    _compute_penalty_logdet_evaluation,
+    _PenaltyLogdetEvaluation,
+)
 
 _PackedRows = Callable[[NDArray[np.float64]], NDArray[np.float64]]
 _Stencil = tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
@@ -383,33 +385,17 @@ def _rank_hessian(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
     face: PenaltyFace | None,
+    *,
+    evaluation: _PenaltyLogdetEvaluation | None = None,
 ) -> dict[tuple[str, str], float]:
     """``d^2 log|S_lambda|_+ / d rho_i d rho_j`` for every pair in one penalty group."""
-    if face is None:
-        _ranks, hessian = compute_logdet_s_derivatives(dict(lambdas), list(layout.penalties))
-        return {key: float(value) for key, value in hessian.items()}
-    components, projected, values = _projected_finite_penalty_inputs(
-        layout=layout,
-        lambdas=lambdas,
-        face=face,
-    )
-    result: dict[tuple[str, str], float] = {}
-    if not components or not projected:
-        return result
-    for indices in _projected_penalty_group_indices(components):
-        group_projected = [projected[index] for index in indices]
-        group_values = values[list(indices)]
-        decomposition = similarity_transform_logdet(group_projected, group_values)
-        hessian = np.asarray(
-            logdet_s_hessian(decomposition, group_projected, group_values),
-            dtype=np.float64,
+    if evaluation is None:
+        evaluation = (
+            _compute_penalty_logdet_evaluation(dict(lambdas), list(layout.penalties))
+            if face is None
+            else _projected_finite_penalty_evaluation(layout=layout, lambdas=lambdas, face=face)
         )
-        for local_i, global_i in enumerate(indices):
-            for local_j, global_j in enumerate(indices):
-                result[(components[global_i].name, components[global_j].name)] = float(
-                    hessian[local_i, local_j]
-                )
-    return result
+    return evaluation.hessian
 
 
 def _penalty_apply(
@@ -490,6 +476,7 @@ class _GradientPass:
     source_matrices: tuple[object, ...]
     estimated: tuple[EFSComponentState, ...]
     rank_hessian: dict[tuple[str, str], float]
+    penalty_hessian_error: NDArray[np.float64]
     rows: _PackedRows
     eta: NDArray[np.float64]
     matrices: tuple[PredictorMatrix, ...]
@@ -568,18 +555,42 @@ def _gradient_pass(
     dense_matrices: Sequence[PredictorMatrix],
     step: float,
 ) -> _GradientPass:
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
     source = fit.terminal_curvature.actual_source
     face = fit.coefficient_face
+    try:
+        penalty_evaluation = (
+            _compute_penalty_logdet_evaluation(dict(lambdas), list(layout.penalties))
+            if face is None
+            else _projected_finite_penalty_evaluation(layout=layout, lambdas=lambdas, face=face)
+        )
+    except PenaltyNumericalError as exc:
+        raise LamlDerivativeError("finite penalty geometry could not be certified") from exc
+    except EndpointLaplaceError as exc:
+        if not isinstance(exc.__cause__, PenaltyNumericalError):
+            raise
+        raise LamlDerivativeError(
+            "finite penalty geometry could not be certified on the face"
+        ) from exc
     components = (
-        _component_states(layout, lambdas)
+        _component_states(layout, lambdas, evaluation=penalty_evaluation)
         if face is None
-        else projected_component_states(layout=layout, lambdas=lambdas, face=face)
+        else projected_component_states(
+            layout=layout, lambdas=lambdas, face=face, evaluation=penalty_evaluation
+        )
     )
     names = _estimated_names(components)
     if not names:
         raise LamlDerivativeError("no estimated smoothing component to differentiate")
     estimated = tuple(component for component in components if component.name in set(names))
-    rank_hessian = _rank_hessian(layout, lambdas, face)
+    rank_hessian = _rank_hessian(layout, lambdas, face, evaluation=penalty_evaluation)
+    penalty_hessian_error = np.array(
+        [
+            [penalty_evaluation.hessian_error.get((left, right), 0.0) for right in names]
+            for left in names
+        ]
+    )
 
     eta = np.asarray(fit.eta, dtype=np.float64)
     n_observations, k_parameters = eta.shape
@@ -668,6 +679,9 @@ def _gradient_pass(
     fs_gradient = 0.5 * quadratic + 0.5 * trace - 0.5 * ranks
     gradient = fs_gradient + 0.5 * (third_vector @ coefficient_directions)
     gradient_certificate *= 0.5
+    gradient_certificate += 0.5 * np.asarray(
+        [penalty_evaluation.gradient_error[name] for name in names]
+    )
     # Every term of h_kl that needs no third or fourth derivative of the
     # likelihood, from the factor and the penalties alone:
     #   1/2 delta_kl lambda_k beta'S_k beta + lambda_k beta'S_k beta_l
@@ -720,6 +734,7 @@ def _gradient_pass(
         source_matrices=tuple(dense_matrices),
         estimated=estimated,
         rank_hessian=rank_hessian,
+        penalty_hessian_error=penalty_hessian_error,
         rows=observed_rows,
         eta=eta,
         matrices=matrices,
@@ -929,6 +944,7 @@ def _hessian_pass(gradient_pass: _GradientPass, *, reused: bool) -> LamlDerivati
             relative_norm[ell] * hessian_error_norm[k] + relative_norm[k] * hessian_error_norm[ell]
         )
         hessian[k, ell] = hessian[ell, k] = value
+        certificate += 0.5 * p.penalty_hessian_error[k, ell]
         hessian_certificate[k, ell] = hessian_certificate[ell, k] = certificate
     base = p.result
     return LamlDerivatives(

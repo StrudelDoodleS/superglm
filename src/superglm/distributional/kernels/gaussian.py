@@ -17,6 +17,7 @@ from superglm.distributional.kernels._common import (
     validated_derivative_order,
     validated_semantics,
 )
+from superglm.distributional.kernels._weighted import weighted_natural_channel
 
 
 def _scale_floor(value: object) -> float:
@@ -113,20 +114,20 @@ def _gaussian_prior_row_channels(
 ) -> tuple[NDArray[np.float64], NDArray[np.float64] | None, NDArray[np.float64] | None]:
     score = None
     hessian = None
-    optimizing = base_normalizer - 0.5 * weights * residual_2 * inverse_scale_2
+    optimizing = base_normalizer - 0.5 * weights * residual_2
     if derivative_order >= 1:
         score = np.column_stack(
             (
-                weights * residual * inverse_scale_2,
-                -inverse_scale + weights * residual_2 * inverse_scale**3,
+                weights * residual * inverse_scale,
+                (weights * residual_2 - 1.0) * inverse_scale,
             )
         )
     if derivative_order == 2:
         hessian = np.column_stack(
             (
-                -weights * inverse_scale_2,
-                -2.0 * weights * residual * inverse_scale**3,
-                inverse_scale_2 - 3.0 * weights * residual_2 * inverse_scale**4,
+                (-weights * inverse_scale) * inverse_scale,
+                (-2.0 * weights * residual * inverse_scale) * inverse_scale,
+                ((1.0 - 3.0 * weights * residual_2) * inverse_scale) * inverse_scale,
             )
         )
     return optimizing, score, hessian
@@ -138,25 +139,33 @@ def _gaussian_frequency_row_channels(
     residual_2: NDArray[np.float64],
     inverse_scale: NDArray[np.float64],
     inverse_scale_2: NDArray[np.float64],
+    scale: NDArray[np.float64],
     weights: NDArray[np.float64],
     derivative_order: int,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64] | None, NDArray[np.float64] | None]:
     score = None
     hessian = None
-    optimizing = weights * (base_normalizer - 0.5 * residual_2 * inverse_scale_2)
+    optimizing = weights * (base_normalizer - 0.5 * residual_2)
     if derivative_order >= 1:
         score = weights[:, None] * np.column_stack(
             (
-                residual * inverse_scale_2,
-                -inverse_scale + residual_2 * inverse_scale**3,
+                residual * inverse_scale,
+                (residual_2 - 1.0) * inverse_scale,
             )
         )
     if derivative_order == 2:
-        hessian = weights[:, None] * np.column_stack(
+        unit_hessian = np.column_stack(
             (
                 -inverse_scale_2,
-                -2.0 * residual * inverse_scale**3,
-                inverse_scale_2 - 3.0 * residual_2 * inverse_scale**4,
+                (-2.0 * residual * inverse_scale) * inverse_scale,
+                ((1.0 - 3.0 * residual_2) * inverse_scale) * inverse_scale,
+            )
+        )
+        numerators = ((-1.0,), (-2.0, residual), (1.0 - 3.0 * residual_2,))
+        hessian = np.column_stack(
+            tuple(
+                weighted_natural_channel(unit_hessian[:, column], weights, factors, (scale, scale))
+                for column, factors in enumerate(numerators)
             )
         )
     return optimizing, score, hessian
@@ -182,7 +191,18 @@ def evaluate_gaussian_rows(
     order = validated_derivative_order(derivative_order)
     if np.any(scale_values <= 0.0):
         raise ValueError("scale must be finite and strictly positive")
-    residual = response_values - location_values
+    # These row-channel helpers use the standardized residual. Squaring
+    # the raw residual or materializing inverse powers of sigma first can
+    # lose finite density/derivative channels at a large natural scale.
+    with np.errstate(over="ignore", invalid="ignore"):
+        raw_residual = response_values - location_values
+        residual = raw_residual / scale_values
+    overflowed = ~np.isfinite(raw_residual)
+    if np.any(overflowed):
+        residual[overflowed] = (
+            response_values[overflowed] / scale_values[overflowed]
+            - location_values[overflowed] / scale_values[overflowed]
+        )
     inverse_scale = 1.0 / scale_values
     inverse_scale_2 = inverse_scale * inverse_scale
     residual_2 = residual * residual
@@ -204,6 +224,7 @@ def evaluate_gaussian_rows(
             residual_2=residual_2,
             inverse_scale=inverse_scale,
             inverse_scale_2=inverse_scale_2,
+            scale=scale_values,
             weights=weight_values,
             derivative_order=order,
         )

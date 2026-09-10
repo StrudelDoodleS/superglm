@@ -64,7 +64,7 @@ The frozen recovery implementation completes the identical NB2 fixture in 11
 outer iterations. The [receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_convergence_receipt.json)
 and [comparison script](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_compare.py) record raw-file
 hashes, source provenance, work counts, dispatch, memory and held-out comparisons.
-Timing is unmeasured because numerical work may overlap Headroom/Kompress and
+Timing is unmeasured because numerical work may overlap external processes and
 tests; these NB2 numerical runs support no speed claim.
 
 Held-out means differ from the old rejected Newton endpoint by at most
@@ -279,7 +279,7 @@ from its 8 MiB budget and 960 estimated bytes per row. This differs from the
 
 All six workers ran serially in BCCBBC order with numerical thread limits set
 to one. Agent numerical work and tests had ended before the timed window.
-Headroom/Kompress v2 remained active: endpoint CPU samples recorded 0.016–0.062
+An auxiliary process remained active. Endpoint CPU samples recorded 0.016–0.062
 average cores for it and 0.130–0.209 cores for all external persistent processes.
 The first preflight screen refused 0.165 external cores against a 0.1-core
 threshold before any timed worker started. A second window explicitly used a
@@ -289,7 +289,7 @@ approval. The neutral generated summary retains its pending review label;
 the independent receipt supplies this narrower assessment.
 
 Raw worker `perf_counter` measurements, JSON/NPZ outputs, source and input
-hashes, and exact worker PIDs are authoritative. Headroom tool-response clocks
+hashes, and exact worker PIDs are authoritative. Tool-response clocks
 and compressed text are not timing inputs. Fresh processes retained existing
 compiled/disk caches; there was no explicit warmup or cache flush. Endpoint
 process snapshots cannot detect every short-lived task, contention peak or
@@ -308,11 +308,14 @@ general absence of discretization error. The earlier
 exact compiled-design regressions and continuous-grid sensitivity at 64, 256
 and 1,024 bins.
 
-The exact executed controller and summary are now tracked in
+The exact executed controller and summary were archived in
 [benchmarks/c3_practical](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_practical/README.md), with hashes,
 required source/data layout and commands for a fresh window or historical
 replay. Replaying the tracked summary against the retained raw window reproduced
 the existing summary exactly without changing any raw artifact.
+The current controller has since removed obsolete process categories. The
+[current README](../../benchmarks/c3_practical/README.md) distinguishes its hash
+from the historical controller required for that replay.
 
 ## Final validation and remaining limits
 

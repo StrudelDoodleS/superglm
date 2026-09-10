@@ -91,6 +91,7 @@ EndpointAssessmentFailureReason = Literal[
     "cap_not_stationary",
     "endpoint_not_converged",
     "endpoint_not_stationary",
+    "endpoint_state_changed",
     "provenance_changed",
     # Diagnostic only: no curvature direction derivative could be evaluated,
     # analytic or finite-difference; two fitted states cannot prove why.

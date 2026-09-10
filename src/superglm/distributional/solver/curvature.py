@@ -14,6 +14,7 @@ from superglm.solvers.rank import (
     SHARED_RANK_POLICY,
     RankDecomposition,
     RankPolicy,
+    _symmetric_part,
     decompose_gram,
 )
 
@@ -91,7 +92,7 @@ def _analyze_curvature(
     if not np.all(np.isfinite(values)):
         raise CurvaturePolicyError(f"{label} curvature contains non-finite values")
 
-    symmetric = np.array(0.5 * (values + values.T), dtype=np.float64, copy=True)
+    symmetric = np.array(_symmetric_part(values), dtype=np.float64, copy=True)
     symmetric.setflags(write=False)
     try:
         eigenvalues = np.linalg.eigvalsh(symmetric)

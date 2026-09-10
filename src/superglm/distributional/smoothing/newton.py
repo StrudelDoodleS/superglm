@@ -72,7 +72,6 @@ NO_HANDOFF_REASONS = frozenset(
 )
 INITIAL_RIDGE = 1.0e-8
 BRACKET_WIDTH = 1.0e-3
-BRACKET_ROOT = 1.0e-10
 
 
 def _finite_vector(values: NDArray, *, name: str) -> NDArray[np.float64]:
@@ -331,10 +330,10 @@ def bracket_beyond_cap(
     the endpoint (``phi_at_endpoint < 0``: the optimum is finite), so a root
     lies between the cap and infinity.  ``evaluate(u)`` returns ``dF/dtau`` at
     ``lambda_cap * exp(u)``; the cap value is reused, never re-evaluated.
-    Brent's method on ``[0, log_span]`` stops when the bracket is narrower
-    than 1e-3 or ``phi`` is below 1e-10 in magnitude; a root beyond
-    ``log_span`` (``phi`` still positive there) or an exhausted budget is
-    reported as not found with the bracket searched.
+    Brent's method on ``[0, log_span]`` stops when the dimensionless bracket
+    is narrower than 1e-3; a root beyond ``log_span`` (``phi`` still positive
+    there) or an exhausted budget is reported as not found with the bracket
+    searched.
     """
     cap_value = _finite_scalar(phi_at_cap, name="phi_at_cap")
     endpoint_value = _finite_scalar(phi_at_endpoint, name="phi_at_endpoint")
@@ -379,13 +378,6 @@ def bracket_beyond_cap(
     if far is None:
         return BracketOutcome(
             found=False, log_lambda_ratio=None, evaluations=evaluations, bracket=(0.0, span)
-        )
-    if abs(far) < BRACKET_ROOT:
-        return BracketOutcome(
-            found=True,
-            log_lambda_ratio=far_end,
-            evaluations=evaluations,
-            bracket=(far_end, far_end),
         )
     if far > 0.0:
         return BracketOutcome(

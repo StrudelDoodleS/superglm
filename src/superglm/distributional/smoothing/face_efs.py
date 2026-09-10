@@ -8,13 +8,11 @@ import numpy as np
 
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.smoothing.endpoint_laml import (
-    _projected_finite_penalty_inputs,
-    _projected_penalty_group_indices,
+    _projected_finite_penalty_evaluation,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.reml.efs_update import EFSComponentState
-from superglm.reml.multi_penalty import logdet_s_gradient, similarity_transform_logdet
-from superglm.reml.penalty_algebra import penalty_component_dense_matrix
+from superglm.reml.penalty_algebra import _PenaltyLogdetEvaluation, penalty_component_dense_matrix
 from superglm.types import LambdaPolicy
 
 
@@ -36,37 +34,30 @@ def projected_component_states(
     layout: StackedLayout,
     lambdas: Mapping[str, float],
     face: PenaltyFace,
+    evaluation: _PenaltyLogdetEvaluation | None = None,
 ) -> tuple[EFSComponentState, ...]:
     """Build finite-component EFS states using ranks on the face."""
-    components, projected, values = _projected_finite_penalty_inputs(
-        layout=layout,
-        lambdas=lambdas,
-        face=face,
+    if evaluation is None:
+        evaluation = _projected_finite_penalty_evaluation(layout=layout, lambdas=lambdas, face=face)
+    components = tuple(
+        component for component in layout.penalties if component.name not in face.component_names
     )
     if not components:
         return ()
-    effective_ranks = [0.0] * len(components)
-    for indices in _projected_penalty_group_indices(components):
-        group_projected = [projected[index] for index in indices]
-        group_values = values[list(indices)]
-        decomposition = similarity_transform_logdet(group_projected, group_values)
-        group_ranks = logdet_s_gradient(decomposition, group_projected, group_values)
-        for index, effective_rank in zip(indices, group_ranks, strict=True):
-            effective_ranks[index] = float(effective_rank)
     return tuple(
         EFSComponentState(
             name=component.name,
             coefficient_slice=component.group_sl,
             penalty=penalty_component_dense_matrix(component),
             rank=_bounded_effective_rank(
-                effective_rank,
+                evaluation.gradient[component.name],
                 width=component.group_sl.stop - component.group_sl.start,
                 problem_width=face.reduced_width,
             ),
             lambda_value=float(lambdas[component.name]),
             policy=component.lambda_policy or LambdaPolicy.estimate(),
         )
-        for component, effective_rank in zip(components, effective_ranks, strict=True)
+        for component in components
     )
 
 

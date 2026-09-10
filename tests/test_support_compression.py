@@ -241,9 +241,11 @@ def test_cross_gram_uses_fast_path_for_compressed_groups():
     np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
     # Assert the positive branch, not merely the absence of the negative one, so
     # the test cannot pass vacuously if profiling keys are ever renamed.
-    assert "block_cross_fallback_s" in baseline_profile, (
-        f"expected uncompressed groups to take the fallback; profile={baseline_profile}"
+    assert "block_cross_ssp_ssp_s" in baseline_profile, (
+        f"uncompressed groups did not take the batched SSP path; profile={baseline_profile}"
     )
+    assert baseline_profile["block_cross_ssp_ssp_calls"] == 1
+    assert "block_cross_fallback_s" not in baseline_profile
     assert "block_cross_disc_disc_s" in profile, (
         f"compressed groups did not take the 2-D histogram path; profile={profile}"
     )

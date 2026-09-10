@@ -4875,7 +4875,7 @@
       "Baseline/new discrete stored arrays and input hashes match. Same-source baseline exact/discrete binning comparisons remain separate; small floating-point differences do not prove exact representation equivalence.",
       "All fits terminate at practical_plateau with coefficient and smoothing convergence but smoothing_certified=false.",
       "Policy N>=262144 and histogram-density limits define initial scope, not a proven crossover.",
-      "Runtime process presence is taken from actual audits. User reports Headroom and Kompress uninstalled; neither is assumed active or specially excluded. Endpoint audits are lower bounds, not host-isolation evidence."
+      "Runtime process presence is taken from actual audits. No external process is assumed active or specially excluded. Endpoint audits are lower bounds, not host-isolation evidence."
     ],
     "raw_receipt": {
       "path": ".benchmark-artifacts/discrete-performance/global-moments-299ab249/production-public-receipt-5c1ce17e.json",
@@ -8432,7 +8432,7 @@
       "all_endpoint_audits_passed": true,
       "all_source_helper_freezes_verified": true,
       "warmup": "Existing public warmup plus identical four-row native signature calls in all arms, outside fit clocks. No additional fitting/model compilation. Retain inherited caches and both frozen prototype module aliases.",
-      "process_status": "User subsequently clarified Headroom and Kompress were uninstalled/not running. Presence is not inferred from historical operator prose; raw process snapshots record observations. No special process exemptions.",
+      "process_status": "Process presence is not inferred from historical operator prose; raw process snapshots record observations. No special process exemptions.",
       "cpu_caveat": "Endpoint accounting is a lower bound: CPU used after a process's last observation before exit, and by processes born and exited between snapshots, is unavailable. Newly observed processes contribute all observed lifetime ticks; PID reuse is distinguished by start ticks. Descendants that reparent between snapshots may not be identifiable. This is a screening check, not proof that the machine stayed quiet throughout a fit."
     },
     "limitations": [
@@ -8534,7 +8534,7 @@
       "preflight_seconds": 10,
       "external_cpu_limit_cores": 0.25,
       "all_observed_external_processes_included": true,
-      "runtime_status_note": "User reports Headroom and Kompress uninstalled. Inclusion in an activity-audit policy does not establish service presence; raw process observations remain authoritative.",
+      "runtime_status_note": "Inclusion in an activity-audit policy does not establish service presence; raw process observations remain authoritative.",
       "execution": "Six fresh serial workers; cProfile plus integer dispatch witnesses, public warmup outside fit, existing caches retained.",
       "rss": "Process highwater captured at fit completion before representation and saved-output collection.",
       "activity_limit": "Endpoint screening cannot establish exclusive host access."
@@ -9528,7 +9528,7 @@
     "warmup_for_fit_windows": "Fresh serial interpreters call public superglm.warmup() before the fit timer, retaining existing caches; additional JIT/cache misses may occur within a fit.",
     "thread_environment": "OPENBLAS_NUM_THREADS, OMP_NUM_THREADS, MKL_NUM_THREADS, BLIS_NUM_THREADS, VECLIB_MAXIMUM_THREADS, NUMEXPR_NUM_THREADS and NUMBA_NUM_THREADS are one; only the explicit BLAS-thread diagnostic changes the solver BLAS scope.",
     "instrumentation": "Complete-fit windows retain disclosed lightweight execution/dispatch witnesses; no call-stack profiler or per-call clocks. Geometry timing is a separate diagnostic.",
-    "activity": "Other numerical work stopped; all observed external processes remain in the activity audit. User reports Headroom and Kompress uninstalled. Guest CPU endpoint screens do not prove exclusive physical-host access.",
+    "activity": "Other numerical work stopped; all observed external processes remain in the activity audit. Guest CPU endpoint screens do not prove exclusive physical-host access.",
     "numerical_differences": "Saved-array comparisons are descriptive differences, not certified error bounds or a bitwise-equivalence promise.",
     "policy": "Dense override is an internal experiment on the stored discrete basis, not an automatic dense-policy or public API/serialization change. Panel workspace budgets do not bound whole-process RSS."
   },

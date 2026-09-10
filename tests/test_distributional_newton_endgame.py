@@ -105,6 +105,42 @@ def test_bracket_beyond_cap_finds_the_root_in_log_tau() -> None:
     assert not none.found and none.evaluations == 0
 
 
+@pytest.mark.parametrize("multiplier", (1.0, 1.0e-11, 1.0e11))
+def test_bracket_beyond_cap_root_decision_is_invariant_to_derivative_units(
+    multiplier: float,
+) -> None:
+    def phi(u: float) -> float:
+        return multiplier * (1.0 - u)
+
+    out = bracket_beyond_cap(
+        phi_at_cap=phi(0.0),
+        phi_at_endpoint=phi(2.0),
+        evaluate=phi,
+        log_span=2.0,
+    )
+
+    assert out.found
+    assert out.log_lambda_ratio == pytest.approx(1.0, abs=1.0e-3)
+
+
+def test_bracket_beyond_cap_does_not_accept_small_positive_far_derivative() -> None:
+    def phi(u: float) -> float:
+        return 1.0e-11 * (3.0 - u)
+
+    out = bracket_beyond_cap(
+        phi_at_cap=phi(0.0),
+        # The endpoint direction says the finite optimum lies beyond the cap;
+        # the searched span still ends before this curve's root.
+        phi_at_endpoint=-1.0,
+        evaluate=phi,
+        log_span=2.0,
+    )
+
+    assert not out.found
+    assert out.log_lambda_ratio is None
+    assert out.bracket == pytest.approx((0.0, 2.0))
+
+
 # --- The endgame inside the loop ---------------------------------------------
 
 

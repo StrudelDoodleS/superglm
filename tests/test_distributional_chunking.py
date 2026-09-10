@@ -740,7 +740,9 @@ def test_chunk_consumers_refuse_a_family_returning_the_wrong_exact_order(
     family = _WrongDerivativeOrderGaussian()
     plan = _plan(family, response, weights)
 
-    with pytest.raises(ValueError, match=rf"exact derivative order {expected_order}"):
+    with pytest.raises(
+        UnsupportedLikelihoodContractError, match=rf"exact derivative order {expected_order}"
+    ):
         if route == "value":
             chunking.evaluate_chunked_log_likelihood(
                 family,

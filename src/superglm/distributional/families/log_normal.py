@@ -17,6 +17,7 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -380,13 +381,48 @@ class LogNormalLS:
         the fit and has no weighted law to report a second moment from.
         """
         values = self._theta(theta, None)
-        mean = (
-            values[:, 0]
-            if self.parametrisation == "mean"
-            else mean_of_location(values[:, 0], values[:, 1])
-        )
         scale = values[:, 1]
-        return readonly(np.asarray(mean, dtype=np.float64) ** 2 * np.expm1(scale * scale))
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            mean = (
+                values[:, 0]
+                if self.parametrisation == "mean"
+                else mean_of_location(values[:, 0], scale)
+            )
+            mean_square = mean * mean
+            scale_square = scale * scale
+            factor = np.expm1(scale_square)
+            result = mean_square * factor
+        tiny = np.finfo(float).tiny
+        unsafe = (
+            ~np.isfinite(mean_square)
+            | (mean_square < tiny)
+            | ~np.isfinite(factor)
+            | (scale_square < tiny)
+        )
+        for index in np.flatnonzero(unsafe):
+            if self.parametrisation == "mean" and np.isfinite(factor[index]):
+                if scale_square[index] < tiny:
+                    # expm1(sigma^2) / sigma^2 differs from one by less than u.
+                    factors = (mean[index], mean[index], scale[index], scale[index])
+                else:
+                    factors = (mean[index], mean[index], factor[index])
+                result[index] = _variance_product(factors)
+                continue
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                if self.parametrisation == "mean":
+                    # An overflowing expm1 has exp(-sigma^2) far below u.
+                    log_variance = 2.0 * math.log(mean[index]) + scale_square[index]
+                elif np.isfinite(factor[index]):
+                    log_factor = (
+                        2.0 * math.log(scale[index])
+                        if scale_square[index] < tiny
+                        else math.log(factor[index])
+                    )
+                    log_variance = 2.0 * values[index, 0] + scale_square[index] + log_factor
+                else:
+                    log_variance = 2.0 * (values[index, 0] + scale_square[index])
+                result[index] = np.exp(log_variance)
+        return readonly(result)
 
     def cdf(self, y: NDArray, theta: NDArray) -> NDArray[np.float64]:
         values = self._theta(theta, None)

@@ -61,8 +61,7 @@ working-tree run: the source-tree and diff hashes bind the actual implementation
 The production changes are committed at `9277baef`; the production tree is
 unchanged from the source-bound candidate receipts described here.
 
-Only directly written raw worker evidence supports these results. Headroom or
-Kompress summaries, transformed tool stdout and proxy clocks do not establish
+Only directly written raw worker evidence supports these results. External-tool summaries, transformed tool stdout and proxy clocks do not establish
 numerical results or elapsed time. The initial numerical receipt clocks are explicitly **unmeasured** because
 numerical probes and repository tests overlapped. Whole worker process RSS
 includes imports, fixture preparation and retained histories; it is not a
@@ -158,7 +157,7 @@ These observed process peaks remain separate from the kernel allocation result.
 
 The first six-run series, `severity-k12-replicate20-timing-summary.json`, retains
 valid raw observations but is **excluded from quiet-window speed claims**.
-Headroom activity rose from a quiet preflight to as much as 0.676 CPU core
+Auxiliary-process activity rose from a quiet preflight to as much as 0.676 CPU core
 averaged over a fit. Low load and a worker consuming nearly one core did not
 exclude cache or memory-bandwidth interference.
 
@@ -188,7 +187,7 @@ after seven smoothing iterations and nine coefficient fits. Candidate source
 `ee937668f83c46d8e6d0990f4d0781186a2d98531000afbb564eecd687b377af`,
 matching the earlier candidate receipts.
 
-During each fit, measured Headroom activity was 0.0029–0.0057 CPU core.
+During each fit, measured auxiliary-process activity was 0.0029–0.0057 CPU core.
 Other matched-process activity, excluding the worker, totaled 0.137–0.159 core;
 the largest individual background process stayed below 0.030 core. The worker
 used 0.993–0.998 core, and one-minute load was 0.742–1.097 on 16 available CPUs.

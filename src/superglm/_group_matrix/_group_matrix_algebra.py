@@ -6,6 +6,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+import scipy.sparse as sp
 from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
@@ -828,8 +829,7 @@ def _weighted_row_chunk(csr, W_rows: NDArray, start_row: int, stop_row: int):
     row_ptr = csr.indptr[start_row : stop_row + 1]
     data = np.repeat(W_rows[start_row:stop_row], np.diff(row_ptr))
     data *= csr.data[lo:hi]
-    # Built from the input's own class: this module never imports scipy, it
-    # duck-types on whatever ``tocsr()`` returned.
+    # The weighted view preserves the input's CSR storage class.
     return csr.__class__(
         (data, csr.indices[lo:hi], row_ptr - lo),
         shape=(stop_row - start_row, csr.shape[1]),
@@ -1162,6 +1162,89 @@ def _cross_gram_factor_smooth_dense(
     return blocks.reshape(factor.shape[1], q)
 
 
+def _full_csr_values(basis) -> NDArray | None:
+    """View canonical, fully stored live CSR values as the raw dense basis."""
+    rows, cols = basis.shape
+    if (
+        basis.data.size == rows * cols
+        and basis.data.flags.c_contiguous
+        and np.all(np.diff(basis.indptr) == cols)
+        and np.all(basis.indices[basis.indptr[:-1]] == 0)
+        and np.all(basis.indices[basis.indptr[1:] - 1] == cols - 1)
+    ):
+        return basis.data.reshape(rows, cols)
+    return None
+
+
+def _cross_gram_sparse_ssp(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray | None:
+    """Contract live raw SSP bases before mapping the small cross product."""
+    B_i, B_j = gm_i.B, gm_j.B
+    R_i, R_j = gm_i.R_inv, gm_j.R_inv
+    n = gm_i.shape[0]
+    if (
+        type(B_i) is not sp.csr_matrix
+        or type(B_j) is not sp.csr_matrix
+        or any(
+            type(value) is not np.ndarray or value.dtype != np.float64
+            for value in (W, B_i.data, B_j.data, R_i, R_j)
+        )
+        or any(
+            type(value) is not np.ndarray
+            or value.dtype not in (np.dtype(np.int32), np.dtype(np.int64))
+            for basis in (B_i, B_j)
+            for value in (basis.indices, basis.indptr)
+        )
+        or W.shape != (n,)
+        or B_i.shape[0] != n
+        or B_j.shape[0] != n
+        or gm_j.shape[0] != n
+        or R_i.shape != (B_i.shape[1], gm_i.shape[1])
+        or R_j.shape != (B_j.shape[1], gm_j.shape[1])
+        or min(n, B_i.shape[1], B_j.shape[1], gm_i.shape[1], gm_j.shape[1]) == 0
+    ):
+        return None
+    k_i, k_j = B_i.shape[1], B_j.shape[1]
+    p_i, p_j = gm_i.shape[1], gm_j.shape[1]
+    # Conservatively allow two weighted payloads and an index copy, four
+    # row-pointer/work arrays, three raw value/index buffers including dense
+    # conversion, and both mapped outputs. No n-by-solver-width array exists.
+    transient_bytes = (
+        24 * max(B_i.data.size, B_j.data.size)
+        + 32 * (n + 1)
+        + 48 * k_i * k_j
+        + 8 * (p_i * k_j + p_i * p_j)
+    )
+    if transient_bytes > _MAX_CROSS_EXPANSION_BYTES:
+        return None
+    # Reassociation has five factors and three reductions. This existing
+    # interval keeps their products and sums in binary64's exponent range.
+    if not all(
+        _tensor_operand_in_reassociation_range(value)
+        for value in (W[:, None], B_i.data[:, None], B_j.data[:, None], R_i, R_j)
+    ):
+        return None
+    # Public matvec/rmatvec read live B, not the separate Gram data snapshot.
+    # Fresh views also avoid cached canonical flags after index mutations.
+    left = sp.csr_matrix((B_i.data, B_i.indices, B_i.indptr), shape=B_i.shape, copy=False)
+    right = sp.csr_matrix((B_j.data, B_j.indices, B_j.indptr), shape=B_j.shape, copy=False)
+    if not left.has_canonical_format or not right.has_canonical_format:
+        return None
+    dense_i, dense_j = _full_csr_values(left), _full_csr_values(right)
+    if dense_j is not None and (dense_i is None or left.nnz <= right.nnz):
+        weighted = _weighted_row_chunk(left, W, 0, n)
+        raw = np.asarray(weighted.T @ dense_j)
+    elif dense_i is not None:
+        weighted = _weighted_row_chunk(right, W, 0, n)
+        raw = np.asarray(weighted.T @ dense_i).T
+    elif left.nnz <= right.nnz:
+        weighted = _weighted_row_chunk(left, W, 0, n)
+        raw = (weighted.T @ right).toarray()
+    else:
+        weighted = _weighted_row_chunk(right, W, 0, n)
+        raw = (weighted.T @ left).toarray().T
+    return R_i.T @ raw @ R_j
+
+
 def _cross_gram_by_columns(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray:
     """Form a cross-product one generated column at a time.
 
@@ -1440,6 +1523,14 @@ def _cross_gram(
             _profile_count(profile, "block_cross_factor_smooth_dense_calls")
             _profile_elapsed(profile, "block_cross_factor_smooth_dense_s", t0)
             return result if factor_dense else result.T
+
+    if type(gm_i) is _SparseSSPGroupMatrix and type(gm_j) is _SparseSSPGroupMatrix:
+        t0 = perf_counter() if profile is not None else 0.0
+        result = _cross_gram_sparse_ssp(gm_i, gm_j, W)
+        if result is not None:
+            _profile_count(profile, "block_cross_ssp_ssp_calls")
+            _profile_elapsed(profile, "block_cross_ssp_ssp_s", t0)
+            return result
 
     # Factored support-space groups must never be selected for the generic
     # observation-matrix materialization below. Generate the narrower side a

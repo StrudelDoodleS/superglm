@@ -10,13 +10,154 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.special import gammaln
+from scipy.special import betaln, gammaln
 
 # ── Numerical guard constants for positive-mean families ─────────
 _POSITIVE_INIT_MIN = 1e-12  # floor for initial_mean (replaces 0.1 pseudo-response)
 _POSITIVE_MU_MIN = 1e-50  # clip_mu lower bound (log → eta ≈ -115)
 _POSITIVE_MU_MAX = 1e50  # clip_mu upper bound (log → eta ≈ +115)
 _VARIANCE_FLOOR = 1e-100  # V(mu) floor for IRLS working weights
+_FLOAT64_MIN_NORMAL = np.finfo(np.float64).tiny
+
+
+def _poisson_half_deviance(y: NDArray, mu: NDArray) -> NDArray:
+    """Return y*log(y/mu)-y+mu, centering its near-equality remainder."""
+    result = np.array(mu, dtype=np.float64, copy=True)
+    positive = y > 0.0
+    response, mean = y[positive], mu[positive]
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        delta = (response - mean) / mean
+        ratio = response / mean
+        log_ratio = np.log(ratio)
+        exceptional = ~np.isfinite(log_ratio)
+        log_ratio[exceptional] = np.log(response[exceptional]) - np.log(mean[exceptional])
+        value = response * (log_ratio - 1.0) + mean
+    close = np.abs(delta) <= 0.125
+    if np.any(close):
+        t = delta[close]
+        # (1+t)*log1p(t)-t = sum_{n>=2} (-t)^n/[n(n-1)].
+        # Through n=25 the absolute tail is <= |t|^26/[650(1-|t|)],
+        # below binary64 roundoff relative to this positive remainder.
+        polynomial = np.zeros_like(t)
+        for n in range(25, 1, -1):
+            polynomial = polynomial * t + (-1.0 if n % 2 else 1.0) / (n * (n - 1))
+        value[close] = (mean[close] * t) * t * polynomial
+    result[positive] = value
+    return result
+
+
+def _poisson_log_density(y: NDArray, mu: NDArray) -> NDArray:
+    """Retain the scalar mean floor and center large-count log densities."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        density = y * np.log(np.maximum(mu, 1e-300)) - mu - gammaln(y + 1.0)
+    centered = (y >= 16.0) & (mu >= 1e-300) & np.isfinite(y) & np.isfinite(mu)
+    if np.any(centered):
+        from superglm.distributional.kernels.gamma import _gamma_log_normalizer
+
+        count = y[centered]
+        density[centered] = (
+            _gamma_log_normalizer(count)
+            - np.log(count)
+            - _poisson_half_deviance(count, mu[centered])
+        )
+    return density
+
+
+def _gamma_log_density(y: NDArray, mu: NDArray, shape: NDArray | float) -> NDArray:
+    """Use the existing GammaLS normalizer and centered scaled deviance."""
+    from superglm.distributional.kernels.gamma import _gamma_log_normalizer, _scaled_ratio_terms
+
+    response, mean, size = np.broadcast_arrays(y, mu, shape)
+    density = np.empty_like(response, dtype=np.float64)
+    stable = (
+        np.isfinite(response)
+        & (response > 0.0)
+        & np.isfinite(mean)
+        & (mean > 0.0)
+        & np.isfinite(size)
+        & (size > 0.0)
+    )
+    fallback = ~stable
+    if np.any(stable):
+        normalizer = _gamma_log_normalizer(size[stable]) - np.log(response[stable])
+        try:
+            _, _, deviance = _scaled_ratio_terms(
+                response[stable], mean[stable], size[stable], derivative_order=0
+            )
+            density[stable] = normalizer - deviance
+        except ValueError:
+            # Preserve the scalar API's previous nonfinite disposition for
+            # out-of-domain or unrepresentable rows; one such row must not
+            # prevent stable evaluation of the other carried rows.
+            for local, index in enumerate(np.flatnonzero(stable)):
+                try:
+                    _, _, deviance = _scaled_ratio_terms(
+                        response[index : index + 1],
+                        mean[index : index + 1],
+                        size[index : index + 1],
+                        derivative_order=0,
+                    )
+                    density[index] = normalizer[local] - deviance[0]
+                except ValueError:
+                    fallback[index] = True
+    if np.any(fallback):
+        a, value, location = size[fallback], response[fallback], mean[fallback]
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            density[fallback] = (
+                a * np.log(a * value / location) - a * value / location - np.log(value) - gammaln(a)
+            )
+    return density
+
+
+def _standardized_residual(y: NDArray, mu: NDArray, scale: float) -> NDArray:
+    with np.errstate(over="ignore", invalid="ignore"):
+        residual = y - mu
+        result = residual / scale
+    overflowed = ~np.isfinite(residual) & np.isfinite(y) & np.isfinite(mu)
+    if np.any(overflowed):
+        result[overflowed] = y[overflowed] / scale - mu[overflowed] / scale
+    return result
+
+
+def _weighted_residual_square(
+    y: NDArray, mu: NDArray, weights: NDArray, phi: float | NDArray
+) -> NDArray:
+    """Return w*(y-mu)^2/phi, recovering only unsafe intermediate ranges."""
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        residual = y - mu
+        first = weights * residual
+        second = first * residual
+        result = second / phi
+    zero = (weights == 0.0) | (y == mu)
+    unsafe = ~zero & (
+        ~np.isfinite(residual)
+        | ~np.isfinite(first)
+        | ~np.isfinite(second)
+        | (np.abs(first) < _FLOAT64_MIN_NORMAL)
+        | (np.abs(second) < _FLOAT64_MIN_NORMAL)
+    )
+    if np.any(unsafe):
+        from superglm.distributional.kernels.gamma import _binary_product_divide
+
+        denominator = np.broadcast_to(phi, result.shape)
+        for index in np.flatnonzero(unsafe):
+            difference = float(residual[index])
+            if np.isfinite(difference):
+                factors = (float(weights[index]), difference, difference)
+            else:
+                # An overflowing difference of finite inputs has opposite
+                # signs, so this scaled subtraction has no cancellation.
+                scale = max(abs(float(y[index])), abs(float(mu[index])))
+                difference = float(y[index]) / scale - float(mu[index]) / scale
+                factors = (float(weights[index]), difference, difference, scale, scale)
+            try:
+                result[index] = _binary_product_divide(factors, (float(denominator[index]),))
+            except ValueError:
+                # Positive finite inputs reached the binary primitive: a
+                # final overflow is a truly unrepresentable quadratic.
+                result[index] = np.inf
+    result[zero] = 0.0
+    return result
 
 
 @runtime_checkable
@@ -80,15 +221,12 @@ class Poisson:
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Unit deviance: 2[y log(y/μ) - (y - μ)]."""
-        d = np.zeros_like(y, dtype=float)
-        pos = y > 0
-        d[pos] = 2 * (y[pos] * np.log(y[pos] / mu[pos]) - (y[pos] - mu[pos]))
-        d[~pos] = 2 * mu[~pos]
-        return d
+        return 2.0 * _poisson_half_deviance(y, mu)
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Poisson log-likelihood (φ fixed at 1)."""
-        return float(np.sum(weights * (y * np.log(np.maximum(mu, 1e-300)) - mu - gammaln(y + 1))))
+        carried = weights != 0.0
+        return float(np.sum(weights[carried] * _poisson_log_density(y[carried], mu[carried])))
 
 
 class Gaussian:
@@ -121,9 +259,20 @@ class Gaussian:
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gaussian log-likelihood with dispersion φ = σ²."""
         phi_safe = max(phi, 1e-300)
-        resid2 = (y - mu) ** 2
-        ll = -0.5 * (np.log(2 * np.pi * phi_safe) + resid2 / phi_safe)
-        return float(np.sum(weights * ll))
+        carried = weights != 0.0
+        response, mean, mass = y[carried], mu[carried], weights[carried]
+        residual = _standardized_residual(response, mean, np.sqrt(phi_safe))
+        normalizer = np.log(2 * np.pi) + np.log(phi_safe)
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            square = residual * residual
+            ll = mass * (-0.5 * (normalizer + square))
+        unsafe = ~np.isfinite(square) | ((square < _FLOAT64_MIN_NORMAL) & (response != mean))
+        if np.any(unsafe):
+            quadratic = _weighted_residual_square(
+                response[unsafe], mean[unsafe], mass[unsafe], phi_safe
+            )
+            ll[unsafe] = (-0.5 * mass[unsafe]) * normalizer - 0.5 * quadratic
+        return float(np.sum(ll))
 
 
 class Gamma:
@@ -151,14 +300,99 @@ class Gamma:
 
     def deviance_unit(self, y: NDArray, mu: NDArray) -> NDArray:
         """Unit deviance: 2[-log(y/μ) + (y - μ)/μ]."""
-        return 2 * (-np.log(y / mu) + (y - mu) / mu)
+        from superglm.distributional.kernels.gamma import _vector_deviance_from_t
+
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            delta = (y - mu) / mu
+            log_ratio = np.log(y / mu)
+            exceptional = ~np.isfinite(log_ratio) & (y > 0.0) & (mu > 0.0)
+            log_ratio[exceptional] = np.log(y[exceptional]) - np.log(mu[exceptional])
+            deviance = delta - log_ratio
+        close = np.abs(delta) <= 0.125
+        if np.any(close):
+            deviance[close] = _vector_deviance_from_t(delta[close])
+        return 2.0 * deviance
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """Gamma log-likelihood. Shape k = 1/φ."""
         k = 1.0 / phi
-        return float(
-            np.sum(weights * (k * np.log(k * y / mu) - k * y / mu - np.log(y) - gammaln(k)))
+        carried = weights != 0.0
+        return float(np.sum(weights[carried] * _gamma_log_density(y[carried], mu[carried], k)))
+
+
+def _log1p_ratio(numerator: NDArray, denominator: NDArray) -> NDArray:
+    """Return log(1 + numerator / denominator) without an overflowing ratio."""
+    top, bottom = np.broadcast_arrays(numerator, denominator)
+    small = top <= bottom
+    result = np.empty_like(top, dtype=np.float64)
+    result[small] = np.log1p(top[small] / bottom[small])
+    result[~small] = (
+        np.log(top[~small]) - np.log(bottom[~small]) + np.log1p(bottom[~small] / top[~small])
+    )
+    return result
+
+
+def _negative_binomial_log_density(y: NDArray, mu: NDArray, theta: NDArray | float) -> NDArray:
+    """Finite-theta NB density, including the existing fractional-count extension.
+
+    The beta-function identity avoids subtracting two large log Gamma values.
+    Near the Poisson limit, bounded integer counts and mu <= theta use the
+    Gamma recurrence as a finite sum of log1p(j/theta). This removes the
+    cancelling y*log(theta) terms before rounding. The size/count gates
+    select the numerical algorithm, not support or the probability law;
+    ordinary sizes retain the vector beta-function evaluation.
+    """
+    count, mean, size = np.broadcast_arrays(
+        np.asarray(y, dtype=np.float64),
+        np.asarray(mu, dtype=np.float64),
+        np.asarray(theta, dtype=np.float64),
+    )
+    mean_is_smaller = mean <= size
+    log_mean = np.log(mean)
+    log_mean_ratio = _log1p_ratio(mean, size)
+    log_count_probability = -_log1p_ratio(size, mean)
+    density = np.empty_like(mean)
+    ratio = mean[mean_is_smaller] / size[mean_is_smaller]
+    log_ratio_over_ratio = np.divide(
+        log_mean_ratio[mean_is_smaller],
+        ratio,
+        out=np.ones_like(ratio),
+        where=ratio > 0.0,
+    )
+    # size*log1p(mean/size) = mean*log1p(r)/r. Its r=0 limiting
+    # factor is one even when the represented ratio itself underflows.
+    density[mean_is_smaller] = -mean[mean_is_smaller] * log_ratio_over_ratio
+    density[~mean_is_smaller] = -size[~mean_is_smaller] * log_mean_ratio[~mean_is_smaller]
+
+    positive = count > 0.0
+    recurrence = (
+        positive
+        & mean_is_smaller
+        & (size >= 1.0 / np.sqrt(np.finfo(np.float64).eps))
+        & (count <= 64.0)
+        & (count == np.rint(count))
+    )
+    ordinary = positive & ~recurrence
+    if np.any(ordinary):
+        density[ordinary] += (
+            -betaln(size[ordinary], count[ordinary])
+            - np.log(count[ordinary])
+            + count[ordinary] * log_count_probability[ordinary]
         )
+    if np.any(recurrence):
+        counts = count[recurrence]
+        sizes = size[recurrence]
+        rising = np.zeros_like(counts)
+        for step in range(1, int(np.max(counts))):
+            active = counts > step
+            rising[active] += _log1p_ratio(np.full(np.count_nonzero(active), step), sizes[active])
+        density[recurrence] += (
+            rising
+            - gammaln(counts + 1.0)
+            + counts * log_mean[recurrence]
+            - counts * log_mean_ratio[recurrence]
+        )
+    return density
 
 
 class NegativeBinomial:
@@ -214,15 +448,9 @@ class NegativeBinomial:
 
     def log_likelihood(self, y: NDArray, mu: NDArray, weights: NDArray, phi: float = 1.0) -> float:
         """NB2 log-likelihood: Σ w[log Γ(y+θ) - log Γ(θ) - log Γ(y+1) + θ log(θ/(μ+θ)) + y log(μ/(μ+θ))]."""
-        theta = self.theta
-        ll = (
-            gammaln(y + theta)
-            - gammaln(theta)
-            - gammaln(y + 1)
-            + theta * np.log(theta / (mu + theta))
-            + y * np.log(mu / (mu + theta))
-        )
-        return float(np.sum(weights * ll))
+        carried = np.asarray(weights) != 0.0
+        ll = _negative_binomial_log_density(y[carried], mu[carried], self.theta)
+        return float(np.sum(weights[carried] * ll))
 
 
 class Binomial:
@@ -397,12 +625,34 @@ def initial_mean(y: NDArray, weights: NDArray, family: Distribution) -> float:
     For binomial, the raw weighted mean is clipped to (eps, 1-eps).
     For Gaussian, use the raw weighted mean with no positivity clipping.
     """
+    response = np.asarray(y, dtype=np.float64)
+    mass = np.asarray(weights, dtype=np.float64)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        products = mass * response
+        total = float(np.sum(mass))
+        numerator = float(np.sum(products))
+        if total == 0.0:
+            raise ZeroDivisionError("Weights sum to zero, can't be normalized")
+        y_bar = float(np.divide(numerator, total))
+    unsafe_products = (mass != 0.0) & (response != 0.0) & (np.abs(products) < _FLOAT64_MIN_NORMAL)
+    if not np.isfinite(total) or not np.isfinite(y_bar) or np.any(unsafe_products):
+        from fractions import Fraction
+
+        # Global rescaling can discard a small weight before its large
+        # response rescues the product. Sum the original binary inputs
+        # exactly on this exceptional path and round only the final ratio.
+        exact_total = Fraction(0)
+        exact_numerator = Fraction(0)
+        for value, weight in zip(response, mass):
+            exact_weight = Fraction.from_float(float(weight))
+            exact_total += exact_weight
+            exact_numerator += exact_weight * Fraction.from_float(float(value))
+        y_bar = float(exact_numerator / exact_total)
     if isinstance(family, Binomial):
-        y_bar = float(np.average(y, weights=weights))
         return np.clip(y_bar, 1e-3, 1 - 1e-3)
     if isinstance(family, Gaussian):
-        return float(np.average(y, weights=weights))
-    return max(float(np.average(y, weights=weights)), _POSITIVE_INIT_MIN)
+        return y_bar
+    return max(y_bar, _POSITIVE_INIT_MIN)
 
 
 def clip_mu(mu: NDArray, family: Distribution) -> NDArray:
@@ -460,21 +710,23 @@ def prior_weight_log_density(
         # N(mu, phi / w): the residual arm w r^2 / (2 phi) is already the
         # frequency arm, and only the per-row normalizer moves.
         phi_safe = max(phi, 1e-300)
-        with np.errstate(divide="ignore"):
-            log_w = np.where(w > 0.0, np.log(np.maximum(w, 1e-300)), 0.0)
-        contribution = (
-            0.5 * log_w - 0.5 * np.log(2 * np.pi * phi_safe) - w * (y - mu) ** 2 / (2 * phi_safe)
+        carried = w > 0.0
+        contribution = np.zeros_like(w)
+        quadratic = _weighted_residual_square(y[carried], mu[carried], w[carried], phi_safe)
+        contribution[carried] = (
+            0.5 * (np.log(np.maximum(w[carried], 1e-300)) - np.log(2 * np.pi) - np.log(phi_safe))
+            - 0.5 * quadratic
         )
-        return np.where(w > 0.0, contribution, 0.0)
+        return contribution
     if isinstance(family, Gamma):
         # Shape w/phi, scale mu phi/w. The shape enters lgamma per row, so
         # this is genuinely a row scan rather than sum(w) times a scalar.
-        shape = w / max(phi, 1e-300)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            contribution = (
-                shape * np.log(shape * y / mu) - shape * y / mu - np.log(y) - gammaln(shape)
-            )
-        return np.where(w > 0.0, contribution, 0.0)
+        carried = w > 0.0
+        contribution = np.zeros_like(w)
+        with np.errstate(over="ignore"):
+            shape = w[carried] / max(phi, 1e-300)
+        contribution[carried] = _gamma_log_density(y[carried], mu[carried], shape)
+        return contribution
     if isinstance(family, Poisson):
         # w Y ~ Poisson(w mu) on the lattice w^-1 Z.
         wy = w * y
@@ -485,6 +737,11 @@ def prior_weight_log_density(
                 - w * mu
                 - gammaln(wy + 1.0)
             )
+        # Preserve the two existing mean/weight log floors. Where neither
+        # is active, the exact scaled Poisson law admits the centered form.
+        centered = (w >= 1e-300) & (mu >= 1e-300) & (wy >= 16.0)
+        if np.any(centered):
+            contribution[centered] = _poisson_log_density(wy[centered], (w * mu)[centered])
         return np.where(w > 0.0, contribution, 0.0)
     if isinstance(family, NegativeBinomial):
         # w Y ~ NB2(w mu, w theta): the negative binomial is infinitely
@@ -493,19 +750,12 @@ def prior_weight_log_density(
         # "auto"; by the time a likelihood is evaluated the profile has
         # resolved it to a number.
         theta = float(family.theta)
-        wy = w * y
-        w_theta = w * theta
-        with np.errstate(invalid="ignore"):
-            # A zero-weight row sends both gamma arguments to their pole, so
-            # the difference is nan before the mask discards it.
-            contribution = (
-                gammaln(wy + w_theta)
-                - gammaln(w_theta)
-                - gammaln(wy + 1.0)
-                + w_theta * np.log(theta / (mu + theta))
-                + wy * np.log(mu / (mu + theta))
-            )
-        return np.where(w > 0.0, contribution, 0.0)
+        carried = w > 0.0
+        contribution = np.zeros_like(w)
+        contribution[carried] = _negative_binomial_log_density(
+            w[carried] * y[carried], w[carried] * mu[carried], w[carried] * theta
+        )
+        return contribution
     if isinstance(family, Binomial):
         # w is the trial count and y the success proportion, which is R's
         # documented binomial convention.  On this family's own domain

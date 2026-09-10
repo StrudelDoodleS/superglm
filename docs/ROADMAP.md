@@ -106,8 +106,8 @@ performance gate below remains open within C1.
 The final-source [performance receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_performance_receipt.json)
 records three serial runs per arm on the replicated 449,000-row severity
 workload: median complete-fit time 25.56 → 20.96 s (18.0% lower), and process
-high-water RSS 1,490.48 → 1,007.39 MiB (32.4% lower). Headroom remained active;
-the independently reviewed result is a qualified local observation, with
+high-water RSS 1,490.48 → 1,007.39 MiB (32.4% lower). The independently
+reviewed result is a qualified local observation, with
 background CPU and screening changes recorded. The comparison changes both
 source version and `discrete=False` to `True`; observed numerical agreement
 does not replace separate discretization-error evidence. Final production
@@ -433,8 +433,7 @@ another predictor count. Reopen only with a concrete use case and validating evi
 - Follow the [cost and timing policy](development/cost-and-timing.md): record
   exact revision/data/configuration, stopping status, work/allocation and
   dispatch. Use raw worker clocks and artifacts, with an activity audit during
-  each timing run; tool completion clocks are not fit timings. Current work
-  follows the user's correction that Headroom and Kompress are uninstalled.
+  each timing run; tool completion clocks are not fit timings.
   Historical scalar timings and one dense LSS receipt
   cannot justify 10⁷–10⁸-row or sub-second LSS promises.
 

@@ -306,6 +306,7 @@ def _warmup_compiled_tweedie_dispatchers(
         ),
         (_compiled._mean_score_channel, (1.0, 1.2, rho, 1.5)),
         (_compiled._mean_hessian_channel, (1.0, 1.2, rho, 1.5)),
+        (_compiled._natural_scale_hessian, (-1.0, 1.0, 0.7)),
         (_compiled._row_failure, (_compiled.KERNEL_MAX_TERMS,)),
         (_compiled._zero_row, (1.2, 0.7, 1.5, rho, 2)),
         (

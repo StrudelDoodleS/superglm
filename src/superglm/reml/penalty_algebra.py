@@ -13,9 +13,12 @@ References
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 
 import numpy as np
+import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm.factor_smooth_geometry import (
@@ -60,6 +63,854 @@ class TensorPairLogdetEvaluation:
     rank: float
     gradient: dict[str, float]
     hessian: dict[tuple[str, str], float]
+    logdet_error: float = 0.0
+    gradient_error: dict[str, float] = field(default_factory=dict)
+    hessian_error: dict[tuple[str, str], float] = field(default_factory=dict)
+    support_rank: int | None = None
+
+
+@dataclass(frozen=True)
+class _PenaltyLogdetEvaluation:
+    """One component representative for scalar rank and determinant derivatives."""
+
+    rank: int
+    logdet: float
+    gradient: dict[str, float]
+    hessian: dict[tuple[str, str], float]
+    logdet_error: float
+    gradient_error: dict[str, float]
+    hessian_error: dict[tuple[str, str], float]
+
+
+def _frozen_array(value: NDArray) -> NDArray:
+    """Expose a read-only view whose owned backing data are also read-only."""
+    backing = np.array(value, dtype=float, copy=True)
+    backing.setflags(write=False)
+    result = backing.view()
+    result.setflags(write=False)
+    return result
+
+
+def _enclosed_bound_sum(*bounds: NDArray | float | np.longdouble) -> NDArray:
+    from superglm.reml.multi_penalty import _gamma, _upper
+
+    wide = np.sum(np.asarray(bounds, dtype=np.longdouble), axis=0)
+    unit = np.finfo(np.longdouble).eps / 2
+    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
+    return _upper((wide + len(bounds) * tiny) / (1 - _gamma(len(bounds) + 2, unit)))
+
+
+def _enclosed_root_gram(root: NDArray, error: NDArray) -> tuple[NDArray, NDArray]:
+    from superglm.reml.multi_penalty import _matmul_enclosed, _positive_product
+
+    gram, arithmetic = _matmul_enclosed(root.T, root)
+    bound = _enclosed_bound_sum(
+        arithmetic,
+        _positive_product(np.abs(root).T, error),
+        _positive_product(error.T, np.abs(root)),
+        _positive_product(error.T, error),
+    )
+    return gram, bound
+
+
+def _context_product(left: NDArray, right: NDArray, *, refine: bool) -> tuple[NDArray, NDArray]:
+    from superglm.reml.multi_penalty import _compensated_dot, _matmul_enclosed
+
+    value, error = _matmul_enclosed(left, right)
+    if refine:
+        for row, column in np.ndindex(value.shape):
+            corrected, bound = _compensated_dot(left[row], right[:, column])
+            if bound < error[row, column]:
+                value[row, column], error[row, column] = corrected, bound
+    return value, error
+
+
+def _retained_coordinate_map(
+    support, coordinate_map: NDArray, *, refine: bool = False
+) -> tuple[NDArray, NDArray]:
+    """Enclose (Q.T Q)^-1 Q.T C without amplifying off-support root residue."""
+    from superglm.reml.multi_penalty import (
+        _gamma,
+        _norm_upper,
+        _positive_product,
+        _upper,
+    )
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    basis, rank = support.Q_plus, support.rank
+    if rank == 0:
+        empty = np.empty((0, coordinate_map.shape[1]))
+        return empty, empty.copy()
+    gram, gram_error = _context_product(basis.T, basis, refine=refine)
+    defect_bound = _enclosed_bound_sum(np.abs(gram - np.eye(rank)), gram_error)
+    eta = _norm_upper(defect_bound)
+    if eta >= 1:
+        raise PenaltyNumericalError("retained penalty coordinates are unresolved")
+    mapped, mapped_error = _context_product(basis.T, coordinate_map, refine=refine)
+    result = scipy.linalg.solve(gram, mapped, assume_a="pos", check_finite=False)
+    product, product_error = _context_product(gram, result, refine=refine)
+    residual = _enclosed_bound_sum(
+        np.abs(product.astype(np.longdouble) - mapped.astype(np.longdouble)),
+        product_error,
+        mapped_error,
+        _positive_product(gram_error, np.abs(result)),
+    )
+    # The Neumann series gives an elementwise enclosure of G^-1:
+    # |G^-1| <= I + |G-I| + eta**2/(1-eta), since every tail entry is
+    # bounded by the corresponding sum of spectral norms.
+    unit = np.finfo(np.longdouble).eps / 2
+    tail = _upper(np.longdouble(eta) ** 2 / (1 - eta) / (1 - _gamma(5, unit)))
+    inverse_bound = _enclosed_bound_sum(np.eye(rank), defect_bound, np.full_like(gram, tail))
+    return result, _positive_product(inverse_bound, residual)
+
+
+def _ssp_component_roots(support, coordinate_map: NDArray, *, refine: bool = False):
+    """One common retained-coordinate target, with optional sharper products."""
+    from superglm.reml.multi_penalty import _positive_product
+
+    full = support.rank == support.Q_plus.shape[0]
+    if not full:
+        retained_map, retained_error = _retained_coordinate_map(
+            support, coordinate_map, refine=refine
+        )
+    roots, errors = [], []
+    for source, source_error in zip(
+        support.component_roots, support.component_root_error_bounds, strict=True
+    ):
+        if full:
+            root, root_error = _context_product(source, coordinate_map, refine=refine)
+            root_error = _enclosed_bound_sum(
+                root_error, _positive_product(source_error, np.abs(coordinate_map))
+            )
+        else:
+            coordinates, coordinate_error = _context_product(source, support.Q_plus, refine=refine)
+            coordinate_error = _enclosed_bound_sum(
+                coordinate_error, _positive_product(source_error, np.abs(support.Q_plus))
+            )
+            root, root_error = _context_product(coordinates, retained_map, refine=refine)
+            root_error = _enclosed_bound_sum(
+                root_error,
+                _positive_product(coordinate_error, np.abs(retained_map)),
+                _positive_product(np.abs(coordinates), retained_error),
+                _positive_product(coordinate_error, retained_error),
+            )
+        roots.append(_frozen_array(root))
+        errors.append(_frozen_array(root_error))
+    return tuple(roots), tuple(errors)
+
+
+def _near_identity_logdet(gram: NDArray, error: NDArray) -> tuple[float, float]:
+    """Trace expansion with an enclosed Frobenius-norm remainder."""
+    from superglm.reml.multi_penalty import _gamma, _norm_upper, _upper
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    defect = gram.astype(np.longdouble) - np.eye(len(gram), dtype=np.longdouble)
+    eta = float(_upper(_norm_upper(defect) + _norm_upper(error)))
+    if eta >= 1:
+        raise PenaltyNumericalError("SSP coordinate volume cannot certify injectivity")
+    diagonal = np.diag(defect)
+    value = math.fsum(map(float, diagonal))
+    # For symmetric D with ||D||_2 <= eta < 1,
+    # |log det(I+D) - tr D| <= ||D||_F**2 / (2*(1-eta)).
+    wide_eta = np.longdouble(eta)
+    bound = (
+        np.longdouble(math.fsum(map(float, np.diag(error))))
+        + wide_eta**2 / (2 * (1 - wide_eta))
+        + np.longdouble(_gamma(len(gram) + 2)) * math.fsum(map(float, np.abs(diagonal)))
+    )
+    unit = np.finfo(np.longdouble).eps / 2
+    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
+    return value, float(_upper((bound + 8 * tiny) / (1 - _gamma(8, unit))))
+
+
+def _support_coordinate_volume(
+    support, coordinate_map: NDArray, *, _refine: bool = False
+) -> tuple[float, float]:
+    """Bound the volume ratio of one fixed active support under an SSP map.
+
+    For B = C.T Q, the log pseudodeterminant changes by
+    log det(B.T B) - log det(Q.T Q). The denominator accounts for the stored
+    Q's finite orthogonality. This common-map identity preserves log-weight
+    derivatives; it does not introduce independent component-root errors.
+    """
+    from superglm.reml.multi_penalty import (
+        _compensated_dot,
+        _finite_double,
+        _gamma,
+        _matmul_enclosed,
+        _positive_product,
+        _triangular_solve,
+        _upper,
+    )
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    rank = support.rank
+    width = coordinate_map.shape[0]
+    if rank == 0 or np.array_equal(coordinate_map, np.eye(width)):
+        return 0.0, 0.0
+    basis = support.Q_plus
+    mapped, mapped_error = _matmul_enclosed(coordinate_map.T, basis)
+    if _refine:
+        for row, column in np.ndindex(mapped.shape):
+            value, error = _compensated_dot(coordinate_map[:, row], basis[:, column])
+            if error < mapped_error[row, column]:
+                mapped[row, column], mapped_error[row, column] = value, error
+    _, upper = scipy.linalg.qr(mapped, mode="economic", check_finite=False)
+    if upper.shape != (rank, rank) or np.any(np.diag(upper) == 0):
+        raise PenaltyNumericalError("SSP coordinate map does not preserve penalty support")
+    triangular = _finite_double(
+        _triangular_solve(upper[::-1, ::-1], np.eye(rank)[::-1])[::-1],
+        "SSP volume preconditioner",
+    )
+    if np.any(np.diag(triangular) == 0):
+        raise PenaltyNumericalError("SSP volume preconditioner is singular")
+    whitened, arithmetic = _matmul_enclosed(mapped, triangular)
+    action_error = _enclosed_bound_sum(
+        arithmetic, _positive_product(mapped_error, np.abs(triangular))
+    )
+    gram, gram_error = _enclosed_root_gram(whitened, action_error)
+    numerator, numerator_error = _near_identity_logdet(gram, gram_error)
+    basis_gram, basis_error = _matmul_enclosed(basis.T, basis)
+    denominator, denominator_error = _near_identity_logdet(basis_gram, basis_error)
+    # T is a chosen checked float64 triangular matrix. This identity needs
+    # neither an exact inverse of the QR factor nor a bound on that solve:
+    # det((B T).T (B T)) = det(T)**2 det(B.T B).
+    terms = [-2 * math.log(abs(value)) for value in np.diag(triangular)]
+    value = math.fsum([*terms, numerator, -denominator])
+    operation_scale = rank + math.fsum(map(abs, [*terms, numerator, denominator]))
+    error = float(
+        _enclosed_bound_sum(
+            numerator_error,
+            denominator_error,
+            _upper(np.longdouble(_gamma(4 * rank + 8)) * np.longdouble(operation_scale)),
+        )
+    )
+    rows = sum(len(root) for root in support.component_roots)
+    target = _gamma(8 * (rows + width + rank + len(support.component_roots) + 1))
+    if error > target * operation_scale:
+        if not _refine:
+            return _support_coordinate_volume(support, coordinate_map, _refine=True)
+        raise PenaltyNumericalError("SSP coordinate volume cannot meet the accuracy contract")
+    return value, error
+
+
+def _active_support_volume_error(support) -> float:
+    """Bound the volume omitted by projecting an enclosed fixed-rank target.
+
+    Root-action errors only enclose the target compressed to the selected
+    range. Its perpendicular part contributes a weight-independent volume.
+    If T spans that range and ||(H T).T (H T)-I|| <= eta < 1, then
+    log det(I+L L.T) <= ||L||_F**2 <= ||T||_F**2 ||H(I-P)||_F**2/(1-eta).
+    Component scaling preserves both ranges and avoids reciprocal root scales.
+    """
+    from superglm.reml.multi_penalty import (
+        _finite_double,
+        _gamma,
+        _norm_upper,
+        _positive_product,
+        _triangular_solve,
+        _upper,
+    )
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    basis, rank = support.Q_plus, support.rank
+    width = basis.shape[0]
+    if rank == 0 or rank == width:
+        return 0.0
+    unit = np.finfo(np.longdouble).eps / 2
+    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
+    roots, errors = [], []
+    for root, error in zip(
+        support.component_roots, support.component_root_error_bounds, strict=True
+    ):
+        scale = np.longdouble(np.max(np.abs(root), initial=0.0))
+        if scale == 0:
+            scale = np.longdouble(1)
+        wide = root.astype(np.longdouble) / scale
+        normalized = _finite_double(wide, "active support roots")
+        bound = (
+            error.astype(np.longdouble) / scale
+            + _gamma(1, unit) * np.abs(wide)
+            + np.abs(wide - normalized.astype(np.longdouble))
+            + tiny
+        ) / (1 - _gamma(6, unit))
+        roots.append(normalized)
+        errors.append(_finite_double(_upper(bound), "active support root errors"))
+    root, root_error = np.vstack(roots), np.vstack(errors)
+    coordinates, coordinate_error = _context_product(root, basis, refine=False)
+    coordinate_error = _enclosed_bound_sum(
+        coordinate_error, _positive_product(root_error, np.abs(basis))
+    )
+    _, upper = scipy.linalg.qr(coordinates, mode="economic", check_finite=False)
+    if upper.shape != (rank, rank) or np.any(np.diag(upper) == 0):
+        raise PenaltyNumericalError("active support volume has unresolved coordinates")
+    triangular = _finite_double(
+        _triangular_solve(upper[::-1, ::-1], np.eye(rank)[::-1])[::-1],
+        "active support volume preconditioner",
+    )
+    action, action_error = _context_product(coordinates, triangular, refine=False)
+    action_error = _enclosed_bound_sum(
+        action_error, _positive_product(coordinate_error, np.abs(triangular))
+    )
+    gram, gram_error = _enclosed_root_gram(action, action_error)
+    eta = _norm_upper(_enclosed_bound_sum(np.abs(gram - np.eye(rank)), gram_error))
+    if eta >= 1:
+        raise PenaltyNumericalError("active support volume cannot certify its projected rank")
+    mapped, mapped_error = _context_product(basis, triangular, refine=False)
+    map_norm = _norm_upper(_enclosed_bound_sum(np.abs(mapped), mapped_error))
+    # The chosen numeric coordinates times Q.T lie exactly in range(Q).
+    # Their construction need not be an exact orthogonal projection.
+    projected, projection_error = _context_product(coordinates, basis.T, refine=False)
+    off = _enclosed_bound_sum(
+        np.abs(root.astype(np.longdouble) - projected.astype(np.longdouble)),
+        projection_error,
+        root_error,
+    )
+    off_norm = _norm_upper(off)
+    volume_error = float(
+        _upper(
+            ((np.longdouble(map_norm) * off_norm) ** 2 / (1 - np.longdouble(eta)) + tiny)
+            / (1 - _gamma(8, unit))
+        )
+    )
+    target = _gamma(8 * (len(root) + width + rank + len(roots) + 1))
+    if not np.isfinite(volume_error) or volume_error > target * rank:
+        raise PenaltyNumericalError("active support volume cannot meet the accuracy contract")
+    return volume_error
+
+
+def _joint_near_isometry_volume_error(
+    row_map: NDArray, *, rank: int, root_rows: int, components: int
+) -> float:
+    """Bound one common coordinate volume without changing local targets.
+
+    For a block-diagonal fixed local penalty with orthonormal active range U,
+    an injective row map A contributes log det(U.T A A.T U). If
+    ||A A.T-I|| <= delta < 1, its absolute value is at most
+    rank * -log(1-delta) <= rank * delta/(1-delta). This joint Gram includes
+    cross-block terms; the volume is independent of positive weights on each
+    fixed active set, so all log-weight derivatives are unchanged.
+    """
+    from superglm.reml.multi_penalty import _gamma, _matmul_enclosed, _norm_upper, _upper
+    from superglm.reml.penalty_support import PenaltyNumericalError
+
+    row_map = np.asarray(row_map, dtype=float)
+    if (
+        row_map.ndim != 2
+        or not np.all(np.isfinite(row_map))
+        or rank < 0
+        or rank > row_map.shape[0]
+        or row_map.shape[0] > row_map.shape[1]
+    ):
+        raise PenaltyNumericalError("finite coefficient map has invalid dimensions")
+    if rank == 0:
+        return 0.0
+    gram, arithmetic = _matmul_enclosed(row_map, row_map.T)
+    # Subtract in the wider type and enclose its rounding too. This avoids
+    # relying on exact diagonal subtraction when the map is malformed.
+    unit = np.finfo(np.longdouble).eps / 2
+    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
+    difference = gram.astype(np.longdouble) - np.eye(len(gram), dtype=np.longdouble)
+    defect = _enclosed_bound_sum(
+        np.abs(difference), arithmetic, _gamma(1, unit) * np.abs(difference) + tiny
+    )
+    delta = _norm_upper(defect)
+    if delta >= 1:
+        raise PenaltyNumericalError("finite coefficient map does not preserve penalty support")
+    error = float(
+        _upper(
+            (np.longdouble(rank) * delta / (1 - np.longdouble(delta)) + tiny)
+            / (1 - _gamma(8, unit))
+        )
+    )
+    # Use the existing dimension gamma and its minimum rank operation scale
+    # for this additional volume certificate, as in the active-support bound.
+    dimension = root_rows + row_map.shape[1] + rank + components + 1
+    if error > _gamma(8 * dimension) * rank:
+        raise PenaltyNumericalError("finite coefficient volume cannot meet the accuracy contract")
+    return error
+
+
+def _component_geometry_key(component: PenaltyComponent) -> tuple:
+    return (
+        component.name,
+        component.group_name,
+        component.group_index,
+        component.group_sl,
+        component.penalty_kind,
+        component.repeat_count,
+        component.block_width,
+    )
+
+
+def _raw_evidence_value(value):
+    """Own exact static values for the one explicit raw-context handoff."""
+    if isinstance(value, np.ndarray):
+        return (np.ndarray, value.dtype.str, value.shape, value.tobytes())
+    if isinstance(value, tuple):
+        return (tuple, tuple(_raw_evidence_value(item) for item in value))
+    if is_dataclass(value):
+        return (
+            type(value),
+            tuple(
+                (item.name, _raw_evidence_value(getattr(value, item.name)))
+                for item in fields(value)
+            ),
+        )
+    return (type(value), value)
+
+
+def _raw_evidence_readonly(value) -> bool:
+    if isinstance(value, np.ndarray):
+        return not value.flags.writeable
+    if isinstance(value, tuple):
+        return all(_raw_evidence_readonly(item) for item in value)
+    if is_dataclass(value):
+        return all(_raw_evidence_readonly(getattr(value, item.name)) for item in fields(value))
+    return True
+
+
+def _raw_support_values(support) -> tuple:
+    # The basis-Gram memo is derived from these inputs and has its own token.
+    # It is not part of the selected mathematical support or its error ledger.
+    return tuple(
+        (item.name, getattr(support, item.name))
+        for item in fields(support)
+        if item.name != "_basis_gram_evidence"
+    )
+
+
+def _raw_penalty_arithmetic() -> tuple:
+    from superglm.reml import multi_penalty, penalty_support
+    from superglm.solvers import rank
+
+    return (
+        multi_penalty._LD,
+        multi_penalty._EPS,
+        multi_penalty._U_LD,
+        multi_penalty._TINY_LD,
+        penalty_support._LD,
+        penalty_support._EPS,
+        _raw_evidence_value(rank.SHARED_RANK_POLICY),
+        _raw_evidence_value(multi_penalty.SHARED_RANK_POLICY),
+        _raw_evidence_value(penalty_support.SHARED_RANK_POLICY),
+        tuple(
+            getattr(multi_penalty, name, None)
+            for name in (
+                "_evaluate_penalty_summary",
+                "_evaluate_penalty_geometry",
+                "_matmul_enclosed",
+                "_reference_root_actions",
+                "_direct_candidate",
+                "_candidate_product",
+                "_wide_product",
+                "_dyadic_product",
+                "_dyadic_slices",
+                "_positive_product",
+                "_gamma",
+                "_upper",
+                "_finite_double",
+            )
+        ),
+        penalty_support._penalty_support,
+        penalty_support._penalty_support_from_roots,
+        penalty_support._component_root,
+        penalty_support.decompose_gram,
+    )
+
+
+def _raw_family_inputs(grouped: Sequence[PenaltyComponent]) -> tuple:
+    return tuple(
+        (
+            _component_geometry_key(component),
+            _raw_evidence_value(component.component_type),
+            _raw_evidence_value(component.lambda_policy),
+            _raw_evidence_value(np.asarray(component.omega_raw)),
+        )
+        for component in grouped
+    )
+
+
+@dataclass(frozen=True)
+class _RawPenaltyFamilyReceipt:
+    support: object
+    inputs: tuple
+    support_values: tuple
+    arithmetic: tuple
+
+    @classmethod
+    def capture(cls, support, grouped):
+        return cls(
+            support,
+            _raw_family_inputs(grouped),
+            _raw_evidence_value(_raw_support_values(support)),
+            _raw_penalty_arithmetic(),
+        )
+
+    def matches(self, geometry, source, target) -> bool:
+        values = _raw_support_values(self.support)
+        return bool(
+            geometry.support is self.support
+            and self.arithmetic == _raw_penalty_arithmetic()
+            and self.inputs == _raw_family_inputs(source) == _raw_family_inputs(target)
+            and _raw_evidence_readonly(values)
+            and self.support_values == _raw_evidence_value(values)
+        )
+
+
+def _raw_summary_values(summary) -> tuple:
+    return tuple(
+        (item.name, getattr(summary, item.name))
+        for item in fields(summary)
+        if item.name != "_support"
+    )
+
+
+@dataclass(frozen=True)
+class _RawPenaltySummaryReceipt:
+    summary: object
+    support: object
+    weights: tuple[float, ...]
+    values: tuple
+    arithmetic: tuple
+
+    @classmethod
+    def capture(cls, summary, weights):
+        return cls(
+            summary,
+            summary._support,
+            weights,
+            _raw_evidence_value(_raw_summary_values(summary)),
+            _raw_penalty_arithmetic(),
+        )
+
+    def matches(self, geometry) -> bool:
+        values = _raw_summary_values(self.summary)
+        return bool(
+            geometry.last_weights == self.weights
+            and geometry.last_evaluation is not None
+            and geometry.last_evaluation[0] is self.summary
+            and geometry.support is self.support is self.summary._support
+            and all(value > 0 for value in self.weights)
+            and np.array_equal(self.summary._input_lambdas, self.weights)
+            and self.arithmetic == _raw_penalty_arithmetic()
+            and _raw_evidence_readonly(values)
+            and self.values == _raw_evidence_value(values)
+        )
+
+
+def _reusable_raw_geometry(source, target):
+    if not source:
+        return None
+    indices = _group_penalties(list(source)).get(target[0].group_name, [])
+    originals = [source[index] for index in indices]
+    if not originals:
+        return None
+    geometry = _context_geometry(originals)
+    if (
+        geometry is None
+        or geometry.coordinate_map is None
+        or geometry.raw_family is None
+        or not geometry.raw_family.matches(geometry, originals, target)
+    ):
+        return None
+    return geometry
+
+
+@dataclass
+class _PenaltyGroupGeometry:
+    """Immutable context inputs and one retained weight/volume evaluation."""
+
+    matrices: tuple[NDArray, ...]
+    keys: tuple[tuple, ...]
+    repeat: int
+    support: object | None = None
+    coordinate_map: NDArray | None = None
+    matrix_error_bounds: tuple[NDArray, ...] = ()
+    ssp_roots: tuple[NDArray, ...] = ()
+    ssp_root_errors: tuple[NDArray, ...] = ()
+    ssp_refined: bool = False
+    face_activity: tuple[bool, ...] | None = None
+    face_support: object | None = None
+    face_logdet_error: float = 0.0
+    last_weights: tuple[float, ...] | None = None
+    last_evaluation: tuple | None = None
+    volume_activity: tuple[bool, ...] | None = None
+    volume: tuple[float, float] | None = None
+    raw_family: _RawPenaltyFamilyReceipt | None = None
+    raw_summary: _RawPenaltySummaryReceipt | None = None
+
+    def __getstate__(self) -> dict:
+        # Function identities certify this fit's arithmetic. Pickle resolves
+        # names in the loading process, so it cannot retain that receipt.
+        state = self.__dict__.copy()
+        state["raw_family"] = state["raw_summary"] = None
+        return state
+
+    def get_support(self):
+        from superglm.reml.penalty_support import _penalty_support
+
+        if self.support is None:
+            self.support = _penalty_support(self.matrices)
+        return self.support
+
+    def evaluate(self, values: NDArray):
+        from superglm.reml.multi_penalty import _evaluate_penalty_summary
+        from superglm.reml.penalty_support import PenaltyNumericalError
+
+        values = np.asarray(values, dtype=float)
+        if (
+            values.shape != (len(self.matrices),)
+            or not np.all(np.isfinite(values))
+            or np.any(values < 0)
+        ):
+            raise ValueError("smoothing parameters must be finite and non-negative")
+        weights = tuple(map(float, values))
+        if weights == self.last_weights:
+            return self.last_evaluation
+        if self.coordinate_map is not None and np.any(values == 0):
+            try:
+                result = self._evaluate_face(values)
+            except PenaltyNumericalError:
+                if self.ssp_refined:
+                    raise
+                self.ssp_roots, self.ssp_root_errors = _ssp_component_roots(
+                    self.get_support(), self.coordinate_map, refine=True
+                )
+                self.ssp_refined = True
+                self.face_activity = self.face_support = None
+                result = self._evaluate_face(values)
+            evaluation = (result, 0.0, self.face_logdet_error)
+            self.last_weights, self.last_evaluation = weights, evaluation
+            self.raw_summary = None
+            return evaluation
+        result = _evaluate_penalty_summary(self.get_support(), values)
+        volume = (0.0, 0.0)
+        if self.coordinate_map is not None:
+            activity = tuple(value > 0 for value in weights)
+            if activity == self.volume_activity:
+                volume = self.volume
+            else:
+                volume = _support_coordinate_volume(result._support, self.coordinate_map)
+                self.volume_activity, self.volume = activity, volume
+        evaluation = (result, *volume)
+        # A refused candidate never replaces the last complete evaluation.
+        if self.raw_family is not None:
+            self.raw_summary = _RawPenaltySummaryReceipt.capture(result, weights)
+        self.last_weights, self.last_evaluation = weights, evaluation
+        return evaluation
+
+    def _evaluate_face(self, values: NDArray):
+        from superglm.reml.multi_penalty import _evaluate_penalty_summary
+        from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support_from_roots
+
+        activity = tuple(value > 0 for value in values)
+        if activity != self.face_activity:
+            raw = self.get_support()
+            width = raw.Q_plus.shape[0]
+
+            def active_arrays(arrays):
+                return [
+                    array if active else np.empty((0, width))
+                    for array, active in zip(arrays, activity, strict=True)
+                ]
+
+            raw_roots = active_arrays(raw.component_roots)
+            raw_active = _penalty_support_from_roots(
+                raw_roots,
+                resolution_limited=raw.component_resolution_limited,
+                input_error_bounds=[np.zeros_like(root) for root in raw_roots],
+            )
+            roots = active_arrays(self.ssp_roots)
+            selected = _penalty_support_from_roots(
+                roots,
+                resolution_limited=raw.component_resolution_limited,
+                input_error_bounds=[np.zeros_like(root) for root in roots],
+            )
+            if selected.rank != raw_active.rank:
+                raise PenaltyNumericalError("SSP active support cannot preserve the raw rank")
+            # Enclose the original fixed SSP roots, not another projected
+            # target: charge the entire selected-root displacement as well as
+            # each original root's construction error.
+            errors = tuple(
+                _frozen_array(_enclosed_bound_sum(error, displacement))
+                for error, displacement in zip(
+                    active_arrays(self.ssp_root_errors),
+                    selected.support_projection_bounds,
+                    strict=True,
+                )
+            )
+            selected = replace(selected, component_root_error_bounds=errors)
+            volume_error = _active_support_volume_error(selected)
+            self.face_support, self.face_logdet_error = selected, volume_error
+            self.face_activity = activity
+        # Inactive components have no root rows. Unit carrier weights retain
+        # their ordered zero derivatives without invoking a second projection.
+        return _evaluate_penalty_summary(self.face_support, np.where(values > 0, values, 1.0))
+
+
+def _context_geometry(grouped: list[PenaltyComponent]) -> _PenaltyGroupGeometry | None:
+    geometry = getattr(grouped[0], "_penalty_geometry", None)
+    if geometry is None or len(grouped) != len(geometry.matrices):
+        return None
+    if any(
+        getattr(component, "_penalty_geometry", None) is not geometry
+        or component.omega_ssp is not matrix
+        or matrix.flags.writeable
+        or _component_geometry_key(component) != key
+        for component, matrix, key in zip(grouped, geometry.matrices, geometry.keys, strict=True)
+    ):
+        return None
+    return geometry
+
+
+def _attach_context_geometry(
+    grouped: list[PenaltyComponent],
+    *,
+    support=None,
+    coordinate_map=None,
+    matrix_errors=(),
+    ssp_roots=(),
+    ssp_errors=(),
+    raw_family=None,
+) -> None:
+    if not grouped or any(component.omega_ssp is None for component in grouped):
+        return
+    for component in grouped:
+        component.omega_ssp = _frozen_array(component.omega_ssp)
+    first = grouped[0]
+    repeat = (
+        first.repeat_count - (first.penalty_kind == "sum_to_zero")
+        if first.penalty_kind in {"repeated", "sum_to_zero"}
+        else 1
+    )
+    geometry = _PenaltyGroupGeometry(
+        tuple(component.omega_ssp for component in grouped),
+        tuple(_component_geometry_key(component) for component in grouped),
+        repeat,
+        support,
+        None if coordinate_map is None else _frozen_array(coordinate_map),
+        tuple(_frozen_array(bound) for bound in matrix_errors),
+        ssp_roots,
+        ssp_errors,
+        raw_family=raw_family,
+    )
+    if coordinate_map is not None:
+        # Rank queries also rely on injectivity; certify it before exposing
+        # the raw rank through this context, independently of positive weights.
+        geometry.volume = _support_coordinate_volume(support, geometry.coordinate_map)
+        geometry.volume_activity = tuple(True for _ in grouped)
+    for component in grouped:
+        component._penalty_geometry = geometry
+
+
+def _rebind_penalty_context(
+    source: Sequence[PenaltyComponent], copied: Sequence[PenaltyComponent]
+) -> None:
+    """Preserve a complete local family through predictor qualification and placement.
+
+    Moving a coefficient block is an isometric injection. Its selected raw
+    support, local SSP map and arithmetic evidence remain valid when the local
+    matrices are copied exactly. Each target family gets its own mutable owner;
+    only already-owned immutable geometry and volume evidence are shared.
+    """
+    if len(source) != len(copied):
+        raise ValueError("penalty context copy requires matching component counts")
+    target_ids = {id(component) for component in copied}
+    if len(target_ids) != len(copied) or target_ids.intersection(map(id, source)):
+        raise ValueError("penalty context copy requires distinct target components")
+    target_groups = _group_penalties(list(copied))
+    pending = []
+    for indices in _group_penalties(list(source)).values():
+        originals = [source[index] for index in indices]
+        geometry = _context_geometry(originals)
+        if geometry is None:
+            # Manual descriptors, incomplete families and invalidated contexts
+            # carry no transferable authority.
+            continue
+        targets = [copied[index] for index in indices]
+        first = targets[0]
+        if (
+            isinstance(first.group_index, bool)
+            or not isinstance(first.group_index, int | np.integer)
+            or first.group_index < 0
+            or target_groups[first.group_name] != indices
+            or any(
+                (item.group_name, item.group_index, item.group_sl)
+                != (first.group_name, first.group_index, first.group_sl)
+                for item in targets
+            )
+        ):
+            raise ValueError("copied penalty family has an inconsistent coefficient block")
+        for original, target in zip(originals, targets, strict=True):
+            suffix = (
+                "wiggle"
+                if original.name == original.group_name
+                else original.name.removeprefix(f"{original.group_name}:")
+            )
+            block = target.group_sl
+            if (
+                (
+                    target.name != f"{target.group_name}#{suffix}"
+                    and _component_geometry_key(target) != _component_geometry_key(original)
+                )
+                or block.start is None
+                or block.stop is None
+                or block.start < 0
+                or block.stop - block.start != original.group_sl.stop - original.group_sl.start
+                or block.step != original.group_sl.step
+                or (target.penalty_kind, target.repeat_count, target.block_width)
+                != (original.penalty_kind, original.repeat_count, original.block_width)
+                or target.omega_ssp is None
+                or not np.array_equal(target.omega_ssp, original.omega_ssp)
+            ):
+                raise ValueError("copied penalty component changed its ordered local geometry")
+        for index, other in enumerate(copied):
+            if index not in indices and (
+                other.group_index == first.group_index
+                or max(first.group_sl.start, other.group_sl.start)
+                < min(first.group_sl.stop, other.group_sl.stop)
+            ):
+                raise ValueError("copied penalty families overlap in the target layout")
+        pending.append((geometry, targets))
+    # Validate every family before modifying any target descriptor.
+    for geometry, targets in pending:
+        for component in targets:
+            component.omega_ssp = _frozen_array(component.omega_ssp)
+        owner = _PenaltyGroupGeometry(
+            matrices=tuple(component.omega_ssp for component in targets),
+            keys=tuple(_component_geometry_key(component) for component in targets),
+            repeat=geometry.repeat,
+            support=geometry.support,
+            coordinate_map=geometry.coordinate_map,
+            matrix_error_bounds=geometry.matrix_error_bounds,
+            ssp_roots=geometry.ssp_roots,
+            ssp_root_errors=geometry.ssp_root_errors,
+            ssp_refined=geometry.ssp_refined,
+            volume_activity=geometry.volume_activity,
+            volume=geometry.volume,
+        )
+        for component in targets:
+            component._penalty_geometry = owner
+
+
+def _snapshot_penalty_context(
+    components: Sequence[PenaltyComponent],
+) -> tuple[PenaltyComponent, ...]:
+    """Own declared component arrays while preserving complete selected targets."""
+    copied = tuple(
+        replace(
+            component,
+            omega_raw=None if component.omega_raw is None else _frozen_array(component.omega_raw),
+            omega_ssp=None if component.omega_ssp is None else _frozen_array(component.omega_ssp),
+            eigvals_omega=(
+                None if component.eigvals_omega is None else _frozen_array(component.eigvals_omega)
+            ),
+        )
+        for component in components
+    )
+    _rebind_penalty_context(components, copied)
+    return copied
 
 
 def _penalty_component_omega_ssp(
@@ -504,43 +1355,93 @@ def evaluate_tensor_pair_logdet_summaries(
 ) -> dict[str, TensorPairLogdetEvaluation]:
     """Evaluate cached tensor summaries for one lambda dictionary."""
     evaluations: dict[str, TensorPairLogdetEvaluation] = {}
+    unit = np.finfo(float).eps / 2.0
     eps_thresh = np.finfo(float).eps ** (2 / 3)
+
+    def marginal_logs(values: NDArray, weight: float) -> tuple[NDArray, NDArray, NDArray]:
+        values = np.asarray(values, dtype=float)
+        if values.ndim != 1 or not np.all(np.isfinite(values)) or np.any(values < 0.0):
+            raise ValueError("tensor marginal spectra must be finite and non-negative")
+        logs = np.full(values.shape, -np.inf)
+        errors = np.zeros(values.shape)
+        positive = values > eps_thresh * float(np.max(values, initial=0.0))
+        if weight > 0.0:
+            # The unweighted marginal representative fixes support. No weighted
+            # cutoff is allowed, including when a weighted eigenvalue overflows.
+            log_weight = math.log(weight)
+            log_values = np.log(values[positive])
+            logs[positive] = log_weight + log_values
+            errors[positive] = (
+                4 * unit * (1 + abs(log_weight) + np.abs(log_values) + np.abs(logs[positive]))
+            )
+        return logs, errors, positive
+
     for group_name, summary in summaries.items():
         left_name, right_name = summary.lambda_names
         lam_left = float(lambdas.get(left_name, 1.0))
         lam_right = float(lambdas.get(right_name, 1.0))
-        left_term = lam_left * summary.eigvals_left[:, None]
-        right_term = lam_right * summary.eigvals_right[None, :]
-        x = left_term + right_term
-        thresh = eps_thresh * max(float(np.max(x)), 1e-12)
-        pos = x > thresh
-        if np.any(pos):
-            left_full = np.broadcast_to(left_term, x.shape)[pos]
-            right_full = np.broadcast_to(right_term, x.shape)[pos]
-            x_pos = x[pos]
-            cross = float(np.sum((left_full * right_full) / np.maximum(x_pos**2, 1e-300)))
-            logdet = float(np.sum(np.log(np.maximum(x_pos, 1e-300))))
-            grad = {
-                left_name: float(np.sum(left_full / x_pos)),
-                right_name: float(np.sum(right_full / x_pos)),
-            }
-            hess = {
-                (left_name, left_name): cross,
-                (right_name, right_name): cross,
-                (left_name, right_name): -cross,
-                (right_name, left_name): -cross,
-            }
-            rank = float(np.sum(pos))
-        else:
-            logdet = 0.0
-            grad = {left_name: 0.0, right_name: 0.0}
-            hess = {
-                (left_name, left_name): 0.0,
-                (right_name, right_name): 0.0,
-                (left_name, right_name): 0.0,
-                (right_name, left_name): 0.0,
-            }
-            rank = 0.0
+        if any(not math.isfinite(value) or value < 0 for value in (lam_left, lam_right)):
+            raise ValueError("smoothing parameters must be finite and non-negative")
+        left, left_error, left_positive = marginal_logs(summary.eigvals_left, lam_left)
+        right, right_error, right_positive = marginal_logs(summary.eigvals_right, lam_right)
+        cell_log = np.logaddexp(left[:, None], right[None, :])
+        active = np.isfinite(cell_log)
+        left_log = np.broadcast_to(left[:, None], cell_log.shape)[active]
+        right_log = np.broadcast_to(right[None, :], cell_log.shape)[active]
+        retained = cell_log[active]
+        left_bound = np.broadcast_to(left_error[:, None], cell_log.shape)[active]
+        right_bound = np.broadcast_to(right_error[None, :], cell_log.shape)[active]
+        cell_bound = np.maximum(left_bound, right_bound) + 4 * unit * (1 + np.abs(retained))
+        left_fraction = np.exp(left_log - retained)
+        right_fraction = np.exp(right_log - retained)
+        # A one-sided cell contributes exactly one to its active derivative.
+        left_fraction[~np.isfinite(right_log)] = 1.0
+        right_fraction[~np.isfinite(left_log)] = 1.0
+
+        def fraction_bound(logs, fractions, input_bound):
+            bound = np.zeros(fractions.shape)
+            finite = np.isfinite(logs)
+            perturbation = (
+                input_bound[finite]
+                + cell_bound[finite]
+                + unit * np.abs(logs[finite] - retained[finite])
+            )
+            bound[finite] = fractions[finite] * (np.expm1(perturbation) + 4 * unit)
+            bound[finite] += np.nextafter(0.0, 1.0)
+            return bound
+
+        left_fraction_bound = fraction_bound(left_log, left_fraction, left_bound)
+        right_fraction_bound = fraction_bound(right_log, right_fraction, right_bound)
+        cross_terms = left_fraction * right_fraction
+        cross = math.fsum(cross_terms)
+        logdet = math.fsum(retained)
+        grad = {left_name: math.fsum(left_fraction), right_name: math.fsum(right_fraction)}
+        hess = {
+            (left_name, left_name): cross,
+            (right_name, right_name): cross,
+            (left_name, right_name): -cross,
+            (right_name, left_name): -cross,
+        }
+        rank = int(np.count_nonzero(active))
+        # logaddexp is 1-Lipschitz in the infinity norm. Exp propagates an
+        # input perturbation d as expm1(d); the product bound expands both
+        # factors. The 4u elementary-function allowance is our float64 libm
+        # policy. These bounds concern the selected marginal spectra only.
+        inflation = 1.0 / (1.0 - (16 + 4 * rank) * unit)
+        logdet_error = inflation * (math.fsum(cell_bound) + 2 * unit * abs(logdet))
+        gradient_error = {
+            left_name: inflation * (math.fsum(left_fraction_bound) + 2 * unit * grad[left_name]),
+            right_name: inflation * (math.fsum(right_fraction_bound) + 2 * unit * grad[right_name]),
+        }
+        cross_error = inflation * (
+            math.fsum(
+                left_fraction * right_fraction_bound
+                + right_fraction * left_fraction_bound
+                + left_fraction_bound * right_fraction_bound
+                + 2 * unit * cross_terms
+            )
+            + 2 * unit * cross
+        )
 
         evaluations[group_name] = TensorPairLogdetEvaluation(
             group_name=group_name,
@@ -550,6 +1451,10 @@ def evaluate_tensor_pair_logdet_summaries(
             rank=rank,
             gradient=grad,
             hessian=hess,
+            logdet_error=logdet_error,
+            gradient_error=gradient_error,
+            hessian_error={key: cross_error for key in hess},
+            support_rank=int(np.count_nonzero(left_positive[:, None] | right_positive[None, :])),
         )
     return evaluations
 
@@ -660,6 +1565,8 @@ def build_penalty_components(
     group_matrices: list,
     reml_groups: list[tuple[int, object]],
     cache: dict | None = None,
+    *,
+    _reuse_raw_from: Sequence[PenaltyComponent] | None = None,
 ) -> list[PenaltyComponent]:
     """Build PenaltyComponent list — the single source of penalty eigenstructure.
 
@@ -776,6 +1683,11 @@ def build_penalty_components(
             continue
 
         group_components: list[PenaltyComponent] = []
+        raw_support = None
+        raw_coordinate_map = None
+        raw_family = reused_geometry = None
+        group_ssp_roots = group_ssp_errors = ()
+        matrix_errors = []
 
         if isinstance(gm, RandomEffectGroupMatrix):
             lp_map = gm.lambda_policies or {}
@@ -836,6 +1748,7 @@ def build_penalty_components(
                         block_width=gm.block_size,
                     )
                 )
+                _attach_context_geometry(group_components)
                 components.extend(group_components)
                 continue
             for suffix, omega_j in gm.repeated_penalty_components:
@@ -865,13 +1778,60 @@ def build_penalty_components(
             # Multi-penalty path: N components share this coefficient block.
             ct_map = getattr(gm, "component_types", None) or {}
             lp_map = getattr(gm, "lambda_policies", None) or {}
-            for suffix, omega_j in gm.omega_components:
+            if len(gm.omega_components) > 1 and not isinstance(gm, DiscretizedTensorGroupMatrix):
+                coordinate_map = np.asarray(gm.R_inv, dtype=float)
+                raw_width = gm.omega_components[0][1].shape[0]
+                if coordinate_map.shape == (raw_width, raw_width):
+                    from superglm.reml.penalty_support import _penalty_support
+
+                    if not np.all(np.isfinite(coordinate_map)):
+                        raise ValueError("SSP coordinate map must be finite")
+                    raw_targets = [
+                        PenaltyComponent(
+                            name=f"{g.name}:{suffix}",
+                            group_name=g.name,
+                            group_index=idx,
+                            group_sl=g.sl,
+                            omega_raw=omega,
+                            component_type=ct_map.get(suffix),
+                            lambda_policy=lp_map.get(suffix),
+                        )
+                        for suffix, omega in gm.omega_components
+                    ]
+                    reused_geometry = _reusable_raw_geometry(_reuse_raw_from, raw_targets)
+                    if reused_geometry is None:
+                        raw_support = _penalty_support([omega for _, omega in gm.omega_components])
+                        raw_family = _RawPenaltyFamilyReceipt.capture(raw_support, raw_targets)
+                    else:
+                        raw_support = reused_geometry.support
+                        raw_family = reused_geometry.raw_family
+                    raw_coordinate_map = coordinate_map
+                    group_ssp_roots, group_ssp_errors = _ssp_component_roots(
+                        raw_support, coordinate_map
+                    )
+            for component_index, (suffix, omega_j) in enumerate(gm.omega_components):
                 tensor_summary = _tensor_marginal_rank_logdet(
                     gm,
                     omega_j,
                     eps_thresh=eps_thresh,
                 )
-                if tensor_summary is not None:
+                if raw_support is not None:
+                    # Transport one selected raw family through the common map.
+                    # Independent eigen-truncations of transformed Grams can
+                    # rotate their null spaces and invent a union direction.
+                    root = group_ssp_roots[component_index]
+                    root_error = group_ssp_errors[component_index]
+                    omega_ssp_j, matrix_error = _enclosed_root_gram(root, root_error)
+                    matrix_errors.append(matrix_error)
+                    singular = scipy.linalg.svdvals(root, check_finite=False)
+                    rank = float(len(singular))
+                    if np.any(singular <= 0):
+                        from superglm.reml.penalty_support import PenaltyNumericalError
+
+                        raise PenaltyNumericalError("SSP map lost a selected component direction")
+                    log_det = math.fsum(2 * math.log(value) for value in singular)
+                    pos_eigvals = singular**2
+                elif tensor_summary is not None:
                     rank, log_det, pos_eigvals = tensor_summary
                     omega_ssp_j = _canonicalize_ssp_penalty(omega_j, rank)
                 else:
@@ -927,6 +1887,24 @@ def build_penalty_components(
                     lambda_policy=lp_map.get(g.name) or lp_map.get("_default"),
                 )
             )
+        _attach_context_geometry(
+            group_components,
+            support=raw_support,
+            coordinate_map=raw_coordinate_map,
+            matrix_errors=matrix_errors,
+            ssp_roots=group_ssp_roots,
+            ssp_errors=group_ssp_errors,
+            raw_family=raw_family,
+        )
+        if reused_geometry is not None:
+            receipt = reused_geometry.raw_summary
+            if receipt is not None and receipt.matches(reused_geometry):
+                geometry = _context_geometry(group_components)
+                # The raw result is map-independent. Its new owner uses only
+                # the fresh map's admitted volume and starts with no face state.
+                geometry.last_weights = receipt.weights
+                geometry.last_evaluation = (receipt.summary, *geometry.volume)
+                geometry.raw_summary = receipt
         if cache_key is not None:
             component_cache[cache_key] = tuple(group_components)
         components.extend(group_components)
@@ -965,6 +1943,15 @@ def coerce_reml_penalties(
             and hasattr(gm, "omega")
             and gm.omega is not None
         ):
+            if (
+                not isinstance(gm, FactorSmoothGroupMatrix)
+                and getattr(gm, "omega_components", None) is None
+            ):
+                # This is an internally formed singleton, with the same
+                # canonical geometry used to build its compatibility cache.
+                # A raw rounded congruence can contaminate its exact nullspace.
+                components.extend(build_penalty_components(group_matrices, [(idx, g)]))
+                continue
             omega_ssp = gm.R_inv.T @ gm.omega @ gm.R_inv
         if gm is not None and hasattr(gm, "omega"):
             omega_raw = gm.omega
@@ -1010,9 +1997,13 @@ def build_penalty_context(
     group_matrices: list,
     reml_groups: list[tuple[int, object]],
     cache: dict | None = None,
+    *,
+    _reuse_raw_from: Sequence[PenaltyComponent] | None = None,
 ) -> tuple[list[PenaltyComponent], dict[str, PenaltyCache], dict[str, float]]:
     """Build penalty components, caches, and rank lookup in one pass."""
-    components = build_penalty_components(group_matrices, reml_groups, cache=cache)
+    components = build_penalty_components(
+        group_matrices, reml_groups, cache=cache, _reuse_raw_from=_reuse_raw_from
+    )
     caches = {
         c.name: PenaltyCache(
             omega_ssp=c.omega_ssp,
@@ -1040,49 +2031,77 @@ def cached_logdet_s_plus(
     groups sharing a coefficient block, use ``compute_logdet_s_plus``
     which correctly computes the joint log-determinant.
     """
-    total = 0.0
+    penalties = []
     for name, cache in penalty_caches.items():
-        lam = lambdas.get(name, 1.0)
-        if lam > 0 and cache.rank > 0:
-            total += cache.rank * np.log(lam) + cache.log_det_omega_plus
-    return total
+        identity = cache.omega_ssp is None
+        if identity:
+            width = int(cache.rank)
+            if width < 0 or width != cache.rank or cache.log_det_omega_plus != 0.0:
+                raise ValueError("identity penalty cache has invalid analytic geometry")
+        else:
+            width = cache.omega_ssp.shape[0]
+        penalties.append(
+            PenaltyComponent(
+                name=name,
+                group_name=name,
+                group_index=len(penalties),
+                group_sl=slice(0, width),
+                omega_raw=None,
+                omega_ssp=cache.omega_ssp,
+                penalty_kind="identity" if identity else "dense",
+            )
+        )
+    return _compute_penalty_logdet_evaluation(lambdas, penalties).logdet
+
+
+def _group_penalty_matrices(grouped: list[PenaltyComponent]) -> tuple[list[NDArray], int]:
+    """Use a single local block for identically repeated component geometry."""
+    if any(component.group_sl != grouped[0].group_sl for component in grouped[1:]):
+        raise ValueError("Components in one group must share their coefficient slice.")
+    if all(component.penalty_kind == "repeated" for component in grouped):
+        geometry = _repeated_penalty_geometry(grouped[0])
+        if any(_repeated_penalty_geometry(component) != geometry for component in grouped[1:]):
+            raise ValueError("Repeated components in one group must share geometry.")
+        matrices = [np.asarray(_penalty_component_omega_ssp(component)) for component in grouped]
+        if any(matrix.shape != (geometry[1], geometry[1]) for matrix in matrices):
+            raise ValueError("Repeated penalty local matrix does not match its geometry.")
+        return matrices, geometry[0]
+    return [penalty_component_dense_matrix(component) for component in grouped], 1
+
+
+def _group_penalty_rank(grouped: list[PenaltyComponent]) -> int:
+    from superglm.reml.penalty_support import _penalty_support
+
+    geometry = _context_geometry(grouped)
+    if geometry is not None:
+        return geometry.repeat * geometry.get_support().rank
+    if len(grouped) == 1:
+        component = grouped[0]
+        if component.penalty_kind == "identity":
+            return component.group_sl.stop - component.group_sl.start
+        if component.penalty_kind == "sum_to_zero":
+            levels, _ = _sum_to_zero_penalty_geometry(component)
+            return (levels - 1) * _penalty_support([_penalty_component_omega_ssp(component)]).rank
+    matrices, repeat = _group_penalty_matrices(grouped)
+    return repeat * _penalty_support(matrices).rank
 
 
 def compute_total_penalty_rank(
     penalties: list[PenaltyComponent],
     tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
 ) -> float:
-    """Compute total penalty rank, correctly handling shared-block groups.
-
-    For single-component groups, uses the component rank.
-    For multi-component groups sharing a coefficient block, computes
-    rank(Σ Ω_j) which is <= sum of individual ranks due to overlap.
-    """
+    """Rank the supplied components as active, before applying any weights."""
     total = 0.0
-    eps_thresh = np.finfo(float).eps ** (2 / 3)
     for group_name, indices in _group_penalties(penalties).items():
-        if len(indices) == 1:
-            total += penalties[indices[0]].rank
-        elif tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
-            total += tensor_pair_evaluations[group_name].rank
+        if tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
+            tensor = tensor_pair_evaluations[group_name]
+            total += (
+                tensor.support_rank
+                if tensor.support_rank is not None
+                else _group_penalty_rank([penalties[index] for index in indices])
+            )
         else:
-            grouped = [penalties[i] for i in indices]
-            if all(component.penalty_kind == "repeated" for component in grouped):
-                repeat_count, block_width = _repeated_penalty_geometry(grouped[0])
-                if any(
-                    _repeated_penalty_geometry(component) != (repeat_count, block_width)
-                    for component in grouped[1:]
-                ):
-                    raise ValueError("Repeated components in one group must share geometry.")
-                omega_sum = sum(component.omega_ssp for component in grouped)
-                eigvals = np.linalg.eigvalsh(omega_sum)
-                thresh = eps_thresh * max(eigvals.max(), 1e-12)
-                total += float(repeat_count * np.sum(eigvals > thresh))
-                continue
-            omega_sum = sum(component.omega_ssp for component in grouped)
-            eigvals = np.linalg.eigvalsh(omega_sum)
-            thresh = eps_thresh * max(eigvals.max(), 1e-12)
-            total += float(np.sum(eigvals > thresh))
+            total += _group_penalty_rank([penalties[index] for index in indices])
     return total
 
 
@@ -1129,42 +2148,7 @@ def _structural_active_penalty_rank(
                 active.append(component)
         if not active:
             continue
-        if len(active) == 1 and active[0].rank > 0.0:
-            total += int(round(active[0].rank))
-            continue
-        if all(component.penalty_kind == "repeated" for component in active):
-            repeat_count, block_width = _repeated_penalty_geometry(active[0])
-            if any(
-                _repeated_penalty_geometry(component) != (repeat_count, block_width)
-                for component in active[1:]
-            ):
-                raise ValueError("Repeated components in one group must share geometry.")
-            normalized_local = np.zeros((block_width, block_width), dtype=np.float64)
-            for component in active:
-                omega = np.asarray(component.omega_ssp, dtype=np.float64)
-                symmetric = 0.5 * (omega + omega.T)
-                eigenvalues = np.linalg.eigvalsh(symmetric)
-                scale = float(np.max(np.abs(eigenvalues), initial=0.0))
-                if scale > 0.0:
-                    normalized_local += symmetric / scale
-            total += repeat_count * _matrix_penalty_rank(normalized_local)
-            continue
-
-        width = active[0].group_sl.stop - active[0].group_sl.start
-        normalized_sum = np.zeros((width, width), dtype=np.float64)
-        for component in active:
-            omega = component.omega_ssp
-            if omega is None:
-                omega = component.omega_raw
-            omega = np.asarray(omega, dtype=np.float64)
-            if omega.shape != (width, width):
-                raise ValueError("penalty component does not match its coefficient slice")
-            symmetric = 0.5 * (omega + omega.T)
-            eigenvalues = np.linalg.eigvalsh(symmetric)
-            scale = float(np.max(np.abs(eigenvalues), initial=0.0))
-            if scale > 0.0:
-                normalized_sum += symmetric / scale
-        total += _matrix_penalty_rank(normalized_sum)
+        total += _group_penalty_rank(active)
     return total
 
 
@@ -1179,7 +2163,7 @@ def compute_penalty_nullity(
     """Return Wood's ``M_p`` in the identifiable full coefficient space.
 
     Production REML callers should supply ``penalties`` and ``lambdas``.  The
-    rank is then computed from equally normalized active component matrices:
+    rank is then computed from balanced active component roots:
     every finite positive lambda is structurally active, while an exact zero
     is inactive.  This makes ``null(S)`` invariant to arbitrary positive
     smoothing-parameter ratios.
@@ -1236,39 +2220,8 @@ def compute_logdet_s_plus(
     penalties: list[PenaltyComponent],
     tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
 ) -> float:
-    """Compute log|S|₊ correctly for both single and multi-penalty groups.
-
-    For single-component groups, uses the fast additive formula
-    r_j · log(λ_j) + log|Ω_j|₊. For multi-component groups sharing
-    a coefficient block, calls similarity_transform_logdet to compute
-    log|Σ λ_j Ω_j|₊ correctly.
-    """
-    from superglm.reml.multi_penalty import similarity_transform_logdet
-
-    total = 0.0
-    for group_name, indices in _group_penalties(penalties).items():
-        if len(indices) == 1:
-            pc = penalties[indices[0]]
-            lam = lambdas.get(pc.name, 1.0)
-            if lam > 0 and pc.rank > 0:
-                total += pc.rank * np.log(lam) + pc.log_det_omega_plus
-        elif tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
-            total += tensor_pair_evaluations[group_name].logdet_s_plus
-        else:
-            grouped = [penalties[i] for i in indices]
-            repeated_scale = 1
-            if all(component.penalty_kind == "repeated" for component in grouped):
-                geometry = _repeated_penalty_geometry(grouped[0])
-                if any(
-                    _repeated_penalty_geometry(component) != geometry for component in grouped[1:]
-                ):
-                    raise ValueError("Repeated components in one group must share geometry.")
-                repeated_scale = geometry[0]
-            comp_omegas = [component.omega_ssp for component in grouped]
-            comp_lambdas = np.array([lambdas.get(component.name, 1.0) for component in grouped])
-            result = similarity_transform_logdet(comp_omegas, comp_lambdas)
-            total += repeated_scale * result.logdet_s_plus
-    return total
+    """Return the determinant of the common checked component representative."""
+    return _compute_penalty_logdet_evaluation(lambdas, penalties, tensor_pair_evaluations).logdet
 
 
 def compute_logdet_s_derivatives(
@@ -1276,53 +2229,166 @@ def compute_logdet_s_derivatives(
     penalties: list[PenaltyComponent],
     tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
-    """Compute ∂log|S|₊/∂ρ_j and ∂²log|S|₊/(∂ρ_i ∂ρ_j) for multi-penalty groups.
+    """Return log-lambda determinant derivatives on the checked support."""
+    evaluation = _compute_penalty_logdet_evaluation(lambdas, penalties, tensor_pair_evaluations)
+    return evaluation.gradient, evaluation.hessian
 
-    Returns (r_dict, hess_dict) where:
-    - r_dict[pc.name] = the effective r_j for gradient: λ_j tr(S⁻¹ S_j)
-    - hess_dict[(name_i, name_j)] = the log-det Hessian contribution
 
-    For single-component groups, r_j = rank(Ω_j) (the fast shortcut).
-    For multi-component groups, uses logdet_s_gradient / logdet_s_hessian.
+def _compute_penalty_logdet_evaluation(
+    lambdas: dict[str, float],
+    penalties: list[PenaltyComponent],
+    tensor_pair_evaluations: dict[str, TensorPairLogdetEvaluation] | None = None,
+) -> _PenaltyLogdetEvaluation:
+    """Evaluate rank, determinant and derivatives from one representative per group.
+
+    Singleton and compact repeated identities follow Wood (2011), section
+    3.1. Their numerical ranks come from the shared root support, never stale
+    component metadata. Bounds concern that selected representative.
     """
     from superglm.reml.multi_penalty import (
+        _evaluate_penalty_support,
         logdet_s_gradient,
         logdet_s_hessian,
         similarity_transform_logdet,
     )
+    from superglm.reml.penalty_support import PenaltyNumericalError, _penalty_support
 
-    r_dict: dict[str, float] = {}
-    hess_dict: dict[tuple[str, str], float] = {}
-
+    values = np.asarray([lambdas.get(component.name, 1.0) for component in penalties], dtype=float)
+    if not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ValueError("smoothing parameters must be finite and non-negative")
+    names = [component.name for component in penalties]
+    if len(set(names)) != len(names):
+        raise ValueError("penalty component names must be unique")
+    gradient = dict.fromkeys(names, 0.0)
+    gradient_error = dict.fromkeys(names, 0.0)
+    hessian: dict[tuple[str, str], float] = {}
+    hessian_error: dict[tuple[str, str], float] = {}
+    log_terms = []
+    log_errors = []
+    rank = 0
+    unit = np.finfo(float).eps / 2
     for group_name, indices in _group_penalties(penalties).items():
-        if len(indices) == 1:
-            pc = penalties[indices[0]]
-            r_dict[pc.name] = pc.rank
-            # Second derivative of log|λΩ|₊ = r·log(λ) + const w.r.t. ρ is 0.
-            hess_dict[(pc.name, pc.name)] = 0.0
-        elif tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
-            eval_result = tensor_pair_evaluations[group_name]
-            r_dict.update(eval_result.gradient)
-            hess_dict.update(eval_result.hessian)
+        grouped = [penalties[index] for index in indices]
+        group_names = [component.name for component in grouped]
+        group_values = values[indices]
+        for name_i in group_names:
+            for name_j in group_names:
+                hessian[name_i, name_j] = hessian_error[name_i, name_j] = 0.0
+        if not np.any(group_values > 0):
+            continue
+        if tensor_pair_evaluations is not None and group_name in tensor_pair_evaluations:
+            evaluation = tensor_pair_evaluations[group_name]
+            rank += int(evaluation.rank)
+            log_terms.append(evaluation.logdet_s_plus)
+            log_errors.append(evaluation.logdet_error)
+            gradient.update(evaluation.gradient)
+            hessian.update(evaluation.hessian)
+            gradient_error.update(evaluation.gradient_error)
+            hessian_error.update(evaluation.hessian_error)
+            continue
+        component = grouped[0]
+        if len(grouped) == 1 and component.penalty_kind == "identity":
+            group_rank = component.group_sl.stop - component.group_sl.start
+            term = group_rank * math.log(float(group_values[0]))
+            rank += group_rank
+            log_terms.append(term)
+            log_errors.append(4 * unit * abs(term))
+            gradient[component.name] = float(group_rank)
+            continue
+        extra_volume = 0.0
+        geometry = _context_geometry(grouped)
+        if len(grouped) == 1 and component.penalty_kind == "sum_to_zero":
+            levels, _ = _sum_to_zero_penalty_geometry(component)
+            matrices = [_penalty_component_omega_ssp(component)]
+            repeat = levels - 1
+            extra_volume = math.log(levels)
+        elif geometry is not None:
+            matrices, repeat = geometry.matrices, geometry.repeat
         else:
-            grouped = [penalties[i] for i in indices]
-            repeated_scale = 1
-            if all(component.penalty_kind == "repeated" for component in grouped):
-                geometry = _repeated_penalty_geometry(grouped[0])
-                if any(
-                    _repeated_penalty_geometry(component) != geometry for component in grouped[1:]
-                ):
-                    raise ValueError("Repeated components in one group must share geometry.")
-                repeated_scale = geometry[0]
-            comp_omegas = [component.omega_ssp for component in grouped]
-            comp_lambdas = np.array([lambdas.get(component.name, 1.0) for component in grouped])
-            result = similarity_transform_logdet(comp_omegas, comp_lambdas)
-            grad = logdet_s_gradient(result, comp_omegas, comp_lambdas)
-            hess = logdet_s_hessian(result, comp_omegas, comp_lambdas)
-            for local_i, global_i in enumerate(indices):
-                name_i = penalties[global_i].name
-                r_dict[name_i] = float(repeated_scale * grad[local_i])
-                for local_j, global_j in enumerate(indices):
-                    name_j = penalties[global_j].name
-                    hess_dict[(name_i, name_j)] = float(repeated_scale * hess[local_i, local_j])
-    return r_dict, hess_dict
+            matrices, repeat = _group_penalty_matrices(grouped)
+        if len(grouped) == 1:
+            # Establish the unweighted representative once, then use the
+            # analytic affine log-lambda identity. Its derivatives are exact.
+            support = geometry.get_support() if geometry is not None else _penalty_support(matrices)
+            log_weight = math.log(float(group_values[0]))
+            try:
+                result = (
+                    geometry.evaluate(np.ones(1))[0]
+                    if geometry is not None
+                    else _evaluate_penalty_support(support, np.ones(1))
+                )
+            except PenaltyNumericalError as exc:
+                if str(exc) != "required dense penalty inverse is not representable":
+                    raise
+                # The actual weighted system may have a representable inverse
+                # even when a component's arbitrary units make P^-1 overflow.
+                result = (
+                    geometry.evaluate(group_values)[0]
+                    if geometry is not None
+                    else _evaluate_penalty_support(support, group_values)
+                )
+                log_weight = 0.0
+            group_rank = repeat * result.rank
+            term = math.fsum(
+                [
+                    repeat * result.logdet_s_plus,
+                    result.rank * extra_volume,
+                    group_rank * log_weight,
+                ]
+            )
+            rank += group_rank
+            log_terms.append(term)
+            gradient[component.name] = float(group_rank)
+            certificate = result._certificate
+            if certificate is None:
+                raise ValueError("penalty evaluation did not provide arithmetic evidence")
+            log_errors.append(
+                repeat * certificate.logdet_error
+                + 8
+                * unit
+                * (
+                    abs(repeat * result.logdet_s_plus)
+                    + abs(result.rank * extra_volume)
+                    + abs(group_rank * log_weight)
+                )
+            )
+            continue
+        if geometry is None:
+            result = similarity_transform_logdet(matrices, group_values)
+            volume, volume_error = 0.0, 0.0
+            grad = logdet_s_gradient(result, matrices, group_values)
+            hess = logdet_s_hessian(result, matrices, group_values)
+        else:
+            result, volume, volume_error = geometry.evaluate(group_values)
+            grad, hess = result.gradient, result.hessian
+        certificate = result._certificate
+        if certificate is None:
+            raise ValueError("penalty evaluation did not provide arithmetic evidence")
+        rank += repeat * result.rank
+        term = repeat * math.fsum([result.logdet_s_plus, volume])
+        log_terms.append(term)
+        log_errors.append(
+            repeat * (certificate.logdet_error + volume_error)
+            + 4 * unit * repeat * (abs(result.logdet_s_plus) + abs(volume))
+        )
+        for i, name_i in enumerate(group_names):
+            gradient[name_i] = float(repeat * grad[i])
+            gradient_error[name_i] = float(
+                repeat * certificate.gradient_error[i] + 2 * unit * abs(gradient[name_i])
+            )
+            for j, name_j in enumerate(group_names):
+                key = (name_i, name_j)
+                hessian[key] = float(repeat * hess[i, j])
+                hessian_error[key] = float(
+                    repeat * certificate.hessian_error[i, j] + 2 * unit * abs(hessian[key])
+                )
+    logdet = math.fsum(log_terms)
+    return _PenaltyLogdetEvaluation(
+        rank=rank,
+        logdet=logdet,
+        gradient=gradient,
+        hessian=hessian,
+        logdet_error=math.fsum(log_errors) + 2 * unit * abs(logdet),
+        gradient_error=gradient_error,
+        hessian_error=hessian_error,
+    )

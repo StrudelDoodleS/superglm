@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import FrozenInstanceError, dataclass, fields, replace
 
 import numpy as np
@@ -13,7 +14,10 @@ import superglm.distributional.smoothing.authority as smoothing_authority
 import superglm.distributional.smoothing.endpoint_laml as endpoint_laml_module
 import superglm.distributional.smoothing.faces as smoothing_faces
 import superglm.distributional.smoothing.loop as smoothing_loop
+import superglm.distributional.smoothing.penalty_geometry as penalty_geometry
 import superglm.distributional.solver.solver as solver_module
+import superglm.reml.multi_penalty as penalty_kernel
+import superglm.reml.penalty_support as penalty_support
 from superglm._frame import as_eager_frame
 from superglm.distributional.efs import fit_distributional_efs
 from superglm.distributional.endpoint_laml import (
@@ -54,7 +58,6 @@ from superglm.distributional.solver import fit_dense_fixed_lambda
 from superglm.distributional.weights import ResolvedLikelihoodWeights
 from superglm.features import Numeric, RandomEffect, Spline
 from superglm.links import IdentityLink
-from superglm.reml.multi_penalty import SimilarityTransformResult
 from superglm.solvers.rank import decompose_gram
 from superglm.types import PenaltyComponent
 
@@ -732,6 +735,42 @@ def _zero_step_strict_armijo_face_problem() -> tuple[
     )
 
 
+def _replace_with_certified_nonstationary_objective_step(
+    result: DenseSolverResult,
+    terminal_score: np.ndarray,
+) -> DenseSolverResult:
+    """Forge a valid scaled-decrement stop for downstream authority tests."""
+    score = np.asarray(terminal_score, dtype=np.float64)
+    if result.coefficient_face is None:
+        retained_score = score
+        retained_curvature = result.terminal_penalized_curvature
+    else:
+        face = result.coefficient_face
+        retained_score = face.reduce_vector(score)
+        retained_curvature = face.reduce_matrix(result.terminal_penalized_curvature)
+    rank = decompose_gram(retained_curvature)
+    correction = rank.solve(retained_score)
+    decrement = float(retained_score @ correction)
+    objective = result.penalized_optimizing_log_likelihood
+    assert objective is not None
+    limit = result.config.tolerance * (1.0 + abs(objective))
+    if decrement > limit:
+        score_scale = math.sqrt(0.5 * limit / decrement)
+        scaled_score = score_scale * retained_score
+        score = (
+            scaled_score
+            if result.coefficient_face is None
+            else result.coefficient_face.lift_vector(scaled_score)
+        )
+    return replace(
+        result,
+        terminal_score=score,
+        score_relative=1.0,
+        converged=True,
+        convergence_reason="objective_and_step",
+    )
+
+
 def _resolution_limited_face_problem(
     coefficient_scale: float = 1.0,
 ) -> tuple[
@@ -1379,8 +1418,8 @@ def test_private_score_only_solver_continues_past_ordinary_objective_step_stop()
     assert ordinary.config is config
     assert ordinary.converged is True
     assert ordinary.convergence_reason == "objective_and_step"
-    assert ordinary.iterations == 1
-    np.testing.assert_array_equal(ordinary.coefficients, np.array([5.0 / 4.0]))
+    assert ordinary.iterations == 15
+    np.testing.assert_array_equal(ordinary.coefficients, np.array([4.75]))
     assert ordinary.history[0].objective_relative_change == pytest.approx(
         31.0 / 288.0,
         rel=0.0,
@@ -1392,7 +1431,7 @@ def test_private_score_only_solver_continues_past_ordinary_objective_step_stop()
         abs=16.0 * epsilon,
     )
     assert ordinary.score_relative == pytest.approx(
-        120.0 / 257.0,
+        8.0 / 33.0,
         rel=0.0,
         abs=16.0 * epsilon,
     )
@@ -1576,7 +1615,14 @@ def test_endpoint_authority_score_only_dispatch_has_exact_failure_metadata_scope
                 kwargs["score_only"] = True
             result = real_fit_fixed_state(*args, **kwargs)  # type: ignore[arg-type]
             if len(modes) == 1:
-                result = replace(result, **overrides)
+                if case == "already_converged":
+                    result = _replace_with_certified_nonstationary_objective_step(
+                        result,
+                        face.lift_vector(np.array([1.0e-6])),
+                    )
+                    result = replace(result, converged=True)
+                else:
+                    result = replace(result, **overrides)
                 sources.append(result)
             return result
 
@@ -1627,7 +1673,11 @@ def test_endpoint_authority_score_only_dispatch_has_exact_failure_metadata_scope
         "eligible": False,
         "wrong_reason": True,
         "nonzero_iterations": True,
-        "already_converged": False,
+        # This source is a valid objective-and-step certificate, but its
+        # deliberately strict Armijo configuration cannot accept the fresh
+        # score-only polish trial.  Dispatch still occurs (above); retaining
+        # the source is the authority contract when polish does not certify.
+        "already_converged": True,
     }
     assert source_metadata_by_case == {
         "eligible": (False, "line_search_failed", 0),
@@ -2982,11 +3032,7 @@ def test_efs_records_typed_joint_failures_with_their_one_fitted_face(
                 )
             terminal_score = np.array(fit.terminal_score, copy=True)
             terminal_score[-1] = 1.0e-4
-            return replace(
-                fit,
-                terminal_score=terminal_score,
-                convergence_reason="objective_and_step",
-            )
+            return _replace_with_certified_nonstationary_objective_step(fit, terminal_score)
 
         monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", fail_joint_fit)
         monkeypatch.setattr(smoothing_loop, "_fit_endpoint_authority_stationary", fail_joint_fit)
@@ -3061,10 +3107,9 @@ def test_joint_face_result_rejects_forged_fit_authority_and_chronology(
     moving_score_fits = list(smoothing.coefficient_fits)
     terminal_score = np.array(endpoint_fit.terminal_score, copy=True)
     terminal_score[-1] = 1.0e-4
-    moving_score_fits[accepted_index] = replace(
+    moving_score_fits[accepted_index] = _replace_with_certified_nonstationary_objective_step(
         endpoint_fit,
-        terminal_score=terminal_score,
-        convergence_reason="objective_and_step",
+        terminal_score,
     )
     with pytest.raises(ValueError, match="stationary common fit"):
         replace(smoothing, coefficient_fits=tuple(moving_score_fits))
@@ -3693,17 +3738,35 @@ def test_terminal_face_recheck_refuses_a_moving_endpoint_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = 0
+    inject_endpoint_result = False
+    injected = False
     real_check = efs_module._check_face_direction
+    real_fit = smoothing_faces._fit_endpoint_authority_stationary
+
+    def inject_solver_result(*args: object, **kwargs: object):
+        nonlocal injected
+        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
+        if inject_endpoint_result and not injected and kwargs.get("face") is not None:
+            face = kwargs["face"]
+            assert face is not None
+            moved = np.array(fit.coefficients, copy=True)
+            moved += 1.0e-4 * face.constraint_basis[:, 0]
+            object.__setattr__(fit, "coefficients", moved)
+            injected = True
+        return fit
 
     def perturb_revalidation_start(*args: object, **kwargs: object):
-        nonlocal calls
+        nonlocal calls, inject_endpoint_result
         calls += 1
         if calls == 2:
-            endpoint_initial = np.array(kwargs["endpoint_initial"], copy=True)
-            endpoint_initial[0] += 1.0e-4
-            kwargs["endpoint_initial"] = endpoint_initial
-        return real_check(*args, **kwargs)  # type: ignore[arg-type]
+            np.testing.assert_array_equal(kwargs["endpoint_initial"], kwargs["initial"])
+            inject_endpoint_result = True
+        try:
+            return real_check(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            inject_endpoint_result = False
 
+    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", inject_solver_result)
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
     monkeypatch.setattr(efs_module, "_check_face_direction", perturb_revalidation_start)
     component_name, smoothing = _scalar_efs_fit(0.5)
@@ -3720,36 +3783,48 @@ def test_stationary_cap_recheck_refuses_tiny_endpoint_state_movement(
 ) -> None:
     """Kills applying the direct-route refit envelope to an ordinary cap."""
     calls = 0
-    perturbed_starts: list[np.ndarray] = []
+    inject_endpoint_result = False
+    injected = False
     real_check = efs_module._check_face_direction
+    real_fit = smoothing_faces._fit_endpoint_authority_stationary
+
+    def inject_solver_result(*args: object, **kwargs: object):
+        nonlocal injected
+        fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
+        if inject_endpoint_result and not injected and kwargs.get("face") is not None:
+            face = kwargs["face"]
+            assert face is not None
+            moved = np.array(fit.coefficients, copy=True)
+            moved += 1.0e-14 * face.constraint_basis[:, 0]
+            object.__setattr__(fit, "coefficients", moved)
+            injected = True
+        return fit
 
     def perturb_revalidation_start(*args: object, **kwargs: object):
-        nonlocal calls
+        nonlocal calls, inject_endpoint_result
         calls += 1
         if calls == 2:
-            endpoint_initial = np.array(kwargs["endpoint_initial"], copy=True)
-            endpoint_initial[0] += 1.0e-14
-            perturbed_starts.append(endpoint_initial)
-            kwargs["endpoint_initial"] = endpoint_initial
-        return real_check(*args, **kwargs)  # type: ignore[arg-type]
+            np.testing.assert_array_equal(kwargs["endpoint_initial"], kwargs["initial"])
+            inject_endpoint_result = True
+        try:
+            return real_check(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            inject_endpoint_result = False
 
+    monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", inject_solver_result)
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
     monkeypatch.setattr(efs_module, "_check_face_direction", perturb_revalidation_start)
     component_name, smoothing = _scalar_efs_fit(0.5)
 
     assert calls == 2
-    assert len(perturbed_starts) == 1
     terminal_event = smoothing.history[-1]
     endpoint_index = terminal_event.coefficient_fit_indices[1]
     endpoint_fit = smoothing.coefficient_fits[endpoint_index]
-    movement_bound = efs_module._endpoint_candidate_refit_bound(
-        perturbed_starts[0],
-        endpoint_fit,
-        tolerance=terminal_event.coefficient_tolerances[1],
+    source_fit = smoothing.coefficient_fits[terminal_event.source_fit_index]
+    movement = float(
+        np.max(np.abs(endpoint_fit.coefficients - source_fit.coefficients), initial=0.0)
     )
-    movement = float(np.max(np.abs(endpoint_fit.coefficients - perturbed_starts[0]), initial=0.0))
-    assert movement_bound is not None
-    assert 0.0 < movement <= movement_bound
+    assert movement > 0.0
 
     assert smoothing.converged is False
     assert smoothing.convergence_reason == "endpoint_revalidation_failed"
@@ -5673,31 +5748,26 @@ def test_projected_penalty_refuses_nonzero_logdet_for_a_zero_rank_group(
 ) -> None:
     """Kills allowing another group to mask an invalid rank/logdet pair."""
     layout, face, lambdas = _independent_projected_penalty_problem()
-    real_logdet = endpoint_laml_module.similarity_transform_logdet
+    real_logdet = penalty_kernel._evaluate_penalty_summary
     calls = 0
 
     def malformed_second_group(
-        penalty_matrices: list[np.ndarray],
+        support,
         finite_lambdas: np.ndarray,
-    ) -> SimilarityTransformResult:
+    ) -> penalty_kernel._PenaltySummary:
         nonlocal calls
         calls += 1
         if calls == 1:
-            return real_logdet(penalty_matrices, finite_lambdas)
-        width = penalty_matrices[0].shape[0]
-        zeros = np.zeros((width, width), dtype=np.float64)
-        return SimilarityTransformResult(
+            return real_logdet(support, finite_lambdas)
+        return replace(
+            real_logdet(support, finite_lambdas),
             logdet_s_plus=1.0,
-            S_pinv_plus=zeros,
-            Q_plus=np.zeros((width, 0), dtype=np.float64),
-            Q_zero=np.eye(width, dtype=np.float64),
-            E_sqrt=zeros,
             rank=0,
         )
 
     monkeypatch.setattr(
-        endpoint_laml_module,
-        "similarity_transform_logdet",
+        penalty_kernel,
+        "_evaluate_penalty_summary",
         malformed_second_group,
     )
 
@@ -5790,9 +5860,7 @@ def test_projected_penalty_accepts_unresolved_negative_roundoff_under_shared_pol
     assert result.log_pdet == pytest.approx(expected_log_pdet, rel=0.0, abs=tolerance)
 
 
-def test_projected_penalty_symmetrizes_finite_large_projection_without_overflow(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_projected_compatibility_inputs_symmetrize_large_projection_without_overflow() -> None:
     layout, face, _lambdas, _, _ = _projected_penalty_problem()
     face_component = next(
         component for component in layout.penalties if component.name in face.component_names
@@ -5813,36 +5881,13 @@ def test_projected_penalty_symmetrizes_finite_large_projection_without_overflow(
         face,
         large_component,
     )
-    captured: list[np.ndarray] | None = None
-    width = aligned_face.reduced_width
-    q_plus = np.eye(width, dtype=np.float64)[:, :1]
-    q_zero = np.eye(width, dtype=np.float64)[:, 1:]
-
-    def capture_logdet(
-        penalty_matrices: list[np.ndarray],
-        _finite_lambdas: np.ndarray,
-    ) -> SimilarityTransformResult:
-        nonlocal captured
-        captured = [np.array(matrix, copy=True) for matrix in penalty_matrices]
-        return SimilarityTransformResult(
-            logdet_s_plus=0.0,
-            S_pinv_plus=q_plus @ q_plus.T,
-            Q_plus=q_plus,
-            Q_zero=q_zero,
-            E_sqrt=q_plus @ q_plus.T,
-            rank=1,
-        )
-
-    monkeypatch.setattr(endpoint_laml_module, "similarity_transform_logdet", capture_logdet)
-
-    result = projected_finite_penalty_logdet(
+    _components, captured, values = endpoint_laml_module._projected_finite_penalty_inputs(
         layout=large_layout,
         lambdas={face_component.name: 13.0, large_component.name: 0.0},
         face=aligned_face,
     )
 
-    assert result.rank == 1
-    assert captured is not None
+    np.testing.assert_array_equal(values, [0.0])
     assert len(captured) == 1
     assert np.all(np.isfinite(captured[0]))
     assert large_value > np.finfo(np.float64).max / 2.0
@@ -5914,7 +5959,7 @@ def test_projected_penalty_contains_nonfinite_local_retained_component(
     assert str(error.value.__cause__) == "array must not contain infs or NaNs"
 
 
-def test_projected_penalty_contains_finite_input_projection_overflow() -> None:
+def test_projected_compatibility_inputs_contain_finite_input_projection_overflow() -> None:
     layout, face, _lambdas, _, _ = _projected_penalty_problem()
     face_component = next(
         component for component in layout.penalties if component.name in face.component_names
@@ -5962,7 +6007,7 @@ def test_projected_penalty_contains_finite_input_projection_overflow() -> None:
         endpoint_laml_module.EndpointLaplaceError,
         match="projection of retained penalty .* produced non-finite values",
     ) as error:
-        projected_finite_penalty_logdet(
+        endpoint_laml_module._projected_finite_penalty_inputs(
             layout=overflowing_layout,
             lambdas={face_component.name: 13.0, overflowing.name: 1.0},
             face=rotated_face,
@@ -5976,7 +6021,7 @@ def test_projected_penalty_contains_finite_input_projection_overflow() -> None:
     ("stage", "error_type"),
     [
         pytest.param("materialization", TypeError, id="materialization-type-error"),
-        pytest.param("norm", RuntimeError, id="norm-runtime-error"),
+        pytest.param("support", RuntimeError, id="support-runtime-error"),
         pytest.param("decomposition", ValueError, id="decomposition-value-error"),
         pytest.param("decomposition", RuntimeError, id="decomposition-runtime-error"),
     ],
@@ -5993,11 +6038,11 @@ def test_projected_penalty_does_not_reclassify_programming_errors(
         raise sentinel
 
     if stage == "materialization":
-        monkeypatch.setattr(endpoint_laml_module, "penalty_component_dense_matrix", fail)
-    elif stage == "norm":
-        monkeypatch.setattr(endpoint_laml_module, "_spectral_norm", fail)
+        monkeypatch.setattr(penalty_geometry, "penalty_component_dense_matrix", fail)
+    elif stage == "support":
+        monkeypatch.setattr(penalty_support, "_penalty_support_from_roots", fail)
     else:
-        monkeypatch.setattr(endpoint_laml_module, "decompose_gram", fail)
+        monkeypatch.setattr(penalty_support, "_component_root", fail)
 
     with pytest.raises(error_type, match="programming sentinel") as error:
         projected_finite_penalty_logdet(
@@ -6015,18 +6060,18 @@ def test_projected_penalty_projects_each_component_before_logdet_kernel(
     layout, face, lambdas, first_matrix, second_matrix = _projected_penalty_problem()
     captured_matrices: list[np.ndarray] | None = None
     captured_lambdas: np.ndarray | None = None
-    real_logdet = endpoint_laml_module.similarity_transform_logdet
+    real_logdet = penalty_kernel._evaluate_penalty_summary
 
     def capture_logdet(
-        penalty_matrices: list[np.ndarray],
+        support,
         finite_lambdas: np.ndarray,
-    ) -> SimilarityTransformResult:
+    ) -> penalty_kernel._PenaltySummary:
         nonlocal captured_matrices, captured_lambdas
-        captured_matrices = [np.array(matrix, copy=True) for matrix in penalty_matrices]
+        captured_matrices = [root.T @ root for root in support.component_roots]
         captured_lambdas = np.array(finite_lambdas, copy=True)
-        return real_logdet(penalty_matrices, finite_lambdas)
+        return real_logdet(support, finite_lambdas)
 
-    monkeypatch.setattr(endpoint_laml_module, "similarity_transform_logdet", capture_logdet)
+    monkeypatch.setattr(penalty_kernel, "_evaluate_penalty_summary", capture_logdet)
 
     result = projected_finite_penalty_logdet(
         layout=layout,

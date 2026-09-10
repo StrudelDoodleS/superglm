@@ -18,6 +18,7 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -430,8 +431,17 @@ class GammaLS:
             theta, n_observations=None, parameters=self.parameters, family_name="GammaLS"
         )
         prior = _prior_weight_vector(weights, len(values))
-        spread = values[:, 0] * values[:, 1]
-        return readonly(spread * spread / prior)
+        mean, cv = values[:, 0], values[:, 1]
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            spread = mean * cv
+            square = spread * spread
+            result = square / prior
+        unsafe = ~np.isfinite(square) | (square < np.finfo(float).tiny)
+        for index in np.flatnonzero(unsafe):
+            result[index] = _variance_product(
+                (mean[index], cv[index], mean[index], cv[index]), (prior[index],)
+            )
+        return readonly(result)
 
     def cdf_prior_weighted(
         self, y: NDArray, theta: NDArray, weights: NDArray

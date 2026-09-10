@@ -8,9 +8,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+from superglm.distributions import clip_mu
 from superglm.group_matrix import FactorSmoothGroupMatrix, RandomEffectGroupMatrix
 from superglm.links import stabilize_eta
+from superglm.solvers.working_rows import fisher_working_weights
 
 if TYPE_CHECKING:
     from superglm.distributions import Distribution
@@ -126,9 +127,13 @@ def build_reporting_support_state(
 
     full_eta = stabilize_eta(dm.matvec(result.beta) + result.intercept + offset, link)
     mu = clip_mu(link.inverse(full_eta), distribution)
-    variance = np.maximum(distribution.variance(mu), _VARIANCE_FLOOR)
-    derivative = link.deriv_inverse(full_eta)
-    working_weights = sample_weight * derivative**2 / variance
+    working_weights = fisher_working_weights(
+        distribution=distribution,
+        link=link,
+        mu=mu,
+        eta=full_eta,
+        sample_weight=sample_weight,
+    )
     supplied = information_by_group_index or {}
     totals: dict[str, StructuredLevelSupport | FactorSmoothLevelSupport] = {}
 

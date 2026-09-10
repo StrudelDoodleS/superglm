@@ -28,7 +28,7 @@ from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.linalg import cho_factor, cho_solve
+from scipy.linalg import cho_factor, cho_solve, norm
 from scipy.sparse.linalg import LinearOperator, minres
 
 from superglm.group_matrix import _disc_disc_2d_hist
@@ -281,6 +281,85 @@ def _safe_trial_objective_delta(
     return float(objective_delta) if np.isfinite(objective_delta) else np.inf
 
 
+def _objective_delta_roundoff(
+    *,
+    gammas: list[NDArray],
+    trial_gammas: list[NDArray],
+    betas: list[NDArray],
+    trial_betas: list[NDArray],
+    grams: list[NDArray],
+    penalties: list[NDArray],
+    lambdas: list[float],
+    response_norm: float,
+    n_rows: int,
+) -> float:
+    """Bound rounding in the expanded, represented WLS objective difference.
+
+    Cauchy--Schwarz gives ||sqrt(W) B gamma|| <= sum_j |gamma_j|
+    sqrt((B'WB)_jj). Thus cached Gram diagonals bound the absolute expanded
+    data actions without an observation-level trial calculation. Include the
+    formation of projected residuals: |B'W r| alone misses cancellation in r.
+    Bound penalty cross actions explicitly; |S| need not be positive definite.
+
+    gamma_k = k*u/(1-k*u) covers weighted row accumulation (including bins),
+    matrix/vector products, subtraction and summation in the delta. The bound
+    concerns the represented gamma endpoints; it does not assert a libm error
+    bound for exp. No additive objective unit or optimizer tolerance enters.
+    """
+    width = sum(len(beta) for beta in betas)
+    count = 4 * n_rows + 6 * width + 4 * len(betas) + 32
+    ku = count * (np.finfo(float).eps / 2.0)
+    if ku >= 1.0:
+        return np.inf
+    gamma_k = np.longdouble(ku / (1.0 - ku))
+    inflation = 1.0 / (1.0 - gamma_k)
+    with np.errstate(over="ignore", invalid="ignore"):
+        column_norms = [
+            np.sqrt(np.asarray(np.diag(gram), dtype=np.longdouble) * inflation) for gram in grams
+        ]
+        response_bound = np.longdouble(response_norm) * inflation
+        current_bound = np.longdouble(0.0)
+        trial_bound = np.longdouble(0.0)
+        delta_bound = np.longdouble(0.0)
+        for current, trial, columns in zip(gammas, trial_gammas, column_norms, strict=True):
+            current = np.asarray(current, dtype=np.longdouble)
+            trial = np.asarray(trial, dtype=np.longdouble)
+            current_bound += np.abs(current) @ columns
+            trial_bound += np.abs(trial) @ columns
+            delta_bound += np.abs(trial - current) @ columns
+        # Absolute linear/quadratic actions, followed by propagation of the
+        # subtraction error in delta_gamma. The final term encloses its square.
+        endpoint_sum = current_bound + trial_bound
+        action = delta_bound * (response_bound + current_bound + 0.5 * delta_bound)
+        action += endpoint_sum * (response_bound + current_bound + delta_bound)
+        action += 0.5 * gamma_k * endpoint_sum**2
+        for current, trial, penalty, lam in zip(
+            betas, trial_betas, penalties, lambdas, strict=True
+        ):
+            current = np.asarray(current, dtype=np.longdouble)
+            trial = np.asarray(trial, dtype=np.longdouble)
+            x = np.abs(current)
+            delta = np.abs(trial - current)
+            endpoint_sum = x + np.abs(trial)
+            matrix = np.abs(np.asarray(penalty, dtype=np.longdouble))
+            matrix_x = matrix @ x
+            matrix_delta = matrix @ delta
+            matrix_sum = matrix @ endpoint_sum
+            expansion = x @ matrix_delta + delta @ matrix_x + delta @ matrix_delta
+            subtraction = (
+                x @ matrix_sum
+                + endpoint_sum @ matrix_x
+                + delta @ matrix_sum
+                + endpoint_sum @ matrix_delta
+                + gamma_k * (endpoint_sum @ matrix_sum)
+            )
+            action += 0.5 * abs(lam) * (expansion + subtraction)
+        allowance = float(gamma_k * inflation * action)
+    if not np.isfinite(allowance):
+        return np.inf
+    return float(np.nextafter(allowance, np.inf)) if allowance > 0.0 else 0.0
+
+
 def scop_newton_step(
     B_scop: NDArray,
     W: NDArray,
@@ -415,6 +494,7 @@ def scop_newton_step(
     # are treated as rejected line-search proposals, never as accepted iterates.
     alpha = 1.0
     accepted = False
+    response_norm = float(norm(np.sqrt(W) * z, check_finite=False))
 
     for _ in range(max_halving + 1):  # +1 for the initial full step
         beta_trial = beta - alpha * step
@@ -428,7 +508,22 @@ def scop_newton_step(
             r_eff,
             BtWB,
         )
-        if np.isfinite(objective_delta) and objective_delta <= 1e-14:
+        allowance = (
+            _objective_delta_roundoff(
+                gammas=[gamma_eff],
+                trial_gammas=[reparam.forward(beta_trial)],
+                betas=[beta],
+                trial_betas=[beta_trial],
+                grams=[BtWB],
+                penalties=[S_scop],
+                lambdas=[lambda2],
+                response_norm=response_norm,
+                n_rows=len(W),
+            )
+            if np.isfinite(objective_delta)
+            else np.inf
+        )
+        if np.isfinite(objective_delta) and np.isfinite(allowance) and objective_delta <= allowance:
             accepted = True
             break
         alpha *= 0.5
@@ -1402,6 +1497,7 @@ def scop_joint_newton_step(
     # --- Step 5: Joint line search ---
     alpha = 1.0
     accepted = False
+    response_norm = float(norm(np.sqrt(W) * z_scop, check_finite=False))
 
     for _ in range(max_halving + 1):
         beta_trial = beta_joint - alpha * step
@@ -1414,7 +1510,25 @@ def scop_joint_newton_step(
             r_effs,
             objective_cache,
         )
-        if np.isfinite(objective_delta) and objective_delta <= 1e-14:
+        allowance = (
+            _objective_delta_roundoff(
+                gammas=gammas,
+                trial_gammas=[
+                    state["reparam"].forward(beta_trial[group_slice])
+                    for (_, state), group_slice in zip(scop_items, joint_slices, strict=True)
+                ],
+                betas=betas,
+                trial_betas=[beta_trial[group_slice] for group_slice in joint_slices],
+                grams=BtWBs,
+                penalties=[state["S_scop"] for _, state in scop_items],
+                lambdas=lambdas_list,
+                response_norm=response_norm,
+                n_rows=len(W),
+            )
+            if np.isfinite(objective_delta)
+            else np.inf
+        )
+        if np.isfinite(objective_delta) and np.isfinite(allowance) and objective_delta <= allowance:
             accepted = True
             break
         alpha *= 0.5

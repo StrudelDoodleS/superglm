@@ -35,6 +35,7 @@ from superglm.solvers.rank import (
     diagonal_of_square,
     needs_factor_certification,
 )
+from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice
 
 
@@ -1000,7 +1001,15 @@ def build_observed_scop_joint_geometry(
         _VARIANCE_FLOOR,
     )
     dmu_deta = np.asarray(link.deriv_inverse(eta), dtype=np.float64)
-    fisher_weights = sample_weight * dmu_deta**2 / variance
+    fisher_weights = fisher_working_weights(
+        distribution=distribution,
+        link=link,
+        mu=mu,
+        eta=eta,
+        sample_weight=sample_weight,
+        dmu_deta=dmu_deta,
+        variance=variance,
+    )
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         negative_score_eta = sample_weight * (mu - y) * dmu_deta / variance
     if not np.all(np.isfinite(negative_score_eta)):

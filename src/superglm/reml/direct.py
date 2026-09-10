@@ -56,6 +56,7 @@ from superglm.reml.penalty_algebra import (
     penalty_component_quadratic,
     total_penalty_quadratic,
 )
+from superglm.reml.penalty_support import PenaltyNumericalError
 from superglm.reml.result import REMLResult
 from superglm.reml.scale import (
     prepare_reml_scale_data,
@@ -1242,29 +1243,36 @@ def optimize_direct_reml(
                     continue
                 trial_mode_stationary = True
 
-            trial_evaluation = reml_laml_objective(
-                dm,
-                distribution,
-                link,
-                groups,
-                y,
-                trial_result,
-                trial_lambdas,
-                sample_weight,
-                offset_arr,
-                XtWX=trial_xtwx,
-                penalty_caches=penalty_caches,
-                log_det_H=trial_logdet,
-                hessian_rank=trial_hessian_rank,
-                S_override=S_trial,
-                reml_penalties=penalties,
-                likelihood_size=likelihood_size,
-                saturated_log_weight=saturated_log_weight,
-                weight_semantics=weight_semantics,
-                gamma_scale_data=gamma_scale_data,
-                tweedie_scale_data=tweedie_scale_data,
-                return_evaluation=True,
-            )
+            try:
+                trial_evaluation = reml_laml_objective(
+                    dm,
+                    distribution,
+                    link,
+                    groups,
+                    y,
+                    trial_result,
+                    trial_lambdas,
+                    sample_weight,
+                    offset_arr,
+                    XtWX=trial_xtwx,
+                    penalty_caches=penalty_caches,
+                    log_det_H=trial_logdet,
+                    hessian_rank=trial_hessian_rank,
+                    S_override=S_trial,
+                    reml_penalties=penalties,
+                    likelihood_size=likelihood_size,
+                    saturated_log_weight=saturated_log_weight,
+                    weight_semantics=weight_semantics,
+                    gamma_scale_data=gamma_scale_data,
+                    tweedie_scale_data=tweedie_scale_data,
+                    return_evaluation=True,
+                )
+            except PenaltyNumericalError:
+                # A refused trial supplies no objective or precision evidence.
+                # Keep the retained state and try a shorter step. The current
+                # candidate's objective and caller-contract errors still raise.
+                step *= 0.5
+                continue
             trial_obj = (
                 trial_evaluation.value
                 if isinstance(trial_evaluation, REMLObjectiveEvaluation)

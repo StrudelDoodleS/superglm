@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.reml.multi_penalty as multi_penalty
 import superglm.reml.penalty_algebra as penalty_algebra
 import superglm.solvers.irls_direct as irls_direct
 from superglm import FactorSmooth, LambdaPolicy, Numeric, Spline, SuperGLM
@@ -465,13 +466,30 @@ def test_sz_structured_fit_uses_tabmat_small_partition_without_dense_dominant(
     discrete: bool,
 ) -> None:
     X, y, weights, offset = _data("gaussian")
+    dense_penalty_shapes = set()
+    support_dimensions = set()
+    materialize_penalty = penalty_algebra.penalty_component_dense_matrix
+    evaluate_support = multi_penalty._evaluate_penalty_geometry
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("structured SZ path materialized dominant geometry")
 
+    def checked_penalty(component, *args, **kwargs):
+        if component.group_name == "x:group:sz":
+            forbidden()
+        matrix = materialize_penalty(component, *args, **kwargs)
+        dense_penalty_shapes.add(matrix.shape)
+        assert matrix is component.omega_ssp
+        return matrix
+
+    def checked_support(support, *args, **kwargs):
+        support_dimensions.add((support.Q_plus.shape[0], support.rank))
+        return evaluate_support(support, *args, **kwargs)
+
     monkeypatch.setattr(FactorSmoothGroupMatrix, "toarray", forbidden)
     monkeypatch.setattr(FactorSmoothGroupMatrix, "gram", forbidden)
-    monkeypatch.setattr(penalty_algebra, "penalty_component_dense_matrix", forbidden)
+    monkeypatch.setattr(penalty_algebra, "penalty_component_dense_matrix", checked_penalty)
+    monkeypatch.setattr(multi_penalty, "_evaluate_penalty_geometry", checked_support)
     model = _model(
         family="gaussian",
         discrete=discrete,
@@ -494,3 +512,11 @@ def test_sz_structured_fit_uses_tabmat_small_partition_without_dense_dominant(
     assert layout.small_execution_plan.ordinary_indices
     assert layout.small_execution_plan._ordinary_split_built
     assert model.result.direct_backend == "structured"
+    assert dense_penalty_shapes <= {(8, 8)}
+    assert support_dimensions == {(8, 7), (6, 4)}
+    dominant = next(
+        component for component in model._reml_penalties if component.group_name == "x:group:sz"
+    )
+    assert dominant.group_sl.stop - dominant.group_sl.start == 30
+    with pytest.raises(AssertionError, match="materialized dominant geometry"):
+        penalty_algebra.penalty_component_dense_matrix(dominant)

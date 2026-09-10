@@ -49,6 +49,7 @@ from superglm.solvers.rank import (
     selected_group_name_set,
     streamed_weighted_factor,
 )
+from superglm.solvers.working_rows import fisher_working_weights, pearson_chi2
 from superglm.types import GroupSlice
 
 if TYPE_CHECKING:
@@ -585,8 +586,13 @@ class ModelMetrics:
 
     @cached_property
     def pearson_chi2(self) -> float:
-        V = self._family.variance(self._mu)
-        return float(np.sum(self._weights * (self._y - self._mu) ** 2 / V))
+        return pearson_chi2(
+            distribution=self._family,
+            y=self._y,
+            mu=self._mu,
+            sample_weight=self._weights,
+            variance_floor=0.0,
+        )
 
     @cached_property
     def n_active_groups(self) -> int:
@@ -816,11 +822,13 @@ class ModelMetrics:
             W = self._fit_working_weights
         else:
             eta, mu = self._working_eta_mu
-            V = self._family.variance(mu)
-            dmu_deta = self._link.deriv_inverse(eta)
-            from superglm.distributions import _VARIANCE_FLOOR
-
-            W = self._weights * dmu_deta**2 / np.maximum(V, _VARIANCE_FLOOR)
+            W = fisher_working_weights(
+                distribution=self._family,
+                link=self._link,
+                mu=mu,
+                eta=eta,
+                sample_weight=self._weights,
+            )
 
         uses_fitted_rank = self._working_weights_match_fit(W)
         scop_inference = getattr(self._result, "scop_inference", None)

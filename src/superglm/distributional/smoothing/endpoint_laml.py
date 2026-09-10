@@ -23,20 +23,23 @@ from superglm.distributional.result import (
     EndpointDirectionDecision,
     EndpointDirectionEvidence,
 )
+from superglm.distributional.results.solver import _record_penalty_objective
 from superglm.distributional.smoothing.endpoint_direction import (
     FiniteDifferenceDirection,
     finite_difference_curvature_direction,
 )
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
+from superglm.distributional.smoothing.penalty_geometry import (
+    EndpointLaplaceError,
+    _finite_penalty_evaluation_from_components,
+)
+from superglm.distributional.smoothing.penalty_geometry import (
+    _projected_penalty_group_indices as _projected_penalty_group_indices,
+)
 from superglm.distributional.solver.assembly import assemble_grouped_geometry
-from superglm.reml.multi_penalty import similarity_transform_logdet
-from superglm.reml.penalty_algebra import penalty_component_dense_matrix
+from superglm.reml.penalty_algebra import _PenaltyLogdetEvaluation, penalty_component_dense_matrix
 from superglm.solvers.rank import RankDecomposition, decompose_gram
 from superglm.types import PenaltyComponent
-
-
-class EndpointLaplaceError(ValueError):
-    """Raised when a fit cannot prove the supplied endpoint provenance."""
 
 
 @dataclass(frozen=True)
@@ -245,104 +248,30 @@ def projected_finite_penalty_logdet(
     face: PenaltyFace,
 ) -> ProjectedPenaltyLogDet:
     """Return ``log|sum(lambda_j Q.T S_j Q)|+`` off the selected face."""
-    finite_components, projected, finite_lambdas = _projected_finite_penalty_inputs(
+    evaluation = _projected_finite_penalty_evaluation(
         layout=layout,
         lambdas=lambdas,
         face=face,
     )
-    component_names = tuple(component.name for component in finite_components)
-
-    if face.reduced_width == 0 or not finite_components:
-        return ProjectedPenaltyLogDet(
-            component_names=component_names,
-            rank=0,
-            log_pdet=0.0,
-        )
-
-    rank = 0
-    log_pdet = 0.0
-    for indices in _projected_penalty_group_indices(finite_components):
-        decomposition = similarity_transform_logdet(
-            [projected[index] for index in indices],
-            finite_lambdas[np.asarray(indices, dtype=np.intp)],
-        )
-        group_rank = decomposition.rank
-        group_log_pdet = decomposition.logdet_s_plus
-        if (
-            isinstance(group_rank, bool)
-            or not isinstance(group_rank, Integral)
-            or group_rank < 0
-            or group_rank > face.reduced_width
-        ):
-            raise ValueError("projected penalty decomposition returned an invalid rank")
-        if not isinstance(group_log_pdet, Real) or not np.isfinite(float(group_log_pdet)):
-            raise ValueError(
-                "projected penalty decomposition returned a non-finite log determinant"
-            )
-        if group_rank == 0 and float(group_log_pdet) != 0.0:
-            raise ValueError(
-                "projected penalty decomposition returned a nonzero log determinant for zero rank"
-            )
-        rank += int(group_rank)
-        log_pdet += float(group_log_pdet)
-    if rank > face.reduced_width:
-        raise ValueError("projected penalty decomposition returned an invalid rank")
-    if not np.isfinite(log_pdet):
-        raise ValueError("projected penalty decomposition returned a non-finite log determinant")
     return ProjectedPenaltyLogDet(
-        component_names=component_names,
-        rank=rank,
-        log_pdet=log_pdet,
+        component_names=tuple(evaluation.gradient), rank=evaluation.rank, log_pdet=evaluation.logdet
     )
 
 
-def _projected_penalty_group_indices(
-    components: tuple[PenaltyComponent, ...],
-) -> tuple[tuple[int, ...], ...]:
-    """Keep projected components partitioned by their original coefficient block."""
-    grouped: dict[str, list[int]] = {}
-    group_blocks: dict[str, tuple[int, int, int]] = {}
-    group_index_owners: dict[int, str] = {}
-    for index, component in enumerate(components):
-        block = component.group_sl
-        group_index = component.group_index
-        if (
-            not isinstance(component.group_name, str)
-            or not component.group_name
-            or isinstance(group_index, bool)
-            or not isinstance(group_index, Integral)
-            or not isinstance(block, slice)
-            or block.step not in (None, 1)
-            or not isinstance(block.start, int)
-            or not isinstance(block.stop, int)
-            or block.start < 0
-            or block.stop <= block.start
-        ):
-            raise EndpointLaplaceError(
-                "retained penalty group metadata has invalid coefficient blocks"
-            )
-        identity = (int(group_index), block.start, block.stop)
-        previous = group_blocks.get(component.group_name)
-        if previous is not None and previous != identity:
-            raise EndpointLaplaceError(
-                "retained penalty group metadata has inconsistent coefficient blocks"
-            )
-        owner = group_index_owners.get(int(group_index))
-        if owner is not None and owner != component.group_name:
-            raise EndpointLaplaceError(
-                "retained penalty group metadata has inconsistent coefficient blocks"
-            )
-        for other_name, (_, other_start, other_stop) in group_blocks.items():
-            if other_name == component.group_name:
-                continue
-            if max(block.start, other_start) < min(block.stop, other_stop):
-                raise EndpointLaplaceError(
-                    "retained penalty group metadata has overlapping coefficient blocks"
-                )
-        group_blocks.setdefault(component.group_name, identity)
-        group_index_owners.setdefault(int(group_index), component.group_name)
-        grouped.setdefault(component.group_name, []).append(index)
-    return tuple(tuple(indices) for indices in grouped.values())
+def _projected_finite_penalty_evaluation(
+    *, layout: StackedLayout, lambdas: Mapping[str, float], face: PenaltyFace
+) -> _PenaltyLogdetEvaluation:
+    """Project frozen component roots, retaining their arithmetic evidence.
+
+    The face basis is validated independently. A finite component is selected
+    as a PSD representative before the projection F_i Q. Forming Q' P_i Q
+    and selecting its rank again would change the represented penalty.
+    """
+    face.validate_layout(layout)
+    resolved = _validated_complete_lambdas(layout, lambdas)
+    return _finite_penalty_evaluation_from_components(
+        components=layout.penalties, resolved=resolved, face=face
+    )
 
 
 def _projected_finite_penalty_inputs(
@@ -800,10 +729,15 @@ def evaluate_endpoint_laplace(
         raise EndpointLaplaceError("result does not carry the supplied coefficient face")
     face.validate_layout(layout)
 
-    projected_penalty = projected_finite_penalty_logdet(
+    penalty_evaluation = _projected_finite_penalty_evaluation(
         layout=layout,
         lambdas=lambdas,
         face=face,
+    )
+    projected_penalty = ProjectedPenaltyLogDet(
+        component_names=tuple(penalty_evaluation.gradient),
+        rank=penalty_evaluation.rank,
+        log_pdet=penalty_evaluation.logdet,
     )
     endpoint_lambdas = dict(_validated_complete_lambdas(layout, lambdas))
     for name in face.component_names:
@@ -819,7 +753,7 @@ def evaluate_endpoint_laplace(
     penalized_optimizing = result.penalized_optimizing_log_likelihood
     assert penalized_optimizing is not None
     objective = -float(penalized_optimizing) + 0.5 * (hessian_log_pdet - projected_penalty.log_pdet)
-    return EndpointLaplaceEvaluation(
+    evaluation = EndpointLaplaceEvaluation(
         objective=objective,
         face_component_names=face.component_names,
         finite_component_names=projected_penalty.component_names,
@@ -829,3 +763,11 @@ def evaluate_endpoint_laplace(
         hessian_log_pdet=hessian_log_pdet,
         penalty_log_pdet=projected_penalty.log_pdet,
     )
+    _record_penalty_objective(
+        layout,
+        result,
+        lambdas=endpoint_lambdas,
+        evaluation=penalty_evaluation,
+        objective=evaluation.objective,
+    )
+    return evaluation

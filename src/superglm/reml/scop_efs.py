@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_centered import _raw_centering_well_scaled
-from superglm.distributions import _VARIANCE_FLOOR, clip_mu
+from superglm.distributions import clip_mu
 from superglm.group_matrix import DesignMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.objective import reml_laml_objective
@@ -32,6 +32,9 @@ from superglm.reml.observed_geometry import (
     classify_scop_reml_curvature,
 )
 from superglm.reml.penalty_algebra import (
+    _attach_context_geometry,
+    _context_geometry,
+    _frozen_array,
     build_penalty_matrix,
     compute_logdet_s_derivatives,
     penalty_component_quadratic,
@@ -64,6 +67,7 @@ from superglm.solvers.rank import (
     decompose_factor,
     decompose_gram_if_authoritative,
 )
+from superglm.solvers.working_rows import fisher_working_weights
 from superglm.types import GroupSlice, PenaltyComponent
 
 # These private thresholds intentionally mix units: absolute lambda scale for the
@@ -188,6 +192,9 @@ class _SCOPREMLFitContext:
     # prior contract; defaulted so a hand-built context needs only the two
     # fields that decide a number.
     saturated_log_weight: float | None = None
+    _penalty_context_cache: dict[int, _SCOPPenaltyContextEntry] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -371,13 +378,63 @@ def _multi_scop_discrete_plateau_converged(
     )
 
 
+@dataclass(frozen=True)
+class _SCOPPenaltyContextEntry:
+    """One authenticated latent target, independent of coefficients and Jacobians."""
+
+    component: PenaltyComponent
+    source_key: tuple
+    reparam: object
+    descriptor: tuple[tuple[str, object], ...]
+    geometry: object
+
+    def matches(self, group_index: int, state: dict) -> bool:
+        matrix = np.asarray(state["S_scop"])
+        if (
+            self.source_key != _scop_penalty_source_key(group_index, state, matrix)
+            or self.reparam is not state.get("reparam")
+            or _context_geometry([self.component]) is not self.geometry
+        ):
+            return False
+        for name, expected in self.descriptor:
+            actual = getattr(self.component, name)
+            if isinstance(expected, np.ndarray):
+                if actual is not expected or actual.flags.writeable:
+                    return False
+            elif type(actual) is not type(expected) or actual != expected:
+                return False
+        return bool(
+            np.array_equal(matrix, self.component.omega_ssp)
+            and state.get("penalty_rank") == self.component.rank
+            and state.get("penalty_log_det_omega_plus") == self.component.log_det_omega_plus
+            and np.array_equal(state.get("penalty_eigvals_omega"), self.component.eigvals_omega)
+        )
+
+
+def _scop_penalty_source_key(group_index: int, state: dict, matrix: NDArray) -> tuple:
+    return (
+        group_index,
+        state["group_name"],
+        state["group_sl"],
+        matrix.shape,
+        matrix.dtype.str,
+    )
+
+
 def build_scop_penalty_components(
     scop_states: dict[int, dict],
+    *,
+    _cache: dict[int, _SCOPPenaltyContextEntry] | None = None,
+    _lambdas: dict[str, float] | None = None,
 ) -> list[PenaltyComponent]:
     """Build PenaltyComponent objects for SCOP terms.
 
     For SCOP terms, omega_ssp = S_scop (first-diff penalty in beta_eff space).
     No R_inv transform -- SCOP bypasses SSP reparameterization.
+
+    The optimizer's private cache retains the exact fixed latent target and
+    its checked unit-weight summary. It owns no beta, Jacobian or fitted
+    Hessian. Standalone callers keep the uncached descriptor contract.
 
     Parameters
     ----------
@@ -393,7 +450,39 @@ def build_scop_penalty_components(
 
     for gi, st in scop_states.items():
         S_scop = st["S_scop"]
-        rank, log_det, pos_eigvals = _get_scop_penalty_metadata(st)
+        if _cache is not None:
+            cached = _cache.get(gi)
+            if cached is not None and cached.matches(gi, st):
+                components.append(cached.component)
+                continue
+            matrix = np.asarray(S_scop)
+            group_slice = st["group_sl"]
+            if (
+                isinstance(gi, bool)
+                or not isinstance(gi, int | np.integer)
+                or gi < 0
+                or not isinstance(st["group_name"], str)
+                or not st["group_name"]
+                or not isinstance(group_slice, slice)
+                or group_slice.step not in (None, 1)
+                or not isinstance(group_slice.start, int | np.integer)
+                or not isinstance(group_slice.stop, int | np.integer)
+                or group_slice.start < 0
+                or matrix.shape != (group_slice.stop - group_slice.start,) * 2
+            ):
+                raise ValueError("SCOP penalty context has invalid local geometry")
+            # A changed matrix or descriptor must not inherit stale spectral
+            # metadata. Stage it locally so a refusal preserves the last
+            # authenticated cache entry and the source's previous evidence.
+            metadata_state = {
+                key: value
+                for key, value in st.items()
+                if key
+                not in {"penalty_rank", "penalty_log_det_omega_plus", "penalty_eigvals_omega"}
+            }
+        else:
+            metadata_state = st
+        rank, log_det, pos_eigvals = _get_scop_penalty_metadata(metadata_state)
 
         pc = PenaltyComponent(
             name=st["group_name"],
@@ -406,6 +495,34 @@ def build_scop_penalty_components(
             log_det_omega_plus=log_det,
             eigvals_omega=pos_eigvals,
         )
+        if _cache is not None:
+            _attach_context_geometry([pc])
+            pc.omega_raw = pc.omega_ssp
+            pc.eigvals_omega = _frozen_array(pc.eigvals_omega)
+            geometry = _context_geometry([pc])
+            if geometry is None:
+                raise ValueError("SCOP penalty context could not bind its local target")
+            # Preserve the existing inactive-weight shortcut. Invalid weights
+            # remain for the established consumer to reject; a new zero-only
+            # target must not request an unused unit-weight certificate.
+            value = 1.0 if _lambdas is None else _lambdas.get(pc.name, 1.0)
+            try:
+                active = np.isfinite(float(value)) and float(value) > 0.0
+            except (TypeError, ValueError, OverflowError):
+                active = False
+            if active:
+                geometry.evaluate(np.ones(1))
+                entry = _SCOPPenaltyContextEntry(
+                    component=pc,
+                    source_key=_scop_penalty_source_key(gi, st, matrix),
+                    reparam=st.get("reparam"),
+                    descriptor=tuple((item.name, getattr(pc, item.name)) for item in fields(pc)),
+                    geometry=geometry,
+                )
+                st["penalty_rank"] = rank
+                st["penalty_log_det_omega_plus"] = log_det
+                st["penalty_eigvals_omega"] = pc.eigvals_omega
+                _cache[gi] = entry
         components.append(pc)
 
     return components
@@ -663,7 +780,9 @@ def _evaluate_scop_reml_mode(
     if penalty_components is None:
         penalty_components = _merge_scop_penalty_components(
             context.reml_penalties,
-            build_scop_penalty_components(scop_states),
+            build_scop_penalty_components(
+                scop_states, _cache=context._penalty_context_cache, _lambdas=lambdas
+            ),
         )
     if penalty is None:
         penalty = build_penalty_matrix(
@@ -714,12 +833,13 @@ def _evaluate_scop_reml_mode(
         )
         eta = stabilize_eta(eta_raw, context.link)
         mu = clip_mu(context.link.inverse(eta), context.distribution)
-        variance = np.maximum(
-            np.asarray(context.distribution.variance(mu), dtype=np.float64),
-            _VARIANCE_FLOOR,
+        return fisher_working_weights(
+            distribution=context.distribution,
+            link=context.link,
+            mu=mu,
+            eta=eta,
+            sample_weight=context.sample_weight,
         )
-        derivative = np.asarray(context.link.deriv_inverse(eta), dtype=np.float64)
-        return context.sample_weight * derivative**2 / variance
 
     curvature = (
         classify_scop_reml_curvature(context.distribution, context.link)
@@ -1060,7 +1180,9 @@ def _fit_scop_reml_mode(
     centered_xtwx = np.asarray(centered_xtwx, dtype=np.float64)
     penalty_components = _merge_scop_penalty_components(
         context.reml_penalties,
-        build_scop_penalty_components(scop_states),
+        build_scop_penalty_components(
+            scop_states, _cache=context._penalty_context_cache, _lambdas=lambdas
+        ),
     )
     penalty = build_penalty_matrix(
         list(context.dm.group_matrices),
@@ -1283,12 +1405,13 @@ def _finalize_scop_reml_mode(
                 context.link,
             )
             mu = clip_mu(context.link.inverse(eta), context.distribution)
-            variance = np.maximum(
-                np.asarray(context.distribution.variance(mu), dtype=np.float64),
-                _VARIANCE_FLOOR,
+            cached_weights = fisher_working_weights(
+                distribution=context.distribution,
+                link=context.link,
+                mu=mu,
+                eta=eta,
+                sample_weight=context.sample_weight,
             )
-            derivative = np.asarray(context.link.deriv_inverse(eta), dtype=np.float64)
-            cached_weights = context.sample_weight * derivative**2 / variance
         return cached_weights
 
     _hydrate_scop_terminal_rank_info(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import time
 import warnings
 from collections.abc import Iterator, Mapping
@@ -16,7 +17,7 @@ import scipy.optimize
 from numpy.typing import NDArray
 
 from superglm._fit_trace import TraceRun
-from superglm.distributions import _VARIANCE_FLOOR, Distribution
+from superglm.distributions import Distribution
 from superglm.group_matrix import (
     DenseGroupMatrix,
     DesignMatrix,
@@ -56,6 +57,7 @@ from superglm.solvers.rank import (
 from superglm.solvers.working_rows import (
     coefficient_initial_intercept,
     coefficient_working_rows,
+    pearson_chi2,
 )
 from superglm.types import GroupSlice
 
@@ -477,8 +479,67 @@ def _compute_group_hessians(
     Total cost is O(n * p) across all groups.
     """
     hessians = _build_group_hessians(gms, W, groups, S)
-    L_groups = [max(float(np.linalg.eigvalsh(hessian)[-1]), 1e-12) for hessian in hessians]
+    L_groups = [_block_lipschitz(hessian) for hessian in hessians]
     return L_groups, hessians
+
+
+def _block_lipschitz(hessian: NDArray) -> float:
+    """Bound represented positive curvature without introducing a unit floor."""
+    scale = float(np.max(np.abs(hessian), initial=0.0))
+    if not np.isfinite(scale):
+        raise np.linalg.LinAlgError("nonfinite composite block Hessian")
+    if scale == 0.0:
+        return 0.0
+    eigenvalues = scipy.linalg.eigvalsh(hessian / scale, check_finite=False)
+    cutoff = np.finfo(float).eps * len(eigenvalues) * float(np.max(np.abs(eigenvalues)))
+    if eigenvalues[0] < -cutoff:
+        raise np.linalg.LinAlgError("composite block Hessian is not positive semidefinite")
+    return float((max(float(eigenvalues[-1]), 0.0) + cutoff) * scale)
+
+
+def _safe_norm(values: NDArray) -> float:
+    """Use the scaled BLAS Euclidean norm instead of squaring raw coordinates."""
+    return float(scipy.linalg.norm(values, check_finite=False))
+
+
+def _positive_product_ratio(left: float, right: float, denominator: float) -> float:
+    """Evaluate nonnegative ``left * right / denominator`` without an unsafe product."""
+    if not all(np.isfinite(value) for value in (left, right, denominator)):
+        return float("inf")
+    if denominator <= 0.0 or left < 0.0 or right < 0.0:
+        return float("inf")
+    if left == 0.0 or right == 0.0:
+        return 0.0
+    lm, le = math.frexp(left)
+    rm, re = math.frexp(right)
+    dm, de = math.frexp(denominator)
+    try:
+        return math.ldexp(lm * rm / dm, le + re - de)
+    except OverflowError:
+        return float("inf")
+
+
+def _roundoff_gamma(operations: int) -> float:
+    eps_count = operations * np.finfo(float).eps
+    if not 0.0 <= eps_count < 1.0:
+        raise ValueError("dimensions do not admit the composite stationarity roundoff bound")
+    return eps_count / (1.0 - eps_count)
+
+
+def _stationarity_ratio(residual: float, scale: float, allowance: float, tol: float) -> float:
+    """Encode ``residual <= tol * scale + allowance`` in the existing tol units."""
+    if not all(np.isfinite(value) and value >= 0.0 for value in (residual, scale, allowance)):
+        return float("inf")
+    if residual == 0.0:
+        return 0.0
+    normalizer = max(residual, scale, allowance)
+    denominator = tol * (scale / normalizer) + allowance / normalizer
+    if denominator == 0.0:
+        return float("inf")
+    ratio = _positive_product_ratio(tol, residual / normalizer, denominator)
+    # An underflowed diagnostic must not turn a nonzero computed residual into
+    # an exact fixed point in the published trace.
+    return max(ratio, float(np.nextafter(0.0, 1.0)))
 
 
 def _factor_psd_block(matrix: NDArray) -> tuple[NDArray, bool]:
@@ -516,65 +577,161 @@ def _radial_block_eigensystems(
     hessians: list[NDArray],
     groups: list[GroupSlice],
     penalty: GroupLasso | GroupElasticNet,
-) -> tuple[list[float], list[tuple[NDArray, NDArray]]]:
-    """Precompute eigensystems and reuse their maxima as block Lipschitz constants."""
-    systems: list[tuple[NDArray, NDArray]] = []
+) -> tuple[list[float], list[tuple[NDArray, NDArray, float, NDArray]]]:
+    """Normalize each whole quadratic, preserving its Euclidean radial penalty."""
+    systems: list[tuple[NDArray, NDArray, float, NDArray]] = []
     lipschitz: list[float] = []
     lam = float(penalty.lambda1 or 0.0)
-    ridge_fraction = 0.0 if isinstance(penalty, GroupLasso) else 1.0 - penalty.alpha
+    ridge_fraction = 0.0 if type(penalty) is GroupLasso else 1.0 - penalty.alpha
     for hessian, group in zip(hessians, groups, strict=True):
         system = hessian.copy()
         if penalty_targets_group(penalty, group) and ridge_fraction != 0.0:
             system[np.diag_indices_from(system)] += lam * ridge_fraction
+        scale = float(np.max(np.abs(system), initial=0.0))
+        if not np.isfinite(scale):
+            raise np.linalg.LinAlgError("nonfinite composite block Hessian")
+        if scale != 0.0:
+            system /= scale
         if system.shape == (1, 1):
             eigenvalues = np.array([float(system[0, 0])])
             eigenvectors = np.ones((1, 1))
         else:
             eigenvalues, eigenvectors = scipy.linalg.eigh(system, check_finite=False)
-        scale = max(float(np.max(np.abs(eigenvalues))), 1.0)
-        cutoff = np.finfo(float).eps * max(system.shape) * scale
+        cutoff = np.finfo(float).eps * len(eigenvalues) * float(np.max(np.abs(eigenvalues)))
         eigenvalues[np.abs(eigenvalues) <= cutoff] = 0.0
         if np.any(eigenvalues < 0.0):
             raise np.linalg.LinAlgError("composite block Hessian is not positive semidefinite")
-        systems.append((eigenvalues, eigenvectors))
-        lipschitz.append(max(float(eigenvalues[-1]), 1e-12))
+        systems.append((eigenvalues, eigenvectors, scale, system))
+        lipschitz.append(float((eigenvalues[-1] + cutoff) * scale))
     return lipschitz, systems
 
 
+def _radial_action_is_compatible(
+    system: NDArray,
+    beta: NDArray,
+    rhs: NDArray,
+    threshold: float,
+) -> bool:
+    """Check the original quadratic action, including eigensystem error.
+
+    A componentwise residual bound cannot hide a score in an exactly zero
+    matrix row behind the magnitude of unrelated, resolved rows.  The gamma
+    count covers the matrix action, radial norm/division and residual assembly.
+    """
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        force = np.zeros_like(beta)
+        if threshold > 0.0:
+            norm = _safe_norm(beta)
+            if not np.isfinite(norm):
+                return False
+            if norm == 0.0:
+                # At zero the radial subgradient is a ball.  Its nearest
+                # point to rhs certifies the possibly rounded activity test.
+                rhs_norm = _safe_norm(rhs)
+                if not np.isfinite(rhs_norm):
+                    return False
+                if rhs_norm > 0.0:
+                    force = min(threshold, rhs_norm) * (rhs / rhs_norm)
+            else:
+                force = threshold * (beta / norm)
+        residual = system @ beta + force - rhs
+        action_scale = np.abs(system) @ np.abs(beta) + np.abs(force) + np.abs(rhs)
+        allowance = _roundoff_gamma(2 * len(beta) + 8) * action_scale
+    return bool(
+        np.all(np.isfinite(residual))
+        and np.all(np.isfinite(allowance))
+        and np.all(np.abs(residual) <= allowance)
+    )
+
+
 def _solve_radial_block(
-    eigensystem: tuple[NDArray, NDArray],
+    eigensystem: tuple[NDArray, NDArray, float, NDArray],
     rhs: NDArray,
     threshold: float,
 ) -> NDArray:
-    """Solve ``0.5 b'Hb - rhs'b + threshold*||b||`` exactly."""
-    eigenvalues, eigenvectors = eigensystem
-    projected = eigenvectors.T @ rhs
+    """Solve the radial KKT equation in whole-quadratic normalized units."""
+    eigenvalues, eigenvectors, scale, system = eigensystem
+    if not np.isfinite(threshold) or threshold < 0.0 or not np.all(np.isfinite(rhs)):
+        raise np.linalg.LinAlgError("nonfinite or invalid radial subproblem")
+    if _safe_norm(rhs) <= threshold:
+        return np.zeros_like(rhs)
+    if scale == 0.0:
+        raise np.linalg.LinAlgError("unbounded radial subproblem with zero curvature")
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        scaled_rhs = rhs / scale
+        projected = eigenvectors.T @ scaled_rhs
+        threshold = float(np.divide(threshold, scale))
+    if not np.all(np.isfinite(projected)) or not np.isfinite(threshold):
+        raise np.linalg.LinAlgError("nonfinite normalized radial subproblem")
+    rhs_norm = _safe_norm(scaled_rhs)
+    norm_allowance = _roundoff_gamma(2 * len(rhs) + 8) * rhs_norm
+    if np.isfinite(rhs_norm) and rhs_norm - threshold <= norm_allowance:
+        # Normalizing and projecting can erase the last ulp of an active
+        # norm margin.  Certify zero against the original normalized RHS
+        # instead of asking a rounded root equation for an infinite bracket.
+        zero = np.zeros_like(rhs)
+        if _radial_action_is_compatible(system, zero, scaled_rhs, threshold):
+            return zero
+    null = eigenvalues == 0.0
+    null_norm = _safe_norm(projected[null])
+    if null_norm != 0.0 and null_norm >= threshold:
+        # Computed null eigenvectors need not annihilate a compatible RHS
+        # exactly.  Certify against the original normalized matrix before
+        # discarding any such component; a projection-dot error bound alone
+        # would miss errors in the eigenvectors themselves.
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            range_beta = eigenvectors[:, ~null] @ (projected[~null] / eigenvalues[~null])
+        if _radial_action_is_compatible(system, range_beta, scaled_rhs, 0.0):
+            projected[null] = 0.0
+            null_norm = 0.0
+    if null_norm > threshold:
+        raise np.linalg.LinAlgError("unbounded radial subproblem in the quadratic null space")
+    if threshold > 0.0 and null_norm == threshold:
+        raise np.linalg.LinAlgError("radial subproblem has no finite minimizer")
     if len(eigenvalues) == 1:
         numerator = np.sign(projected[0]) * max(abs(float(projected[0])) - threshold, 0.0)
-        value = numerator / eigenvalues[0] if eigenvalues[0] > 0.0 else 0.0
-        return eigenvectors[:, 0] * value
-    if threshold <= 0.0:
+        with np.errstate(over="ignore"):
+            result = eigenvectors[:, 0] * (numerator / eigenvalues[0])
+    elif threshold == 0.0:
         inverse = np.divide(
             projected,
             eigenvalues,
             out=np.zeros_like(projected),
             where=eigenvalues > 0.0,
         )
-        return eigenvectors @ inverse
-    if float(np.linalg.norm(rhs)) <= threshold:
-        return np.zeros_like(rhs)
+        result = eigenvectors @ inverse
+    else:
 
-    def root(rho: float) -> float:
-        if rho == 0.0:
-            return -threshold
-        norm = float(np.linalg.norm(projected / (eigenvalues + rho)))
-        return rho * norm - threshold
+        def root(rho: float) -> float:
+            if rho == 0.0:
+                return null_norm - threshold
+            # rho/(d+rho) lies in [0, 1].  Forming this ratio first avoids
+            # overflowing the inverse or underflowing rho * norm(inverse).
+            value = _safe_norm(projected * (rho / (eigenvalues + rho))) - threshold
+            if not np.isfinite(value):
+                raise np.linalg.LinAlgError("nonfinite radial root equation")
+            return value
 
-    upper = max(1.0, threshold)
-    while root(upper) <= 0.0:
-        upper *= 2.0
-    rho = scipy.optimize.brentq(root, 0.0, upper, xtol=1e-14, rtol=1e-14)
-    return eigenvectors @ (projected / (eigenvalues + rho))
+        upper = float(eigenvalues[-1])
+        while root(upper) <= 0.0:
+            if upper >= np.finfo(float).max / 2.0:
+                raise np.linalg.LinAlgError("radial root has no finite bracket")
+            upper *= 2.0
+        rho = scipy.optimize.brentq(
+            root,
+            0.0,
+            upper,
+            xtol=np.nextafter(0.0, 1.0),
+            rtol=4.0 * np.finfo(float).eps,
+            maxiter=2048,
+        )
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            result = eigenvectors @ (projected / (eigenvalues + rho))
+    if not np.all(np.isfinite(result)):
+        raise np.linalg.LinAlgError("nonfinite radial block solution")
+    if np.any(null) and not _radial_action_is_compatible(system, result, scaled_rhs, threshold):
+        raise np.linalg.LinAlgError("radial solution cannot be certified against its quadratic")
+    return result
 
 
 def _composite_kkt_violation(
@@ -591,13 +748,21 @@ def _composite_kkt_violation(
     S: NDArray | None,
     has_smooth_penalty: bool,
     L_groups: list[float] | None = None,
+    curvature_weights: NDArray | None = None,
+    tol: float = 1e-6,
 ) -> float:
-    """Return a scale-relative minimum-proximal-subgradient violation.
+    """Return homogeneous proximal stationarity with represented-score roundoff.
 
     Zero is equivalent to the composite KKT equations for every penalty that
-    implements the solver's proximal protocol.  This is evaluated only when
-    the requested outer stopping criterion first appears satisfied.
+    implements the solver's proximal protocol.  The arithmetic allowance is
+    for the represented working rows and smooth penalty, not uncertainty in
+    likelihood derivatives.  Cached curvature must use these same weights.
     """
+    if not np.isfinite(tol) or tol <= 0.0:
+        raise ValueError("composite stationarity tolerance must be finite and positive")
+    n, p = dm.shape
+    score_gamma = _roundoff_gamma(n + p + 4)
+    intercept_gamma = _roundoff_gamma(n + 2)
     working_rows = coefficient_working_rows(
         distribution=family,
         link=link,
@@ -608,14 +773,15 @@ def _composite_kkt_violation(
         prefer_observed=False,
     )
     W = working_rows.weights
-    working_residual = working_rows.response - state.eta
+    z = working_rows.response
+    working_residual = z - state.eta
     loss_gradient = -dm.rmatvec(W * working_residual)
     if has_smooth_penalty:
         assert S is not None
         smooth_gradient = loss_gradient + S @ state.beta
     else:
         smooth_gradient = loss_gradient
-    if L_groups is None:
+    if L_groups is None or curvature_weights is None or not np.array_equal(W, curvature_weights):
         L_groups, _ = _compute_group_hessians(
             list(dm.group_matrices),
             W,
@@ -623,42 +789,56 @@ def _composite_kkt_violation(
             S if has_smooth_penalty else None,
         )
 
-    max_violation = abs(float(np.sum(W * working_residual)))
+    with np.errstate(over="ignore", invalid="ignore"):
+        intercept_residual = abs(float(np.sum(W * working_residual)))
+        intercept_scale = float(np.sum(W * (np.abs(z) + np.abs(state.eta))))
+        root_w = np.sqrt(W)
+        response_norm = _safe_norm(root_w * z) + _safe_norm(root_w * state.eta)
+    if not np.isfinite(response_norm) or not np.all(np.isfinite(smooth_gradient)):
+        return float("inf")
+    max_violation = _stationarity_ratio(
+        intercept_residual,
+        intercept_scale,
+        intercept_gamma * intercept_scale,
+        tol,
+    )
     for group, L_g in zip(groups, L_groups, strict=True):
+        if not np.isfinite(L_g) or L_g < 0.0:
+            return float("inf")
+        # An arbitrary positive step is valid for a structurally zero quadratic.
+        # It must never replace a represented positive curvature.
+        step_curvature = L_g if L_g > 0.0 else 1.0
+        step = 1.0 / step_curvature
+        if not np.isfinite(step):
+            return float("inf")
         beta_g = state.beta[group.sl]
-        candidate = penalty.prox_group(
-            beta_g - smooth_gradient[group.sl] / L_g,
-            group,
-            1.0 / L_g,
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            u = smooth_gradient[group.sl] / step_curvature
+            candidate = penalty.prox_group(beta_g - u, group, step)
+            d = beta_g - candidate
+            penalty_force = d - u
+        if not all(np.all(np.isfinite(value)) for value in (u, candidate, d, penalty_force)):
+            return float("inf")
+        beta_norm, candidate_norm, u_norm = map(_safe_norm, (beta_g, candidate, u))
+        scale = max(beta_norm, candidate_norm, u_norm, _safe_norm(penalty_force))
+        # || |X_g|' W (|z| + |eta|) || <= sqrt(k_g L_g) R, since
+        # each weighted column norm is bounded by sqrt(L_g).
+        bound = (
+            _positive_product_ratio(math.sqrt(group.size), response_norm, math.sqrt(L_g))
+            if L_g > 0.0
+            else 0.0
         )
+        if has_smooth_penalty:
+            assert S is not None
+            with np.errstate(over="ignore", invalid="ignore"):
+                bound += _safe_norm(np.abs(S[group.sl, :]) @ np.abs(state.beta)) / step_curvature
+        allowance = score_gamma * bound
+        allowance += _roundoff_gamma(group.size + 5) * (beta_norm + candidate_norm + u_norm)
         max_violation = max(
             max_violation,
-            float(L_g * np.linalg.norm(beta_g - candidate)),
+            _stationarity_ratio(_safe_norm(d), scale, allowance, tol),
         )
-
-    # The block curvature gives a cheap normal-equation scale without a second
-    # row pass.  A proximal fixed point is independent of which positive step
-    # size is used, so the preceding outer iteration's L values are valid for
-    # this convergence diagnostic even when the candidate's IRLS weights moved.
-    from superglm.distributions import Poisson
-    from superglm.links import SqrtLink
-
-    if type(family) is Poisson and type(link) is SqrtLink:
-        # The Poisson/sqrt score scales as sqrt(y).  Fixed unit floors in this
-        # KKT normalization otherwise certify visibly wrong modes when all
-        # means are tiny.
-        with np.errstate(over="ignore", invalid="ignore"):
-            response_score_scale = float(np.sum(weights * np.sqrt(y), dtype=np.float64))
-        if not np.isfinite(response_score_scale):
-            response_score_scale = 1.0
-        scale = max(response_score_scale, np.finfo(np.float64).tiny)
-        for group, L_g in zip(groups, L_groups, strict=True):
-            scale = max(scale, L_g * float(np.linalg.norm(state.beta[group.sl])))
-    else:
-        scale = max(1.0, float(np.sum(W)) * max(1.0, abs(state.intercept)))
-        for group, L_g in zip(groups, L_groups, strict=True):
-            scale = max(scale, L_g * max(1.0, float(np.linalg.norm(state.beta[group.sl]))))
-    return max_violation / scale
+    return max_violation
 
 
 def _add_selection_local_curvature(
@@ -1005,15 +1185,11 @@ def _fit_pirls_inner(
             radial_penalty = None
             # The exact Ridge branch does not use a scalar-gradient step.  A
             # cheap positive upper bound is sufficient for its later KKT map.
-            L_groups = [
-                max(float(np.linalg.norm(hessian, ord=np.inf)), 1e-12) for hessian in block_hessians
-            ]
+            L_groups = [float(np.linalg.norm(hessian, ord=np.inf)) for hessian in block_hessians]
             radial_eigensystems = None
         else:
             radial_penalty = None
-            L_groups = [
-                max(float(np.linalg.eigvalsh(hessian)[-1]), 1e-12) for hessian in block_hessians
-            ]
+            L_groups = [_block_lipschitz(hessian) for hessian in block_hessians]
             radial_eigensystems = None
         ridge_factors = (
             _ridge_block_factors(block_hessians, groups, penalty)
@@ -1063,6 +1239,7 @@ def _fit_pirls_inner(
                     continue
 
                 bg_old = beta[g.sl].copy()
+                step_curvature = L_g if L_g > 0.0 else 1.0
 
                 grad_g = -gm.rmatvec(W * r)
                 if S_beta is not None:
@@ -1093,8 +1270,8 @@ def _fit_pirls_inner(
                         threshold,
                     )
                 else:
-                    step_g = 1.0 / L_g
-                    bg_cand = bg_old - step_g * grad_g
+                    step_g = 1.0 / step_curvature
+                    bg_cand = bg_old - grad_g / step_curvature
                     bg_new = penalty.prox_group(bg_cand, g, step_g)
 
                 d = bg_new - bg_old
@@ -1107,7 +1284,7 @@ def _fit_pirls_inner(
 
                 # Active set: check KKT for zeroed groups after the update
                 if active_set:
-                    if np.linalg.norm(bg_new) < 1e-12:
+                    if not np.any(bg_new != 0.0):
                         # A zero block is inactive exactly when it is a fixed
                         # point of the penalty's own proximal operator.  This
                         # works for group, sparse-group, elastic-net, and custom
@@ -1116,11 +1293,11 @@ def _fit_pirls_inner(
                         if S_beta is not None:
                             grad_after = grad_after + S_beta[g.sl]
                         zero_probe = penalty.prox_group(
-                            -grad_after / L_g,
+                            -grad_after / step_curvature,
                             g,
-                            1.0 / L_g,
+                            1.0 / step_curvature,
                         )
-                        group_active[gi] = bool(np.linalg.norm(zero_probe) > 1e-12)
+                        group_active[gi] = bool(np.any(zero_probe != 0.0))
                     else:
                         group_active[gi] = True
 
@@ -1239,6 +1416,8 @@ def _fit_pirls_inner(
                 S=S,
                 has_smooth_penalty=has_smooth_penalty,
                 L_groups=L_groups,
+                curvature_weights=W,
+                tol=tol,
             )
             convergence_value = max(convergence_value, kkt_violation)
             iteration_converged = convergence_value < tol
@@ -1510,7 +1689,6 @@ def _fit_pirls_inner(
     )
     has_inference_curvature = bool(np.any(selected_penalty))
 
-    V_final = np.maximum(family.variance(mu_new), _VARIANCE_FLOOR)
     final_working_rows = coefficient_working_rows(
         distribution=family,
         link=link,
@@ -1629,13 +1807,13 @@ def _fit_pirls_inner(
     # The Pearson numerator has the same form under either weight contract --
     # both scale a row's squared residual by its weight -- so only the
     # denominator's likelihood size distinguishes them.
-    pearson_chi2 = float(np.sum(weights * (y - mu_new) ** 2 / V_final))
+    pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu_new, sample_weight=weights)
     df_resid = pearson_residual_degrees_of_freedom(
         weights,
         p_eff,
         weight_semantics=weight_semantics,
     )
-    phi = pearson_chi2 / df_resid
+    phi = pearson_sum / df_resid
 
     return PIRLSResult(
         beta=beta,

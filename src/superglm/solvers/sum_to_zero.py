@@ -22,6 +22,13 @@ from superglm.solvers._structured.operators import (
     _trace_symmetric_bdlr,
 )
 from superglm.solvers.hessian_factor import _component_indices, _component_omega
+from superglm.solvers.rank import (
+    SHARED_RANK_POLICY,
+    _eigensolver_relative_bar,
+    _equilibrate_gram,
+    _symmetric_part,
+    decompose_gram,
+)
 from superglm.types import PenaltyComponent
 
 
@@ -66,7 +73,7 @@ def _decompose_local_psd_batch(
         raise ValueError("Local blocks must have shape (K, k, k).")
     if values.shape[0] != len(level_labels):
         raise ValueError("level_labels length must equal the number of local blocks.")
-    symmetric = 0.5 * (values + values.transpose(0, 2, 1))
+    symmetric = np.stack([_symmetric_part(block) for block in values])
     finite = np.all(np.isfinite(symmetric), axis=(1, 2))
     if not np.all(finite):
         level = int(np.flatnonzero(~finite)[0])
@@ -75,7 +82,7 @@ def _decompose_local_psd_batch(
         )
 
     eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
-    scales = np.maximum(np.max(np.abs(eigenvalues), axis=1), 1.0)
+    scales = np.max(np.abs(eigenvalues), axis=1)
     # A large smoothing parameter can put O(1) data curvature beside an
     # O(1e11) wiggle penalty.  The usual dimension-scaled roundoff threshold
     # retains that real null-space information; eps**(2/3) would incorrectly
@@ -137,9 +144,7 @@ def _decompose_local_psd_batch(
 
 def _constraint_equilibration(matrix: NDArray) -> NDArray:
     """Whiten the positive range of a small constraint covariance."""
-    symmetric = 0.5 * (
-        np.asarray(matrix, dtype=np.float64) + np.asarray(matrix, dtype=np.float64).T
-    )
+    symmetric = _symmetric_part(np.asarray(matrix, dtype=np.float64))
     if symmetric.shape == (0, 0):
         return symmetric
     eigenvalues, eigenvectors = scipy.linalg.eigh(
@@ -147,7 +152,7 @@ def _constraint_equilibration(matrix: NDArray) -> NDArray:
         driver="evr",
         check_finite=False,
     )
-    scale = max(float(np.max(np.abs(eigenvalues), initial=0.0)), 1.0)
+    scale = float(np.max(np.abs(eigenvalues), initial=0.0))
     threshold = np.finfo(np.float64).eps * max(symmetric.shape[0], 1) * scale * 10.0
     factors = np.ones_like(eigenvalues)
     positive = eigenvalues > threshold
@@ -156,7 +161,12 @@ def _constraint_equilibration(matrix: NDArray) -> NDArray:
 
 
 class _SymmetricBorderFactor:
-    """LDL factor with a residual-checked SVD fallback for a small border."""
+    """Equilibrated LDL execution on the shared signed-rank representative.
+
+    Congruence preserves inertia, but its diagonal units must be removed
+    before numerical rank is assessed. The shared decomposition owns inertia
+    and determinant; neither LDL pivots nor a fallback select another rank.
+    """
 
     def __init__(self, matrix: NDArray):
         border = np.asarray(matrix, dtype=np.float64)
@@ -164,104 +174,77 @@ class _SymmetricBorderFactor:
             raise ValueError("The constrained border must be square.")
         if not np.all(np.isfinite(border)):
             raise np.linalg.LinAlgError("The constrained border contains non-finite values.")
-        self.matrix = 0.5 * (border + border.T)
-        self.size = self.matrix.shape[0]
-        scale = max(float(np.linalg.norm(self.matrix, ord=np.inf)), 1.0)
-        self.threshold = max(
-            np.finfo(np.float64).eps ** (2 / 3) * scale,
-            np.finfo(np.float64).eps * max(self.size, 1) * scale * 10.0,
+        self._original_matrix = _symmetric_part(border)
+        self.size = len(border)
+        self._authority = decompose_gram(self._original_matrix, allow_indefinite=True)
+        self.matrix, scales, active, _ = _equilibrate_gram(
+            self._original_matrix, allow_indefinite=True
         )
+        self._scale = np.where(scales > 0.0, scales, 1.0)
+        self.zero_count = self.size - self._authority.rank
+        retained = self._authority.retained_values
+        if retained is None:
+            self.positive_count = self._authority.rank
+            self.negative_count = 0
+        else:
+            self.positive_count = int(np.count_nonzero(retained > 0.0))
+            self.negative_count = int(np.count_nonzero(retained < 0.0))
+        self.logabsdet = self._authority.log_pdet
+        self.condition_estimate = self._authority.pre_truncation_condition**2
         self.used_fallback = False
         self.fallback_reason: str | None = None
         self._triangular: NDArray | None = None
         self._permutation: NDArray | None = None
         self._inverse_pivots: tuple[tuple[slice, NDArray], ...] = ()
-        self._svd: tuple[NDArray, NDArray, NDArray] | None = None
-
+        if self.zero_count:
+            return
+        assert len(active) == self.size
         try:
             lu, diagonal, permutation = scipy.linalg.ldl(
-                self.matrix,
-                lower=True,
-                hermitian=True,
-                check_finite=False,
+                self.matrix, lower=True, hermitian=True, check_finite=False
             )
-            triangular = lu[permutation, :]
-            residual = np.linalg.norm(lu @ diagonal @ lu.T - self.matrix, ord=np.inf) / scale
-            if not np.isfinite(residual) or residual > 1e-9:
-                raise np.linalg.LinAlgError(
-                    f"LDL reconstruction residual {residual:.3g} exceeds 1e-9"
-                )
+            action = np.abs(lu) @ np.abs(diagonal) @ np.abs(lu.T)
+            reconstructed = lu @ diagonal @ lu.T
+            unit = np.finfo(float).eps / 2
+            gamma = (3 * self.size + 2) * unit / (1 - (3 * self.size + 2) * unit)
+            # Check the represented factorization in componentwise action
+            # units. The allowance contains no objective or constraint unit.
+            allowance = gamma * (action + np.abs(self.matrix))
+            if np.any(np.abs(reconstructed - self.matrix) > allowance):
+                raise np.linalg.LinAlgError("LDL reconstruction exceeds its action allowance")
             pivots, inverse_pivots = self._analyze_ldl_pivots(diagonal)
-            self._triangular = triangular
+            if (
+                np.count_nonzero(pivots > 0.0) != self.positive_count
+                or np.count_nonzero(pivots < 0.0) != self.negative_count
+            ):
+                raise np.linalg.LinAlgError("LDL inertia disagrees with the shared representative")
+            self._triangular = lu[permutation, :]
             self._permutation = np.asarray(permutation, dtype=np.intp)
             self._inverse_pivots = inverse_pivots
-            self._set_spectrum(pivots)
-            if self.zero_count == 0:
-                probe = np.zeros((self.size, min(self.size, 2)))
-                for column in range(probe.shape[1]):
-                    probe[column * (self.size - 1) // max(probe.shape[1] - 1, 1), column] = 1.0
-                if probe.size:
-                    solution = self.solve(probe)
-                    solve_residual = np.linalg.norm(
-                        self.matrix @ solution - probe, ord=np.inf
-                    ) / max(np.linalg.norm(probe, ord=np.inf), 1.0)
-                    if not np.isfinite(solve_residual) or solve_residual > 1e-8:
-                        raise np.linalg.LinAlgError(
-                            f"LDL solve residual {solve_residual:.3g} exceeds 1e-8"
-                        )
         except (np.linalg.LinAlgError, ValueError) as error:
             self.used_fallback = True
             self.fallback_reason = f"constrained-border LDL fallback: {error}"
-            self._triangular = None
-            self._permutation = None
-            self._inverse_pivots = ()
-            left, singular_values, right = np.linalg.svd(self.matrix, full_matrices=False)
-            inverse_values = np.zeros_like(singular_values)
-            active = singular_values > self.threshold
-            np.divide(1.0, singular_values, out=inverse_values, where=active)
-            self._svd = (left, inverse_values, right)
-            self._set_spectrum(np.linalg.eigvalsh(self.matrix))
 
     def _analyze_ldl_pivots(
-        self,
-        diagonal: NDArray,
+        self, diagonal: NDArray
     ) -> tuple[NDArray, tuple[tuple[slice, NDArray], ...]]:
         eigenvalues: list[float] = []
         inverse_blocks: list[tuple[slice, NDArray]] = []
         index = 0
         while index < self.size:
-            if index + 1 < self.size and diagonal[index, index + 1] != 0.0:
-                block_slice = slice(index, index + 2)
-                block = diagonal[block_slice, block_slice]
-                values = np.linalg.eigvalsh(block)
-                eigenvalues.extend(float(value) for value in values)
-                if np.all(np.abs(values) > self.threshold):
-                    inverse_blocks.append((block_slice, np.linalg.inv(block)))
-                index += 2
-            else:
-                block_slice = slice(index, index + 1)
-                value = float(diagonal[index, index])
-                eigenvalues.append(value)
-                if abs(value) > self.threshold:
-                    inverse_blocks.append(
-                        (block_slice, np.array([[1.0 / value]], dtype=np.float64))
-                    )
-                index += 1
+            width = 2 if index + 1 < self.size and diagonal[index, index + 1] != 0.0 else 1
+            block_slice = slice(index, index + width)
+            block = diagonal[block_slice, block_slice]
+            values = np.linalg.eigvalsh(block)
+            if np.any(values == 0.0):
+                raise np.linalg.LinAlgError("LDL cannot execute a retained border direction")
+            inverse = np.linalg.inv(block)
+            if not np.all(np.isfinite(inverse)):
+                raise np.linalg.LinAlgError("LDL pivot inverse is not representable")
+            eigenvalues.extend(float(value) for value in values)
+            inverse_blocks.append((block_slice, inverse))
+            index += width
         return np.asarray(eigenvalues), tuple(inverse_blocks)
-
-    def _set_spectrum(self, eigenvalues: NDArray) -> None:
-        values = np.asarray(eigenvalues, dtype=np.float64)
-        positive = values > self.threshold
-        negative = values < -self.threshold
-        self.positive_count = int(np.count_nonzero(positive))
-        self.negative_count = int(np.count_nonzero(negative))
-        self.zero_count = int(values.size - self.positive_count - self.negative_count)
-        active = np.abs(values) > self.threshold
-        self.logabsdet = float(np.sum(np.log(np.abs(values[active])))) if np.any(active) else 0.0
-        absolute = np.abs(values[active])
-        self.condition_estimate = (
-            float(absolute.max() / absolute.min()) if absolute.size else float("inf")
-        )
 
     def solve(self, rhs: NDArray) -> NDArray:
         values = np.asarray(rhs, dtype=np.float64)
@@ -272,11 +255,13 @@ class _SymmetricBorderFactor:
             raise ValueError(f"border rhs must have shape ({self.size},) or ({self.size}, m)")
         if self.zero_count:
             raise np.linalg.LinAlgError("The constrained border is singular.")
-        if self._triangular is not None and self._permutation is not None:
-            permuted_rhs = values[self._permutation]
+        if self._triangular is None or self._permutation is None:
+            solution = np.column_stack([self._authority.solve(column) for column in values.T])
+        else:
+            scaled_rhs = values / self._scale[:, None]
             forward = scipy.linalg.solve_triangular(
                 self._triangular,
-                permuted_rhs,
+                scaled_rhs[self._permutation],
                 lower=True,
                 unit_diagonal=True,
                 check_finite=False,
@@ -293,11 +278,9 @@ class _SymmetricBorderFactor:
             )
             solution = np.empty_like(permuted_solution)
             solution[self._permutation] = permuted_solution
-        elif self._svd is not None:
-            left, inverse_values, right = self._svd
-            solution = (right.T * inverse_values) @ (left.T @ values)
-        else:  # pragma: no cover - guarded by construction
-            raise RuntimeError("The constrained border has no usable factor.")
+            solution /= self._scale[:, None]
+        if not np.all(np.isfinite(solution)):
+            raise np.linalg.LinAlgError("The constrained border solution is not representable.")
         return solution[:, 0] if vector_rhs else solution
 
 
@@ -355,9 +338,18 @@ class SumToZeroBlockFactor:
             raise np.linalg.LinAlgError(
                 f"Structured SZ term {term_name!r} has non-finite ordinary, cross, or local blocks."
             )
-        if not np.allclose(self.A, self.A.T, rtol=0.0, atol=1e-13):
+
+        def symmetric_in_block_units(matrix: NDArray) -> bool:
+            scale = float(np.max(np.abs(matrix), initial=0.0))
+            if scale == 0.0:
+                return True
+            normalized = matrix / scale
+            allowance = (len(matrix) + 2) * np.finfo(float).eps
+            return bool(np.all(np.abs(normalized - normalized.T) <= allowance))
+
+        if not symmetric_in_block_units(self.A):
             raise ValueError("A must be symmetric.")
-        if not np.allclose(self.D, self.D.transpose(0, 2, 1), rtol=0.0, atol=1e-13):
+        if not all(symmetric_in_block_units(block) for block in self.D):
             raise ValueError("Every local D block must be symmetric.")
         all_indices = np.concatenate((self.small_indices, self.structured_indices.ravel()))
         if len(np.unique(all_indices)) != len(all_indices):
@@ -411,7 +403,7 @@ class SumToZeroBlockFactor:
             M += local.pinv
             E[:, gamma_slice] = self.C[level].T @ local.null
             N[:, gamma_slice] = local.null
-        Q = 0.5 * (Q + Q.T)
+        Q = _symmetric_part(Q)
         border = np.block(
             [
                 [Q, E, -R.T],
@@ -426,6 +418,21 @@ class SumToZeroBlockFactor:
         self._border = border
         constraint_transform = _constraint_equilibration(M)
         border_transform = np.eye(border.shape[0], dtype=np.float64)
+        # Ordinary and local-null coordinates both have coefficient units.
+        # Whitening only multipliers leaves their coupling proportional to
+        # sqrt(curvature), so auxiliary units can manufacture rank loss in a
+        # well-conditioned public Hessian. Normalize every coefficient block
+        # by the same curvature root before the shared signed-rank decision.
+        curvature_scale = max(
+            float(np.max(np.abs(self.A), initial=0.0)),
+            float(np.max(np.abs(self.C), initial=0.0)),
+            float(np.max(np.abs(self.D), initial=0.0)),
+        )
+        if curvature_scale > 0.0:
+            coefficient_indices = np.arange(q + self._null_width)
+            border_transform[coefficient_indices, coefficient_indices] = 1.0 / np.sqrt(
+                curvature_scale
+            )
         border_transform[-self.block_size :, -self.block_size :] = constraint_transform
         scaled_border = border_transform.T @ border @ border_transform
         self._border_transform = border_transform
@@ -468,6 +475,215 @@ class SumToZeroBlockFactor:
         self._public_border_basis = np.zeros((self.shape[0], border.shape[0]))
         self._public_border_basis[self.small_indices, :q] = np.eye(q)
         self._public_border_basis[self.structured_indices] = self._raw_border_basis[:-1]
+        self._certify_public_rank()
+
+    def _certify_public_rank(self) -> None:
+        """Require public-coordinate rank in addition to auxiliary inertia.
+
+        The ordinary path bounds the residual of the represented compact
+        inverse without forming a public matrix. If that sufficient certificate
+        is unresolved, only a matrix within the existing inverse-block cap may
+        be materialized for the shared Gram authority.
+        """
+        if self._compact_public_rank_certificate():
+            return
+        if self.shape[0] <= self.max_structured_inverse_block:
+            public = np.zeros(self.shape)
+            public[np.ix_(self.small_indices, self.small_indices)] = self.A
+            for level, indices in enumerate(self.structured_indices):
+                cross = self.C[level] - self.C[-1]
+                public[np.ix_(indices, self.small_indices)] = cross
+                public[np.ix_(self.small_indices, indices)] = cross.T
+                for other, other_indices in enumerate(self.structured_indices):
+                    block = self.D[-1] + (self.D[level] if other == level else 0.0)
+                    public[np.ix_(indices, other_indices)] = block
+            if decompose_gram(public).rank == self.shape[0]:
+                return
+        raise SumToZeroIdentifiabilityError(
+            f"Structured SZ term {self.term_name!r} is globally unidentifiable or its "
+            "public numerical rank is unresolved after enforcing sum-to-zero."
+        )
+
+    def _compact_public_rank_certificate(self) -> bool:
+        """Certify the original public operator using a compact inverse residual.
+
+        For E=S^-1 H S^-1 and the represented Z=S G S, rho>=||I-EZ||_F
+        implies ||E^-1||_2 <= ||Z||_2/(1-rho). Absolute row/column actions
+        bound both operator norms, so (1-rho)/(E_bound * Z_bound) is a relative
+        eigenvalue-magnitude lower bound. No exact unit diagonal or PSD trace
+        identity is assumed. Inertia is checked separately above.
+
+        Products remain block-diagonal plus low rank. The squared Frobenius
+        residual uses three contractions, with absolute expanded contractions
+        bounding their cancellation. A separate formation allowance relates
+        that product back to the original A/C/D, including |C_i|+|C_last|.
+        The gamma count dominates normalization, block products, thin products,
+        their row-length contractions, and the final reductions. All bounds
+        use the float epsilon even where extended arithmetic is used.
+        """
+        p = self.shape[0]
+        q = len(self.small_indices)
+        k = self.block_size
+        indices = self.structured_indices
+        extended = np.longdouble
+        diagonal = np.empty(p, dtype=extended)
+        diagonal[self.small_indices] = np.diag(self.A)
+        diagonal[indices] = np.diagonal(self.D[:-1], axis1=1, axis2=2).astype(extended)
+        diagonal[indices] += np.diag(self.D[-1]).astype(extended)
+        if np.any(diagonal <= 0.0):
+            return False
+        scales = np.sqrt(diagonal)
+        local_scales = scales[indices]
+        # The shared Gram authority acts on the symmetric public matrix. Work
+        # from these small symmetric moment blocks, retaining the original
+        # absolute moments for the formation-error enclosure below.
+        symmetric_A = (self.A.astype(extended) + self.A.T.astype(extended)) * extended(0.5)
+        symmetric_D = (self.D.astype(extended) + self.D.swapaxes(1, 2).astype(extended)) * extended(
+            0.5
+        )
+
+        # H = blockdiag(D_i) + V K V'. Normalize columns as well as public
+        # coordinates so a uniform curvature unit does not create large thin
+        # intermediates before they cancel.
+        V = np.zeros((p, 2 * q + k), dtype=extended)
+        V[self.small_indices, :q] = np.eye(q) / scales[self.small_indices, None]
+        V[indices, q : 2 * q] = (
+            self.C[:-1].astype(extended) - self.C[-1].astype(extended)
+        ) / local_scales[:, :, None]
+        V[indices, 2 * q :] = np.eye(k) / local_scales[:, :, None]
+        K = np.zeros((2 * q + k, 2 * q + k), dtype=extended)
+        K[:q, :q] = symmetric_A
+        K[:q, q : 2 * q] = np.eye(q)
+        K[q : 2 * q, :q] = np.eye(q)
+        K[2 * q :, 2 * q :] = symmetric_D[-1]
+        U = self._public_border_basis.astype(extended) * scales[:, None]
+        J = self._border_inverse().astype(extended)
+
+        def normalize(basis, core):
+            units = np.max(np.abs(basis), axis=0, initial=0.0)
+            units = np.where(units > 0.0, units, 1.0)
+            return basis / units, core * units[:, None] * units[None, :]
+
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            exact_V, exact_K = normalize(V, K)
+            exact_Be = symmetric_D[:-1] / local_scales[:, :, None] / local_scales[:, None, :]
+            V, K, Be = (np.asarray(value, dtype=float) for value in (exact_V, exact_K, exact_Be))
+            U, J = (np.asarray(value, dtype=float) for value in normalize(U, J))
+            Bz = np.asarray(
+                self._pinv[:-1].astype(extended)
+                * local_scales[:, :, None]
+                * local_scales[:, None, :],
+                dtype=float,
+            )
+        if not all(np.all(np.isfinite(value)) for value in (V, K, U, J, Be, Bz)):
+            return False
+        # The moment representation uses a relative formation bound. Refuse
+        # casts outside its normal range; the inverse representation may be
+        # arbitrary because its entire residual is checked below.
+        for source, represented in ((exact_V, V), (exact_K, K), (exact_Be, Be)):
+            if np.any((source != 0.0) & (np.abs(represented) < np.finfo(float).tiny)):
+                return False
+
+        r = U.shape[1] + V.shape[1]
+        # This dominates p + 3*r + 2*k + 32 for complete product/formation
+        # paths and pk+2, pr+k+3, 2p+r^2+3 for the three scalar contractions.
+        count = 4 * p * r + 8 * r * r + 4 * p * k + 32
+        product = extended(count) * (np.finfo(float).eps / 2)
+        if product >= 0.5:
+            return False
+        gamma = np.nextafter(product / (1.0 - product), extended(np.inf))
+        inflate = np.nextafter(1.0 / (1.0 - gamma), extended(np.inf))
+
+        def apply(blocks, basis):
+            result = np.zeros_like(basis)
+            result[indices] = blocks @ basis[indices]
+            return result
+
+        with np.errstate(over="ignore", invalid="ignore"):
+            left = np.column_stack((apply(Be, U), V))
+            right = np.column_stack((U, apply(Bz.swapaxes(1, 2), V)))
+            core = np.zeros((r, r))
+            width = U.shape[1]
+            core[:width, :width] = J
+            core[width:, :width] = K @ (V.T @ U) @ J
+            core[width:, width:] = K
+            thin = left @ core
+            base = np.eye(k)[None, :, :] - Be @ Bz
+            base_right = apply(base, right)
+            base_right[self.small_indices] = right[self.small_indices]
+            base_norm = float(np.sum(base * base)) + q
+            cross = float(np.sum(thin * base_right))
+            low = float(np.sum((thin.T @ thin) * (right.T @ right)))
+            squared = base_norm - 2.0 * cross + low
+
+            abs_right = np.abs(right)
+            abs_thin = np.abs(thin)
+            base_action = apply(np.abs(base), abs_right)
+            base_action[self.small_indices] = abs_right[self.small_indices]
+            squared_action = (
+                base_norm
+                + 2.0 * float(np.sum(abs_thin * base_action))
+                + float(np.sum((abs_thin.T @ abs_thin) * (abs_right.T @ abs_right)))
+            )
+            z_rows = np.abs(U) @ (np.abs(J) @ np.sum(np.abs(U), axis=0))
+            z_rows[indices] += np.sum(np.abs(Bz), axis=2)
+            z_columns = np.abs(U) @ (np.abs(J).T @ np.sum(np.abs(U), axis=0))
+            z_columns[indices] += np.sum(np.abs(Bz), axis=1)
+
+        # Absolute actions use the supplied moments, not the possibly cancelled
+        # public cross block or the private Schur complement.
+        cross_action = (
+            (np.abs(self.C[:-1].astype(extended)) + np.abs(self.C[-1].astype(extended)))
+            / local_scales[:, :, None]
+            / scales[self.small_indices]
+        )
+        e_rows = np.zeros(p, dtype=extended)
+        e_rows[self.small_indices] = np.sum(
+            np.abs(self.A.astype(extended))
+            / scales[self.small_indices, None]
+            / scales[None, self.small_indices],
+            axis=1,
+        ) + np.sum(cross_action, axis=(0, 1))
+        e_rows[indices] = (
+            np.sum(np.abs(Be.astype(extended)), axis=2)
+            + np.sum(cross_action, axis=2)
+            + (np.abs(self.D[-1].astype(extended)) @ np.sum(1.0 / local_scales, axis=0))[None, :]
+            / local_scales
+        )
+        e_columns = np.zeros(p, dtype=extended)
+        e_columns[self.small_indices] = np.sum(
+            np.abs(self.A.astype(extended))
+            / scales[self.small_indices, None]
+            / scales[None, self.small_indices],
+            axis=0,
+        ) + np.sum(cross_action, axis=(0, 1))
+        e_columns[indices] = (
+            np.sum(np.abs(Be.astype(extended)), axis=1)
+            + np.sum(cross_action, axis=2)
+            + (np.abs(self.D[-1].astype(extended)).T @ np.sum(1.0 / local_scales, axis=0))[None, :]
+            / local_scales
+        )
+        e_norm = max(np.max(e_rows, initial=0.0), np.max(e_columns, initial=0.0)) * inflate
+        z_norm = (
+            extended(max(np.max(z_rows, initial=0.0), np.max(z_columns, initial=0.0))) * inflate
+        )
+        squared_upper = (max(0.0, squared) + gamma * squared_action) * inflate
+        formation = extended(gamma) * np.sqrt(extended(p)) * (1.0 + e_norm * z_norm)
+        rho = np.sqrt(extended(squared_upper)) + formation
+        rho = np.nextafter(rho * inflate, extended(np.inf))
+        spectral_error = extended(_eigensolver_relative_bar(p))
+        relative_cutoff = max(SHARED_RANK_POLICY.gram_rcond, spectral_error)
+        # Clear the shared cutoff even after its stated eigensolver error.
+        # An inconclusive bound falls back; this does not change that cutoff.
+        required = (
+            (relative_cutoff + spectral_error * (1.0 + relative_cutoff)) * e_norm * z_norm * inflate
+        )
+        return bool(
+            np.isfinite(rho)
+            and np.isfinite(required)
+            and rho < 1.0
+            and (1.0 - rho) / inflate > required
+        )
 
     def _build_raw_border_basis(self) -> NDArray:
         q = len(self.small_indices)

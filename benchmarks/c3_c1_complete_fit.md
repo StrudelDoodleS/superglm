@@ -71,7 +71,7 @@ Wall time defaults to **unmeasured**. Coordinate an exclusive run and follow
 `--measure-time --quiet-profile 'operator/session identifying a quiet host'`.
 The worker refuses measured mode when load exceeds twice the available CPU count
 and records load and all processes' CPU ticks around the
-fit, with fixed Python/pytest/Headroom/Kompress/Pylance/node category labels derived
+fit, with fixed Python/pytest/Pylance/node category labels derived
 from command lines without recording their arguments. That threshold is necessary,
 not sufficient: the operator must establish
 quietness. If load exceeds the bound after the fit, elapsed time is discarded.
@@ -80,7 +80,7 @@ the timed public `fit_reml`; use `--no-warmup` only for explicitly cold comparis
 All timings come from `perf_counter` **inside the worker**. The tool proxy's clock
 and transformed stdout are not receipts. Peak RSS belongs to that fresh worker,
 including imports, fixture preparation, warmup, retained fit history and compiled
-libraries; Headroom/Kompress processes are excluded from RSS but can contend CPU.
+libraries; external processes are excluded from RSS but can contend CPU.
 
 Category labels are heuristic command-line matches, not process identity. Exclude
 the measured worker PID when auditing background activity: descriptive argument

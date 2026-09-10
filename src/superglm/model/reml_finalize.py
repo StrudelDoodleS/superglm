@@ -401,7 +401,9 @@ def finalize_reml_fit(
     if use_direct:
         old_gms = model._dm.group_matrices
         model._dm = rebuild_dm_with_lambdas(model, lambdas, sample_weight)
-        reml_penalties, _, _ = build_penalty_context(model._dm.group_matrices, reml_groups)
+        reml_penalties, _, _ = build_penalty_context(
+            model._dm.group_matrices, reml_groups, _reuse_raw_from=reml_penalties
+        )
         model._reml_penalties = reml_penalties
 
         beta_init = _map_beta_between_bases(

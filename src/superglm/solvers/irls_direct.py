@@ -36,7 +36,7 @@ from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
     _is_raw_spline_tabmat_centering_candidate,
 )
-from superglm.distributions import _VARIANCE_FLOOR, Distribution
+from superglm.distributions import Distribution, Gaussian
 from superglm.group_matrix import (
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
@@ -121,6 +121,7 @@ from superglm.solvers.sum_to_zero import (
 from superglm.solvers.working_rows import (
     coefficient_initial_intercept,
     coefficient_working_rows,
+    pearson_chi2,
     supports_observed_newton,
 )
 from superglm.types import GroupSlice, PenaltyComponent
@@ -1291,29 +1292,66 @@ def _fit_irls_direct_once(
             ),
         )
 
+        # Remove mapped diagonal SCOP penalties before evaluating the merit.
+        # Subtracting them after a full quadratic introduces avoidable
+        # cancellation; cross-group override entries keep their existing role.
+        scop_outer_penalty = S.copy()
+        for spec in _scop_specs.values():
+            scop_outer_penalty[spec.group.sl, spec.group.sl] = 0.0
+        scop_outer_penalty_abs = np.abs(scop_outer_penalty)
+        scop_merit_errors: dict[int, float] = {}
+        merit_ku = (len(y) + 3 * len(beta) + 4 * len(_scop_specs) + 16) * (
+            np.finfo(float).eps / 2.0
+        )
+        merit_gamma = merit_ku / (1.0 - merit_ku) if merit_ku < 1.0 else np.inf
+        # For Gaussian deviance, (|y|+|mu|)^2 <= 8*y^2 + 2*(y-mu)^2.
+        # This encloses residual formation without an observation-level
+        # calculation on every trial. Other families supply deviance-unit
+        # values; the guard covers their weighted accumulation and penalty.
+        gaussian_response_action = (
+            np.sum(
+                np.asarray(weights, dtype=np.longdouble) * np.asarray(y, dtype=np.longdouble) ** 2
+            )
+            if type(family) is Gaussian
+            else np.longdouble(0.0)
+        )
+
         def with_scop_merit(trial: _SCOPTrialState) -> _SCOPTrialState:
             """Attach deviance plus the latent-coordinate quadratic penalty."""
-            penalty_quad = float(trial.irls.beta @ S @ trial.irls.beta)
+            penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
+            magnitude = np.abs(trial.irls.beta)
+            penalty_action = np.longdouble(magnitude @ scop_outer_penalty_abs @ magnitude)
             for group_state in trial.groups:
                 group = groups[group_state.group_index]
-                group_slice = group.sl
-                block = S[group_slice, group_slice]
-                penalty_quad -= float(group_state.gamma_eff @ block @ group_state.gamma_eff)
                 lam_scop = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
                 latent_penalty = _scop_specs[group_state.group_index].S_scop
                 penalty_quad += float(
                     lam_scop * (group_state.beta_eff @ latent_penalty @ group_state.beta_eff)
                 )
-            return replace(
+                magnitude = np.abs(group_state.beta_eff)
+                penalty_action += abs(lam_scop) * (magnitude @ np.abs(latent_penalty) @ magnitude)
+            retained = replace(
                 trial,
                 irls=replace(
                     trial.irls,
                     penalized_deviance=float(trial.irls.deviance + penalty_quad),
                 ),
             )
+            deviance_action = np.longdouble(abs(trial.irls.deviance))
+            if type(family) is Gaussian:
+                deviance_action = 8.0 * gaussian_response_action + 2.0 * deviance_action
+            with np.errstate(over="ignore", invalid="ignore"):
+                allowance = float(
+                    merit_gamma * (deviance_action + penalty_action) / (1.0 - merit_gamma)
+                )
+            scop_merit_errors[id(retained.irls)] = allowance
+            return retained
 
         scop_committed = with_scop_merit(scop_committed)
         committed = scop_committed.irls
+        # Relative change uses the current objective alone. An initial-merit
+        # reference would weaken late convergence after a poor starting fit.
+        objective_merit_scale = 0.0
         emit_evaluation(
             committed,
             phase="initial",
@@ -1820,7 +1858,10 @@ def _fit_irls_direct_once(
                     link=link,
                     default=max_halving,
                 ),
-                merit_scale=objective_merit_scale,
+                merit_scale=0.0,
+                merit_roundoff=lambda candidate, current: (
+                    scop_merit_errors[id(candidate)] + scop_merit_errors[id(current)]
+                ),
             )
             retained_scop = (
                 scop_committed if decision.step_rejected else scop_trial_cache[decision.alpha]
@@ -2799,14 +2840,13 @@ def _fit_irls_direct_once(
     # same under either weight contract; only the denominator's likelihood
     # size distinguishes them.
     if _compute_fit_statistics and not getattr(family, "scale_known", True):
-        V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
-        pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
+        pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu, sample_weight=weights)
         df_resid = pearson_residual_degrees_of_freedom(
             weights,
             p_eff,
             weight_semantics=weight_semantics,
         )
-        phi = pearson_chi2 / df_resid
+        phi = pearson_sum / df_resid
     else:
         phi = 1.0
     if not _compute_reml_geometry or not _compute_fit_statistics:
@@ -2922,9 +2962,8 @@ def _fit_irls_direct_once(
         # covariance and summaries expose.  Known-scale likelihoods retain
         # their defining phi=1 rather than profiling a Pearson scale.
         if not getattr(family, "scale_known", True):
-            V_final = np.maximum(family.variance(mu), _VARIANCE_FLOOR)
-            pearson_chi2 = float(np.sum(weights * (y - mu) ** 2 / V_final))
-            result.phi = pearson_chi2 / pearson_residual_degrees_of_freedom(
+            pearson_sum = pearson_chi2(distribution=family, y=y, mu=mu, sample_weight=weights)
+            result.phi = pearson_sum / pearson_residual_degrees_of_freedom(
                 weights,
                 inference.total_edf,
                 weight_semantics=weight_semantics,

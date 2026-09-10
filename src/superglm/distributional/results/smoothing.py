@@ -28,14 +28,18 @@ from superglm.distributional.results.solver import (
     _assessment_face_geometry_matches,
     _assessment_finite_objective,
     _assessment_is_numerically_stationary,
+    _assessment_objective_error_bound,
     _assessment_penalty_direction_matches,
     _assessment_retained_kkt_ratio,
     _assessment_scalar_error_bound,
     _assessment_unpenalized_logdet_term,
     _dense_penalty_fingerprint,
+    _endpoint_revalidation_projection_bound,
     _frozen_endpoint_mapping,
     _frozen_float_mapping,
+    _PenaltyAssessmentContext,
 )
+from superglm.distributional.smoothing.penalty_face import PenaltyFace
 
 
 def _practical_outward_window(
@@ -177,6 +181,9 @@ class DistributionalEFSResult:
     newton_iterations: int = 0
     bfgs_fallback_iterations: int = 0
     beyond_cap_components: tuple[str, ...] = ()
+    _penalty_assessment_context: _PenaltyAssessmentContext | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def stationarity_bar(self) -> float:
@@ -187,6 +194,10 @@ class DistributionalEFSResult:
     def __post_init__(self) -> None:
         if not isinstance(self.config, DistributionalEFSConfig):
             raise TypeError("config must be DistributionalEFSConfig")
+        if self._penalty_assessment_context is not None:
+            if not isinstance(self._penalty_assessment_context, _PenaltyAssessmentContext):
+                raise TypeError("penalty assessment context has an invalid type")
+            self._penalty_assessment_context._validate()
         initial = _frozen_float_mapping(
             self.initial_lambdas,
             name="initial_lambdas",
@@ -463,16 +474,27 @@ class DistributionalEFSResult:
             ):
                 raise ValueError("joint endpoint evidence requires a stationary common fit")
 
-            calculated_objective, penalty_logdet = _assessment_exact_face_objective(endpoint_fit)
+            if reason == "joint_analytic_unavailable":
+                # This reason claims no objective; the original computation
+                # itself may have refused its penalty accuracy certificate.
+                return
             current_ceiling = item.objective_before + self.config.objective_tolerance * (
                 1.0 + abs(item.objective_before)
             )
             if reason == "joint_objective_rejected":
-                if calculated_objective <= current_ceiling:
+                if self._penalty_assessment_context is None:
+                    outcomes = (_assessment_exact_face_objective(endpoint_fit)[0],)
+                else:
+                    outcomes = self._penalty_assessment_context.original_objectives(
+                        endpoint_fit, lambdas=item.lambdas_before
+                    )
+                if not all(value > current_ceiling for value in outcomes):
                     raise ValueError("joint objective failure disagrees with its common fit")
                 return
-            if reason == "joint_analytic_unavailable":
-                return
+            assessment = _assessment_exact_face_objective(
+                endpoint_fit, context=self._penalty_assessment_context, lambdas=item.lambdas_before
+            )
+            calculated_objective = assessment[0]
             assert isinstance(direction, JointEndpointDirectionEvidence)
             if (
                 endpoint_fit.terminal_curvature.actual_source != "observed"
@@ -481,11 +503,13 @@ class DistributionalEFSResult:
                 raise ValueError(
                     "joint endpoint evidence requires unfallbacked observed-curvature authority"
                 )
-            objective_error = _assessment_scalar_error_bound(
-                calculated_objective,
-                direction.endpoint_objective,
-                width=endpoint_fit.penalty.shape[0],
-                calculation_scale=abs(penalty_logdet),
+            objective_error = _assessment_objective_error_bound(
+                assessment,
+                result=endpoint_fit,
+                original_objective=direction.endpoint_objective,
+                context=self._penalty_assessment_context,
+                lambdas=item.lambdas_before,
+                failure_context="joint endpoint directions do not share the fitted objective",
             )
             if abs(calculated_objective - direction.endpoint_objective) > objective_error:
                 raise ValueError("joint endpoint directions do not share the fitted objective")
@@ -572,15 +596,174 @@ class DistributionalEFSResult:
                     "joint endpoint rollback penalty fingerprint disagrees with terminal penalty"
                 )
 
-            calculated_objective, penalty_logdet = _assessment_finite_objective(rollback_fit)
-            objective_error = _assessment_scalar_error_bound(
-                calculated_objective,
-                item.objective_after,
-                width=rollback_fit.penalty.shape[0],
-                calculation_scale=abs(penalty_logdet),
+            assessment = _assessment_finite_objective(
+                rollback_fit, context=self._penalty_assessment_context, lambdas=item.lambdas_after
+            )
+            calculated_objective = assessment[0]
+            objective_error = _assessment_objective_error_bound(
+                assessment,
+                result=rollback_fit,
+                original_objective=item.objective_after,
+                context=self._penalty_assessment_context,
+                lambdas=item.lambdas_after,
+                failure_context="joint endpoint rollback objective",
             )
             if abs(calculated_objective - item.objective_after) > objective_error:
                 raise ValueError("joint endpoint rollback objective disagrees with its finite fit")
+
+        def validate_revalidation_endpoint_common(
+            *,
+            source_fit: DenseSolverResult,
+            cap_fit: DenseSolverResult,
+            endpoint_fit: DenseSolverResult,
+            tolerance: float,
+            cap_numerically_stationary: bool,
+        ) -> None:
+            """Authenticate shared stationarity and provenance for revalidation."""
+            if not cap_fit.converged:
+                raise ValueError("endpoint revalidation cap did not converge")
+            if cap_numerically_stationary and not _assessment_is_numerically_stationary(
+                cap_fit,
+                tolerance,
+            ):
+                raise ValueError("endpoint revalidation cap is not numerically stationary")
+            if not endpoint_fit.converged or not _assessment_is_numerically_stationary(
+                endpoint_fit,
+                tolerance,
+            ):
+                raise ValueError("endpoint revalidation endpoint is not numerically stationary")
+            if assessment_shared_signature(endpoint_fit) != assessment_shared_signature(cap_fit):
+                raise ValueError("endpoint revalidation changed shared solver provenance")
+
+        def validate_revalidation_endpoint_state(
+            *,
+            source_fit: DenseSolverResult,
+            cap_fit: DenseSolverResult,
+            endpoint_fit: DenseSolverResult,
+            endpoint_face: PenaltyFace,
+            tolerance: float,
+            cap_numerically_stationary: bool,
+            direct_nonstationary_cap: bool,
+        ) -> None:
+            """Authenticate an accepted revalidation endpoint against its source."""
+            validate_revalidation_endpoint_common(
+                source_fit=source_fit,
+                cap_fit=cap_fit,
+                endpoint_fit=endpoint_fit,
+                tolerance=tolerance,
+                cap_numerically_stationary=cap_numerically_stationary,
+            )
+            if not np.array_equal(endpoint_fit.coefficients, source_fit.coefficients):
+                with np.errstate(over="ignore", invalid="ignore"):
+                    movement = float(
+                        np.linalg.norm(endpoint_fit.coefficients - source_fit.coefficients, ord=2)
+                    )
+                if cap_numerically_stationary:
+                    projection_bound = _endpoint_revalidation_projection_bound(
+                        endpoint_face,
+                        source_fit.coefficients,
+                    )
+                    try:
+                        projected_source = endpoint_face.project(source_fit.coefficients)
+                    except ValueError:
+                        projected_source = None
+                    if (
+                        endpoint_fit.iterations != 0
+                        or projected_source is None
+                        or not np.array_equal(endpoint_fit.coefficients, projected_source)
+                        or projection_bound is None
+                        or not math.isfinite(movement)
+                        or movement > projection_bound
+                    ):
+                        raise ValueError(
+                            "endpoint revalidation changed the canonical endpoint state"
+                        )
+                else:
+                    movement_bound = _assessment_coefficient_refit_bound(
+                        source_fit.coefficients,
+                        endpoint_fit.coefficients,
+                        tolerance=tolerance,
+                    )
+                    if (
+                        not direct_nonstationary_cap
+                        or movement_bound is None
+                        or not math.isfinite(movement)
+                        or movement > movement_bound
+                    ):
+                        raise ValueError(
+                            "endpoint revalidation changed the canonical endpoint state"
+                        )
+
+        def validate_state_changed_revalidation(
+            *,
+            source_fit: DenseSolverResult,
+            cap_fit: DenseSolverResult,
+            endpoint_fit: DenseSolverResult,
+            endpoint_face: PenaltyFace,
+            tolerance: float,
+            cap_numerically_stationary: bool,
+            direct_nonstationary_cap: bool,
+        ) -> None:
+            """Authenticate a scalar refusal caused by a changed endpoint state."""
+            validate_revalidation_endpoint_common(
+                source_fit=source_fit,
+                cap_fit=cap_fit,
+                endpoint_fit=endpoint_fit,
+                tolerance=tolerance,
+                cap_numerically_stationary=cap_numerically_stationary,
+            )
+            with np.errstate(over="ignore", invalid="ignore"):
+                movement = float(
+                    np.linalg.norm(endpoint_fit.coefficients - source_fit.coefficients, ord=2)
+                )
+            if not math.isfinite(movement) or np.array_equal(
+                endpoint_fit.coefficients,
+                source_fit.coefficients,
+            ):
+                raise ValueError("endpoint state-change evidence has no endpoint movement")
+
+            projection_bound = _endpoint_revalidation_projection_bound(
+                endpoint_face,
+                source_fit.coefficients,
+            )
+            try:
+                projected_source = endpoint_face.project(source_fit.coefficients)
+            except ValueError:
+                projected_source = None
+            certified_projection_replay = (
+                endpoint_fit.iterations == 0
+                and projected_source is not None
+                and np.array_equal(endpoint_fit.coefficients, projected_source)
+                and projection_bound is not None
+                and movement <= projection_bound
+            )
+            if certified_projection_replay:
+                raise ValueError("endpoint state-change evidence is only projection roundoff")
+
+            if not cap_numerically_stationary and direct_nonstationary_cap:
+                endpoint_rank = endpoint_fit.terminal_reduced_rank
+                endpoint_curvature = endpoint_fit.terminal_curvature
+                if (
+                    endpoint_rank is None
+                    or endpoint_rank.rank != endpoint_face.reduced_width
+                    or endpoint_curvature.requested_source != "observed"
+                    or endpoint_curvature.actual_source != "observed"
+                    or endpoint_curvature.fallback_count != 0
+                ):
+                    raise ValueError(
+                        "nonstationary-cap exact-face authority requires full observed rank"
+                    )
+                movement_bound = _assessment_coefficient_refit_bound(
+                    source_fit.coefficients,
+                    endpoint_fit.coefficients,
+                    tolerance=tolerance,
+                )
+                if (
+                    movement_bound is None
+                    or not math.isfinite(movement)
+                    or movement <= movement_bound
+                ):
+                    raise ValueError("endpoint state-change movement is within the refit envelope")
 
         def validate_endpoint_assessment(
             item: DistributionalEFSIteration,
@@ -622,6 +805,121 @@ class DistributionalEFSResult:
                 )
                 return
             if direction is None:
+                if item.deactivated_face_components:
+                    reason = item.endpoint_assessment_failure_reason
+                    if reason is None:
+                        return
+                    if (
+                        reason != "endpoint_state_changed"
+                        or len(item.deactivated_face_components) != 1
+                    ):
+                        raise ValueError(
+                            "scalar endpoint deactivation requires endpoint state-change evidence"
+                        )
+                    indices = item.coefficient_fit_indices
+                    if len(indices) != 3:
+                        raise ValueError(
+                            "endpoint state-change deactivation requires cap, endpoint, and rollback fits"
+                        )
+                    cap_fit, endpoint_fit, rollback_fit = (fits[index] for index in indices)
+                    tolerance = item.coefficient_tolerances[0]
+                    if any(
+                        fit.config.tolerance != tolerance
+                        or item.coefficient_tolerances[position] != tolerance
+                        for position, fit in enumerate((cap_fit, endpoint_fit, rollback_fit))
+                    ):
+                        raise ValueError("endpoint state-change deactivation changed its tolerance")
+                    assessed_name = item.deactivated_face_components[0]
+                    if source_face != (assessed_name,):
+                        raise ValueError(
+                            "endpoint state-change deactivation requires a scalar source face"
+                        )
+                    expected_finite_face = tuple(
+                        name for name in source_face if name != assessed_name
+                    )
+                    if coefficient_face_names(indices[0]) != expected_finite_face:
+                        raise ValueError(
+                            "endpoint state-change cap used the wrong coefficient face"
+                        )
+                    if coefficient_face_names(indices[1]) != source_face:
+                        raise ValueError(
+                            "endpoint state-change assessment used the wrong exact coefficient face"
+                        )
+                    if (
+                        item.accepted_fit_index != indices[-1]
+                        or coefficient_face_names(indices[-1]) != accepted_face
+                    ):
+                        raise ValueError("endpoint state-change rollback used the wrong finite fit")
+                    if (
+                        not cap_fit.converged
+                        or not endpoint_fit.converged
+                        or not rollback_fit.converged
+                        or cap_fit.config.coefficient_curvature != "observed"
+                        or endpoint_fit.config.coefficient_curvature != "observed"
+                        or rollback_fit.config.coefficient_curvature != "observed"
+                        or cap_fit.terminal_curvature.actual_source != "observed"
+                        or endpoint_fit.terminal_curvature.actual_source != "observed"
+                        or rollback_fit.terminal_curvature.actual_source != "observed"
+                        or cap_fit.terminal_curvature.fallback_count != 0
+                        or endpoint_fit.terminal_curvature.fallback_count != 0
+                        or rollback_fit.terminal_curvature.fallback_count != 0
+                        or rollback_fit.config.max_iterations < 150
+                        or rollback_fit.config.newton_decrement_tolerance is not None
+                        or item.accepted_curvature != rollback_fit.terminal_curvature
+                    ):
+                        raise ValueError("endpoint state-change deactivation used uncertified fits")
+                    if not np.array_equal(cap_fit.penalty, rollback_fit.penalty):
+                        raise ValueError(
+                            "endpoint state-change rollback changed its finite penalty"
+                        )
+                    if cap_fit.config != rollback_fit.config:
+                        raise ValueError("endpoint state-change rollback changed its fit policy")
+                    source_fit = fits[item.source_fit_index]
+                    source_geometry = source_fit.coefficient_face
+                    endpoint_face = endpoint_fit.coefficient_face
+                    if (
+                        source_geometry is None
+                        or endpoint_face is None
+                        or source_geometry.component_names != source_face
+                        or not _assessment_face_geometry_matches(source_geometry, endpoint_face)
+                    ):
+                        raise ValueError("endpoint state-change revalidation changed face geometry")
+                    cap_numerically_stationary = _assessment_is_numerically_stationary(
+                        cap_fit,
+                        tolerance,
+                    )
+                    capped_outside = tuple(
+                        name
+                        for name in terminal
+                        if name not in expected_finite_face
+                        and item.lambdas_before[name] == self.config.maximum_lambda
+                    )
+                    validate_state_changed_revalidation(
+                        source_fit=source_fit,
+                        cap_fit=cap_fit,
+                        endpoint_fit=endpoint_fit,
+                        endpoint_face=endpoint_face,
+                        tolerance=tolerance,
+                        cap_numerically_stationary=cap_numerically_stationary,
+                        direct_nonstationary_cap=capped_outside == (assessed_name,),
+                    )
+                    assessment = _assessment_finite_objective(
+                        rollback_fit,
+                        context=self._penalty_assessment_context,
+                        lambdas=item.lambdas_after,
+                    )
+                    calculated_objective = assessment[0]
+                    objective_error = _assessment_objective_error_bound(
+                        assessment,
+                        result=rollback_fit,
+                        original_objective=item.objective_after,
+                        context=self._penalty_assessment_context,
+                        lambdas=item.lambdas_after,
+                        failure_context="endpoint state-change rollback objective",
+                    )
+                    if abs(calculated_objective - item.objective_after) > objective_error:
+                        raise ValueError("endpoint state-change rollback objective disagrees")
+                    return
                 if not item.refused_face_components:
                     return
                 reason = item.endpoint_assessment_failure_reason
@@ -694,6 +992,10 @@ class DistributionalEFSResult:
                             "endpoint stationarity failure reason disagrees with its fit"
                         )
                     return
+                if reason == "endpoint_state_changed":
+                    raise ValueError(
+                        "endpoint state-change evidence is valid only for scalar retraction"
+                    )
                 if not cap_fit.converged or not endpoint_fit.converged:
                     raise ValueError("endpoint analytic failure requires converged assessment fits")
                 provenance_changed = assessment_shared_signature(endpoint_fit) != (
@@ -793,31 +1095,16 @@ class DistributionalEFSResult:
                     raise ValueError(
                         "nonstationary-cap exact-face authority requires full retained rank"
                     )
-            if item.revalidated_face_components and not np.array_equal(
-                endpoint_fit.coefficients,
-                fits[item.source_fit_index].coefficients,
-            ):
-                source_coefficients = fits[item.source_fit_index].coefficients
-                movement_bound = _assessment_coefficient_refit_bound(
-                    source_coefficients,
-                    endpoint_fit.coefficients,
+            if item.revalidated_face_components:
+                validate_revalidation_endpoint_state(
+                    source_fit=fits[item.source_fit_index],
+                    cap_fit=cap_fit,
+                    endpoint_fit=endpoint_fit,
+                    endpoint_face=endpoint_face,
                     tolerance=tolerance,
+                    cap_numerically_stationary=cap_numerically_stationary,
+                    direct_nonstationary_cap=direct_nonstationary_cap,
                 )
-                with np.errstate(over="ignore", invalid="ignore"):
-                    movement = float(
-                        np.max(
-                            np.abs(endpoint_fit.coefficients - source_coefficients),
-                            initial=0.0,
-                        )
-                    )
-                if (
-                    cap_numerically_stationary
-                    or not direct_nonstationary_cap
-                    or movement_bound is None
-                    or not math.isfinite(movement)
-                    or movement > movement_bound
-                ):
-                    raise ValueError("endpoint revalidation changed the canonical endpoint state")
             selected_rank = endpoint_face.constraint_rank - finite_rank
             selected_penalty = _assessment_penalty_direction_matches(
                 cap_fit=cap_fit,

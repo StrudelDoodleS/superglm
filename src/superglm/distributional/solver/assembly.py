@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
 from superglm.distributional.solver.packing import packed_pairs
+from superglm.solvers.rank import _symmetric_part
 
 if TYPE_CHECKING:
     from superglm.distributional.solver._small_group_panels import SmallGroupPanelWorkspace
@@ -191,7 +192,7 @@ def validated_dense_penalty(penalty: NDArray, width: int) -> NDArray[np.float64]
     tolerance = 1.0e-12 * max(1.0, float(np.linalg.norm(values, ord=np.inf)))
     if not np.allclose(values, values.T, rtol=0.0, atol=tolerance):
         raise ValueError("penalty must be symmetric")
-    return 0.5 * (values + values.T)
+    return _symmetric_part(values)
 
 
 def _assemble_dense_geometry_from_matrices(
@@ -232,7 +233,7 @@ def _assemble_dense_geometry_from_matrices(
         if left_index != right_index:
             data_curvature[right_state.coefficient_slice, left_state.coefficient_slice] = block.T
 
-    data_curvature = 0.5 * (data_curvature + data_curvature.T)
+    data_curvature = _symmetric_part(data_curvature)
     score_penalized = score_data - penalty_matrix @ coefficient_values
     penalized_curvature = data_curvature + penalty_matrix
     return DenseJointGeometry(

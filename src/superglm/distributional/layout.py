@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
 import numpy as np
@@ -12,7 +12,7 @@ from numpy.typing import NDArray
 from superglm.distributional.predictor import CompiledPredictor
 from superglm.group_matrix import DesignMatrix
 from superglm.links import Link
-from superglm.reml.penalty_algebra import penalty_component_dense_matrix
+from superglm.reml.penalty_algebra import _rebind_penalty_context, penalty_component_dense_matrix
 from superglm.types import GroupSlice, PenaltyComponent
 
 
@@ -58,6 +58,11 @@ class StackedLayout:
     coefficient_names: tuple[str, ...]
     term_slices: Mapping[str, slice]
     penalties: tuple[PenaltyComponent, ...]
+    # Scalar producer evidence lasts for this layout's fit. Replacing a layout
+    # starts a new journal; no evaluations or dense fit objects are cached.
+    _penalty_objective_receipts: dict[tuple, object] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         predictor_names = tuple(state.name for state in self.predictors)
@@ -307,6 +312,8 @@ def build_stacked_layout(builds: Sequence[CompiledPredictor]) -> StackedLayout:
             _qualify_local_component(component, predictor=predictor)
             for component in predictor.penalties
         )
+        _rebind_penalty_context(predictor.penalties, embedded)
+        _rebind_penalty_context(predictor.penalties, local_penalties)
         penalties.extend(embedded)
         states.append(
             PredictorState(

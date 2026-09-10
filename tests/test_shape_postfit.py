@@ -1080,7 +1080,7 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
     structured_kind: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from superglm.reml import penalty_algebra
+    from superglm.reml import penalty_algebra, penalty_support
 
     rng = np.random.default_rng(20260727)
     n_levels = 36
@@ -1139,14 +1139,37 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
     beta_before = np.concatenate([model.result.beta[group.sl] for group in x_groups])
     revision_before = model._fit_revision
 
-    def reject_dense_component(*_args, **_kwargs):
-        raise AssertionError("post-fit repair expanded a structured penalty component")
+    materialize_penalty = penalty_algebra.penalty_component_dense_matrix
+    make_support = penalty_support._penalty_support
+    context_support = penalty_algebra._PenaltyGroupGeometry.get_support
+    dense_penalty_shapes = set()
+    support_dimensions = set()
+
+    def reject_dense_component(component, *args, **kwargs):
+        if component.penalty_kind != "dense":
+            raise AssertionError("post-fit repair expanded a structured penalty component")
+        matrix = materialize_penalty(component, *args, **kwargs)
+        dense_penalty_shapes.add(matrix.shape)
+        assert matrix is component.omega_ssp
+        return matrix
+
+    def checked_support(matrices):
+        support = make_support(matrices)
+        support_dimensions.add((tuple(matrix.shape for matrix in matrices), support.rank))
+        return support
+
+    def checked_context(context, *args, **kwargs):
+        support = context_support(context, *args, **kwargs)
+        support_dimensions.add((tuple(matrix.shape for matrix in context.matrices), support.rank))
+        return support
 
     monkeypatch.setattr(
         penalty_algebra,
         "penalty_component_dense_matrix",
         reject_dense_component,
     )
+    monkeypatch.setattr(penalty_support, "_penalty_support", checked_support)
+    monkeypatch.setattr(penalty_algebra._PenaltyGroupGeometry, "get_support", checked_context)
 
     model.apply_shape_postfit(X, n_grid=120)
 
@@ -1161,6 +1184,20 @@ def test_structured_postfit_shape_repair_uses_compact_penalties(
     assert certificate.minimum_scaled_slack >= -2.0e-11
     assert np.all(np.isfinite(model.predict(X)))
     assert model.result.direct_backend == "structured"
+    assert dense_penalty_shapes <= {(10, 10)}
+    expected_support = {(((10, 10),), 9)}
+    if structured_kind == "sz":
+        expected_support.add((((5, 5),), 3))
+    elif structured_kind == "fs":
+        expected_support.add((((5, 5),) * 3, 5))
+    assert support_dimensions == expected_support
+    compact = next(
+        component for component in model._reml_penalties if component.penalty_kind != "dense"
+    )
+    compact_width = {"re": 36, "fs": 180, "sz": 175}[structured_kind]
+    assert compact.group_sl.stop - compact.group_sl.start == compact_width
+    with pytest.raises(AssertionError, match="expanded a structured penalty"):
+        penalty_algebra.penalty_component_dense_matrix(compact)
 
 
 @pytest.mark.parametrize("spline_penalty", [0.0, 0.5])

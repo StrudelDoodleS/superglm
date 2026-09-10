@@ -677,7 +677,7 @@ class SuperLSS:
         reml_tol: float = 1.0e-6,
         max_log_step: float = 5.0,
         max_lambda: float = 1.0e10,
-        initial_lambda: float = 0.1,
+        initial_lambda: float | None = None,
         max_inner_iter: int = 100,
         inner_tol: float = 1.0e-7,
         lambdas: Mapping[str, float] | None = None,
@@ -701,21 +701,30 @@ class SuperLSS:
         negligible objective and fitted-parameter movement. Set it to ``False``
         when strict Fellner--Schall stationarity is required.
 
-        ``initial_lambda`` is the search start for every smoothing parameter
-        without an explicit entry in ``lambdas``; the Fellner--Schall stops are
-        start-dependent on some problems, so vary it when comparing fits.
+        By default, choose a data-scaled starting penalty for each term.
+        ``initial_lambda=None`` adjusts the starting strength of smoothing to
+        the term's units and the information in the data. Terms with several
+        penalties get a separate start for each.
+        These starts are clipped to the smoothing bounds. Families without
+        expected information and terms with unresolved numerical rank use 0.1,
+        also clipped to those bounds.
+
+        A numeric ``initial_lambda`` supplies a common start. Entries in
+        ``lambdas`` override it, and fixed penalty policies take precedence over
+        both. The smoothing result retains the numeric starts for replay.
+        Stops can depend on the starting values, so vary them when comparing fits.
         """
         if method != "efs":
             raise NotImplementedError("SuperLSS currently supports only method='efs'")
         if outer not in ("efs", "efs+newton"):
             raise ValueError("outer must be 'efs' or 'efs+newton'")
-        if (
+        if initial_lambda is not None and (
             isinstance(initial_lambda, bool)
             or not isinstance(initial_lambda, int | float)
             or not math.isfinite(initial_lambda)
             or initial_lambda <= 0.0
         ):
-            raise ValueError("initial_lambda must be a finite positive number")
+            raise ValueError("initial_lambda must be None or a finite positive number")
         return self._fit(
             X,
             y,
@@ -732,7 +741,9 @@ class SuperLSS:
                 tolerance=reml_tol,
                 max_log_step=max_log_step,
                 maximum_lambda=max_lambda,
-                initial_lambda=min(float(initial_lambda), max_lambda),
+                initial_lambda=(
+                    None if initial_lambda is None else min(float(initial_lambda), max_lambda)
+                ),
                 acceleration=acceleration,
                 acceleration_history=acceleration_history,
                 acceleration_max_amplification=acceleration_max_amplification,

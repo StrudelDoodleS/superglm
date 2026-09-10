@@ -32,6 +32,7 @@ from superglm.distributional.result import (
     _resolution_limited_decrement_is_within_objective_ulp,
     _validate_resolution_limited_stationarity,
 )
+from superglm.distributional.results.solver import _newton_decrement_is_certified
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.solver._likelihood_cache import (
     _is_builtin_gaussian_gamma,
@@ -950,6 +951,58 @@ def _optimization_score_relative(
     return _relative_score(reduced, objective)
 
 
+def _objective_and_step_is_certified(
+    context: _SolverContext,
+    config: DenseSolverConfig,
+    geometry: DenseJointGeometry,
+    state: _AcceptedState,
+    direction: _Direction,
+    score_relative: float,
+    phase_recorder: FitPhaseRecorder | None,
+) -> bool:
+    """Require retained score or a safe, scale-invariant stationarity proof."""
+    if score_relative <= config.tolerance:
+        return True
+    optimization_score = _optimization_score(context, geometry.score_penalized)
+    decomposition = direction.decomposition
+    if (
+        config.coefficient_curvature not in ("observed", "fisher")
+        or direction.levenberg_shift != 0.0
+        or direction.residual > config.residual_tolerance
+        or decomposition.width != len(optimization_score)
+        or decomposition.rank != len(optimization_score)
+        or decomposition.rank_truncated
+        or decomposition.used_svd_fallback
+        or decomposition.resolution_limited
+    ):
+        return False
+    certificate_geometry = geometry
+    if config.coefficient_curvature == "fisher":
+        certificate_geometry = _measured_geometry(
+            context,
+            state,
+            "observed",
+            phase_recorder,
+        )
+        if (
+            _optimization_score_relative(
+                context,
+                certificate_geometry.score_penalized,
+                state.penalized_optimizing_log_likelihood,
+            )
+            <= config.tolerance
+        ):
+            return True
+    return _newton_decrement_is_certified(
+        config=config,
+        score=certificate_geometry.score_penalized,
+        penalized_curvature=certificate_geometry.penalized_curvature,
+        penalized_objective=state.penalized_optimizing_log_likelihood,
+        face=context.coefficient_face,
+        tolerance=config.tolerance,
+    )
+
+
 def _policy_curvature(
     context: _SolverContext,
     matrix: NDArray,
@@ -1135,9 +1188,14 @@ def _run_iterations(
             and direction.levenberg_shift == 0.0
             and direction.decomposition.rank == len(optimization_score)
         ):
-            decrement = float(geometry.score_penalized @ direction.step)
-            objective_scale = 1.0 + abs(state.penalized_optimizing_log_likelihood)
-            if 0.0 <= decrement <= config.newton_decrement_tolerance * objective_scale:
+            if _newton_decrement_is_certified(
+                config=config,
+                score=geometry.score_penalized,
+                penalized_curvature=geometry.penalized_curvature,
+                penalized_objective=state.penalized_optimizing_log_likelihood,
+                face=context.coefficient_face,
+                tolerance=config.newton_decrement_tolerance,
+            ):
                 return _OptimizationRun(
                     state=state,
                     geometry=geometry,
@@ -1240,16 +1298,25 @@ def _run_iterations(
             backtracks += 1
         if accepted is None:
             if stop_policy == "ordinary" and reached_identical_candidate:
-                return _OptimizationRun(
-                    state=state,
-                    geometry=geometry,
-                    history=tuple(history),
-                    converged=True,
-                    reason="objective_and_step",
-                    score_relative=score_relative,
-                    objective_relative_change=0.0,
-                    step_relative=0.0,
-                )
+                if _objective_and_step_is_certified(
+                    context,
+                    config,
+                    geometry,
+                    state,
+                    direction,
+                    score_relative,
+                    phase_recorder,
+                ):
+                    return _OptimizationRun(
+                        state=state,
+                        geometry=geometry,
+                        history=tuple(history),
+                        converged=True,
+                        reason="objective_and_step",
+                        score_relative=score_relative,
+                        objective_relative_change=0.0,
+                        step_relative=0.0,
+                    )
             retained_correction: NDArray[np.float64] | None = None
             if direction.decomposition.rank == len(optimization_score):
                 try:
@@ -1345,16 +1412,29 @@ def _run_iterations(
                 )
             continue
         if objective_relative_change <= config.tolerance and step_relative <= config.tolerance:
-            return _OptimizationRun(
-                state=state,
-                geometry=geometry,
-                history=tuple(history),
-                converged=True,
-                reason="objective_and_step",
-                score_relative=accepted_score_relative,
-                objective_relative_change=objective_relative_change,
-                step_relative=step_relative,
-            )
+            if _objective_and_step_is_certified(
+                context,
+                config,
+                geometry,
+                state,
+                direction,
+                accepted_score_relative,
+                phase_recorder,
+            ):
+                return _OptimizationRun(
+                    state=state,
+                    geometry=geometry,
+                    history=tuple(history),
+                    converged=True,
+                    reason="objective_and_step",
+                    score_relative=accepted_score_relative,
+                    objective_relative_change=objective_relative_change,
+                    step_relative=step_relative,
+                )
+            # A distinct tiny step is still a valid state transition.  Keep
+            # the remaining iteration budget so a fresh direction can recover
+            # stationarity; only an identical candidate has no progress to
+            # retry and returns ``line_search_failed`` below.
         if (
             objective_relative_change <= config.tolerance
             and accepted_score_relative <= config.tolerance
@@ -1671,9 +1751,8 @@ def _fit_dense_fixed_lambda_core(
                 state = retry.state
                 coefficient_geometry = retry.geometry
                 history.extend(retry.history)
-                if retry.converged:
-                    converged = True
-                    reason = retry.reason
+                converged = retry.converged
+                reason = retry.reason
                 score_relative = retry.score_relative
                 objective_relative_change = retry.objective_relative_change
                 step_relative = retry.step_relative
