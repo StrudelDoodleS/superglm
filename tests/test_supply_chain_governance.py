@@ -2,6 +2,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from tests.test_ci_contracts import _check_run_names, _compatibility_cases, _jobs
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -231,48 +233,56 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     workflow = _read(".github/workflows/ci.yml")
     header = _workflow_header(workflow)
 
-    compatibility_job = workflow.split("  test-compatibility:", maxsplit=1)[1].split(
-        "  test-coverage:", maxsplit=1
-    )[0]
-    coverage_shard_job = workflow.split("  test-coverage:", maxsplit=1)[1].split(
-        "  coverage:", maxsplit=1
-    )[0]
-    coverage_job = workflow.split("  coverage:", maxsplit=1)[1].split("  lint:", maxsplit=1)[0]
+    jobs = _jobs(workflow)
+    compatibility_job = jobs["test-compatibility"]
+    coverage_job = jobs["coverage"]
 
     assert '      - ".test_durations"' in header
 
     assert "fail-fast: false" in compatibility_job
-    for version in ("3.12", "3.14"):
-        assert f'"{version}"' in compatibility_job
-    # 3.13 gets dedicated coverage-shard jobs below; running it here too is waste.
-    assert '"3.13"' not in compatibility_job
-    assert "uv run --with pyarrow --with mpmath pytest tests/" in compatibility_job
-    assert '-m "not browser"' in compatibility_job
-    assert "--splits" not in compatibility_job
-    assert "--cov" not in compatibility_job
+    assert "max-parallel: 4" in compatibility_job
+    cases = _compatibility_cases(compatibility_job)
+    assert len(cases) == 12
+    assert set(cases) == {
+        (version, group, label)
+        for version in ("3.12", "3.13", "3.14")
+        for group, label in enumerate("ABCD", start=1)
+    }
+    assert set(_check_run_names(workflow)["test-compatibility"]) == {
+        f"Python {version} · non-browser regression suite · balanced {label}"
+        for version, _group, label in cases
+    }
+    assert "uv sync --locked --python ${{ matrix.python-version }}" in compatibility_job
+    assert "--extra dev --extra bench --extra plotting" in compatibility_job
     assert "ruff check" not in compatibility_job
 
-    assert "fail-fast: false" in coverage_shard_job
-    assert "uv python install 3.13" in coverage_shard_job
-    for group, label in enumerate(("A", "B", "C", "D"), start=1):
-        assert f"- group: {group}" in coverage_shard_job
-        assert f"label: {label}" in coverage_shard_job
-    assert "uv run --with pyarrow --with mpmath pytest tests/" in coverage_shard_job
-    assert '-m "not browser"' in coverage_shard_job
-    assert "--splits 4" in coverage_shard_job
-    assert "--group ${{ matrix.group }}" in coverage_shard_job
-    assert "--splitting-algorithm least_duration" in coverage_shard_job
-    assert "--cov=superglm" in coverage_shard_job
-    assert "--cov-branch" in coverage_shard_job
-    assert "--cov-report=" in coverage_shard_job
-    assert "COVERAGE_FILE: .coverage.${{ matrix.group }}" in coverage_shard_job
-    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in coverage_shard_job
-    assert "name: coverage-py313-${{ matrix.group }}" in coverage_shard_job
-    assert "path: .coverage.${{ matrix.group }}" in coverage_shard_job
-    assert "if-no-files-found: error" in coverage_shard_job
-    assert "include-hidden-files: true" in coverage_shard_job
+    run_steps = re.findall(r"(?ms)^      - name: [^\n]+\n(.*?)(?=^      - |\Z)", compatibility_job)
+    pytest_steps = [step for step in run_steps if "pytest tests/" in step]
+    assert len(pytest_steps) == compatibility_job.count("pytest tests/") == 2
+    regression, coverage = pytest_steps
+    # Complementary conditions make coverage replace the normal invocation.
+    assert "if: github.event_name != 'push' || matrix.python-version != '3.13'" in regression
+    assert "if: github.event_name == 'push' && matrix.python-version == '3.13'" in coverage
+    for step in pytest_steps:
+        assert "uv run --with mpmath pytest tests/" in step
+        assert '-m "not browser"' in step
+        assert "--splits 4" in step
+        assert "--group ${{ matrix.group }}" in step
+        assert "--splitting-algorithm least_duration" in step
+    assert "--cov" not in regression
+    assert "--cov=superglm" in coverage
+    assert "--cov-branch" in coverage
+    assert "--cov-report=" in coverage
+    assert "COVERAGE_FILE: .coverage.${{ matrix.group }}" in coverage
+    upload = next(step for step in run_steps if "actions/upload-artifact@" in step)
+    assert "if: github.event_name == 'push' && matrix.python-version == '3.13'" in upload
+    assert "name: coverage-py313-${{ matrix.group }}" in upload
+    assert "path: .coverage.${{ matrix.group }}" in upload
+    assert "if-no-files-found: error" in upload
+    assert "include-hidden-files: true" in upload
 
-    assert "needs: test-coverage" in coverage_job
+    assert "if: github.event_name == 'push'" in coverage_job
+    assert "needs: test-compatibility" in coverage_job
     assert "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" in coverage_job
     assert "pattern: coverage-py313-*" in coverage_job
     assert "merge-multiple: true" in coverage_job
@@ -284,35 +294,24 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert workflow.count("uv run ruff format --check src/ tests/") == 1
 
 
-def test_dev_ci_parallelizes_complete_python314_suite():
+def test_dev_ci_keeps_auxiliary_checks_without_duplicating_the_regression_suite():
     workflow = _read(".github/workflows/dev-ci.yml")
 
+    assert "pull_request:" in workflow
+    assert "\n  push:\n" not in workflow
+    assert "workflow_dispatch:" not in workflow
     assert "  quick-check:" not in workflow
     assert "  py314-full:" not in workflow
-    for job in ("quality", "docs", "frontend", "browser", "type-check", "pytest-314"):
+    for job in ("quality", "docs", "frontend", "browser", "type-check"):
         assert f"  {job}:" in workflow
 
-    pytest_job = workflow.split("  pytest-314:", maxsplit=1)[1]
-    assert "name: ${{ matrix.label }}" in pytest_job
-    assert "fail-fast: false" in pytest_job
-    assert "include:" in pytest_job
-    for group in range(1, 5):
-        assert f"- group: {group}" in pytest_job
-    for label in (
-        "Python 3.14 · non-browser regression suite · balanced A",
-        "Python 3.14 · non-browser regression suite · balanced B",
-        "Python 3.14 · non-browser regression suite · balanced C",
-        "Python 3.14 · non-browser regression suite · balanced D",
-    ):
-        assert f"label: {label}" in pytest_job
-    assert "uv python install 3.14" in pytest_job
-    assert "uv sync --python 3.14 --extra dev" in pytest_job
-    assert "uv run --with pyarrow --with mpmath pytest tests/" in pytest_job
-    assert '-m "not browser"' in pytest_job
-    assert "--splits 4" in pytest_job
-    assert "--group ${{ matrix.group }}" in pytest_job
-    assert "--splitting-algorithm least_duration" in pytest_job
-    assert "--maxfail=1" in pytest_job
+    full_suite_jobs = [
+        (path, name)
+        for path in (".github/workflows/ci.yml", ".github/workflows/dev-ci.yml")
+        for name, block in _jobs(_read(path)).items()
+        if re.search(r"pytest\s+tests/(?:\s|$)", block)
+    ]
+    assert full_suite_jobs == [(".github/workflows/ci.yml", "test-compatibility")]
 
 
 def test_dev_ci_keeps_browser_and_non_test_checks_independent():
@@ -321,7 +320,7 @@ def test_dev_ci_keeps_browser_and_non_test_checks_independent():
     quality_job = workflow.split("  quality:", maxsplit=1)[1].split("  docs:", maxsplit=1)[0]
     docs_job = workflow.split("  docs:", maxsplit=1)[1].split("  frontend:", maxsplit=1)[0]
     frontend_job = workflow.split("  frontend:", maxsplit=1)[1].split("  browser:", maxsplit=1)[0]
-    browser_job = workflow.split("  browser:", maxsplit=1)[1].split("  pytest-314:", maxsplit=1)[0]
+    browser_job = _jobs(workflow)["browser"]
 
     assert "ruff check src/ tests/" in quality_job
     assert "ruff format --check src/ tests/" in quality_job

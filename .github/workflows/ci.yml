@@ -17,58 +17,25 @@ on:
       - ".test_durations"
   pull_request:
     branches: [master]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "benchmarks/**"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "package.json"
-      - "package-lock.json"
-      - "jsconfig.json"
-      - "tests/editor_frontend/**"
-      - ".github/workflows/**"
-      - ".test_durations"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test-compatibility:
-    name: Python ${{ matrix.python-version }} · complete non-browser suite
+    # Keep the 3.14 names listed in the Protect master ruleset.
+    name: Python ${{ matrix.python-version }} · non-browser regression suite · balanced ${{ matrix.label }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
-        python-version: >-
-          ${{ fromJSON(
-            github.event_name == 'pull_request'
-            && '["3.12"]'
-            || '["3.12","3.14"]'
-          ) }}
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: uv sync --python ${{ matrix.python-version }} --extra dev
-
-      - name: Run complete compatibility suite
-        run: uv run --with pyarrow --with mpmath pytest tests/ -q -m "not browser"
-
-  test-coverage:
-    name: Python 3.13 · coverage shard ${{ matrix.label }}
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
+        group: [1, 2, 3, 4]
+        python-version: ["3.12", "3.13", "3.14"]
         include:
           - group: 1
             label: A
@@ -85,22 +52,33 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
 
-      - name: Set up Python 3.13
-        run: uv python install 3.13
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: uv sync --python 3.13 --extra dev
+      - name: Install all tested optional dependencies
+        run: >-
+          uv sync --locked --python ${{ matrix.python-version }}
+          --extra dev --extra bench --extra plotting
+
+      - name: Run duration-balanced regression shard
+        if: github.event_name != 'push' || matrix.python-version != '3.13'
+        run: >-
+          uv run --with mpmath pytest tests/ -q -m "not browser"
+          --splits 4 --group ${{ matrix.group }}
+          --splitting-algorithm least_duration
 
       - name: Run duration-balanced coverage shard
+        if: github.event_name == 'push' && matrix.python-version == '3.13'
         env:
           COVERAGE_FILE: .coverage.${{ matrix.group }}
         run: >-
-          uv run --with pyarrow --with mpmath pytest tests/ -q -m "not browser"
+          uv run --with mpmath pytest tests/ -q -m "not browser"
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
           --cov=superglm --cov-branch --cov-report=
 
       - name: Upload coverage database
+        if: github.event_name == 'push' && matrix.python-version == '3.13'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: coverage-py313-${{ matrix.group }}
@@ -109,10 +87,22 @@ jobs:
           include-hidden-files: true
           retention-days: 1
 
+  python-floor:
+    # Preserve the existing required context and gate it on the entire matrix.
+    name: Python 3.12 · non-browser suite · version floor
+    if: ${{ always() }}
+    needs: test-compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every compatibility shard to pass
+        env:
+          TEST_RESULT: ${{ needs.test-compatibility.result }}
+        run: test "$TEST_RESULT" = success
+
   coverage:
     name: Python 3.13 · combined branch coverage
     if: github.event_name == 'push'
-    needs: test-coverage
+    needs: test-compatibility
     runs-on: ubuntu-latest
 
     steps:
@@ -170,6 +160,7 @@ jobs:
 
   frontend-browser:
     name: frontend-browser
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +34,14 @@ def _check_run_names(workflow: str) -> dict[str, list[str]]:
             published[job_id] = [job_id]
             continue
         template = declared.group(1).strip().strip("\"'")
+        if "${{ matrix.python-version }}" in template:
+            published[job_id] = [
+                template.replace("${{ matrix.python-version }}", version).replace(
+                    "${{ matrix.label }}", label
+                )
+                for version, _group, label in _compatibility_cases(block)
+            ]
+            continue
         matrix_key = re.fullmatch(r"\$\{\{ *matrix\.([\w-]+) *\}\}", template)
         if matrix_key is None:
             published[job_id] = [template]
@@ -45,6 +54,24 @@ def _check_run_names(workflow: str) -> dict[str, list[str]]:
             )
         ]
     return published
+
+
+def _compatibility_cases(block: str) -> list[tuple[str, int, str]]:
+    """Expand the two literal matrix axes and their group-to-label additions."""
+    versions = re.search(r"(?m)^        python-version: (\[.+\])$", block)
+    groups = re.search(r"(?m)^        group: (\[.+\])$", block)
+    assert versions is not None and groups is not None
+    labels = re.findall(r"- group: (\d+)\n +label: ([A-D])\n", block)
+    by_group = {int(group): label for group, label in labels}
+    group_values = json.loads(groups.group(1))
+    assert len(labels) == len(by_group) == len(group_values)
+    assert set(by_group) == set(group_values)
+    assert "exclude:" not in block
+    return [
+        (version, group, by_group[group])
+        for version in json.loads(versions.group(1))
+        for group in group_values
+    ]
 
 
 def _mirror_workflows(root: Path, *, dev_ci: str, compatibility: str) -> None:
@@ -92,25 +119,46 @@ _PYTHON_FLOOR_CHECK = "Python 3.12 · non-browser suite · version floor"
 
 
 def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
-    workflow = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
+    workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     names = _check_run_names(workflow)
     floor = [
         block for job_id, block in _jobs(workflow).items() if _PYTHON_FLOOR_CHECK in names[job_id]
     ]
 
     assert "pull_request:" in workflow
-    assert "\n  push:\n" not in workflow
-    assert "workflow_dispatch:" not in workflow
+    pull_request = workflow.split("  pull_request:\n", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+    assert "paths:" not in pull_request and "paths-ignore:" not in pull_request
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
     assert len(floor) == 1, f"exactly one job must publish {_PYTHON_FLOOR_CHECK!r}"
-    assert "uv python install 3.12" in floor[0], (
-        "the Python floor job must run on the declared minimum version"
-    )
-    assert "uv run pytest tests/" in floor[0], "the Python floor job must run the test suite"
-    assert "--extra bench --extra plotting" in floor[0], (
-        "the Python floor job must install the bench and plotting extras, so that the "
-        "oracle and plotly tests run somewhere that executes tests"
+    assert "if: ${{ always() }}" in floor[0]
+    assert "needs: test-compatibility" in floor[0]
+    matrix = _jobs(workflow)["test-compatibility"]
+    assert {case for case in _compatibility_cases(matrix) if case[0] == "3.12"} == {
+        ("3.12", group, label) for group, label in enumerate("ABCD", start=1)
+    }
+    assert "uv run --with mpmath pytest tests/" in matrix
+    assert "--extra dev --extra bench --extra plotting" in matrix, (
+        "the compatibility test matrix must install the bench and plotting extras"
     )
     assert "continue-on-error: true" not in workflow
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
+def test_python_floor_aggregate_executes_the_matrix_verdict(result: str) -> None:
+    workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    aggregate = _jobs(workflow)["python-floor"]
+    assert "TEST_RESULT: ${{ needs.test-compatibility.result }}" in aggregate
+    commands = re.findall(r"(?m)^        run: (.+)$", aggregate)
+    assert len(commands) == 1
+    completed = subprocess.run(
+        ["bash", "-e", "-c", commands[0]],
+        env=os.environ | {"TEST_RESULT": result},
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert (completed.returncode == 0) == (result == "success"), completed.stderr
 
 
 def test_dev_ci_job_names_do_not_claim_merge_gate_membership() -> None:
@@ -141,19 +189,19 @@ def test_python_floor_contract_rejects_extras_installed_only_where_no_tests_run(
     """The extras contract must be scoped to the job that actually runs pytest.
 
     `--extra bench --extra plotting` also appears in `type-check`, which runs no
-    tests.  Dropping the extras from the Python floor job therefore has to fail
-    the contract even though the bare string survives elsewhere in the file.
+    tests. Dropping the extras from the compatibility matrix must fail even
+    though the type-check job still installs them.
     """
     dev_ci = (_ROOT / ".github/workflows/dev-ci.yml").read_text(encoding="utf-8")
     compatibility = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    floor_job = _jobs(dev_ci)["pytest-312"]
-    mutant = dev_ci.replace(floor_job, floor_job.replace(" --extra bench --extra plotting", ""))
+    matrix = _jobs(compatibility)["test-compatibility"]
+    mutant = compatibility.replace(matrix, matrix.replace(" --extra bench --extra plotting", ""))
 
-    assert mutant != dev_ci
-    assert "--extra bench --extra plotting" not in _jobs(mutant)["pytest-312"]
-    assert "--extra bench --extra plotting" in mutant
+    assert mutant != compatibility
+    assert "--extra bench --extra plotting" not in _jobs(mutant)["test-compatibility"]
+    assert "--extra bench --extra plotting" in _jobs(dev_ci)["type-check"]
 
-    _mirror_workflows(tmp_path, dev_ci=mutant, compatibility=compatibility)
+    _mirror_workflows(tmp_path, dev_ci=dev_ci, compatibility=mutant)
     monkeypatch.setattr(sys.modules[__name__], "_ROOT", tmp_path)
 
     with pytest.raises(AssertionError, match="bench and plotting extras"):
@@ -200,6 +248,7 @@ def test_frontend_check_names_are_unambiguous() -> None:
     assert "\n  frontend-browser:\n" in compatibility, (
         "ci.yml's browser job must keep the disambiguated frontend-browser id"
     )
+    assert "if: github.event_name == 'push'" in _jobs(compatibility)["frontend-browser"]
     assert "frontend" not in {
         name for names in _check_run_names(compatibility).values() for name in names
     }, "ci.yml must not define a job that publishes the required 'frontend' check run"
