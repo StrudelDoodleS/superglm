@@ -679,7 +679,7 @@ giving a **68 MB dense augmented Gram**; that path's budgets were sized when `n_
 
 Measured on the real design: **all diagonal and cross blocks via `_gram_any_sign`/`_cross_gram` take 6.2 ms**,
 against ~90 ms per call for the chunked centered path over 51 calls. Worst per-pair histogram is 261,072 cells
-(2.1 MB) against the 5,000,000-cell cap — 40x of headroom. Nothing scales with `sum(supports)` or with the
+(2.1 MB) against the 5,000,000-cell cap. Nothing scales with `sum(supports)` or with the
 joint support, so the brittleness that rules out the augmented route does not apply.
 
 This is the audit's `large-n:general-raw-moments-rung` (RFC-1) with its verified amendment: raw moments plus a

@@ -283,7 +283,7 @@ experiments). Facts both forks agree on:
   shrinkage is more diffuse, sum h_i^2 ~ 5.2 vs edf 8, so conservative z
   understates it more). Costs one rank on one wiggly seed via a literal
   tie-flip (T 27.0375 vs 27.0358). Widens null right tail ~14% (correct
-  scaling, not a defect); z<10 gate keeps >=2.1x headroom.
+  scaling, not a defect); the z<10 threshold is at least 2.1 times the measured maximum.
 - Extended ladder (1.5,2,4,8,16,32): closes both boundary regimes from
   the curve analysis (VehAge:VehPower gap-to-sup 0.55 -> 0.07, wins at
   rung 32; left-boundary climbers recover ~2/3 of their gaps at rung
@@ -479,8 +479,8 @@ Zero crashes, zero NaN skips (largest grid 545k cells), screens 1.3-4s.
 
 Pre-flight protocol for a new book (docs material): (1) check the
 printed phi_hat is sane for the family; (2) read z against the measured
-null envelope (best-z < ~4.5 across every config tested; the z<10 gate
-has >2x headroom); (3) winning rung 2 = tilt-level evidence; (4) always
+null envelope (best-z < ~4.5 across every config tested, against the z<10 gate);
+(3) winning rung 2 = tilt-level evidence; (4) always
 confirmatory-refit top-3 — the refit, not the screen, is the gate.
 Known gaps unchanged: continuous high-cardinality pairs above the cell
 budget NaN-skip (Task 4 quantile fallback), corner-localized power.

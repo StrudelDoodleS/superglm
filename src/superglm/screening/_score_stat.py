@@ -300,16 +300,16 @@ followed by 8.97e-06, 4.05e-06, 6.54e-07, 3.23e-07 and 1.74e-07.  Every ``ti``,
 the change is visible only on ``spline_cat`` pairs and only in the fifth
 decimal of ``z``, which is the size #257 said it would be.
 
-**AND THE PUBLISHED TABLE'S OWN PINS WERE RE-TAKEN RATHER THAN ASSUMED**, since
-a fifth-decimal move against a ``rel=1e-4, abs=1e-4`` pin is only 2.7x of the
-bound and that is not a headroom anyone should infer.  Against the committed
+The published table's regression checks were rerun. A fifth-decimal difference
+alone does not establish compliance with a ``rel=1e-4, abs=1e-4`` bound.
+Against the committed
 fixture, at one thread, the shipped factor route uses 0.180 of the ``z`` bound
 (5.6x inside, worst on ``VehAge x Region``), 0.191 of the ``statistic`` bound,
 0.070 of the ``edf0`` bound and 0.00037 of the ``lambda0`` bound.  The moment
 route the fixture was generated with uses 0.215, 0.296, 0.063 and 0.00037 of
-the same four.  So the change does not consume the fixture's headroom; on ``z``
-it widens it, because the moment route's own thread-to-thread spread on this
-screen is larger than the distance between the two routes.
+the same four. The factor route's ``z`` difference is smaller than the moment
+route's. On this screen, the moment route's thread-to-thread spread exceeds
+the distance between the two routes.
 
 **AN EARLIER REVISION OF THIS SECTION QUOTED A DIFFERENT SCREEN, AND SAID SO
 IN THE PUBLISHED TABLE'S NAME.**  It reported these tables on "100,000 rows,

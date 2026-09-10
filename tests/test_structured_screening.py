@@ -1190,8 +1190,8 @@ def test_the_edf_and_the_statistic_must_be_scoring_the_same_penalty():
 
         if label == "dropped, trace-invisible":
             # The point of the arm: the AGGREGATE guard cannot see this, so the
-            # refusal above is the per-direction one and nothing else.  10.1x
-            # of headroom at the worst kernel swept, asserted at 5x.
+            # refusal above is the per-direction one. The smallest measured
+            # trace-bound-to-clip ratio is 10.1; the assertion requires 5.
             assert clip * 5.0 < trace_bound, (label, clip, trace_bound)
         else:
             assert clip > trace_bound, (label, clip, trace_bound)
@@ -2258,7 +2258,7 @@ def _reference_edf_and_bound(factors, lam):
     """``edf(lambda)``, and a DERIVED bound on this routine's own error in it.
 
     The bound is built from dimensions, the unit roundoff, and the conditioning
-    of the augmented system -- never from observed headroom.  That distinction
+    of the augmented system, independently of the observed residuals. That distinction
     is the whole subject of issue #272: a tolerance calibrated on one machine's
     rounding is not a tolerance, and this oracle calls pivoted QR, an
     unpivoted QR with its factor accumulated, a symmetric eigensolver and two
@@ -2855,8 +2855,8 @@ def test_the_low_edge_reference_matches_a_certified_high_precision_value():
       compares at ``abs=bound`` against a 1.1253e-05 defect, and the gate below
       holds ``bound`` under 1e-5, so it is protected to 1.125x by construction.
       The relabeling check compares at ``abs = 2 x bound`` and goes vacuous at
-      ``bound = 6.02e-06`` -- which is 1.66x INSIDE the same 1e-5 gate.  Current
-      headroom to that ceiling is 2.71x, and it is a property of the fixture
+      ``bound = 6.02e-06`` -- which is 1.66x INSIDE the same 1e-5 gate. The
+      ceiling-to-bound ratio is currently 2.71, a property of the fixture
       rather than of anything asserted here.
     * on ``_vanishing_mass_pair(1e-12)`` the relabeling check does **not**
       catch it -- 6.9564e-05 of spread against a 1.584e-03 allowance, 0.05x --
@@ -3015,7 +3015,7 @@ def test_a_thin_level_does_not_cost_the_pair_a_degree_of_freedom(low_weight):
 
     **THE LOW-EDGE BOUND IS DERIVED AND THE HIGH-EDGE ONES ARE NOT, AND THE
     DIFFERENCE IS STATED RATHER THAN BLURRED.**  This paragraph used to claim
-    both were derived and neither set from headroom.  That was true of the low
+    both were derived independently of measured residuals. That was true of the low
     edge, where a floor the arithmetic cannot beat and the defect to be caught
     bracket the bound between them; it is not true of the high edge, where
     issue #332 established that no floor available here bounds the quantity --
@@ -4531,7 +4531,7 @@ def test_the_pencil_carries_its_own_orthonormality_invariant(build):
     measurement that the subtraction happened to be harmless; there is nothing
     left to argue, and this asserts it instead.
 
-    THE BAR IS THE MODULE'S OWN ROUND-OFF FLOOR, NOT AN OBSERVED HEADROOM.
+    The threshold uses the module's roundoff floor.
     Departure from orthonormality of a Householder-accumulated factor is
     bounded by a modest polynomial in the dimensions times ``eps`` (Higham,
     *Accuracy and Stability of Numerical Algorithms*, 2nd ed., Thm 19.4; the
@@ -4735,7 +4735,7 @@ def test_the_zero_penalty_rung_on_a_near_rank_pair(build, observed):
         assert 0.0 <= s.edf0 <= B_a.shape[1] * level_rows.size
         # ``tr(V_eff^+ V_eff)`` is a projector trace, so it cannot exceed the
         # rank of the design it projects onto -- exactly.  The slack is this
-        # test's own portability measurement and not headroom: CI read
+        # test's measured portability allowance. CI read
         # 18.000341 against a design rank of 18 where this machine reads
         # 15.256470, which is the same 0.379 df spread the docstring derives
         # from ``band-1e-3-L5``.  ``observed`` is what this machine reads and
@@ -5446,7 +5446,7 @@ def test_the_absorption_floor_reads_dimensions_and_never_a_measured_residual():
     #
     # **BAND RE-PLACED FROM THE SPREAD -- ISSUE #354.**  The previous
     # ``9.9e-13 .. 1.8e-12`` was the numpy 2.4.2 spread taken as the band
-    # itself, with no headroom at either end: SKYLAKEX sat 0.4% above the floor
+    # itself. SKYLAKEX sat just 0.4% above the floor
     # and SANDYBRIDGE 0.3% below the ceiling.  numpy 2.5.2 crosses it at BOTH
     # ends -- PRESCOTT and CORE2 read 8.399e-13, under the floor, and NEHALEM
     # reads 2.138e-12, over the ceiling.  Measured over 7 microkernels x 2

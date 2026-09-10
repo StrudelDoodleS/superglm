@@ -101,7 +101,7 @@ class TestFrequencyIsReplication:
         the coordinates would pin the rotation rather than the identity.
 
         The bound is the worst relative gap measured across all six families
-        and all four quantities (1.32e-14), with roughly 750x headroom.
+        and all four quantities (1.32e-14), multiplied by roughly 750.
         """
         rng, frame = _frame(seed=3, n=120)
         y = _response(rng, frame, family)

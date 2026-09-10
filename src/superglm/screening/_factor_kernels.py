@@ -312,8 +312,8 @@ def _penalty_root(S_a: NDArray) -> tuple[NDArray, float, float]:
     fixture's reconstruction, whose distance to the cut moves 7x across
     kernels: 69.6x inside on SKYLAKEX down to **10.0x on NEHALEM**.  Still an
     order clear, and it is a reconstructed test fixture rather than anything a
-    caller builds, but 10.0x-with-a-7x-spread is the honest headroom for a
-    claim about which side of the cut something lands on.
+    caller builds. The measured ratio of cut to residual is at least 10.0,
+    with a 7x spread across kernels.
 
     **THE TRACE WAS ALSO THE WRONG NORM, AND THAT IS A PUBLISHED RESULT
     RATHER THAN A PREFERENCE.**  ``|tr S - ||rootS||_F^2|`` is the TRACE-NORM

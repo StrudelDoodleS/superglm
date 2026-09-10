@@ -320,8 +320,7 @@ by 0.05 and 0.09 against p90s of 1.5-1.9. Differences that small, with no
 direction that survives across kinds, are sampling noise rather than a short
 score grid inflating anything.
 
-One thing follows for the release-gate bound of `z < 10`: it holds with
-headroom, but it is a bound, not a floor measurement. The suite's null gates
+The release gate uses `z < 10`; the measured maxima are below it. The suite's null gates
 cover every kind and every probe df this battery measures — `spline_cat`,
 `cat_cat` at df 6 and `numeric_cat` at df 2 and 3 in both gates, `ti` in the
 Poisson gate only, and `numeric_cat` at df 1, `cat_cat` at df 2 and 3 and

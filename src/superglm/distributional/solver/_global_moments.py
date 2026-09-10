@@ -44,8 +44,8 @@ from superglm.group_matrix import (
 )
 
 # Bounds apply to original solver-support, ordinary and derivative operands,
-# never to signed accumulated moments. Their degree-three products retain
-# normal-range headroom under the separately bounded row/support dimensions;
+# never to signed accumulated moments. Their degree-three products stay in the
+# normal exponent range under the separately bounded row/support dimensions;
 # cancellation may produce much smaller intermediate or final values.
 _MIN_ABS = 2.0**-128
 _MAX_ABS = 2.0**128

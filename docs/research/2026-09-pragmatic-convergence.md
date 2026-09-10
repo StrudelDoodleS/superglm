@@ -314,7 +314,7 @@ required source/data layout and commands for a fresh window or historical
 replay. Replaying the tracked summary against the retained raw window reproduced
 the existing summary exactly without changing any raw artifact.
 The current controller has since removed obsolete process categories. The
-[current README](../../benchmarks/c3_practical/README.md) distinguishes its hash
+[updated README](https://github.com/StrudelDoodleS/superglm/blob/fdcd41ef/benchmarks/c3_practical/README.md) distinguishes its hash
 from the historical controller required for that replay.
 
 ## Final validation and remaining limits

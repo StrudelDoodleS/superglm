@@ -35,7 +35,7 @@ from superglm.solvers.rank import (
     decompose_gram,
 )
 
-# Headroom on the normal-equation consistency floor (see ``_consistency_floor``).
+# Multiplier on the normal-equation consistency floor (see ``_consistency_floor``).
 # The floor estimates the accuracy of the *computed null basis*, and this is the
 # safety factor above that estimate.  It is deliberately a constant of its own
 # rather than ``SHARED_RANK_POLICY.certification_band``, which happens to hold

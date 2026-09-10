@@ -5,10 +5,11 @@ could report a stationary fit when it had stalled. The smoothing loop also
 rejected harmless exact-face projection roundoff. Independently, the common
 starting lambda of 0.1 ignored the units and scale of each penalty.
 
-This work starts at `origin/master`, commit
-`66141d2873afc03287ca924f4592e33482281a0e`, in the isolated
-`fix/lss-convergence-repair` worktree. No likelihood, response, version or
-publication changes are included.
+The repair starts from `origin/master`, commit
+`66141d2873afc03287ca924f4592e33482281a0e`. It preserves the likelihood and
+response values. [Current verification and timings](family_arithmetic.md)
+include the final family-arithmetic addition. The results below describe the
+original Gamma cases.
 
 ## What failed
 
@@ -55,10 +56,10 @@ a unique REML optimum. Explicit numeric starts, per-component values and fixed
 policies keep their meaning. Families without expected information, or blocks
 with unresolved numerical support, retain the bounded 0.1 fallback.
 
-Coefficient stopping now requires retained stationarity evidence and carries
-the retry's verdict with its state. Numerical decrement checks must agree
-between iteration stopping and final result validation. Their bounds include
-linear-solve error, not just rounding in the final dot product.
+Coefficient stopping requires stationarity evidence for the returned state.
+A retry keeps its own convergence verdict. Newton-decrement checks use the
+same bounds during iteration and final validation, including linear-solve
+error and rounding in the final dot product.
 
 Endpoint revalidation permits a changed coefficient vector only when it is the
 zero-iteration replay of the exact face projection and lies within the
@@ -80,8 +81,8 @@ all listed features stay in each fit.
 | Caller-fixed lambda 0.1, all training features | Incorrect coefficient success despite unresolved score | Returns nonconverged, `line_search_failed` |
 
 The BOHB exact face removes six vehicle-age wiggle directions, leaving rank
-82 in the 88-coefficient representation. This is intentional, not accidental
-rank loss. The repaired successful dense fits use observed curvature without
+82 in the 88-coefficient representation. That rank change follows the selected
+face. The repaired successful dense fits use observed curvature without
 Fisher fallback.
 
 Wall time is unmeasured for these original diagnostic runs, which used one
@@ -170,7 +171,8 @@ defects. Their repairs now have independent review and focused regression
 evidence, including a complete scalar tensor fit that preserves support
 through terminal coordinate reconstruction. The subsequent frozen non-browser
 suite passed 13,941 tests with no failures and all 88 required real-data checks.
-Two worker-limit skips passed separately with 16 workers: combined verification
-has 13,943 passes and 87 optional/inapplicable skips. Controlled final
-performance checks remain in progress; these results do not establish
-general numerical robustness.
+Two worker-limit skips passed separately with 16 workers, bringing that
+checkpoint to 13,943 passes and 87 optional/inapplicable skips. Later
+verification and complete-fit measurements are in the
+[numerical audit](numerical_robustness_audit.md) and
+[family-arithmetic report](family_arithmetic.md).

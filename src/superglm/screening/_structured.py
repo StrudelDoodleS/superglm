@@ -612,8 +612,8 @@ _TRACE_CHUNK_DOUBLES = 262_144
 # Safety factor in :func:`_orthonormality_bound`.  Set from a SWEEP and not
 # from one run: 1382 ``_profile`` calls over this suite's whole fixture bank,
 # repeated across 7 ``OPENBLAS_CORETYPE`` microkernels x 2 thread settings, put
-# the measured residual between 0 and 0.408 of ``n eps kappa``.  2.0 leaves
-# 4.90x of headroom on the worst of the 14 configurations.  The literature's
+# the measured residual between 0 and 0.408 of ``n eps kappa``. The 2.0 bound
+# is 4.90 times the largest measured residual. The literature's
 # dimensional factor for the ROUTE THIS IS NOT is ``m rank^(3/2)``; folding
 # ``rank^(3/2)`` into this constant is checked past the ranks the bank reaches
 # -- see :func:`_orthonormality_bound`.
@@ -1575,13 +1575,13 @@ def _profile(p: SplineCatPair) -> _PairGeometry:
     # precisely so that a badly conditioned -- but correctly assembled -- pair
     # widens the bar instead of tripping it.  Measured over 1382 profiles x 14
     # microkernel/thread configurations, the worst observed residual is **0.204
-    # of the bound computed on the next line**, i.e. 4.90x of headroom, so
+    # of the bound computed on the next line**, so
     # nothing in this suite's bank reaches it.  DENOMINATOR NAMED ON PURPOSE:
     # the 0.408 quoted elsewhere in this module is against the UNFACTORED
     # ``n_terms eps kappa``, and the two differ by exactly
     # :data:`_ORTHONORMALITY_FACTOR` -- which is the constant a reader would be
     # weighing when they read this comment, so quoting the wrong one here
-    # reports 2.45x of headroom at the site that runs on 4.90x.
+    # understates the bound-to-residual ratio by a factor of two.
     bound = _orthonormality_bound(L * k_a, rank, conditioning)
     if defect > bound:
         raise _UnstableStructuredEDFError(
@@ -1746,8 +1746,8 @@ def _orthonormality_bound(n_terms: int, rank: int, conditioning: float) -> float
     CONSTANT is not available from the literature -- Higham writes it as "a
     small integer constant whose exact value is unimportant" (sec. 3.4,
     eq. (3.8)) and Yamamoto et al. as "a small positive constant" -- so
-    :data:`_ORTHONORMALITY_FACTOR` is set from the measured population with
-    stated headroom, in the same spirit as LAPACK's ``RCOND`` default and
+    :data:`_ORTHONORMALITY_FACTOR` is calibrated against the measured population,
+    in the same spirit as LAPACK's ``RCOND`` default and
     ``numpy.linalg.matrix_rank``'s ``max(shape) eps``, which are conventions
     and not worst-case theorems.  ``rank^(3/2)`` is folded into it, which is
     the part that would decay with size if it decayed at all, so it is checked
@@ -2212,7 +2212,7 @@ def _filter_factor_sum(
         # 200 lambdas each on ``_starved_bs_pair`` and #280's starved pair --
         # the two the floor change moves most -- ``uncertified`` is EXACTLY 0.0
         # at all 400.  Every PSD clip on both is inside its own allowance, so
-        # the guard's numerator is zero and no headroom was spent.  What the
+        # the guard's numerator is zero. What the
         # looser allowance would cost is therefore not measurable here, and
         # this comment records that it was looked for rather than that it is
         # absent in general.
@@ -2310,8 +2310,8 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     # microkernels x 2 thread settings, 2786 bracket-edge evaluations: the
     # tightest edge margin anywhere is **1.0350** and NOTHING falls inside
     # 1.01.  What fires is the interior -- 2 of 601 lambdas on #280's own pair,
-    # 1 or 2 of 200 on ``_starved_bs_pair``.  Headroom on the binding edge is
-    # 3.5x in the excess over 1, thinner than the interior figures, and it is
+    # 1 or 2 of 200 on ``_starved_bs_pair``. At the binding edge, the excess
+    # over 1 is 3.5 times the cutoff's excess, less than at interior points. It is
     # the number to re-measure if :data:`_ABSORPTION_MARGIN` is ever raised.
     #
     # The zero-penalty branch of :func:`structured_ladder` is a FOURTH site and

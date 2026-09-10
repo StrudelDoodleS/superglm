@@ -70,7 +70,7 @@ _EPS = float(np.finfo(np.float64).eps)
 # exp for the piecewise block (6), a power for the numeric block (3), and four
 # products (4).  Model: a hat dot product (2), five additive term contributions
 # (5) and an exp (1).  Twenty-two, plus the comparison's own two, rounded up to
-# 32 for headroom on a differently ordered BLAS -- the same count and the same
+# 32 to allow for BLAS operation ordering, using the same count and the same
 # rounding the piecewise workbook test derives, because it is the same two
 # paths with two more exactly tabulable terms in the product.
 #
@@ -1099,7 +1099,7 @@ def _binned_bias_roundoff_bound(payload, X: pd.DataFrame, predicted: np.ndarray)
 
     Every input is read from the payload, the frame and ``model.predict`` --
     the quantities a consumer holds -- and never from the residual, so this is
-    a bound and not a fit to the headroom.  Measured on this fixture: 8.0e-13
+    a bound independent of the measured residual. Measured on this fixture: 8.0e-13
     (native) and 6.1e-13 (mean), against the 8.1e-02 the printing band used to
     force.
     """
@@ -1126,9 +1126,8 @@ def test_the_binned_reconstruction_carries_no_uniform_scale_error():
     On this fixture it is 8.0e-13 against a measured bias of 4.1e-17, and the
     smallest constant this export actually transfers is the 0.5 that
     ``test_the_base_relativity_moves_by_exactly_the_shift_the_blocks_applied``
-    fixes -- 6.3e+11 times the bound.  So the check
-    bites on a real regression and is not sized to the headroom it happens to
-    have.  It does NOT catch a scale error smaller than the bound; that is what
+    fixes -- 6.3e+11 times the bound. The check catches that regression.
+    It does NOT catch a scale error smaller than the bound; that is what
     the exactly tabulable sweep is for, on the paths where exactness is
     available.
 

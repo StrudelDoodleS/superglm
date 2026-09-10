@@ -217,7 +217,7 @@ def _eigensolver_relative_bar(order: int) -> float:
     ``||pseudo_inverse||_2`` reads **1.817e+15** on that one against 1.0 on
     the rest.  Against this bar the same residue runs **0.017x to 0.488x** and
     never approaches it, so the direction drops on all fourteen -- worst
-    reading 0.488x, i.e. **2.05x of headroom**, min 0.017x.  One number moved
+    reading 0.488x, min 0.017x.  One number moved
     from a 1.8e+15 spread to no spread at all.
 
     **The module already believed this bar, in another field, to the bit.**
