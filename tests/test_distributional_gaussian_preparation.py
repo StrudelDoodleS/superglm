@@ -25,6 +25,101 @@ from superglm.distributional.weights import (
 from superglm.features import Numeric, Spline
 
 
+@pytest.mark.parametrize("semantics", ["prior", "frequency"])
+@pytest.mark.parametrize("n", [17, 16389])
+def test_derived_root_curvature_matches_eager_and_independent_gaussian(semantics, n):
+    from superglm.distributional.smoothing.endpoint_direction import _curvature_packed
+
+    family, response, eager, root = _plans(n, semantics)
+    eta = np.column_stack((0.25 * response, np.linspace(-0.5, 0.5, n)))
+    links = tuple(parameter.default_link for parameter in family.parameters)
+    expected = _curvature_packed(family, response, eta, links, eager)
+    actual = _curvature_packed(family, response, eta, links, root)
+    np.testing.assert_array_equal(actual, expected)
+
+    # Independent negative eta-Hessian for sigma = floor + exp(eta_scale).
+    shift = np.exp(eta[:, 1])
+    sigma = family.scale_floor + shift
+    residual = response - eta[:, 0]
+    weight = eager.weights.values
+    precision = weight if semantics == "prior" else np.ones(n)
+    mass = np.ones(n) if semantics == "prior" else weight
+    a = mass * shift**2 * 3.0 * precision * residual**2 / sigma**4
+    b = mass * shift**2 / sigma**2
+    c = mass * shift / sigma
+    d = mass * shift * precision * residual**2 / sigma**3
+    oracle = np.column_stack(
+        (
+            mass * precision / sigma**2,
+            mass * 2.0 * precision * residual * shift / sigma**3,
+            a - b + c - d,
+        )
+    )
+    absolute_terms = np.column_stack((np.abs(oracle[:, 0]), np.abs(oracle[:, 1]), a + b + c + d))
+    bound = 64 * np.finfo(float).eps * np.maximum(1.0, absolute_terms)
+    assert np.all(np.abs(actual - oracle) <= bound)
+    assert root.parameter_independent_carrier is None
+
+
+def test_derived_curvature_dispatch_owns_bounded_children_and_refreshes(monkeypatch):
+    from superglm.distributional.smoothing import endpoint_direction
+
+    family, response, eager, root = _plans(23)
+    eta = np.column_stack((response * 0.2, np.zeros(23)))
+    links = tuple(parameter.default_link for parameter in family.parameters)
+    takes, evaluations, children = [], [], []
+    original_take = GaussianLikelihoodPlan.take
+    original_evaluate = GaussianLS.evaluate_natural
+
+    def take(plan, indices):
+        assert all(reference() is None for reference in children)
+        assert plan is root
+        takes.append(tuple(indices))
+        child = original_take(plan, indices)
+        children.append(weakref.ref(child))
+        return child
+
+    def evaluate(self, y, theta, plan, **kwargs):
+        assert plan is not root
+        assert plan.parameter_independent_carrier is not None
+        evaluations.append(len(y))
+        return original_evaluate(self, y, theta, plan, **kwargs)
+
+    monkeypatch.setattr(endpoint_direction, "_CURVATURE_CHUNK_ROWS", 7, raising=False)
+    monkeypatch.setattr(GaussianLikelihoodPlan, "take", take)
+    monkeypatch.setattr(GaussianLS, "evaluate_natural", evaluate)
+    endpoint_direction._curvature_packed(family, response, eta, links, root)
+    endpoint_direction._curvature_packed(family, response, eta, links, root)
+    assert evaluations == [7, 7, 7, 2] * 2
+    assert takes == [tuple(range(start, min(start + 7, 23))) for start in (0, 7, 14, 21)] * 2
+    assert all(reference() is None for reference in children)
+    # Eager input keeps its single existing family call, without taking children.
+    endpoint_direction._curvature_packed(family, response, eta, links, eager)
+    assert evaluations[-1] == 23
+
+
+@pytest.mark.parametrize("changed", ["response", "eta", "weights", "mode", "family_config"])
+def test_derived_curvature_does_not_accept_stale_or_mismatched_root(changed):
+    from superglm.distributional.smoothing.endpoint_direction import _curvature_packed
+
+    family, response, _, root = _plans(11)
+    eta = np.column_stack((response * 0.2, np.zeros(11)))
+    links = tuple(parameter.default_link for parameter in family.parameters)
+    _curvature_packed(family, response, eta, links, root)
+    if changed == "response":
+        response = response[:-1]
+    elif changed == "eta":
+        eta = eta[:-1]
+    elif changed == "weights":
+        object.__setattr__(root.weights, "values", root.weights.values[:-1])
+    elif changed == "mode":
+        object.__setattr__(root, "carrier_preparation", "unknown")
+    else:
+        object.__setattr__(root, "family_config", ("GaussianLS/v1", family.scale_floor + 0.1))
+    with pytest.raises((ValueError, UnsupportedLikelihoodContractError)):
+        _curvature_packed(family, response, eta, links, root)
+
+
 def _plans(n=31, semantics="prior", *, extreme=False):
     values = np.linspace(0.25, 4.0, n) if semantics == "prior" else 1 + np.arange(n) % 4
     if extreme and semantics == "prior":
