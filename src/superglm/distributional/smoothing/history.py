@@ -1,7 +1,7 @@
 """Release obsolete smoothing rows while preserving complete fit evidence."""
 
 from collections.abc import Sequence
-from dataclasses import replace
+from copy import copy
 
 from superglm.distributional.results.iteration import (
     DistributionalEFSConfig,
@@ -31,4 +31,10 @@ def compact_coefficient_history(
             retained.add(item.accepted_fit_index)
     for index, fit in enumerate(coefficient_fits):
         if index not in retained and fit.eta is not None:
-            coefficient_fits[index] = replace(fit, eta=None, theta=None)
+            # The solver already validated this frozen result and published its
+            # arrays with immutable byte backing. Only private history references
+            # lose rows; rebuilding would copy geometry and recertify the stop.
+            compact = copy(fit)
+            object.__setattr__(compact, "eta", None)
+            object.__setattr__(compact, "theta", None)
+            coefficient_fits[index] = compact

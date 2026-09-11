@@ -1141,8 +1141,10 @@ make hostile pickle safe.
 
 Artifacts carry two independent version numbers. The envelope's
 `schema_version` versions the fitted state itself, and **MAJOR is a read
-barrier unless explicitly supported**. This build writes envelope `9.0.0`
-and also reads `8.0.0`. New fits record whether curvature diagnostics assessed
+barrier unless explicitly supported**. This build writes envelope `10.0.0`
+and also reads `8.0.0` and `9.0.0`. Schema 10 permits compact historical row
+arrays and records the full-history opt-in; older readers refuse this format
+before loading its payload. New fits record whether curvature diagnostics assessed
 the data matrix or the penalized matrix; older fits keep their original
 family-dependent interpretation. Unsupported majors receive a version error
 naming both versions. MINOR and PATCH promise readability. Because the loader

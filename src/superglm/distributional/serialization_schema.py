@@ -7,12 +7,13 @@ holds the data that policy consults, so the reader and the writer agree on it.
 
 from __future__ import annotations
 
-# 9.0.0 records whether terminal policy assessed data or penalized curvature.
-SCHEMA_VERSION = "9.0.0"
+# 10.0.0 permits compact historical rows and the full-history retention flag.
+SCHEMA_VERSION = "10.0.0"
 
 # Schema 8 remains readable: its missing scope retains the family-dependent
 # interpretation, and omission from telemetry preserves the original manifest.
-READABLE_PREVIOUS_MAJORS: frozenset[int] = frozenset({8})
+# Schema 9 has full historical rows; migration derives their original shapes.
+READABLE_PREVIOUS_MAJORS: frozenset[int] = frozenset({8, 9})
 
 #: Manifest type names are the classes' canonical compatibility paths, held
 #: fixed across the package reorganisation so the manifest authenticates fitted

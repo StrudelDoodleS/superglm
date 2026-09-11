@@ -204,7 +204,7 @@ class _DenseObservedReuseSession:
         ):
             key = id(result)
             self._results[key] = (
-                weakref.ref(result, lambda _ref: self._results.pop(key, None)),
+                self._source_reference(result, chunked=False),
                 owner,
             )
         elif (
@@ -228,13 +228,28 @@ class _DenseObservedReuseSession:
             if certificate is not None:
                 key = id(result)
                 self._chunk_results[key] = _ChunkObservedReuseRecord(
-                    source=weakref.ref(result, lambda _ref: self._chunk_results.pop(key, None)),
+                    source=self._source_reference(result, chunked=True),
                     owner=owner,
                     coefficients=_readonly(result.coefficients),
                     score_data=_readonly(score_data),
                     data_curvature=_readonly(result.terminal_data_curvature),
                     certificate=certificate,
                 )
+
+    def _source_reference(
+        self, result: DenseSolverResult, *, chunked: bool
+    ) -> weakref.ReferenceType[DenseSolverResult]:
+        """Evict a collected source without making its callback own this session."""
+        session_reference = weakref.ref(self)
+        key = id(result)
+
+        def discard(_reference: weakref.ReferenceType[DenseSolverResult]) -> None:
+            session = session_reference()
+            if session is not None:
+                entries = session._chunk_results if chunked else session._results
+                entries.pop(key, None)
+
+        return weakref.ref(result, discard)
 
 
 @dataclass(frozen=True)

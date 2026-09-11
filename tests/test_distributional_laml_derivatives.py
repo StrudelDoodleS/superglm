@@ -356,6 +356,20 @@ def test_derivatives_refuse_a_non_converged_fit() -> None:
         )
 
 
+def test_derivatives_refuse_a_compact_historical_fit() -> None:
+    family, layout, y, plan, lambdas, fit, _config, session = _interior_case("gaussian", "fisher")
+    with pytest.raises(LamlDerivativeError, match="retained predictor rows"):
+        laml_derivatives(
+            family,
+            layout,
+            y,
+            plan,
+            lambdas=lambdas,
+            fit=replace(fit, eta=None, theta=None),
+            dense_matrices=session.dense_matrices(layout),
+        )
+
+
 def test_config_derivative_step_default_is_the_finite_difference_step() -> None:
     """``results`` cannot import ``smoothing.endpoint_direction`` (import cycle); pin the value."""
     assert DistributionalEFSConfig().derivative_step == DEFAULT_STEP

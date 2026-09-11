@@ -376,6 +376,7 @@ def _scalar_efs_fit(
     practical_convergence: bool = False,
     practical_parameter_tolerance: float = 1.0e-3,
     plateau_tolerance: float = 1.0e-7,
+    retain_history_rows: bool = False,
 ):
     family = _UnitGaussian() if family is None else family
     response = np.array([mean], dtype=np.float64)
@@ -417,6 +418,7 @@ def _scalar_efs_fit(
             practical_convergence=practical_convergence,
             practical_parameter_tolerance=practical_parameter_tolerance,
             plateau_tolerance=plateau_tolerance,
+            retain_history_rows=retain_history_rows,
         ),
     )
     return component.name, result
@@ -2434,8 +2436,7 @@ def test_efs_certifies_an_exact_face_by_finite_differences_without_directional_c
         smoothing.assert_matched_certified()
 
 
-def test_observed_newton_decrement_stops_at_a_resolved_quadratic_gap() -> None:
-    """Kills requiring a raw score after the remaining objective gap is certified."""
+def _resolved_quadratic_gap_fit() -> DenseSolverResult:
     family = _UnitGaussian()
     response = np.array([1.0])
     weights = resolved_prior(np.ones(1))
@@ -2472,6 +2473,48 @@ def test_observed_newton_decrement_stops_at_a_resolved_quadratic_gap() -> None:
     assert result.convergence_reason == "newton_decrement"
     assert result.iterations == 0
     np.testing.assert_array_equal(result.coefficients, initial)
+    return result
+
+
+def test_observed_newton_decrement_stops_at_a_resolved_quadratic_gap() -> None:
+    """Kills requiring a raw score after the remaining objective gap is certified."""
+    _resolved_quadratic_gap_fit()
+
+
+def test_history_compaction_reuses_validated_newton_certificate(monkeypatch) -> None:
+    from superglm.distributional.results import solver as solver_results
+    from superglm.distributional.smoothing.history import compact_coefficient_history
+
+    source = _resolved_quadratic_gap_fit()
+    fits = [source, source]
+    decompositions = []
+    original = solver_results.decompose_gram
+
+    def record_decomposition(*args, **kwargs):
+        decompositions.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(solver_results, "decompose_gram", record_decomposition)
+    compact_coefficient_history(fits, (), terminal_fit_index=1, config=DistributionalEFSConfig())
+    assert decompositions == []
+    compact = fits[0]
+    assert compact is not source
+    assert fits[1] is source
+    assert compact.eta is None and compact.theta is None
+    assert source.eta is not None and source.theta is not None
+    for field in fields(source):
+        if field.name in {"eta", "theta"}:
+            continue
+        value = getattr(source, field.name)
+        assert getattr(compact, field.name) is value
+        if isinstance(value, np.ndarray):
+            with pytest.raises(ValueError):
+                value.setflags(write=True)
+    compact_coefficient_history(fits, (), terminal_fit_index=1, config=DistributionalEFSConfig())
+    assert fits[0] is compact
+    # Public construction still revalidates a certificate with changed evidence.
+    with pytest.raises(ValueError, match="Newton decrement certificate"):
+        replace(compact, terminal_score=compact.terminal_score * 1.0e8)
 
 
 def test_newton_decrement_result_revalidates_its_terminal_certificate() -> None:
@@ -2677,7 +2720,11 @@ def _independent_penalty_efs_fit(
         fit = real_fit(*args, **kwargs)  # type: ignore[arg-type]
         face = kwargs["face"]
         assert face is None or isinstance(face, PenaltyFace)
-        authority_faces[id(fit)] = () if face is None else face.component_names
+        # History compaction preserves this certificate, so its identity stays
+        # live even when the original full result has been collected.
+        key = id(fit.terminal_rank)
+        assert key not in authority_faces, "authority certificate reused or identity collided"
+        authority_faces[key] = () if face is None else face.component_names
         return fit
 
     monkeypatch.setattr(
@@ -2721,7 +2768,7 @@ def test_efs_activates_two_independent_cap_components_as_one_joint_face(
     assert transition.accepted_fit_index == transition.coefficient_fit_indices[0]
     assert isinstance(transition.endpoint_direction_evidence, JointEndpointDirectionEvidence)
     assert tuple(
-        authority_faces[id(smoothing.coefficient_fits[index])]
+        authority_faces[id(smoothing.coefficient_fits[index].terminal_rank)]
         for index in transition.coefficient_fit_indices
     ) == (layout.penalty_names,)
 
@@ -2740,7 +2787,7 @@ def test_efs_revalidates_a_joint_face_from_one_fresh_common_fit(
         (
             item.revalidated_face_components,
             tuple(
-                authority_faces[id(smoothing.coefficient_fits[index])]
+                authority_faces[id(smoothing.coefficient_fits[index].terminal_rank)]
                 for index in item.coefficient_fit_indices
             ),
         )
@@ -2760,8 +2807,8 @@ def test_efs_revalidates_a_joint_face_from_one_fresh_common_fit(
         for fit_id, face_names in authority_faces.items()
         if face_names == layout.penalty_names
     ) == (
-        id(smoothing.coefficient_fits[activation.accepted_fit_index]),
-        id(common_fit),
+        id(smoothing.coefficient_fits[activation.accepted_fit_index].terminal_rank),
+        id(common_fit.terminal_rank),
     )
     assert common_fit.config.tolerance == 1.0e-12
     assert common_fit.config.coefficient_curvature == "observed"
@@ -2843,7 +2890,7 @@ def test_efs_rolls_back_the_complete_joint_face_when_the_second_recheck_is_finit
     assert len(retraction.coefficient_fit_indices) == 2
     assert retraction.accepted_fit_index == retraction.coefficient_fit_indices[-1]
     assert tuple(
-        authority_faces[id(smoothing.coefficient_fits[index])]
+        authority_faces[id(smoothing.coefficient_fits[index].terminal_rank)]
         for index in retraction.coefficient_fit_indices
     ) == (layout.penalty_names, ())
     direction = retraction.endpoint_direction_evidence
@@ -4077,7 +4124,7 @@ def test_analytic_endpoint_direction_resolves_anisotropic_penalty_geometry() -> 
     assert check.direction.upper_bound < 0.0
 
 
-def _two_face_efs_fit():
+def _two_face_efs_fit(*, retain_history_rows: bool = False):
     family = _UnitGaussian()
     response = np.zeros(4, dtype=np.float64)
     weights = resolved_prior(np.ones(4, dtype=np.float64))
@@ -4118,6 +4165,7 @@ def _two_face_efs_fit():
             tolerance=1.0e-8,
             initial_lambda=0.1,
             maximum_lambda=10.0,
+            retain_history_rows=retain_history_rows,
         ),
     )
     return (first_name, second_name), smoothing
@@ -4330,6 +4378,8 @@ def test_stationary_scalar_face_refuses_multi_cap_runtime_and_result_forgery(
 
 def _joint_terminal_analytic_failure(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    retain_history_rows: bool = False,
 ) -> tuple[tuple[str, str], DistributionalEFSResult]:
     calls = 0
     real_derivative = efs_module.evaluate_endpoint_laplace_derivative
@@ -4347,7 +4397,7 @@ def _joint_terminal_analytic_failure(
     monkeypatch.setattr(
         efs_module, "evaluate_endpoint_laplace_derivative", fail_second_terminal_direction
     )
-    names, smoothing = _two_face_efs_fit()
+    names, smoothing = _two_face_efs_fit(retain_history_rows=retain_history_rows)
     assert calls == 4
     return names, smoothing
 
@@ -4442,7 +4492,8 @@ def test_joint_terminal_result_binds_finite_rollback_penalty_magnitude(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Kills accepting an earlier finite fit whose penalty spans the right subspace."""
-    _names, smoothing = _joint_terminal_analytic_failure(monkeypatch)
+    # This mutation promotes an older fit to terminal, which requires real rows.
+    _names, smoothing = _joint_terminal_analytic_failure(monkeypatch, retain_history_rows=True)
     retraction = smoothing.history[-1]
     _common_index, rollback_index = retraction.coefficient_fit_indices
     rollback_fit = smoothing.coefficient_fits[rollback_index]
@@ -4545,7 +4596,8 @@ def test_joint_terminal_result_authenticates_finite_rollback_authority(
 
 
 def test_exact_face_result_rejects_missing_stale_or_unrecorded_terminal_authority() -> None:
-    component_name, smoothing = _scalar_efs_fit(0.5)
+    # Terminal substitution mutants need the older cap's full row state.
+    component_name, smoothing = _scalar_efs_fit(0.5, retain_history_rows=True)
     evidence = smoothing.terminal_endpoint_directions[component_name]
 
     with pytest.raises(ValueError, match="fresh terminal endpoint directions"):

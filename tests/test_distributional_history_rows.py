@@ -1,6 +1,7 @@
 """Historical row retention must not change smoothing or replay authority."""
 
 import base64
+import gc
 import hashlib
 import json
 import math
@@ -249,6 +250,58 @@ def test_dense_reuse_keeps_live_authority_without_owning_old_fits(monkeypatch):
     assert probe_reference() is None
     assert probe_key not in live_session._results
     assert model.smoothing.terminal_fit.eta is not None
+
+
+def test_initial_rows_are_collected_after_the_plateau_window(monkeypatch):
+    from superglm.distributional.smoothing import loop
+
+    original = loop.compact_coefficient_history
+    initial_rows = []
+    observed_release = []
+
+    def measured(fits, history, **kwargs):
+        if not initial_rows:
+            initial_rows.extend((weakref.ref(fits[0].eta), weakref.ref(fits[0].theta)))
+        original(fits, history, **kwargs)
+        if fits[0].eta is None:
+            assert all(reference() is None for reference in initial_rows)
+            observed_release.append(len(history))
+
+    monkeypatch.setattr(loop, "compact_coefficient_history", measured)
+    _fit()
+    assert observed_release
+
+
+@pytest.mark.parametrize("chunk_size", [None, 16])
+def test_reuse_session_and_caches_are_collected_without_cyclic_gc(chunk_size):
+    from superglm.distributional.solver.solver import _DenseObservedReuseSession
+
+    from .test_distributional_chunk_reuse import _fit as fit_problem
+    from .test_distributional_chunk_reuse import _problem
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        session = _DenseObservedReuseSession()
+        source = fit_problem(_problem(), session=session, chunk_size=chunk_size)
+        session_reference = weakref.ref(session)
+        if chunk_size is None:
+            assert id(source) in session._results
+            cache_arrays = [
+                weakref.ref(array) for _, arrays in session._dense.values() for array in arrays
+            ]
+        else:
+            cache_arrays = [weakref.ref(session._chunk_results[id(source)].score_data)]
+        assert cache_arrays
+        # Keep the source alive, so its callback remains registered, while
+        # dropping the caller's sole ownership of the completed fit session.
+        del session
+        assert session_reference() is None
+        assert all(reference() is None for reference in cache_arrays)
+        assert source.eta is not None
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 @pytest.mark.parametrize("practical", [True, False])

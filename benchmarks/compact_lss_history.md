@@ -1,5 +1,42 @@
 # Compact LSS smoothing history
 
+## Review follow-up
+
+The final patch removes the obsolete initial-fit reference and self-capturing
+weakref callbacks in both reuse registries. Compaction shares the already
+validated immutable coefficient evidence, avoiding constructor copies and
+repeated stop certification. Derivatives explicitly refuse missing predictor
+rows. Artifact schema 10 makes old readers refuse new payloads at the version
+gate; the new reader still reads schemas 8 and 9. Actual old-source artifact
+probes verify both directions.
+
+All 367 final integration tests pass, including the seven distinct CI failures
+on `32a4d935`. Tests that promote historical fits explicitly keep their rows;
+resized Gamma fixtures update their row-shape provenance. The numerical
+assertions are preserved. Astra high checked the implementation and Astra xhigh
+approved it. Both isolated source snapshots have 891 type diagnostics.
+
+The [final receipt](compact_lss_history_followup_receipt.json) records the exact
+source, output hashes and fresh complete fits. The million-row pair takes
+14.727 versus 14.564 seconds, with peak RSS of 1693.48 versus 1534.55 MiB.
+Historical row buffers remain 256 versus 128 MiB. Three dense pairs have median
+times of 2.292 versus 2.397 seconds, an observed 4.59% increase, and median peak
+RSS of 612.10 versus 608.30 MiB. This does not establish unchanged dense latency.
+All saved arrays, numerical histories, phase counts and backends match exactly.
+No speedup is claimed.
+
+Separate final profiles have the same nine solver calls, 18 geometry assemblies
+and 67 Gram decompositions. Eight compaction calls take 0.476 milliseconds.
+A real Newton-decrement regression also proves that compaction does not repeat
+decomposition. Lifetime regressions verify that obsolete initial rows and
+session caches release without cyclic garbage collection. The original dense
+resident-RSS increase below is absent after the callback fix.
+
+## Original measurements at `32a4d935`
+
+The measurements and validation below describe the initial implementation.
+The follow-up above supersedes its lifetime and compaction findings.
+
 On the million-row C1 fixture, retained historical row buffers fall from
 256 to 128 MiB and median peak process RSS falls from 1702.69 to 1569.94 MiB.
 Saved numerical outputs are bitwise identical. Median fit time increases from

@@ -11,8 +11,9 @@ Schema versioning
 ``SCHEMA_VERSION`` is a semantic version, and MAJOR is the only component the
 reader consults:
 
-* **MAJOR is a read barrier unless explicitly supported.** Schema 8 retains
-  its original telemetry encoding and family-dependent curvature scope. Known
+* **MAJOR is a read barrier unless explicitly supported.** Schemas 8 and 9
+  retain full historical rows. Schema 8 also retains its original telemetry
+  encoding and family-dependent curvature scope. Known
   pre-contract majors receive the typed legacy-weight refusal; other majors
   receive an ordinary version error.
 * **MINOR and PATCH promise readability.**  A reader accepts any artifact that
@@ -219,6 +220,7 @@ def _dataclass_config(value: object) -> dict[str, Any]:
     if isinstance(value, DenseSolverConfig) and result.get("newton_decrement_tolerance") is None:
         result.pop("newton_decrement_tolerance")
     if isinstance(value, DistributionalEFSConfig) and not result["retain_history_rows"]:
+        # Preserve schema-8/9 manifests when migrating their full-array payloads.
         result.pop("retain_history_rows")
     return result
 
