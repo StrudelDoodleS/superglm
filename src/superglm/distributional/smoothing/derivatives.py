@@ -993,6 +993,8 @@ def laml_derivatives(
         raise TypeError("fit must be a DenseSolverResult")
     if not fit.converged:
         raise LamlDerivativeError("derivatives require a converged coefficient fit")
+    if fit.eta is None:
+        raise LamlDerivativeError("derivatives require retained predictor rows")
     if isinstance(step, bool) or not isinstance(step, int | float) or not math.isfinite(step):
         raise ValueError("step must be a finite positive float")
     if step <= 0.0:

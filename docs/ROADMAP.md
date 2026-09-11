@@ -213,11 +213,13 @@ mostly distinct observations. Compact internal solver history is implemented in
 [PR #381](https://github.com/StrudelDoodleS/superglm/pull/381): obsolete historical
 row arrays are released during EFS/Newton optimization, while terminal and
 recent plateau rows remain available. `retain_history_rows=True` preserves full
-history for debugging. On the million-row C1 fixture, three matched pairs reduce
-historical row buffers from 256 to 128 MiB and median peak process RSS by
-132.75 MiB, with bitwise-identical numerical outputs. Median fit time is
-13.806 versus 14.197 seconds; no latency gain is claimed. The dense control
-releases historical buffers without an observed peak-RSS improvement. See the
+history for debugging. On the million-row C1 fixture, final source confirmation
+reduces historical row buffers from 256 to 128 MiB and peak process RSS by
+158.93 MiB, with bitwise-identical numerical outputs. Fit time is 14.727 versus
+14.564 seconds in that pair; no latency gain is claimed. Three dense pairs have
+median times of 2.292 versus 2.397 seconds. Lifetime regressions cover obsolete
+initial fits and session caches. New artifacts use schema 10, with schemas 8
+and 9 still readable. See the
 [compact-history report](https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/compact_lss_history.md). Bounded-row
 input/likelihood preparation and fewer avoidable row passes remain C1 work.
 The working validation sequence is 10 million then 100 million rows with a

@@ -1451,7 +1451,7 @@ def _endpoint_polish_fixture(
         repeats = math.ceil(retained_rows / len(base.eta))
         eta = np.tile(base.eta, (repeats, 1))[:retained_rows]
         theta = np.tile(base.theta, (repeats, 1))[:retained_rows]
-        base = replace(base, eta=eta, theta=theta)
+        base = replace(base, eta=eta, theta=theta, row_shape=eta.shape)
     score = np.array([1.0e-6, -5.0e-7], dtype=np.float64)
     source = replace(
         base,

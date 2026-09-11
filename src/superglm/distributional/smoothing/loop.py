@@ -248,6 +248,7 @@ def fit_distributional_efs(
             face=current_face,
         )
     initial_objective = current_objective
+    del initial_fit  # current_fit and history own it until their live window ends.
     with measure_phase(phase_recorder, "efs_update_backtracking"):
         terminal_evidence = _fresh_raw_evidence(
             layout,
