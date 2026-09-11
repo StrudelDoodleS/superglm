@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from superglm._group_matrix._group_matrix_centered import (
     _raw_centering_well_scaled,
     centered_gram_rhs,
+    centered_signed_grams,
 )
 from superglm.distributions import _VARIANCE_FLOOR, Gamma, clip_mu
 from superglm.group_matrix import DesignMatrix
@@ -47,6 +48,8 @@ from superglm.solvers.structured import (
     structured_design_rmatvec,
 )
 from superglm.types import GroupSlice, PenaltyComponent
+
+_SIGNED_GRAM_BATCH_BYTES = 64 << 20
 
 
 def _leverage_gradient_rhs(
@@ -439,7 +442,6 @@ def reml_w_correction(
             mean_x = np.asarray(factor_mean, dtype=np.float64)
             sum_w = float(factor_sum_w)
         use_stable_signed_gram = False
-    stable_gram_rhs = np.zeros(dm.n, dtype=np.float64) if use_stable_signed_gram else None
 
     def centered_matvec(values: NDArray) -> NDArray:
         """Apply the profiled-intercept design ``X - 1 mean_x'``."""
@@ -506,6 +508,36 @@ def reml_w_correction(
             )
         grad_correction[:] = rhs @ -factor.solve(penalty_rhs)
         return grad_correction, None
+
+    batch_size = 0
+    if (
+        use_stable_signed_gram
+        and isinstance(factor, DenseHessianFactor)
+        and w_correction_order == 1
+    ):
+        # Retained weights, Gram accumulators, compensation and outputs.
+        # Row blocks and single-direction scratch retain their chunk-scale cost.
+        bytes_per_direction = np.dtype(np.float64).itemsize * (dm.n + 3 * p * p)
+        batch_size = min(m, _SIGNED_GRAM_BATCH_BYTES // max(1, bytes_per_direction))
+        if batch_size < 2:
+            batch_size = 0
+    stable_gram_rhs = (
+        np.zeros(dm.n, dtype=np.float64)
+        if use_stable_signed_gram and not batch_size and structured_group_index is None
+        else None
+    )
+    pending: list[tuple[int, NDArray, float]] = []
+
+    def flush_signed_grams() -> None:
+        grams = centered_signed_grams(
+            dm=dm, weights=[weights for _, weights, _ in pending], mean_x=mean_x
+        )
+        for (i, _, dsum_w_j), C_j in zip(pending, grams, strict=True):
+            grad_correction[i] = 0.5 * float(np.sum(factor.inverse * C_j))
+            if sum_w is not None:
+                grad_correction[i] += 0.5 * dsum_w_j / sum_w
+            dH_extra[i] = C_j
+        pending.clear()
 
     def centered_signed_gram(
         row_weights: NDArray,
@@ -588,10 +620,11 @@ def reml_w_correction(
         # a_j = (dW/deta) * deta_j  -- weight changes per obs
         a_j = dW_deta * deta_j
 
-        # dm/drho_j = X_c' (dw/drho_j) / sum(W).  The first derivative
-        # of the centered Gram does not need dm/drho because X_c'W1=0,
-        # but both mean-derivative outer products enter at second order.
-        dmean_j = centered_rmatvec(a_j) / sum_w if sum_w is not None else np.zeros_like(mean_x)
+        if batch_size:
+            pending.append((i, a_j, float(np.sum(a_j, dtype=np.float64))))
+            if len(pending) == batch_size:
+                flush_signed_grams()
+            continue
 
         # C_j = X_c'diag(a_j)X_c -- dW contribution to the
         # profiled-intercept Hessian.
@@ -614,11 +647,17 @@ def reml_w_correction(
         dH_extra[i] = C_j
 
         if w_correction_order >= 2:
+            # Mean-derivative outer products enter only at second order;
+            # the first derivative has no such term because X_c'W1=0.
+            dmean_j = centered_rmatvec(a_j) / sum_w if sum_w is not None else np.zeros_like(mean_x)
             deta_vectors.append(deta_j)
             dbeta_vectors.append(dbeta_j)
             dmean_vectors.append(dmean_j)
             dsum_w_values.append(dsum_w_j)
             lam_list.append(lam)
+
+    if pending:
+        flush_signed_grams()
 
     # -- Second-order Hessian cross-terms (Wood 2011, Section 3.5.1) --
     #

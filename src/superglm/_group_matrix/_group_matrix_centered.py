@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -1033,6 +1034,37 @@ def centered_gram_rhs(
 
     gram = 0.5 * (gram + gram.T)
     return gram, rhs
+
+
+def centered_signed_grams(
+    *,
+    dm,
+    weights: Sequence[NDArray],
+    mean_x: NDArray,
+    chunk_size: int = 8192,
+) -> list[NDArray]:
+    """Reuse centered row chunks across signed Gram products in input order."""
+    n, p = dm.shape
+    weights = [np.asarray(channel, dtype=float) for channel in weights]
+    mean_x = np.asarray(mean_x, dtype=float)
+    if any(channel.shape != (n,) for channel in weights):
+        raise ValueError("weights must match the design row count")
+    if mean_x.shape != (p,):
+        raise ValueError("mean_x must match the design column count")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    grams = [np.zeros((p, p), dtype=float) for _ in weights]
+    if not weights or p == 0:
+        return grams
+    compensations = [np.zeros_like(gram) for gram in grams]
+    for start in range(0, n, chunk_size):
+        stop = min(start + chunk_size, n)
+        block = np.asarray(dm.row_subset(np.arange(start, stop)).toarray(), dtype=float)
+        block -= mean_x
+        for weights_j, gram, compensation in zip(weights, grams, compensations, strict=True):
+            contribution = block.T @ (weights_j[start:stop, None] * block)
+            _compensated_add(gram, compensation, contribution)
+    return [0.5 * (gram + gram.T) for gram in grams]
 
 
 def centered_rhs(
