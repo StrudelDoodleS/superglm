@@ -1,0 +1,755 @@
+{
+  "scope": "C1 Packet 1: exact Gaussian root carrier preparation; capacity and latency gates remain open",
+  "baseline_commit": "141497cfd3117e6d6d4864e90f424babdaa98c16",
+  "source_sha256": {
+    "baseline": "f6e86bd799c1e90653cfaf5839f9adf5a7b6acc70618a3dd8092cbc85982c668",
+    "candidate": "b8b5689f4d2afb370696f1af45762b8b01ed542eb4bd52baccf874dcb2ec0393"
+  },
+  "harness_sha256": "72f015ab22b9d036497902f04b4f8b5b32b660dd6d3d2614ccf076dc0387115b",
+  "fixture_generator_sha256": "1b32f03d1bf7cdec59f501b6f0306924757184181e9ae5c48aced63d65073547",
+  "fixture": {
+    "provenance": {
+      "seed": 28109,
+      "holdout_seed": 28110,
+      "construction": "Independent synthetic Gaussian location-scale with small feature groups",
+      "numeric_terms": 6,
+      "categorical_levels": [
+        3,
+        3,
+        4
+      ],
+      "spline_terms": 2,
+      "grouped_curve": {
+        "basis": "spline-by-categorical",
+        "levels": 3
+      }
+    },
+    "rows": 1048576,
+    "inputs": {
+      "frame": "9f9f32a7a7f13f5c40f6964b269e2b0711644e509996cfac70ee597e9b1dd180",
+      "response": "a73eba0dfa1f6e8675a8e99ef345ea49b39030348d69e359e25f757532b69d9f",
+      "holdout": "ca15892cc4f2e6512329be33f76137ab087a5c18bee1b2c726ba5b1423ca7338"
+    }
+  },
+  "environment": {
+    "python": "3.13.14 (main, Jul 23 2026, 14:44:45) [Clang 22.1.3 ]",
+    "packages": {
+      "superglm": "0.31.0",
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "pandas": "3.0.5",
+      "numba": "0.67.0"
+    },
+    "numba_workers": 16
+  },
+  "execution": "Serial fresh processes; public fit clock includes compilation, optimization and finalization; warmup outside clock. BLAS 1, Numba 16, tabmat OpenMP 1. Separate profiles, no profile clocks used for timing. One timed pair only.",
+  "million_runs": {
+    "baseline": {
+      "fit_seconds": 20.214538648957387,
+      "fit_cpu_seconds": 86.17312374999999,
+      "fit_peak_process_rss_bytes": 1939943424,
+      "resident_before_fit_bytes": 923082752,
+      "resident_after_fit_bytes": 1526812672,
+      "warmup_seconds": 44.506566739990376,
+      "load_before": [
+        0.7529296875,
+        0.4013671875,
+        0.3056640625
+      ],
+      "load_after": [
+        2.7890625,
+        0.9287109375,
+        0.48388671875
+      ],
+      "background_activity": {
+        "external_cpu_cores_lower_bound": 0.18788244278381508,
+        "passes_activity_screen": true,
+        "caveat": "Endpoint accounting is a lower bound: CPU used after a process's last observation before exit, and by processes born and exited between snapshots, is unavailable. Newly observed processes contribute all observed lifetime ticks; PID reuse is distinguished by start ticks. Descendants that reparent between snapshots may not be identifiable. This is a screening check, not proof that the machine stayed quiet throughout a fit."
+      },
+      "native_pools": [
+        {
+          "user_api": "blas",
+          "internal_api": "openblas",
+          "num_threads": 1,
+          "prefix": "libscipy_openblas",
+          "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+          "version": "0.3.34.0.0",
+          "threading_layer": "pthreads",
+          "architecture": "SkylakeX"
+        },
+        {
+          "user_api": "blas",
+          "internal_api": "openblas",
+          "num_threads": 1,
+          "prefix": "libscipy_openblas",
+          "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+          "version": "0.3.31.dev",
+          "threading_layer": "pthreads",
+          "architecture": "SkylakeX"
+        },
+        {
+          "user_api": "openmp",
+          "internal_api": "openmp",
+          "num_threads": 1,
+          "prefix": "libgomp",
+          "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+          "version": null
+        },
+        {
+          "user_api": "openmp",
+          "internal_api": "openmp",
+          "num_threads": 16,
+          "prefix": "libgomp",
+          "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+          "version": null
+        }
+      ],
+      "phases": {
+        "seconds": {
+          "frame_normalization": 5.611800588667393e-05,
+          "predictor_compilation": 3.7866353989811614,
+          "layout_penalty_assembly": 0.0020552120404317975,
+          "dense_predictor_matrices": 0.0,
+          "initialization": 3.098593350034207,
+          "likelihood_evaluation": 1.4415726991719566,
+          "curvature_gradient_assembly": 10.647246563923545,
+          "coefficient_decomposition_solve": 0.046732702874578536,
+          "efs_update_backtracking": 0.07893120282096788,
+          "newton_endgame": 0.0,
+          "terminal_observed_retry_fallback": 0.7659714000183158,
+          "inference_edf": 0.3637620910303667,
+          "serialization": 0.0,
+          "fit_total": 20.185464391019195
+        },
+        "counts": {
+          "frame_normalization": 1,
+          "predictor_compilation": 1,
+          "layout_penalty_assembly": 9,
+          "dense_predictor_matrices": 0,
+          "initialization": 8,
+          "likelihood_evaluation": 26,
+          "curvature_gradient_assembly": 18,
+          "coefficient_decomposition_solve": 16,
+          "efs_update_backtracking": 30,
+          "newton_endgame": 0,
+          "terminal_observed_retry_fallback": 8,
+          "inference_edf": 1,
+          "serialization": 0,
+          "fit_total": 1
+        }
+      }
+    },
+    "candidate": {
+      "fit_seconds": 20.72922675299924,
+      "fit_cpu_seconds": 86.28227551900001,
+      "fit_peak_process_rss_bytes": 1955995648,
+      "resident_before_fit_bytes": 922812416,
+      "resident_after_fit_bytes": 1568309248,
+      "warmup_seconds": 45.50305439601652,
+      "load_before": [
+        1.7119140625,
+        0.94384765625,
+        0.51611328125
+      ],
+      "load_after": [
+        2.96240234375,
+        1.314453125,
+        0.65185546875
+      ],
+      "background_activity": {
+        "external_cpu_cores_lower_bound": 0.15718911595376098,
+        "passes_activity_screen": true,
+        "caveat": "Endpoint accounting is a lower bound: CPU used after a process's last observation before exit, and by processes born and exited between snapshots, is unavailable. Newly observed processes contribute all observed lifetime ticks; PID reuse is distinguished by start ticks. Descendants that reparent between snapshots may not be identifiable. This is a screening check, not proof that the machine stayed quiet throughout a fit."
+      },
+      "native_pools": [
+        {
+          "user_api": "blas",
+          "internal_api": "openblas",
+          "num_threads": 1,
+          "prefix": "libscipy_openblas",
+          "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+          "version": "0.3.34.0.0",
+          "threading_layer": "pthreads",
+          "architecture": "SkylakeX"
+        },
+        {
+          "user_api": "blas",
+          "internal_api": "openblas",
+          "num_threads": 1,
+          "prefix": "libscipy_openblas",
+          "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+          "version": "0.3.31.dev",
+          "threading_layer": "pthreads",
+          "architecture": "SkylakeX"
+        },
+        {
+          "user_api": "openmp",
+          "internal_api": "openmp",
+          "num_threads": 1,
+          "prefix": "libgomp",
+          "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+          "version": null
+        },
+        {
+          "user_api": "openmp",
+          "internal_api": "openmp",
+          "num_threads": 16,
+          "prefix": "libgomp",
+          "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+          "version": null
+        }
+      ],
+      "phases": {
+        "seconds": {
+          "frame_normalization": 5.205202614888549e-05,
+          "predictor_compilation": 3.5823460890096612,
+          "layout_penalty_assembly": 0.001708257885184139,
+          "dense_predictor_matrices": 0.0,
+          "initialization": 3.1705432340386324,
+          "likelihood_evaluation": 1.5466439382871613,
+          "curvature_gradient_assembly": 11.194059893954545,
+          "coefficient_decomposition_solve": 0.04865967994555831,
+          "efs_update_backtracking": 0.08772678708191961,
+          "newton_endgame": 0.0,
+          "terminal_observed_retry_fallback": 0.8120169579051435,
+          "inference_edf": 0.4420889430330135,
+          "serialization": 0.0,
+          "fit_total": 20.703505713958293
+        },
+        "counts": {
+          "frame_normalization": 1,
+          "predictor_compilation": 1,
+          "layout_penalty_assembly": 9,
+          "dense_predictor_matrices": 0,
+          "initialization": 8,
+          "likelihood_evaluation": 26,
+          "curvature_gradient_assembly": 18,
+          "coefficient_decomposition_solve": 16,
+          "efs_update_backtracking": 30,
+          "newton_endgame": 0,
+          "terminal_observed_retry_fallback": 8,
+          "inference_edf": 1,
+          "serialization": 0,
+          "fit_total": 1
+        }
+      }
+    }
+  },
+  "million_comparison": {
+    "saved_arrays": {
+      "coefficients": {
+        "shape": [
+          102
+        ],
+        "dtype": "float64",
+        "sha256": "39c0ab6733655a537ad02c2692179da405474743b99695ed40ef10f86cdd12a4",
+        "bitwise_equal": true
+      },
+      "covariance": {
+        "shape": [
+          102,
+          102
+        ],
+        "dtype": "float64",
+        "sha256": "f5597f1d2b5e8fc5b640b4bd5ee6a78c08908506a3c3ffad8d72076e11d19c99",
+        "bitwise_equal": true
+      },
+      "train_parameters": {
+        "shape": [
+          1048576,
+          2
+        ],
+        "dtype": "float64",
+        "sha256": "de33bbde5ccbb11ec3691a7e37d0cd8ec1623be9aaa264fd6bec599daffda4e9",
+        "bitwise_equal": true
+      },
+      "holdout_parameters": {
+        "shape": [
+          2000,
+          2
+        ],
+        "dtype": "float64",
+        "sha256": "e29fee09ab6974eb758b4bc722fd4ce943e6bb7cb3dd4ea50d355315598d9976",
+        "bitwise_equal": true
+      },
+      "lambdas": {
+        "shape": [
+          10
+        ],
+        "dtype": "float64",
+        "sha256": "1bade53dea89e6053ac2a44aadb492815a8d58437e2c5ef413dc7d3f9475da25",
+        "bitwise_equal": true
+      },
+      "terminal_score": {
+        "shape": [
+          102
+        ],
+        "dtype": "float64",
+        "sha256": "f43eb8c24fb8dd3dccf20a6e1fa2349ed39fea402f04f45bffad260f5e844461",
+        "bitwise_equal": true
+      },
+      "terminal_curvature": {
+        "shape": [
+          102,
+          102
+        ],
+        "dtype": "float64",
+        "sha256": "9188430390672fab03356e6a4cd731b38d3ced29ffed0dc17e790e32d97b9ee0",
+        "bitwise_equal": true
+      }
+    },
+    "other_exactly_equal_fields": [
+      "result",
+      "history",
+      "smoothing_reason",
+      "coefficient_fit_backends",
+      "coefficient_fit_iterations",
+      "history_census"
+    ],
+    "result": {
+      "converged": true,
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "n_inner_iter": 16,
+      "n_smoothing_iter": 7,
+      "log_likelihood": -1168908.7726277818,
+      "penalized_log_likelihood": -1168933.1360521768,
+      "total_effective_df": 90.72691502018914,
+      "rank": 102,
+      "smoothing_parameters": {
+        "location:smooth0#wiggle": 3.3780910771264807,
+        "location:smooth1#wiggle": 33.12652568389799,
+        "location:curve#wiggle": 3.213556186956562,
+        "location:curve:group[level0]#wiggle": 21.92247704407015,
+        "location:curve:group[level2]#wiggle": 18.286339559114428,
+        "scale:smooth0#wiggle": 72.9298494743409,
+        "scale:smooth1#wiggle": 101.45729101339522,
+        "scale:curve#wiggle": 130.8274156818094,
+        "scale:curve:group[level0]#wiggle": 1180.1073955282645,
+        "scale:curve:group[level2]#wiggle": 1314.90366854979
+      },
+      "exact_face_components": []
+    },
+    "coefficient_fit_iterations": [
+      8,
+      2,
+      2,
+      2,
+      1,
+      1,
+      0,
+      0
+    ],
+    "coefficient_fit_backends": [
+      "distributional-chunked-v1",
+      "distributional-chunked-v1",
+      "distributional-chunked-v1",
+      "distributional-chunked-v1",
+      "distributional-chunked-v1",
+      "distributional-chunked-v1",
+      "distributional-chunked-v1",
+      "distributional-chunked-v1"
+    ],
+    "history_census": {
+      "history_fits": 8,
+      "history_fits_with_rows": 4,
+      "reachable_solver_results": 8,
+      "reachable_solver_results_with_rows": 4,
+      "unique_reachable_solver_row_bytes": 134217728,
+      "scope": "Solver results reachable through smoothing dataclasses and containers."
+    },
+    "phase_counts_equal": true,
+    "root_carrier_payload_removed_bytes": 8388608,
+    "full_fit_peak_rss_delta_bytes": 16052224,
+    "full_fit_peak_reduction_demonstrated": false,
+    "speedup_demonstrated": false
+  },
+  "separate_profiles": {
+    "baseline": {
+      "profile_seconds_excluded_from_timing": 20.359475870034657,
+      "outputs_and_history_equal_to_timed": true,
+      "functions": [
+        {
+          "function": "_carrier_digest",
+          "calls": 17,
+          "own_seconds": 9.704800000000001e-05,
+          "cumulative_seconds": 0.011993332,
+          "callers": [
+            {
+              "function": "_set_prepared_carrier",
+              "calls": 17,
+              "cumulative_seconds": 0.011993332
+            }
+          ]
+        },
+        {
+          "function": "_compile_for_args",
+          "calls": 5,
+          "own_seconds": 0.00015036000000000002,
+          "cumulative_seconds": 0.041357712000000005,
+          "callers": [
+            {
+              "function": "disc_disc_hist",
+              "calls": 1,
+              "cumulative_seconds": 0.007956348
+            },
+            {
+              "function": "_agg_by_bin",
+              "calls": 2,
+              "cumulative_seconds": 0.017133133000000002
+            },
+            {
+              "function": "_cross_gram",
+              "calls": 1,
+              "cumulative_seconds": 0.008826628000000001
+            },
+            {
+              "function": "gram_rmatvec",
+              "calls": 1,
+              "cumulative_seconds": 0.007441603000000001
+            }
+          ]
+        },
+        {
+          "function": "_set_prepared_carrier",
+          "calls": 17,
+          "own_seconds": 0.001094031,
+          "cumulative_seconds": 0.014509966000000001,
+          "callers": [
+            {
+              "function": "__post_init__",
+              "calls": 17,
+              "cumulative_seconds": 0.014509966000000001
+            }
+          ]
+        },
+        {
+          "function": "_take_likelihood_rows",
+          "calls": 320,
+          "own_seconds": 0.0017805850000000001,
+          "cumulative_seconds": 0.237124894,
+          "callers": [
+            {
+              "function": "iter_likelihood_chunks",
+              "calls": 288,
+              "cumulative_seconds": 0.15673556300000002
+            },
+            {
+              "function": "evaluate_chunked_log_likelihood",
+              "calls": 32,
+              "cumulative_seconds": 0.08038933100000001
+            }
+          ]
+        }
+      ]
+    },
+    "candidate": {
+      "profile_seconds_excluded_from_timing": 20.251791122020222,
+      "outputs_and_history_equal_to_timed": true,
+      "functions": [
+        {
+          "function": "_carrier_block",
+          "calls": 128,
+          "own_seconds": 0.001663002,
+          "cumulative_seconds": 0.0017025660000000002,
+          "callers": [
+            {
+              "function": "_derived_carrier_digest",
+              "calls": 128,
+              "cumulative_seconds": 0.0017025660000000002
+            }
+          ]
+        },
+        {
+          "function": "_carrier_digest",
+          "calls": 17,
+          "own_seconds": 5.5913000000000005e-05,
+          "cumulative_seconds": 0.012014332,
+          "callers": [
+            {
+              "function": "_set_prepared_carrier",
+              "calls": 17,
+              "cumulative_seconds": 0.012014332
+            }
+          ]
+        },
+        {
+          "function": "_compile_for_args",
+          "calls": 5,
+          "own_seconds": 0.00014303200000000002,
+          "cumulative_seconds": 0.043532205000000004,
+          "callers": [
+            {
+              "function": "disc_disc_hist",
+              "calls": 1,
+              "cumulative_seconds": 0.007224043
+            },
+            {
+              "function": "_agg_by_bin",
+              "calls": 2,
+              "cumulative_seconds": 0.020065853
+            },
+            {
+              "function": "_cross_gram",
+              "calls": 1,
+              "cumulative_seconds": 0.0088225
+            },
+            {
+              "function": "gram_rmatvec",
+              "calls": 1,
+              "cumulative_seconds": 0.007419809
+            }
+          ]
+        },
+        {
+          "function": "_derived_carrier_digest",
+          "calls": 1,
+          "own_seconds": 0.0006931820000000001,
+          "cumulative_seconds": 0.008648008,
+          "callers": [
+            {
+              "function": "_chunked",
+              "calls": 1,
+              "cumulative_seconds": 0.008648008
+            }
+          ]
+        },
+        {
+          "function": "_set_prepared_carrier",
+          "calls": 17,
+          "own_seconds": 0.000995295,
+          "cumulative_seconds": 0.014704788000000002,
+          "callers": [
+            {
+              "function": "__post_init__",
+              "calls": 17,
+              "cumulative_seconds": 0.014704788000000002
+            }
+          ]
+        },
+        {
+          "function": "_take_likelihood_rows",
+          "calls": 320,
+          "own_seconds": 0.0020727930000000003,
+          "cumulative_seconds": 0.229154344,
+          "callers": [
+            {
+              "function": "iter_likelihood_chunks",
+              "calls": 288,
+              "cumulative_seconds": 0.15320387700000002
+            },
+            {
+              "function": "evaluate_chunked_log_likelihood",
+              "calls": 32,
+              "cumulative_seconds": 0.07595046700000001
+            }
+          ]
+        },
+        {
+          "function": "bind_chunked_likelihood",
+          "calls": 1,
+          "own_seconds": 7.612e-06,
+          "cumulative_seconds": 0.00909685,
+          "callers": [
+            {
+              "function": "_fit_candidate",
+              "calls": 1,
+              "cumulative_seconds": 0.00909685
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "weighted_controls": [
+    {
+      "case": "gaussian",
+      "rows": 384,
+      "input_sha256": "96b0064d4a5236933bce3d821c590365a14b1a32009f26d53e2dfd2f58002943",
+      "outputs_and_history_exactly_equal": true,
+      "converged": true,
+      "execution_backend": "distributional-chunked-v1",
+      "runs": {
+        "baseline": {
+          "wall_seconds": 0.5906551029765978,
+          "cpu_seconds": 0.5899533679999998,
+          "process_peak_rss_mib": 388.390625,
+          "native_pools": [
+            {
+              "user_api": "blas",
+              "internal_api": "openblas",
+              "num_threads": 1,
+              "prefix": "libscipy_openblas",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+              "version": "0.3.34.0.0",
+              "threading_layer": "pthreads",
+              "architecture": "SkylakeX"
+            },
+            {
+              "user_api": "blas",
+              "internal_api": "openblas",
+              "num_threads": 1,
+              "prefix": "libscipy_openblas",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+              "version": "0.3.31.dev",
+              "threading_layer": "pthreads",
+              "architecture": "SkylakeX"
+            },
+            {
+              "user_api": "openmp",
+              "internal_api": "openmp",
+              "num_threads": 1,
+              "prefix": "libgomp",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+              "version": null
+            }
+          ]
+        },
+        "candidate": {
+          "wall_seconds": 0.5718390420079231,
+          "cpu_seconds": 0.571506667,
+          "process_peak_rss_mib": 388.51171875,
+          "native_pools": [
+            {
+              "user_api": "blas",
+              "internal_api": "openblas",
+              "num_threads": 1,
+              "prefix": "libscipy_openblas",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+              "version": "0.3.34.0.0",
+              "threading_layer": "pthreads",
+              "architecture": "SkylakeX"
+            },
+            {
+              "user_api": "blas",
+              "internal_api": "openblas",
+              "num_threads": 1,
+              "prefix": "libscipy_openblas",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+              "version": "0.3.31.dev",
+              "threading_layer": "pthreads",
+              "architecture": "SkylakeX"
+            },
+            {
+              "user_api": "openmp",
+              "internal_api": "openmp",
+              "num_threads": 1,
+              "prefix": "libgomp",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+              "version": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "case": "gamma",
+      "rows": 384,
+      "input_sha256": "7121a71f07f19ccfb4ba123b15a89c64f47035a4057c84346d451d57d981c741",
+      "outputs_and_history_exactly_equal": true,
+      "converged": true,
+      "execution_backend": "distributional-chunked-v1",
+      "runs": {
+        "baseline": {
+          "wall_seconds": 0.26298114302335307,
+          "cpu_seconds": 0.26206898700000014,
+          "process_peak_rss_mib": 378.00390625,
+          "native_pools": [
+            {
+              "user_api": "blas",
+              "internal_api": "openblas",
+              "num_threads": 1,
+              "prefix": "libscipy_openblas",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+              "version": "0.3.34.0.0",
+              "threading_layer": "pthreads",
+              "architecture": "SkylakeX"
+            },
+            {
+              "user_api": "blas",
+              "internal_api": "openblas",
+              "num_threads": 1,
+              "prefix": "libscipy_openblas",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+              "version": "0.3.31.dev",
+              "threading_layer": "pthreads",
+              "architecture": "SkylakeX"
+            },
+            {
+              "user_api": "openmp",
+              "internal_api": "openmp",
+              "num_threads": 1,
+              "prefix": "libgomp",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+              "version": null
+            }
+          ]
+        },
+        "candidate": {
+          "wall_seconds": 0.2699898600112647,
+          "cpu_seconds": 0.26973332800000005,
+          "process_peak_rss_mib": 378.05078125,
+          "native_pools": [
+            {
+              "user_api": "blas",
+              "internal_api": "openblas",
+              "num_threads": 1,
+              "prefix": "libscipy_openblas",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+              "version": "0.3.34.0.0",
+              "threading_layer": "pthreads",
+              "architecture": "SkylakeX"
+            },
+            {
+              "user_api": "blas",
+              "internal_api": "openblas",
+              "num_threads": 1,
+              "prefix": "libscipy_openblas",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+              "version": "0.3.31.dev",
+              "threading_layer": "pthreads",
+              "architecture": "SkylakeX"
+            },
+            {
+              "user_api": "openmp",
+              "internal_api": "openmp",
+              "num_threads": 1,
+              "prefix": "libgomp",
+              "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+              "version": null
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "focused_verification": {
+    "passed": 411,
+    "seconds": 11.87,
+    "independent_review": "James approved numbered steps 1\u201310, no blockers",
+    "mutation_baseline": "Unfixed 37-row public fit retained 296 carrier bytes; new regression failed before implementation"
+  },
+  "limitations": [
+    "The eager null-only carrier remains temporary; bounded initialization and null fitting are later requirements.",
+    "Removing 8*N retained root bytes does not establish a reduction in full-fit peak RSS.",
+    "The older 14.56-second historical receipt differs from this current baseline timing; its cause has not been isolated. No latency acceptance claimed.",
+    "Cold small controls and one million-row timing pair do not support general performance claims."
+  ],
+  "raw_artifacts": {
+    "packet1-gamma-baseline.json": "5e712ab78a99e68a8da1ed7125ddf6eb17c7251c9ad7ebe806236bf57cffddf6",
+    "packet1-gamma-candidate.json": "183161b0c6cd259a9a14415b93d63da988bb6bccd0a3c8e5e09ffe189548c48a",
+    "packet1-gaussian-baseline.json": "742a085218c6adec071fa5e5cf8ec1ac2812f5654c43f2ddd5248b31ebafa335",
+    "packet1-gaussian-candidate.json": "22bd6fb111287eeabe07e7bea32415c462956506e233ff117cd8ab7b82948a5f",
+    "packet1-million-baseline-profile.json": "7827789d6f6e73aadc5c335333ff0dcd552f6f68284e05f47b0bc34da1dbca48",
+    "packet1-million-baseline-profile.npz": "32657164e5ede3af1a7b9c9d2afd3895ae4f6a93e13f88ff37b76773cef92179",
+    "packet1-million-baseline-profile.prof": "0bbdac28c000bf36a645e67d29d8d4e637b2449befc7b2a5fd2134cec93ba4f3",
+    "packet1-million-baseline.json": "f7b66117a3fe562dbd2a25411f8eb57e47754b585bcc2eec2ec7c0f82cebdcd2",
+    "packet1-million-baseline.npz": "32657164e5ede3af1a7b9c9d2afd3895ae4f6a93e13f88ff37b76773cef92179",
+    "packet1-million-candidate-profile.json": "ae9894a84b00f284931833df532cb14e00c02f1587124f2ea7971f78474c6a9d",
+    "packet1-million-candidate-profile.npz": "32657164e5ede3af1a7b9c9d2afd3895ae4f6a93e13f88ff37b76773cef92179",
+    "packet1-million-candidate-profile.prof": "a7010a278c79ae93986a4f48ab7c490ca4ed81d848616fc451b08fe83ade7db6",
+    "packet1-million-candidate.json": "60972cb9dd3bfac4aa02ab007cacf4d19db0cc30f97f99ecc553f4d0a5401e8f",
+    "packet1-million-candidate.npz": "32657164e5ede3af1a7b9c9d2afd3895ae4f6a93e13f88ff37b76773cef92179"
+  },
+  "control_driver_sha256": "f7bd20cd0c856bd7962eb1c43dc53892d198d97c23c7df683aa168b6472b8bba"
+}

@@ -17,6 +17,7 @@ from superglm.distributional.family import (
     ExpectedInformationFamily,
     FamilyLikelihoodPlan,
     _likelihood_reuse_contract,
+    _prepared_field_modes,
 )
 from superglm.distributional.layout import StackedLayout
 from superglm.distributional.predictor import PredictorExecutionPlan
@@ -305,6 +306,9 @@ def _build_chunk_reuse_data_certificate(
         or type(weights) is not ResolvedLikelihoodWeights
     ):
         return None
+    prepared_modes = _prepared_field_modes(context.likelihood_plan, contract)
+    if prepared_modes is None:
+        return None
     field = digest.field
     array = digest.array
 
@@ -348,8 +352,12 @@ def _build_chunk_reuse_data_certificate(
     field(weights.provenance.contract.semantics)
     field((context.chunk_size, context.layout.n_coefficients))
     array(context.response)
-    for name in contract.prepared_array_fields:
-        array(getattr(context.likelihood_plan, name))
+    # Logical IDs intentionally agree between eager and derived roots. Their
+    # storage authority does not: certify the explicit audited transform too.
+    field(("prepared-field-storage/v1", prepared_modes))
+    for name, mode in prepared_modes:
+        if mode == "stored":
+            array(getattr(context.likelihood_plan, name))
     for name in ("values", "geometry_values", "root_take_map", "input_positions"):
         array(getattr(weights, name))
     for state in context.layout.predictors:

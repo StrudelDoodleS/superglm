@@ -16,7 +16,11 @@ import numpy as np
 
 from superglm.distributional.families.gamma import GammaLikelihoodPlan, GammaLS
 from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
-from superglm.distributional.family import ObservationContract, _likelihood_reuse_contract
+from superglm.distributional.family import (
+    ObservationContract,
+    _likelihood_reuse_contract,
+    _prepared_field_modes,
+)
 from superglm.distributional.weights import (
     ResolvedLikelihoodWeights,
     WeightContract,
@@ -215,6 +219,7 @@ def _eligible(family, plan):
         and contract is not None
         and contract.deterministic_chunk_replay
         and type(plan) is contract.plan_type
+        and _prepared_field_modes(plan, contract) is not None
         and type(plan.weights) is ResolvedLikelihoodWeights
         and type(plan.weights.provenance) is WeightProvenance
         and type(plan.weights.provenance.contract) is WeightContract

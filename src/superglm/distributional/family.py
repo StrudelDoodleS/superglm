@@ -51,6 +51,18 @@ class FamilyLikelihoodPlan(Protocol):
     def take(self, indices: NDArray[np.integer]) -> FamilyLikelihoodPlan: ...
 
 
+@runtime_checkable
+class ChunkPreparedLikelihoodFamily(Protocol):
+    """Optional binding whose root prepares owned likelihood children on demand."""
+
+    def bind_chunked_likelihood(
+        self,
+        y: NDArray,
+        weights: ResolvedLikelihoodWeights,
+        observation: ObservationContract,
+    ) -> FamilyLikelihoodPlan: ...
+
+
 @dataclass(frozen=True)
 class _LikelihoodReuseContract:
     """Adapter-declared numerical inputs eligible for fixed-point certification."""
@@ -59,6 +71,8 @@ class _LikelihoodReuseContract:
     prepared_array_fields: tuple[str, ...]
     link_types: tuple[type, ...]
     deterministic_chunk_replay: bool = False
+    # (prepared field, storage-mode field, audited derivation identifier).
+    derived_prepared_fields: tuple[tuple[str, str, str], ...] = ()
 
 
 _LIKELIHOOD_REUSE_CONTRACTS: dict[type, _LikelihoodReuseContract] = {}
@@ -71,6 +85,7 @@ def _register_likelihood_reuse_contract(
     prepared_array_fields: tuple[str, ...],
     link_types: tuple[type, ...] = (),
     deterministic_chunk_replay: bool = False,
+    derived_prepared_fields: tuple[tuple[str, str, str], ...] = (),
 ) -> None:
     """Register an audited adapter after its exact family/plan types exist.
 
@@ -83,6 +98,7 @@ def _register_likelihood_reuse_contract(
         tuple(prepared_array_fields),
         tuple(link_types),
         deterministic_chunk_replay,
+        tuple(derived_prepared_fields),
     )
     previous = _LIKELIHOOD_REUSE_CONTRACTS.get(family_type)
     if previous is not None and previous != contract:
@@ -92,6 +108,34 @@ def _register_likelihood_reuse_contract(
 
 def _likelihood_reuse_contract(family: object) -> _LikelihoodReuseContract | None:
     return _LIKELIHOOD_REUSE_CONTRACTS.get(type(family))
+
+
+def _prepared_field_modes(
+    plan: FamilyLikelihoodPlan, contract: _LikelihoodReuseContract
+) -> tuple[tuple[str, str], ...] | None:
+    """Refuse absent prepared arrays unless their exact derivation is declared."""
+    derived = {
+        name: (mode_field, identifier)
+        for name, mode_field, identifier in contract.derived_prepared_fields
+    }
+    modes = []
+    for name in contract.prepared_array_fields:
+        value = getattr(plan, name, None)
+        declaration = derived.get(name)
+        if declaration is not None:
+            mode_field, identifier = declaration
+            mode = getattr(plan, mode_field, None)
+            if type(mode) is not str:
+                return None
+            if value is None and mode == identifier:
+                modes.append((name, identifier))
+                continue
+            if mode != "stored":
+                return None
+        if type(value) is not np.ndarray:
+            return None
+        modes.append((name, "stored"))
+    return tuple(modes)
 
 
 @runtime_checkable
