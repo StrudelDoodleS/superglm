@@ -20,6 +20,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.features import Numeric
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _weights(values, semantics):
@@ -298,7 +299,7 @@ def test_a_public_fit_reaches_the_family_through_the_facade():
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 400)})
     scale = np.exp(0.2 + 0.5 * frame["x"].to_numpy())
     y = scale * np.expm1(-0.3 * np.log(rng.random(400))) / 0.3
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedParetoLSS(),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)
@@ -318,7 +319,7 @@ def test_artifact_round_trip_preserves_predictions_and_config():
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 500)})
     scale = np.exp(0.3 + 0.4 * frame["x"].to_numpy())
     y = scale * np.expm1(-0.35 * np.log(rng.random(500))) / 0.35
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedParetoLSS(shape_lower=0.0, shape_upper=1.0),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)
@@ -344,7 +345,7 @@ def test_narrow_walls_round_trip_and_a_tampered_config_is_refused():
     rng = np.random.default_rng(21)
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 300)})
     y = np.expm1(-0.2 * np.log(rng.random(300))) / 0.2
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.5),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)

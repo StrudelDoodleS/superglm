@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from superglm import Spline, SuperLSS
+from superglm import Spline
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.families.two_piece import TwoPieceLogNormalLSS, TwoPieceNormalLSS
@@ -21,6 +21,7 @@ from superglm.distributional.kernels import two_piece as tp
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric
 from tests._r_harness import ROOT, r_environment, require_r_harness
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _frequency_weights(n):
@@ -51,7 +52,7 @@ def _predictors(first="mean"):
 
 def test_mean_form_recovers_the_simulated_surfaces_under_reml():
     frame, y, log_mean, sigma = _simulate(4000, 20260902)
-    model = SuperLSS(family=TwoPieceLogNormalLSS(), predictors=_predictors()).fit_reml(
+    model = model_from_templates(family=TwoPieceLogNormalLSS(), predictors=_predictors()).fit_reml(
         frame, y, method="efs"
     )
     fitted = model.predict_parameters(frame)
@@ -66,7 +67,7 @@ def test_mean_form_recovers_the_simulated_surfaces_under_reml():
 
 def test_location_form_reaches_the_same_law_as_the_mean_form():
     frame, y, _, _ = _simulate(1500, 7)
-    mean_form = SuperLSS(
+    mean_form = model_from_templates(
         family=TwoPieceLogNormalLSS(),
         predictors=(
             Predictor("mean", {"x": Numeric()}),
@@ -74,7 +75,7 @@ def test_location_form_reaches_the_same_law_as_the_mean_form():
             Predictor("skew", {}),
         ),
     ).fit(frame, y)
-    location_form = SuperLSS(
+    location_form = model_from_templates(
         family=TwoPieceLogNormalLSS(parametrisation="location"),
         predictors=(
             Predictor("location", {"x": Numeric()}),
@@ -100,7 +101,7 @@ def test_the_real_line_family_recovers_a_skewed_location_scale_surface():
     skew = np.full(n, -0.5)
     y = tp.two_piece_quantile(rng.uniform(size=n), location, sigma, skew)
     frame = pd.DataFrame({"x": x})
-    model = SuperLSS(
+    model = model_from_templates(
         family=TwoPieceNormalLSS(),
         predictors=(
             Predictor("location", {"x": Numeric()}),
@@ -169,7 +170,7 @@ def test_two_piece_normal_at_zero_skew_is_the_gaussian_family():
 def test_the_hessian_kink_does_not_hide_behind_a_silent_nonconvergence():
     """An FD refusal at the kink must be a named reason, not a silent flag."""
     frame, y, _, _ = _simulate(1200, 5, eps=0.7)
-    model = SuperLSS(family=TwoPieceLogNormalLSS(), predictors=_predictors()).fit_reml(
+    model = model_from_templates(family=TwoPieceLogNormalLSS(), predictors=_predictors()).fit_reml(
         frame, y, method="efs"
     )
     assert model.smoothing_convergence_reason_ is not None
@@ -184,7 +185,7 @@ def test_the_hessian_kink_does_not_hide_behind_a_silent_nonconvergence():
 
 def test_fisher_curvature_request_is_honoured():
     frame, y, _, _ = _simulate(800, 3)
-    model = SuperLSS(
+    model = model_from_templates(
         family=TwoPieceLogNormalLSS(), predictors=_predictors(), coefficient_curvature="fisher"
     ).fit(frame, y, lambdas={"mean:x#wiggle": 1.0})
     assert model.coefficient_curvature == "fisher"
@@ -239,7 +240,7 @@ def test_real_line_family_matches_gamlss_sn2_at_a_parametric_specification():
         text=True,
     )
     reference = json.loads(completed.stdout)
-    model = SuperLSS(
+    model = model_from_templates(
         family=TwoPieceNormalLSS(),
         predictors=(
             Predictor("location", {"x": Numeric()}),

@@ -9,6 +9,7 @@ import json
 import math
 import operator
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -20,6 +21,11 @@ from numpy.typing import NDArray
 from superglm._blas_threads import solver_blas_threads
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.diagnostics.fit_report import FitDiagnosticReport
+from superglm.distributional.binding import (
+    BoundPredictor,
+    _bind_predictor_template,
+    resolve_predictors,
+)
 from superglm.distributional.checks.binned import (
     BinnedCheck,
     BinnedCheck2D,
@@ -491,9 +497,9 @@ class SuperLSS:
 
     def __init__(
         self,
-        *,
         family: DistributionalFamily,
-        predictors: Sequence[Predictor],
+        /,
+        *predictors: BoundPredictor,
         weight_semantics: Literal["prior", "frequency"] = "prior",
         discrete: bool = False,
         n_bins: int | Mapping[str, int] = 256,
@@ -503,9 +509,9 @@ class SuperLSS:
         if not isinstance(discrete, bool):
             raise TypeError("discrete must be bool")
         self._separation = validate_separation_policy(separation)
-        self._family = family
-        self._predictors = _owned_predictors(family, predictors)
-        self._coefficient_curvature = _coefficient_curvature(family, coefficient_curvature)
+        self._family, templates = resolve_predictors(family, predictors)
+        self._predictors = _owned_predictors(self._family, templates)
+        self._coefficient_curvature = _coefficient_curvature(self._family, coefficient_curvature)
         self._weight_contract = WeightContract(semantics=weight_semantics)
         self._discrete = discrete
         self._n_bins = _owned_n_bins(n_bins)
@@ -519,7 +525,7 @@ class SuperLSS:
 
     @property
     def family(self) -> DistributionalFamily:
-        return self._family
+        return deepcopy(self._family)
 
     @property
     def weight_semantics(self) -> str:
@@ -784,7 +790,7 @@ class SuperLSS:
 
     @property
     def family_(self) -> DistributionalFamily:
-        return self._require_fitted().family
+        return deepcopy(self._require_fitted().family)
 
     @property
     def predictors_(self) -> tuple[Predictor, ...]:
@@ -1003,8 +1009,11 @@ class SuperLSS:
                 "SuperLSS fitted chunk policy is incompatible with its public configuration"
             )
         model = cls(
-            family=fitted.family,
-            predictors=fitted.fit_state.predictor_templates,
+            fitted.family,
+            *(
+                _bind_predictor_template(fitted.family, template)
+                for template in fitted.fit_state.predictor_templates
+            ),
             weight_semantics=state.weight_contract.semantics,
             discrete=state.requested_discrete,
             n_bins=state_n_bins,

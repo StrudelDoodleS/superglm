@@ -21,7 +21,7 @@ import pytest
 from numpy.typing import NDArray
 from scipy import stats
 
-from superglm import Categorical, Spline, SuperLSS
+from superglm import Categorical, Spline
 from superglm._frame import as_eager_frame
 from superglm.distributional import Predictor
 from superglm.distributional.checks.binned import (
@@ -50,6 +50,7 @@ from superglm.distributional.model import (
 from superglm.distributional.residuals import ResidualSet, _sample_residuals, compute_residuals
 from superglm.distributional.result import DenseSolverConfig
 from superglm.distributional.weights import WeightContract
+from tests.bound_predictor_fixtures import model_from_templates
 
 # --------------------------------------------------------------------------- #
 # Simulated data and fits
@@ -119,7 +120,7 @@ def _burn_cost_sample(n: int = 1500, seed: int = 20260905) -> tuple[pd.DataFrame
 @pytest.fixture(scope="module")
 def gaussian_case() -> tuple[DenseDistributionalModel, pd.DataFrame, NDArray]:
     X, y = _gaussian_sample()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=8), "g": Categorical()}),
@@ -133,7 +134,7 @@ def gaussian_case() -> tuple[DenseDistributionalModel, pd.DataFrame, NDArray]:
 def missing_effect_case() -> tuple[DenseDistributionalModel, pd.DataFrame, NDArray]:
     """The same data with ``x`` left out of the location predictor."""
     X, y = _gaussian_sample()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"g": Categorical()}),
@@ -147,7 +148,7 @@ def missing_effect_case() -> tuple[DenseDistributionalModel, pd.DataFrame, NDArr
 def constant_scale_case() -> tuple[DenseDistributionalModel, pd.DataFrame, NDArray]:
     """The same data with a constant scale, so the second moment is wrong by region."""
     X, y = _gaussian_sample()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=8), "g": Categorical()}),
@@ -160,7 +161,7 @@ def constant_scale_case() -> tuple[DenseDistributionalModel, pd.DataFrame, NDArr
 @pytest.fixture(scope="module")
 def gamma_case() -> tuple[DenseDistributionalModel, pd.DataFrame, NDArray]:
     X, y = _gamma_sample()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=[
             Predictor("mean", {"x": Spline("cr", k=8)}),

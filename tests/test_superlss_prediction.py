@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS
 from superglm.distributional import GaussianLS, Predictor
 from superglm.features import Numeric
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 @pytest.mark.parametrize("shift", [-1000.0, 1000.0])
@@ -14,7 +14,7 @@ def test_review_prediction_refuses_excluded_scale_floor_and_overflow_without_war
     import warnings
 
     frame, response, _ = _fixture()
-    model = SuperLSS(family=GaussianLS(scale_floor=0.03), predictors=_predictors()).fit(
+    model = model_from_templates(family=GaussianLS(scale_floor=0.03), predictors=_predictors()).fit(
         frame, response
     )
     with warnings.catch_warnings():
@@ -31,7 +31,7 @@ def test_review_public_quantile_preserves_nonfinite_refusal(family_name):
     frame, response, _ = _fixture()
     response = response if family_name == "GaussianLS" else np.exp(response)
     predictors = (Predictor(family.parameters[0].name, {"x": Numeric()}), Predictor("scale", {}))
-    model = SuperLSS(family=family, predictors=predictors).fit(frame, response)
+    model = model_from_templates(family=family, predictors=predictors).fit(frame, response)
     with pytest.raises(ValueError):
         model.predict_quantile(frame, np.nan)
 
@@ -40,7 +40,7 @@ def test_review_plot_terms_resolve_across_selected_predictors():
     import matplotlib.pyplot as plt
 
     frame, response, _ = _fixture()
-    model = SuperLSS(family=GaussianLS(), predictors=_predictors()).fit(frame, response)
+    model = model_from_templates(family=GaussianLS(), predictors=_predictors()).fit(frame, response)
     figures = model.plot(terms=["x", "z"], n_sim=32)
     assert set(figures) == {"location", "scale"}
     for figure in figures.values():
@@ -58,7 +58,7 @@ def test_review_explicit_plot_interaction_still_refuses():
     from superglm import NumericInteraction
 
     frame, response, _ = _fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(
             Predictor(
@@ -99,7 +99,7 @@ def _predictors() -> tuple[Predictor, Predictor]:
 
 def test_prediction_exposes_both_parameter_and_link_columns_with_input_index() -> None:
     frame, response, offsets = _fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=0.03),
         predictors=_predictors(),
     ).fit(frame, response, offsets=offsets)
@@ -125,7 +125,7 @@ def test_prediction_exposes_both_parameter_and_link_columns_with_input_index() -
 
 def test_prediction_offsets_are_predictor_keyed_and_apply_on_link_scale() -> None:
     frame, response, _ = _fixture()
-    model = SuperLSS(family=GaussianLS(), predictors=_predictors()).fit(frame, response)
+    model = model_from_templates(family=GaussianLS(), predictors=_predictors()).fit(frame, response)
     base = model.predict_link(frame)
     shifts = {
         "location": np.full(len(frame), 0.2),
@@ -146,7 +146,7 @@ def test_prediction_offsets_are_predictor_keyed_and_apply_on_link_scale() -> Non
 
 def test_prediction_and_fitted_views_require_a_successful_fit() -> None:
     frame, _, _ = _fixture()
-    model = SuperLSS(family=GaussianLS(), predictors=_predictors())
+    model = model_from_templates(family=GaussianLS(), predictors=_predictors())
 
     for operation in (
         lambda: model.predict_link(frame),

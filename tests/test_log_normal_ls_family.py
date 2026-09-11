@@ -20,6 +20,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.features import Numeric
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _weights(values, semantics):
@@ -209,7 +210,7 @@ def test_artifact_round_trip_preserves_predictions_and_config():
     rng = np.random.default_rng(9)
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 150)})
     y = np.exp(0.3 + 0.4 * frame["x"].to_numpy() + 0.7 * rng.standard_normal(150))
-    model = SuperLSS(
+    model = model_from_templates(
         family=LogNormalLS(),
         predictors=(Predictor("mean", {"x": Numeric()}), Predictor("scale", {})),
     ).fit(frame, y)

@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 from scipy import special, stats
 
-from superglm import Spline, SuperLSS
+from superglm import Spline
 from superglm.distributional import Predictor
 from superglm.distributional.checks import qq as qq_module
 from superglm.distributional.checks.pit import PITPayload, pit_payload
@@ -29,6 +29,7 @@ from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.residuals import ResidualSet, _sample_residuals, compute_residuals
 from superglm.distributional.result import DenseSolverConfig
 from superglm.distributional.weights import WeightContract
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _order_statistic_grid(n: int) -> np.ndarray:
@@ -44,7 +45,7 @@ def gaussian_case():
     scale = np.exp(-1.0 + 0.5 * np.cos(1.8 * x))
     X = pd.DataFrame({"x": x})
     y = 0.6 * np.sin(2.4 * x) + scale * rng.standard_normal(n)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=8)}),
@@ -65,7 +66,7 @@ def gamma_case():
     cv2 = 0.36
     X = pd.DataFrame({"x": x})
     y = rng.gamma(1.0 / cv2, mean * cv2)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=[
             Predictor("mean", {"x": Spline("cr", k=8)}),
@@ -84,7 +85,7 @@ def misspecified_case():
     x = rng.uniform(-1.0, 1.0, n)
     X = pd.DataFrame({"x": x})
     y = np.exp(0.5 * x + 0.8 * rng.standard_normal(n))
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=8)}),
@@ -104,7 +105,7 @@ def frequency_case():
     X = pd.DataFrame({"x": x})
     y = 0.4 * x + 0.5 * rng.standard_normal(n)
     counts = rng.integers(1, 4, n).astype(np.float64)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         weight_semantics="frequency",
         predictors=[Predictor("location", {"x": Spline("cr", k=4)}), Predictor("scale", {})],

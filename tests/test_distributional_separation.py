@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.distributional import GammaLS, GaussianLS, NegativeBinomialLS, Predictor, TweedieLSS
 from superglm.distributional.curvature import RepeatedCurvatureIndefinitenessError
@@ -16,6 +15,7 @@ from superglm.distributional.family import ResponseBoundaryFamily
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
 from superglm.features import Categorical, Spline
 from superglm.links import IdentityLink, LogLink
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def test_tweedie_and_nb2_declare_their_zero_boundary() -> None:
@@ -54,7 +54,7 @@ def _separated_tweedie_fixture(n: int = 600, seed: int = 5):
 
 
 def _tweedie_model(**kwargs):
-    return SuperLSS(
+    return model_from_templates(
         family=TweedieLSS(),
         predictors=(
             Predictor("mean", {"x": Spline(kind="cr", k=6), "region": Categorical()}),
@@ -112,7 +112,7 @@ def test_a_level_with_a_claim_does_not_warn() -> None:
 def test_families_without_a_boundary_are_never_scanned() -> None:
     frame, y, exposure = _separated_tweedie_fixture()
     y = np.abs(y) + 0.1
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=(
             Predictor("mean", {"x": Spline(kind="cr", k=6), "region": Categorical()}),

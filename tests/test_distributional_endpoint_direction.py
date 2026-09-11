@@ -22,6 +22,7 @@ from superglm.distributional.result import (
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Spline
 from superglm.links import LogLink
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _gamma_rows(n: int = 810, seed: int = 5):
@@ -244,13 +245,14 @@ def _cap_start():
 
 
 def test_gamma_decisions_agree_between_analytic_and_finite_difference() -> None:
-    from superglm import SuperLSS
 
     frame, mean = _linear_x_fixture()
     y = _gamma_response(mean)
     outcomes = {}
     for label, family in (("analytic", GammaLS()), ("fd", _GammaWithoutDirection())):
-        model = SuperLSS(family=family, predictors=(_mean_predictor(), Predictor("scale", {})))
+        model = model_from_templates(
+            family=family, predictors=(_mean_predictor(), Predictor("scale", {}))
+        )
         model.fit_reml(frame, y, lambdas=_cap_start(), practical_reml=False)
         smoothing = model._require_fitted().smoothing
         outcomes[label] = (
@@ -268,12 +270,11 @@ def test_tweedie_certifies_a_genuine_infinity_through_finite_differences() -> No
     Either strict stopping label is valid; the endpoint evidence and
     terminal smoothing residual determine correctness.
     """
-    from superglm import SuperLSS
 
     frame, mu = _linear_x_fixture(seed=6)
     y = _tweedie_response(mu, seed=6)
     for practical in (False, True):
-        model = SuperLSS(
+        model = model_from_templates(
             family=TweedieLSS(),
             predictors=(_mean_predictor(), Predictor("dispersion", {}), Predictor("power", {})),
         )
@@ -306,7 +307,6 @@ def test_a_finite_optimum_is_not_certified() -> None:
     optimum. A smaller amplitude on this seeded sample can legitimately place
     the optimum at infinity and therefore cannot test this refusal.
     """
-    from superglm import SuperLSS
 
     rng = np.random.default_rng(21)
     n = 1000
@@ -315,7 +315,7 @@ def test_a_finite_optimum_is_not_certified() -> None:
     eta = 0.4 + 0.2 * np.sin(np.pi * x) + 0.55 * np.sin(np.pi * w) + 0.15 * w
     y = _gamma_response(np.exp(eta), seed=21)
     frame = pd.DataFrame({"x": x, "w": w})
-    model = SuperLSS(
+    model = model_from_templates(
         family=_GammaWithoutDirection(),
         predictors=(_mean_predictor(), Predictor("scale", {})),
     )

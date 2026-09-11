@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from scipy import special, stats
 
-from superglm import Categorical, Spline, SuperLSS
+from superglm import Categorical, Spline
 from superglm._frame import as_eager_frame
 from superglm.distributional import Predictor
 from superglm.distributional.families.gamma import GammaLS
@@ -27,6 +27,7 @@ from superglm.distributional.posterior import (
     simultaneous_critical_value,
 )
 from superglm.distributional.prediction_design import build_joint_prediction_design
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _simulated(n: int = 1500, seed: int = 20260903) -> tuple[pd.DataFrame, np.ndarray]:
@@ -145,7 +146,7 @@ def test_task10_simultaneous_zero_and_positive_errors_preserve_normal_floor(erro
 @pytest.fixture(scope="module")
 def fit_case() -> tuple[DenseDistributionalModel, pd.DataFrame, np.ndarray]:
     X, y = _simulated()
-    model = SuperLSS(family=GaussianLS(), predictors=_predictors()).fit_reml(
+    model = model_from_templates(family=GaussianLS(), predictors=_predictors()).fit_reml(
         X, y, outer="efs+newton"
     )
     return model._require_fitted(), X, y
@@ -167,7 +168,7 @@ def weighted_gamma_case() -> tuple[DenseDistributionalModel, pd.DataFrame, np.nd
     cv2 = 0.36
     X = pd.DataFrame({"x": x})
     y = rng.gamma(weights / cv2, mean * cv2 / weights)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=[Predictor("mean", {"x": Spline("cr", k=6)}), Predictor("scale", {})],
     ).fit_reml(X, y, sample_weight=weights)
@@ -288,7 +289,9 @@ def test_corrected_covariance_adds_the_smoothing_parameter_term(fit_case) -> Non
         for step in (delta, -delta):
             trial = dict(lambdas)
             trial[name] = lambdas[name] * float(np.exp(step))
-            refit = SuperLSS(family=GaussianLS(), predictors=_predictors()).fit(X, y, lambdas=trial)
+            refit = model_from_templates(family=GaussianLS(), predictors=_predictors()).fit(
+                X, y, lambdas=trial
+            )
             moved.append(np.asarray(refit._require_fitted().coefficients))
         columns.append((moved[0] - moved[1]) / (2.0 * delta))
     jacobian = np.column_stack(columns)
@@ -691,7 +694,7 @@ def test_generated_draws_reject_other_basis_and_successful_refit() -> None:
     X, y = _simulated(n=120)
 
     def fit(frame):
-        return SuperLSS(
+        return model_from_templates(
             family=GaussianLS(),
             predictors=[Predictor("location", {"x": Spline("cr", k=5)}), Predictor("scale", {})],
         ).fit(frame, y, lambdas={"location:x#wiggle": 1.0})
@@ -737,7 +740,7 @@ def test_predictive_refuses_real_lognormal_overflow_before_reduction(reduce) -> 
     X = pd.DataFrame({"x": np.linspace(-1, 1, 60)})
     y = np.exp(np.random.default_rng(71).normal(size=len(X)))
     fitted = (
-        SuperLSS(
+        model_from_templates(
             family=LogNormalLS(parametrisation="location"),
             predictors=[Predictor("location", {}), Predictor("scale", {})],
         )

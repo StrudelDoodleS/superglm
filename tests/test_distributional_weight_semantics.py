@@ -24,6 +24,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.features import Categorical, Numeric
+from tests.bound_predictor_fixtures import model_from_templates
 
 from . import _gaussian_lss_oracles as gaussian_oracles
 from ._gaussian_lss_oracles import (
@@ -40,7 +41,7 @@ _SOLVER_TOLERANCE = float(np.sqrt(np.finfo(np.float64).eps))
 
 def test_negative_binomial_lss_keeps_the_public_prior_weight_default() -> None:
     """Kills changing the SuperLSS default to frequency for the NB2 family."""
-    model = SuperLSS(
+    model = model_from_templates(
         family=NegativeBinomialLS(),
         predictors=(Predictor("mean", {}), Predictor("theta", {})),
     )
@@ -49,7 +50,7 @@ def test_negative_binomial_lss_keeps_the_public_prior_weight_default() -> None:
 
 
 def _boundary_model(*, weight_semantics: str = "prior") -> SuperLSS:
-    return SuperLSS(
+    return model_from_templates(
         family=GaussianLS(scale_floor=0.01),
         predictors=(
             Predictor("location", {"x": Numeric(), "g": Categorical()}),
@@ -303,7 +304,7 @@ def test_common_scale_continuous_multiplier_identity_is_algebra_only() -> None:
     )
 
     frame = pd.DataFrame({"row": np.arange(len(response), dtype=np.float64)})
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=0.0),
         predictors=(Predictor("location", {}), Predictor("scale", {})),
         weight_semantics="frequency",
@@ -797,7 +798,7 @@ def test_gamma_refit_rebinds_response_and_rebuilds_omitted_weight_root(
     response = rng.gamma(shape=1.0 / scale**2, scale=mean * scale**2)
     weights = 0.5 + np.arange(len(x)) % 5 / 2.0
     model = (
-        SuperLSS(
+        model_from_templates(
             family=GammaLS(),
             predictors=(Predictor("mean", {"x": Numeric()}), Predictor("scale", {"z": Numeric()})),
         )

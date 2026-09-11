@@ -11,7 +11,6 @@ import pytest
 from scipy import special
 
 import superglm.distributional.families.negative_binomial as nb_module
-from superglm import SuperLSS
 from superglm.distributional import Predictor
 from superglm.distributional.families.negative_binomial import (
     NegativeBinomialInitializationError,
@@ -32,6 +31,7 @@ from superglm.distributional.weights import (
 from superglm.features import Categorical
 from superglm.links import LogLink
 from tests._negative_binomial_lss_oracles import NEGATIVE_BINOMIAL_LSS_CASES
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _plan(
@@ -494,7 +494,7 @@ def test_book_shaped_nb2_fit_is_accepted_and_matches_the_aggregated_fit() -> Non
             Predictor("theta", {"cell": Categorical()}),
         )
 
-    per_row = SuperLSS(family=NegativeBinomialLS(), predictors=predictors()).fit(
+    per_row = model_from_templates(family=NegativeBinomialLS(), predictors=predictors()).fit(
         frame, counts, lambdas={}, inner_tol=1.0e-9
     )
     aggregated = (
@@ -503,7 +503,7 @@ def test_book_shaped_nb2_fit_is_accepted_and_matches_the_aggregated_fit() -> Non
         .size()
     )
     assert len(aggregated) < 100
-    compact = SuperLSS(
+    compact = model_from_templates(
         family=NegativeBinomialLS(),
         predictors=predictors(),
         weight_semantics="frequency",

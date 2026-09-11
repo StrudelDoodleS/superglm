@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from superglm import Categorical, Numeric, Spline, SuperLSS
+from superglm import Categorical, Numeric, Spline
 from superglm.distributional import Predictor
 from superglm.distributional import terms as terms_module
 from superglm.distributional.families.gaussian import GaussianLS
@@ -26,6 +26,7 @@ from superglm.distributional.terms import (
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.interaction import TensorInteraction
 from superglm.features.ordered_categorical import OrderedCategorical
+from tests.bound_predictor_fixtures import model_from_templates
 
 SUMMARY_COLUMNS = (
     "parameter",
@@ -80,7 +81,7 @@ def _simulated(n: int = 1200, seed: int = 20260903) -> tuple[pd.DataFrame, np.nd
 
 
 def _fit(frame: pd.DataFrame, y: np.ndarray) -> DenseDistributionalModel:
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor(
@@ -107,7 +108,7 @@ def interaction_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     x2 = rng.uniform(-1.0, 1.0, n)
     frame = pd.DataFrame({"x1": x1, "x2": x2})
     y = 0.8 * x1 * x2 + 0.4 * rng.standard_normal(n)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor(
@@ -139,7 +140,7 @@ def specials_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     frame = pd.DataFrame({"band": band, "x": x})
     effect = np.where(band == "MISSING", 1.4, 0.35 * position)
     y = effect + 0.5 * x + 0.3 * rng.standard_normal(n)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor(
@@ -175,7 +176,7 @@ def absorbed_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     level = pd.Series(g).map({"a": 0.4, "b": -0.3, "c": 0.0}).to_numpy()
     frame = pd.DataFrame({"x": x, "g": g})
     y = 0.7 * np.sin(2.2 * x) + level + level * x + 0.3 * rng.standard_normal(n)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor(
@@ -368,7 +369,7 @@ def test_wood_test_keeps_null_p_values_calibrated() -> None:
         frame = pd.DataFrame({"x": x, "z": z})
         scale = np.exp(-1.0 + 0.5 * np.cos(1.8 * x))
         y = 0.9 * np.sin(2.4 * x) + scale * rng.standard_normal(n)
-        model = SuperLSS(
+        model = model_from_templates(
             family=GaussianLS(),
             predictors=[
                 Predictor("location", {"x": Spline("cr", k=8), "z": Spline("cr", k=6)}),

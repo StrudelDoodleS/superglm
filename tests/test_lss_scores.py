@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 from scipy import integrate, special, stats
 
-from superglm import Categorical, Spline, SuperLSS
+from superglm import Categorical, Spline
 from superglm.distributional import Predictor
 from superglm.distributional.checks.compare import (
     Comparison,
@@ -47,6 +47,7 @@ from superglm.distributional.weights import (
     UnsupportedLikelihoodContractError,
     resolve_likelihood_weights,
 )
+from tests.bound_predictor_fixtures import model_from_templates
 
 _GRID = 96
 
@@ -585,7 +586,7 @@ def _simulated(n: int = 1200, seed: int = 20260903) -> tuple[pd.DataFrame, np.nd
 
 def _fit(scale_features: dict, *, weight_semantics: str = "prior", sample_weight=None):
     X, y = _simulated()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         weight_semantics=weight_semantics,
         predictors=[

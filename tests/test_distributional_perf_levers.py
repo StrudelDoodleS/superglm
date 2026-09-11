@@ -7,11 +7,11 @@ from threadpoolctl import ThreadpoolController
 
 import superglm.distributional.solver.assembly as assembly_module
 import superglm.distributional.solver.solver as solver_module
-from superglm import SuperLSS
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional.families.gaussian import GaussianLS as _GaussianLS
 from superglm.distributional.timing import PHASE_NAMES, FitPhaseRecorder
 from superglm.features import Spline
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _blas_threads() -> list[int]:
@@ -59,7 +59,7 @@ def test_narrow_fit_keeps_blas_capped_regardless_of_row_count(monkeypatch, n: in
         pytest.skip("BLAS pool has a single thread; a release is unobservable")
     _ProbeGaussian.observed = []
     frame, y = _fixture(n)
-    SuperLSS(
+    model_from_templates(
         family=_ProbeGaussian(),
         predictors=_predictors(location_k=60, scale_k=30),
     ).fit(
@@ -82,7 +82,7 @@ def test_dense_matrices_are_built_once_per_layout(monkeypatch):
 
     monkeypatch.setattr(solver_module, "dense_predictor_matrices", counting)
     frame, y = _fixture(3_000)
-    model = SuperLSS(family=GaussianLS(), predictors=_predictors())
+    model = model_from_templates(family=GaussianLS(), predictors=_predictors())
     recorder = FitPhaseRecorder()
     model.fit_reml(frame, y, practical_reml=False, phase_recorder=recorder)
     fitted = model._require_fitted()
@@ -103,7 +103,7 @@ def test_memoised_matrices_do_not_change_the_fit(monkeypatch):
     frame, y = _fixture(3_000, seed=8)
 
     def run() -> tuple[np.ndarray, float]:
-        model = SuperLSS(family=GaussianLS(), predictors=_predictors())
+        model = model_from_templates(family=GaussianLS(), predictors=_predictors())
         model.fit_reml(frame, y, practical_reml=False)
         smoothing = model._require_fitted().smoothing
         return np.array(list(model.coef_.values())), float(smoothing.objective)

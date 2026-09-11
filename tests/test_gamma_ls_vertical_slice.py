@@ -38,6 +38,7 @@ from superglm.features import Numeric
 from superglm.group_matrix import DiscretizedSSPGroupMatrix
 from superglm.types import LambdaPolicy
 from tests._gamma_lss_oracles import gamma_row_reference
+from tests.bound_predictor_fixtures import model_from_templates
 from tests.test_distributional_efs import _spectral_logdet
 
 
@@ -180,7 +181,7 @@ def test_public_gamma_fixed_fit_recovers_the_independent_intercept_mle(
         initial_diagnostics,
         inner_tolerance,
     )
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=(Predictor("mean", {}), Predictor("scale", {})),
     ).fit(frame, response, inner_tol=inner_tolerance)
@@ -949,7 +950,7 @@ def test_gamma_two_surface_smoothing_is_start_stable_and_algorithm_matched(
     displaced_initial_eta[:, 1] -= 0.5 * math.log(2.0)
 
     def fit_model() -> SuperLSS:
-        return SuperLSS(
+        return model_from_templates(
             family=GammaLS(),
             predictors=_gamma_predictors(),
         ).fit_reml(
@@ -1291,7 +1292,7 @@ def test_gamma_fixed_fit_matches_dense_on_generic_compact_routes(
 
 
 def _support_model() -> SuperLSS:
-    return SuperLSS(
+    return model_from_templates(
         family=GammaLS(),
         predictors=(
             Predictor("mean", {"x": _RejectMarkerNumeric()}),
@@ -1357,7 +1358,7 @@ def test_public_gamma_artifact_restore_and_refit_preserve_weight_semantics(
         else np.tile(np.array([1.0, 3.0, 2.0, 4.0]), 4)
     )
     predictors = (Predictor("mean", {"x": Numeric()}), Predictor("scale", {}))
-    fitted = SuperLSS(
+    fitted = model_from_templates(
         family=GammaLS(),
         predictors=predictors,
         weight_semantics=semantics,

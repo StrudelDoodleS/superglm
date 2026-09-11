@@ -22,6 +22,7 @@ from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.smoothing.derivatives import laml_derivatives
 from superglm.distributional.smoothing.objective import joint_laplace_objective
 from superglm.distributional.solver.solver import fit_dense_fixed_lambda
+from tests.bound_predictor_fixtures import model_from_templates
 
 _N = 480
 _EPS = np.finfo(float).eps
@@ -76,7 +77,7 @@ def _fit(kind, smoothing=False, discrete=False, transform="original", shared=Fal
         order = np.random.default_rng(71023).permutation(_N)
         frame, y, weights = frame.iloc[order].reset_index(drop=True), y[order], weights[order]
     family = GaussianLS(scale_floor=0.0) if kind == "gaussian" else GammaLS()
-    model = SuperLSS(
+    model = model_from_templates(
         family=family,
         predictors=_predictors(kind, shared=shared),
         discrete=discrete,

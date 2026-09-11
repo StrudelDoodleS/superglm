@@ -214,9 +214,12 @@ def _fixture(case: str, discrete: bool, *, tensor_rows: int = 2000):
             "scale:x#d1": 1.0,
             "scale:x#d2": 2.0,
         }
+    from superglm.distributional.binding import _bind_predictor_template
+
+    bound_family = GammaLS() if gamma else GaussianLS(scale_floor=0.0)
     model = SuperLSS(
-        family=GammaLS() if gamma else GaussianLS(scale_floor=0.0),
-        predictors=predictors,
+        bound_family,
+        *(_bind_predictor_template(bound_family, predictor) for predictor in predictors),
         discrete=discrete,
         n_bins=512,
     )

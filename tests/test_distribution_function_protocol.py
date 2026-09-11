@@ -8,7 +8,6 @@ import pytest
 from scipy import stats
 
 import superglm.distributional as distributional
-from superglm import SuperLSS
 from superglm.distributional import DistributionFunctionFamily, GammaLS, GaussianLS, Predictor
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
@@ -17,6 +16,7 @@ from superglm.distributional.families.negative_binomial import NegativeBinomialL
 from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.families.two_piece import TwoPieceLogNormalLSS, TwoPieceNormalLSS
 from superglm.features import Numeric
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _frame(n=120, seed=5):
@@ -123,7 +123,7 @@ def test_gaussian_and_gamma_functionals_match_scipy():
 def test_facade_round_trips_quantile_and_cdf_and_refuses_without_the_protocol():
     frame, rng = _frame()
     y = rng.gamma(4.0, np.exp(0.4 * frame["x"].to_numpy()) / 4.0)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=(Predictor("mean", {"x": Numeric()}), Predictor("scale", {})),
     ).fit(frame, y)
@@ -133,7 +133,7 @@ def test_facade_round_trips_quantile_and_cdf_and_refuses_without_the_protocol():
     per_row = model.predict_quantile(frame, np.linspace(0.05, 0.95, len(frame)))
     assert per_row.shape == (len(frame),)
     counts = rng.poisson(2.0, len(frame)).astype(float)
-    nb = SuperLSS(
+    nb = model_from_templates(
         family=NegativeBinomialLS(),
         predictors=(Predictor("mean", {"x": Numeric()}), Predictor("theta", {})),
     ).fit(frame, counts)
