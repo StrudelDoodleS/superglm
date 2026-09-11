@@ -62,10 +62,15 @@ def test_contexts_share_preparation_only_within_their_fit_session():
 
 
 @pytest.mark.parametrize("global_geometry", [False, True])
+@pytest.mark.parametrize("derived_root", [False, True])
 def test_value_and_geometry_passes_reuse_children_with_identical_outputs(
-    monkeypatch, global_geometry
+    monkeypatch, global_geometry, derived_root
 ):
     problem = _support_problem(False)
+    if derived_root:
+        family, layout, response, plan, coefficients = problem
+        plan = family.bind_chunked_likelihood(response, plan.weights, plan.observation)
+        problem = (family, layout, response, plan, coefficients)
     context = _context(problem)
     if global_geometry:
         monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)

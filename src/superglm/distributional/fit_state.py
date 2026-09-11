@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from superglm.distributional.families.gaussian import GaussianLikelihoodPlan, GaussianLS
 from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
 from superglm.distributional.inference import JointInference, compute_joint_inference
 from superglm.distributional.layout import StackedLayout
@@ -477,14 +478,28 @@ def prepare_distributional_fit_state(
     requested_solver_config = (
         solver_result.config if smoothing is None else smoothing.coefficient_fits[0].config
     )
+    # Null fitting still evaluates eager rows. Prepare its carrier once at
+    # this compatibility boundary, rather than on each likelihood evaluation.
+    null_plan = likelihood_plan
+    if (
+        type(family) is GaussianLS
+        and type(likelihood_plan) is GaussianLikelihoodPlan
+        and likelihood_plan.parameter_independent_carrier is None
+    ):
+        null_plan = family.bind_likelihood(
+            response, likelihood_plan.weights, likelihood_plan.observation
+        )
+        if null_plan.plan_identifier != likelihood_plan.plan_identifier:
+            raise ValueError("null likelihood preparation changed the logical Gaussian plan")
     null = fit_joint_null_model(
         family,
         layout,
         response,
-        likelihood_plan=likelihood_plan,
+        likelihood_plan=null_plan,
         config=requested_solver_config,
     )
     compact_null = _compact_null(null)
+    del null_plan
     parameter_names = tuple(state.name for state in layout.predictors)
     predictor_coefficients = {
         state.name: solver_result.coefficients[state.coefficient_slice]

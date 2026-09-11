@@ -62,6 +62,35 @@ def _carrier_digest(values: NDArray[np.float64]) -> str:
     return array_digest(b"GaussianLS/carrier/v1\0", values)
 
 
+_DERIVED_CARRIER = "gaussian-carrier-from-weights/v1"
+_CARRIER_BLOCK_ROWS = 8192
+
+
+def _carrier_block(values: NDArray, semantics: str) -> NDArray[np.float64]:
+    if semantics == "prior":
+        carrier = np.log(values)
+        carrier *= 0.5
+        return np.asarray(carrier, dtype=np.float64)
+    return np.zeros(len(values), dtype=np.float64)
+
+
+def _derived_carrier_digest(weights: ResolvedLikelihoodWeights) -> str:
+    """Hash the logical eager float64 array without constructing its root."""
+    digest = hashlib.sha256(b"GaussianLS/carrier/v1\0")
+    digest.update(np.dtype(np.float64).str.encode("ascii"))
+    digest.update(repr(weights.values.shape).encode("ascii"))
+    for start in range(0, len(weights.values), _CARRIER_BLOCK_ROWS):
+        carrier = _carrier_block(
+            weights.values[start : start + _CARRIER_BLOCK_ROWS],
+            weights.provenance.contract.semantics,
+        )
+        if not np.all(np.isfinite(carrier)):
+            raise UnsupportedLikelihoodContractError("Gaussian likelihood carrier must be finite")
+        digest.update(memoryview(carrier).cast("B"))
+        del carrier
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class LowerBoundedLogLink:
     """Shifted log link: ``eta = log(value - floor)``."""
@@ -153,8 +182,9 @@ class GaussianLikelihoodPlan:
     invariant: GaussianInvariant
     family_config: tuple[str, float]
     observation: ObservationContract
-    parameter_independent_carrier: NDArray[np.float64] = field(init=False, repr=False)
+    parameter_independent_carrier: NDArray[np.float64] | None = field(init=False, repr=False)
     carrier_digest: str = field(init=False, repr=False)
+    carrier_preparation: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._validate_static_contract()
@@ -164,6 +194,32 @@ class GaussianLikelihoodPlan:
             else np.zeros(len(self.weights.values), dtype=np.float64)
         )
         self._set_prepared_carrier(carrier)
+
+    @classmethod
+    def _chunked(
+        cls,
+        *,
+        weights: ResolvedLikelihoodWeights,
+        row_law: GaussianRowLaw,
+        invariant: GaussianInvariant,
+        family_config: tuple[str, float],
+        observation: ObservationContract,
+    ) -> GaussianLikelihoodPlan:
+        # Do not call the eager constructor and discard an N-row allocation.
+        plan = object.__new__(cls)
+        for name, value in (
+            ("weights", weights),
+            ("row_law", row_law),
+            ("invariant", invariant),
+            ("family_config", family_config),
+            ("observation", observation),
+        ):
+            object.__setattr__(plan, name, value)
+        plan._validate_static_contract()
+        object.__setattr__(plan, "parameter_independent_carrier", None)
+        object.__setattr__(plan, "carrier_preparation", _DERIVED_CARRIER)
+        object.__setattr__(plan, "carrier_digest", _derived_carrier_digest(weights))
+        return plan
 
     def _validate_static_contract(self) -> None:
         if not isinstance(self.weights, ResolvedLikelihoodWeights):
@@ -210,6 +266,7 @@ class GaussianLikelihoodPlan:
             )
         object.__setattr__(self, "parameter_independent_carrier", carrier)
         object.__setattr__(self, "carrier_digest", _carrier_digest(carrier))
+        object.__setattr__(self, "carrier_preparation", "stored")
 
     @property
     def plan_identifier(self) -> str:
@@ -299,6 +356,26 @@ class GaussianLS:
         weights: ResolvedLikelihoodWeights,
         observation: ObservationContract,
     ) -> GaussianLikelihoodPlan:
+        return self._bind_likelihood(y, weights, observation, chunked=False)
+
+    def bind_chunked_likelihood(
+        self,
+        y: NDArray,
+        weights: ResolvedLikelihoodWeights,
+        observation: ObservationContract,
+    ) -> GaussianLikelihoodPlan:
+        if type(self) is not GaussianLS:
+            return self.bind_likelihood(y, weights, observation)
+        return self._bind_likelihood(y, weights, observation, chunked=True)
+
+    def _bind_likelihood(
+        self,
+        y: NDArray,
+        weights: ResolvedLikelihoodWeights,
+        observation: ObservationContract,
+        *,
+        chunked: bool,
+    ) -> GaussianLikelihoodPlan:
         response = _validated_response(y)
         if observation != COMPLETE_OBSERVATION:
             raise UnsupportedLikelihoodContractError(
@@ -312,8 +389,9 @@ class GaussianLS:
             raise UnsupportedLikelihoodContractError(
                 "Gaussian response rows do not match resolved likelihood-weight rows"
             )
+        factory = GaussianLikelihoodPlan._chunked if chunked else GaussianLikelihoodPlan
         if weights.provenance.contract.semantics == "prior":
-            return GaussianLikelihoodPlan(
+            return factory(
                 weights=weights,
                 row_law="normal-variance-sigma2-over-w/v1",
                 invariant="conditional-location",
@@ -321,7 +399,7 @@ class GaussianLS:
                 observation=observation,
             )
         if weights.provenance.contract.semantics == "frequency":
-            return GaussianLikelihoodPlan(
+            return factory(
                 weights=weights,
                 row_law="normal-literal-replication/v1",
                 invariant="literal-row-replication",
@@ -360,6 +438,10 @@ class GaussianLS:
             family_name="GaussianLS",
         )
         gaussian_plan = _validated_plan(plan, len(response), self.scale_floor)
+        if gaussian_plan.parameter_independent_carrier is None:
+            raise UnsupportedLikelihoodContractError(
+                "chunk-prepared Gaussian roots must be evaluated through owned row children"
+            )
         evaluated = evaluate_gaussian_rows(
             response,
             parameters[:, 0],
@@ -533,4 +615,7 @@ _register_likelihood_reuse_contract(
     prepared_array_fields=("parameter_independent_carrier",),
     link_types=(LowerBoundedLogLink,),
     deterministic_chunk_replay=True,
+    derived_prepared_fields=(
+        ("parameter_independent_carrier", "carrier_preparation", _DERIVED_CARRIER),
+    ),
 )
