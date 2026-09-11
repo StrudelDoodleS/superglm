@@ -1,0 +1,199 @@
+{
+  "source_sha256": "b8b5689f4d2afb370696f1af45762b8b01ed542eb4bd52baccf874dcb2ec0393",
+  "source_stable": true,
+  "harness_sha256": "72f015ab22b9d036497902f04b4f8b5b32b660dd6d3d2614ccf076dc0387115b",
+  "fixture_generator_sha256": "1b32f03d1bf7cdec59f501b6f0306924757184181e9ae5c48aced63d65073547",
+  "fixture": {
+    "provenance": {
+      "seed": 28109,
+      "holdout_seed": 28110,
+      "construction": "Independent synthetic Gaussian location-scale with small feature groups",
+      "numeric_terms": 6,
+      "categorical_levels": [
+        3,
+        3,
+        4
+      ],
+      "spline_terms": 2,
+      "grouped_curve": {
+        "basis": "spline-by-categorical",
+        "levels": 3
+      }
+    },
+    "rows": 10000000,
+    "inputs": {
+      "frame": "de47915955387d65258fd11add6374d81507aa4553f9f29a09c2f386f90df612",
+      "response": "38a42a8fe5480d6585a881fc076ca4bf34838a0f088214ca79fa27f986f9bc9f",
+      "holdout": "ca15892cc4f2e6512329be33f76137ab087a5c18bee1b2c726ba5b1423ca7338"
+    }
+  },
+  "config": {
+    "source": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.superpowers/sdd/2026-09-11-c1-closeout/packet1-candidate",
+    "out": ".superpowers/sdd/2026-09-11-c1-closeout/current-10m-model-baseline.json",
+    "n": 10000000,
+    "retain_rows": 1,
+    "discrete": true,
+    "history": "default",
+    "profile": false
+  },
+  "environment": {
+    "python": "3.13.14 (main, Jul 23 2026, 14:44:45) [Clang 22.1.3 ]",
+    "packages": {
+      "superglm": "0.31.0",
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "pandas": "3.0.5",
+      "numba": "0.67.0"
+    },
+    "numba_workers": 16
+  },
+  "native_pools": [
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+      "version": "0.3.34.0.0",
+      "threading_layer": "pthreads",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+      "version": "0.3.31.dev",
+      "threading_layer": "pthreads",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "openmp",
+      "internal_api": "openmp",
+      "num_threads": 1,
+      "prefix": "libgomp",
+      "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+      "version": null
+    },
+    {
+      "user_api": "openmp",
+      "internal_api": "openmp",
+      "num_threads": 16,
+      "prefix": "libgomp",
+      "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+      "version": null
+    }
+  ],
+  "fit_seconds": 152.4980603820295,
+  "fit_cpu_seconds": 637.694853215,
+  "fit_peak_process_rss_bytes": 11055116288,
+  "resident_before_fit_bytes": 1960460288,
+  "resident_after_fit_bytes": 6172098560,
+  "warmup_seconds": 1.364849478006363,
+  "background_activity": {
+    "external_cpu_cores_lower_bound": 0.1797295849510602,
+    "passes_activity_screen": true,
+    "caveat": "Endpoint accounting is a lower bound: CPU used after a process's last observation before exit, and by processes born and exited between snapshots, is unavailable. Newly observed processes contribute all observed lifetime ticks; PID reuse is distinguished by start ticks. Descendants that reparent between snapshots may not be identifiable. This is a screening check, not proof that the machine stayed quiet throughout a fit."
+  },
+  "history_census": {
+    "history_fits": 6,
+    "history_fits_with_rows": 4,
+    "reachable_solver_results": 6,
+    "reachable_solver_results_with_rows": 4,
+    "unique_reachable_solver_row_bytes": 1280000000,
+    "scope": "Solver results reachable through smoothing dataclasses and containers."
+  },
+  "result": {
+    "converged": true,
+    "coefficient_converged": true,
+    "smoothing_converged": true,
+    "n_inner_iter": 13,
+    "n_smoothing_iter": 5,
+    "log_likelihood": -11162073.677224193,
+    "penalized_log_likelihood": -11162101.619040072,
+    "total_effective_df": 97.87405801376069,
+    "rank": 102,
+    "smoothing_parameters": {
+      "location:smooth0#wiggle": 3.4295394072920447,
+      "location:smooth1#wiggle": 63.45028776085901,
+      "location:curve#wiggle": 1.7153365571604988,
+      "location:curve:group[level0]#wiggle": 6.118401001469393,
+      "location:curve:group[level1]#wiggle": 24.61185476578748,
+      "scale:smooth0#wiggle": 60.92022033671822,
+      "scale:smooth1#wiggle": 96.3663788232458,
+      "scale:curve#wiggle": 101.83543457346542,
+      "scale:curve:group[level0]#wiggle": 382.34721240813553,
+      "scale:curve:group[level1]#wiggle": 1638.5955800273716
+    },
+    "exact_face_components": []
+  },
+  "smoothing_reason": "practical_plateau",
+  "coefficient_fit_iterations": [
+    8,
+    1,
+    2,
+    1,
+    1,
+    0
+  ],
+  "coefficient_fit_backends": [
+    "distributional-chunked-v1",
+    "distributional-chunked-v1",
+    "distributional-chunked-v1",
+    "distributional-chunked-v1",
+    "distributional-chunked-v1",
+    "distributional-chunked-v1"
+  ],
+  "phases": {
+    "seconds": {
+      "frame_normalization": 3.9811013266444206e-05,
+      "predictor_compilation": 41.306778656027745,
+      "layout_penalty_assembly": 0.0013524410896934569,
+      "dense_predictor_matrices": 0.0,
+      "initialization": 13.539702722046059,
+      "likelihood_evaluation": 11.727912883856334,
+      "curvature_gradient_assembly": 76.06496469100239,
+      "coefficient_decomposition_solve": 0.03128636098699644,
+      "efs_update_backtracking": 0.07028640015050769,
+      "newton_endgame": 0.0,
+      "terminal_observed_retry_fallback": 6.524190626048949,
+      "inference_edf": 4.133555937034544,
+      "serialization": 0.0,
+      "fit_total": 152.23581427300815
+    },
+    "counts": {
+      "frame_normalization": 1,
+      "predictor_compilation": 1,
+      "layout_penalty_assembly": 7,
+      "dense_predictor_matrices": 0,
+      "initialization": 6,
+      "likelihood_evaluation": 21,
+      "curvature_gradient_assembly": 15,
+      "coefficient_decomposition_solve": 13,
+      "efs_update_backtracking": 22,
+      "newton_endgame": 0,
+      "terminal_observed_retry_fallback": 6,
+      "inference_edf": 1,
+      "serialization": 0,
+      "fit_total": 1
+    }
+  },
+  "scope": "Current eager-input chunked Gaussian REML baseline; bounded prepared fitting has not run.",
+  "watchdog": {
+    "pid": 2869231,
+    "start_ticks": 28398205,
+    "total_process_timeout_seconds": 600,
+    "grace_seconds": 10,
+    "scope": "Entire benchmark process, including setup; not the internal fit clock",
+    "status": "process_finished",
+    "attached_elapsed_seconds": 76.72000000003027,
+    "elapsed_seconds": 236.8400000000256,
+    "fit_receipt_exists": true
+  },
+  "response_matches_streaming_fixture": true,
+  "raw_artifact_sha256": {
+    "current-10m-model-baseline.json": "0a3050a41b02a456a26f4912bb50cb97065206c0de5829b93bd0433cf16b80dd",
+    "current-10m-model-baseline.npz": "b686fc86b9c9567e7cddb5c5f855d9b9db0d8f948ef3178ab191879576f5c383"
+  }
+}
