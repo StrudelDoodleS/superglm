@@ -58,6 +58,7 @@ from superglm.distributional.smoothing.faces import (
     _try_exact_face,
     _try_joint_exact_face,
 )
+from superglm.distributional.smoothing.history import compact_coefficient_history
 from superglm.distributional.smoothing.initialization import prepare_distributional_initialization
 from superglm.distributional.smoothing.newton import (
     BracketAttempt,
@@ -124,6 +125,9 @@ def _efs_result(
     endgame: NewtonEndgameOutcome | None = None,
     beyond_cap_components: tuple[str, ...] = (),
 ) -> DistributionalEFSResult:
+    compact_coefficient_history(
+        coefficient_fits, history, terminal_fit_index=terminal_fit_index, config=config
+    )
     derivatives = None if endgame is None else endgame.derivatives
     gradient = certificate = hessian = hessian_certificate = None
     if derivatives is not None:
@@ -531,6 +535,9 @@ def fit_distributional_efs(
     minimum_log_lambda = math.log(outer_config.minimum_lambda)
     maximum_log_lambda = math.log(outer_config.maximum_lambda)
     while True:
+        compact_coefficient_history(
+            coefficient_fits, history, terminal_fit_index=terminal_fit_index, config=outer_config
+        )
         if terminal_evidence.unresolved_upper_bound:
             if len(history) >= outer_config.max_iterations:
                 return _result(converged=False, reason="lambda_cap_unresolved")

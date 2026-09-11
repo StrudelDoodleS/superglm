@@ -194,7 +194,7 @@ def _endpoint_polish_provenance_matches(
         and source.coefficient_face is face
         and polished.coefficient_face is face
         and source.coefficients.shape == polished.coefficients.shape
-        and source.eta.shape == polished.eta.shape
+        and source.row_shape == polished.row_shape
         and np.array_equal(source.penalty, polished.penalty)
         and source_rank is not None
         and polished_rank is not None
@@ -251,7 +251,9 @@ def _endpoint_objective_accumulation_bound(
     source: DenseSolverResult,
     polished: DenseSolverResult,
 ) -> float | None:
-    row_count = source.eta.shape[0]
+    if source.row_shape is None:
+        raise ValueError("endpoint authority requires the original row shape")
+    row_count = source.row_shape[0]
     chunk_count = (
         1
         if source.resolved_chunk_size is None

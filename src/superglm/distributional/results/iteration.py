@@ -24,10 +24,12 @@ from superglm.distributional.telemetry import CurvatureTelemetry
 
 
 def _maximum_relative_natural_parameter_change(
-    source: NDArray,
-    candidate: NDArray,
+    source: NDArray | None,
+    candidate: NDArray | None,
 ) -> float:
     """Largest fitted-parameter movement on a stable relative scale."""
+    if source is None or candidate is None:
+        raise ValueError("natural-parameter rows are required for plateau replay")
     source_array = np.asarray(source, dtype=np.float64)
     candidate_array = np.asarray(candidate, dtype=np.float64)
     if source_array.shape != candidate_array.shape or source_array.ndim != 2:
@@ -101,8 +103,11 @@ class DistributionalEFSConfig:
     # ``None`` resolves to ``max(1e14, maximum_lambda)``: a cap above 1e14 is
     # itself the conditioning limit rather than a configuration error.
     maximum_lambda_conditioning: float | None = None
+    retain_history_rows: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.retain_history_rows, bool):
+            raise TypeError("retain_history_rows must be bool")
         for name in (
             "max_iterations",
             "max_backtracks",

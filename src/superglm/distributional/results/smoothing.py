@@ -329,6 +329,11 @@ class DistributionalEFSResult:
             or not 0 <= self.terminal_fit_index < len(fits)
         ):
             raise ValueError("terminal_fit_index lies outside coefficient_fits")
+        terminal_fit = fits[self.terminal_fit_index]
+        if terminal_fit.eta is None or terminal_fit.theta is None:
+            raise ValueError("terminal coefficient fit must retain its rows")
+        if any(fit.row_shape != terminal_fit.eta.shape for fit in fits):
+            raise ValueError("historical row shapes must match the terminal fit's rows")
         expected_fit_index = 0
         next_trial_fit_index = 1
         expected_lambdas: Mapping[str, float] = initial

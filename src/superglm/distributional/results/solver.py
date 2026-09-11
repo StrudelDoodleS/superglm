@@ -1115,8 +1115,8 @@ class DenseSolverResult:
     resolved_chunk_size: int | None
     execution_backend_identifier: ExecutionBackendIdentifier
     coefficients: NDArray[np.float64]
-    eta: NDArray[np.float64]
-    theta: NDArray[np.float64]
+    eta: NDArray[np.float64] | None
+    theta: NDArray[np.float64] | None
     penalty: NDArray[np.float64]
     initial_penalized_log_likelihood: float
     log_likelihood: float
@@ -1141,6 +1141,7 @@ class DenseSolverResult:
     initial_penalized_optimizing_log_likelihood: float | None = None
     coefficient_face: PenaltyFace | None = None
     terminal_reduced_rank: RankDecomposition | None = None
+    row_shape: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1163,8 +1164,27 @@ class DenseSolverResult:
                 "execution backend identifier must agree with the resolved chunk route"
             )
         coefficients = _readonly_finite(self.coefficients, name="coefficients")
-        eta = _readonly_finite(self.eta, name="eta")
-        theta = _readonly_finite(self.theta, name="theta")
+        if (self.eta is None) != (self.theta is None):
+            raise ValueError("eta and theta rows must be retained or omitted together")
+        eta = None if self.eta is None else _readonly_finite(self.eta, name="eta")
+        theta = None if self.theta is None else _readonly_finite(self.theta, name="theta")
+        row_shape = self.row_shape
+        if eta is not None:
+            assert theta is not None  # Paired presence was checked above.
+            if eta.ndim != 2 or theta.shape != eta.shape:
+                raise ValueError("eta and theta must be matching two-dimensional arrays")
+            if row_shape is not None and row_shape != eta.shape:
+                raise ValueError("row shape must match retained eta and theta")
+            row_shape = eta.shape
+        if (
+            not isinstance(row_shape, tuple)
+            or len(row_shape) != 2
+            or any(
+                isinstance(size, bool) or not isinstance(size, int) or size < 0
+                for size in row_shape
+            )
+        ):
+            raise ValueError("row shape must record the original two-dimensional rows")
         penalty = _readonly_finite(self.penalty, name="penalty")
         score = _readonly_finite(self.terminal_score, name="terminal_score")
         data_curvature = _readonly_finite(
@@ -1178,8 +1198,6 @@ class DenseSolverResult:
         width = len(coefficients)
         if coefficients.shape != (width,) or score.shape != (width,):
             raise ValueError("coefficient and terminal score shapes must agree")
-        if eta.ndim != 2 or theta.shape != eta.shape:
-            raise ValueError("eta and theta must be matching two-dimensional arrays")
         if penalty.shape != (width, width):
             raise ValueError("penalty shape must match coefficients")
         if data_curvature.shape != (width, width) or penalized_curvature.shape != (width, width):
@@ -1304,6 +1322,7 @@ class DenseSolverResult:
         object.__setattr__(self, "coefficients", coefficients)
         object.__setattr__(self, "eta", eta)
         object.__setattr__(self, "theta", theta)
+        object.__setattr__(self, "row_shape", row_shape)
         object.__setattr__(self, "penalty", penalty)
         object.__setattr__(self, "terminal_score", score)
         object.__setattr__(self, "terminal_data_curvature", data_curvature)

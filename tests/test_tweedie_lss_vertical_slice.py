@@ -219,6 +219,9 @@ def _fit_automatic_prior(fixture: _TweedieFixture) -> DenseDistributionalModel:
         ),
         lambdas=_fixed_lambdas(),
         efs_config=DistributionalEFSConfig(
+            # This test promotes old fits to terminal states to replay an
+            # earlier iteration cap, which requires their original rows.
+            retain_history_rows=True,
             max_iterations=120,
             tolerance=1.0e-4,
             max_log_step=1.0,

@@ -523,6 +523,10 @@ def prepare_distributional_fit_state(
     )
     rows = None
     if retain_rows:
+        if solver_result.eta is None or solver_result.theta is None:
+            raise ValueError("final row diagnostics require retained fitted rows")
+        if null.result.eta is None or null.result.theta is None:
+            raise ValueError("final row diagnostics require retained null-model rows")
         rows = DistributionalRowState(
             response=response,
             likelihood_weights=likelihood_plan.weights,

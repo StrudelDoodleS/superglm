@@ -686,6 +686,7 @@ class SuperLSS:
         acceleration_history: int = 5,
         acceleration_max_amplification: float = 8.0,
         practical_reml: bool = True,
+        retain_history_rows: bool = False,
         practical_reml_parameter_tol: float = 1.0e-3,
         reml_plateau_tol: float = 1.0e-7,
         outer: Literal["efs", "efs+newton"] = "efs",
@@ -700,6 +701,12 @@ class SuperLSS:
         ``practical_reml`` stops the Fellner--Schall loop after sustained
         negligible objective and fitted-parameter movement. Set it to ``False``
         when strict Fellner--Schall stationarity is required.
+
+        Historical coefficient fits retain compact evidence by default, with
+        row arrays kept only for the terminal fit and recent plateau checks.
+        Set ``retain_history_rows=True`` to keep every fit's ``eta`` and
+        ``theta`` for debugging. ``retain_rows`` separately controls final
+        row diagnostics and keeps its existing default.
 
         By default, choose a data-scaled starting penalty for each term.
         ``initial_lambda=None`` adjusts the starting strength of smoothing to
@@ -748,6 +755,7 @@ class SuperLSS:
                 acceleration_history=acceleration_history,
                 acceleration_max_amplification=acceleration_max_amplification,
                 practical_convergence=practical_reml,
+                retain_history_rows=retain_history_rows,
                 practical_parameter_tolerance=practical_reml_parameter_tol,
                 plateau_tolerance=reml_plateau_tol,
                 outer=outer,

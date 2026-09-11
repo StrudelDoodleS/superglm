@@ -559,6 +559,9 @@ def evaluate_endpoint_laplace_derivative(
 ) -> EndpointLaplaceDerivative:
     """Evaluate the analytic local negative-LAML derivative at one exact face."""
 
+    eta = endpoint_fit.eta
+    if eta is None:
+        raise EndpointLaplaceError("endpoint derivative requires retained predictor rows")
     analytic_direction = isinstance(family, PredictorCurvatureDirectionalFamily) and callable(
         getattr(family, "predictor_curvature_directional_derivative", None)
     )
@@ -618,7 +621,7 @@ def evaluate_endpoint_laplace_derivative(
             curvature_direction = np.asarray(
                 family.predictor_curvature_directional_derivative(
                     y,
-                    endpoint_fit.eta,
+                    eta,
                     eta_direction,
                     links,
                     likelihood_plan,
@@ -630,7 +633,7 @@ def evaluate_endpoint_laplace_derivative(
             numeric: FiniteDifferenceDirection = finite_difference_curvature_direction(
                 family,
                 y,
-                endpoint_fit.eta,
+                eta,
                 eta_direction,
                 links,
                 likelihood_plan,
@@ -642,8 +645,8 @@ def evaluate_endpoint_laplace_derivative(
         raise EndpointLaplaceError(
             "family could not evaluate the endpoint curvature direction"
         ) from exc
-    n_observations = endpoint_fit.eta.shape[0]
-    n_parameters = endpoint_fit.eta.shape[1]
+    n_observations = eta.shape[0]
+    n_parameters = eta.shape[1]
     expected_channels = n_parameters * (n_parameters + 1) // 2
     if curvature_direction.shape != (n_observations, expected_channels) or not np.all(
         np.isfinite(curvature_direction)
