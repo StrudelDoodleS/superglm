@@ -8,9 +8,17 @@ from superglm.distributional import serialization as serialization_module
 from superglm.distributional.serialization import (
     DistributionalSerializationError,
     deserialize_distributional_model,
+    distributional_manifest,
     serialize_distributional_model,
 )
 from tests.test_distributional_history_rows import _fit, _mutated_artifact
+
+
+def test_full_history_manifest_adds_only_the_explicit_retention_flag():
+    compact = distributional_manifest(_fit(retain_history_rows=False))["smoothing"]["config"]
+    full = distributional_manifest(_fit(retain_history_rows=True))["smoothing"]["config"]
+    assert "retain_history_rows" not in compact
+    assert full == {**compact, "retain_history_rows": True}
 
 
 @pytest.mark.parametrize("retain_history_rows", [False, True])
