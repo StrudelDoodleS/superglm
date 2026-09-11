@@ -57,7 +57,7 @@ def test_bound_terms_keep_numeric_and_categorical_semantics():
 ```
 
 - [ ] Run `uv run pytest tests/test_bound_terms.py -q`; record the missing-feature failure.
-- [ ] Implement owned declarations and normalization. Reject empty names, duplicate/colliding terms, invalid term types, missing parents and incompatible `ti` parents. Resolve parents after collecting all declarations; preserve main and interaction ordering separately. Copy complete graphs, not fitted row arrays.
+- [ ] Implement owned declarations and normalization. Reject empty names, duplicate/colliding terms, invalid term types, missing parents and incompatible `ti` parents. Resolve parents after collecting all declarations; preserve main and interaction ordering separately. Copy configuration graphs without initiating row-design construction. Arbitrary fitted or custom state is preserved rather than stripped without a configuration-only copy protocol.
 - [ ] Add and run regressions for mutable feature inputs, helper settings, valid interaction compilation, invalid parents, numeric data refusal and explicit categorical handling. Use the current compiler/build boundary for behavioral assertions; do not merely compare repr strings.
 - [ ] Run focused tests and Ruff on owned files; record commands and results, self-review and commit only owned files.
 
@@ -111,7 +111,7 @@ def test_family_first_constructor_orders_named_predictors():
     assert model.family.to_config() == family.to_config()
 ```
 
-- [ ] Integrate construction with current validation and owned predictors. Preserve all option meanings. Refuse old `predictors=` construction with an actionable migration message; do not silently accept old dict/tuple public input.
+- [ ] Integrate construction with current validation and owned predictors. Preserve all option meanings. Refuse old keyword construction with native TypeError and document migration; keep the exact ordinary signature instead of adding metaclass/wrapper interception. Do not silently accept old dict/tuple public input.
 - [ ] Update deserialization using `_bind_predictor_template` and the new constructor, preserving artifact schema and certified model state.
 - [ ] Migrate public boundary tests to the actual new interface. Numerical tests whose inputs deliberately exercise internal `Predictor` templates may use a test-only adapter that binds those templates then calls the real new constructor. Do not add a production compatibility method solely for tests. Keep unrelated expected numerical outputs and tolerances unchanged. Update benchmarks to executable new construction without test imports.
 - [ ] Add real fixed-smoothing and REML parity tests with internal-baseline fixtures, including discrete execution, interactions, predictions, covariance and round trips. Include old trusted artifact loading where existing fixtures support it. Reject wrong input with specific errors at the public boundary.
