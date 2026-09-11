@@ -72,6 +72,7 @@ jobs:
           use_commit_signing: true
           settings: |
             {
+              "switchModelsOnFlag": false,
               "permissions": {
                 "deny": [
                   "Read(/.git/**)",
