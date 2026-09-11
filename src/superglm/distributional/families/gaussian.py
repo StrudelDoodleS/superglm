@@ -19,6 +19,10 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import (
+    LocationPredictor,
+    ScalePredictor,
+)
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -311,7 +315,7 @@ def _validated_response(y: NDArray) -> NDArray[np.float64]:
 
 
 @dataclass(frozen=True)
-class GaussianLS:
+class GaussianLS(LocationPredictor, ScalePredictor):
     """Gaussian family parameterized by location and standard deviation."""
 
     scale_floor: float = 0.01

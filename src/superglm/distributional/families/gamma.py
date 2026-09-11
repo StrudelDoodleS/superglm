@@ -18,6 +18,10 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import (
+    MeanPredictor,
+    ScalePredictor,
+)
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -168,7 +172,7 @@ def _validated_plan(
 
 
 @dataclass(frozen=True)
-class GammaLS:
+class GammaLS(MeanPredictor, ScalePredictor):
     """Gamma family with natural parameters mean and coefficient of variation."""
 
     @property

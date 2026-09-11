@@ -17,6 +17,10 @@ from superglm.distributional.families._base import (
     response_row_count,
     typed_plan,
 )
+from superglm.distributional.families._predictors import (
+    MeanPredictor,
+    ThetaPredictor,
+)
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -180,7 +184,7 @@ _PARAMETERS = (
 
 
 @dataclass(frozen=True)
-class NegativeBinomialLS:
+class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
     """NB2 family with natural parameters conditional mean and size theta."""
 
     parameters = _PARAMETERS

@@ -17,6 +17,12 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import (
+    LocationPredictor,
+    MeanPredictor,
+    ScalePredictor,
+    ShapePredictor,
+)
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -164,7 +170,7 @@ class GeneralizedGammaLikelihoodPlan:
 
 
 @dataclass(frozen=True)
-class GeneralizedGammaLSS:
+class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, ShapePredictor):
     """Generalized gamma with natural parameters ``(mean | location, scale, shape)``.
 
     Prentice's ``(mu, sigma, Q)`` law on ``y > 0``: ``shape = 0`` is the

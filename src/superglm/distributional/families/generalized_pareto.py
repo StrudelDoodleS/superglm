@@ -23,6 +23,10 @@ from superglm.distributional.families._base import (
     validated_float_response,
 )
 from superglm.distributional.families._links import BoundedLogitLink
+from superglm.distributional.families._predictors import (
+    ScalePredictor,
+    ShapePredictor,
+)
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -150,7 +154,7 @@ class GeneralizedParetoLikelihoodPlan:
 
 
 @dataclass(frozen=True)
-class GeneralizedParetoLSS:
+class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
     """Generalized Pareto on excesses with natural parameters ``(scale, shape)``.
 
     The shape carries a two-wall logit.  This release enforces
