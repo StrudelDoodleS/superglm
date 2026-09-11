@@ -218,6 +218,8 @@ def _dataclass_config(value: object) -> dict[str, Any]:
     }
     if isinstance(value, DenseSolverConfig) and result.get("newton_decrement_tolerance") is None:
         result.pop("newton_decrement_tolerance")
+    if isinstance(value, DistributionalEFSConfig) and not result["retain_history_rows"]:
+        result.pop("retain_history_rows")
     return result
 
 
@@ -1276,13 +1278,22 @@ def _migrate_unpickled_fit_state(model: DenseDistributionalModel):
     smoothing = model.smoothing
     if smoothing is None:
         return model.fit_state
+    if model.fit_state.solver_result is not smoothing.terminal_fit:
+        raise ValueError("solver result must be the accepted terminal EFS fit")
     state = dict(vars(smoothing))
     config = _with_absent_fields(state["config"], DistributionalEFSConfig)
     history = tuple(
         _with_absent_fields(item, DistributionalEFSIteration) for item in state["history"]
     )
+    coefficient_fits = tuple(
+        _with_absent_fields(item, DenseSolverResult) for item in state["coefficient_fits"]
+    )
     changed = config is not state["config"] or any(
         rebuilt is not item for rebuilt, item in zip(history, state["history"], strict=True)
+    )
+    changed = changed or any(
+        rebuilt is not item
+        for rebuilt, item in zip(coefficient_fits, state["coefficient_fits"], strict=True)
     )
     terminal_fit = state["coefficient_fits"][state["terminal_fit_index"]]
     if "terminal_endpoint_directions" not in state and terminal_fit.coefficient_face is None:
@@ -1295,8 +1306,13 @@ def _migrate_unpickled_fit_state(model: DenseDistributionalModel):
         return model.fit_state
     state["config"] = config
     state["history"] = history
+    state["coefficient_fits"] = coefficient_fits
     migrated_smoothing = _build_from_state(state, DistributionalEFSResult)
-    return dataclasses.replace(model.fit_state, smoothing=migrated_smoothing)
+    return dataclasses.replace(
+        model.fit_state,
+        smoothing=migrated_smoothing,
+        solver_result=migrated_smoothing.terminal_fit,
+    )
 
 
 _INVARIANT_DATACLASS_TYPES = (

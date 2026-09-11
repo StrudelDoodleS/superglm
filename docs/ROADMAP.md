@@ -209,8 +209,17 @@ training rows. A bounded Gamma sufficient-statistic oracle passes, but supplies
 no complete-fit speed result. Exact grouping is an optional accelerator.
 
 The user's stated objective is now explicit: scale GAMLSS end to end, including
-mostly distinct observations. The next C1 stage targets compact internal solver
-history, bounded-row input/likelihood preparation and fewer avoidable row passes.
+mostly distinct observations. Compact internal solver history is implemented in
+[PR #381](https://github.com/StrudelDoodleS/superglm/pull/381): obsolete historical
+row arrays are released during EFS/Newton optimization, while terminal and
+recent plateau rows remain available. `retain_history_rows=True` preserves full
+history for debugging. On the million-row C1 fixture, three matched pairs reduce
+historical row buffers from 256 to 128 MiB and median peak process RSS by
+132.75 MiB, with bitwise-identical numerical outputs. Median fit time is
+13.806 versus 14.197 seconds; no latency gain is claimed. The dense control
+releases historical buffers without an observed peak-RSS improvement. See the
+[compact-history report](https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/compact_lss_history.md). Bounded-row
+input/likelihood preparation and fewer avoidable row passes remain C1 work.
 The working validation sequence is 10 million then 100 million rows with a
 bounded coefficient count on a single machine; these are milestones, not
 demonstrated capabilities. Billion-row fitting remains unproven. Current full-N

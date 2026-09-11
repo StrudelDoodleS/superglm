@@ -43,6 +43,7 @@ from superglm.distributional.smoothing.derivatives import (
     laml_derivatives,
 )
 from superglm.distributional.smoothing.evidence import _fresh_raw_evidence, _FreshRawEvidence
+from superglm.distributional.smoothing.history import compact_coefficient_history
 from superglm.distributional.smoothing.objective import _complete_mapping, _laplace_objective
 from superglm.distributional.smoothing.penalty_face import PenaltyFace
 from superglm.distributional.solver.chunks import ChunkSize
@@ -748,6 +749,9 @@ def run_newton_endgame(
         norm: float | None,
         caps: tuple[str, ...] = (),
     ) -> NewtonEndgameOutcome:
+        compact_coefficient_history(
+            coefficient_fits, history, terminal_fit_index=current.terminal_fit_index, config=config
+        )
         return NewtonEndgameOutcome(
             kind=kind,
             state=current,
@@ -777,6 +781,9 @@ def run_newton_endgame(
             )
 
     while True:
+        compact_coefficient_history(
+            coefficient_fits, history, terminal_fit_index=current.terminal_fit_index, config=config
+        )
         workspace = LamlDerivativeWorkspace()
         try:
             derivatives = derivative_pass(False, workspace)

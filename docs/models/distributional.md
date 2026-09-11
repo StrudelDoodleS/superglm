@@ -1015,10 +1015,17 @@ continuous fit to assess that approximation. This grid sensitivity is not
 bounded by a machine-epsilon coefficient tolerance.
 
 Discrete execution retains row likelihood work and dense coefficient-space
-factors; it is not an out-of-core or sparse-factor solver. Smoothing receipts
-also retain parameter arrays from coefficient fits, so memory still grows with
-row count, predictor count and the number of retained fits. Report complete-fit
-memory and actual backend dispatch for the intended model. Practical plateaus,
+factors; it is not an out-of-core or sparse-factor solver. Smoothing history
+keeps complete coefficient and endpoint evidence, but releases obsolete
+`eta` and `theta` arrays during optimization. The terminal fit and recent
+plateau checks retain real rows. For debugging, pass
+`retain_history_rows=True` to `fit_reml`, or set it on
+`DistributionalEFSConfig`, to keep every historical fit's arrays. The separate
+`retain_rows` option still controls final row diagnostics and defaults to
+`True`. Rowless historical fits expose `eta=None`, `theta=None`, and their
+original `row_shape`. Memory still grows with row count, predictor count and
+coefficient-space history. Report complete-fit memory and actual backend
+dispatch for the intended model. Practical plateaus,
 strict stationarity, unresolved caps and curvature refusals retain the same
 meaning on both execution routes.
 

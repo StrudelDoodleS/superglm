@@ -129,7 +129,9 @@ class _DenseObservedReuseSession:
     """Recognize certified observed results produced inside one fit session."""
 
     def __init__(self) -> None:
-        self._results: dict[int, tuple[DenseSolverResult, _DenseObservedReuseOwner]] = {}
+        self._results: dict[
+            int, tuple[weakref.ReferenceType[DenseSolverResult], _DenseObservedReuseOwner]
+        ] = {}
         self._chunk_results: dict[int, _ChunkObservedReuseRecord] = {}
         self._dense: dict[int, tuple[StackedLayout, tuple[NDArray[np.float64], ...]]] = {}
         self._likelihood: (
@@ -175,7 +177,7 @@ class _DenseObservedReuseSession:
         owner: _DenseObservedReuseOwner,
     ) -> bool:
         entry = self._results.get(id(result))
-        return bool(entry is not None and entry[0] is result and entry[1].matches(owner))
+        return bool(entry is not None and entry[0]() is result and entry[1].matches(owner))
 
     def remember(
         self,
@@ -200,7 +202,11 @@ class _DenseObservedReuseSession:
             and curvature.actual_source == "observed"
             and curvature.fallback_count == 0
         ):
-            self._results[id(result)] = (result, owner)
+            key = id(result)
+            self._results[key] = (
+                weakref.ref(result, lambda _ref: self._results.pop(key, None)),
+                owner,
+            )
         elif (
             context is not None
             and score_data is not None
@@ -1474,6 +1480,8 @@ def _reuse_observed_initial_result(
     owner: _DenseObservedReuseOwner,
 ) -> tuple[_AcceptedState, DenseJointGeometry] | None:
     """Re-penalize a certified same-session endpoint without likelihood refresh."""
+    if source.eta is None or source.theta is None:
+        raise ValueError("observed endpoint reuse requires retained predictor and parameter rows")
     optimizing = source.optimizing_log_likelihood
     if (
         context.coefficient_face is not None

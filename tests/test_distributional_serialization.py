@@ -625,7 +625,10 @@ def test_first_public_efs_manifest_records_the_complete_current_schema() -> None
     assert manifest is not None
 
     config_fields = {field.name for field in fields(model.smoothing.config)}
-    assert config_fields <= manifest["config"].keys()
+    # The default retention flag is omitted so pre-field manifests remain
+    # readable; opting into full rows writes it explicitly.
+    assert config_fields - {"retain_history_rows"} <= manifest["config"].keys()
+    assert "retain_history_rows" not in manifest["config"]
 
     current_iteration_fields = {
         "stage",

@@ -70,6 +70,7 @@ def test_unresolved_trials_keep_initial_coefficient_and_lambda_state(monkeypatch
 def test_unresolved_first_trial_backtracks_to_a_valid_fit(monkeypatch):
     original = smoothing_loop._laplace_objective
     rejected = []
+    rejected_rows = []
     calls = 0
 
     def objective(fit, **kwargs):
@@ -77,6 +78,7 @@ def test_unresolved_first_trial_backtracks_to_a_valid_fit(monkeypatch):
         calls += 1
         if calls == 2:
             rejected.append(fit)
+            rejected_rows.append((fit.eta, fit.theta))
             _refuse(False)
         return original(fit, **kwargs)
 
@@ -89,7 +91,21 @@ def test_unresolved_first_trial_backtracks_to_a_valid_fit(monkeypatch):
     assert iteration.raw_backtracks >= 1
     assert iteration.accepted_fit_index != 1
     assert model.result is not rejected[0]
-    assert result.coefficient_fits[1] is rejected[0]
+    recorded = result.coefficient_fits[1]
+    assert recorded.eta is None and recorded.theta is None
+    assert recorded.row_shape == rejected[0].eta.shape
+    for name in ("coefficients", "penalty", "terminal_score", "terminal_penalized_curvature"):
+        np.testing.assert_array_equal(getattr(recorded, name), getattr(rejected[0], name))
+    assert (
+        recorded.penalized_optimizing_log_likelihood
+        == rejected[0].penalized_optimizing_log_likelihood
+    )
+    assert recorded.history == rejected[0].history
+    assert recorded.terminal_rank is rejected[0].terminal_rank
+    assert recorded.terminal_curvature == rejected[0].terminal_curvature
+    # Compact only the history reference; the still-live trial stays usable.
+    assert rejected[0].eta is rejected_rows[0][0]
+    assert rejected[0].theta is rejected_rows[0][1]
     ceiling = iteration.objective_before + result.config.objective_tolerance * (
         1.0 + abs(iteration.objective_before)
     )
