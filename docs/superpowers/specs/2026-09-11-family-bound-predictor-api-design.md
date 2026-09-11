@@ -70,15 +70,19 @@ Its other execution and likelihood-weight options retain their meanings.
 The family is the first positional argument, followed by predictor declarations;
 execution options are keyword-only. This puts the family before its predictors
 without placing ordinary positional arguments after a keyword argument. Do not
-infer the family from the first predictor. The old `predictors=` keyword is an
-error with a migration example. Migrate first-party examples and public
-constructor tests together.
+infer the family from the first predictor. Removed keyword construction receives
+Python's native TypeError; document the migration rather than adding constructor
+interception just to customize that error. Migrate first-party examples and
+public constructor tests together.
 
 `family.mu(...)` and analogous methods produce a uniform bound predictor
 specification carrying its canonical parameter name, originating family identity,
 terms and predictor-level options. Helpers do not mutate the family or create a
 model. Creating a specification must not read a training frame, build a design
-matrix, initialize a likelihood or allocate arrays proportional to row count.
+matrix or initialize a likelihood. Ordinary unfitted declarations have no row
+arrays to allocate. Defensive copies of already-fitted or arbitrary custom
+FeatureSpecs may copy retained state; this API does not promise a row-memory
+bound or strip that state through an unspecified configuration-only protocol.
 
 Use frozen outer specifications and defensive ownership of the specification
 graph. A frozen dataclass alone does not make contained feature objects immutable.
