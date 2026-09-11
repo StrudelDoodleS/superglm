@@ -1,6 +1,8 @@
 """Public and lower-level contracts for multi-predictor distributional models."""
 
 _EXPORTS = {
+    "BoundPredictor": ("superglm.distributional.binding", "BoundPredictor"),
+    "bind_predictor": ("superglm.distributional.binding", "bind_predictor"),
     "GammaLS": ("superglm.distributional.families.gamma", "GammaLS"),
     "GaussianLS": ("superglm.distributional.families.gaussian", "GaussianLS"),
     "GeneralizedGammaLSS": (

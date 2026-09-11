@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tests.bound_predictor_fixtures import model_from_templates
+
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -45,7 +47,7 @@ def stationary_case() -> tuple[DenseDistributionalModel, pd.DataFrame]:
     frame = pd.DataFrame({"x": x})
     response = location + scale * rng.standard_normal(len(x))
     fitted = (
-        SuperLSS(
+        model_from_templates(
             family=GaussianLS(),
             predictors=[
                 Predictor("location", {"x": Spline("cr", k=7)}),
@@ -140,7 +142,7 @@ def _public_model(
     fitted: DenseDistributionalModel,
     frame: pd.DataFrame,
 ) -> SuperLSS:
-    model = SuperLSS(
+    model = model_from_templates(
         family=fitted.family,
         predictors=fitted.fit_state.predictor_templates,
     )

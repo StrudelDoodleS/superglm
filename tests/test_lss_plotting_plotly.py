@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Spline, SuperLSS
+from superglm import Categorical, Spline
 from superglm.distributional import Predictor
 from superglm.distributional.checks.binned import binned_check, binned_check_2d
 from superglm.distributional.checks.calibration import (
@@ -38,6 +38,7 @@ from superglm.distributional.surfaces import (
     risk_curves,
 )
 from superglm.distributional.terms import term_effect
+from tests.bound_predictor_fixtures import model_from_templates
 
 go = pytest.importorskip("plotly.graph_objects")
 pio = pytest.importorskip("plotly.io")
@@ -67,7 +68,7 @@ def case():
     level = np.where(g == "a", 0.3, np.where(g == "b", -0.2, 0.0))
     X = pd.DataFrame({"x": x, "g": g})
     y = 0.6 * np.sin(2.4 * x) + level + scale * rng.standard_normal(n)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=6), "g": Categorical()}),
@@ -82,7 +83,7 @@ def case():
 def misfit(case):
     """A constant-scale fit of the same rows, for the comparison payload."""
     _, X, y, _ = case
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=6)}),

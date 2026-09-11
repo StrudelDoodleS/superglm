@@ -9,11 +9,12 @@ import pytest
 import superglm.distributional as distributional
 import superglm.distributional.families as distributional_families
 import superglm.distributional.fit_state as fit_state_module
-from superglm import Spline, SuperLSS
+from superglm import Spline
 from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.families.negative_binomial import NegativeBinomialLS
 from superglm.distributional.result import DistributionalEFSConfig
 from superglm.features import RandomEffect
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 @pytest.mark.parametrize(
@@ -69,7 +70,7 @@ def test_public_gamma_reml_exposes_an_exact_face_at_the_default_lambda_cap(
 
     monkeypatch.setattr(fit_state_module, "fit_joint_null_model", capture_null_config)
 
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=(
             Predictor("mean", {"x": Spline(kind="cr", n_knots=5)}),

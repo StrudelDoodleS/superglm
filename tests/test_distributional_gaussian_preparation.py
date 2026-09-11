@@ -23,6 +23,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.features import Numeric, Spline
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 @pytest.mark.parametrize("semantics", ["prior", "frequency"])
@@ -148,7 +149,7 @@ def test_public_chunked_fit_does_not_own_a_full_row_carrier(monkeypatch, n):
     monkeypatch.setattr(model_module, "fit_dense_fixed_lambda", capture)
     x = np.linspace(-1.0, 1.0, n)
     response = 0.5 * x + np.random.default_rng(314).normal(size=len(x))
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {"x": Numeric()}), Predictor("scale", {})),
         discrete=True,
@@ -353,7 +354,7 @@ def test_public_derived_fit_matches_eager_binding_and_serialization(
     monkeypatch.setattr(fit_state, "fit_joint_null_model", null)
 
     def fit():
-        model = SuperLSS(
+        model = model_from_templates(
             family=GaussianLS(),
             predictors=(Predictor("location", {"x": Spline(n_knots=4)}), Predictor("scale", {})),
             weight_semantics=semantics,
@@ -409,7 +410,7 @@ def test_custom_gaussian_binding_is_not_bypassed(monkeypatch):
             return GaussianLS().to_config()
 
     x = np.linspace(-1.0, 1.0, 31)
-    model = SuperLSS(
+    model = model_from_templates(
         family=CustomGaussian(),
         predictors=(Predictor("location", {"x": Numeric()}), Predictor("scale", {})),
         discrete=True,
@@ -463,7 +464,7 @@ def test_public_gamma_chunked_binding_remains_eager(monkeypatch):
     monkeypatch.setattr(model_module, "fit_dense_fixed_lambda", capture)
     x = np.linspace(-1.0, 1.0, 37)
     response = np.random.default_rng(331).gamma(3.0, np.exp(0.2 * x) / 3.0)
-    model = SuperLSS(
+    model = model_from_templates(
         family=family,
         predictors=(
             Predictor(family.parameters[0].name, {"x": Numeric()}),

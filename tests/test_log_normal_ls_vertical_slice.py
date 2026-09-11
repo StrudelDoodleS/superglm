@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Spline, SuperLSS
+from superglm import Spline
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.families.log_normal import LogNormalLS
@@ -16,6 +16,7 @@ from superglm.distributional.families.two_piece import TwoPieceLogNormalLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _simulate(n, seed):
@@ -43,7 +44,7 @@ def _frequency_weights(n):
 
 def test_mean_form_recovers_the_simulated_surfaces_under_reml():
     frame, y, log_mean, sigma = _simulate(4000, 20260902)
-    model = SuperLSS(family=LogNormalLS(), predictors=_predictors()).fit_reml(
+    model = model_from_templates(family=LogNormalLS(), predictors=_predictors()).fit_reml(
         frame, y, method="efs"
     )
     fitted = model.predict_parameters(frame)
@@ -57,11 +58,11 @@ def test_mean_form_recovers_the_simulated_surfaces_under_reml():
 
 def test_location_form_fits_and_agrees_with_the_mean_form():
     frame, y, _, _ = _simulate(1500, 7)
-    mean_form = SuperLSS(
+    mean_form = model_from_templates(
         family=LogNormalLS(),
         predictors=(Predictor("mean", {"x": Numeric()}), Predictor("scale", {})),
     ).fit(frame, y)
-    location_form = SuperLSS(
+    location_form = model_from_templates(
         family=LogNormalLS(parametrisation="location"),
         predictors=(Predictor("location", {"x": Numeric()}), Predictor("scale", {})),
     ).fit(frame, y)
@@ -76,7 +77,7 @@ def test_location_form_fits_and_agrees_with_the_mean_form():
 
 def test_fisher_curvature_request_is_honoured():
     frame, y, _, _ = _simulate(800, 3)
-    model = SuperLSS(
+    model = model_from_templates(
         family=LogNormalLS(), predictors=_predictors(), coefficient_curvature="fisher"
     ).fit(frame, y, lambdas={"mean:x#wiggle": 1.0})
     assert model.coefficient_curvature == "fisher"
@@ -87,10 +88,12 @@ def test_location_form_is_gaussian_on_log_y_up_to_the_jacobian():
     """The identity that makes the family worth having: same fit, mean on the y scale."""
     frame, y, _, _ = _simulate(1200, 41)
     predictors = (Predictor("location", {"x": Numeric()}), Predictor("scale", {"z": Numeric()}))
-    log_normal = SuperLSS(
+    log_normal = model_from_templates(
         family=LogNormalLS(parametrisation="location"), predictors=predictors
     ).fit(frame, y)
-    gaussian = SuperLSS(family=GaussianLS(), predictors=predictors).fit(frame, np.log(y))
+    gaussian = model_from_templates(family=GaussianLS(), predictors=predictors).fit(
+        frame, np.log(y)
+    )
     ours = log_normal.predict_parameters(frame)
     theirs = gaussian.predict_parameters(frame)
     # Two independent optimiser runs on the same likelihood stop at slightly different
@@ -207,7 +210,7 @@ def test_location_form_matches_gamlss_logno_at_a_parametric_specification():
         text=True,
     )
     reference = json.loads(completed.stdout)
-    model = SuperLSS(
+    model = model_from_templates(
         family=LogNormalLS(parametrisation="location"),
         predictors=(Predictor("location", {"x": Numeric()}), Predictor("scale", {})),
     ).fit(frame, y)

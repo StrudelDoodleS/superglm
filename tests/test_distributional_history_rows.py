@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional import serialization as serialization_module
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
@@ -30,6 +29,7 @@ from superglm.distributional.serialization import (
 )
 from superglm.distributional.weights import WeightContract
 from superglm.features import RandomEffect, Spline
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _data():
@@ -64,7 +64,7 @@ def test_default_history_releases_obsolete_row_arrays():
 
 def test_public_full_history_opt_in():
     frame, y = _data()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {"x": Spline(n_knots=5)}), Predictor("scale", {})),
     )
@@ -310,7 +310,7 @@ def test_plateau_and_exact_face_keep_replay_authority(practical):
     y = np.random.default_rng(7).normal(size=len(frame))
     models = []
     for retain_history_rows in (False, True):
-        model = SuperLSS(
+        model = model_from_templates(
             family=GaussianLS(scale_floor=1e-4),
             predictors=(Predictor("location", {"effect": RandomEffect()}), Predictor("scale", {})),
         ).fit_reml(

@@ -18,6 +18,7 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.features import Numeric
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _weights(values, semantics):
@@ -327,7 +328,7 @@ def test_artifact_round_trip_preserves_predictions_and_config():
     frame = pd.DataFrame({"x": rng.uniform(-1.0, 1.0, 150)})
     k = 1.0 / 0.5**2
     y = np.exp(0.3 + 0.4 * frame["x"].to_numpy() + 0.7 * np.log(rng.gamma(k, 1.0, 150) / k) / 0.5)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedGammaLSS(),
         predictors=(
             Predictor("mean", {"x": Numeric()}),

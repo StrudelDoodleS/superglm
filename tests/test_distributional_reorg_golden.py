@@ -69,6 +69,7 @@ from superglm.distributional.kernels.two_piece import (
 )
 from superglm.distributional.kernels.two_piece import two_piece_quantile
 from superglm.features import Categorical, CubicRegressionSpline, Spline
+from tests.bound_predictor_fixtures import model_from_templates
 
 GOLDEN = Path(__file__).parent / "fixtures" / "distributional_golden.json"
 
@@ -242,17 +243,17 @@ def _compute() -> dict[str, dict[str, object]]:
     cases, frame = _cases()
     out = {}
     for name, (family, predictors, y) in cases.items():
-        fixed = SuperLSS(family=family, predictors=predictors).fit(
+        fixed = model_from_templates(family=family, predictors=predictors).fit(
             frame, y, lambdas={key: 1.0 for key in _wiggle_names(predictors)}
         )
         out[f"{name}:fixed"] = _record(fixed)
         # The record predates automatic initialization. Keep its numerical
         # configuration fixed; default-start behavior has its own regressions.
-        reml = SuperLSS(family=family, predictors=predictors).fit_reml(
+        reml = model_from_templates(family=family, predictors=predictors).fit_reml(
             frame, y, outer="efs", initial_lambda=0.1
         )
         out[f"{name}:reml"] = _record(reml)
-        newton = SuperLSS(family=family, predictors=predictors).fit_reml(
+        newton = model_from_templates(family=family, predictors=predictors).fit_reml(
             frame, y, outer="efs+newton", initial_lambda=0.1
         )
         out[f"{name}:reml+newton"] = _record(newton)

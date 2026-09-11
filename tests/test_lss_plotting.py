@@ -16,6 +16,8 @@ import pandas as pd
 import pytest
 from numpy.typing import NDArray
 
+from tests.bound_predictor_fixtures import model_from_templates
+
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -23,7 +25,7 @@ from matplotlib.collections import PathCollection, PolyCollection
 from matplotlib.colors import to_rgba
 from matplotlib.figure import Figure
 
-from superglm import Categorical, Spline, SuperLSS
+from superglm import Categorical, Spline
 from superglm.distributional import Predictor
 from superglm.distributional.checks.binned import (
     BinnedCheck2D,
@@ -78,7 +80,7 @@ def test_review_diagnostics_labels_are_generic_for_gamma():
     rng = np.random.default_rng(593)
     frame = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 100)})
     y = rng.gamma(4.0, 0.25, len(frame))
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(), predictors=[Predictor("mean", {}), Predictor("scale", {})]
     ).fit(frame, y)
     figure = model.plot_diagnostics(frame, y, n_sim=4)
@@ -107,7 +109,7 @@ def case():
     scale = np.exp(-1.0 + 0.5 * np.cos(1.8 * x))
     frame = pd.DataFrame({"x": x, "g": g})
     y = location + scale * rng.standard_normal(n)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=6), "g": Categorical()}),
@@ -122,7 +124,7 @@ def case():
 def flat_fit(case):
     """A comparison model with no scale predictor, for the paired score figures."""
     _, frame, y, _ = case
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=6)}),

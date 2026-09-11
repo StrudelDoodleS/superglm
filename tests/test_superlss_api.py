@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import SuperLSS
+from superglm import SuperLSS, bind_predictor, term
 from superglm.distributional import GammaLS, GaussianLS, Predictor
 from superglm.distributional import TweedieLSS as _TweedieLSS
 from superglm.distributional import api as api_module
@@ -38,6 +38,7 @@ from superglm.distributional.weights import (
 )
 from superglm.features import Numeric, RandomEffect, Spline
 from superglm.types import LambdaPolicy
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _fixture(
@@ -188,7 +189,7 @@ def _tweedie_model(
     frequency: bool = False,
 ) -> SuperLSS:
     kwargs = {"weight_semantics": "frequency"} if frequency else {}
-    return SuperLSS(
+    return model_from_templates(
         family=_TweedieLSS(power_lower=1.08, power_upper=1.92),
         predictors=(
             _intercept_only_tweedie_predictors()
@@ -249,13 +250,8 @@ def _assert_public_tweedie_round_trip(model: SuperLSS, frame: pd.DataFrame) -> N
 
 
 def _linear_model() -> SuperLSS:
-    return SuperLSS(
-        family=GaussianLS(scale_floor=0.02),
-        predictors=(
-            Predictor("location", {"x": Numeric()}),
-            Predictor("scale", {"z": Numeric()}),
-        ),
-    )
+    family = GaussianLS(scale_floor=0.02)
+    return SuperLSS(family, family.location("x"), family.scale("z"))
 
 
 class _FailIfCompiledNumeric(Numeric):
@@ -453,7 +449,7 @@ def test_public_imports_and_fixed_fit_publish_named_immutable_views() -> None:
 
 def test_public_superlss_discrete_fitting_selects_automatic_chunks() -> None:
     frame, response, weights, offsets = _fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {}), Predictor("scale", {})),
         discrete=True,
@@ -479,7 +475,7 @@ def test_public_reml_defaults_to_practical_convergence_with_a_strict_opt_out(
 
     monkeypatch.setattr(SuperLSS, "_fit", capture_fit)
     frame, response, _weights, _offsets = _fixture(12)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {}), Predictor("scale", {})),
     )
@@ -513,7 +509,7 @@ def test_public_reml_preserves_automatic_start_with_a_small_lambda_cap(
 
     monkeypatch.setattr(SuperLSS, "_fit", capture_fit)
     frame, response, _weights, _offsets = _fixture(12)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {}), Predictor("scale", {})),
     )
@@ -541,10 +537,7 @@ def test_constructor_admits_exact_public_distributional_families(
     predictors: tuple[Predictor, ...],
     names: tuple[str, ...],
 ) -> None:
-    model = SuperLSS(
-        family=family,  # type: ignore[arg-type]
-        predictors=predictors,
-    )
+    model = SuperLSS(family, *(bind_predictor(family, p.name) for p in predictors))
 
     assert type(model.family) is type(family)
     assert tuple(parameter.name for parameter in model.family.parameters) == names
@@ -566,7 +559,7 @@ def test_public_tweedie_fixed_fit_requests_and_uses_observed_curvature() -> None
 def test_public_tweedie_configured_prior_reml_publishes_certified_observed_state() -> None:
     frame, response = _certified_automatic_tweedie_fixture()
     penalty_names = tuple(f"{name}:x_{name}#wiggle" for name in ("mean", "dispersion", "power"))
-    model = SuperLSS(
+    model = model_from_templates(
         family=_TweedieLSS(power_lower=1.08, power_upper=1.92),
         predictors=_all_smooth_tweedie_predictors(),
     ).fit_reml(
@@ -625,7 +618,7 @@ def test_public_tweedie_configured_prior_reml_publishes_certified_observed_state
 
 def test_public_tweedie_reml_uses_an_honest_practical_plateau_by_default() -> None:
     frame, response = _certified_automatic_tweedie_fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=_TweedieLSS(power_lower=1.08, power_upper=1.92),
         predictors=_all_smooth_tweedie_predictors(),
     ).fit_reml(
@@ -669,7 +662,7 @@ def test_public_practical_fit_defers_cap_pressure_to_the_exact_face() -> None:
     rng = np.random.default_rng(7)
     levels = np.repeat(np.array(["a", "b", "c", "d"]), 10)
     response = rng.normal(size=len(levels))
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=1.0e-4),
         predictors=(
             Predictor("location", {"effect": RandomEffect()}),
@@ -816,20 +809,19 @@ def test_constructor_admits_structural_family_subclasses_and_lookalikes(
     family: DistributionalFamily,
     predictors: tuple[Predictor, ...],
 ) -> None:
-    model = SuperLSS(family=family, predictors=predictors)
+    model = SuperLSS(family, *(bind_predictor(family, p.name) for p in predictors))
 
-    assert model.family is family
+    assert model.family is not family
+    assert type(model.family) is type(family)
 
 
 def test_complete_fit_admission_requires_declared_family_configuration() -> None:
+    family = _UnconfiguredGammaLookalike()
     with pytest.raises(
         TypeError,
         match="complete-fit.*ConfigurableDistributionalFamily.*to_config",
     ):
-        SuperLSS(
-            family=_UnconfiguredGammaLookalike(),
-            predictors=(Predictor("mean", {}), Predictor("scale", {})),
-        )
+        SuperLSS(family, bind_predictor(family, "mean"), bind_predictor(family, "scale"))
 
 
 @pytest.mark.parametrize(
@@ -838,27 +830,21 @@ def test_complete_fit_admission_requires_declared_family_configuration() -> None
         (GammaLS(), ("mean",), "missing.*scale"),
         (GammaLS(), ("mean", "mean"), "duplicate.*mean"),
         (GammaLS(), ("mean", "shape"), "unknown.*shape"),
-        (GammaLS(), ("scale", "mean"), "order.*mean.*scale"),
         (_TweedieLSS(), ("mean", "dispersion"), "missing.*power"),
         (_TweedieLSS(), ("mean", "dispersion", "dispersion"), "duplicate.*dispersion"),
         (_TweedieLSS(), ("mean", "dispersion", "shape"), "unknown.*shape"),
-        (_TweedieLSS(), ("dispersion", "mean", "power"), "order.*mean.*dispersion.*power"),
         (_NegativeBinomialLS(), ("mean",), "missing.*theta"),
         (_NegativeBinomialLS(), ("mean", "mean"), "duplicate.*mean"),
         (_NegativeBinomialLS(), ("mean", "shape"), "unknown.*shape"),
-        (_NegativeBinomialLS(), ("theta", "mean"), "order.*mean.*theta"),
     ],
 )
-def test_constructor_rejects_public_predictors_that_do_not_match_family_order(
+def test_constructor_rejects_public_predictors_that_do_not_match_family_names(
     family: object,
     names: tuple[str, ...],
     message: str,
 ) -> None:
-    with pytest.raises(ValueError, match=message):
-        SuperLSS(
-            family=family,  # type: ignore[arg-type]
-            predictors=tuple(Predictor(name, {}) for name in names),
-        )
+    with pytest.raises(ValueError, match="(?i)" + message):
+        SuperLSS(family, *(bind_predictor(family, name) for name in names))
 
 
 @pytest.mark.parametrize(
@@ -873,18 +859,15 @@ def test_constructor_rejects_public_predictors_that_do_not_match_family_order(
             (Predictor("location", {}), Predictor("shape", {})),
             "unknown.*shape",
         ),
-        (
-            (Predictor("scale", {}), Predictor("location", {})),
-            "order.*location.*scale",
-        ),
     ],
 )
-def test_constructor_rejects_predictors_that_do_not_match_family_order(
+def test_constructor_rejects_predictors_that_do_not_match_family_names(
     predictors: tuple[Predictor, ...],
     message: str,
 ) -> None:
-    with pytest.raises(ValueError, match=message):
-        SuperLSS(family=GaussianLS(), predictors=predictors)
+    family = GaussianLS()
+    with pytest.raises(ValueError, match="(?i)" + message):
+        SuperLSS(family, *(bind_predictor(family, p.name) for p in predictors))
 
 
 @pytest.mark.parametrize(
@@ -912,7 +895,19 @@ def test_constructor_rejects_public_incompatible_links_before_fit(
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        SuperLSS(family=family, predictors=predictors)  # type: ignore[arg-type]
+        SuperLSS(
+            family,
+            *(
+                bind_predictor(
+                    family,
+                    p.name,
+                    *(term(name, spec) for name, spec in p.features.items()),
+                    link=p.link,
+                    intercept=p.intercept,
+                )
+                for p in predictors
+            ),
+        )
 
 
 def test_model_fit_refuses_a_family_plan_bound_to_a_substituted_root_before_geometry() -> None:
@@ -939,7 +934,7 @@ def test_model_fit_refuses_a_family_plan_bound_to_a_substituted_root_before_geom
 
 def test_public_fit_reml_exposes_only_efs_and_honours_fixed_policy() -> None:
     frame, response, _, _ = _fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(
             Predictor(
@@ -1057,7 +1052,7 @@ def test_fit_reml_forwards_multisecant_config_and_phase_recorder(
 
 def test_fixed_fit_honours_component_lambda_policy_without_duplicate_input() -> None:
     frame, response, _, _ = _fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(
             Predictor(
@@ -1133,7 +1128,7 @@ def test_published_arrays_cannot_rearm_writes_and_isolate_constructor_inputs() -
 
 def test_public_artifact_round_trip_preserves_fitted_state_and_execution_config() -> None:
     frame, response, weights, offsets = _fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=0.025),
         predictors=(
             Predictor("location", {"x": Numeric()}),
@@ -1240,7 +1235,7 @@ def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> 
         Predictor("location", {"x": Numeric()}),
         Predictor("scale", {"z": Numeric()}),
     )
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=0.02),
         predictors=predictors,
         weight_semantics="frequency",
@@ -1270,7 +1265,7 @@ def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> 
         sample_weight=new_counts,
         offsets=new_offsets,
     )
-    fresh = SuperLSS(
+    fresh = model_from_templates(
         family=GaussianLS(scale_floor=0.02),
         predictors=predictors,
         weight_semantics="frequency",
@@ -1281,7 +1276,7 @@ def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> 
         offsets=new_offsets,
     )
     positions = np.repeat(np.arange(len(new_frame)), new_counts)
-    expanded = SuperLSS(
+    expanded = model_from_templates(
         family=GaussianLS(scale_floor=0.02),
         predictors=predictors,
     ).fit(
@@ -1309,7 +1304,7 @@ def test_frequency_facade_round_trip_and_refit_keep_the_canonical_contract() -> 
 
 def test_public_schema_routes_legacy_future_and_current_duplicate_separately() -> None:
     frame, response, _, _ = _fixture(12)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {}), Predictor("scale", {})),
         weight_semantics="frequency",
@@ -1356,7 +1351,7 @@ def test_current_public_n_bins_rejects_type_aliases_after_valid_resigning(
     aliased_n_bins: object,
 ) -> None:
     frame, response, _, _ = _fixture(12)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {}), Predictor("scale", {})),
         n_bins=accepted_n_bins,
@@ -1511,7 +1506,7 @@ def test_expected_information_is_a_fallback_not_a_switch() -> None:
     config, while the terminal telemetry always requests observed curvature for inference."""
     frame, y = _gamma_curvature_fixture()
     observed_spy = _ExpectedInformationSpy(GammaLS())
-    model = SuperLSS(family=observed_spy, predictors=_gamma_curvature_predictors())
+    model = model_from_templates(family=observed_spy, predictors=_gamma_curvature_predictors())
     assert model.coefficient_curvature == "observed"
     fitted = model.fit(frame, y, lambdas=_GAMMA_CURVATURE_LAMBDAS)._require_fitted()
     assert fitted.fit_state.requested_solver_config.coefficient_curvature == "observed"
@@ -1525,7 +1520,7 @@ def test_expected_information_is_a_fallback_not_a_switch() -> None:
     observed_iterations = fitted.fit_state.solver_result.iterations
 
     fisher_spy = _ExpectedInformationSpy(GammaLS())
-    fisher = SuperLSS(
+    fisher = model_from_templates(
         family=fisher_spy,
         predictors=_gamma_curvature_predictors(),
         coefficient_curvature="fisher",
@@ -1535,7 +1530,11 @@ def test_expected_information_is_a_fallback_not_a_switch() -> None:
     assert fitted_fisher.fit_state.requested_solver_config.coefficient_curvature == "fisher"
     assert fisher.training_telemetry().curvature_policy == "fisher"
     assert fitted_fisher.fit_state.solver_result.converged
-    assert fisher_spy.expected_information_calls >= fitted_fisher.fit_state.solver_result.iterations
+    assert fisher_spy.expected_information_calls == 0
+    assert (
+        fitted_fisher.family.expected_information_calls
+        >= fitted_fisher.fit_state.solver_result.iterations
+    )
     assert observed_iterations <= fitted_fisher.fit_state.solver_result.iterations
     observed_objective = fitted.fit_state.solver_result.penalized_log_likelihood
     fisher_objective = fitted_fisher.fit_state.solver_result.penalized_log_likelihood
@@ -1544,13 +1543,13 @@ def test_expected_information_is_a_fallback_not_a_switch() -> None:
 
 def test_fisher_request_requires_the_capability() -> None:
     with pytest.raises(ValueError, match="expected information"):
-        SuperLSS(
+        model_from_templates(
             family=_TweedieLSS(),
             predictors=_mean_smooth_tweedie_predictors(),
             coefficient_curvature="fisher",
         )
     with pytest.raises(ValueError, match="coefficient_curvature"):
-        SuperLSS(
+        model_from_templates(
             family=GammaLS(),
             predictors=_gamma_curvature_predictors(),
             coefficient_curvature="newton",  # type: ignore[arg-type]
@@ -1564,7 +1563,7 @@ def test_material_indefiniteness_still_falls_back_to_fisher() -> None:
     indefinite at every state instead; the accepted terminal point then lands on Fisher with
     the fallback recorded, while the requested policy stays observed."""
     frame, response, _, _ = _fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=_IndefiniteObservedGaussianLS(),
         predictors=(
             Predictor("location", {"x": Numeric()}),
@@ -1583,7 +1582,7 @@ def test_material_indefiniteness_still_falls_back_to_fisher() -> None:
 
 def _small_gaussian_reml_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     frame, response, _, _ = _fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=0.02),
         predictors=(
             Predictor("location", {"x": Spline(kind="cr", n_knots=6)}),

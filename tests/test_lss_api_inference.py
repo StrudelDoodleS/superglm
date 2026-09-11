@@ -17,6 +17,8 @@ import pandas as pd
 import pytest
 from scipy import special
 
+from tests.bound_predictor_fixtures import model_from_templates
+
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -54,7 +56,7 @@ def test_review_training_defaults_own_positive_rows():
     frame = pd.DataFrame({"x": np.r_[np.linspace(-1, 1, 30), 1e6]}, index=np.arange(31) + 70)
     original = frame.iloc[:30].copy()
     y = np.sin(frame["x"].to_numpy()) + np.random.default_rng(2).normal(0, 0.2, 31)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[Predictor("location", {"x": Spline("cr", k=4)}), Predictor("scale", {})],
     ).fit(frame, y, sample_weight=np.r_[np.ones(30), 0.0], lambdas={"location:x#wiggle": 1.0})
@@ -71,7 +73,7 @@ def test_review_training_defaults_own_positive_rows():
 def test_review_mixed_categories_reach_surface_predictions():
     frame = pd.DataFrame({"g": np.array([1, "b"] * 20, dtype=object), "x": np.linspace(-1, 1, 40)})
     y = frame["x"].to_numpy() + np.random.default_rng(3).normal(0, 0.5, 40)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"g": Categorical(), "x": Spline("cr", k=4)}),
@@ -200,7 +202,7 @@ def case():
     location = 0.6 * np.sin(2.4 * x) + np.where(g == "a", 0.3, np.where(g == "b", -0.2, 0.0))
     scale = np.exp(-1.0 + 0.5 * np.cos(1.8 * x))
     y = location + scale * rng.standard_normal(n)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=6), "g": Categorical()}),
@@ -214,7 +216,7 @@ def case():
 def flat_model(case):
     """A comparison candidate with a constant scale."""
     _, frame, y = case
-    return SuperLSS(
+    return model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=6)}),
@@ -239,7 +241,7 @@ def weighted_fits():
     cv = np.exp(-0.6 + 0.2 * x)
     y = rng.gamma(weights / cv**2, mean * cv**2 / weights)
     fits["gamma"] = (
-        SuperLSS(
+        model_from_templates(
             family=GammaLS(),
             predictors=[Predictor("mean", {"x": Spline("cr", k=5)}), Predictor("scale", {})],
         ).fit_reml(frame, y, weights),
@@ -252,7 +254,7 @@ def weighted_fits():
     sigma = np.exp(-0.5 + 0.3 * x)
     y = location + sigma / np.sqrt(weights) * rng.standard_normal(len(x))
     fits["gaussian"] = (
-        SuperLSS(
+        model_from_templates(
             family=GaussianLS(),
             predictors=[Predictor("location", {"x": Spline("cr", k=5)}), Predictor("scale", {})],
         ).fit_reml(frame, y, weights),
@@ -270,7 +272,7 @@ def weighted_fits():
     counts = rng.poisson(rate)
     y = np.where(counts > 0, rng.gamma(shape * np.maximum(counts, 1), scale), 0.0)
     fits["tweedie"] = (
-        SuperLSS(
+        model_from_templates(
             family=TweedieLSS(),
             predictors=[
                 Predictor("mean", {"x": Spline("cr", k=5)}),
@@ -291,7 +293,7 @@ def weighted_fits():
 
 
 def test_an_unfitted_model_refuses_every_inference_method():
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[Predictor("location", {}), Predictor("scale", {})],
     )
@@ -572,7 +574,7 @@ def test_plot_refuses_a_parameter_with_no_plottable_term(case, flat_model):
         flat_model.plot(parameter="scale", n_sim=64)
     only_location = flat_model.plot(n_sim=64)
     assert set(only_location) == {"location"}
-    flat = SuperLSS(
+    flat = model_from_templates(
         family=GaussianLS(),
         predictors=[Predictor("location", {}), Predictor("scale", {})],
     ).fit_reml(frame, y)
@@ -691,7 +693,7 @@ def test_a_prior_weight_also_weighs_the_spread_table(weighted_fits):
 
 def test_a_frequency_weight_is_not_a_row_law(case):
     _, frame, y = case
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[Predictor("location", {"x": Spline("cr", k=5)}), Predictor("scale", {})],
         weight_semantics="frequency",

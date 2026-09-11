@@ -66,13 +66,19 @@ def main():
         if args.scenario == "constant"
         else NUMS + CATS
     )
+    from superglm.distributional.binding import _bind_predictor_template
+
+    bound_family = GammaLS()
     model = SuperLSS(
-        family=GammaLS(),
+        bound_family,
+        *(
+            _bind_predictor_template(bound_family, predictor)
+            for predictor in [
+                Predictor("mean", specifications(NUMS + CATS)),
+                Predictor("scale", specifications(scale_names)),
+            ]
+        ),
         coefficient_curvature="observed",
-        predictors=[
-            Predictor("mean", specifications(NUMS + CATS)),
-            Predictor("scale", specifications(scale_names)),
-        ],
         discrete=args.discrete,
     )
     source = Path(superglm.__file__).resolve()

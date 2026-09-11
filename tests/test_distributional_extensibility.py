@@ -17,6 +17,7 @@ from superglm.distributional import (
     UnsupportedLikelihoodContractError,
 )
 from superglm.links import IdentityLink
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _spec(name: str) -> ParameterSpec:
@@ -119,7 +120,7 @@ class _FourParameterFamily:
 def _fitted_four_parameter_model() -> tuple[SuperLSS, pd.DataFrame, np.ndarray]:
     frame = pd.DataFrame({"row": np.linspace(-1.0, 1.0, 12)})
     response = np.linspace(-0.8, 1.2, len(frame))
-    model = SuperLSS(
+    model = model_from_templates(
         family=_FourParameterFamily(),
         predictors=tuple(Predictor(name, {}) for name in ("a", "b", "c", "d")),
     ).fit(frame, response, lambdas={})

@@ -26,6 +26,7 @@ from superglm.distributional.timing import FitPhaseRecorder, FitPhaseSnapshot
 from superglm.distributional.weights import WeightContract
 from superglm.features import Numeric, RandomEffect, Spline
 from superglm.types import LambdaPolicy
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +38,7 @@ def profiled_face_fit() -> tuple[SuperLSS, FitPhaseSnapshot]:
     response = 0.4 + 0.006 * x + np.exp(-1.2 + 0.003 * z) * sign
     ticks = itertools.count()
     recorder = FitPhaseRecorder(clock=lambda: next(ticks) * 0.001)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=0.0),
         predictors=(
             Predictor("location", {"x": Spline(kind="cr", k=3)}),
@@ -57,7 +58,7 @@ def profiled_face_fit() -> tuple[SuperLSS, FitPhaseSnapshot]:
 
 
 def _fixed_model() -> SuperLSS:
-    return SuperLSS(
+    return model_from_templates(
         family=GaussianLS(scale_floor=0.01),
         predictors=(
             Predictor("location", {"x": Numeric()}),
@@ -180,7 +181,7 @@ def test_profile_does_not_call_a_fixed_lambda_a_search_boundary() -> None:
     z = np.tile(np.repeat(levels, 2), 3)
     sign = np.tile(np.array([-1.0, 1.0]), 9)
     response = 0.4 + 0.006 * x + np.exp(-1.2 + 0.003 * z) * sign
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=0.0),
         predictors=(
             Predictor(

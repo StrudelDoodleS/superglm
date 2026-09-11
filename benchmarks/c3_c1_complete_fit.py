@@ -172,7 +172,19 @@ def gaussian_fragmented_fixture(n, knots):
         "spline_terms": 2,
         "grouped_curve": {"basis": "spline-by-categorical", "levels": 3},
     }
-    return SuperLSS(family=GaussianLS(), predictors=predictors), frame, y, holdout, provenance
+    from superglm.distributional.binding import _bind_predictor_template
+
+    bound_family = GaussianLS()
+    return (
+        SuperLSS(
+            bound_family,
+            *(_bind_predictor_template(bound_family, predictor) for predictor in predictors),
+        ),
+        frame,
+        y,
+        holdout,
+        provenance,
+    )
 
 
 def data_fixture(args):
@@ -235,14 +247,22 @@ def data_fixture(args):
             np.sin(5 * x) * (1 + g / args.levels) + np.exp(-0.5 + 0.2 * x) * rng.normal(size=len(x))
         )[:n]
         frame, holdout, weight = all_frame.iloc[:n].copy(), all_frame.iloc[n:].copy(), None
+        from superglm.distributional.binding import _bind_predictor_template
+
+        bound_family = GaussianLS()
         model = SuperLSS(
-            family=GaussianLS(),
-            predictors=[
-                Predictor(
-                    p, {"x": Spline(n_knots=knots), "g": Categorical()}, interactions=[("x", "g")]
-                )
-                for p in (parameter.name for parameter in GaussianLS().parameters)
-            ],
+            bound_family,
+            *(
+                _bind_predictor_template(bound_family, predictor)
+                for predictor in [
+                    Predictor(
+                        p,
+                        {"x": Spline(n_knots=knots), "g": Categorical()},
+                        interactions=[("x", "g")],
+                    )
+                    for p in (parameter.name for parameter in GaussianLS().parameters)
+                ]
+            ),
         )
         provenance.update(seed=9507, levels=args.levels)
     else:
@@ -284,12 +304,18 @@ def data_fixture(args):
         frame = frame[["DrivAge", "VehAge", "BonusMalus"]]
         holdout = holdout[frame.columns]
         weight = None
+        from superglm.distributional.binding import _bind_predictor_template
+
+        bound_family = family
         model = SuperLSS(
-            family=family,
-            predictors=[
-                Predictor(p.name, {name: Spline(n_knots=knots) for name in frame.columns})
-                for p in family.parameters
-            ],
+            bound_family,
+            *(
+                _bind_predictor_template(bound_family, predictor)
+                for predictor in [
+                    Predictor(p.name, {name: Spline(n_knots=knots) for name in frame.columns})
+                    for p in family.parameters
+                ]
+            ),
         )
         provenance.update(
             covariate_clips={"DrivAge": [18, 90], "VehAge": [0, 20], "BonusMalus": [50, 150]},
@@ -322,8 +348,14 @@ def data_fixture(args):
                     args.support_size - 1
                 )
         provenance["finite_support"] = args.support_size
+    from superglm.distributional.binding import _bind_predictor_template
+
+    bound_family = model.family
     model = SuperLSS(
-        family=model.family, predictors=model.predictors, discrete=args.discrete, n_bins=args.n_bins
+        bound_family,
+        *(_bind_predictor_template(bound_family, predictor) for predictor in model.predictors),
+        discrete=args.discrete,
+        n_bins=args.n_bins,
     )
     return model, frame, np.asarray(y), weight, offsets, holdout, holdout_offsets, provenance
 

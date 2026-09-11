@@ -8,6 +8,7 @@ import pandas as pd
 from superglm import SuperLSS
 from superglm.distributional import NegativeBinomialLS, Predictor
 from superglm.features import Numeric
+from tests.bound_predictor_fixtures import model_from_templates
 
 _INNER_TOLERANCE = 1.0e-8
 
@@ -38,7 +39,7 @@ def _fixture(
 
 
 def _model() -> SuperLSS:
-    return SuperLSS(
+    return model_from_templates(
         family=NegativeBinomialLS(),
         predictors=(
             Predictor("mean", {"x_mean": Numeric()}),

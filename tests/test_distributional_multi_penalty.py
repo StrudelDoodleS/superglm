@@ -26,6 +26,7 @@ from tests._gaussian_lss_oracles import (
     _gradient_roundoff,
     coefficient_oracle,
 )
+from tests.bound_predictor_fixtures import model_from_templates
 from tests.test_distributional_endpoint_laml import (
     _axis_aligned_projected_face,
     _projected_penalty_problem,
@@ -141,7 +142,9 @@ def _public_fit(kind, discrete, rho=(0.0, 0.0), origin=None):
     weights = _weights(kind) if origin is None else dict(origin)
     for name, step in zip(tuple(weights)[:2], rho, strict=True):
         weights[name] *= math.exp(step)
-    model = SuperLSS(family=family, predictors=predictors, discrete=discrete, n_bins=512)
+    model = model_from_templates(
+        family=family, predictors=predictors, discrete=discrete, n_bins=512
+    )
     model.fit(frame, y, lambdas=weights, max_inner_iter=150, inner_tol=1e-10)
     return model
 
@@ -544,9 +547,9 @@ def test_public_shared_penalty_row_order_and_chunk_boundaries(kind, monkeypatch)
 
     monkeypatch.setattr(chunks, "_resolve_fitting_chunk_size", small_chunks)
     monkeypatch.setattr(chunks, "iter_row_chunks", record_chunks)
-    reordered = SuperLSS(family=family, predictors=predictors, discrete=True, n_bins=512).fit(
-        frame.iloc[order], y[order], lambdas=_weights(kind), max_inner_iter=150, inner_tol=1e-10
-    )
+    reordered = model_from_templates(
+        family=family, predictors=predictors, discrete=True, n_bins=512
+    ).fit(frame.iloc[order], y[order], lambdas=_weights(kind), max_inner_iter=150, inner_tol=1e-10)
     oracle = _independent_mode(reordered, kind)
     assert observed_bounds and max(observed_bounds) <= 37
     assert reordered._require_fitted().fit_state.solver_result.resolved_chunk_size == 37
@@ -702,7 +705,7 @@ def test_public_reml_shared_penalty_mode_has_an_independent_local_profile(outer)
         + np.exp(-0.4 + 0.35 * x + 0.3 * np.cos(np.pi * x))
         * np.random.default_rng(248).normal(size=x.size)
     )
-    model = SuperLSS(family=family, predictors=predictors).fit_reml(
+    model = model_from_templates(family=family, predictors=predictors).fit_reml(
         frame,
         y,
         lambdas=_weights("gaussian"),
@@ -724,7 +727,7 @@ def test_public_reml_shared_penalty_mode_has_an_independent_local_profile(outer)
         weights = dict(state.lambdas)
         for name, step in zip(tuple(weights)[:2], delta, strict=True):
             weights[name] *= math.exp(step)
-        fitted = SuperLSS(family=family, predictors=predictors).fit(
+        fitted = model_from_templates(family=family, predictors=predictors).fit(
             frame, y, lambdas=weights, max_inner_iter=150, inner_tol=1e-10
         )
         return _independent_mode(fitted, "gaussian")

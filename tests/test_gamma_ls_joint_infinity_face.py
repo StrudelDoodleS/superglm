@@ -27,6 +27,7 @@ from superglm.distributional.result import (
     JointEndpointDirectionEvidence,
 )
 from superglm.reml.penalty_algebra import penalty_component_dense_matrix
+from tests.bound_predictor_fixtures import model_from_templates
 
 _FACE_COMPONENTS = ("mean:x#wiggle", "mean:z#wiggle")
 _FINITE_COMPONENT = "mean:w#wiggle"
@@ -76,7 +77,7 @@ def _fit_public_gamma_joint_face(
     maximum_lambda = DistributionalEFSConfig().maximum_lambda
     # The scenario (a cap fit that is not stationary to solver tolerance) arises under
     # Fisher scoring; observed Newton converges the cap fit to round-off.
-    return SuperLSS(
+    return model_from_templates(
         family=GammaLS(),
         coefficient_curvature="fisher",
         predictors=(
