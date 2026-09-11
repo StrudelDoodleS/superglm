@@ -15,7 +15,7 @@ from superglm.group_matrix import SparseSSPGroupMatrix
 def _group(rows, width, *, full):
     basis = (1 + np.arange(rows * width).reshape(rows, width) % 11) / 16.0
     if not full:
-        basis[::2, 0] = 0.0
+        basis[::3, 0] = 0.0
     return SparseSSPGroupMatrix(sp.csr_matrix(basis), np.eye(width))
 
 
@@ -63,6 +63,34 @@ def test_large_saturated_gram_bounds_scratch_and_keeps_blas(monkeypatch, full, i
     else:
         assert len(rendered) > 1
         assert all(rows < group.shape[0] and rows * width * 8 <= budget for rows, width in rendered)
+
+
+@pytest.mark.parametrize("full", [True, False], ids=["dense_view", "dense_copy"])
+def test_numerical_fixture_dispatches_to_blocked_dense_gram(monkeypatch, full):
+    group = _group(31, 5, full=full)
+    weights = np.linspace(-0.5, 1.0, 31)
+    monkeypatch.setattr(core, "_MAX_SSP_GRAM_WORKSPACE_BYTES", 256)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("the numerical fixture must exercise saturated dense products")
+
+    monkeypatch.setattr(core, "_csr_weighted_gram", forbidden)
+    monkeypatch.setattr(core, "_exact_ssp_moments", forbidden)
+    original = sp.csr_matrix.toarray
+    rendered = []
+
+    def record_render(matrix, *args, **kwargs):
+        rendered.append(matrix.shape)
+        return original(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(sp.csr_matrix, "toarray", record_render)
+    group.gram(weights)
+    if full:
+        assert rendered == []
+    else:
+        assert len(rendered) > 1
+        assert sum(rows for rows, _ in rendered) == group.shape[0]
+        assert all(rows < group.shape[0] and width == group._p_b for rows, width in rendered)
 
 
 def _assert_exact_factor_target(group, weights, actual):

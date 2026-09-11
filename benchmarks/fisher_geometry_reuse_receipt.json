@@ -1,0 +1,152 @@
+{
+  "scope": "Private explicit-Fisher observed-geometry handoff; ordinary public fit is a no-regression control, boundary reuse is verified by focused tests",
+  "rows": 2000,
+  "predictors": "GaussianLS location~1+x, scale~1+z; Numeric; x=linspace(-1,1,N), z=cos(linspace(0,2*pi,N))",
+  "response": "0.4+0.8*x+default_rng(2077).normal(scale=0.25+0.08*(z+1),size=N)",
+  "tolerance": 1e-12,
+  "baseline_commit": "b59e5f1f81b1717f903b4d38e943f763b9b7babc",
+  "candidate_solver_sha256": "cf63db0138b596015a3a6c618970be5de06c76c2052a7d1903fc0415976f64ce",
+  "all_outputs_and_histories_equal": true,
+  "native_threads": 1,
+  "run_order": "three alternating fresh-process timing pairs, separate dispatch and profile pairs; one untimed same-fixture warmup in each process",
+  "driver_path": ".superpowers/sdd/2026-09-11-fable-followup/fisher_complete_fit.py",
+  "driver_sha256": "a2318237a9b7974194d2f507a6b52f35090394533136f6931149ec5cdba65263",
+  "raw_summary_path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-comparison-summary.json",
+  "raw_summary_sha256": "306cdd8a974d6cb9fb7915dbba6c647b37d725e828c94b2296911c72902ae32c",
+  "sides": {
+    "baseline": {
+      "source_digest": "a503a0e4b2b67bf03a564d802cc67ad35ae0bf363cd1c7b2391fc6c5982c082b",
+      "timing_seconds": [
+        0.025495477952063084,
+        0.025053626974113286,
+        0.031099249026738107
+      ],
+      "cpu_seconds": [
+        0.025480792000000196,
+        0.025040431999999946,
+        0.031085390999999962
+      ],
+      "process_peak_rss_mib": [
+        336.75,
+        336.63671875,
+        336.68359375
+      ],
+      "median_wall_seconds": 0.025495477952063084,
+      "median_cpu_seconds": 0.025480792000000196,
+      "median_peak_rss_mib": 336.68359375,
+      "observed_geometry_calls": 2,
+      "fisher_geometry_calls": 16,
+      "interpretation": "One observed geometry for fitted model and one for null model; no duplicate is removed on this ordinary fixture. Timing spread exceeds median difference; no speedup claim.",
+      "profiles": [
+        {
+          "function": "_objective_and_step_is_certified",
+          "calls": 1,
+          "self_seconds": 7.01e-07,
+          "cumulative_seconds": 7.01e-07
+        },
+        {
+          "function": "_geometry",
+          "calls": 18,
+          "self_seconds": 4.1492e-05,
+          "cumulative_seconds": 0.004663125000000001
+        },
+        {
+          "function": "_measured_geometry",
+          "calls": 18,
+          "self_seconds": 4.9926e-05,
+          "cumulative_seconds": 0.0049842440000000005
+        }
+      ],
+      "raw_receipts": [
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-baseline-timing-1.json",
+          "sha256": "3c758159a81d64690d952f37485cba7fb8b3552e1832fcc989ef45f12e76d5e6"
+        },
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-baseline-timing-2.json",
+          "sha256": "d25648ded937bcf1cea171fdc1701b41627e30b0b1cf988e5526e08fa1189ebb"
+        },
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-baseline-timing-3.json",
+          "sha256": "8231569da90a3f339be527e9e54a84214df6147e58cfdf0f2aba172b44274973"
+        },
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-baseline-dispatch-1.json",
+          "sha256": "caf9349da46a3f92eb650d79232813eb100f0448d09cb3a7dc704cf5d6b9792f"
+        },
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-baseline-profile-1.json",
+          "sha256": "b5a1897990f9cb8dfe1948f0249778ff0cb7d7533f81913728fe1cac5a3b9257",
+          "profile_sha256": "bd5f07016cd60472932ec7367e892e547fc1627507d7ebc2dcbab7ac0516a990"
+        }
+      ]
+    },
+    "candidate": {
+      "source_digest": "8a47811b8bdcc1b8fc7082cd1b9f8a8f4a1a36d9c6196933e5fc78371da5d1ce",
+      "timing_seconds": [
+        0.03482953499769792,
+        0.02428046998102218,
+        0.0250423300312832
+      ],
+      "cpu_seconds": [
+        0.03476449199999987,
+        0.02426533899999983,
+        0.024801113000000097
+      ],
+      "process_peak_rss_mib": [
+        336.8515625,
+        336.80078125,
+        336.7421875
+      ],
+      "median_wall_seconds": 0.0250423300312832,
+      "median_cpu_seconds": 0.024801113000000097,
+      "median_peak_rss_mib": 336.80078125,
+      "observed_geometry_calls": 2,
+      "fisher_geometry_calls": 16,
+      "interpretation": "One observed geometry for fitted model and one for null model; no duplicate is removed on this ordinary fixture. Timing spread exceeds median difference; no speedup claim.",
+      "profiles": [
+        {
+          "function": "_objective_and_step_is_certified",
+          "calls": 1,
+          "self_seconds": 5.41e-07,
+          "cumulative_seconds": 5.41e-07
+        },
+        {
+          "function": "_geometry",
+          "calls": 18,
+          "self_seconds": 5.8137e-05,
+          "cumulative_seconds": 0.005020544
+        },
+        {
+          "function": "_measured_geometry",
+          "calls": 18,
+          "self_seconds": 5.9859000000000004e-05,
+          "cumulative_seconds": 0.005346791
+        }
+      ],
+      "raw_receipts": [
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-candidate-timing-1.json",
+          "sha256": "871f5bf0206af9ca5dad1f19ad2a71d8a1dca7dfc18d1ade2e8a6fbad5cb41e8"
+        },
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-candidate-timing-2.json",
+          "sha256": "79f46957694091427604b0bdbda77a09370b6c6f64100073fcbc9cbf77d43c6a"
+        },
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-candidate-timing-3.json",
+          "sha256": "ef32df708185b3e9bd808382e9ce6d9cf4bd58a7d83c33d624e6425c0d66dea3"
+        },
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-candidate-dispatch-1.json",
+          "sha256": "d83e142c6f7289aae91f4754306f95a0e9f14d47b0fc3e92df51ff14ceec1e55"
+        },
+        {
+          "path": ".superpowers/sdd/2026-09-11-fable-followup/fisher-candidate-profile-1.json",
+          "sha256": "3d7c34dc1c5d6256febb439143dda7742dd0cd5690c945e943301319b6c4fe22",
+          "profile_sha256": "cadf18fae804500ae91a286252f2b1f42970bcc5b30e3e7a97a5faa77e738533"
+        }
+      ]
+    }
+  }
+}
