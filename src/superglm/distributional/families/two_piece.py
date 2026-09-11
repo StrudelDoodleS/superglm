@@ -18,6 +18,12 @@ from superglm.distributional.families._base import (
     validated_float_response,
 )
 from superglm.distributional.families._links import BoundedLogitLink
+from superglm.distributional.families._predictors import (
+    LocationPredictor,
+    MeanPredictor,
+    ScalePredictor,
+    SkewPredictor,
+)
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -217,7 +223,7 @@ def _scale_and_skew_specs(scale_floor: float, skew_bound: float) -> tuple[Parame
 
 
 @dataclass(frozen=True)
-class TwoPieceLogNormalLSS:
+class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, SkewPredictor):
     """Two-piece log-normal with natural parameters ``(mean | location, scale, skew)``.
 
     ``log Y = mu + sigma W`` with ``W`` epsilon-skew two-piece standard normal;
@@ -449,7 +455,7 @@ class TwoPieceLogNormalLSS:
 
 
 @dataclass(frozen=True)
-class TwoPieceNormalLSS:
+class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     """Epsilon-skew two-piece normal on the real line, ``(location, scale, skew)``.
 
     The same kernel as ``TwoPieceLogNormalLSS`` with the identity variate and

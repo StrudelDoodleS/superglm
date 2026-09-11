@@ -18,6 +18,7 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import TweediePredictors
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -565,7 +566,7 @@ def _validated_plan(plan: FamilyLikelihoodPlan, *, n_observations: int) -> Tweed
 
 
 @dataclass(frozen=True)
-class TweedieLSS:
+class TweedieLSS(TweediePredictors):
     """Three-parameter normalized Tweedie family on configured interior walls."""
 
     power_lower: float = 1.05

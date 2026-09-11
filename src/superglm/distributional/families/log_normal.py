@@ -17,6 +17,11 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import (
+    LocationPredictor,
+    MeanPredictor,
+    ScalePredictor,
+)
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
@@ -161,7 +166,7 @@ class LogNormalLikelihoodPlan:
 
 
 @dataclass(frozen=True)
-class LogNormalLS:
+class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     """Log-normal with natural parameters ``(mean | location, scale)``.
 
     ``log Y ~ N(mu, sigma^2)`` on ``y > 0``.  The default mean form puts
