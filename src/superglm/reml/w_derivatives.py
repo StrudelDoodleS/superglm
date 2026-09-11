@@ -561,7 +561,9 @@ def reml_w_correction(
                 total=system.sum_w,
                 center=mean_x,
             )
-        if stable_gram_rhs is not None:
+        if use_stable_signed_gram:
+            if stable_gram_rhs is None:  # pragma: no cover - serial calls exclude batching
+                raise RuntimeError("Stable signed Gram reached the serial route while batching.")
             result, _ = centered_gram_rhs(
                 dm=dm,
                 W=row_weights,
