@@ -22,6 +22,8 @@ source, output hashes and fresh complete fits. The million-row pair takes
 Historical row buffers remain 256 versus 128 MiB. Three dense pairs have median
 times of 2.292 versus 2.397 seconds, an observed 4.59% increase, and median peak
 RSS of 612.10 versus 608.30 MiB. This does not establish unchanged dense latency.
+Three pairs do not separate that cost from run-to-run variation. The profile
+does not attribute the difference to compaction, so its cause remains unproven.
 All saved arrays, numerical histories, phase counts and backends match exactly.
 No speedup is claimed.
 

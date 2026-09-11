@@ -1023,7 +1023,9 @@ plateau checks retain real rows. For debugging, pass
 `DistributionalEFSConfig`, to keep every historical fit's arrays. The separate
 `retain_rows` option still controls final row diagnostics and defaults to
 `True`. Rowless historical fits expose `eta=None`, `theta=None`, and their
-original `row_shape`. Memory still grows with row count, predictor count and
+original `row_shape`. When using `dataclasses.replace` to give a solver result
+new `eta` and `theta` arrays with a different shape, also pass
+`row_shape=eta.shape`. Memory still grows with row count, predictor count and
 coefficient-space history. Report complete-fit memory and actual backend
 dispatch for the intended model. Practical plateaus,
 strict stationarity, unresolved caps and curvature refusals retain the same
