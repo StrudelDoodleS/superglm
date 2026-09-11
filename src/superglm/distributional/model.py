@@ -11,7 +11,6 @@ from numpy.typing import NDArray
 
 from superglm._blas_threads import allow_wide_design
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
-from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     ChunkPreparedLikelihoodFamily,
@@ -19,6 +18,7 @@ from superglm.distributional.family import (
     DistributionalFamily,
     DistributionFunctionFamily,
     FamilyLikelihoodPlan,
+    _likelihood_reuse_contract,
 )
 from superglm.distributional.fit_state import (
     CompactNullModel,
@@ -496,10 +496,12 @@ def _fit_candidate(
     retained_y = np.array(original_y[positions], copy=True)
     retained_offsets = _take_unvalidated_offsets(original_offsets, positions)
     # Inherited capability must not bypass a custom family's ordinary binder.
+    preparation_contract = _likelihood_reuse_contract(family)
     bind = (
         family.bind_chunked_likelihood
         if chunk_size is not None
-        and type(family) is GaussianLS
+        and preparation_contract is not None
+        and preparation_contract.derived_prepared_fields
         and isinstance(family, ChunkPreparedLikelihoodFamily)
         else family.bind_likelihood
     )

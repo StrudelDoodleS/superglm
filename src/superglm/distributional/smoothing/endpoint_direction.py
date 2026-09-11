@@ -21,12 +21,18 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from superglm.distributional.family import DistributionalFamily, FamilyLikelihoodPlan
+from superglm.distributional.family import (
+    DistributionalFamily,
+    FamilyLikelihoodPlan,
+    _likelihood_reuse_contract,
+    _prepared_field_modes,
+)
 from superglm.distributional.solver.derivatives import transform_natural_derivatives
 from superglm.links import Link
 
 FINITE_DIFFERENCE_AUTHORITY = "finite-difference-curvature-direction/v1"
 DEFAULT_STEP = 1.0e-3
+_CURVATURE_CHUNK_ROWS = 8192
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,45 @@ def _theta_from_eta(eta: NDArray[np.float64], links: Sequence[Link]) -> NDArray[
 
 
 def _curvature_packed(
+    family: DistributionalFamily,
+    y: NDArray,
+    eta: NDArray[np.float64],
+    links: Sequence[Link],
+    plan: FamilyLikelihoodPlan,
+) -> NDArray[np.float64]:
+    contract = _likelihood_reuse_contract(family)
+    modes = (
+        _prepared_field_modes(plan, contract)
+        if contract is not None and type(plan) is contract.plan_type
+        else None
+    )
+    if modes is not None and any(mode != "stored" for _, mode in modes):
+        # Derived roots deliberately have no row carrier. Inspect their exact
+        # declared mode on every call and derive fresh owned children; there
+        # is no cache or repeated whole-root certification inside this loop.
+        response = np.asarray(y)
+        if (
+            eta.ndim != 2
+            or eta.shape[1] != len(links)
+            or len(eta) == 0
+            or response.shape != (len(eta),)
+            or plan.weights.values.shape != (len(eta),)
+        ):
+            raise ValueError("response, predictor and likelihood rows must agree")
+        channels = len(links) * (len(links) + 1) // 2
+        result = np.empty((len(eta), channels), dtype=np.float64)
+        for start in range(0, len(eta), _CURVATURE_CHUNK_ROWS):
+            stop = min(start + _CURVATURE_CHUNK_ROWS, len(eta))
+            child = plan.take(np.arange(start, stop, dtype=np.intp))
+            result[start:stop] = _evaluated_curvature_packed(
+                family, response[start:stop], eta[start:stop], links, child
+            )
+            del child
+        return result
+    return _evaluated_curvature_packed(family, y, eta, links, plan)
+
+
+def _evaluated_curvature_packed(
     family: DistributionalFamily,
     y: NDArray,
     eta: NDArray[np.float64],

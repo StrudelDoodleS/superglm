@@ -1,0 +1,462 @@
+{
+  "scope": "Small frequency-weighted Gaussian discrete efs+newton full-fit control; all samples retained, no speedup claim. Standard public warmup is outside the fit clock. The first pair has a higher process peak than subsequent runs.",
+  "baseline_commit": "141497cfd3117e6d6d4864e90f424babdaa98c16",
+  "baseline_source_sha256": "f6e86bd799c1e90653cfaf5839f9adf5a7b6acc70618a3dd8092cbc85982c668",
+  "candidate_source_sha256": "cb5b5ba7cfab92c0cbb54633ab4d274843a191a16d2e22dcc2b290225d675385",
+  "driver_sha256": "c1d1a312e0737ae37f8091511b57580b01cb6da1aac691e193686ccadd3dbe70",
+  "fixture_sha256": "1745df7878dc728b72afc725c44930f7c9913b25e20b35f00f800dbe893f8286",
+  "input_sha256": "352b4c45bf8303a4dd3ae49fd1fd0464d5faa3b2419a352a7e4595d38c6c8f91",
+  "rows": 384,
+  "samples": {
+    "baseline": [
+      {
+        "fit_seconds": 0.28323994000675157,
+        "fit_cpu_seconds": 0.28317604700000043,
+        "peak_process_rss_bytes": 643993600,
+        "source_stable": true,
+        "iterations": [
+          5,
+          5,
+          3,
+          2,
+          1
+        ],
+        "backends": [
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1"
+        ]
+      },
+      {
+        "fit_seconds": 0.28654093702789396,
+        "fit_cpu_seconds": 0.2863953669999999,
+        "peak_process_rss_bytes": 448610304,
+        "source_stable": true,
+        "iterations": [
+          5,
+          5,
+          3,
+          2,
+          1
+        ],
+        "backends": [
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1"
+        ]
+      },
+      {
+        "fit_seconds": 0.30295245203888044,
+        "fit_cpu_seconds": 0.30270690300000025,
+        "peak_process_rss_bytes": 449028096,
+        "source_stable": true,
+        "iterations": [
+          5,
+          5,
+          3,
+          2,
+          1
+        ],
+        "backends": [
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1"
+        ]
+      }
+    ],
+    "candidate": [
+      {
+        "fit_seconds": 0.5293490900075994,
+        "fit_cpu_seconds": 0.5286245369999989,
+        "peak_process_rss_bytes": 757837824,
+        "source_stable": true,
+        "iterations": [
+          5,
+          5,
+          3,
+          2,
+          1
+        ],
+        "backends": [
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1"
+        ]
+      },
+      {
+        "fit_seconds": 0.2815833800123073,
+        "fit_cpu_seconds": 0.2808497270000001,
+        "peak_process_rss_bytes": 449060864,
+        "source_stable": true,
+        "iterations": [
+          5,
+          5,
+          3,
+          2,
+          1
+        ],
+        "backends": [
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1"
+        ]
+      },
+      {
+        "fit_seconds": 0.2462395720067434,
+        "fit_cpu_seconds": 0.24603200300000028,
+        "peak_process_rss_bytes": 448974848,
+        "source_stable": true,
+        "iterations": [
+          5,
+          5,
+          3,
+          2,
+          1
+        ],
+        "backends": [
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1",
+          "distributional-chunked-v1"
+        ]
+      }
+    ]
+  },
+  "median_fit_seconds": {
+    "baseline": 0.28654093702789396,
+    "candidate": 0.2815833800123073
+  },
+  "comparisons": [
+    {
+      "file": "gaussian-newton-baseline-1.json",
+      "source_stable": true,
+      "inputs_equal": true,
+      "outputs_exact": true,
+      "history_exact": true,
+      "iterations_exact": true,
+      "backends_exact": true,
+      "arrays": {
+        "covariance": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        },
+        "predictions": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    },
+    {
+      "file": "gaussian-newton-baseline-2.json",
+      "source_stable": true,
+      "inputs_equal": true,
+      "outputs_exact": true,
+      "history_exact": true,
+      "iterations_exact": true,
+      "backends_exact": true,
+      "arrays": {
+        "covariance": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        },
+        "predictions": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    },
+    {
+      "file": "gaussian-newton-baseline-3.json",
+      "source_stable": true,
+      "inputs_equal": true,
+      "outputs_exact": true,
+      "history_exact": true,
+      "iterations_exact": true,
+      "backends_exact": true,
+      "arrays": {
+        "covariance": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        },
+        "predictions": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    },
+    {
+      "file": "gaussian-newton-baseline-profile.json",
+      "source_stable": true,
+      "inputs_equal": true,
+      "outputs_exact": true,
+      "history_exact": true,
+      "iterations_exact": true,
+      "backends_exact": true,
+      "arrays": {
+        "covariance": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        },
+        "predictions": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    },
+    {
+      "file": "gaussian-newton-candidate-1.json",
+      "source_stable": true,
+      "inputs_equal": true,
+      "outputs_exact": true,
+      "history_exact": true,
+      "iterations_exact": true,
+      "backends_exact": true,
+      "arrays": {
+        "covariance": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        },
+        "predictions": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    },
+    {
+      "file": "gaussian-newton-candidate-2.json",
+      "source_stable": true,
+      "inputs_equal": true,
+      "outputs_exact": true,
+      "history_exact": true,
+      "iterations_exact": true,
+      "backends_exact": true,
+      "arrays": {
+        "covariance": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        },
+        "predictions": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    },
+    {
+      "file": "gaussian-newton-candidate-3.json",
+      "source_stable": true,
+      "inputs_equal": true,
+      "outputs_exact": true,
+      "history_exact": true,
+      "iterations_exact": true,
+      "backends_exact": true,
+      "arrays": {
+        "covariance": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        },
+        "predictions": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    },
+    {
+      "file": "gaussian-newton-candidate-profile.json",
+      "source_stable": true,
+      "inputs_equal": true,
+      "outputs_exact": true,
+      "history_exact": true,
+      "iterations_exact": true,
+      "backends_exact": true,
+      "arrays": {
+        "covariance": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        },
+        "predictions": {
+          "exact": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    }
+  ],
+  "profile_calls": {
+    "baseline": [
+      {
+        "file": "superglm/distributional/families/gaussian.py",
+        "line": 296,
+        "name": "bind_likelihood",
+        "calls": 1,
+        "self_seconds": 1.88e-05,
+        "cumulative_seconds": 0.00012417300000000002
+      },
+      {
+        "file": "superglm/distributional/weights.py",
+        "line": 113,
+        "name": "take",
+        "calls": 13,
+        "self_seconds": 0.000139168,
+        "cumulative_seconds": 0.0015365770000000001
+      },
+      {
+        "file": "superglm/distributional/families/gaussian.py",
+        "line": 346,
+        "name": "evaluate_natural",
+        "calls": 250,
+        "self_seconds": 0.002420289,
+        "cumulative_seconds": 0.084358185
+      },
+      {
+        "file": "superglm/distributional/smoothing/endpoint_direction.py",
+        "line": 70,
+        "name": "_curvature_packed",
+        "calls": 13,
+        "self_seconds": 7.319000000000001e-05,
+        "cumulative_seconds": 0.006832076
+      },
+      {
+        "file": "superglm/distributional/solver/_likelihood_cache.py",
+        "line": 293,
+        "name": "take",
+        "calls": 234,
+        "self_seconds": 0.001070568,
+        "cumulative_seconds": 0.070578
+      },
+      {
+        "file": "superglm/distributional/families/gaussian.py",
+        "line": 231,
+        "name": "take",
+        "calls": 13,
+        "self_seconds": 4.8962e-05,
+        "cumulative_seconds": 0.002187324
+      }
+    ],
+    "candidate": [
+      {
+        "file": "superglm/distributional/families/gaussian.py",
+        "line": 424,
+        "name": "evaluate_natural",
+        "calls": 250,
+        "self_seconds": 0.002763775,
+        "cumulative_seconds": 0.085609131
+      },
+      {
+        "file": "superglm/distributional/weights.py",
+        "line": 113,
+        "name": "take",
+        "calls": 26,
+        "self_seconds": 0.00035555300000000004,
+        "cumulative_seconds": 0.003319348
+      },
+      {
+        "file": "superglm/distributional/solver/_likelihood_cache.py",
+        "line": 298,
+        "name": "take",
+        "calls": 234,
+        "self_seconds": 0.001231602,
+        "cumulative_seconds": 0.066801156
+      },
+      {
+        "file": "superglm/distributional/smoothing/endpoint_direction.py",
+        "line": 76,
+        "name": "_curvature_packed",
+        "calls": 13,
+        "self_seconds": 0.00023728400000000001,
+        "cumulative_seconds": 0.010635301000000002
+      },
+      {
+        "file": "superglm/distributional/smoothing/endpoint_direction.py",
+        "line": 115,
+        "name": "_evaluated_curvature_packed",
+        "calls": 13,
+        "self_seconds": 9.3787e-05,
+        "cumulative_seconds": 0.008280338
+      },
+      {
+        "file": "superglm/distributional/families/gaussian.py",
+        "line": 353,
+        "name": "bind_likelihood",
+        "calls": 1,
+        "self_seconds": 2.384e-06,
+        "cumulative_seconds": 0.0001026
+      },
+      {
+        "file": "superglm/distributional/families/gaussian.py",
+        "line": 288,
+        "name": "take",
+        "calls": 26,
+        "self_seconds": 0.000108845,
+        "cumulative_seconds": 0.004767245000000001
+      }
+    ]
+  },
+  "native_pools": [
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+      "version": "0.3.34.0.0",
+      "threading_layer": "pthreads",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+      "version": "0.3.31.dev",
+      "threading_layer": "pthreads",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "openmp",
+      "internal_api": "openmp",
+      "num_threads": 1,
+      "prefix": "libgomp",
+      "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+      "version": null
+    },
+    {
+      "user_api": "openmp",
+      "internal_api": "openmp",
+      "num_threads": 1,
+      "prefix": "libgomp",
+      "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+      "version": null
+    }
+  ],
+  "raw_artifact_sha256": {
+    "gaussian-newton-baseline-1.json": "0c0a2499afa667502cb2573ec8805de165c5fcc58ae15501361db9cbb7989454",
+    "gaussian-newton-baseline-1.npz": "f3cff93610dc6b190d83b5e12144625595393811fdae5eeab5edeb6ba7d0fddd",
+    "gaussian-newton-baseline-2.json": "80dac355b8a418c1cfd8b85ea85787113685b6d3843038af93a537c7b3252bf1",
+    "gaussian-newton-baseline-2.npz": "f3cff93610dc6b190d83b5e12144625595393811fdae5eeab5edeb6ba7d0fddd",
+    "gaussian-newton-baseline-3.json": "8534289e4fe6e1d4247d5256db075978c0af2c9428f777710c7206c98ec86fa9",
+    "gaussian-newton-baseline-3.npz": "f3cff93610dc6b190d83b5e12144625595393811fdae5eeab5edeb6ba7d0fddd",
+    "gaussian-newton-baseline-profile.json": "f43a9aa8ff3d3bd50b43db9fbd734c2755332365ee1acdc51738da13fe13989a",
+    "gaussian-newton-baseline-profile.npz": "f3cff93610dc6b190d83b5e12144625595393811fdae5eeab5edeb6ba7d0fddd",
+    "gaussian-newton-baseline-profile.prof": "e865366c1074ddb5a7c9f9d06061c56f336297dc4867f9861642bcadd13fe726",
+    "gaussian-newton-candidate-1.json": "b6506a2d56ebd4d6a79a1ded16de0be9c790faaf5565e06da315d3b882678a70",
+    "gaussian-newton-candidate-1.npz": "f3cff93610dc6b190d83b5e12144625595393811fdae5eeab5edeb6ba7d0fddd",
+    "gaussian-newton-candidate-2.json": "4a09c445e09f8abb85b47688a6100e6fe93e34cf0cca479c80189377f1eac6e2",
+    "gaussian-newton-candidate-2.npz": "f3cff93610dc6b190d83b5e12144625595393811fdae5eeab5edeb6ba7d0fddd",
+    "gaussian-newton-candidate-3.json": "0cc8612d85c3a05a5338dd35cb49ffadd05f639c7ea899c3cc3427bdb3a82aee",
+    "gaussian-newton-candidate-3.npz": "f3cff93610dc6b190d83b5e12144625595393811fdae5eeab5edeb6ba7d0fddd",
+    "gaussian-newton-candidate-profile.json": "4fca3ea30353f76d1c53c7e36a8da831613b7d807f2fb0573a4c0cfd168920bc",
+    "gaussian-newton-candidate-profile.npz": "f3cff93610dc6b190d83b5e12144625595393811fdae5eeab5edeb6ba7d0fddd",
+    "gaussian-newton-candidate-profile.prof": "0d79a31d8b56d9be43e7281c8bfbfae7ae55bdbc6e4113d572349b70574e6d69"
+  }
+}
