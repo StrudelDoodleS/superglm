@@ -1,5 +1,14 @@
 # Discrete execution performance plan
 
+**Scope correction, 2026-09-11:** the user separated 100-million-row/out-of-core
+support from the current C1 closeout for the 0.32 release target. The storage,
+compiler and solver expansion below is deferred. The current 10-million-row
+model fit completes in 152.498 s at 11.055 GB peak process RSS with convergence;
+see the [model receipt](https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/c1_current_10m_receipt.json).
+The 12.5-second target remains unmet. Historical plans and measurements below
+are retained, but do not override the current
+[closeout specification](../superpowers/specs/2026-09-11-c1-closeout.md).
+
 ## Closing checkpoint: 15 seconds confirmed; 12.5 seconds open
 
 The 15-second fit target is demonstrated at `37f4ecdb`: three new fits take
@@ -1207,13 +1216,14 @@ all-pass 65,536-row follow-up and parallel-accumulator work. Audit:
    target. Do not infer that a scalar cached-W implementation transfers
    unchanged to coupled signed LSS curvature or smoothing certification.
 
-### End-to-end large-data scope
+### End-to-end large-data scope — deferred separately
 
-The user explicitly asks for true large-data GAMLSS. The working target is the
-dossier's 10^7–10^8-row range on a single machine, with a bounded coefficient
-count and mostly distinct observations. A billion rows remains a later target
-requiring measured storage, pass count and runtime evidence. This work stays
-within C1; C5 and other capabilities remain deferred.
+The following is the historical large-data plan. On 2026-09-11 the user removed
+the 100-million-row target and new out-of-core architecture from this closeout.
+The current route has now completed the 10-million-row Gaussian model, with
+the time, memory and numerical limits recorded above. No 100-million-row or
+billion-row capability is claimed. Resume that work only under the separate
+roadmap item and its own finite scope.
 
 The initial scaling fixture is the existing two-predictor Gaussian model, with
 the public Gamma book retained as a numerical/insurance control. The accelerated
@@ -1244,7 +1254,7 @@ The completed audit changes the next decision:
   prepared-family, predictor and history arrays still prevent an end-to-end
   bounded-RAM claim. Keeping `retain_rows=False` alone does not solve this.
 
-Proceed in dependency order:
+Deferred dependency plan:
 
 1. Audit retained row arrays and endpoint consumers. Design a compact internal
    coefficient endpoint plus streamed endpoint comparison/replay that retains
@@ -1267,10 +1277,11 @@ Proceed in dependency order:
    and storage traffic. Fixture construction and requested output materialization
    have separate clocks/highwaters and explicit disk requirements.
 
-Only the source audits and design are active at this checkpoint. No compact
-endpoint, out-of-core input API, new chunk/thread default or larger-scale fit
-has been implemented or demonstrated. Further grouping and pseudo-response
-experiments are held; repeated rows are not a prerequisite for progress.
+The compact-history reduction and 10-million-row current-route fit are complete.
+The reviewed row store and unfinished prepared compiler are preserved on the
+local `deferred/c1-out-of-core` branch at `92f99dda`, outside this PR's final
+code. No out-of-core fitting API or 100-million-row model has been demonstrated.
+Further grouping and pseudo-response experiments remain held.
 
 The first allocation audit identifies a concrete history cost. Each coefficient
 endpoint materializes and copies eta/theta in `solver/chunks.py` and

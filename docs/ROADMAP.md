@@ -1,9 +1,14 @@
 # Roadmap
 
-Last strategic review: **2026-09-09**. Current implementation baseline:
+Last strategic review: **2026-09-11**. Current implementation baseline:
 `origin/master` at `7d054022`, the merged C3+C1 checkpoint in PR #379.
 The starting baseline was `8962c452` (published v0.31.0); individual implementation
 and benchmark revisions remain pinned in the evidence below.
+
+**0.32 release target:** finish the reviewed C1 core in PR #381. The user has
+separated 100-million-row/out-of-core fitting into the future item below.
+The 12.5-second latency target remains unmet; neither follow-up requires a new
+architecture in this closeout. This records release intent, not publication.
 
 This is **directional project state, not an implementation specification**,
 delivery commitment, or authorization to start a capability. Scope implementation
@@ -220,15 +225,19 @@ reduces historical row buffers from 256 to 128 MiB and peak process RSS by
 median times of 2.292 versus 2.397 seconds. Lifetime regressions cover obsolete
 initial fits and session caches. New artifacts use schema 10, with schemas 8
 and 9 still readable. See the
-[compact-history report](https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/compact_lss_history.md). Bounded-row
-input/likelihood preparation and fewer avoidable row passes remain C1 work.
-The working validation sequence is 10 million then 100 million rows with a
-bounded coefficient count on a single machine; these are milestones, not
-demonstrated capabilities. Billion-row fitting remains unproven. Current full-N
-inputs, initialization arrays, prepared arrays and retained endpoints prevent
-a bounded whole-fit RAM claim, despite bounded geometry workspaces. Preserve
-the compiled binned model and current convergence/inference contracts when
-replacing those allocations.
+[compact-history report](https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/compact_lss_history.md).
+Exact Gaussian root preparation also removes its retained carrier array while
+preserving logical likelihood identity and immutable child reuse; its 411
+affected tests pass. The current 10-million-row Gaussian REML fit, already using
+`discrete=True`, completes in **152.498 s** with **11.055 GB peak process RSS**,
+13 inner iterations, five smoothing iterations and rank 102. See the
+[actual model receipt](https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/c1_current_10m_receipt.json).
+This is a demonstrated fixture-specific result, not a whole-fit RAM bound.
+On 2026-09-11 the user explicitly deferred the 100-million-row target and its
+storage/compiler/solver expansion to a separate item. Full-row inputs,
+initialization and live/output state remain known limits. The C1 core is
+substantially complete for the 0.32 target, subject to final PR review and CI;
+the 12.5-second goal remains a separate latency follow-up.
 The dossier's promised removal of the N factor does not describe total fitting:
 observation likelihood work remains, while support contraction reduces expensive
 basis-width dependence. Further grouping and pseudo-response experiments are held.
@@ -255,7 +264,8 @@ change reduces repeated child preparations from 560 to 16. Peak process memory
 is about 1.86 GiB, approximately 38 MiB above the baseline median; the prepared
 child cache has a separate 64 MiB retention allowance. This is a C1 latency
 milestone, not a universal thread policy or a bounded whole-fit RAM claim.
-Larger-N capacity work remains within the chosen C3+C1 scope. See the current
+Larger-N capacity work was subsequently deferred to the separate
+100-million-row/out-of-core item. See the current
 [performance report](research/2026-09-discrete-performance-report.md).
 
 A subsequent fair comparison uses the same production source `68bf3cd5` for
@@ -271,7 +281,8 @@ smoothing iterations and `practical_plateau`. This is one shape on one machine,
 with screen-selected settings and standard warmup excluded. It establishes a
 moderate time advantage and a larger memory advantage, not a general optimum,
 an mgcv comparison or a whole-fit bounded-memory guarantee. Larger-N capacity,
-broader n-by-q validation and automatic threading remain C1 work. See the
+broader n-by-q validation and automatic threading are deferred follow-ups,
+outside the current C1 release closeout. See the
 [thread receipt](https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_thread_screen_receipt.json).
 
 The selected latency targets are 15 seconds, then 12.5 seconds, on this
@@ -333,7 +344,21 @@ scope limit, without universal speed parity or a novelty claim. Wood's 2020
 review described the multiple-predictor large-data extension as not yet usable,
 not mathematically infeasible; references and complexity are in the report.
 
-After the active C1 performance gate, the candidate priority order is:
+## Separate future item: 100-million-row/out-of-core fitting
+
+**Deferred; not a condition of the current C1 closeout.** A mostly-distinct
+100-million-row dataset requires its own memory, storage and I/O feasibility
+scope. The current 10-million-row peak makes an unbounded tenfold escalation
+inappropriate on the measured 62.8 GiB machine. No 100-million-row fit is claimed.
+
+Start any later work with a finite ownership/pass-cost analysis and a declared
+memory/time budget. Preserve one compiled model and the existing numerical
+contracts; do not turn the current release into a new data/storage API project.
+The reviewed row store and unfinished compiler are preserved locally on
+`deferred/c1-out-of-core` at `92f99dda`, outside PR #381's final code. No further
+analysis or implementation is active for this item.
+
+After the current C1 closeout, the candidate priority order is:
 
 **1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing
 constraints and distributional fits, starting with demanded monotone effects.
@@ -431,8 +456,9 @@ another predictor count. Reopen only with a concrete use case and validating evi
   convergence failure blocks an intended model. The tested NB2 stop prompted
   EFS recovery, pragmatic stopping and a bounded finite-NB2 range extension;
   it now reaches configured stationarity.
-- C1 remains active through the discrete execution gate above. After that gate,
-  reopen scaling work when an intended book exceeds its memory or latency
+- Finish the scoped C1 core without treating the open 12.5-second goal or
+  deferred out-of-core item as completed. Reopen scaling work when an intended
+  book exceeds its memory or latency
   budget. Profile derivative evaluation, accumulation, retained history and
   coefficient factors before selecting another execution change. Bin
   sensitivity or covariance disagreement blocks a representation change even
