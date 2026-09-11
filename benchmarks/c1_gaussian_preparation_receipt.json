@@ -751,5 +751,63 @@
     "packet1-million-candidate.json": "60972cb9dd3bfac4aa02ab007cacf4d19db0cc30f97f99ecc553f4d0a5401e8f",
     "packet1-million-candidate.npz": "32657164e5ede3af1a7b9c9d2afd3895ae4f6a93e13f88ff37b76773cef92179"
   },
-  "control_driver_sha256": "f7bd20cd0c856bd7962eb1c43dc53892d198d97c23c7df683aa168b6472b8bba"
+  "control_driver_sha256": "f7bd20cd0c856bd7962eb1c43dc53892d198d97c23c7df683aa168b6472b8bba",
+  "historical_source_control": {
+    "source_sha256": "5a7f055f2a197e0ccd47492740367a2a2e64bb1aa29e3c3095ff313f20ed1723",
+    "source_stable": true,
+    "harness_sha256": "72f015ab22b9d036497902f04b4f8b5b32b660dd6d3d2614ccf076dc0387115b",
+    "fixture_generator_sha256": "1b32f03d1bf7cdec59f501b6f0306924757184181e9ae5c48aced63d65073547",
+    "fit_seconds": 21.831042675010394,
+    "fit_cpu_seconds": 95.55889730999999,
+    "fit_peak_process_rss_bytes": 1917476864,
+    "background_activity": {
+      "external_cpu_cores_lower_bound": 0.19550467520977277,
+      "passes_activity_screen": true,
+      "caveat": "Endpoint accounting is a lower bound: CPU used after a process's last observation before exit, and by processes born and exited between snapshots, is unavailable. Newly observed processes contribute all observed lifetime ticks; PID reuse is distinguished by start ticks. Descendants that reparent between snapshots may not be identifiable. This is a screening check, not proof that the machine stayed quiet throughout a fit."
+    },
+    "native_pools": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/lss-convergence-repair/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 16,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ],
+    "historical_fit_seconds": 14.563594195002224,
+    "same_source_fixture_and_work": true,
+    "arrays_bitwise_equal_to_packet1": true,
+    "raw_json_sha256": "3a6a1cdb57fcbd37f6f8e0308dc796c19cad60f3e375f68e770e69d3a9c351e6",
+    "raw_npz_sha256": "32657164e5ede3af1a7b9c9d2afd3895ae4f6a93e13f88ff37b76773cef92179",
+    "interpretation": "The historical source is also slower in this current run; this does not isolate the environmental cause or establish a candidate speedup."
+  }
 }

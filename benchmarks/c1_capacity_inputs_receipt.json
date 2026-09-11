@@ -1,0 +1,168 @@
+{
+  "scope": "Input generation and replay only; no compiled-source or complete-fit capacity claim",
+  "adapter": "benchmarks/c1_bounded_fixture.py",
+  "adapter_sha256": "5dda87380d1694289cd468160deadbe726c5df602f7e54fab47e1d656c71ae60",
+  "original_generator_sha256": "1b32f03d1bf7cdec59f501b6f0306924757184181e9ae5c48aced63d65073547",
+  "exact_small_comparisons": [
+    {
+      "rows": 37,
+      "generation_batch_rows": 7,
+      "replay_batch_rows": 11,
+      "frame_exact": true,
+      "response_bitwise_equal": true,
+      "response_sha256": "355f05f9f6e42c745fa27e1af0b2cc2941d99b768de54c819fe92eb9201b2eed",
+      "payload_bytes": 3552
+    },
+    {
+      "rows": 257,
+      "generation_batch_rows": 64,
+      "replay_batch_rows": 71,
+      "frame_exact": true,
+      "response_bitwise_equal": true,
+      "response_sha256": "bf86a47ea77a63e8da4b76f8e1ca44f5224fe379def74826729e8e6702580f86",
+      "payload_bytes": 24672
+    },
+    {
+      "rows": 65537,
+      "generation_batch_rows": 8191,
+      "replay_batch_rows": 8192,
+      "frame_exact": true,
+      "response_bitwise_equal": true,
+      "response_sha256": "9546d7c0e554c460c48a6193d8eca25ae909090f29f26968bf41e8d540256ee8",
+      "payload_bytes": 6291552
+    }
+  ],
+  "generation_runs": [
+    {
+      "format": "c1-fragmented-gaussian-input/v1",
+      "rows": 10000000,
+      "seed": 28109,
+      "generation_batch_rows": 65536,
+      "dtypes": {
+        "linear0": "<f8",
+        "linear1": "<f8",
+        "linear2": "<f8",
+        "linear3": "<f8",
+        "linear4": "<f8",
+        "linear5": "<f8",
+        "smooth0": "<f8",
+        "smooth1": "<f8",
+        "curve": "<f8",
+        "category0": "<i4",
+        "category1": "<i4",
+        "category2": "<i4",
+        "group": "<i4",
+        "y": "<f8"
+      },
+      "sha256": {
+        "linear0": "06a4a0cbe1486404b44b71088ffd1105ca9ae3b2ae49be350575864efbcde675",
+        "linear1": "ae707cc58627fd541e4a6e00d0b58e5a5afcd1e6bbc3af98446f80b70fd4ac06",
+        "linear2": "ee04d2a6371352510cfad518592d2b645a52c69034a515f5dd7269316452fc98",
+        "linear3": "11bcd887e428c387a38fa3910e8ba00253b7e2c936586f50aa81df3b5893852a",
+        "linear4": "348b9a1f97e998d802710789bfcdbaf73cbdd938bc9da8e36b896c71d1ea317c",
+        "linear5": "2f921a799459bea4b5cb48fdd70636dd34dd02232699c378ca94ddf041849795",
+        "smooth0": "c2d346f5872e9e3b7010944f84a770a30259c59946b754cff606007c3acb864e",
+        "smooth1": "1ac160b8b85a5b63326fddd8fa475168181ffd8a37263b2b62b378a07de05748",
+        "curve": "6c5023ce9fa28bcf2ed838b0e8589f84596bf7efbaa9ca9330e424e250eca6c7",
+        "category0": "4166125421ab4af1b878a9e37396b13c8279c090f5c113920685f30f5e38c556",
+        "category1": "a19938bb668162342bbef067b9af0e9491b31067787298844f791a59ec6434e8",
+        "category2": "5ab7dfb23b57886382ebc02b64e1ca3b91ce17c2fb922a522efcaa700affd856",
+        "group": "48b529d8075f0692bb5dc9345305a37405240b2eec77a8e80962d5c487173e5b",
+        "y": "38a42a8fe5480d6585a881fc076ca4bf34838a0f088214ca79fa27f986f9bc9f"
+      },
+      "payload_bytes": 960000000,
+      "generation_seconds": 2.749166486028116,
+      "original_generator_sha256": "1b32f03d1bf7cdec59f501b6f0306924757184181e9ae5c48aced63d65073547"
+    },
+    {
+      "format": "c1-fragmented-gaussian-input/v1",
+      "rows": 100000000,
+      "seed": 28109,
+      "generation_batch_rows": 65536,
+      "dtypes": {
+        "linear0": "<f8",
+        "linear1": "<f8",
+        "linear2": "<f8",
+        "linear3": "<f8",
+        "linear4": "<f8",
+        "linear5": "<f8",
+        "smooth0": "<f8",
+        "smooth1": "<f8",
+        "curve": "<f8",
+        "category0": "<i4",
+        "category1": "<i4",
+        "category2": "<i4",
+        "group": "<i4",
+        "y": "<f8"
+      },
+      "sha256": {
+        "linear0": "992612cfc421ed68e4465ba2262db5a6bae9bf712a0b45dbecb841a6470808a9",
+        "linear1": "4d7e2cf8cd6e300fa7ddd8c843468943300f2f2ccf423ef6b7f84794234782d6",
+        "linear2": "8598b1d1a2dff76ee188fe99d466b06c701278405e2c2ed9d4f7d5f085a57daf",
+        "linear3": "3e85a2b8bfbf4cc1f5c5f2d042f61c4e2cf1f1f022947fe4df14aa6932837de7",
+        "linear4": "7a927fe57185fa358a4ca1382abac640dfe2d7db4d96015782d667ea563fe0b5",
+        "linear5": "5aff9f2a194857b4bc37302858858dca0080adf23441ce4dcf0ab3c521a43136",
+        "smooth0": "e5216e10261a2639ca84927b515f4d960ae3959a663cd878cd3da137e9630eb5",
+        "smooth1": "02481e734d78ded1f41cac44b5cdbdc7643d1629069175cb3dfc696b721b081c",
+        "curve": "a68a0ccbad0264f608a8a908f7cc88149108d6c69715c5c3616c2648ff141080",
+        "category0": "17841cf2c1991f4050d75f0d6f8e227ca5c596642e3d2c9d9cb4f1f75ca17102",
+        "category1": "a6cdcd5b3f65dada49eb0ea0493ceef922967fc0e687bf39ddd83c58641576d0",
+        "category2": "cc8ec2ddf2cd4c41b9ba3a80fc7c0d0877e8bb07955029c7ae5d4bcd565b076e",
+        "group": "3572e28d8235cfd455525220a3302496983bbf15483f4caeb6cdc242abf30340",
+        "y": "0638a0f100787d09c641661ed79d0ca9cbb63239f79158f4f93e4ea6b2a69055"
+      },
+      "payload_bytes": 9600000000,
+      "generation_seconds": 33.790773272980005,
+      "generation_cpu_seconds": 33.567438501000005,
+      "process_peak_rss_bytes": 639393792,
+      "adapter_sha256": "5dda87380d1694289cd468160deadbe726c5df602f7e54fab47e1d656c71ae60",
+      "original_generator_sha256": "1b32f03d1bf7cdec59f501b6f0306924757184181e9ae5c48aced63d65073547"
+    }
+  ],
+  "separate_memory_checks": [
+    {
+      "rows": 10000000,
+      "input_hashes_match_retained_10m": true,
+      "before": {
+        "rss": 112214016,
+        "ru_maxrss": 112062464
+      },
+      "after": {
+        "rss": 122654720,
+        "ru_maxrss": 126525440
+      },
+      "sampled_peak_rss": 126717952,
+      "sample_interval_seconds": 0.01,
+      "tracemalloc_current_peak": [
+        1969494,
+        13060359
+      ],
+      "instrumented_generation_seconds": 3.7174635009723715,
+      "instrumented_not_a_timing_sample": true
+    },
+    {
+      "rows": 100000000,
+      "input_hashes_match_retained_100m": true,
+      "before": {
+        "rss": 112001024,
+        "ru_maxrss": 111800320
+      },
+      "after": {
+        "rss": 122130432,
+        "ru_maxrss": 125394944
+      },
+      "sampled_peak_rss": 125730816,
+      "sample_interval_seconds": 0.02,
+      "sample_count": 1588,
+      "instrumented_generation_seconds": 32.48319098399952,
+      "instrumented_not_a_timing_sample": true
+    }
+  ],
+  "independent_review": "James approved RNG order, formula and bounded source ownership; no additional sweep",
+  "storage": "Project disk /dev/vda4; /tmp is a tmpfs and was not used for capacity payloads",
+  "limits": [
+    "The original 100m ru_maxrss reading of 639393792 bytes is retained. A later fresh instrumented repeat with identical input hashes samples 125730816 bytes peak RSS; the discrepancy is not isolated.",
+    "Generation and replay keep bounded row buffers; full fitting remains unimplemented at this checkpoint.",
+    "Instrumented memory-check clocks are excluded from uninstrumented generation timings."
+  ]
+}

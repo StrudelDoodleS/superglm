@@ -31,8 +31,10 @@ no whole-fit peak reduction. Both fits converge with rank 102, 16 inner and seve
 smoothing iterations. Their backend, complete history, practical-plateau stop,
 phase counts and covariance agree exactly. They retain the same 128 MiB of
 solver-history rows. The earlier 14.56-second historical timing is faster than
-both current samples; the cause has not been isolated. The 12.5-second C1 gate
-remains open.
+both current samples. A subsequent run of that exact historical source takes
+21.831 seconds today, with the same fixture, driver, outputs and work counts.
+This rules out attributing the historical/current timing difference solely to
+Packet 1, but does not isolate its cause. The 12.5-second C1 gate remains open.
 
 Separate cProfile runs reproduce the timed outputs. Candidate preparation calls
 `bind_chunked_likelihood` once from `_fit_candidate` (9.10 ms cumulative),
