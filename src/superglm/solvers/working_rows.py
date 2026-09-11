@@ -73,8 +73,10 @@ def fisher_working_weights(
     Built-in log pairs use the fitted mean, which is the inverse of stabilized
     eta. Their algebraic reductions keep unweighted curvature in range and
     avoid recomputing the inverse link. Exact types preserve custom variance
-    and link overrides. Other pairs retain the variance floor and their actual
-    inverse-link derivative, including when the mean has been clipped.
+    and link overrides. Poisson/sqrt uses the exact 4w curvature, including at
+    zero, with the unfloored working response in ``_fisher_rows``. Other pairs
+    retain the variance floor and their actual inverse-link derivative,
+    including when the mean has been clipped.
     """
     family_type, link_type = type(distribution), type(link)
     if (family_type is Gaussian and link_type is IdentityLink) or (

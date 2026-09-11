@@ -4,10 +4,11 @@ This audit records the rank and arithmetic failures reproduced during the
 Gamma convergence repair. It explains the fixes, their tests and their measured
 cost. Coverage limits are stated beside the relevant results.
 
-The [final family-arithmetic addition](family_arithmetic.md) records the scalar
+The [family-arithmetic addition](family_arithmetic.md) records the scalar
 working-weight and Pearson fixes, four LSS variance fixes, current verification
-and new complete-fit comparisons. The earlier checkpoints below retain their
-own source digests and measurements.
+and new complete-fit comparisons. The later [compact-history report](compact_lss_history.md)
+records its own verification and memory measurements. Verification counts below
+belong to their named checkpoints, which retain their source digests and measurements.
 
 ## Tensor checkpoint before the family-arithmetic addition
 
@@ -142,6 +143,11 @@ These experiments distinguish changed objectives, arithmetic errors and
 explicit refusals. Their results apply to the listed cases. They do not rank
 the libraries overall or establish identical failures in full distributional
 models. The implementations were derived independently of the library code.
+
+The matched Gamma fit driver is tracked in `benchmarks/lss_repair_mgcv.R`.
+The targeted `gam.reparam`, SZ and pyGAM probe scripts and raw receipts remain
+in the local, ignored `.superpowers/` artifacts. The table records those executed
+experiments; it is not a repository-contained reproduction bundle for them.
 
 The SZ comparison executes eight fixed objectives through each mgcv interface:
 the original 480-by-70 fixture, its moderate-weight control, and six two-level

@@ -150,10 +150,10 @@ def _kernel_dispatch(sampler=None):
             setattr(module, attribute, original)
 
 
-def _fixture(case: str, discrete: bool):
+def _fixture(case: str, discrete: bool, *, tensor_rows: int = 2000):
     rng = np.random.default_rng(248)
     if case == "scalar_tensor":
-        x, z = rng.uniform(-1.0, 1.0, (2, 2000))
+        x, z = rng.uniform(-1.0, 1.0, (2, tensor_rows))
         frame = pd.DataFrame({"x": x, "z": z})
         y = rng.poisson(np.exp(0.2 + 0.6 * np.sin(np.pi * x) + 0.4 * z + 0.5 * x * z)).astype(float)
         model = SuperGLM(
@@ -313,12 +313,17 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--discrete", action="store_true")
     parser.add_argument("--measure-time", action="store_true")
+    parser.add_argument("--tensor-rows", type=int, default=2000)
     args = parser.parse_args()
+    if args.tensor_rows < 1:
+        parser.error("--tensor-rows must be positive")
+    if args.tensor_rows != 2000 and args.case != "scalar_tensor":
+        parser.error("--tensor-rows applies only to --case scalar_tensor")
     load_before = os.getloadavg()
     cores = len(os.sched_getaffinity(0))
     if args.measure_time and load_before[0] > 2 * cores:
         parser.error("machine load exceeds the repository wall-time threshold")
-    model, frame, y, lambdas = _fixture(args.case, args.discrete)
+    model, frame, y, lambdas = _fixture(args.case, args.discrete, tensor_rows=args.tensor_rows)
     data_bytes = frame.to_numpy().tobytes() + y.tobytes()
     receipt = {
         "label": args.label,
@@ -345,6 +350,7 @@ def main():
     with warnings.catch_warnings(record=True) as recorded, threadpool_limits(limits=1):
         with sampler if sampler is not None else nullcontext(), dispatch_context as dispatch:
             started = time.perf_counter() if args.measure_time else None
+            cpu_started = time.process_time() if args.measure_time else None
             if scalar:
                 if args.mode == "reml":
                     model.fit_reml(frame, y, max_reml_iter=40, reml_tol=1e-6)
@@ -362,9 +368,11 @@ def main():
             else:
                 model.fit(frame, y, lambdas=lambdas, max_inner_iter=150, inner_tol=1e-10)
             elapsed = None if started is None else time.perf_counter() - started
+            cpu_elapsed = None if cpu_started is None else time.process_time() - cpu_started
         receipt["kernel_dispatch"] = dispatch
         receipt["warnings"] = [str(item.message) for item in recorded]
     receipt["fit_seconds"] = elapsed if args.measure_time else None
+    receipt["fit_cpu_seconds"] = cpu_elapsed if args.measure_time else None
     receipt["load_after"] = os.getloadavg()
     rss_unit = 1024.0**2 if sys.platform == "darwin" else 1024.0
     receipt["process_peak_rss_mib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_unit

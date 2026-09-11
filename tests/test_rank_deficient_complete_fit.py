@@ -345,7 +345,7 @@ def test_timed_complete_fit_drivers_have_no_observer(
         if driver_name == "multi_penalty_support"
         else (Model(), frame, response, None, None, {})
     )
-    monkeypatch.setattr(driver, "_fixture", lambda *_args: fixture)
+    monkeypatch.setattr(driver, "_fixture", lambda *_args, **_kwargs: fixture)
     monkeypatch.setattr(driver, "_source_identity", lambda: {"source_digest": "test"})
     monkeypatch.setattr(driver, "_fit_outputs", outputs)
     monkeypatch.setattr(driver.time, "perf_counter", clock)

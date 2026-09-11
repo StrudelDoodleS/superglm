@@ -225,9 +225,10 @@ input/likelihood preparation and fewer avoidable row passes remain C1 work.
 The working validation sequence is 10 million then 100 million rows with a
 bounded coefficient count on a single machine; these are milestones, not
 demonstrated capabilities. Billion-row fitting remains unproven. Current full-N
-inputs, prepared arrays and retained endpoints prevent a bounded whole-fit RAM
-claim, despite bounded geometry workspaces. Preserve the compiled binned model
-and current convergence/inference contracts when replacing those allocations.
+inputs, initialization arrays, prepared arrays and retained endpoints prevent
+a bounded whole-fit RAM claim, despite bounded geometry workspaces. Preserve
+the compiled binned model and current convergence/inference contracts when
+replacing those allocations.
 The dossier's promised removal of the N factor does not describe total fitting:
 observation likelihood work remains, while support contraction reduces expensive
 basis-width dependence. Further grouping and pseudo-response experiments are held.

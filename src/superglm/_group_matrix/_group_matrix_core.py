@@ -702,7 +702,7 @@ class SparseSSPGroupMatrix:
                 copy=False,
             )
             return _exact_ssp_moments(raw_basis, self.R_inv, W)[0]
-        dense = None
+        raw_gram = None
         cells = self.shape[0] * self._p_b
         if (
             cells
@@ -713,28 +713,18 @@ class SparseSSPGroupMatrix:
         ):
             # A fresh view checks the current indices instead of trusting
             # B's cached canonical-format flag after an in-place mutation.
+            # The sparse-object constructor also retains int64 indices;
+            # reconstructing from arrays can narrow and copy the full source.
             raw_basis = sp.csr_matrix(
-                (self._data, self._indices, self._indptr),
+                self.B,
                 shape=(self.shape[0], self._p_b),
                 copy=False,
             )
             if raw_basis.has_canonical_format:
-                if (
-                    self._data.size == cells
-                    and self._data.flags.c_contiguous
-                    and np.all(np.diff(self._indptr) == self._p_b)
-                    and np.all(self._indices[self._indptr[:-1]] == 0)
-                    and np.all(self._indices[self._indptr[1:] - 1] == self._p_b - 1)
-                ):
-                    # Strictly ordered p-entry rows spanning 0..p-1 already
-                    # store dense B. This view follows live owned values.
-                    dense = self._data.reshape(self.shape[0], self._p_b)
-                else:
-                    dense = _dense_if_saturated(raw_basis)
-        if dense is None:
+                raw_gram = _saturated_ssp_gram(raw_basis, W)
+        if raw_gram is None:
             raw_gram = _csr_weighted_gram(self._data, self._indices, self._indptr, W, self._p_b)
         else:
-            raw_gram = (dense * W[:, None]).T @ dense
             # Match the CSR kernel's upper-triangle orientation and exact
             # raw symmetry; copying adds no rounding to the weighted dots.
             lower = np.tril_indices(self._p_b, -1)
@@ -767,6 +757,59 @@ class SparseSSPGroupMatrix:
 # make an ordinary sparse block worse; it only reclaims the case where the
 # sparse representation was storing no zeros at all.
 _DENSE_LEVEL_SATURATION = 0.9
+
+# Bound observation-dependent scratch, independently of the p-by-p products.
+_MAX_SSP_GRAM_WORKSPACE_BYTES = 64 << 20
+
+
+def _saturated_ssp_gram(basis: sp.csr_matrix, weights: NDArray) -> NDArray | None:
+    """Use live canonical CSR in bounded dense weighted products."""
+    rows, width = basis.shape
+    budget = _MAX_SSP_GRAM_WORKSPACE_BYTES
+    pointer_bytes = basis.indptr.dtype.itemsize
+    index_bytes = basis.indices.dtype.itemsize
+    # Account conservatively for pointer arithmetic, gathered endpoints and
+    # boolean comparisons. Fullness certification must not allocate N arrays.
+    check_rows = min(8192, budget // (4 * pointer_bytes + 2 * index_bytes + 2))
+    if check_rows < 1:
+        return None
+    dense_view = basis.data.size == rows * width and basis.data.flags.c_contiguous
+    if dense_view:
+        for start in range(0, rows, check_rows):
+            pointers = basis.indptr[start : min(rows, start + check_rows) + 1]
+            if not (
+                np.all(np.diff(pointers) == width)
+                and np.all(basis.indices[pointers[:-1]] == 0)
+                and np.all(basis.indices[pointers[1:] - 1] == width - 1)
+            ):
+                dense_view = False
+                break
+    bytes_per_row = width * basis.data.dtype.itemsize
+    if not dense_view:
+        # A copied CSR slice, its dense rendering and a weighted dense block.
+        # Charge both index dtypes, including the extra terminal row pointer.
+        bytes_per_row = width * (3 * basis.data.dtype.itemsize + index_bytes) + pointer_bytes
+    block_rows = (budget - pointer_bytes) // bytes_per_row
+    if block_rows < 1:
+        return None
+    raw_gram = None
+    for start in range(0, rows, block_rows):
+        stop = min(rows, start + block_rows)
+        if dense_view:
+            dense = basis.data[start * width : stop * width].reshape(stop - start, width)
+        elif start == 0 and stop == rows:
+            dense = _dense_if_saturated(basis)
+            if dense is None:
+                return None
+        else:
+            dense = basis[start:stop].toarray()
+        block_gram = (dense * weights[start:stop, None]).T @ dense
+        del dense  # Release copied rows before rendering the next block.
+        if raw_gram is None:
+            raw_gram = block_gram
+        else:
+            raw_gram += block_gram
+    return raw_gram
 
 
 def _dense_if_saturated(block) -> NDArray | None:
