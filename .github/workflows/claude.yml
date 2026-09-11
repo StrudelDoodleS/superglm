@@ -65,7 +65,7 @@ jobs:
 
       - name: Run Claude PR review
         id: claude
-        uses: anthropics/claude-code-action@e8c2d7c16c018cf1e694711c1c07a5f5db2b5eb1 # v1
+        uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1, Claude Code 2.1.268
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Avoid embedding the Claude App token in the Git remote. Commit tools stay denied.
@@ -94,3 +94,26 @@ jobs:
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Bash,Edit,Write,MultiEdit,NotebookEdit,Agent,Task,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
             --append-system-prompt "Act only as a code reviewer. Do not modify files, create commits, or push branches. Return review feedback through PR comments only."
+
+      - name: Report Claude startup errors
+        if: failure() && steps.claude.outputs.execution_file != ''
+        env:
+          CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          messages = json.loads(Path(os.environ["CLAUDE_EXECUTION_FILE"]).read_text())
+          for message in messages:
+              if message.get("type") == "result" and message.get("is_error"):
+                  summary = {key: message.get(key) for key in (
+                      "subtype", "api_error_status", "result", "errors"
+                  )}
+                  text = json.dumps(summary)
+                  text = re.sub(r"sk-ant-[\w-]+|gh[pousr]_[\w]+|github_pat_[\w]+", "[redacted]", text)
+                  text = re.sub(r"(?i)bearer\s+[^\s\"\\]+", "Bearer [redacted]", text)
+                  print(text[:4000])
+          PY
