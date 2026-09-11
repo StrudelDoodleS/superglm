@@ -1,0 +1,398 @@
+{
+  "measurement_date": "2026-09-11",
+  "scope": "Exact constrained scalar Poisson REML, supplied French planted-noise models.",
+  "implementation_commit": "8da1fe0958c96a38731107dbbc6b56977651f3b5",
+  "parent_commit": "6370652d3d8acb1ba4f87a1830cecf829f1258d2",
+  "source_sha256": {
+    "baseline": "827cff38215102644f2c15619bbbf0ab839801b028ec31d223aa1fa51893745c",
+    "candidate": "63dd9a315070b893e3613d4424b463621e7cc513f21b825563294e77d7d5f983"
+  },
+  "source_hash_method": "SHA256 of sorted relative .py paths and file bytes under src/superglm, concatenated in that order.",
+  "timed_snapshots_differ_only_in": [
+    "src/superglm/_group_matrix/_group_matrix_centered.py",
+    "src/superglm/reml/w_derivatives.py"
+  ],
+  "shared_local_experiment": {
+    "files": [
+      "src/superglm/model/api.py",
+      "src/superglm/solvers/irls_direct.py"
+    ],
+    "description": "Both timed sources include an uncommitted compact coefficient-QR experiment. The implementation commit excludes it. The QR iteration branch calls certify_centered_factor; both separate profiles record zero such calls. Other QR factorizations still run elsewhere in the solver."
+  },
+  "data_sha256": "a1a19a4e8bff1d1b8dc0f645a25d5fec6a237642df38fe853badc6b3c8f8c690",
+  "runner_sha256": "2b7f29a54025be618ab22d71f3c084b6d9c5dbd1de8db5f7922e5a18c66cb65d",
+  "data_path": "/home/max/superglm-assurance/benchmark/fremtpl/results/freMTPL2freq.csv.gz",
+  "runner_path": "/home/max/superglm-assurance/benchmark/fremtpl/run_fremtpl.py",
+  "measurement_wrapper_sha256": "e6cff44e5aa2c750dd5bdd6c3565132e9a4705ba5e082d4bf597e7566b2616c9",
+  "environment": {
+    "python": "3.13.14",
+    "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+    "packages": {
+      "superglm": "0.31.0",
+      "numpy": "2.5.2",
+      "pandas": "3.0.5",
+      "scipy": "1.18.0",
+      "statsmodels": "0.14.6",
+      "scikit-learn": "1.9.0",
+      "numba": "0.67.0",
+      "tabmat": "4.2.1",
+      "threadpoolctl": "3.6.0",
+      "openpyxl": "3.1.5"
+    },
+    "blas_threads": 1
+  },
+  "native_pools": [
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "version": "0.3.34.0.0",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "version": "0.3.31.dev",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "openmp",
+      "internal_api": "openmp",
+      "num_threads": 1,
+      "version": null,
+      "architecture": null
+    }
+  ],
+  "training_rows": 508509,
+  "test_rows": 169504,
+  "coefficient_count_including_intercept": 88,
+  "selection_penalties": 9,
+  "control_penalties": 5,
+  "records": {
+    "baseline-1": {
+      "fit_seconds": 59.10602949099848,
+      "peak_process_rss_mib": 1170.03515625,
+      "actual_backend": "gram",
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "coefficient_iterations": 3,
+      "smoothing_iterations": 10,
+      "internal_profile": {
+        "direct_backend": "gram",
+        "irls_calls": 11,
+        "irls_iters": 22,
+        "reml_w_correction_order": 1,
+        "reml_w_correction_mode": "derivative_grams",
+        "reml_n_outer_iter": 10,
+        "reml_n_linesearch_fits": 9
+      },
+      "receipt_sha256": "0d3bede71afe272221fdcab5dc64ce59f1f04f79c55d3468408b5859afb603a2",
+      "prediction_array_sha256": {
+        "train_prediction": "466e6b6e4717561ae5a716b2bdf806907f0f0b43ecd079296f2e484f3c2b5d89",
+        "test_prediction": "452f95d9277d8d6cdfd2c1cbd15e7cf02935e684528039d294e204f04d90a5d7"
+      }
+    },
+    "candidate-1": {
+      "fit_seconds": 42.26900250799372,
+      "peak_process_rss_mib": 1169.9453125,
+      "actual_backend": "gram",
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "coefficient_iterations": 3,
+      "smoothing_iterations": 10,
+      "internal_profile": {
+        "direct_backend": "gram",
+        "irls_calls": 11,
+        "irls_iters": 22,
+        "reml_w_correction_order": 1,
+        "reml_w_correction_mode": "derivative_grams",
+        "reml_n_outer_iter": 10,
+        "reml_n_linesearch_fits": 9
+      },
+      "receipt_sha256": "12dd25702bf1585170324fec7b16b80f74924c7730c55edcf0c6a4d718c19ee0",
+      "prediction_array_sha256": {
+        "train_prediction": "466e6b6e4717561ae5a716b2bdf806907f0f0b43ecd079296f2e484f3c2b5d89",
+        "test_prediction": "452f95d9277d8d6cdfd2c1cbd15e7cf02935e684528039d294e204f04d90a5d7"
+      }
+    },
+    "baseline-2": {
+      "fit_seconds": 60.44863977798377,
+      "peak_process_rss_mib": 1169.78515625,
+      "actual_backend": "gram",
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "coefficient_iterations": 3,
+      "smoothing_iterations": 10,
+      "internal_profile": {
+        "direct_backend": "gram",
+        "irls_calls": 11,
+        "irls_iters": 22,
+        "reml_w_correction_order": 1,
+        "reml_w_correction_mode": "derivative_grams",
+        "reml_n_outer_iter": 10,
+        "reml_n_linesearch_fits": 9
+      },
+      "receipt_sha256": "0ed33d9c9267191a38234439c8f59d0274344855ec1444be53b2253ec6fcb357",
+      "prediction_array_sha256": {
+        "train_prediction": "466e6b6e4717561ae5a716b2bdf806907f0f0b43ecd079296f2e484f3c2b5d89",
+        "test_prediction": "452f95d9277d8d6cdfd2c1cbd15e7cf02935e684528039d294e204f04d90a5d7"
+      }
+    },
+    "candidate-2": {
+      "fit_seconds": 42.246231844008435,
+      "peak_process_rss_mib": 1169.453125,
+      "actual_backend": "gram",
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "coefficient_iterations": 3,
+      "smoothing_iterations": 10,
+      "internal_profile": {
+        "direct_backend": "gram",
+        "irls_calls": 11,
+        "irls_iters": 22,
+        "reml_w_correction_order": 1,
+        "reml_w_correction_mode": "derivative_grams",
+        "reml_n_outer_iter": 10,
+        "reml_n_linesearch_fits": 9
+      },
+      "receipt_sha256": "9414810fd43e0af685d0ff590143084a2973bb011531a93f48ef7e21695a006e",
+      "prediction_array_sha256": {
+        "train_prediction": "466e6b6e4717561ae5a716b2bdf806907f0f0b43ecd079296f2e484f3c2b5d89",
+        "test_prediction": "452f95d9277d8d6cdfd2c1cbd15e7cf02935e684528039d294e204f04d90a5d7"
+      }
+    },
+    "baseline-3": {
+      "fit_seconds": 58.36166868498549,
+      "peak_process_rss_mib": 1169.97265625,
+      "actual_backend": "gram",
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "coefficient_iterations": 3,
+      "smoothing_iterations": 10,
+      "internal_profile": {
+        "direct_backend": "gram",
+        "irls_calls": 11,
+        "irls_iters": 22,
+        "reml_w_correction_order": 1,
+        "reml_w_correction_mode": "derivative_grams",
+        "reml_n_outer_iter": 10,
+        "reml_n_linesearch_fits": 9
+      },
+      "receipt_sha256": "e45a4c12bedd89213fc9d9404e55ece0536a85f6b6e3a1dd9a551d0d8f9112c5",
+      "prediction_array_sha256": {
+        "train_prediction": "466e6b6e4717561ae5a716b2bdf806907f0f0b43ecd079296f2e484f3c2b5d89",
+        "test_prediction": "452f95d9277d8d6cdfd2c1cbd15e7cf02935e684528039d294e204f04d90a5d7"
+      }
+    },
+    "candidate-3": {
+      "fit_seconds": 42.14574051898671,
+      "peak_process_rss_mib": 1169.94921875,
+      "actual_backend": "gram",
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "coefficient_iterations": 3,
+      "smoothing_iterations": 10,
+      "internal_profile": {
+        "direct_backend": "gram",
+        "irls_calls": 11,
+        "irls_iters": 22,
+        "reml_w_correction_order": 1,
+        "reml_w_correction_mode": "derivative_grams",
+        "reml_n_outer_iter": 10,
+        "reml_n_linesearch_fits": 9
+      },
+      "receipt_sha256": "a03d92af920a48155477d04010cf6371ded32417c2c8b279c27ef177a93e1fbf",
+      "prediction_array_sha256": {
+        "train_prediction": "466e6b6e4717561ae5a716b2bdf806907f0f0b43ecd079296f2e484f3c2b5d89",
+        "test_prediction": "452f95d9277d8d6cdfd2c1cbd15e7cf02935e684528039d294e204f04d90a5d7"
+      }
+    },
+    "control-baseline": {
+      "fit_seconds": 24.90015483298339,
+      "peak_process_rss_mib": 1169.546875,
+      "actual_backend": "gram",
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "coefficient_iterations": 3,
+      "smoothing_iterations": 10,
+      "internal_profile": {
+        "direct_backend": "gram",
+        "irls_calls": 11,
+        "irls_iters": 22,
+        "reml_w_correction_order": 1,
+        "reml_w_correction_mode": "derivative_grams",
+        "reml_n_outer_iter": 10,
+        "reml_n_linesearch_fits": 9
+      },
+      "receipt_sha256": "0e672697acd1b241272ac9635af88b65049a2e289b2e6ef035e9519e65d79e47",
+      "prediction_array_sha256": {
+        "train_prediction": "118935cd8298fef2a828b2f463d5851f207448868c8d4659d3246600825f4ba6",
+        "test_prediction": "e61be8130e03e2ada8ea44e4b0cc3f6429e452ec84f2abaee76b9f505fd2d1fe"
+      }
+    },
+    "control-candidate": {
+      "fit_seconds": 24.03711862702039,
+      "peak_process_rss_mib": 1169.7265625,
+      "actual_backend": "gram",
+      "coefficient_converged": true,
+      "smoothing_converged": true,
+      "coefficient_iterations": 3,
+      "smoothing_iterations": 10,
+      "internal_profile": {
+        "direct_backend": "gram",
+        "irls_calls": 11,
+        "irls_iters": 22,
+        "reml_w_correction_order": 1,
+        "reml_w_correction_mode": "derivative_grams",
+        "reml_n_outer_iter": 10,
+        "reml_n_linesearch_fits": 9
+      },
+      "receipt_sha256": "b1d447df702ef57bf73163107f9655e3224a6028430882764d48a04276accc46",
+      "prediction_array_sha256": {
+        "train_prediction": "118935cd8298fef2a828b2f463d5851f207448868c8d4659d3246600825f4ba6",
+        "test_prediction": "e61be8130e03e2ada8ea44e4b0cc3f6429e452ec84f2abaee76b9f505fd2d1fe"
+      }
+    }
+  },
+  "selection_timing": {
+    "baseline_median_seconds": 59.10602949099848,
+    "candidate_median_seconds": 42.246231844008435,
+    "baseline_range_seconds": [
+      58.36166868498549,
+      60.44863977798377
+    ],
+    "candidate_range_seconds": [
+      42.14574051898671,
+      42.26900250799372
+    ],
+    "median_reduction_percent": 28.52466625178688
+  },
+  "all_four_pairs_equal": {
+    "train_and_test_predictions": "Verified bitwise equal; SHA256 above hashes contiguous float64 array bytes, not the archive.",
+    "lambdas": true,
+    "term_edf": true,
+    "objective_history": true,
+    "train_deviance": true,
+    "test_deviance": true,
+    "effective_df": true
+  },
+  "selection_outputs": {
+    "train_deviance": 158879.16405948185,
+    "test_deviance": 52859.53998312188,
+    "effective_df": 67.45881165896706,
+    "lambdas": {
+      "VehAge:null": 3.5023384438427607,
+      "VehAge:wiggle": 94.61009647284811,
+      "DrivAge:null": 10000000000.0,
+      "DrivAge:wiggle": 1.7465057711271927,
+      "BonusMalus": 6460.81554085507,
+      "log_density:null": 12.314957149571882,
+      "log_density:wiggle": 580.7301346956715,
+      "noise:null": 39753.20665293476,
+      "noise:wiggle": 435334.1617844451
+    },
+    "term_edf": {
+      "VehAge": 4.176665226702734,
+      "DrivAge": 6.854268522181988,
+      "BonusMalus": 4.97252956138048,
+      "log_density": 1.4434060220771006,
+      "noise": 0.011942326624770072
+    },
+    "objective_history": [
+      79671.65152868391,
+      79654.87321853233,
+      79629.68822980161,
+      79619.38455839471,
+      79614.61765695532,
+      79614.24130039717,
+      79614.17296212085,
+      79614.1521424355,
+      79614.14632601214,
+      79614.14632599447
+    ]
+  },
+  "control_outputs": {
+    "train_deviance": 158877.79933119495,
+    "test_deviance": 52858.44558331081,
+    "effective_df": 69.13633089793551
+  },
+  "profiles": {
+    "baseline": {
+      "profile_sha256": "32966771c15a0615bd1d41821953290317695c4d42b6a7f9f6a852c95d8b3882",
+      "coefficient_solver_calls": 13,
+      "experimental_qr_certification_calls": 0,
+      "selected_functions": [
+        {
+          "function": "centered_gram_rhs",
+          "calls": 129,
+          "self_seconds": 35.400686399,
+          "inclusive_seconds": 61.626802578
+        },
+        {
+          "function": "reml_w_correction",
+          "calls": 10,
+          "self_seconds": 0.035692226,
+          "inclusive_seconds": 45.682341126000004
+        },
+        {
+          "function": "centered_signed_gram",
+          "calls": 90,
+          "self_seconds": 0.0013369220000000002,
+          "inclusive_seconds": 43.151515557
+        },
+        {
+          "function": "centered_rmatvec",
+          "calls": 90,
+          "self_seconds": 0.004264996,
+          "inclusive_seconds": 1.535143197
+        }
+      ]
+    },
+    "candidate": {
+      "profile_sha256": "68ae648886016d4766149823d750cae53cf94d43b86741233a8d569db245ed2a",
+      "coefficient_solver_calls": 13,
+      "experimental_qr_certification_calls": 0,
+      "selected_functions": [
+        {
+          "function": "reml_w_correction",
+          "calls": 10,
+          "self_seconds": 0.028089267,
+          "inclusive_seconds": 21.350854908000002
+        },
+        {
+          "function": "centered_signed_grams",
+          "calls": 10,
+          "self_seconds": 18.43377892,
+          "inclusive_seconds": 20.509546117000003
+        },
+        {
+          "function": "centered_gram_rhs",
+          "calls": 39,
+          "self_seconds": 9.208318091,
+          "inclusive_seconds": 16.048270053
+        }
+      ]
+    }
+  },
+  "profile_call_counts": {
+    "derivative_design_block_expansions": {
+      "baseline": 5670,
+      "candidate": 630
+    },
+    "total_design_block_expansions": {
+      "baseline": 8127,
+      "candidate": 3087
+    },
+    "candidate_expansion_callers": {
+      "centered_gram_rhs": 2457,
+      "centered_signed_grams": 630
+    }
+  },
+  "memory": {
+    "per_batch_retention_budget_bytes": 67108864,
+    "selection_retained_weight_bytes": 36612648,
+    "selection_retention_allowance_bytes": 38247552,
+    "exclusions": "Completed derivative matrices, shared row chunks and single-direction product scratch are outside the batch budget. Process peak includes data preparation."
+  }
+}
