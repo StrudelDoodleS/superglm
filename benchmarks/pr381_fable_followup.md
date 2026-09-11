@@ -49,12 +49,32 @@ groups; the tensor does not fall back to scalar CSR accumulation. Native pool
 samples report one thread and no observer errors. The trace observes completed
 NumPy products and pool state; it does not intercept native BLAS symbols.
 
+Two further complete fits were profiled separately with `cProfile`, using the
+same frozen sources and 100,000-row fixture. Each reproduces its corresponding
+uninstrumented outputs exactly. The caller chain is
+`_moments_impl -> SparseSSPGroupMatrix.gram -> _saturated_ssp_gram` on the
+candidate. The 18 Gram calls take 2.045 versus 2.089 seconds cumulatively; the
+candidate's six saturated helper calls account for 1.309 seconds. The helper
+uses dense views on this fixture and calls neither CSR slicing nor `toarray`.
+Across each whole profiled fit, both sources make 149 `toarray` calls and seven
+CSR slice calls, from other callers. Repeated densification therefore does not
+explain the single large timing difference reported above.
+
+The enclosing IRLS solve takes 5.770 versus 5.776 seconds in these profiles.
+This localizes the extra Gram work without establishing a repeatable full-fit
+regression from one uninstrumented pair. `cProfile` aggregates the NumPy
+products in helper self time; it does not separate multiplication from BLAS
+execution. The earlier product trace supplies their counts. Profile and receipt
+hashes, function statistics and the retained caller/callee summary are recorded
+in the receipt. Profiled clocks are not included in the timing comparison.
+
 Reproduce with frozen package source selected through `PYTHONPATH`:
 
 ```sh
 python -m benchmarks.multi_penalty_support --case scalar_tensor --tensor-rows 2000 --mode reml --measure-time --label small --out small.json
 python -m benchmarks.multi_penalty_support --case scalar_tensor --tensor-rows 100000 --mode fixed --measure-time --label large --out large.json
 python -m benchmarks.saturated_ssp_gram_dispatch --case scalar_tensor --tensor-rows 100000 --mode fixed --label dispatch --out dispatch.json
+python -m cProfile -o large-profile.prof -m benchmarks.multi_penalty_support --case scalar_tensor --tensor-rows 100000 --mode fixed --measure-time --label profile --out profile.json
 ```
 
 Source and driver hashes bind the retained measurements. The full local receipts
@@ -72,12 +92,12 @@ completed Gram products and was run separately from every timed fit.
 | 4: result-time penalty reassessment | The cited saved Gaussian/shared, Gamma/shared and LSS tensor profiles have zero assessment-context evaluations. Their full result construction costs are 0.727, 0.821 and 1.011 ms. They do not attribute the cited slowdown to result replay. Repeated identical-weight evaluations already use a memo; transferable summary authority requires more than a scalar objective receipt. A wide fit with face transitions and artifact loading still needs a dedicated profile before changing this cache. |
 | 5: Schur refusal | The certificate protects the pseudo-determinant. `test_structured_factor_extreme.py` includes acceptance at zero and `2**-30` null coupling, as well as refusal. An instrumented complete fit entering the rank-deficient Schur fallback during a collapsing-level trajectory remains a coverage item. No valid-fit regression was demonstrated. |
 | 6: wide sum-to-zero refusal | The automatic IRLS route catches `SumToZeroIdentifiabilityError` and retries Gram. Existing factor-smooth tests cover automatic fallback, forced-structured refusal and public REML fallback. A complete wide near-boundary fit, including terminal reconstruction, remains a coverage item. The certificate is preserved. |
-| 7: discarded observed geometry | An explicit Fisher fit can recompute observed geometry after a successful objective/step certificate. This is an optional reuse opportunity for that route; it does not affect the default observed-curvature C1 fixture. |
+| 7: discarded observed geometry | The certificate now passes its measured observed geometry through the private optimization run to initial/retry finalization. Fisher geometry remains separate and accepted-state changes invalidate the handoff. Fourteen focused regressions detect the unfixed duplicate and cover both certificate sites, refusal, changed states and fallback. |
 | 8: single-direction batching | The previously documented single-direction work and chunk-workspace accounting remain deferred. No new speed or whole-workspace bound is claimed. |
 | 9: merit-error dictionary | A small dictionary survives for the fit's trial lifetime. The review found no incorrect lookup. Ownership cleanup remains optional and does not justify changing solver-state contracts in this memory fix. |
 | 10: evidence and documentation | The audit now distinguishes checkpoint verification counts and states that the targeted comparator probe bundle is local. The opt-in manifest regression already exists in `test_distributional_history_schema.py::test_full_history_manifest_adds_only_the_explicit_retention_flag`. The roadmap now names initialization arrays among the remaining full-row owners. |
 
-The profile values above come from the saved diagnostic profiles in
+The finding 4 profile values come from the saved diagnostic profiles in
 `.superpowers/sdd/2026-09-10-numerical-resume/artifacts/pr381-followup/complete-fits/`.
 They are historical source-bound observations, not new timings or measurements
 of wide fits with face transitions.
@@ -89,6 +109,25 @@ exact Fraction targets and dimension-derived error bounds. The benchmark
 driver's test double was updated for the new optional row-count argument;
 its no-observer timing assertions are unchanged. Ruff and strict docs pass.
 An independent source review approved the narrow production and regression diff.
+
+Codex's follow-up found that the 31-by-5 partial-saturation fixtures stored
+139/155 entries, just below the dense threshold. Their revised zero pattern
+stores 144/155 entries. A separate dispatch regression fails with the original
+fixture and verifies blocked dense copies with the corrected one; numerical
+and live-mutation assertions now exercise that route. All 131 group-matrix
+cases pass after this correction.
+
+The observed-geometry handoff passes 226 focused solver, endpoint and reuse
+checks and an independent source review. It retains two coefficient vectors
+and three coefficient matrices, with no additional row ownership. A separate
+[complete-fit receipt](fisher_geometry_reuse_receipt.json) compares three
+2,000-row public Gaussian/Fisher fits per source: median wall time is 25.50
+versus 25.04 ms and process peak RSS is 336.68 versus 336.80 MiB. All recorded
+outputs and histories are identical. Separate profiles and dispatch witnesses
+show the same 16 Fisher and two observed assemblies: one observed assembly
+belongs to the fitted model and one to its null fit. This ordinary control
+does not reach the duplicate branch. The boundary regressions demonstrate
+that saving; the complete-fit timing spread supports no speedup claim.
 
 ## C1 completion remains separate work
 

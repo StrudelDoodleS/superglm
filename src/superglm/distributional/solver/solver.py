@@ -555,6 +555,9 @@ class _OptimizationRun:
     score_relative: float
     objective_relative_change: float
     step_relative: float
+    # Coefficient-only evidence for this exact accepted state and fit context;
+    # it never replaces the Fisher geometry used for coefficient directions.
+    observed_geometry: DenseJointGeometry | None = None
 
 
 def _validated_context(
@@ -980,10 +983,10 @@ def _objective_and_step_is_certified(
     direction: _Direction,
     score_relative: float,
     phase_recorder: FitPhaseRecorder | None,
-) -> bool:
+) -> tuple[bool, DenseJointGeometry | None]:
     """Require retained score or a safe, scale-invariant stationarity proof."""
     if score_relative <= config.tolerance:
-        return True
+        return True, None
     optimization_score = _optimization_score(context, geometry.score_penalized)
     decomposition = direction.decomposition
     if (
@@ -996,8 +999,9 @@ def _objective_and_step_is_certified(
         or decomposition.used_svd_fallback
         or decomposition.resolution_limited
     ):
-        return False
+        return False, None
     certificate_geometry = geometry
+    observed_geometry = None
     if config.coefficient_curvature == "fisher":
         certificate_geometry = _measured_geometry(
             context,
@@ -1005,6 +1009,7 @@ def _objective_and_step_is_certified(
             "observed",
             phase_recorder,
         )
+        observed_geometry = certificate_geometry
         if (
             _optimization_score_relative(
                 context,
@@ -1013,14 +1018,17 @@ def _objective_and_step_is_certified(
             )
             <= config.tolerance
         ):
-            return True
-    return _newton_decrement_is_certified(
-        config=config,
-        score=certificate_geometry.score_penalized,
-        penalized_curvature=certificate_geometry.penalized_curvature,
-        penalized_objective=state.penalized_optimizing_log_likelihood,
-        face=context.coefficient_face,
-        tolerance=config.tolerance,
+            return True, observed_geometry
+    return (
+        _newton_decrement_is_certified(
+            config=config,
+            score=certificate_geometry.score_penalized,
+            penalized_curvature=certificate_geometry.penalized_curvature,
+            penalized_objective=state.penalized_optimizing_log_likelihood,
+            face=context.coefficient_face,
+            tolerance=config.tolerance,
+        ),
+        observed_geometry,
     )
 
 
@@ -1162,6 +1170,7 @@ def _run_iterations(
     phase_recorder: FitPhaseRecorder | None = None,
 ) -> _OptimizationRun:
     state = initial_state
+    observed_geometry: DenseJointGeometry | None = None
     history: list[SolverIteration] = []
     objective_relative_change = 0.0
     step_relative = 0.0
@@ -1186,6 +1195,7 @@ def _run_iterations(
             return _OptimizationRun(
                 state=state,
                 geometry=geometry,
+                observed_geometry=observed_geometry,
                 history=tuple(history),
                 converged=True,
                 reason="score",
@@ -1220,6 +1230,7 @@ def _run_iterations(
                 return _OptimizationRun(
                     state=state,
                     geometry=geometry,
+                    observed_geometry=observed_geometry,
                     history=tuple(history),
                     converged=True,
                     reason="newton_decrement",
@@ -1319,7 +1330,7 @@ def _run_iterations(
             backtracks += 1
         if accepted is None:
             if stop_policy == "ordinary" and reached_identical_candidate:
-                if _objective_and_step_is_certified(
+                certified, measured_observed = _objective_and_step_is_certified(
                     context,
                     config,
                     geometry,
@@ -1327,10 +1338,15 @@ def _run_iterations(
                     direction,
                     score_relative,
                     phase_recorder,
-                ):
+                )
+                if measured_observed is not None:
+                    observed_geometry = measured_observed
+                del measured_observed
+                if certified:
                     return _OptimizationRun(
                         state=state,
                         geometry=geometry,
+                        observed_geometry=observed_geometry,
                         history=tuple(history),
                         converged=True,
                         reason="objective_and_step",
@@ -1368,6 +1384,7 @@ def _run_iterations(
             return _OptimizationRun(
                 state=state,
                 geometry=geometry,
+                observed_geometry=observed_geometry,
                 history=tuple(history),
                 converged=resolution_limited,
                 reason=(
@@ -1418,12 +1435,17 @@ def _run_iterations(
             )
         )
         state = accepted
+        # A refused certificate may survive a terminal exit, but never a
+        # coefficient transition. Context, penalty and precision are fixed
+        # for this run; no evidence is shared across independent fits.
+        observed_geometry = None
         geometry = accepted_geometry
         if stop_policy == "score_only":
             if accepted_score_relative <= config.tolerance:
                 return _OptimizationRun(
                     state=state,
                     geometry=geometry,
+                    observed_geometry=observed_geometry,
                     history=tuple(history),
                     converged=True,
                     reason="score",
@@ -1433,7 +1455,7 @@ def _run_iterations(
                 )
             continue
         if objective_relative_change <= config.tolerance and step_relative <= config.tolerance:
-            if _objective_and_step_is_certified(
+            certified, measured_observed = _objective_and_step_is_certified(
                 context,
                 config,
                 geometry,
@@ -1441,10 +1463,15 @@ def _run_iterations(
                 direction,
                 accepted_score_relative,
                 phase_recorder,
-            ):
+            )
+            if measured_observed is not None:
+                observed_geometry = measured_observed
+            del measured_observed
+            if certified:
                 return _OptimizationRun(
                     state=state,
                     geometry=geometry,
+                    observed_geometry=observed_geometry,
                     history=tuple(history),
                     converged=True,
                     reason="objective_and_step",
@@ -1463,6 +1490,7 @@ def _run_iterations(
             return _OptimizationRun(
                 state=state,
                 geometry=geometry,
+                observed_geometry=observed_geometry,
                 history=tuple(history),
                 converged=True,
                 reason="objective_and_score",
@@ -1474,6 +1502,7 @@ def _run_iterations(
     return _OptimizationRun(
         state=state,
         geometry=geometry,
+        observed_geometry=observed_geometry,
         history=tuple(history),
         converged=False,
         reason="max_iterations",
@@ -1703,11 +1732,15 @@ def _fit_dense_fixed_lambda_core(
     score_relative = run.score_relative
     objective_relative_change = run.objective_relative_change
     step_relative = run.step_relative
+    observed_geometry = run.observed_geometry
+    del run
 
     with measure_phase(phase_recorder, "terminal_observed_retry_fallback"):
         observed_geometry = (
             coefficient_geometry
             if solver_config.coefficient_curvature == "observed"
+            else observed_geometry
+            if observed_geometry is not None
             else _measured_geometry(
                 context,
                 state,
@@ -1782,6 +1815,8 @@ def _fit_dense_fixed_lambda_core(
                 observed_geometry = (
                     coefficient_geometry
                     if retry_config.coefficient_curvature == "observed"
+                    else retry.observed_geometry
+                    if retry.observed_geometry is not None
                     else _measured_geometry(
                         context,
                         state,
@@ -1789,6 +1824,7 @@ def _fit_dense_fixed_lambda_core(
                         phase_recorder,
                     )
                 )
+                del retry
             fisher_matrix = None
             # A dense reused endpoint carries no row derivatives (see
             # _reuse_observed_initial_result), and a failed retry keeps that

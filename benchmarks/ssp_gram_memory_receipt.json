@@ -372,5 +372,97 @@
       "native_pool_errors": 0
     }
   },
-  "raw_artifacts": ".superpowers/sdd/2026-09-11-fable-followup/ (ignored local artifacts; full receipts hash-bound above)"
+  "raw_artifacts": ".superpowers/sdd/2026-09-11-fable-followup/ (ignored local artifacts; full receipts hash-bound above)",
+  "profile_review": {
+    "kind": "separate cProfile complete fits; profiled times are not uninstrumented fit measurements",
+    "call_path": [
+      "GroupMatrixExecution._moments_impl",
+      "SparseSSPGroupMatrix.gram",
+      "_saturated_ssp_gram (candidate only)"
+    ],
+    "caller_callee_summary_path": ".superpowers/sdd/2026-09-11-fable-followup/gram-profile-callers-callees.json",
+    "caller_callee_summary_sha256": "70c6df1892697a3395e07d1779961b98b8b631dbe79e121ceba8a32d2607291f",
+    "fits": [
+      {
+        "side": "baseline",
+        "profile_path": ".superpowers/sdd/2026-09-11-fable-followup/large-baseline-profile.prof",
+        "profile_sha256": "074467c0b0b267ec71c5b823a48e4e5abf494fa4ab768681ae15782e96ac9a89",
+        "receipt_path": ".superpowers/sdd/2026-09-11-fable-followup/large-baseline-profile.json",
+        "receipt_sha256": "f372ebed218050aa92692d60ce851563d1968644b359fb66363cd3c2dd28d8a2",
+        "source_digest": "46d8cd50fb4d324a5c90ea0668de76e6cfee1481e76d7388799d695db3f23251",
+        "data_sha256": "0e80d2728f9a66f8abcd9a3b7692fe21f517e8a5edf1d5c3c586c32cce852894",
+        "outputs_equal_timed_fit": true,
+        "call_statistics": [
+          {
+            "function": "_compressed.py:1011(toarray)",
+            "calls": 149,
+            "self_seconds": 0.0014507550000000002,
+            "cumulative_seconds": 0.056396850000000005
+          },
+          {
+            "function": "src/superglm/_group_matrix/_group_matrix_core.py:697(gram)",
+            "calls": 18,
+            "self_seconds": 1.310631308,
+            "cumulative_seconds": 2.0453044300000003
+          },
+          {
+            "function": "src/superglm/solvers/irls_direct.py:409(fit_irls_direct)",
+            "calls": 1,
+            "self_seconds": 9.666e-06,
+            "cumulative_seconds": 5.770154037
+          },
+          {
+            "function": "_compressed.py:553(_get_sliceXslice)",
+            "calls": 7,
+            "self_seconds": 7.4007e-05,
+            "cumulative_seconds": 0.08146267600000001
+          }
+        ],
+        "saturated_helper_calls_csr_slice_or_toarray": false
+      },
+      {
+        "side": "candidate",
+        "profile_path": ".superpowers/sdd/2026-09-11-fable-followup/large-candidate-profile.prof",
+        "profile_sha256": "5315546cdd7ec75e62c6a7c0c1a5f7fee7e8e7da97e445fb91ef5751e71b104f",
+        "receipt_path": ".superpowers/sdd/2026-09-11-fable-followup/large-candidate-profile.json",
+        "receipt_sha256": "abc59945ef155dc628f4abb58718eb9664612c439520f976ff80524e7a0f03d0",
+        "source_digest": "a503a0e4b2b67bf03a564d802cc67ad35ae0bf363cd1c7b2391fc6c5982c082b",
+        "data_sha256": "0e80d2728f9a66f8abcd9a3b7692fe21f517e8a5edf1d5c3c586c32cce852894",
+        "outputs_equal_timed_fit": true,
+        "call_statistics": [
+          {
+            "function": "_compressed.py:1011(toarray)",
+            "calls": 149,
+            "self_seconds": 0.001333957,
+            "cumulative_seconds": 0.051799766000000004
+          },
+          {
+            "function": "src/superglm/_group_matrix/_group_matrix_core.py:697(gram)",
+            "calls": 18,
+            "self_seconds": 0.039508291,
+            "cumulative_seconds": 2.089287819
+          },
+          {
+            "function": "src/superglm/_group_matrix/_group_matrix_core.py:765(_saturated_ssp_gram)",
+            "calls": 6,
+            "self_seconds": 1.306049051,
+            "cumulative_seconds": 1.308523428
+          },
+          {
+            "function": "src/superglm/solvers/irls_direct.py:409(fit_irls_direct)",
+            "calls": 1,
+            "self_seconds": 9.846e-06,
+            "cumulative_seconds": 5.776070113
+          },
+          {
+            "function": "_compressed.py:553(_get_sliceXslice)",
+            "calls": 7,
+            "self_seconds": 6.9627e-05,
+            "cumulative_seconds": 0.08394539100000001
+          }
+        ],
+        "saturated_helper_calls_csr_slice_or_toarray": false
+      }
+    ]
+  }
 }
