@@ -53,10 +53,10 @@ from superglm.features.random_effect import RandomEffect
 
 @pytest.mark.parametrize("edf0", [1.0, 49.0, 225.0, 576.0, 1599.0])
 def test_threshold_is_exactly_where_the_cp_criterion_switches(edf0: float) -> None:
-    """`z > sqrt(edf0/2)` must be the same statement as `T/phi > 2*edf0`.
+    """The two score thresholds agree for an unpenalized Gaussian block.
 
-    The screen reports z, not T, so the gate is only usable if the two agree
-    exactly rather than approximately.
+    These rows have reference variance 2*EDF. The returned statistic is
+    T/phi, so either column can express the same algebraic rule here.
     """
     at_criterion = 2.0 * edf0  # T/phi sitting exactly on Mallows' Cp
     z_at = (at_criterion - edf0) / np.sqrt(2.0 * edf0)

@@ -307,12 +307,19 @@ size settles nothing. See [caveats 9 and 15](#caveats).
 ### The threshold is not a constant
 
 [Caveat 3](#caveats) already notes that scoring by `gain - 2*edf` changes which
-screen wins. That is Mallows' Cp, and on PSST's own scale it is not a rescoring
-but a threshold. Since `z = (T/φ − edf0) / sqrt(2·edf0)`:
+screen wins. For the unpenalized Gaussian `cat_cat` rows measured here, the
+Cp score rule can also be written as a threshold on PSST's z. Their reference
+variance is `2·edf0`, so `z = (T/φ − edf0) / sqrt(2·edf0)` gives:
 
 ```
 T/φ > 2·edf0    ⟺    z > sqrt(edf0 / 2)
 ```
+
+For penalized rows, the right-hand threshold is instead
+`edf0 / sqrt(2·sum(a²))`. EDF alone does not determine it. To apply the same
+algebraic score rule, compare the returned `statistic` (already `T/φ`) with
+`2·edf0` directly. This identity supplies no guarantee about the benefit of
+a penalized refit.
 
 Both sides read the **same** `edf0`, and for an unpenalized `cat_cat` the value
 `screen_interactions` returns is the block's *achieved rank*, not `(L−1)²` — it

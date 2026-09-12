@@ -233,9 +233,10 @@ _PENALIZED_LADDER_COST = 2
 # the level count rather than cubic; see screening/_structured.py.  It needs
 # the same two KINDS of budget the dense path needs and for the same reasons:
 # _within_structured_budget and _within_structured_cells bound allocations,
-# which grow as k_s^2, and _structured_evaluation_budget bounds solve time,
-# which grows as k_s^3 -- one batched eigendecomposition of (k_s + 1) blocks
-# per level per evaluation, and a ladder that has to bisect runs tens of them.
+# which grow as k_s^2, and _structured_evaluation_budget limits factor passes
+# using a cubic work proxy. Each pass runs block-angular QR and local inverse
+# factors; a ladder that has to bisect runs tens of passes. Variance passes
+# also build the cross-level QR tree, so the passes are not equal-cost units.
 # The cubic factor retains the original arrow-factorization calibration.  The
 # stable profiled-trace setup introduced for issue #204 is now deducted from
 # that same work ceiling before any endpoint evaluations are admitted.
@@ -249,7 +250,12 @@ _STRUCTURED_CUBIC_BUDGET_FACTOR = 50
 
 
 def _structured_evaluation_allowance(max_cells, n_a, k_s, n_levels):
-    """Arrow evaluations left after the stable profiled-trace setup."""
+    """Factor passes left under the dimensional work estimate.
+
+    This is a count of passes, not a certified floating-operation budget.
+    Variance passes add contractions and a QR tree to the ordinary pass;
+    their cost is measured separately in the reference-variance report.
+    """
     max_cells, n_a, k_s, n_levels = (
         int(max_cells),
         int(n_a),
@@ -1089,9 +1095,9 @@ def screen_interactions(
         This bounds neither of the pair's other two costs.  The moment
         assembly's ``(n_a, k_s, k_s)`` intermediate is bounded by
         ``_within_structured_cells``, because it scales with the SUPPORT and
-        binning can shrink it; the batched eigendecomposition is bounded by
-        ``_structured_evaluation_budget``, because it is cubic in ``k_s``
-        where this gate is quadratic.
+        binning can shrink it. ``_structured_evaluation_budget`` separately
+        limits factor passes using cubic work in ``k_s``, where this
+        allocation gate is quadratic.
         """
         live_stack_cells = 2 * int(n_levels) * (int(k_s) + 1) ** 2
         return live_stack_cells <= _STRUCTURED_BUDGET_FACTOR * max_cells
@@ -1132,8 +1138,11 @@ def screen_interactions(
         EDF targets require bisection. It reserves the worst-case search
         cost plus a final variance pass for each distinct emitted lambda.
         A ladder clamped to one edge therefore needs three passes. Final
-        variance passes also add linear-in-levels QR-tree work; this count
-        is a work estimate, not a wall-clock guarantee.
+        variance passes also add linear-in-levels QR-tree work. Passes have
+        different costs: this count is neither a bound on floating-point
+        operations nor a wall-clock guarantee. The width-45, 34-level review
+        measurement and its profiler breakdown are recorded in
+        ``docs/research/2026-09-psst-reference-variance.md``.
 
         Exact support that cannot afford setup may be retried after spline
         binning. The kernel makes the final admission decision once it knows

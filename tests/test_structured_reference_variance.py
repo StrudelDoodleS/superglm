@@ -109,7 +109,7 @@ def test_variance_refusal_preserves_an_independent_rung(monkeypatch):
     assert results[0].lambda0 > 1.0
 
 
-@pytest.mark.parametrize("exponent", [-600, 600])
+@pytest.mark.parametrize("exponent", [-1000, -600, 600, 1000])
 def test_structured_midpoint_preserves_extreme_penalty_units(exponent):
     baseline = st.structured_ladder(_pair(), budgets=(2.0,))[0]
     results = st.structured_ladder(_pair(exponent), budgets=(2.0,))
