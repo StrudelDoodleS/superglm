@@ -254,3 +254,51 @@ Validation:
 - Ruff checks, formatting, `git diff --check`, `uv lock --check` and
   `uv pip check` passed. The numerical test suite was not repeated for this
   documentation-only follow-up.
+
+## CI follow-up: numerical comparison in the new API test
+
+PR #386's first CI run exposed exact comparisons of independently computed
+penalty matrices. Differences were at most about `1.1e-14`. Replacing that
+assertion with a dimension/epsilon/norm bound allowed the discrete REML case
+to reach a second unsupported assertion: prediction agreement near `1e-11`
+between independently stopped practical REML fits. CI observed about `5.3e-6`.
+These assertions were new in this PR, not tests that passed in 0.32.0.
+
+The internal baseline bypassed the public API's existing BLAS thread cap.
+With OpenBLAS's Haswell kernel, the native-thread baseline stopped after 29
+outer iterations and the public fit after 44. Both reported a practical
+plateau. Their predictions differed by about `1.8e-5` locally. Running the
+same original test with `OPENBLAS_NUM_THREADS=1` made both fits take 44
+iterations and match exactly in predictions and covariance. The ordinary
+local SkylakeX kernel had not exposed this difference.
+
+The fixture also samples `z` as a deterministic function of `x`. Its
+64-column location design has numerical rank 58 and condition around
+`1e18`. It cannot justify an unqualified forward-accuracy assertion. Equal
+coefficient-convergence booleans also say nothing about outer convergence.
+
+The replacement regression tests the API boundary. It compiles independent
+literal `Predictor` templates, checks the bound model's designs, links,
+offsets and penalties, and records the arguments passed to the real fitter.
+It snapshots predictions, covariance and combined convergence status before
+returning the actual fit to SuperLSS, then checks publication and exact
+serialization. It exercises fixed smoothing and REML in dense and discrete
+execution. It does not assert roundoff agreement between independently
+stopped REML optimisations. Existing solver-oracle suites retain numerical
+convergence and accuracy coverage.
+
+Validation of the final test correction:
+
+- All 40 tests in `tests/test_bound_superlss.py` passed under the Haswell
+  kernel on Python 3.12, 3.13 and 3.14. Python 3.13 used
+  `OPENBLAS_CORETYPE=Haswell uv run --no-sync pytest tests/test_bound_superlss.py -q`.
+  The other versions used `uv run --isolated --locked --python VERSION
+  --extra dev --extra bench --extra plotting --with mpmath pytest
+  tests/test_bound_superlss.py -q` with the same kernel selection.
+- Deliberately omitting the interaction, changing the forwarded REML
+  iteration budget, and discarding prediction offsets each failed the
+  revised regression at its corresponding boundary.
+- An independent numerical-test review approved the correction after
+  checking combined coefficient/smoothing convergence and dataframe metadata.
+- Ruff checks and formatting passed. No production code, solver tolerance,
+  version field or lock pin changed in this CI follow-up.

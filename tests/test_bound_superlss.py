@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import superglm.distributional.api as distributional_api
 from superglm import (
     BoundPredictor,
     GammaLS,
@@ -28,11 +29,13 @@ from superglm import (
     term,
     ti,
 )
+from superglm._frame import as_eager_frame
 from superglm.distributional.families.tweedie import TweedieLSS
 from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.model import fit_dense_distributional
+from superglm.distributional.predictor import compile_predictors
 from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
-from superglm.distributional.weights import WeightContract
+from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.links import IdentityLink
 from tests.test_bound_predictors import _FourParameterFamily
 from tests.test_superlss_api import _ExpectedInformationSpy, _fixture, _roundoff_factor
@@ -285,7 +288,8 @@ def test_independent_read_only_and_frozen_metadata_remains_supported(storage):
 
 @pytest.mark.parametrize("discrete", [False, True])
 @pytest.mark.parametrize("reml", [False, True])
-def test_bound_smooth_interaction_matches_internal_fit(discrete, reml):
+def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml, monkeypatch):
+    """Check bound inputs and publication of one real coefficient/REML fit."""
     frame, response, weights, offsets = _fixture(n=160)
     family = GaussianLS(scale_floor=0.02)
     model = SuperLSS(
@@ -313,41 +317,94 @@ def test_bound_smooth_interaction_matches_internal_fit(discrete, reml):
             "location:x:z#margin_z": 1.3,
         }
     )
-    baseline = fit_dense_distributional(
-        frame,
-        response,
-        family=GaussianLS(scale_floor=0.02),
-        predictors=templates,
-        weight_contract=WeightContract("prior"),
-        sample_weight=weights,
+    expected_compiled = compile_predictors(
+        as_eager_frame(frame),
+        resolve_likelihood_weights(
+            weights, n_observations=len(frame), contract=WeightContract("prior")
+        ),
+        GaussianLS(scale_floor=0.02).parameters,
+        templates,
         offsets=offsets,
-        config=DenseSolverConfig(max_iterations=100, tolerance=1.0e-7),
-        lambdas=lambdas,
-        efs_config=(
+        model_discrete=discrete,
+        n_bins_config=32,
+    )
+    snapshots = []
+
+    def record_fit(fit_frame, fit_response, **kwargs):
+        pd.testing.assert_frame_equal(fit_frame, frame)
+        np.testing.assert_array_equal(fit_response, response)
+        np.testing.assert_array_equal(kwargs["sample_weight"], weights)
+        assert tuple(kwargs["offsets"]) == tuple(offsets)
+        for name, offset in offsets.items():
+            np.testing.assert_array_equal(kwargs["offsets"][name], offset)
+        assert kwargs["family"].to_config() == GaussianLS(scale_floor=0.02).to_config()
+        assert kwargs["weight_contract"] == WeightContract("prior")
+        assert kwargs["config"] == DenseSolverConfig(max_iterations=100, tolerance=1.0e-7)
+        assert kwargs["efs_config"] == (
             DistributionalEFSConfig(
                 max_iterations=100, initial_lambda=None, practical_convergence=True
             )
             if reml
             else None
-        ),
-        discrete=discrete,
-        n_bins=32,
-        chunk_size="auto" if discrete else None,
-    )
+        )
+        assert kwargs["lambdas"] == lambdas
+        assert kwargs["discrete"] is discrete
+        assert kwargs["n_bins"] == 32
+        assert kwargs["chunk_size"] == ("auto" if discrete else None)
+        assert kwargs["retain_rows"] is True
+        assert kwargs["separation"] == "warn"
+        internal = fit_dense_distributional(fit_frame, fit_response, **kwargs)
+        smoothing = internal.smoothing
+        assert (smoothing is not None) is reml
+        # Snapshot inside the real-fitter boundary, before the facade receives
+        # the result. Independent practical REML stops need not coincide.
+        snapshots.append(
+            {
+                "prediction": internal.predict(frame, offsets=offsets).copy(),
+                "covariance": internal.covariance.copy(),
+                "converged": internal.fitted_result.converged,
+                "smoothing_reason": None if smoothing is None else smoothing.convergence_reason,
+                "smoothing_certified": None if smoothing is None else smoothing.matched_certified,
+                "lambdas": dict(internal.smoothing_parameters),
+                "backend": internal.result.execution_backend_identifier,
+            }
+        )
+        return internal
+
+    monkeypatch.setattr(distributional_api, "fit_dense_distributional", record_fit)
     fit = model.fit_reml if reml else model.fit
     fit(frame, response, sample_weight=weights, offsets=offsets, lambdas=lambdas)
     fitted = model._require_fitted()
-    assert model.parameter_names_ == baseline.parameter_names
-    assert fitted.result.converged == baseline.result.converged
-    assert (
-        fitted.result.execution_backend_identifier == baseline.result.execution_backend_identifier
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert model.parameter_names_ == ("location", "scale")
+    assert model.result_.converged == snapshot["converged"]
+    assert model.smoothing_convergence_reason_ == snapshot["smoothing_reason"]
+    assert model.smoothing_certified_ == snapshot["smoothing_certified"]
+    assert dict(model.smoothing_parameters_) == snapshot["lambdas"]
+    assert snapshot["backend"] == (
+        "distributional-chunked-v1" if discrete else "distributional-dense-v1"
     )
     for actual, expected in zip(
-        fitted.fit_state.compiled_predictors, baseline.fit_state.compiled_predictors, strict=True
+        fitted.fit_state.compiled_predictors, expected_compiled, strict=True
     ):
-        np.testing.assert_array_equal(
-            actual.compiled.design.toarray(), expected.compiled.design.toarray()
+        assert (actual.name, actual.parameter_index, actual.intercept) == (
+            expected.name,
+            expected.parameter_index,
+            expected.intercept,
         )
+        assert type(actual.link) is type(expected.link)
+        assert vars(actual.link) == vars(expected.link)
+        np.testing.assert_array_equal(actual.offset, expected.offset)
+        design, expected_design = (
+            actual.compiled.design.toarray(),
+            expected.compiled.design.toarray(),
+        )
+        tolerance = _roundoff_factor(design, expected_design)
+        scale = max(1.0, np.linalg.norm(expected_design, ord=np.inf))
+        np.testing.assert_allclose(design, expected_design, rtol=0.0, atol=tolerance * scale)
+        assert actual.compiled.feature_order == expected.compiled.feature_order
+        assert actual.compiled.interaction_order == expected.compiled.interaction_order
         assert tuple(p.name for p in actual.penalties) == tuple(p.name for p in expected.penalties)
         for a, b in zip(actual.penalties, expected.penalties, strict=True):
             assert a.rank == b.rank
@@ -356,17 +413,8 @@ def test_bound_smooth_interaction_matches_internal_fit(discrete, reml):
             tolerance = _roundoff_factor(a.omega_ssp, b.omega_ssp)
             scale = max(1.0, np.linalg.norm(b.omega_ssp, ord=np.inf))
             np.testing.assert_allclose(a.omega_ssp, b.omega_ssp, rtol=0.0, atol=tolerance * scale)
-    for actual, expected in (
-        (model.predict(frame, offsets=offsets), baseline.predict(frame, offsets=offsets)),
-        (model.covariance_, baseline.covariance),
-    ):
-        tolerance = _roundoff_factor(actual, expected)
-        np.testing.assert_allclose(
-            actual,
-            expected,
-            rtol=tolerance,
-            atol=tolerance * max(1.0, np.linalg.norm(expected, ord=np.inf)),
-        )
+    np.testing.assert_array_equal(model.predict(frame, offsets=offsets), snapshot["prediction"])
+    np.testing.assert_array_equal(model.covariance_, snapshot["covariance"])
     restored = SuperLSS.from_bytes(model.to_bytes())
     np.testing.assert_array_equal(
         restored.predict(frame, offsets=offsets), model.predict(frame, offsets=offsets)
