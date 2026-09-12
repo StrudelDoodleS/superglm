@@ -1,0 +1,158 @@
+{
+  "baseline_revision": "9af47afe895893dde3b66b1ed782faa5b1ff7178",
+  "after_source_note": "After uses the working tree pinned by source_sha256; revision names its parent.",
+  "regressions": {
+    "baseline_budget_failures": 2,
+    "baseline_numerical_control_passes": 1,
+    "clearing_both_latches_fails_numerical_control": true,
+    "final_structured_routing_cost_tests_passed": 124
+  },
+  "performance": {
+    "before": {
+      "case": "structured_search_retry",
+      "rows": 1557,
+      "holdout_rows": 1557,
+      "seed": 391,
+      "strength": 0.2,
+      "revision": "9af47afe895893dde3b66b1ed782faa5b1ff7178",
+      "source_sha256": "9fd6a157abde5d65379328ac4668360b95d9a04fe935e71cb0927f58be428d0c",
+      "python": "3.13.14",
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "threads": {
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "NUMBA_NUM_THREADS": "2"
+      },
+      "fit_seconds": [
+        0.17685039999196306,
+        0.176994263951201,
+        0.18044382997322828
+      ],
+      "screen_seconds": [
+        0.030718926049303263,
+        0.02921301400056109,
+        0.029089511022903025
+      ],
+      "process_peak_rss_mib": 407.62109375,
+      "dispatch": [
+        {
+          "structured_ladder": 1,
+          "structured_ladder_budget_refused": 1
+        },
+        {
+          "structured_ladder": 1,
+          "structured_ladder_budget_refused": 1
+        },
+        {
+          "structured_ladder": 1,
+          "structured_ladder_budget_refused": 1
+        }
+      ],
+      "load_before": [
+        2.65185546875,
+        1.25,
+        0.88037109375
+      ],
+      "load_after": [
+        2.65185546875,
+        1.25,
+        0.88037109375
+      ],
+      "prediction_sum": 1029.6499484815613,
+      "prediction_sum_squares": 887.3888020868648,
+      "repeat_prediction_max_difference": 0.0,
+      "holdout_mains_loss": 1643.0641435338057,
+      "mains_edf": 74.58791978699483,
+      "mains_deviance": 1499.9763910649542,
+      "phi": 1.0118484671613208,
+      "candidates": [
+        {
+          "feature_a": "x",
+          "feature_b": "g",
+          "kind": "spline_cat",
+          "statistic": null,
+          "z": null,
+          "edf0": null,
+          "lambda0": null,
+          "n_cells": 18176,
+          "approx": true,
+          "planted": false
+        }
+      ]
+    },
+    "after": {
+      "case": "structured_search_retry",
+      "rows": 1557,
+      "holdout_rows": 1557,
+      "seed": 391,
+      "strength": 0.2,
+      "revision": "9af47afe895893dde3b66b1ed782faa5b1ff7178",
+      "source_sha256": "28cd665020e82cbd4b5e0f7107f599bf45839510a199c80f233ba76c711594d4",
+      "python": "3.13.14",
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "threads": {
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "NUMBA_NUM_THREADS": "2"
+      },
+      "fit_seconds": [
+        0.1731970839900896,
+        0.17337517201667652,
+        0.17772471299394965
+      ],
+      "screen_seconds": [
+        0.24919618701096624,
+        0.25052963697817177,
+        0.26818107801955193
+      ],
+      "process_peak_rss_mib": 393.96484375,
+      "dispatch": [
+        {
+          "structured_ladder": 2,
+          "structured_ladder_budget_refused": 1
+        },
+        {
+          "structured_ladder": 2,
+          "structured_ladder_budget_refused": 1
+        },
+        {
+          "structured_ladder": 2,
+          "structured_ladder_budget_refused": 1
+        }
+      ],
+      "load_before": [
+        1.22021484375,
+        1.04541015625,
+        0.8740234375
+      ],
+      "load_after": [
+        1.2021484375,
+        1.04443359375,
+        0.875
+      ],
+      "prediction_sum": 1029.6499484815613,
+      "prediction_sum_squares": 887.3888020868648,
+      "repeat_prediction_max_difference": 0.0,
+      "holdout_mains_loss": 1643.0641435338057,
+      "mains_edf": 74.58791978699483,
+      "mains_deviance": 1499.9763910649542,
+      "phi": 1.0118484671613208,
+      "candidates": [
+        {
+          "feature_a": "x",
+          "feature_b": "g",
+          "kind": "spline_cat",
+          "statistic": 2.747486290551444,
+          "z": 2.272069180840151,
+          "edf0": 2.00000067721952,
+          "lambda0": 6300.316981590886,
+          "n_cells": 18176,
+          "approx": true,
+          "planted": false
+        }
+      ]
+    }
+  }
+}

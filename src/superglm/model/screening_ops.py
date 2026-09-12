@@ -1279,12 +1279,12 @@ def screen_interactions(
             # pair outside the arrow budgets, the dense path gets its binning
             # fallback back rather than the pair becoming a NaN row.
             arrow_lookahead = False
-            # Latched once the LADDER itself refuses, as opposed to a gate.
-            # Without it the restore below and the speculation further down
-            # chase each other: the dense path fails its budget, speculates,
-            # the ladder refuses, the dense track is handed back, and the same
-            # speculation is taken again.
+            # A failed handoff cannot repeat on the same support. Keep
+            # numerical certification refusals latched for the whole pair.
             arrow_refused = False
+            # Budget refusals are local to the support whose work was too
+            # expensive; binning can make another attempt affordable.
+            arrow_budget_refused = False
             while True:
                 codes_l, n_l = _margin_support(left, bin_flag[left])
                 codes_r, n_r = _margin_support(right, bin_flag[right])
@@ -1380,7 +1380,7 @@ def screen_interactions(
                             # the same unaffordable handoff again.
                             if arrow_lookahead:
                                 allow_dense, arrow_lookahead = True, False
-                                arrow_refused = True
+                                arrow_budget_refused = True
                                 continue
                         else:
                             if structured_results is None and arrow_lookahead:
@@ -1433,7 +1433,7 @@ def screen_interactions(
                         allow_dense
                         and not structured
                         and kind == "spline_cat"
-                        and not arrow_refused
+                        and not (arrow_refused or arrow_budget_refused)
                     ):
                         allow_dense = False
                         continue
@@ -1448,7 +1448,7 @@ def screen_interactions(
                     # try it before binning rather than after.  `left` is the
                     # spline margin for spline_cat, by the swap above.
                     if (
-                        not arrow_refused
+                        not (arrow_refused or arrow_budget_refused)
                         and _within_structured_budget(k_l, n_r)
                         and _structured_evaluation_budget(n_l, k_l, n_r) >= 2
                         and _within_structured_cells(n_l, n_r, k_l)
@@ -1456,6 +1456,10 @@ def screen_interactions(
                         allow_dense, arrow_lookahead = False, True
                         continue
                 bin_flag[binnable[0][1]] = True
+                # The refusal applies only to the unchanged support. Binning
+                # frees structured work even when the dense intermediate
+                # still does not fit, so allow a fresh handoff on this state.
+                arrow_budget_refused = False
             approx = (
                 bin_flag[left] or bin_flag[right] or _pair_refits_discrete(kind, feat_a, feat_b)
             )

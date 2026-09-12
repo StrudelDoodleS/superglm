@@ -33,6 +33,18 @@ from superglm.features import Categorical, Numeric, Spline
 
 def _sample(case, n, seed, strength):
     rng = np.random.default_rng(seed)
+    if case == "structured_search_retry":
+        x = np.linspace(0, 1, 1557)[np.arange(n) % 1557]
+        group = np.arange(n) % 71
+        rng.shuffle(group)
+        frame = pd.DataFrame({"x": x, "g": group.astype(str)})
+        return (
+            frame,
+            np.sin(3 * x) + rng.normal(size=n),
+            {"x": Spline(kind="ns", k=7), "g": Categorical()},
+            set(),
+            {"candidates": [("x", "g")], "max_cells": 221_206},
+        )
     if case in ("variance_budget", "variance_budget_two_edges"):
         x = np.linspace(0, 1, 5094)[np.arange(n) % 5094]
         group = np.arange(n) % 200
@@ -138,6 +150,7 @@ def main():
             "structured_wide",
             "variance_budget",
             "variance_budget_two_edges",
+            "structured_search_retry",
         ),
         default="mixed",
     )

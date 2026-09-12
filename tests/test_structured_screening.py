@@ -5163,6 +5163,66 @@ def test_unaffordable_speculative_variance_reaches_dense_binning(monkeypatch):
     assert np.isfinite(row["z"])
 
 
+@pytest.mark.parametrize(
+    "n, n_levels, spline, max_cells, numerical_refusal, expected_shapes",
+    [
+        pytest.param(
+            1557,
+            71,
+            Spline(kind="ns", k=7),
+            221_206,
+            False,
+            [(1557, 6), (256, 6)],
+            id="search-budget",
+        ),
+        pytest.param(
+            300, 20, Spline(kind="ps", n_knots=2), 6800, False, [(256, 5)], id="preflight-budget"
+        ),
+        pytest.param(
+            1557, 71, Spline(kind="ns", k=7), 221_206, True, [(1557, 6)], id="numerical-refusal"
+        ),
+    ],
+)
+def test_binning_retries_a_budget_refusal_but_keeps_numerical_refusals(
+    monkeypatch, n, n_levels, spline, max_cells, numerical_refusal, expected_shapes
+):
+    """Only a work-budget refusal becomes eligible for retry after binning."""
+    import superglm.screening._structured as st
+
+    rng = np.random.default_rng(391)
+    levels = np.arange(n) % n_levels
+    rng.shuffle(levels)
+    df = pd.DataFrame({"x": np.linspace(0, 1, n), "g": levels.astype(str)})
+    y = np.sin(3 * df["x"].to_numpy()) + rng.normal(size=n)
+    model = SuperGLM(family="gaussian", features={"x": spline, "g": Categorical()}).fit_reml(df, y)
+    if numerical_refusal:
+        profile = st._profile
+        attempted = []
+
+        def refuse_first_geometry(pair):
+            attempted.append(pair)
+            if len(attempted) == 1:
+                raise st._UnstableStructuredEDFError("Injected geometry certification failure")
+            return profile(pair)
+
+        monkeypatch.setattr(st, "_profile", refuse_first_geometry)
+    seen = []
+    real = ops.spline_cat_moments
+
+    def record(basis, *args):
+        seen.append(basis.shape)
+        return real(basis, *args)
+
+    monkeypatch.setattr(ops, "spline_cat_moments", record)
+    row = model.screen_interactions(df, y, candidates=[("x", "g")], max_cells=max_cells).iloc[0]
+    assert bool(np.isnan(row["z"])) is numerical_refusal, row.to_dict()
+    if not numerical_refusal:
+        assert np.isfinite(row["z"])
+    assert bool(row["approx"])
+    assert row["n_cells"] == 256 * n_levels
+    assert seen == expected_shapes
+
+
 def test_the_structured_path_bins_rather_than_allocate_its_own_intermediate(monkeypatch):
     """The kernel's ``(n_a, k_s, k_s)`` outer products need a gate of their own.
 
