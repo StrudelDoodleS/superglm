@@ -1,0 +1,2411 @@
+{
+  "baseline_sha": "087d5983d1cba9823014c73eb8400b593a8c9217",
+  "measured_repeats": [
+    1,
+    2
+  ],
+  "excluded_warmup_repeat": 0,
+  "worker_source_path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src",
+  "source_selection": "PYTHONPATH set explicitly to worker_source_path in each fresh process",
+  "memory_measure": "peak process RSS through fit, including imports and fixture construction",
+  "se_measure": "conditional link standard errors at fitted smoothing parameters",
+  "se_comparison_formula": "abs(SE_before / SE_repaired - 1) for repair comparisons; abs(SE_EFS / SE_strict - 1) for policy comparisons; multiply by 100 for percent fields",
+  "cases": [
+    {
+      "case": "gaussian-correlated",
+      "routes": {
+        "efs": {
+          "status": "completed",
+          "smoothing_reason": "practical_plateau",
+          "smoothing_certified": false,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "objective_and_score",
+          "coefficient_score_relative": 1.1375049229202386e-11,
+          "smoothing_objective": 100.80901584846261,
+          "smoothing_iterations": 29,
+          "coefficient_fits": 34,
+          "coefficient_iterations": 86,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 66,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 0.7996583351859541,
+            "rank": 66,
+            "condition_estimate": 1051.1953386954006,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.0001018090158484626,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.termination_uncertified",
+            "smoothing.trajectory_unsettled",
+            "smoothing.persistent_upward_drift",
+            "smoothing.persistent_upward_drift",
+            "optimization.repeated_step_rejection",
+            "smoothing.update_dominance"
+          ],
+          "options": {
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 1.567404447006993,
+              "cpu_seconds": 1.566047101,
+              "peak_process_rss_mib": 389.14453125,
+              "receipt_sha256": "d3eabf79c7007921bac74c9fd025d29dd9c85979d11616f0371c6e402f970b8d"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 1.4889889860060066,
+              "cpu_seconds": 1.4877710759999998,
+              "peak_process_rss_mib": 389.01953125,
+              "receipt_sha256": "ebcf0b724229515585746167f333819e94b4ba4dee4106f568f06eff40012d0d"
+            }
+          ],
+          "median_wall_seconds": 1.5281967165064998,
+          "median_peak_process_rss_mib": 389.08203125,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "fa3176223663912640103cccc46591dd03beff0f05468f9485e6ff87720ed1b0"
+        },
+        "newton-strict": {
+          "status": "completed",
+          "smoothing_reason": "stationary",
+          "smoothing_certified": true,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "score",
+          "coefficient_score_relative": 1.2076271082532442e-08,
+          "smoothing_objective": 100.80548310527874,
+          "smoothing_iterations": 15,
+          "coefficient_fits": 16,
+          "coefficient_iterations": 63,
+          "newton_iterations": 11,
+          "bfgs_iterations": 10,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 66,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 0.8982940173508669,
+            "rank": 66,
+            "condition_estimate": 262.31172590973165,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.00010180548310527874,
+          "projected_gradient": 6.410187458254918e-05,
+          "diagnostic_codes": [],
+          "options": {
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 1.1525817139772698,
+              "cpu_seconds": 1.151997766,
+              "peak_process_rss_mib": 386.39453125,
+              "receipt_sha256": "b8648b1916252cfc4dc8ef5ae25bb25680ee39b9c1fed373854a2917d81ce893"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 1.039701756031718,
+              "cpu_seconds": 1.03899254,
+              "peak_process_rss_mib": 386.640625,
+              "receipt_sha256": "cd6bad6992e785d6e572c794372da17cb3171ebeb3880957261157c84d421076"
+            }
+          ],
+          "median_wall_seconds": 1.096141735004494,
+          "median_peak_process_rss_mib": 386.517578125,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "ad39af04d2cfca37a2f257f3c7440908e1f07cd7baf73fe3628fba0e81daa13b"
+        }
+      },
+      "rows": 160,
+      "evaluation_rows": 160,
+      "coefficients": 66,
+      "parameters": [
+        "location",
+        "scale"
+      ],
+      "input_hashes": {
+        "frame": "a5e3fb5a0012299082c1f239aa55c6893156bf5030e9fbb814a872c54a43a5d6",
+        "response": "9d6a0b3f13f7b2de722205eb9cbfbe2d9d29691f80ee5c502d433941faf55505",
+        "evaluation": "a5e3fb5a0012299082c1f239aa55c6893156bf5030e9fbb814a872c54a43a5d6",
+        "weights": "049bdcfb094393faad72626dc1bbce72b6ec0e5fb84f4cbf40c54e36de4ec0ed",
+        "offset:location": "167137ac26e7d86b7a96e379085e33e6bbc8ef8194867cd3d8d179471defb2ff",
+        "offset:scale": "e675fd862d17b343bf325fdf1987530c82d971492c5059ced109f65018ea2a50"
+      },
+      "provenance": {
+        "evaluation": "training rows"
+      },
+      "family": {
+        "type": "GaussianLS",
+        "scale_floor": 0.02
+      },
+      "comparison": {
+        "conditional_link_se": [
+          {
+            "parameter": "location",
+            "median_absolute_se_change_percent": 1.5971597676969873,
+            "max_absolute_se_change_percent": 3.240153104642274,
+            "max_link_prediction_change_in_strict_se": 0.11791388657708796,
+            "relative_l2_natural_prediction_difference": 0.004064895784829128
+          },
+          {
+            "parameter": "scale",
+            "median_absolute_se_change_percent": 0.016699581456802726,
+            "max_absolute_se_change_percent": 0.04053540767756658,
+            "max_link_prediction_change_in_strict_se": 0.02122309323487738,
+            "relative_l2_natural_prediction_difference": 0.0012539767652318787
+          }
+        ],
+        "relative_covariance_frobenius_difference": 0.15335981495003248
+      }
+    },
+    {
+      "case": "gaussian-crossed",
+      "routes": {
+        "efs": {
+          "status": "completed",
+          "smoothing_reason": "objective_rejected",
+          "smoothing_certified": false,
+          "converged": false,
+          "coefficient_converged": true,
+          "coefficient_reason": "objective_and_step",
+          "coefficient_score_relative": 2.2109579279200713e-12,
+          "smoothing_objective": 56.40713802819103,
+          "smoothing_iterations": 6,
+          "coefficient_fits": 16,
+          "coefficient_iterations": 41,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 66,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 0.49468299331508137,
+            "rank": 66,
+            "condition_estimate": 28.64919321444114,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 5.7407138028191024e-05,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.not_converged",
+            "smoothing.trajectory_unsettled",
+            "optimization.repeated_step_rejection",
+            "smoothing.update_dominance"
+          ],
+          "options": {
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 0.7392466349992901,
+              "cpu_seconds": 0.7375545109999999,
+              "peak_process_rss_mib": 386.40625,
+              "receipt_sha256": "9c4d3a713edba34432cc6f1e9c90238c34dcb97741db6b42ecc018ea270d9f02"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 0.7170705649768934,
+              "cpu_seconds": 0.7168483139999999,
+              "peak_process_rss_mib": 386.48828125,
+              "receipt_sha256": "532bccb464c6c1560fd9b478cfc6dd45b59519f5d2f8184c59c3e5d6ece25517"
+            }
+          ],
+          "median_wall_seconds": 0.7281585999880917,
+          "median_peak_process_rss_mib": 386.447265625,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "8e4e9756b03583f1e188e6be33f29412a32b6518f40693c62e389c7a4d38f89a"
+        },
+        "newton-strict": {
+          "status": "completed",
+          "smoothing_reason": "stationary",
+          "smoothing_certified": true,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "objective_and_score",
+          "coefficient_score_relative": 1.8178592330082517e-10,
+          "smoothing_objective": 56.4026178954822,
+          "smoothing_iterations": 6,
+          "coefficient_fits": 7,
+          "coefficient_iterations": 26,
+          "newton_iterations": 3,
+          "bfgs_iterations": 2,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 66,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 0.5056755827630338,
+            "rank": 66,
+            "condition_estimate": 28.29570504371065,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 5.74026178954822e-05,
+          "projected_gradient": 5.439784420691041e-07,
+          "diagnostic_codes": [],
+          "options": {
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 0.5217319210059941,
+              "cpu_seconds": 0.52104945,
+              "peak_process_rss_mib": 385.765625,
+              "receipt_sha256": "6921917f9ec9fa1abff8aa41296e116d7f29ffa924b70140b3783f68a5c9a012"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 0.4721361100091599,
+              "cpu_seconds": 0.4713720000000001,
+              "peak_process_rss_mib": 385.59765625,
+              "receipt_sha256": "2b3e025c4a56efff77f98cb34bbc6c95b601a72e009585454f32cea0cfa6be2e"
+            }
+          ],
+          "median_wall_seconds": 0.496934015507577,
+          "median_peak_process_rss_mib": 385.681640625,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "ec09fcb5508553b471c2b9b633601cd305cdad04d138cd32e53126373164a739"
+        }
+      },
+      "rows": 400,
+      "evaluation_rows": 400,
+      "coefficients": 66,
+      "parameters": [
+        "location",
+        "scale"
+      ],
+      "input_hashes": {
+        "frame": "aac6ddde1f1f73e724bdfc1c4d2ed67ca7d41bfbb0267568e0da5fa62c71e9d0",
+        "response": "e05d3355adfe94a53c13d070924aa161680e106b442518dcff0749b2e49e7fec",
+        "evaluation": "aac6ddde1f1f73e724bdfc1c4d2ed67ca7d41bfbb0267568e0da5fa62c71e9d0",
+        "weights": "9498dac910b1db181ba67f375928e0a69b5d011418bbc60f185b36b4256fb76c",
+        "offset:location": "5a312281df4bd8dfbb4d4a94ad0bf44d01bb8cfced1206b90e21b4ca0568cdb1",
+        "offset:scale": "5a312281df4bd8dfbb4d4a94ad0bf44d01bb8cfced1206b90e21b4ca0568cdb1"
+      },
+      "provenance": {
+        "evaluation": "training rows"
+      },
+      "family": {
+        "type": "GaussianLS",
+        "scale_floor": 0.02
+      },
+      "comparison": {
+        "conditional_link_se": [
+          {
+            "parameter": "location",
+            "median_absolute_se_change_percent": 0.23832824264458097,
+            "max_absolute_se_change_percent": 0.40646600969822533,
+            "max_link_prediction_change_in_strict_se": 0.022060128544899256,
+            "relative_l2_natural_prediction_difference": 0.0005384995744542698
+          },
+          {
+            "parameter": "scale",
+            "median_absolute_se_change_percent": 0.009633055516067301,
+            "max_absolute_se_change_percent": 0.013224453663285285,
+            "max_link_prediction_change_in_strict_se": 0.008093362195238625,
+            "relative_l2_natural_prediction_difference": 0.0002826720034043421
+          }
+        ],
+        "relative_covariance_frobenius_difference": 0.024773611622580866
+      }
+    },
+    {
+      "case": "gaussian-mixed",
+      "routes": {
+        "efs": {
+          "status": "completed",
+          "smoothing_reason": "practical_plateau",
+          "smoothing_certified": false,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "objective_and_score",
+          "coefficient_score_relative": 3.886713011350712e-11,
+          "smoothing_objective": 4778.121080101732,
+          "smoothing_iterations": 11,
+          "coefficient_fits": 23,
+          "coefficient_iterations": 41,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 102,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 24.4213248902229,
+            "rank": 102,
+            "condition_estimate": 24.600274720868256,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.004779121080101732,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.termination_uncertified",
+            "smoothing.trajectory_unsettled",
+            "optimization.repeated_step_rejection",
+            "smoothing.update_dominance"
+          ],
+          "options": {
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 0.9677443300024606,
+              "cpu_seconds": 0.9674280240000002,
+              "peak_process_rss_mib": 404.14453125,
+              "receipt_sha256": "0392527c1ac8293761300642197ac78da5e26e3b5438668b3342d3d16df2ac25"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 0.8437971670064144,
+              "cpu_seconds": 0.8429566310000003,
+              "peak_process_rss_mib": 404.10546875,
+              "receipt_sha256": "3410abe6f51d49f1cb8934c7e02de73680a2786106dc2b90d147f244776194c5"
+            }
+          ],
+          "median_wall_seconds": 0.9057707485044375,
+          "median_peak_process_rss_mib": 404.125,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "9cd55037748fb2d42f240d495be8628f321fcb5ddede3701859a490edffc02cd"
+        },
+        "newton-strict": {
+          "status": "completed",
+          "smoothing_reason": "max_iterations",
+          "smoothing_certified": false,
+          "converged": false,
+          "coefficient_converged": true,
+          "coefficient_reason": "score",
+          "coefficient_score_relative": 9.568298453590426e-08,
+          "smoothing_objective": 4778.091116960544,
+          "smoothing_iterations": 25,
+          "coefficient_fits": 29,
+          "coefficient_iterations": 59,
+          "newton_iterations": 20,
+          "bfgs_iterations": 19,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 102,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 24.588575587174343,
+            "rank": 102,
+            "condition_estimate": 86.24765525370057,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.004779091116960544,
+          "projected_gradient": 4.195654540798104e-06,
+          "diagnostic_codes": [
+            "fit.not_converged",
+            "smoothing.trajectory_unsettled",
+            "optimization.repeated_step_rejection"
+          ],
+          "options": {
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 1.5577596540097147,
+              "cpu_seconds": 1.556534531,
+              "peak_process_rss_mib": 432.09765625,
+              "receipt_sha256": "5d63b0e1a9242159a4278a1aeefee60d7ede801ecc42306d7b815cc72251043b"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 1.379092073009815,
+              "cpu_seconds": 1.3780822610000003,
+              "peak_process_rss_mib": 432.05859375,
+              "receipt_sha256": "a512886697b283295fc70d84cfca8db86b271ce6828f88c613dba860f639880e"
+            }
+          ],
+          "median_wall_seconds": 1.468425863509765,
+          "median_peak_process_rss_mib": 432.078125,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "5734ba5d135978572bec42c4b6a952a08dcedefcc888ca911f19f4923c902a80"
+        }
+      },
+      "rows": 4096,
+      "evaluation_rows": 2000,
+      "coefficients": 102,
+      "parameters": [
+        "location",
+        "scale"
+      ],
+      "input_hashes": {
+        "frame": "0ad2c72ff9c26799403410e23fa5549e44aefcb5ef786f9222656f9ae4c80cb7",
+        "response": "fd9ef1b4aa2485fdca0f97f6233d1a335a315669e44a56090ba76004b9cf2d85",
+        "evaluation": "6a89b8eac18c201d05bca2f03f43efbe366ac8912b2a83dbec38d59291d4fa70"
+      },
+      "provenance": {
+        "seed": 28109,
+        "holdout_seed": 28110,
+        "construction": "Independent synthetic Gaussian location-scale with small feature groups",
+        "numeric_terms": 6,
+        "categorical_levels": [
+          3,
+          3,
+          4
+        ],
+        "spline_terms": 2,
+        "grouped_curve": {
+          "basis": "spline-by-categorical",
+          "levels": 3
+        }
+      },
+      "family": {
+        "type": "GaussianLS",
+        "scale_floor": 0.01
+      },
+      "comparison": {
+        "conditional_link_se": [
+          {
+            "parameter": "location",
+            "median_absolute_se_change_percent": 0.17288823167239675,
+            "max_absolute_se_change_percent": 1.6766618890621698,
+            "max_link_prediction_change_in_strict_se": 0.058166071078410174,
+            "relative_l2_natural_prediction_difference": 0.0012420235084586533
+          },
+          {
+            "parameter": "scale",
+            "median_absolute_se_change_percent": 2.035284483533062,
+            "max_absolute_se_change_percent": 11.6091448540391,
+            "max_link_prediction_change_in_strict_se": 0.5702548759542225,
+            "relative_l2_natural_prediction_difference": 0.00925873284620851
+          }
+        ],
+        "relative_covariance_frobenius_difference": 0.036369897212811024
+      },
+      "repaired_strict_comparison": {
+        "location": {
+          "max_absolute_se_change_percent": 1.6880123447941653,
+          "max_link_prediction_change_in_strict_se": 0.05842082766299958
+        },
+        "scale": {
+          "max_absolute_se_change_percent": 11.694268924771078,
+          "max_link_prediction_change_in_strict_se": 0.5742420712014716
+        }
+      }
+    },
+    {
+      "case": "gaussian-outward",
+      "routes": {
+        "efs": {
+          "status": "completed",
+          "smoothing_reason": "practical_plateau",
+          "smoothing_certified": false,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "score",
+          "coefficient_score_relative": 1.0791379558030379e-13,
+          "smoothing_objective": 52.59526886507924,
+          "smoothing_iterations": 3,
+          "coefficient_fits": 4,
+          "coefficient_iterations": 4,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-dense-v1",
+          "terminal_rank": 6,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 60.902063911433046,
+            "rank": 6,
+            "condition_estimate": 1.0031741228286382,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 5.359526886507924e-07,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.termination_uncertified",
+            "fit.lambda_cap_unresolved",
+            "smoothing.trajectory_unsettled",
+            "smoothing.penalty_at_upper_boundary"
+          ],
+          "options": {
+            "lambdas": {
+              "location:effect#wiggle": 1000000.0
+            },
+            "max_lambda": 6049647.464412946,
+            "max_log_step": 0.6,
+            "max_reml_iter": 20,
+            "reml_tol": 1e-08,
+            "inner_tol": 1e-10,
+            "reml_plateau_tol": 1e-06,
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 0.023552942962851375,
+              "cpu_seconds": 0.023560870999999928,
+              "peak_process_rss_mib": 338.4921875,
+              "receipt_sha256": "30d49b0cd8b595431c7605e561c1b3b5a263f7aee03110dbcc28d8367f4eb6f3"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 0.021295031998306513,
+              "cpu_seconds": 0.021301161000000235,
+              "peak_process_rss_mib": 338.6328125,
+              "receipt_sha256": "a9e19e08778cc9564c9c94cdff698f508e8dec54519555d059cf32a7c9eb08ad"
+            }
+          ],
+          "median_wall_seconds": 0.022423987480578944,
+          "median_peak_process_rss_mib": 338.5625,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "529795f54969497f37bae18a37961ee40b837ed22ed5fa76a1e0360c1258fb14"
+        },
+        "newton-strict": {
+          "status": "completed",
+          "smoothing_reason": "lambda_change",
+          "smoothing_certified": false,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "score",
+          "coefficient_score_relative": 1.1410497677287154e-14,
+          "smoothing_objective": 52.595266766903194,
+          "smoothing_iterations": 5,
+          "coefficient_fits": 8,
+          "coefficient_iterations": 6,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-dense-v1",
+          "terminal_rank": 2,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 60.90220697623976,
+            "rank": 2,
+            "condition_estimate": 1.0000000000000002,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 5.359526676690319e-07,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.termination_uncertified",
+            "smoothing.penalized_subspace_suppressed",
+            "smoothing.penalty_at_upper_boundary"
+          ],
+          "options": {
+            "lambdas": {
+              "location:effect#wiggle": 1000000.0
+            },
+            "max_lambda": 6049647.464412946,
+            "max_log_step": 0.6,
+            "max_reml_iter": 20,
+            "reml_tol": 1e-08,
+            "inner_tol": 1e-10,
+            "reml_plateau_tol": 1e-06,
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 0.050934750004671514,
+              "cpu_seconds": 0.05091879999999982,
+              "peak_process_rss_mib": 338.43359375,
+              "receipt_sha256": "6ddf4f6c0225efffd84c4bcf7bd6f7bc8045a2feabc165c7b2c91ce0aba01da3"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 0.03486780304228887,
+              "cpu_seconds": 0.034873456000000136,
+              "peak_process_rss_mib": 338.734375,
+              "receipt_sha256": "64b12f9dfa85a30f0bbdf40a120659801a6bd6d42d8efb77fbae0e5863202d7d"
+            }
+          ],
+          "median_wall_seconds": 0.04290127652348019,
+          "median_peak_process_rss_mib": 338.583984375,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "64b2bcc3c9806ee6fd75f44eab0b0bc828d2a5f10e7688a4121aabe5c2222d32"
+        }
+      },
+      "rows": 40,
+      "evaluation_rows": 40,
+      "coefficients": 6,
+      "parameters": [
+        "location",
+        "scale"
+      ],
+      "input_hashes": {
+        "frame": "8bc8cd976c77519c241b3125af72001d9f35ab4f35b427dda1236b40293cec15",
+        "response": "00ee0d9c3176737732a93df9596bbc3f25370e01fd9785622569576551a581fa",
+        "evaluation": "8bc8cd976c77519c241b3125af72001d9f35ab4f35b427dda1236b40293cec15"
+      },
+      "provenance": {
+        "evaluation": "training rows"
+      },
+      "family": {
+        "type": "GaussianLS",
+        "scale_floor": 0.0001
+      },
+      "comparison": {
+        "conditional_link_se": [
+          {
+            "parameter": "location",
+            "median_absolute_se_change_percent": 0.00036912860870152997,
+            "max_absolute_se_change_percent": 0.0003691286334595034,
+            "max_link_prediction_change_in_strict_se": 4.207015424821345e-06,
+            "relative_l2_natural_prediction_difference": 9.420635312097019e-07
+          },
+          {
+            "parameter": "scale",
+            "median_absolute_se_change_percent": 8.385789396214705e-06,
+            "max_absolute_se_change_percent": 8.385789396214705e-06,
+            "max_link_prediction_change_in_strict_se": 7.499589960707291e-07,
+            "relative_l2_natural_prediction_difference": 8.384796124684878e-08
+          }
+        ],
+        "relative_covariance_frobenius_difference": 1.7140710808741492e-05
+      }
+    },
+    {
+      "case": "gamma-real",
+      "routes": {
+        "efs": {
+          "status": "completed",
+          "smoothing_reason": "practical_plateau",
+          "smoothing_certified": false,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "objective_and_score",
+          "coefficient_score_relative": 2.56485701318242e-10,
+          "smoothing_objective": 39410.640608118374,
+          "smoothing_iterations": 15,
+          "coefficient_fits": 16,
+          "coefficient_iterations": 43,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 44,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 1.0558174968840264,
+            "rank": 44,
+            "condition_estimate": 235.79536393093696,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.03941164060811837,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.termination_uncertified",
+            "smoothing.trajectory_unsettled"
+          ],
+          "options": {
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 1.6287727179587819,
+              "cpu_seconds": 1.627476772,
+              "peak_process_rss_mib": 546.265625,
+              "receipt_sha256": "6e9ee215b0ee2004a11d2ed7442522961daaaaef1a2f5f0aa52513b294f00586"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 1.5706898960052058,
+              "cpu_seconds": 1.5691551439999998,
+              "peak_process_rss_mib": 545.53515625,
+              "receipt_sha256": "45525d745a2839f18a5b38cf86b7816e4e1ac6d0ab7d6e5fa7ff842e6e0abf39"
+            }
+          ],
+          "median_wall_seconds": 1.5997313069819938,
+          "median_peak_process_rss_mib": 545.900390625,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:mean": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "02db7fd83f7712f495000b92dc8fa7d2787835b4c8bdab0ce822b6be0e6f5c0a"
+        },
+        "newton-strict": {
+          "status": "completed",
+          "smoothing_reason": "stationary",
+          "smoothing_certified": true,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "objective_and_score",
+          "coefficient_score_relative": 5.530725514806398e-09,
+          "smoothing_objective": 39410.6398029573,
+          "smoothing_iterations": 11,
+          "coefficient_fits": 12,
+          "coefficient_iterations": 37,
+          "newton_iterations": 2,
+          "bfgs_iterations": 1,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 44,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 1.0551461839489016,
+            "rank": 44,
+            "condition_estimate": 235.850849555781,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.0394116398029573,
+          "projected_gradient": 0.0003656728710671061,
+          "diagnostic_codes": [],
+          "options": {
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 1.8308515500393696,
+              "cpu_seconds": 1.8295070929999997,
+              "peak_process_rss_mib": 560.5859375,
+              "receipt_sha256": "ce6d6c8b0293d66ec19afd0f1ab6c91be85d5b5d490431973270dbe459c41994"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 1.6067473180009983,
+              "cpu_seconds": 1.6059817290000002,
+              "peak_process_rss_mib": 559.8359375,
+              "receipt_sha256": "32c7b03a2320beb633afda4b7df0e63c15665042b2f38a0c3301635aba87387f"
+            }
+          ],
+          "median_wall_seconds": 1.718799434020184,
+          "median_peak_process_rss_mib": 560.2109375,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:mean": 0.0,
+            "link_se:scale": 0.0
+          },
+          "array_artifact_sha256": "f4a3a54e15ae876051b0ed830f9fc372a83c83cfc75d0209ac932f2492262d80"
+        }
+      },
+      "rows": 22450,
+      "evaluation_rows": 2494,
+      "coefficients": 44,
+      "parameters": [
+        "mean",
+        "scale"
+      ],
+      "input_hashes": {
+        "frame": "b2f0b2a0a2be731b087d255e63617c0e9e4fe5e87ee2f4615808a4bfc8227940",
+        "response": "eb1b934215290b94d7c5813a971f1d0b2bd5cf6404fa0520051a710b20d7471a",
+        "evaluation": "4fd38754f697846b738fa8c9cfbe667178b6c498a8e18f58e06ef31cbfbc44ab"
+      },
+      "provenance": {
+        "data_sha256": {
+          "freMTPL2freq.parquet": "d691f9a0b53719381467d8b1d3487814e546a9c7cd59f9a56e70ff5100dc14bf",
+          "freMTPL2sev.parquet": "101c58e726eae9fe25eadbd57736cbdf34e43adcbe9bbeeee6ea27c8834e39df"
+        },
+        "covariate_clips": {
+          "DrivAge": [
+            18,
+            90
+          ],
+          "VehAge": [
+            0,
+            20
+          ],
+          "BonusMalus": [
+            50,
+            150
+          ]
+        },
+        "response": "severity-gamma",
+        "holdout_rule": "sorted IDpol, every 10th policy"
+      },
+      "family": {
+        "type": "GammaLS",
+        "parameterization": "mean_cv"
+      },
+      "comparison": {
+        "conditional_link_se": [
+          {
+            "parameter": "mean",
+            "median_absolute_se_change_percent": 0.017536796431549817,
+            "max_absolute_se_change_percent": 0.08170763239595535,
+            "max_link_prediction_change_in_strict_se": 0.004376178571823251,
+            "relative_l2_natural_prediction_difference": 7.214021413110236e-05
+          },
+          {
+            "parameter": "scale",
+            "median_absolute_se_change_percent": 0.027685889472617298,
+            "max_absolute_se_change_percent": 0.08350681165314455,
+            "max_link_prediction_change_in_strict_se": 0.010118696691950124,
+            "relative_l2_natural_prediction_difference": 6.801120743447258e-05
+          }
+        ],
+        "relative_covariance_frobenius_difference": 0.0006646367758214327
+      }
+    },
+    {
+      "case": "nb2-interior",
+      "routes": {
+        "efs": {
+          "status": "completed",
+          "smoothing_reason": "practical_plateau",
+          "smoothing_certified": false,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "objective_and_score",
+          "coefficient_score_relative": 4.8833533253481046e-12,
+          "smoothing_objective": 281.827398202724,
+          "smoothing_iterations": 6,
+          "coefficient_fits": 7,
+          "coefficient_iterations": 15,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 10,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 1.6396934255752287,
+            "rank": 10,
+            "condition_estimate": 10.601037642594857,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.000282827398202724,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.termination_uncertified",
+            "smoothing.trajectory_unsettled",
+            "smoothing.update_dominance"
+          ],
+          "options": {
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 0.2874995330348611,
+              "cpu_seconds": 0.28729427600000035,
+              "peak_process_rss_mib": 384.08203125,
+              "receipt_sha256": "9ced0e7d121ddd43f7ad4faa1a6f333fb88b81454971baa2541daab02ef26cd8"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 0.3001465409761295,
+              "cpu_seconds": 0.29990848199999975,
+              "peak_process_rss_mib": 383.7578125,
+              "receipt_sha256": "1711e8929fb3303bb6f3a4b3a251ba747937f42b645a0e9deec9daeaf38838aa"
+            }
+          ],
+          "median_wall_seconds": 0.2938230370054953,
+          "median_peak_process_rss_mib": 383.919921875,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:mean": 0.0,
+            "link_se:theta": 0.0
+          },
+          "array_artifact_sha256": "7344942664eb3166ee0d4bf35427c78ad5d79472211de915af20af0cbdb6c8b2"
+        },
+        "newton-strict": {
+          "status": "completed",
+          "smoothing_reason": "stationary",
+          "smoothing_certified": true,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "objective_and_score",
+          "coefficient_score_relative": 4.905774364964108e-09,
+          "smoothing_objective": 281.82739762169535,
+          "smoothing_iterations": 3,
+          "coefficient_fits": 4,
+          "coefficient_iterations": 11,
+          "newton_iterations": 2,
+          "bfgs_iterations": 1,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 10,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 1.6393294174993875,
+            "rank": 10,
+            "condition_estimate": 10.601812875544566,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.0002828273976216953,
+          "projected_gradient": 0.00020798282775180287,
+          "diagnostic_codes": [],
+          "options": {
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 0.3798435890348628,
+              "cpu_seconds": 0.3797045210000003,
+              "peak_process_rss_mib": 384.8046875,
+              "receipt_sha256": "1e1c154947c1ed0fb1b7991ab35ce3675e9c5031803669e8c9b3975acfba1669"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 0.35250204300973564,
+              "cpu_seconds": 0.3523395009999999,
+              "peak_process_rss_mib": 384.55078125,
+              "receipt_sha256": "dc15ae7f51d75497b4a28e22788a790f75d51a7067d573254d4b5f1f431cc91a"
+            }
+          ],
+          "median_wall_seconds": 0.36617281602229923,
+          "median_peak_process_rss_mib": 384.677734375,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:mean": 0.0,
+            "link_se:theta": 0.0
+          },
+          "array_artifact_sha256": "81d873e69c147aee247fcc33643cc87f5b9944c0f88fee9a7e6a2f4abb5e7526"
+        }
+      },
+      "rows": 3000,
+      "evaluation_rows": 300,
+      "coefficients": 10,
+      "parameters": [
+        "mean",
+        "theta"
+      ],
+      "input_hashes": {
+        "frame": "6b73674a25c1d8303a02b10bc49987fe0fe639e7b1f185935017136c0c98c5ad",
+        "response": "391ed7a946cf6bd43a6fd7bc7fa0cc8fbaaf78f5c32239e282a6b34879b384bc",
+        "evaluation": "f279ad92a5da5bbc4121926da816d5a403983117f2b91cbdc40eb54c43651aaf"
+      },
+      "provenance": {
+        "evaluation": "fixed grid"
+      },
+      "family": {
+        "type": "NegativeBinomialLS",
+        "parameterization": "nb2_mean_theta"
+      },
+      "comparison": {
+        "conditional_link_se": [
+          {
+            "parameter": "mean",
+            "median_absolute_se_change_percent": 0.002413024957892418,
+            "max_absolute_se_change_percent": 0.004471942747164004,
+            "max_link_prediction_change_in_strict_se": 0.0002840917191702122,
+            "relative_l2_natural_prediction_difference": 7.749228398801267e-06
+          },
+          {
+            "parameter": "theta",
+            "median_absolute_se_change_percent": 6.441647132371386e-06,
+            "max_absolute_se_change_percent": 9.591786398477353e-06,
+            "max_link_prediction_change_in_strict_se": 1.2348898653779413e-05,
+            "relative_l2_natural_prediction_difference": 6.544492934475981e-07
+          }
+        ],
+        "relative_covariance_frobenius_difference": 0.00019529430691729823
+      }
+    },
+    {
+      "case": "nb2-real",
+      "routes": {
+        "efs": {
+          "status": "error",
+          "smoothing_reason": null,
+          "smoothing_certified": null,
+          "converged": null,
+          "coefficient_converged": null,
+          "coefficient_reason": null,
+          "coefficient_score_relative": null,
+          "smoothing_objective": null,
+          "smoothing_iterations": null,
+          "coefficient_fits": null,
+          "coefficient_iterations": null,
+          "newton_iterations": null,
+          "bfgs_iterations": null,
+          "actual_backend": null,
+          "terminal_rank": null,
+          "terminal_curvature": null,
+          "stationarity_bar": null,
+          "projected_gradient": null,
+          "diagnostic_codes": null,
+          "options": {
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 11.993767923966516,
+              "cpu_seconds": 11.983097886000001,
+              "peak_process_rss_mib": 549.4609375,
+              "receipt_sha256": "ee877c58fea9c6b5a1161f0957aa2bfd3a9024ffa3c941b41f1bf55c27558c56"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 10.651319705997594,
+              "cpu_seconds": 10.639469994,
+              "peak_process_rss_mib": 549.28515625,
+              "receipt_sha256": "e96741e4266ea79f01c878304896d114766e644ce0d386752efd2020d188c0f2"
+            }
+          ],
+          "median_wall_seconds": 11.322543814982055,
+          "median_peak_process_rss_mib": 549.373046875,
+          "error_last_line": "superglm.distributional.kernels.negative_binomial.NegativeBinomialPoissonBoundaryError: The negative-binomial fit could not establish a stable finite theta and is Poisson-like at the diagnostic boundary"
+        },
+        "newton-strict": {
+          "status": "error",
+          "smoothing_reason": null,
+          "smoothing_certified": null,
+          "converged": null,
+          "coefficient_converged": null,
+          "coefficient_reason": null,
+          "coefficient_score_relative": null,
+          "smoothing_objective": null,
+          "smoothing_iterations": null,
+          "coefficient_fits": null,
+          "coefficient_iterations": null,
+          "newton_iterations": null,
+          "bfgs_iterations": null,
+          "actual_backend": null,
+          "terminal_rank": null,
+          "terminal_curvature": null,
+          "stationarity_bar": null,
+          "projected_gradient": null,
+          "diagnostic_codes": null,
+          "options": {
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 11.430703666992486,
+              "cpu_seconds": 11.419222325,
+              "peak_process_rss_mib": 549.30859375,
+              "receipt_sha256": "ff67569b60c60c4ede38cbcae6408b5a31597f102c73fc79b83381f3a88dff75"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 11.509540656988975,
+              "cpu_seconds": 11.480846762,
+              "peak_process_rss_mib": 549.42578125,
+              "receipt_sha256": "ab2f2bf0852406adeeba10829e8021765dc10a145850b8f9db5f66b8835ee909"
+            }
+          ],
+          "median_wall_seconds": 11.47012216199073,
+          "median_peak_process_rss_mib": 549.3671875,
+          "error_last_line": "superglm.distributional.kernels.negative_binomial.NegativeBinomialPoissonBoundaryError: The negative-binomial fit could not establish a stable finite theta and is Poisson-like at the diagnostic boundary"
+        }
+      },
+      "rows": 20000,
+      "evaluation_rows": 67801,
+      "input_hashes": {
+        "frame": "d91d377e87c852694d57286618f587bf48378800370581df70adb93f53e14797",
+        "response": "3a696f5093d5c09eebaa70151cc6cfb501aef9a5ca453edfc53f07086e1f61f1",
+        "evaluation": "0c66caa9db4e2b6e0adb7b2ada2d950cb87d3109bd26cb6924469c63e5b81922",
+        "offset:mean": "32f7ef4e00140c91491b00acd928e04777752e08dcf03dfcb61669a65b60aa83"
+      },
+      "provenance": {
+        "data_sha256": {
+          "freMTPL2freq.parquet": "d691f9a0b53719381467d8b1d3487814e546a9c7cd59f9a56e70ff5100dc14bf"
+        },
+        "covariate_clips": {
+          "DrivAge": [
+            18,
+            90
+          ],
+          "VehAge": [
+            0,
+            20
+          ],
+          "BonusMalus": [
+            50,
+            150
+          ]
+        },
+        "response": "nb2",
+        "holdout_rule": "sorted IDpol, every 10th policy"
+      },
+      "family": {
+        "type": "NegativeBinomialLS",
+        "parameterization": "nb2_mean_theta"
+      }
+    },
+    {
+      "case": "tweedie-stress",
+      "routes": {
+        "efs": {
+          "status": "completed",
+          "smoothing_reason": "coefficient_not_converged",
+          "smoothing_certified": false,
+          "converged": false,
+          "coefficient_converged": true,
+          "coefficient_reason": "score",
+          "coefficient_score_relative": 8.097654021595173e-13,
+          "smoothing_objective": 9663.511092798773,
+          "smoothing_iterations": 29,
+          "coefficient_fits": 61,
+          "coefficient_iterations": 201,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 186,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 0.007313094997798344,
+            "rank": 186,
+            "condition_estimate": 32091.645539644393,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.009664511092798773,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.not_converged",
+            "smoothing.trajectory_unsettled",
+            "smoothing.persistent_upward_drift",
+            "smoothing.persistent_upward_drift",
+            "smoothing.persistent_upward_drift",
+            "smoothing.persistent_upward_drift",
+            "smoothing.persistent_upward_drift",
+            "smoothing.persistent_upward_drift",
+            "smoothing.persistent_upward_drift",
+            "smoothing.penalized_subspace_suppressed",
+            "optimization.repeated_step_rejection",
+            "smoothing.update_dominance",
+            "smoothing.penalty_at_upper_boundary"
+          ],
+          "options": {
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 88.92023393401178,
+              "cpu_seconds": 88.815666713,
+              "peak_process_rss_mib": 511.96875,
+              "receipt_sha256": "bd18f976c2c77a19d770b68597f49ba1010adf7be7bc9812a7a86d43bbb2c4c2"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 89.56306812702678,
+              "cpu_seconds": 89.466209885,
+              "peak_process_rss_mib": 510.91796875,
+              "receipt_sha256": "b2099d438ab790a6f2adb82727eb8cd80de4e35bd6e341d446176a8d720889f0"
+            }
+          ],
+          "median_wall_seconds": 89.24165103051928,
+          "median_peak_process_rss_mib": 511.443359375,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:mean": 0.0,
+            "link_se:dispersion": 0.0,
+            "link_se:power": 0.0
+          },
+          "array_artifact_sha256": "57fec84b2bc69e9f9415d217f1db9ecee0ba9af37244b9b1ac99aad5cf9633f9"
+        },
+        "newton-strict": {
+          "status": "completed",
+          "smoothing_reason": "stationary",
+          "smoothing_certified": true,
+          "converged": true,
+          "coefficient_converged": true,
+          "coefficient_reason": "score",
+          "coefficient_score_relative": 3.2135319686658607e-09,
+          "smoothing_objective": 9663.511344101727,
+          "smoothing_iterations": 14,
+          "coefficient_fits": 15,
+          "coefficient_iterations": 34,
+          "newton_iterations": 4,
+          "bfgs_iterations": 3,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 192,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 0.007051228890900892,
+            "rank": 192,
+            "condition_estimate": 4305.397345084229,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.009664511344101727,
+          "projected_gradient": 0.005747029425994848,
+          "diagnostic_codes": [],
+          "options": {
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 7.853945855982602,
+              "cpu_seconds": 7.846492131,
+              "peak_process_rss_mib": 503.45703125,
+              "receipt_sha256": "2405c7ec0e7b66d95f439437c3aa41145d56b86c0c789eaed343ff72adbc7893"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 7.7070395989576355,
+              "cpu_seconds": 7.697017287,
+              "peak_process_rss_mib": 503.421875,
+              "receipt_sha256": "1f8485d39b999e0d7db25059ee4dd8133318b02b2782e6b2c627290215af05c2"
+            }
+          ],
+          "median_wall_seconds": 7.7804927274701186,
+          "median_peak_process_rss_mib": 503.439453125,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:mean": 0.0,
+            "link_se:dispersion": 0.0,
+            "link_se:power": 0.0
+          },
+          "array_artifact_sha256": "8bd9c811b99b1fdb920327088e7c3100354c1b2d4c56ed1c6aaa8f9d1242a768"
+        }
+      },
+      "rows": 10000,
+      "evaluation_rows": 2000,
+      "coefficients": 192,
+      "parameters": [
+        "mean",
+        "dispersion",
+        "power"
+      ],
+      "input_hashes": {
+        "frame": "a463de66bcc6aacefcad64d85aee62abd63073c8d523b0e12c4dcfe451b5ae0d",
+        "response": "bc92e2528755375c97b2988828682a2363fffe581edf24d3aefba7f78a97d9ec",
+        "evaluation": "74935268d5da8f9aa33413431aecfbf8db331eee3edda72caf4bcbc96975a177",
+        "weights": "2651a7b826188cf6fa3c1a7ad576872eee47de1b4b660489050a9aee3d39266c"
+      },
+      "provenance": {
+        "seed": 5915,
+        "holdout_seed": 5916,
+        "mix": 0.75
+      },
+      "family": {
+        "type": "TweedieLSS",
+        "power_lower": 1.05,
+        "power_upper": 1.95
+      },
+      "comparison": {
+        "conditional_link_se": [
+          {
+            "parameter": "mean",
+            "median_absolute_se_change_percent": 0.006740138089267322,
+            "max_absolute_se_change_percent": 0.05878615111215568,
+            "max_link_prediction_change_in_strict_se": 0.0013082349485551428,
+            "relative_l2_natural_prediction_difference": 1.8009450462384838e-05
+          },
+          {
+            "parameter": "dispersion",
+            "median_absolute_se_change_percent": 0.0397826772447929,
+            "max_absolute_se_change_percent": 0.1260148264671912,
+            "max_link_prediction_change_in_strict_se": 0.02551538083983745,
+            "relative_l2_natural_prediction_difference": 0.00024226216938800498
+          },
+          {
+            "parameter": "power",
+            "median_absolute_se_change_percent": 0.2261828363879781,
+            "max_absolute_se_change_percent": 1.2610040753445295,
+            "max_link_prediction_change_in_strict_se": 0.045361128409813156,
+            "relative_l2_natural_prediction_difference": 0.00048385568974092046
+          }
+        ],
+        "relative_covariance_frobenius_difference": 0.03809622649762377
+      }
+    },
+    {
+      "case": "gpd-tail",
+      "routes": {
+        "efs": {
+          "status": "completed",
+          "smoothing_reason": "lambda_cap_unresolved",
+          "smoothing_certified": false,
+          "converged": false,
+          "coefficient_converged": true,
+          "coefficient_reason": "score",
+          "coefficient_score_relative": 3.489575249666095e-08,
+          "smoothing_objective": 10804.850203436072,
+          "smoothing_iterations": 18,
+          "coefficient_fits": 19,
+          "coefficient_iterations": 40,
+          "newton_iterations": 0,
+          "bfgs_iterations": 0,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 98,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 0.019872315763068193,
+            "rank": 98,
+            "condition_estimate": 163661.13850176532,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.01080585020343607,
+          "projected_gradient": null,
+          "diagnostic_codes": [
+            "fit.not_converged",
+            "fit.lambda_cap_unresolved",
+            "smoothing.trajectory_unsettled",
+            "smoothing.update_dominance",
+            "smoothing.penalty_at_upper_boundary"
+          ],
+          "options": {
+            "outer": "efs",
+            "practical_reml": true
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 1.217499618011061,
+              "cpu_seconds": 1.216424784,
+              "peak_process_rss_mib": 394.6640625,
+              "receipt_sha256": "238f385b4316320b65dc510426954cf76b9bf589751594f0068ee136909ec599"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 1.3620610179495998,
+              "cpu_seconds": 1.359576187,
+              "peak_process_rss_mib": 394.41015625,
+              "receipt_sha256": "c5758fa73c910d34934977b94e84de6f6fe5daa875cbcf3490dab53c941b37f8"
+            }
+          ],
+          "median_wall_seconds": 1.2897803179803304,
+          "median_peak_process_rss_mib": 394.537109375,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:scale": 0.0,
+            "link_se:shape": 0.0
+          },
+          "array_artifact_sha256": "971b1bf0a233bcfd71dec71961059629a17a558845b232e81d8e7948a26c558a"
+        },
+        "newton-strict": {
+          "status": "completed",
+          "smoothing_reason": "max_iterations",
+          "smoothing_certified": false,
+          "converged": false,
+          "coefficient_converged": true,
+          "coefficient_reason": "score",
+          "coefficient_score_relative": 2.9978210341816974e-10,
+          "smoothing_objective": 10804.795397661104,
+          "smoothing_iterations": 30,
+          "coefficient_fits": 41,
+          "coefficient_iterations": 67,
+          "newton_iterations": 20,
+          "bfgs_iterations": 19,
+          "actual_backend": "distributional-chunked-v1",
+          "terminal_rank": 98,
+          "terminal_curvature": {
+            "requested_source": "observed",
+            "actual_source": "observed",
+            "reason": null,
+            "minimum_eigenvalue": 0.012035541735810952,
+            "rank": 98,
+            "condition_estimate": 911.6088758557632,
+            "fallback_count": 0,
+            "matrix_kind": "penalized"
+          },
+          "stationarity_bar": 0.010805795397661104,
+          "projected_gradient": 8.012064854449885e-07,
+          "diagnostic_codes": [
+            "fit.not_converged",
+            "smoothing.trajectory_unsettled",
+            "optimization.repeated_step_rejection"
+          ],
+          "options": {
+            "outer": "efs+newton",
+            "practical_reml": false
+          },
+          "samples": [
+            {
+              "repeat": 1,
+              "wall_seconds": 2.5106337500037625,
+              "cpu_seconds": 2.506952846,
+              "peak_process_rss_mib": 404.21484375,
+              "receipt_sha256": "8c68e0e1a22d58866b2b6dada5b81ec3b864474dd19bccaa1016c16c653ef896"
+            },
+            {
+              "repeat": 2,
+              "wall_seconds": 2.591087729029823,
+              "cpu_seconds": 2.5882491480000005,
+              "peak_process_rss_mib": 402.00390625,
+              "receipt_sha256": "8d40d86e32703489dcff0194af7084f22f46ab65a9a34f84e06e2dadff5945bc"
+            }
+          ],
+          "median_wall_seconds": 2.550860739516793,
+          "median_peak_process_rss_mib": 403.109375,
+          "max_absolute_repeat_differences": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:scale": 0.0,
+            "link_se:shape": 0.0
+          },
+          "array_artifact_sha256": "550571321a23f45d07eab14392c39df9758c365e52273177d15369ef4f7a9b7c"
+        }
+      },
+      "rows": 1401,
+      "evaluation_rows": 2500,
+      "coefficients": 98,
+      "parameters": [
+        "scale",
+        "shape"
+      ],
+      "input_hashes": {
+        "frame": "d458df8a32b406ea018340a64905d79de902e58923eb85fc8114ccbfbb69163e",
+        "response": "efddc8f9aad9679bfb61fce8daeb747cc730b05cd3e1286ed3f1a6f29f1f1c36",
+        "evaluation": "d5af2fd7e720defc06628b98f4104ea6a5fb6b59bb8e5ff514e1d6358e32d0ee"
+      },
+      "provenance": {
+        "seed": 9506,
+        "training_policies": 10000,
+        "threshold": 1000
+      },
+      "family": {
+        "type": "GeneralizedParetoLSS",
+        "shape_lower": 0.0,
+        "shape_upper": 1.0
+      },
+      "comparison": {
+        "conditional_link_se": [
+          {
+            "parameter": "scale",
+            "median_absolute_se_change_percent": 0.6511501065118053,
+            "max_absolute_se_change_percent": 3.7673665177065163,
+            "max_link_prediction_change_in_strict_se": 0.20633658640191663,
+            "relative_l2_natural_prediction_difference": 0.014380750670233746
+          },
+          {
+            "parameter": "shape",
+            "median_absolute_se_change_percent": 7.742176571044062,
+            "max_absolute_se_change_percent": 18.931611839973627,
+            "max_link_prediction_change_in_strict_se": 0.4778949382532057,
+            "relative_l2_natural_prediction_difference": 0.06644975221156761
+          }
+        ],
+        "relative_covariance_frobenius_difference": 0.35530257880158
+      },
+      "repaired_strict_comparison": {
+        "scale": {
+          "max_absolute_se_change_percent": 3.7737290200252294,
+          "max_link_prediction_change_in_strict_se": 0.20633579487192033
+        },
+        "shape": {
+          "max_absolute_se_change_percent": 18.949661834056574,
+          "max_link_prediction_change_in_strict_se": 0.4771921680496066
+        }
+      }
+    }
+  ],
+  "production_source_tree_sha256": "5e67384dcc4b2bf3e660aa28ce47d04741a6aa6d183fa047e92e5557790dfe4d",
+  "timing_driver_sha256": "8811ad23661a223399a64ee6ae7a23a1d4ddcdea02acd28b1c9d60f9d78d2841",
+  "versions": {
+    "superglm": "0.32.0",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0",
+    "numba": "0.67.0",
+    "tabmat": "4.2.1"
+  },
+  "native_pools": [
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "version": "0.3.34.0.0",
+      "threading_layer": "pthreads",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "blas",
+      "internal_api": "openblas",
+      "num_threads": 1,
+      "prefix": "libscipy_openblas",
+      "version": "0.3.31.dev",
+      "threading_layer": "pthreads",
+      "architecture": "SkylakeX"
+    },
+    {
+      "user_api": "openmp",
+      "internal_api": "openmp",
+      "num_threads": 1,
+      "prefix": "libgomp",
+      "version": null
+    }
+  ],
+  "curvature_refresh_repair": {
+    "cases": [
+      {
+        "case": "gaussian-mixed",
+        "revisions": {
+          "baseline": {
+            "smoothing_reason": "max_iterations",
+            "smoothing_certified": false,
+            "smoothing_objective": 4778.091116960544,
+            "smoothing_iterations": 25,
+            "newton_iterations": 20,
+            "bfgs_iterations": 19,
+            "coefficient_fits": 29,
+            "coefficient_iterations": 59,
+            "stationarity_bar": 0.004779091116960544,
+            "projected_gradient": 4.195654540798104e-06,
+            "actual_backend": "distributional-chunked-v1",
+            "diagnostic_codes": [
+              "fit.not_converged",
+              "smoothing.trajectory_unsettled",
+              "optimization.repeated_step_rejection"
+            ],
+            "samples": [
+              {
+                "repeat": 1,
+                "wall_seconds": 1.4065476710093208,
+                "cpu_seconds": 1.4053183980000004,
+                "peak_process_rss_mib": 432.08203125,
+                "receipt_sha256": "a4e885f670000c427c35a6bbd81701005c74f9ec8b78de4a072ed9059c6e2495"
+              },
+              {
+                "repeat": 2,
+                "wall_seconds": 1.4993757430347614,
+                "cpu_seconds": 1.495372332,
+                "peak_process_rss_mib": 434.62890625,
+                "receipt_sha256": "eb7bbb1a203dc190dd852876a6d445436d19b5676a1564fb8a68a5808e0ad39d"
+              }
+            ],
+            "median_wall_seconds": 1.452961707022041,
+            "wall_range_seconds": [
+              1.4065476710093208,
+              1.4993757430347614
+            ],
+            "median_peak_process_rss_mib": 433.35546875,
+            "imported_sources": {
+              "superglm": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/__init__.py",
+                "sha256": "ec15d67598c084f2a0423f76a70208afe5fb69e1dc884cecd09985c318aba0e6"
+              },
+              "superglm.distributional.smoothing.loop": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/loop.py",
+                "sha256": "220afef2d4fb6357224715796c5835c8af841df68e68df06f55b11c7c21f7a63"
+              },
+              "superglm.distributional.smoothing.newton": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/newton.py",
+                "sha256": "5cec096678cdeb9098167badf46be5d2c9c9be8c6c9c9f02897f3a0d26d80f9d"
+              },
+              "superglm.distributional.smoothing.derivatives": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/derivatives.py",
+                "sha256": "db468f448733e8931d2cd092fba6c64ad7219c9c920407295e457449d08adc8c"
+              },
+              "superglm.distributional.solver.solver": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/solver/solver.py",
+                "sha256": "c74f55f00dada0b2564d8a8e94850db02ef3e291197967ca57fde86e7d145cc7"
+              }
+            },
+            "profile_calls": {
+              "_leverage_blocks": 21,
+              "_reuse_observed_initial_result": 28,
+              "run_newton_endgame": 1,
+              "_cross_all": 1,
+              "laml_derivatives": 22,
+              "_gradient_pass": 21,
+              "_hessian_pass": 1,
+              "fit_dense_fixed_lambda": 30
+            }
+          },
+          "repaired": {
+            "smoothing_reason": "stationary",
+            "smoothing_certified": true,
+            "smoothing_objective": 4778.091161100954,
+            "smoothing_iterations": 18,
+            "newton_iterations": 13,
+            "bfgs_iterations": 11,
+            "coefficient_fits": 22,
+            "coefficient_iterations": 53,
+            "stationarity_bar": 0.004779091161100954,
+            "projected_gradient": 0.0008282659132967038,
+            "actual_backend": "distributional-chunked-v1",
+            "diagnostic_codes": [
+              "optimization.repeated_step_rejection"
+            ],
+            "samples": [
+              {
+                "repeat": 1,
+                "wall_seconds": 1.3013857469777577,
+                "cpu_seconds": 1.2998616590000003,
+                "peak_process_rss_mib": 439.1015625,
+                "receipt_sha256": "cfab0131ff23101f58f2098925b257a636fefafbd3f7d86c65397da428668cfb"
+              },
+              {
+                "repeat": 2,
+                "wall_seconds": 1.1357473430107348,
+                "cpu_seconds": 1.1350566290000002,
+                "peak_process_rss_mib": 438.5390625,
+                "receipt_sha256": "d1b2dd639d380b9ec0a7426dee5fd9e845f96c4818988bd1bf7858cbe4dfa03a"
+              }
+            ],
+            "median_wall_seconds": 1.2185665449942462,
+            "wall_range_seconds": [
+              1.1357473430107348,
+              1.3013857469777577
+            ],
+            "median_peak_process_rss_mib": 438.8203125,
+            "imported_sources": {
+              "superglm": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/__init__.py",
+                "sha256": "ec15d67598c084f2a0423f76a70208afe5fb69e1dc884cecd09985c318aba0e6"
+              },
+              "superglm.distributional.smoothing.loop": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/loop.py",
+                "sha256": "220afef2d4fb6357224715796c5835c8af841df68e68df06f55b11c7c21f7a63"
+              },
+              "superglm.distributional.smoothing.newton": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/newton.py",
+                "sha256": "6d09edfb78358a9a9e4d3184150fb5a370cf462b8fbeba84501e42e654d04ab1"
+              },
+              "superglm.distributional.smoothing.derivatives": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/derivatives.py",
+                "sha256": "db468f448733e8931d2cd092fba6c64ad7219c9c920407295e457449d08adc8c"
+              },
+              "superglm.distributional.solver.solver": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/solver/solver.py",
+                "sha256": "c74f55f00dada0b2564d8a8e94850db02ef3e291197967ca57fde86e7d145cc7"
+              }
+            },
+            "profile_calls": {
+              "_reuse_observed_initial_result": 21,
+              "_cross_all": 2,
+              "laml_derivatives": 16,
+              "run_newton_endgame": 1,
+              "_leverage_blocks": 14,
+              "_hessian_pass": 2,
+              "_gradient_pass": 14,
+              "fit_dense_fixed_lambda": 23
+            }
+          }
+        },
+        "input_hashes": {
+          "frame": "0ad2c72ff9c26799403410e23fa5549e44aefcb5ef786f9222656f9ae4c80cb7",
+          "response": "fd9ef1b4aa2485fdca0f97f6233d1a335a315669e44a56090ba76004b9cf2d85",
+          "evaluation": "6a89b8eac18c201d05bca2f03f43efbe366ac8912b2a83dbec38d59291d4fa70"
+        },
+        "numerical_changes": {
+          "max_absolute_difference": {
+            "theta": 0.00019956830458134345,
+            "eta": 0.00024887396278183704,
+            "covariance": 3.090874482558265e-06,
+            "link_se:location": 9.616459428096746e-06,
+            "link_se:scale": 5.5682867384040935e-05
+          },
+          "conditional_se_relative_max": {
+            "location": 0.00011544009743835737,
+            "scale": 0.0007819446118628726
+          },
+          "max_link_prediction_change_in_repaired_se": {
+            "location": 0.00036614247052463696,
+            "scale": 0.0036057804171931657
+          }
+        },
+        "plain_efs_control_arrays_identical": true
+      },
+      {
+        "case": "gpd-tail",
+        "revisions": {
+          "baseline": {
+            "smoothing_reason": "max_iterations",
+            "smoothing_certified": false,
+            "smoothing_objective": 10804.795397661104,
+            "smoothing_iterations": 30,
+            "newton_iterations": 20,
+            "bfgs_iterations": 19,
+            "coefficient_fits": 41,
+            "coefficient_iterations": 67,
+            "stationarity_bar": 0.010805795397661104,
+            "projected_gradient": 8.012064854449885e-07,
+            "actual_backend": "distributional-chunked-v1",
+            "diagnostic_codes": [
+              "fit.not_converged",
+              "smoothing.trajectory_unsettled",
+              "optimization.repeated_step_rejection"
+            ],
+            "samples": [
+              {
+                "repeat": 1,
+                "wall_seconds": 2.285169948998373,
+                "cpu_seconds": 2.282223184,
+                "peak_process_rss_mib": 402.51171875,
+                "receipt_sha256": "779060a9926bca9a20c14e89ee8ec5379f3d4ddec757df0503aa5cedf1fd14cc"
+              },
+              {
+                "repeat": 2,
+                "wall_seconds": 2.384463133988902,
+                "cpu_seconds": 2.3790885079999997,
+                "peak_process_rss_mib": 402.58984375,
+                "receipt_sha256": "cce8b20355c99f7143d1e2b1df934116af6b4e909549d0aef2706ada83060be1"
+              }
+            ],
+            "median_wall_seconds": 2.3348165414936375,
+            "wall_range_seconds": [
+              2.285169948998373,
+              2.384463133988902
+            ],
+            "median_peak_process_rss_mib": 402.55078125,
+            "imported_sources": {
+              "superglm": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/__init__.py",
+                "sha256": "ec15d67598c084f2a0423f76a70208afe5fb69e1dc884cecd09985c318aba0e6"
+              },
+              "superglm.distributional.smoothing.loop": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/loop.py",
+                "sha256": "220afef2d4fb6357224715796c5835c8af841df68e68df06f55b11c7c21f7a63"
+              },
+              "superglm.distributional.smoothing.newton": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/newton.py",
+                "sha256": "5cec096678cdeb9098167badf46be5d2c9c9be8c6c9c9f02897f3a0d26d80f9d"
+              },
+              "superglm.distributional.smoothing.derivatives": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/derivatives.py",
+                "sha256": "db468f448733e8931d2cd092fba6c64ad7219c9c920407295e457449d08adc8c"
+              },
+              "superglm.distributional.solver.solver": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/solver/solver.py",
+                "sha256": "c74f55f00dada0b2564d8a8e94850db02ef3e291197967ca57fde86e7d145cc7"
+              }
+            },
+            "profile_calls": {
+              "_reuse_observed_initial_result": 40,
+              "run_newton_endgame": 1,
+              "_cross_all": 1,
+              "_leverage_blocks": 21,
+              "_hessian_pass": 1,
+              "laml_derivatives": 22,
+              "_gradient_pass": 21,
+              "fit_dense_fixed_lambda": 42
+            }
+          },
+          "repaired": {
+            "smoothing_reason": "stationary",
+            "smoothing_certified": true,
+            "smoothing_objective": 10804.796087758454,
+            "smoothing_iterations": 16,
+            "newton_iterations": 6,
+            "bfgs_iterations": 4,
+            "coefficient_fits": 20,
+            "coefficient_iterations": 49,
+            "stationarity_bar": 0.010805796087758453,
+            "projected_gradient": 0.0016946639456755473,
+            "actual_backend": "distributional-chunked-v1",
+            "diagnostic_codes": [
+              "optimization.repeated_step_rejection"
+            ],
+            "samples": [
+              {
+                "repeat": 1,
+                "wall_seconds": 1.370239511015825,
+                "cpu_seconds": 1.3690563020000002,
+                "peak_process_rss_mib": 404.59765625,
+                "receipt_sha256": "3d46233c7a33defdc042ef306c98a6d3615db998a434d3e810edde73bf9cf4ed"
+              },
+              {
+                "repeat": 2,
+                "wall_seconds": 1.4265458030276932,
+                "cpu_seconds": 1.4249803070000002,
+                "peak_process_rss_mib": 406.32421875,
+                "receipt_sha256": "b368fe94029053b5e285eb0823e9188b37c3a909eb809bb28c0f9d2ba4aa5743"
+              }
+            ],
+            "median_wall_seconds": 1.398392657021759,
+            "wall_range_seconds": [
+              1.370239511015825,
+              1.4265458030276932
+            ],
+            "median_peak_process_rss_mib": 405.4609375,
+            "imported_sources": {
+              "superglm": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/__init__.py",
+                "sha256": "ec15d67598c084f2a0423f76a70208afe5fb69e1dc884cecd09985c318aba0e6"
+              },
+              "superglm.distributional.smoothing.loop": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/loop.py",
+                "sha256": "220afef2d4fb6357224715796c5835c8af841df68e68df06f55b11c7c21f7a63"
+              },
+              "superglm.distributional.smoothing.newton": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/newton.py",
+                "sha256": "6d09edfb78358a9a9e4d3184150fb5a370cf462b8fbeba84501e42e654d04ab1"
+              },
+              "superglm.distributional.smoothing.derivatives": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/derivatives.py",
+                "sha256": "db468f448733e8931d2cd092fba6c64ad7219c9c920407295e457449d08adc8c"
+              },
+              "superglm.distributional.solver.solver": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/solver/solver.py",
+                "sha256": "c74f55f00dada0b2564d8a8e94850db02ef3e291197967ca57fde86e7d145cc7"
+              }
+            },
+            "profile_calls": {
+              "_reuse_observed_initial_result": 19,
+              "_leverage_blocks": 7,
+              "_gradient_pass": 7,
+              "_hessian_pass": 2,
+              "run_newton_endgame": 1,
+              "_cross_all": 2,
+              "laml_derivatives": 9,
+              "fit_dense_fixed_lambda": 21
+            }
+          }
+        },
+        "input_hashes": {
+          "frame": "d458df8a32b406ea018340a64905d79de902e58923eb85fc8114ccbfbb69163e",
+          "response": "efddc8f9aad9679bfb61fce8daeb747cc730b05cd3e1286ed3f1a6f29f1f1c36",
+          "evaluation": "d5af2fd7e720defc06628b98f4104ea6a5fb6b59bb8e5ff514e1d6358e32d0ee"
+        },
+        "numerical_changes": {
+          "max_absolute_difference": {
+            "theta": 0.09225830174409566,
+            "eta": 0.0008623955178244103,
+            "covariance": 0.017269287802854194,
+            "link_se:scale": 8.916835193983896e-05,
+            "link_se:shape": 0.0008796240341744088
+          },
+          "conditional_se_relative_max": {
+            "scale": 0.00025413444552857545,
+            "shape": 0.0007682249934873875
+          },
+          "max_link_prediction_change_in_repaired_se": {
+            "scale": 0.00035796040984175715,
+            "shape": 0.000928397984883053
+          }
+        },
+        "plain_efs_control_arrays_identical": true
+      },
+      {
+        "case": "gaussian-correlated",
+        "revisions": {
+          "baseline": {
+            "smoothing_reason": "stationary",
+            "smoothing_certified": true,
+            "smoothing_objective": 100.80548310527874,
+            "smoothing_iterations": 15,
+            "newton_iterations": 11,
+            "bfgs_iterations": 10,
+            "coefficient_fits": 16,
+            "coefficient_iterations": 63,
+            "stationarity_bar": 0.00010180548310527874,
+            "projected_gradient": 6.410187458254918e-05,
+            "actual_backend": "distributional-chunked-v1",
+            "diagnostic_codes": [],
+            "samples": [
+              {
+                "repeat": 1,
+                "wall_seconds": 0.9486805030028336,
+                "cpu_seconds": 0.947769418,
+                "peak_process_rss_mib": 386.44921875,
+                "receipt_sha256": "1464f33c6fe8c29ac244568b7cf47be96e5cb53d2c03a3b07d94096b4a2ac94f"
+              },
+              {
+                "repeat": 2,
+                "wall_seconds": 1.004745840036776,
+                "cpu_seconds": 1.0036928139999999,
+                "peak_process_rss_mib": 386.6171875,
+                "receipt_sha256": "92c5188c94dd186a7ea7e1d8784786786af91bec6ae7ee744a97239ca3cbcc14"
+              },
+              {
+                "repeat": 3,
+                "wall_seconds": 1.076373504998628,
+                "cpu_seconds": 1.07526133,
+                "peak_process_rss_mib": 386.71875,
+                "receipt_sha256": "4bbbce2dc19f65d0c645fd16aa9ea07764daeb40ff99d046990df522b634d111"
+              },
+              {
+                "repeat": 4,
+                "wall_seconds": 0.9416520050144754,
+                "cpu_seconds": 0.9379592790000002,
+                "peak_process_rss_mib": 386.4140625,
+                "receipt_sha256": "386ef6827c59258f3472220f350f037dc3117b4d47283879225824a95840a201"
+              },
+              {
+                "repeat": 5,
+                "wall_seconds": 1.1246454359497875,
+                "cpu_seconds": 1.124210986,
+                "peak_process_rss_mib": 386.5390625,
+                "receipt_sha256": "2740eeb886dcc48e9539186342d612432879eab1ae268407c6b9094d038bbabc"
+              }
+            ],
+            "median_wall_seconds": 1.004745840036776,
+            "wall_range_seconds": [
+              0.9416520050144754,
+              1.1246454359497875
+            ],
+            "median_peak_process_rss_mib": 386.5390625,
+            "imported_sources": {
+              "superglm": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/__init__.py",
+                "sha256": "ec15d67598c084f2a0423f76a70208afe5fb69e1dc884cecd09985c318aba0e6"
+              },
+              "superglm.distributional.smoothing.loop": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/loop.py",
+                "sha256": "220afef2d4fb6357224715796c5835c8af841df68e68df06f55b11c7c21f7a63"
+              },
+              "superglm.distributional.smoothing.newton": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/newton.py",
+                "sha256": "5cec096678cdeb9098167badf46be5d2c9c9be8c6c9c9f02897f3a0d26d80f9d"
+              },
+              "superglm.distributional.smoothing.derivatives": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/derivatives.py",
+                "sha256": "db468f448733e8931d2cd092fba6c64ad7219c9c920407295e457449d08adc8c"
+              },
+              "superglm.distributional.solver.solver": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/solver/solver.py",
+                "sha256": "c74f55f00dada0b2564d8a8e94850db02ef3e291197967ca57fde86e7d145cc7"
+              }
+            },
+            "profile_calls": {
+              "_reuse_observed_initial_result": 15,
+              "_leverage_blocks": 12,
+              "run_newton_endgame": 1,
+              "_gradient_pass": 12,
+              "_hessian_pass": 1,
+              "laml_derivatives": 13,
+              "_cross_all": 1,
+              "fit_dense_fixed_lambda": 17
+            }
+          },
+          "repaired": {
+            "smoothing_reason": "stationary",
+            "smoothing_certified": true,
+            "smoothing_objective": 100.80548310527874,
+            "smoothing_iterations": 15,
+            "newton_iterations": 11,
+            "bfgs_iterations": 10,
+            "coefficient_fits": 16,
+            "coefficient_iterations": 63,
+            "stationarity_bar": 0.00010180548310527874,
+            "projected_gradient": 6.410187458254918e-05,
+            "actual_backend": "distributional-chunked-v1",
+            "diagnostic_codes": [],
+            "samples": [
+              {
+                "repeat": 1,
+                "wall_seconds": 1.2759186180192046,
+                "cpu_seconds": 1.2752207649999998,
+                "peak_process_rss_mib": 386.82421875,
+                "receipt_sha256": "6cdc8628297687a4df1f67a30eedd267c49c3e5dd7d6390536b143fbb1f1efd7"
+              },
+              {
+                "repeat": 2,
+                "wall_seconds": 0.9856479410082102,
+                "cpu_seconds": 0.9799793810000001,
+                "peak_process_rss_mib": 388.6953125,
+                "receipt_sha256": "b0fb3405ea339787f7324285c0976bce099a13c21015e8dbab2fc5197bbf81af"
+              },
+              {
+                "repeat": 3,
+                "wall_seconds": 1.1728732589981519,
+                "cpu_seconds": 1.171739498,
+                "peak_process_rss_mib": 386.67578125,
+                "receipt_sha256": "6c568e1a9526ea8c15e5365dea74697194a07661021fbc79292977a30f360f3a"
+              },
+              {
+                "repeat": 4,
+                "wall_seconds": 1.0235456840018742,
+                "cpu_seconds": 1.022939525,
+                "peak_process_rss_mib": 386.60546875,
+                "receipt_sha256": "9e9951cfb82142e0c08fdb4d56c33d4053be70ce18314ae9abcdaddc16da315e"
+              },
+              {
+                "repeat": 5,
+                "wall_seconds": 1.1109361210255884,
+                "cpu_seconds": 1.1072793509999999,
+                "peak_process_rss_mib": 388.3984375,
+                "receipt_sha256": "9df6ad90aa3aeba3a75219e8eda452a31497ac5a55de04271f1620acb8e6311a"
+              }
+            ],
+            "median_wall_seconds": 1.1109361210255884,
+            "wall_range_seconds": [
+              0.9856479410082102,
+              1.2759186180192046
+            ],
+            "median_peak_process_rss_mib": 386.82421875,
+            "imported_sources": {
+              "superglm": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/__init__.py",
+                "sha256": "ec15d67598c084f2a0423f76a70208afe5fb69e1dc884cecd09985c318aba0e6"
+              },
+              "superglm.distributional.smoothing.loop": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/loop.py",
+                "sha256": "220afef2d4fb6357224715796c5835c8af841df68e68df06f55b11c7c21f7a63"
+              },
+              "superglm.distributional.smoothing.newton": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/newton.py",
+                "sha256": "6d09edfb78358a9a9e4d3184150fb5a370cf462b8fbeba84501e42e654d04ab1"
+              },
+              "superglm.distributional.smoothing.derivatives": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/derivatives.py",
+                "sha256": "db468f448733e8931d2cd092fba6c64ad7219c9c920407295e457449d08adc8c"
+              },
+              "superglm.distributional.solver.solver": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/solver/solver.py",
+                "sha256": "c74f55f00dada0b2564d8a8e94850db02ef3e291197967ca57fde86e7d145cc7"
+              }
+            },
+            "profile_calls": {
+              "_reuse_observed_initial_result": 15,
+              "run_newton_endgame": 1,
+              "_gradient_pass": 12,
+              "_hessian_pass": 1,
+              "laml_derivatives": 13,
+              "_cross_all": 1,
+              "_leverage_blocks": 12,
+              "fit_dense_fixed_lambda": 17
+            }
+          }
+        },
+        "input_hashes": {
+          "frame": "a5e3fb5a0012299082c1f239aa55c6893156bf5030e9fbb814a872c54a43a5d6",
+          "response": "9d6a0b3f13f7b2de722205eb9cbfbe2d9d29691f80ee5c502d433941faf55505",
+          "evaluation": "a5e3fb5a0012299082c1f239aa55c6893156bf5030e9fbb814a872c54a43a5d6",
+          "weights": "049bdcfb094393faad72626dc1bbce72b6ec0e5fb84f4cbf40c54e36de4ec0ed",
+          "offset:location": "167137ac26e7d86b7a96e379085e33e6bbc8ef8194867cd3d8d179471defb2ff",
+          "offset:scale": "e675fd862d17b343bf325fdf1987530c82d971492c5059ced109f65018ea2a50",
+          "evaluation_offset:location": "167137ac26e7d86b7a96e379085e33e6bbc8ef8194867cd3d8d179471defb2ff",
+          "evaluation_offset:scale": "e675fd862d17b343bf325fdf1987530c82d971492c5059ced109f65018ea2a50"
+        },
+        "numerical_changes": {
+          "max_absolute_difference": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:location": 0.0,
+            "link_se:scale": 0.0
+          },
+          "conditional_se_relative_max": {
+            "location": 0.0,
+            "scale": 0.0
+          },
+          "max_link_prediction_change_in_repaired_se": {
+            "location": 0.0,
+            "scale": 0.0
+          }
+        }
+      },
+      {
+        "case": "tweedie-stress",
+        "revisions": {
+          "baseline": {
+            "smoothing_reason": "stationary",
+            "smoothing_certified": true,
+            "smoothing_objective": 9663.511344101727,
+            "smoothing_iterations": 14,
+            "newton_iterations": 4,
+            "bfgs_iterations": 3,
+            "coefficient_fits": 15,
+            "coefficient_iterations": 34,
+            "stationarity_bar": 0.009664511344101727,
+            "projected_gradient": 0.005747029425994848,
+            "actual_backend": "distributional-chunked-v1",
+            "diagnostic_codes": [],
+            "samples": [
+              {
+                "repeat": 1,
+                "wall_seconds": 7.075993182952516,
+                "cpu_seconds": 7.064777522000001,
+                "peak_process_rss_mib": 503.80078125,
+                "receipt_sha256": "99a63bcd1a993e5908d319b54f2fac0cec8af61969e6d0d6c182a6fe7ae11567"
+              },
+              {
+                "repeat": 2,
+                "wall_seconds": 7.029452196031343,
+                "cpu_seconds": 7.023507282999999,
+                "peak_process_rss_mib": 503.7265625,
+                "receipt_sha256": "205e8bffa8cafdb70e6f0538b4b321cd90aa157b404d79d69f7dae1426274c39"
+              },
+              {
+                "repeat": 3,
+                "wall_seconds": 7.226138505036943,
+                "cpu_seconds": 7.219945723,
+                "peak_process_rss_mib": 503.58984375,
+                "receipt_sha256": "a3afd7098ff9dabd5bc1314e7857b9dec7b192e5e84ffa7f1094dd70d78ea7d2"
+              },
+              {
+                "repeat": 4,
+                "wall_seconds": 7.310756784980185,
+                "cpu_seconds": 7.305326272,
+                "peak_process_rss_mib": 503.30078125,
+                "receipt_sha256": "e715cce3e993c447818fdbd6aa9632b3351e2d0edc8e35789cc4b41931f70ecc"
+              },
+              {
+                "repeat": 5,
+                "wall_seconds": 6.931116143008694,
+                "cpu_seconds": 6.925182887000001,
+                "peak_process_rss_mib": 503.5546875,
+                "receipt_sha256": "80fea289b1304e25c3598bb566354f52b29ebf2c526c5473303784852b20aa03"
+              }
+            ],
+            "median_wall_seconds": 7.075993182952516,
+            "wall_range_seconds": [
+              6.931116143008694,
+              7.310756784980185
+            ],
+            "median_peak_process_rss_mib": 503.58984375,
+            "imported_sources": {
+              "superglm": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/__init__.py",
+                "sha256": "ec15d67598c084f2a0423f76a70208afe5fb69e1dc884cecd09985c318aba0e6"
+              },
+              "superglm.distributional.smoothing.loop": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/loop.py",
+                "sha256": "220afef2d4fb6357224715796c5835c8af841df68e68df06f55b11c7c21f7a63"
+              },
+              "superglm.distributional.smoothing.newton": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/newton.py",
+                "sha256": "5cec096678cdeb9098167badf46be5d2c9c9be8c6c9c9f02897f3a0d26d80f9d"
+              },
+              "superglm.distributional.smoothing.derivatives": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/smoothing/derivatives.py",
+                "sha256": "db468f448733e8931d2cd092fba6c64ad7219c9c920407295e457449d08adc8c"
+              },
+              "superglm.distributional.solver.solver": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion-baseline/src/superglm/distributional/solver/solver.py",
+                "sha256": "c74f55f00dada0b2564d8a8e94850db02ef3e291197967ca57fde86e7d145cc7"
+              }
+            },
+            "profile_calls": {
+              "_leverage_blocks": 5,
+              "_reuse_observed_initial_result": 14,
+              "_cross_all": 3,
+              "laml_derivatives": 6,
+              "run_newton_endgame": 1,
+              "_gradient_pass": 5,
+              "_hessian_pass": 1,
+              "fit_dense_fixed_lambda": 16
+            }
+          },
+          "repaired": {
+            "smoothing_reason": "stationary",
+            "smoothing_certified": true,
+            "smoothing_objective": 9663.511344101727,
+            "smoothing_iterations": 14,
+            "newton_iterations": 4,
+            "bfgs_iterations": 3,
+            "coefficient_fits": 15,
+            "coefficient_iterations": 34,
+            "stationarity_bar": 0.009664511344101727,
+            "projected_gradient": 0.005747029425994848,
+            "actual_backend": "distributional-chunked-v1",
+            "diagnostic_codes": [],
+            "samples": [
+              {
+                "repeat": 1,
+                "wall_seconds": 7.316425292985514,
+                "cpu_seconds": 7.307416470000001,
+                "peak_process_rss_mib": 503.66796875,
+                "receipt_sha256": "a00f588cf15c059bdf46867db9ff2dcc3e9b454beb60cea2a7cac79b89cd119c"
+              },
+              {
+                "repeat": 2,
+                "wall_seconds": 7.368793430970982,
+                "cpu_seconds": 7.355485007999999,
+                "peak_process_rss_mib": 503.89453125,
+                "receipt_sha256": "c72f8a2f216f7251eed3d39ea723aee7b1c0ef08b545530f202c264698543aa5"
+              },
+              {
+                "repeat": 3,
+                "wall_seconds": 7.533815719012637,
+                "cpu_seconds": 7.525570005999999,
+                "peak_process_rss_mib": 503.44921875,
+                "receipt_sha256": "7d192a59214907738da46068102a9e832ee87b589268f230554633f6a0af2f63"
+              },
+              {
+                "repeat": 4,
+                "wall_seconds": 6.863301310047973,
+                "cpu_seconds": 6.853727677,
+                "peak_process_rss_mib": 503.60546875,
+                "receipt_sha256": "ccb595fb02607cc0c2369f9cf3d1915258497f6aa68663fdf6c3123d37ae1bab"
+              },
+              {
+                "repeat": 5,
+                "wall_seconds": 7.161852430028375,
+                "cpu_seconds": 7.156009536999999,
+                "peak_process_rss_mib": 503.41015625,
+                "receipt_sha256": "e0b44d3cc119d78652262eb328588cd951cedce67dbd9e18878915bd8e27b7db"
+              }
+            ],
+            "median_wall_seconds": 7.316425292985514,
+            "wall_range_seconds": [
+              6.863301310047973,
+              7.533815719012637
+            ],
+            "median_peak_process_rss_mib": 503.60546875,
+            "imported_sources": {
+              "superglm": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/__init__.py",
+                "sha256": "ec15d67598c084f2a0423f76a70208afe5fb69e1dc884cecd09985c318aba0e6"
+              },
+              "superglm.distributional.smoothing.loop": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/loop.py",
+                "sha256": "220afef2d4fb6357224715796c5835c8af841df68e68df06f55b11c7c21f7a63"
+              },
+              "superglm.distributional.smoothing.newton": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/newton.py",
+                "sha256": "6d09edfb78358a9a9e4d3184150fb5a370cf462b8fbeba84501e42e654d04ab1"
+              },
+              "superglm.distributional.smoothing.derivatives": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/smoothing/derivatives.py",
+                "sha256": "db468f448733e8931d2cd092fba6c64ad7219c9c920407295e457449d08adc8c"
+              },
+              "superglm.distributional.solver.solver": {
+                "path": "/home/max/projects/superglm/.worktrees/lss-newton-completion/src/superglm/distributional/solver/solver.py",
+                "sha256": "c74f55f00dada0b2564d8a8e94850db02ef3e291197967ca57fde86e7d145cc7"
+              }
+            },
+            "profile_calls": {
+              "_reuse_observed_initial_result": 14,
+              "_gradient_pass": 5,
+              "_hessian_pass": 1,
+              "_cross_all": 3,
+              "laml_derivatives": 6,
+              "_leverage_blocks": 5,
+              "run_newton_endgame": 1,
+              "fit_dense_fixed_lambda": 16
+            }
+          }
+        },
+        "input_hashes": {
+          "frame": "a463de66bcc6aacefcad64d85aee62abd63073c8d523b0e12c4dcfe451b5ae0d",
+          "response": "bc92e2528755375c97b2988828682a2363fffe581edf24d3aefba7f78a97d9ec",
+          "evaluation": "74935268d5da8f9aa33413431aecfbf8db331eee3edda72caf4bcbc96975a177",
+          "weights": "2651a7b826188cf6fa3c1a7ad576872eee47de1b4b660489050a9aee3d39266c"
+        },
+        "numerical_changes": {
+          "max_absolute_difference": {
+            "theta": 0.0,
+            "eta": 0.0,
+            "covariance": 0.0,
+            "link_se:mean": 0.0,
+            "link_se:dispersion": 0.0,
+            "link_se:power": 0.0
+          },
+          "conditional_se_relative_max": {
+            "mean": 0.0,
+            "dispersion": 0.0,
+            "power": 0.0
+          },
+          "max_link_prediction_change_in_repaired_se": {
+            "mean": 0.0,
+            "dispersion": 0.0,
+            "power": 0.0
+          }
+        }
+      }
+    ],
+    "source_tree_sha256": {
+      "baseline": "5e67384dcc4b2bf3e660aa28ce47d04741a6aa6d183fa047e92e5557790dfe4d",
+      "repaired": "3957607e87faaefb5fedeaccd1147cd5ad665c0a8f3dd411614eb867f24d77bb"
+    },
+    "timing_design": "one warm-up cycle excluded; two paired repeats for affected fits; five for unchanged controls; source order alternated",
+    "control_timing_limit": "descriptive timings, including overlapping ranges and an observed control median increase; no universal speedup claim",
+    "driver_sha256": "39460e4899fa1e69e1be2320a56126e964ffd92564f6c9ef72ebe519f284ca7b",
+    "trace_artifacts": {
+      "lss-newton-curvature-probe-baseline.jsonl": "323c57c31c60baad612a973975d0d81f5b13b3a9ceec1f0faacc79469825d4c2",
+      "lss-newton-curvature-probe-repaired.jsonl": "e25fe419b38e18e20c7adacc20f8a948ebdcf37860b4378dcfc8a57eb6b16b70",
+      "lss-newton-curvature-refresh-before.log": "ca3e2db6e7f107a2a0f92fc40e6f1ebe73814abb8e7a136250d3ccccf9c8059a",
+      "lss-newton-practical-policy-mutation.log": "7ebd2e4576d894ca3f42754927fa48bfc4ed33c88fde12ef27bde2c69d2059da"
+    }
+  }
+}
