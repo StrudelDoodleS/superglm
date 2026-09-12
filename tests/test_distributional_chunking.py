@@ -10,6 +10,7 @@ import pytest
 
 import superglm.distributional.family as family_contracts
 import superglm.distributional.solver.chunks as chunking
+from superglm import SuperLSS
 from superglm._frame import as_eager_frame
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.negative_binomial import (
@@ -34,7 +35,6 @@ from superglm.distributional.weights import (
     resolve_likelihood_weights,
 )
 from superglm.features import Numeric, Spline
-from tests.bound_predictor_fixtures import model_from_templates
 
 from ._distributional_weights import resolved_prior
 from ._gaussian_lss_oracles import (
@@ -354,12 +354,13 @@ def test_row_chunk_iterator_covers_rows_once_and_validates_sizes(
 def test_public_superlss_admits_a_structural_gaussian_subclass_without_eager_binding() -> None:
     family = _CarrierSubstitutingGaussian()
 
-    model = model_from_templates(
-        family=family,
-        predictors=(Predictor("location", {}), Predictor("scale", {})),
-    )
+    model = SuperLSS(family, family.location(), family.scale())
 
-    assert model.family is family
+    owned_family = model._family
+    assert owned_family is not family
+    assert owned_family.to_config() == family.to_config()
+    assert owned_family.bind_calls == 0
+    assert owned_family.kernel_calls == 0
     assert family.bind_calls == 0
     assert family.kernel_calls == 0
 

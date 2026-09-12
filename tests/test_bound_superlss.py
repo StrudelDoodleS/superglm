@@ -256,8 +256,13 @@ def test_trusted_032_artifact_preserves_predictions_and_covariance():
         offsets=offsets,
         lambdas={},
     )
-    np.testing.assert_array_equal(
-        restored.predict(frame, offsets=offsets), fresh.predict(frame, offsets=offsets)
-    )
-    np.testing.assert_array_equal(restored.covariance_, fresh.covariance_)
-    np.testing.assert_array_equal(tuple(restored.coef_.values()), tuple(fresh.coef_.values()))
+    # Independent fits can differ by platform-dependent numerical roundoff;
+    # exact equality remains required for the same-run round trips above.
+    for historical, current in (
+        (restored.predict(frame, offsets=offsets), fresh.predict(frame, offsets=offsets)),
+        (restored.covariance_, fresh.covariance_),
+        (np.asarray(tuple(restored.coef_.values())), np.asarray(tuple(fresh.coef_.values()))),
+    ):
+        tolerance = _roundoff_factor(historical, current)
+        scale = max(1.0, np.linalg.norm(current, ord=np.inf))
+        np.testing.assert_allclose(historical, current, rtol=tolerance, atol=tolerance * scale)
