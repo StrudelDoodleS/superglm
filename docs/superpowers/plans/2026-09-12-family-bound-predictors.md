@@ -42,7 +42,7 @@
 - Produce `term(column, spec: FeatureSpec)`, `interaction(spec, *, name=None)` and `ti(left, right, *, n_knots=None, decompose=False)`.
 - Produce `normalize_terms(terms: Sequence[TermInput]) -> NormalizedTerms`, whose attributes are `features`, `interaction_specs`, `interaction_order` and whose contents are owned copies. No distributional-family imports in this module.
 
-- [ ] Write real normalization tests before implementation. The first consumer-visible test must fail against the baseline without an import collection error:
+- [x] Write real normalization tests before implementation. The first consumer-visible test must fail against the baseline without an import collection error:
 
 ```python
 def test_bound_terms_keep_numeric_and_categorical_semantics():
@@ -56,10 +56,10 @@ def test_bound_terms_keep_numeric_and_categorical_semantics():
     assert isinstance(result.features["area"], Categorical)
 ```
 
-- [ ] Run `uv run pytest tests/test_bound_terms.py -q`; record the missing-feature failure.
-- [ ] Implement owned declarations and normalization. Reject empty names, duplicate/colliding terms, invalid term types, missing parents and incompatible `ti` parents. Resolve parents after collecting all declarations; preserve main and interaction ordering separately. Copy configuration graphs without initiating row-design construction. Arbitrary fitted or custom state is preserved rather than stripped without a configuration-only copy protocol.
-- [ ] Add and run regressions for mutable feature inputs, helper settings, valid interaction compilation, invalid parents, numeric data refusal and explicit categorical handling. Use the current compiler/build boundary for behavioral assertions; do not merely compare repr strings.
-- [ ] Run focused tests and Ruff on owned files; record commands and results, self-review and commit only owned files.
+- [x] Run `uv run pytest tests/test_bound_terms.py -q`; record the missing-feature failure.
+- [x] Implement owned declarations and normalization. Reject empty names, duplicate/colliding terms, invalid term types, missing parents and incompatible `ti` parents. Resolve parents after collecting all declarations; preserve main and interaction ordering separately. Copy configuration graphs without initiating row-design construction. Arbitrary fitted or custom state is preserved rather than stripped without a configuration-only copy protocol.
+- [x] Add and run regressions for mutable feature inputs, helper settings, valid interaction compilation, invalid parents, numeric data refusal and explicit categorical handling. Use the current compiler/build boundary for behavioral assertions; do not merely compare repr strings.
+- [x] Run focused tests and Ruff on owned files; record commands and results, self-review and commit only owned files.
 
 ## Task 2: Bound predictors, family methods and diagnostics
 
@@ -73,7 +73,7 @@ def test_bound_terms_keep_numeric_and_categorical_semantics():
 - Produce `resolve_predictors(family, predictors: Sequence[BoundPredictor]) -> tuple[DistributionalFamily, tuple[Predictor, ...]]`; validate caller identity first, snapshot family configuration, order canonical templates and validate completeness. Final link support validation may remain in existing API ownership code.
 - Tweedie helper names: `mu`, `phi`, `p`. Other families expose canonical names from the spec's family table. Each method accepts `*terms`, `intercept` and `link` and returns `BoundPredictor`. Keep helper-to-canonical metadata accessible to diagnostic rendering without source inspection.
 
-- [ ] Write the missing-helper regression and run it red:
+- [x] Write the missing-helper regression and run it red:
 
 ```python
 def test_tweedie_helpers_bind_actual_configured_family():
@@ -85,10 +85,10 @@ def test_tweedie_helpers_bind_actual_configured_family():
     assert family.p().family is family
 ```
 
-- [ ] Implement the binder and statically declared methods. Preserve structural family protocols. Mode-dependent families expose mean/location helpers with instance validation. Custom callers may use `bind_predictor` without subclassing.
-- [ ] Write and run red/green tests for completeness, arbitrary order, duplicates, foreign family instances including different Tweedie bounds, bare methods and invalid positional types. Check actual omissions and marked lines without brittle full-message snapshots. The message must contain a family-first suggested constructor, `family.p(...)` and an arrow when only power is missing, with no constant/intercept recommendation.
-- [ ] Test all family parameterizations, a custom four-parameter family, model-owned family snapshots and mutable input ownership. Do not use arbitrary object repr or caller-source inspection to generate errors.
-- [ ] Run `uv run pytest tests/test_bound_terms.py tests/test_bound_predictors.py -q`, focused family-contract coverage and Ruff; record results and commit owned files.
+- [x] Implement the binder and statically declared methods. Preserve structural family protocols. Mode-dependent families expose mean/location helpers with instance validation. Custom callers may use `bind_predictor` without subclassing.
+- [x] Write and run red/green tests for completeness, arbitrary order, duplicates, foreign family instances including different Tweedie bounds, bare methods and invalid positional types. Check actual omissions and marked lines without brittle full-message snapshots. The message must contain a family-first suggested constructor, `family.p(...)` and an arrow when only power is missing, with no constant/intercept recommendation.
+- [x] Test all family parameterizations, a custom four-parameter family, model-owned family snapshots and mutable input ownership. Do not use arbitrary object repr or caller-source inspection to generate errors.
+- [x] Run `uv run pytest tests/test_bound_terms.py tests/test_bound_predictors.py -q`, focused family-contract coverage and Ruff; record results and commit owned files.
 
 ## Task 3: Public constructor, persistence and call-site migration
 
@@ -99,7 +99,7 @@ def test_tweedie_helpers_bind_actual_configured_family():
 - Produce public `SuperLSS(family, /, *predictors: BoundPredictor, weight_semantics="prior", discrete=False, n_bins=256, separation="warn", coefficient_curvature="observed")`.
 - Export bound term helpers, `BoundPredictor` and `bind_predictor` through `superglm`. Replace lazy family imports at the root with statically visible imports if needed for consumer typing. Preserve documented lower-level numerical contracts.
 
-- [ ] Write and run a failing constructor test using actual helper calls:
+- [x] Write and run a failing constructor test using actual helper calls:
 
 ```python
 def test_family_first_constructor_orders_named_predictors():
@@ -111,11 +111,11 @@ def test_family_first_constructor_orders_named_predictors():
     assert model.family.to_config() == family.to_config()
 ```
 
-- [ ] Integrate construction with current validation and owned predictors. Preserve all option meanings. Refuse old keyword construction with native TypeError and document migration; keep the exact ordinary signature instead of adding metaclass/wrapper interception. Do not silently accept old dict/tuple public input.
-- [ ] Update deserialization using `_bind_predictor_template` and the new constructor, preserving artifact schema and certified model state.
-- [ ] Migrate public boundary tests to the actual new interface. Numerical tests whose inputs deliberately exercise internal `Predictor` templates may use a test-only adapter that binds those templates then calls the real new constructor. Do not add a production compatibility method solely for tests. Keep unrelated expected numerical outputs and tolerances unchanged. Update benchmarks to executable new construction without test imports.
-- [ ] Add real fixed-smoothing and REML parity tests with internal-baseline fixtures, including discrete execution, interactions, predictions, covariance and round trips. Include old trusted artifact loading where existing fixtures support it. Reject wrong input with specific errors at the public boundary.
-- [ ] Run focused public API, prediction, discrete, serialization and new binding suites. Review all remaining public `SuperLSS(` call sites for stale syntax. Record results and commit owned files.
+- [x] Integrate construction with current validation and owned predictors. Preserve all option meanings. Refuse old keyword construction with native TypeError and document migration; keep the exact ordinary signature instead of adding metaclass/wrapper interception. Do not silently accept old dict/tuple public input.
+- [x] Update deserialization using `_bind_predictor_template` and the new constructor, preserving artifact schema and certified model state.
+- [x] Migrate public boundary tests to the actual new interface. Numerical tests whose inputs deliberately exercise internal `Predictor` templates may use a test-only adapter that binds those templates then calls the real new constructor. Do not add a production compatibility method solely for tests. Keep unrelated expected numerical outputs and tolerances unchanged. Update benchmarks to executable new construction without test imports.
+- [x] Add real fixed-smoothing and REML parity tests with internal-baseline fixtures, including discrete execution, interactions, predictions, covariance and round trips. Include old trusted artifact loading where existing fixtures support it. Reject wrong input with specific errors at the public boundary.
+- [x] Run focused public API, prediction, discrete, serialization and new binding suites. Review all remaining public `SuperLSS(` call sites for stale syntax. Record results and commit owned files.
 
 ## Task 4: User docs, installed typing and complete verification
 
@@ -123,11 +123,52 @@ def test_family_first_constructor_orders_named_predictors():
 
 **Interfaces:** Consume the completed public constructor and family helpers. Document canonical parameter names used by prediction, offsets and results separately from Tweedie's short construction helpers.
 
-- [ ] Rewrite primary examples around the complete family-first declaration. Show missing-predictor arrows with `...`, explicit empty helpers, custom binding and supported `ti` semantics. Keep the single model entry point and numeric string meaning clear.
-- [ ] Add the packaged marker, build a wheel and inspect its contents. Use an isolated installed-wheel consumer check with a pinned available type checker: valid Tweedie and Gaussian construction must pass; misspelled helpers and invalid term input must fail. Validate statically visible imports, avoiding an `Any` fallback that would make negative checks meaningless.
-- [ ] Run focused new tests and public regression suites, then applicable complete repository checks: `uv run pytest tests/ -q -m "not slow"`, Ruff check/format, `uv lock --check`, `uv pip check`, and `uv run python run_test.py`. Use `SUPERGLM_REQUIRE_DATA=1` when the three mandatory real-data suites are included; obtain the local dataset using the documented fetch command if needed. Run the full suite as practical, reporting legitimate optional skips explicitly rather than calling them executed coverage.
-- [ ] Review the complete diff for numerical-path changes, stale public examples, version changes and generated artifacts. Record exact evidence and any environmental blockers, then commit the docs/typing changes and necessary fixes.
+- [x] Rewrite primary examples around the complete family-first declaration. Show missing-predictor arrows with `...`, explicit empty helpers, custom binding and supported `ti` semantics. Keep the single model entry point and numeric string meaning clear.
+- [x] Add the packaged marker, build a wheel and inspect its contents. Use an isolated installed-wheel consumer check with a pinned available type checker: valid Tweedie and Gaussian construction must pass; misspelled helpers and invalid term input must fail. Validate statically visible imports, avoiding an `Any` fallback that would make negative checks meaningless.
+- [x] Run focused new tests and public regression suites, then applicable complete repository checks: `uv run pytest tests/ -q -m "not slow"`, Ruff check/format, `uv lock --check`, `uv pip check`, and `uv run python run_test.py`. Use `SUPERGLM_REQUIRE_DATA=1` when the three mandatory real-data suites are included; obtain the local dataset using the documented fetch command if needed. Run the full suite as practical, reporting legitimate optional skips explicitly rather than calling them executed coverage.
+- [x] Review the complete diff for numerical-path changes, stale public examples, version changes and generated artifacts. Record exact evidence and any environmental blockers, then commit the docs/typing changes and necessary fixes.
 
 ## Review and delivery
 
 Each implementation task receives an independent task review. A final review checks the whole branch, including migrated tests, ownership boundaries, typing negatives and serialization. Address material findings with focused regressions. Keep the branch and worktree available for user review; do not merge or publish without an explicit instruction.
+
+
+## Validation receipt
+
+All four implementation tasks and their scoped reviews are complete. The final
+whole-branch review follows this receipt. The work remains on
+`work/fresh-0.32.0` for user review.
+
+The complete non-browser suite ran with both required real datasets and CI's
+mpmath overlay:
+
+```sh
+SUPERGLM_REQUIRE_DATA=1 uv run --with mpmath pytest tests/ -q -m "not browser"
+```
+
+It reported 14,896 passed, one failed, eight skipped and 69 browser cases
+deselected in 26m58s. The sole failure was the old architecture import allowlist
+rejecting the new family-helper module. Its explicit allowed edges were updated,
+and all seven architecture tests then passed. No production code changed after
+the full run, and that run was not repeated for the test-policy correction.
+All three mandatory real-data suites ran without skips. Four optional R
+comparisons skipped because R with mgcv and jsonlite was unavailable; four
+storage-mutation cases did not apply to a spline-category lookup without a
+permutation array. The 186 warnings came from existing deprecation, boundary,
+weight-contract and adversarial test scenarios; none came from the new
+term, binding or constructor parity tests.
+
+The installed-wheel check passed with the packaged `py.typed` marker. Positive
+`assert_type` examples passed and all five invalid examples produced the expected
+diagnostics, with imports verified inside an isolated environment's site-packages.
+All 17 documented constructors executed, and the four-parameter custom-family
+example fitted successfully. The final focused declarations, constructor and
+packaging run passed 98 tests. Earlier parity checks cover dense/discrete and
+fixed-smoothing/REML fits, tensor interactions, covariance, serialization and a
+trusted artifact produced with the original 0.32.0 API.
+
+Ruff checks, formatting, lock consistency, dependency consistency and
+`run_test.py` passed. The smoke script's informational `U-shape: CHECK` is not
+an assertion of shape recovery. Repository-wide ty diagnostics remain exactly
+at the pre-change baseline of 891 after normalizing source positions; the
+installed-consumer check is clean. No version field or lock pin changed.
