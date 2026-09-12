@@ -1,0 +1,2448 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>SuperGLM Roadmap - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#superglm-roadmap" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              SuperGLM Roadmap
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your First Distributional Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../models/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../models/distributional-inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking A Distributional Fit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/screening-evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/family-bound-predictors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: family-bound predictors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributional-family-development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Family Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperLSS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="superglm-roadmap">SuperGLM Roadmap<a class="headerlink" href="#superglm-roadmap" title="Permanent link">&para;</a></h1>
+<p>Status: Historical research dossier, C1–C14
+Original strategic review: 2026-09-07</p>
+<p>The September 7 analysis below is retained as research evidence. The
+<a href="../../ROADMAP/">main roadmap</a> records current implementation status, corrections
+and priorities. The <a href="../2026-09-superglm-feature-roadmap-additions/">reviewed additions</a>
+extend the catalogue with <strong>C15–C26</strong>, including C18's multigrid/Krylov work and
+C24's hierarchical matrix-compression proposal. Read both dossiers through the
+current roadmap; their readiness labels are proposals to scope, not commitments.</p>
+<p>Priority order may change as benchmarks, implementation experience,
+published research, or user needs change. A roadmap item is not an
+implementation specification and should not be started without a scoped
+issue/design.</p>
+<p>Legend:
+- ACTIVE — currently being worked on
+- READY — sufficiently understood to scope
+- RESEARCH — requires investigation before implementation
+- NEXT — likely near-term candidate
+- DEFERRED — intentionally not being pursued now
+- KILLED — investigated and rejected unless new evidence emerges
+- SHIPPED — completed</p>
+<h1 id="superglm-feature-roadmap-a-prioritized-sourced-dossier">SuperGLM Feature Roadmap: A Prioritized, Sourced Dossier<a class="headerlink" href="#superglm-feature-roadmap-a-prioritized-sourced-dossier" title="Permanent link">&para;</a></h1>
+<h2 id="tldr">TL;DR<a class="headerlink" href="#tldr" title="Permanent link">&para;</a></h2>
+<ul>
+<li>The single largest, highest-leverage build is a <strong>discrete/marginal cross-product assembly layer for multiple linear predictors</strong> (gap #1). mgcv already ships the exact low-level primitive (<code>XWXd</code> with <code>lt</code>/<code>rt</code> term-subset arguments and the <code>"lpip"</code> attribute — verbatim: <em>"The 'lpip' attribute of X is a list of the coefficient indices for each term. Required if subsetting via lt and rt"</em>) but does NOT wire it to multi-predictor LSS families, so this is a clean-room engineering-plus-integration build, not open research and not a pure port.</li>
+<li><strong>STEP 1's headline hypothesis is REFUTED</strong>: <code>mssm</code> (Joshua Krause, Borst &amp; van Rij; PyPI v1.2.5, 18 Aug 2026, GPL-3.0) does distributional regression with smooths, automatic EFS smoothing selection, and likelihood-based joint inference in Python today. SuperLSS's real differentiators are its MIT license, its actuarial family set (Tweedie-LSS, GPD, generalized Gamma, two-piece), and its scoring/portfolio/refusal machinery — not being "the only one."</li>
+<li>The transcript's "killer combination" (adaptive conditional-exponential-family GAM + distributional PCA + functional compiler) is <strong>tier-(c) research/moonshot at best</strong>: the per-row normalizing-constant quadrature <code>A(η(x))</code> reintroduces an <code>O(n·Q·R)</code> cost per Newton step that the discrete method cannot remove, defeating the very speed argument used to justify it. Build the functional compiler (f) alone; defer (a)+(b).</li>
+</ul>
+<h2 id="key-findings">Key Findings<a class="headerlink" href="#key-findings" title="Permanent link">&para;</a></h2>
+<h3 id="landscape-audit-step-1-verified">Landscape audit (STEP 1), verified<a class="headerlink" href="#landscape-audit-step-1-verified" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>The closest Python competitor is <code>mssm</code></strong> (<code>JoKra1/mssm</code>, PyPI v1.2.5 released 18 Aug 2026, <strong>GPL-3.0</strong>). Per arXiv 2506.13132 (Krause, Borst, van Rij, "The Mixed-Sparse-Smooth-Model Toolbox (MSSM)") it implements <code>GAMM</code>, <code>GAMMLSS</code>, and general smooth models (<code>GSMM</code>); multiple distribution parameters each with their own additive predictor; EFS (Wood &amp; Fasiolo 2017) and the new L-qEFS quasi-Newton update (arXiv 2606.26804 "Structured Secant Methods…", v2 dated 20 Aug 2026, which names <em>"the open-source mssm Python toolbox (v ≥ 1.2.5)"</em>); and Bayesian/likelihood joint inference (β|y ≈ N(β̂, H⁻¹)). <strong>This directly does what SuperLSS does.</strong> Three crucial gaps remain in <code>mssm</code>: (1) it is <strong>sparse-Cholesky/QR based, NOT discretized-covariate</strong> — the Wood-Li-Shaddick-Augustin 2017 method is only its mgcv <em>comparison</em> baseline, not implemented; (2) its shipped GAMMLSS families are only three — verbatim from arXiv 2506.13132 §3.3.1: <em>"The GAMMLSS class in MSSM … currently supports Gaussian (mean and standard deviation), Multinomial, and Gamma (mean and scale) distributions"</em> — <strong>no Tweedie-LSS or GPD built in</strong> (Tweedie-LSS appears only as a qEFS <em>example</em> in 2606.26804 §5); (3) GPL license blocks commercial actuarial adoption.</li>
+<li><strong>Discretized "gigadata" methods</strong> (Wood, Li, Shaddick, Augustin 2017 <em>JASA</em> 112:1199; Li &amp; Wood 2020 <em>Stat. Comput.</em> 30:19) exist in Python <strong>only</strong> in SuperGLM's scalar path — confirmed against <code>mssm</code>, <code>pygam</code>, <code>statsmodels</code> GLMGam, <code>glum</code>, <code>tabmat</code>, <code>interpret</code>. None discretize covariates for marginal cross-products.</li>
+<li><strong>CRITICAL SUB-QUESTION answered.</strong> mgcv's <code>XWXd(X,w,k,ks,ts,dt,v,qc,...,lt=NULL,rt=NULL)</code> (source <code>R/misc.r</code>) computes <code>XᵀWX</code> from marginal discretized matrices; its <code>lt</code>/<code>rt</code> arguments "use only columns of X corresponding to these model matrix terms" and require the <code>"lpip"</code> attribute. <strong>This is precisely the mechanism to build cross-predictor blocks XⱼᵀWⱼₖXₖ with a per-pair weight vector.</strong> The method's own design intent (Li &amp; Wood 2020 abstract, verbatim): <em>"we do not rely on discretizing covariates jointly, which would typically require the use of very coarse discretization. The most expensive computation in model estimation is the formation of the matrix cross product XᵀWX where X is a model matrix and W a diagonal or tri-diagonal matrix."</em> However: the multi-linear-predictor family <code>twlss</code> (Tweedie LSS) is documented "Can only be fitted using EFS method," and per <code>family.mgcv</code> the LSS/general families are "most of which are currently only usable with <code>gam</code>, although some can also be used with <code>bam</code>." So mgcv <strong>has the primitive but does not expose a discrete fitting path for multi-predictor LSS</strong>. Gap #1 is therefore: port the published <code>XWXd</code>/<code>lt</code>/<code>rt</code> primitive (clean-room, since mgcv is GPL) and do the genuine integration research to assemble the <em>coupled</em> penalized Hessian and the EFS traces from it. Not pure research; not a pure port.</li>
+<li>No INLA-style nested Laplace, no TMB/RTMB AD-tape+sparse-Laplace, no mlt/tram most-likely-transformation, no VGAM reduced-rank VGLM, no GJRM copula additive, no gss SS-ANOVA conditional density, no generalized linear array models, no qgam non-crossing quantile GAM, no SCAM shape-constrained additive models — <strong>all confirmed absent from Python</strong> (checked <code>statsmodels</code>, <code>pygam</code>, <code>glum</code>, <code>interpret</code>, <code>ngboost</code>, <code>lightgbmlss</code>, <code>xgboostlss</code>, <code>skpro</code>, <code>mapie</code>, <code>scoringrules</code>, <code>chainladder</code>, <code>formulaic</code>, <code>scikit-misc</code>, <code>mssm</code>). Python GLMM support is genuinely weak: <code>statsmodels</code> offers only <code>BinomialBayesMixedGLM</code>/<code>PoissonBayesMixedGLM</code> with <strong>independent random effects only</strong> and Laplace/VB posteriors; there is no arbitrary-random-effect AD+Laplace equivalent to <code>TMB</code>/<code>glmmTMB</code> in Python.</li>
+<li>Genuinely strong Python competition to respect: <code>glum</code>+<code>tabmat</code> (fast sparse/categorical GLM, already a SuperGLM dependency), <code>interpret</code> (EBM/GA2M with FAST interaction detection, MIT), <code>ngboost</code>/<code>lightgbmlss</code>/<code>xgboostlss</code> (distributional GBMs — the predictive bar), <code>scoringrules</code> (CRPS/energy/variogram; the <code>scores</code> package ships twCRPS per Allen, Ginsbourger &amp; Ziegel 2023, <em>"Evaluating forecasts for high-impact events using transformed kernel scores,"</em> SIAM/ASA J. Uncertainty Quantification 11(3):906–940, doi:10.1137/22M1532184), <code>chainladder</code> (reserving).</li>
+</ul>
+<h3 id="repository-grounding-verified-against-the-code">Repository grounding (verified against the code)<a class="headerlink" href="#repository-grounding-verified-against-the-code" title="Permanent link">&para;</a></h3>
+<p>SuperGLM is MIT-licensed (LICENSE: "Copyright (c) 2026 Max Hicks"), <code>pyproject.toml</code> version 0.30.0, deps <code>numpy/scipy/pandas/narwhals/numba/scikit-learn/joblib/tabmat/threadpoolctl</code>. The distributional engine (<code>src/superglm/distributional/__init__.py</code>) is confirmed to export: family adapters (<code>gamma</code>, <code>gaussian</code>, <code>generalized_gamma</code>, <code>generalized_pareto</code>, <code>log_normal</code>, <code>negative_binomial</code>, <code>tweedie</code>, <code>two_piece</code>); <code>Predictor</code>; the <code>family.py</code> contract stack (<code>ConfigurableDistributionalFamily</code>, <code>ParameterSupport</code>, <code>AtomFamily</code>, <code>ExpectedShortfallFamily</code>, <code>VarianceFamily</code>, <code>PriorWeighted*</code> variants); <code>weights</code> (prior vs frequency semantics); <code>posterior</code> (draws, covariance, simultaneous critical value); <code>residuals</code>; <code>checks</code> (<code>qq</code>, <code>worm</code>, <code>pit</code>, <code>binned</code>, <code>calibration</code>, <code>scores</code> including <code>crps_closed_form</code>, <code>crps_numeric</code>, <code>threshold_weighted_crps</code>, <code>murphy_diagram</code>); <code>terms</code> (<code>term_test</code>, <code>summary_table</code>); <code>surfaces</code> (<code>portfolio</code>, <code>risk_curves</code>, <code>density_fan</code>). README confirms "SuperLSS currently refuses <code>discrete=True</code> until its multi-parameter route is complete." This is the architecture every dossier below maps onto.</p>
+<h2 id="details-candidate-dossiers">Details — Candidate Dossiers<a class="headerlink" href="#details-candidate-dossiers" title="Permanent link">&para;</a></h2>
+<p>Rubric axes, each 1–5: <strong>(1) Novelty in Python</strong> (5 = nothing usable exists); <strong>(2) Statistical value</strong>; <strong>(3) Predictive upside vs GBMs</strong>; <strong>(4) Speed/scale upside</strong> (asymptotic, not constant-factor); <strong>(5) Feasibility</strong> (5 = few person-months, low risk); <strong>(6) Risk of subtle wrongness</strong> (5 = high risk). All complexity in n rows, K linear predictors, per-predictor coefficient counts qₖ, marginal grid sizes mₖ.</p>
+<hr />
+<h3 id="c1-discrete-marginal-cross-product-assembly-for-multiple-linear-predictors-the-flagship">C1. Discrete marginal cross-product assembly for multiple linear predictors — <em>the flagship</em><a class="headerlink" href="#c1-discrete-marginal-cross-product-assembly-for-multiple-linear-predictors-the-flagship" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Give SuperLSS a <code>discrete=True</code> path so a K-predictor Tweedie/GPD/gaulss fit assembles its coupled penalized Hessian from marginal discretized bases instead of dense <code>n×q</code> matrices, removing the <code>n</code> factor from the dominant cost.</p>
+<p><strong>What it unlocks.</strong> Portfolio-scale distributional pricing (10⁷–10⁸ rows) with full likelihood inference — impossible in Python today; <code>mssm</code> is sparse but not discretized, and mgcv does not expose discrete multi-predictor LSS.</p>
+<p><strong>Core mathematics.</strong> For general smooth models (Wood, Pya, Säfken 2016 <em>JASA</em> 111:1548), the penalized Hessian couples predictors through blocks <code>Hⱼₖ = Xⱼᵀ Wⱼₖ Xₖ</code>, where <code>Wⱼₖ = diag(∂²ℓ/∂ηⱼ∂ηₖ)</code> is the per-observation cross-weight from the family's <code>l2</code> array (mgcv's <code>gamlss.gH</code> assembles exactly these from per-observation derivative arrays l1–l4). Under <strong>marginal</strong> discretization, each covariate is discretized once into a unique-value matrix <code>X̄</code> plus an index vector <code>k</code>; the cross-product <code>Xⱼᵀ Wⱼₖ Xₖ</code> is computed directly on <code>X̄</code> via the <code>XWXd</code> recurrence with <code>lt=j, rt=k</code> (the <code>"lpip"</code> attribute supplies the per-term coefficient indices that make <code>lt</code>/<code>rt</code> subsetting possible). When predictors j,k share a covariate's grid, the block reuses one <code>X̄</code>; when grids differ, the two index columns <code>ks[j], ks[k]</code> drive a general two-index summation. <strong>Complexity:</strong> dense assembly is <code>O(n·(Σqₖ)²)</code> (the current 9.7s, 192-coef benchmark). Marginal-discrete assembly is <code>O(Σⱼₖ (n·cⱼₖ + Πmargin-basis))</code> where the <code>n</code> term carries only a small per-unique-value constant <code>cⱼₖ</code> (a few basis columns); Li &amp; Wood (2020) report a dataset-specific 30× cross-product speedup (abstract, verbatim: <em>"a 30 fold reduction in cross product computation time for the Black Smoke model dataset"</em> — that figure is for the UK Black Smoke data, not a universal constant). Memory drops from <code>O(n·Σqₖ)</code> to <code>O(Σn·(#margins) + Σmₖ·basis)</code>. The EFS/LAML objective needs <code>tr(S_λ⁻ Vβ)</code>-type leverages, not the full inverse — obtainable from the sparse Cholesky of the assembled <code>H+S_λ</code> and <code>diagXVXd</code> (mgcv exposes this exact routine), so the coupled blocks are formed once per outer step, not per trace.</p>
+<p><strong>Discretization error.</strong> Marginal (not joint) discretization keeps error <code>O(mₖ⁻²)</code> per margin (Wood et al. 2017 show it propagates negligibly into λ and Vβ at fine grids); SuperGLM should bound it by refitting at doubled <code>n_bins</code> and asserting coefficient/λ movement below a dimension-scaled tolerance — the project's existing "byte-identical refit receipt" discipline extends directly.</p>
+<p><strong>References.</strong> Wood, Li, Shaddick, Augustin (2017) <em>JASA</em> 112:1199, doi:10.1080/01621459.2016.1195744; Li &amp; Wood (2020) <em>Stat. Comput.</em> 30:19, doi:10.1007/s11222-019-09864-2; Wood, Pya, Säfken (2016) <em>JASA</em> 111:1548. Currie, Durban, Eilers (2006) generalized linear array models <em>JRSSB</em> 68:259 for the Kronecker/array arithmetic.</p>
+<p><strong>Existing implementations.</strong> mgcv <code>XWXd</code>/<code>XWyd</code>/<code>Xbd</code>/<code>diagXVXd</code> (GPL-2/3, <code>R/misc.r</code>, <code>discrete.c</code>) — <strong>clean-room reimplementation required</strong> from the two papers. No permissive-licensed version anywhere.</p>
+<p><strong>Implementation sketch.</strong> New module <code>distributional/discrete/</code>: <code>MarginalDesign</code> (per-covariate unique-value matrix + index), <code>CrossBlockAssembler</code> (the <code>lt</code>/<code>rt</code> recurrence, Numba/C++), wired into the existing EFS objective in <code>distributional/smoothing/</code>. Reuse the scalar <code>discrete=True</code> assembly already shipped; the new work is the <em>cross-predictor</em> weight vectors <code>Wⱼₖ</code> fed from each family adapter's existing <code>l2</code> Hessian arrays. <strong>Hardest sub-problem:</strong> the constraint (sum-to-zero) reparameterization <code>qc</code>/Householder <code>v</code> must be applied consistently to a basis that appears in two predictors — get this wrong and Vβ is silently biased.</p>
+<p><strong>Effort.</strong> 6–9 person-months; needs numerical-linear-algebra + P-spline expertise. <strong>Fails loudly:</strong> refit-at-finer-grid receipt must match within tolerance or raise; Cholesky of indefinite <code>H+S_λ</code> must raise (perturbed-Cholesky certificate), never silently pivot.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 5 | Predictive 3 | Speed 5 | Feasibility 2 | Risk 4. — Uniquely absent in Python, the only <em>asymptotic</em> win here, but the coupled-constraint reparameterization is the classic place to get Vβ subtly wrong.</p>
+<hr />
+<h3 id="c2-sparse-ad-tape-laplace-core-a-permissive-tmbrtmb-equivalent">C2. Sparse AD-tape + Laplace core (a permissive TMB/RTMB-equivalent)<a class="headerlink" href="#c2-sparse-ad-tape-laplace-core-a-permissive-tmbrtmb-equivalent" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> A reverse-mode AD tape over a sparse-Cholesky Laplace marginal likelihood, so any new family or random-effect structure needs only a log-likelihood, not hand-derived l1–l4 arrays.</p>
+<p><strong>What it unlocks.</strong> Arbitrary Gaussian random effects (Python has none — <code>statsmodels</code> does independent REs only), and it collapses the marginal cost of <em>every</em> future family (C6, C8, C13, C14). This is the classic "one layer unlocks four things."</p>
+<p><strong>Core mathematics.</strong> Marginal likelihood <code>L(θ)=∫ p(y|β,θ)p(β|θ)dβ ≈ exp(ℓ(β̂,θ))·|H/2π|^{-1/2}</code> with <code>H=−∂²ℓ/∂β∂βᵀ</code> sparse; the Laplace gradient needs <code>∂/∂θ log|H|=tr(H⁻¹ ∂H/∂θ)</code> computed via sparse Cholesky and selected inversion (Takahashi). Complexity is set by the Cholesky fill of <code>H</code>, <code>O(n·bandwidth²)</code> for banded P-splines.</p>
+<p><strong>References.</strong> Kristensen, Nielsen, Berg, Skaug, Bell (2016) "TMB: Automatic Differentiation and Laplace Approximation" <em>J. Stat. Soft.</em> 70:1, arXiv:1509.00660; Wood, Pya, Säfken (2016).</p>
+<p><strong>Existing implementations.</strong> TMB/RTMB (GPL), <code>glmmTMB</code> (AGPL/GPL) — clean-room from paper. Permissive AD building blocks exist (JAX/PyTorch are GPU-first and violate the CPU-structure constraint; <code>sympy</code>/<code>numba</code> hand-tape is the CPU-only route). <strong>Speculation (labelled):</strong> a Numba-backed reverse tape restricted to the family log-density (small, per-observation) plus analytic sparse-Cholesky for the β-block is feasible without a general AD framework.</p>
+<p><strong>Implementation sketch.</strong> <code>core/adtape/</code> producing l1/l2 arrays consumed by the <em>existing</em> <code>gamlss.gH</code>-style assembler; the Laplace <code>log|H|</code> derivative reuses the C1 sparse Cholesky. <strong>Hardest sub-problem:</strong> selected inverse / <code>tr(H⁻¹∂H)</code> at scale without forming <code>H⁻¹</code>.</p>
+<p><strong>Effort.</strong> 9–12 pm; AD + sparse-linear-algebra expert. <strong>Fails loudly:</strong> finite-difference gradient check against the tape at every family-registration; refuse if Hessian indefinite at the mode.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 5 | Predictive 3 | Speed 3 | Feasibility 2 | Risk 4.</p>
+<hr />
+<h3 id="c3-robust-indefinite-hessian-efsnewton-with-certified-stationarity-fixes-the-two-named-failures">C3. Robust indefinite-Hessian EFS/Newton with certified stationarity (fixes the two named failures)<a class="headerlink" href="#c3-robust-indefinite-hessian-efsnewton-with-certified-stationarity-fixes-the-two-named-failures" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Trust-region + perturbed-Cholesky step control and a stable multi-penalty reparameterization, plus a real stationarity certificate replacing <code>practical_plateau</code>.</p>
+<p><strong>Diagnosis of the two failures (labelled analysis).</strong>
+- <em>Correlated Tweedie interaction fit:</em> three competing hypotheses — (a) EFS oscillation (Wood &amp; Fasiolo 2017 <em>Biometrics</em> 73:1071 document EFS convergence conditions and that λ-updates can fail to improve), (b) a flat power-direction (the Tweedie profile likelihood in p is famously flat near the data-implied p), (c) ill-conditioning from correlated tensor terms. <strong>Distinguishing diagnostic:</strong> monitor the EFS λ-trajectory (oscillation → (a)), the curvature of the profile in p at the plateau (flat → (b)), and the condition number of each <code>Hⱼⱼ</code> block after reparameterization (high → (c)). Literature fix for (a): damped/half-stepped EFS (mgcv's <code>fast.REML.fit</code> step-fail logic); for (b): profile p on a grid and fix it, or reparameterize to <code>log((p−1)/(2−p))</code>; for (c): Wood (2011) <em>JRSSB</em> 73:3 stable similarity-transform reparameterization for penalties on wildly different scales.
+- <em>GPD smoothing-cap reference fit:</em> the cap is almost certainly <strong>masking an unbounded likelihood direction</strong> — GPD log-likelihood is irregular as shape ξ→ near/above 0.5 and can be unbounded. <strong>Standard remedy (proven):</strong> penalized MLE of <strong>Coles &amp; Dixon (1999)</strong> "Likelihood-Based Inference for Extreme Value Models," <em>Extremes</em> 2(1):5–23, doi:10.1023/A:1009905222644, which restricts ξ&lt;1 and shrinks toward smaller ξ via an exponential penalty on the shape; equivalently a PC-prior on ξ (Opitz et al. 2018) shrinking toward the ξ=0 exponential-tail model. Replace the cap with this penalty and the direction becomes bounded.</p>
+<p><strong><code>practical_plateau</code> verdict.</strong> Defensible as a <em>stopping heuristic</em> but not as a certificate. A certified stationarity test costs one extra factorization per candidate optimum: check <code>‖∇_λ V‖ &lt; tol·scale</code> and that the Laplace-REML Hessian in log-λ is positive definite. Roughly +5–10% wall-clock; worth it for the model-risk pack.</p>
+<p><strong>References.</strong> Wood (2011); Wood &amp; Fasiolo (2017); Wood, Pya, Säfken (2016); Coles &amp; Dixon (1999).</p>
+<p><strong>Existing implementations.</strong> mgcv <code>newton</code>/<code>fast.REML.fit</code>/<code>gam.reparam</code> (GPL) — clean-room. <strong>Effort.</strong> 3–5 pm. <strong>Fails loudly:</strong> already the culture; add "refuse to certify" as a distinct return state from "converged."</p>
+<p><strong>Rubric.</strong> Novelty 4 | StatValue 4 | Predictive 2 | Speed 2 | Feasibility 4 | Risk 3.</p>
+<hr />
+<h3 id="c4-cross-predictor-shared-smooths-and-penalties-an-id-mechanism-across-predictors">C4. Cross-predictor shared smooths and penalties (an <code>id=</code> mechanism across predictors)<a class="headerlink" href="#c4-cross-predictor-shared-smooths-and-penalties-an-id-mechanism-across-predictors" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Let one smooth (or its λ) be shared between, e.g., the mean and dispersion predictors, and support double-penalty null-space shrinkage per term across the multi-predictor model.</p>
+<p><strong>What it unlocks.</strong> Scientifically valuable models currently unreachable: a common shape function shared by frequency and severity; equal smoothness across parameters; term-selection (a smooth shrunk to zero) inside a distributional fit.</p>
+<p><strong>Core mathematics.</strong> Sharing a basis across predictors adds off-diagonal coupling to the penalty <code>S_λ</code> and changes the EFS update (the shared λ's Fellner-Schall ratio sums traces from both blocks). Centering must be imposed <strong>once</strong> on the shared basis or the two appearances become collinear. Double penalty (Marra &amp; Wood 2011 <em>CSDA</em> 55:2372): add a null-space penalty <code>S⁰</code> so a term can be shrunk to exactly zero.</p>
+<p><strong>References.</strong> Wood (2017) <em>GAMs: An Introduction with R</em> (2e), <code>id=</code> mechanism; Marra &amp; Wood (2011). <strong>Existing:</strong> mgcv <code>id=</code> and <code>select=TRUE</code> (GPL) — clean-room. Note mgcv's own caveat: under <code>discrete=TRUE</code> "the discrete method cannot force the linked bases to be identical" — a real interaction with C1 to design around.</p>
+<p><strong>Implementation sketch.</strong> Extend <code>Predictor</code> to accept a shared-smooth handle; the EFS objective in <code>distributional/smoothing/</code> sums cross-block traces for shared λ. <strong>Hardest sub-problem:</strong> identifiability/centering of a basis living in two predictors (this is also C1's hardest sub-problem — build them together).</p>
+<p><strong>Effort.</strong> 3–4 pm. <strong>Fails loudly:</strong> rank-check the combined penalty null space; raise on collinear shared bases.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 4 | Predictive 2 | Speed 1 | Feasibility 3 | Risk 4.</p>
+<hr />
+<h3 id="c5-shape-constraints-under-a-distributional-likelihood-scamscop-style">C5. Shape constraints under a distributional likelihood (SCAM/SCOP-style)<a class="headerlink" href="#c5-shape-constraints-under-a-distributional-likelihood-scamscop-style" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Monotone/convex constraints on any predictor — including the dispersion or shape predictor — via re-parameterized (exponentiated-coefficient) P-splines compatible with EFS.</p>
+<p><strong>What it unlocks.</strong> Business-mandated monotone relativities inside a distributional model (SuperGLM has this for scalar GLMs via <code>Constraint.fit.increasing</code> SCOP/QP, but not for LSS terms).</p>
+<p><strong>Core mathematics.</strong> Pya &amp; Wood (2015) <em>Stat. Comput.</em> 25:543: re-parameterize coefficients as <code>β = Σ exp(β̃)</code> so monotonicity holds by construction; the penalty acts on <code>β̃</code>; EFS/REML carries over but the mapping is nonlinear so Vβ needs the Jacobian. <strong>Constrained dispersion/shape is well-posed</strong> (the link keeps the parameter in-support) and is genuinely useful in pricing — e.g., monotone-in-exposure dispersion. Standard errors under an <em>active</em> constraint are one-sided; report constrained intervals, never symmetric Wald.</p>
+<p><strong>References.</strong> Pya &amp; Wood (2015); Pya (2024) <code>scam</code> v1.2-21 (GPL, based on mgcv); mgcv 1.9-4 now also ships <code>scasm</code> (shape-constrained additive smooth models). cgam (arXiv:1812.07696) uses cone projection — faster but GPL and less EFS-friendly. Clean-room required.</p>
+<p><strong>Implementation sketch.</strong> New constrained basis in <code>features/spline.py</code> mirroring the existing SCOP path, exposed to <code>Predictor</code>. <strong>Hardest sub-problem:</strong> the exp-reparameterization makes the Hessian indefinite far from the optimum — needs C3's step control.</p>
+<p><strong>Effort.</strong> 4–6 pm. <strong>Fails loudly:</strong> assert monotonicity of fitted values post-fit; refuse symmetric CIs on active constraints.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 4 | Predictive 3 | Speed 1 | Feasibility 3 | Risk 3.</p>
+<hr />
+<h3 id="c6-conditional-most-likely-transformation-models-mlttram-equivalent">C6. Conditional / most-likely transformation models (mlt/tram-equivalent)<a class="headerlink" href="#c6-conditional-most-likely-transformation-models-mlttram-equivalent" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> <code>F(y|x)=F_Z(h(y,x))</code> with a monotone transformation <code>h</code> learned by maximum likelihood — a distribution-free alternative to picking a parametric family.</p>
+<p><strong>What it unlocks.</strong> Escapes family choice entirely (relevant when no named family fits a severity tail); handles censoring/truncation via the exact likelihood on <code>F</code>. Absent in Python.</p>
+<p><strong>Core mathematics.</strong> <code>h(y,x)=Σ (a(y)⊗b(x))ᵀϑ</code> with <code>dh/dy&gt;0</code>; likelihood uses only <code>F</code> and <code>F'</code>, cheap to evaluate. Shift-scale (Siegfried et al. 2023) and multivariate (Klein et al. 2022) extensions exist.</p>
+<p><strong>References.</strong> Hothorn, Kneib, Bühlmann (2014) <em>JRSSB</em>; Hothorn, Möst, Bühlmann (2018) <em>Scand. J. Stat.</em> 45:110, doi:10.1111/sjos.12291; Hothorn (2020) "Most Likely Transformations: The mlt Package" <em>JSS</em> 92(1). <strong>Existing:</strong> <code>mlt</code>/<code>tram</code>/<code>basefun</code> (GPL). Clean-room; heavy synergy with C5 (the monotonicity is the same machinery).</p>
+<p><strong>Implementation sketch.</strong> A <code>TransformationFamily</code> adapter implementing the family contract on <code>(F_Z, h, ∂h)</code>; reuses posterior/scoring/<code>Predictor</code> unchanged. <strong>Hardest sub-problem:</strong> enforcing <code>dh/dy&gt;0</code> while keeping the log-likelihood concave.</p>
+<p><strong>Effort.</strong> 5–7 pm. <strong>Fails loudly:</strong> reject non-monotone <code>h</code>; refuse tail functionals when <code>h</code> is extrapolated beyond observed y.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 5 | Predictive 4 | Speed 2 | Feasibility 3 | Risk 3.</p>
+<hr />
+<h3 id="c7-non-crossing-additive-quantile-gam-qgam-equivalent">C7. Non-crossing additive quantile GAM (qgam-equivalent)<a class="headerlink" href="#c7-non-crossing-additive-quantile-gam-qgam-equivalent" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Calibrated Bayesian additive quantile regression with a smooth pinball loss and a non-crossing guarantee.</p>
+<p><strong>What it unlocks.</strong> Direct quantile pricing with honest credible intervals; Python has nothing equivalent (<code>statsmodels</code> quantile reg is linear, no smooths, no calibration).</p>
+<p><strong>Core mathematics.</strong> Fasiolo et al. (2021) replace the pinball loss with the ELF smooth loss and calibrate the learning rate 1/σ so credible intervals attain nominal coverage; a location-scale learning-rate lets σ vary with x. Non-crossing is imposed either by monotone-in-u constraints (transcript (d)'s <code>dQ/du&gt;0</code>, which is C5 machinery) or by rearrangement (Chernozhukov, Fernández-Val, Galichon 2010).</p>
+<p><strong>References.</strong> Fasiolo, Wood, Zaffran, Nedellec, Goude (2021) <em>JASA</em> "Fast calibrated additive quantile regression," arXiv:1707.03307; <code>qgam</code> (GPL). <strong>Transcript (d) verdict:</strong> the "transport/quantile GAM" is <strong>largely a transformation model in disguise</strong> — a coherent monotone <code>Q(u|x)</code> and a monotone <code>h(y|x)</code> are inverse constructions. Recommend building C6 first and exposing quantiles as its inverse, rather than a separate estimator.</p>
+<p><strong>Effort.</strong> 4–6 pm on top of C5/C6. <strong>Fails loudly:</strong> assert non-crossing on the prediction grid; report calibration diagnostic with every fit.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 4 | Predictive 4 | Speed 2 | Feasibility 3 | Risk 3.</p>
+<hr />
+<h3 id="c8-copula-additive-frequencyseverity-and-low-dim-multivariate-models">C8. Copula additive frequency–severity (and low-dim multivariate) models<a class="headerlink" href="#c8-copula-additive-frequencyseverity-and-low-dim-multivariate-models" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Joint model of two+ responses (e.g., frequency and severity, or AD/BI/TPPD claim types) with covariate-dependent dependence via a copula, each margin a full LSS model.</p>
+<p><strong>What it unlocks.</strong> Correct frequency–severity dependence and sample-selection/endogeneity corrections — GJRM's domain, absent in Python.</p>
+<p><strong>Core mathematics.</strong> <code>F₁₂(y₁,y₂|ϑ)=C(F₁(y₁),F₂(y₂);ρ(x))</code> with <code>ρ(x)</code> itself a GAM; penalized joint likelihood with mgcv-style smoothing (GJRM literally uses mgcv's penalty setup + trust-region). Transcript (e)'s Cholesky-parameterized <code>Σ(x)=L(x)L(x)ᵀ</code> is the truly-multivariate route (Kock &amp; Klein 2025 <em>JCGS</em> 34:1189, arXiv:2306.02711) — but that paper is <strong>Bayesian with shrinkage</strong>; a fast frequentist REML/EFS version for d&gt;3 is genuinely novel and hard.</p>
+<p><strong>References.</strong> Marra &amp; Radice (2017) <em>CSDA</em> 112:99; Marra &amp; Radice (2025) <em>Copula Additive Distributional Regression Using R</em> (GJRM, GPL); Kock &amp; Klein (2025) <em>JCGS</em> 34(4):1189. Clean-room.</p>
+<p><strong>Implementation sketch.</strong> A <code>CopulaFamily</code> taking two registered <code>Predictor</code> margins + a dependence predictor; reuses C2's AD tape for the copula score. <strong>Hardest sub-problem:</strong> identifiability of <code>ρ(x)</code> when margins are also flexible.</p>
+<p><strong>Effort.</strong> 8–10 pm (bivariate); d&gt;3 is research. <strong>Fails loudly:</strong> refuse tail dependence functionals when the copula family cannot represent them.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 5 | Predictive 3 | Speed 1 | Feasibility 2 | Risk 4.</p>
+<hr />
+<h3 id="c9-automatic-model-builder-componentwise-boosting-penalized-lss-refit">C9. Automatic model builder: componentwise boosting → penalized-LSS refit<a class="headerlink" href="#c9-automatic-model-builder-componentwise-boosting-penalized-lss-refit" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> A structure-discovery stage (which feature acts on which parameter, linear vs smooth, which pairwise interactions) via componentwise/gamboostLSS-style boosting, followed by a refit as a penalized LSS model for inference.</p>
+<p><strong>What it unlocks.</strong> Closes much of the GBM predictive gap while keeping GAM interpretability; per-predictor selection prevents the search spending its whole budget on the mean.</p>
+<p><strong>Core mathematics.</strong> gamboostLSS does simultaneous variable + effect-type + parameter selection by cyclically boosting each predictor's base-learners. FAST (Lou et al., the <code>interpret</code> EBM/GA2M line) ranks pairwise interactions cheaply on residuals. <code>gamsel</code> (Chouldechova &amp; Hastie) does zero/linear/nonlinear per feature. <strong>Two-stage validity caveat (proven concern):</strong> naive refit-after-selection invalidates p-values/intervals — must use sample-splitting or selective inference (Lee et al. 2016). Recommend: boost on split A for structure, refit + infer on split B, and report intervals as post-selection-honest only under that protocol. This is the transcript's item (g) with strong heredity — recommend enforcing <code>f_{jk}≠0 ⟹ f_j,f_k≠0</code> in the candidate generation.</p>
+<p><strong>Search objective.</strong> NCV is already road-mapped (excluded); use out-of-sample deviance/CRPS with incremental base-learner updates so each candidate step is cheap even though a full EFS fit is not.</p>
+<p><strong>References.</strong> Mayr, Fenske, Hofner, Kneib, Schmid (2012) gamboostLSS <em>JRSS-C</em>; Thomas et al. gamboostLSS non-cyclical; Lou, Caruana, Gehrke, Hooker (2013) GA2M/FAST <em>KDD</em>. <code>mboost</code>/<code>gamboostLSS</code> (GPL), <code>interpret</code> (MIT). Clean-room for the LSS boosting.</p>
+<p><strong>Effort.</strong> 6–8 pm. <strong>Fails loudly:</strong> label any interval computed on the same data used for selection as "selection-inflated, invalid."</p>
+<p><strong>Rubric.</strong> Novelty 4 | StatValue 4 | Predictive 5 | Speed 2 | Feasibility 3 | Risk 4.</p>
+<hr />
+<h3 id="c10-conformal-predictive-distributions-wrapper">C10. Conformal predictive distributions wrapper<a class="headerlink" href="#c10-conformal-predictive-distributions-wrapper" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> A finite-sample-valid calibration layer (CQR, CV+/jackknife+, Mondrian by segment, distributional conformal) wrapping any fitted SuperLSS model.</p>
+<p><strong>What it unlocks.</strong> Coverage guarantees that the likelihood model alone cannot promise under misspecification — the missing complement to GAM inference.</p>
+<p><strong>Design answer to the brief's headline question.</strong> A coherent split is achievable: <strong>likelihood-based inference reports on <em>effects</em> (Wood 2013 p-values, Marra–Wood unconditional Bayesian intervals), conformal reports on <em>predictions</em> (marginal coverage).</strong> They do not contradict because they answer different questions; the danger is presenting a conformal predictive interval as if it were a credible interval on a parameter. Rule: never overlay them on the same axis without distinct labels.</p>
+<p><strong>References.</strong> Romano, Patterson, Candès (2019) CQR <em>NeurIPS</em>; Barber, Candès, Ramdas, Tibshirani (2021) jackknife+/CV+ <em>Ann. Stat.</em> 49:486; Dimitriadis, Gneiting, Jordan (2021) CORP reliability <em>PNAS</em> 118:e2016191118. <code>mapie</code> (BSD) exists but does not wrap distributional GAMs. Mostly permissive → light clean-room.</p>
+<p><strong>Effort.</strong> 3–4 pm. <strong>Fails loudly:</strong> raise if calibration set too small for requested coverage; refuse Mondrian bins with insufficient counts.</p>
+<p><strong>Rubric.</strong> Novelty 4 | StatValue 4 | Predictive 3 | Speed 4 | Feasibility 4 | Risk 2.</p>
+<hr />
+<h3 id="c11-portfolio-aggregation-via-fft-panjer-saddlepoint-no-monte-carlo">C11. Portfolio aggregation via FFT / Panjer / saddlepoint (no Monte Carlo)<a class="headerlink" href="#c11-portfolio-aggregation-via-fft-panjer-saddlepoint-no-monte-carlo" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Aggregate a heterogeneous portfolio's predictive distribution analytically instead of by simulation, with honest refusal when tail moments don't exist.</p>
+<p><strong>What it unlocks.</strong> Fast, exact-to-numerical-tolerance VaR/TVaR at portfolio scale on CPU — the actuarial payoff of the whole stack. Extends the existing <code>portfolio()</code>/<code>actual_expected()</code>.</p>
+<p><strong>Core mathematics.</strong> Panjer recursion for compound (a,b,0) frequency classes; FFT convolution of discretized severity for the aggregate <code>S=ΣXᵢ</code>; saddlepoint approximation <code>f_S(s)≈(2πK''(ŝ))^{-1/2}exp(K(ŝ)−ŝs)</code> when the CGF <code>K</code> exists. FFT is <code>O(M log M)</code> in the discretization size M — genuinely fast on CPU; Monte Carlo is <code>O(N_sim)</code> with <code>√N</code> error. <strong>Refusal rule (aligns with existing culture):</strong> TVaR/expected-shortfall must raise when the severity's second (or relevant) moment diverges — this is exactly the "finite Monte Carlo variance when the second moment diverges" case the project already refuses. <strong>Threshold-weighted CRPS</strong> (Gneiting &amp; Ranjan 2011; Allen, Ginsbourger &amp; Ziegel 2023, SIAM/ASA JUQ 11(3):906, doi:10.1137/22M1532184) already lives in the codebase (<code>threshold_weighted_crps</code>) and is the correct large-loss-focused score to pair with this.</p>
+<p><strong>References.</strong> Panjer (1981) <em>ASTIN Bull.</em>; Embrechts &amp; Frei (2009) saddlepoint; Klugman, Panjer, Willmot <em>Loss Models</em>. Permissive — clean build.</p>
+<p><strong>Effort.</strong> 4–6 pm. <strong>Fails loudly:</strong> aliasing check on FFT tail; refuse moment-based functionals outside the support of existence.</p>
+<p><strong>Rubric.</strong> Novelty 4 | StatValue 4 | Predictive 2 | Speed 5 | Feasibility 4 | Risk 3.</p>
+<hr />
+<h3 id="c12-inference-compiler-for-arbitrary-functionals-transcript-f">C12. Inference compiler for arbitrary functionals (transcript (f))<a class="headerlink" href="#c12-inference-compiler-for-arbitrary-functionals-transcript-f" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> <code>model.functional(lambda dist: dist.stop_loss(25000), X, se=True)</code> returns estimate + delta-method SE + CI for any <code>Ψ(β,x)=∫ψ(y)p_β(y|x)dy</code>.</p>
+<p><strong>What it unlocks.</strong> Uniform, honest uncertainty for stop-loss layers <code>E[min((Y−a)₊,L)]</code>, VaR/TVaR, entropy, risk differences, feature derivatives — generalizing SuperLSS's existing tail functionals.</p>
+<p><strong>Core mathematics.</strong> <code>∇_β Ψ</code> by AD (C2) or hand-derived family gradients; <code>Var(Ψ)=∇Ψᵀ Vβ ∇Ψ</code>. <strong>When the delta method is invalid (must fail loudly):</strong> (i) non-existent moments (stop-loss/TVaR on a heavy tail — refuse, per C11); (ii) active boundary/shape constraints (C5) — one-sided; (iii) non-smooth functionals such as <strong>VaR at an atom</strong> (a Tweedie mass at zero) where the quantile is set-valued — refuse or return the interval of subgradients; (iv) functionals whose gradient differentiates through a quadrature or root-find — need the implicit-function theorem, not naive AD.</p>
+<p><strong>References.</strong> standard delta method; Wood (2013) <em>Biometrika</em> smooth-term inference; Marra &amp; Wood (2012) <em>Scand. J. Stat.</em> 39:53 unconditional intervals. Permissive.</p>
+<p><strong>Effort.</strong> 4–6 pm (much less if C2 exists). <strong>Fails loudly:</strong> the four cases above each raise a typed numerical-domain error.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 5 | Predictive 2 | Speed 3 | Feasibility 3 | Risk 4. — <strong>This is the transcript's genuinely valuable idea; build it, decoupled from (a)/(b).</strong></p>
+<hr />
+<h3 id="c13-gpd-tail-splicing-with-estimated-threshold-and-penalized-shape">C13. GPD tail-splicing with estimated threshold and penalized shape<a class="headerlink" href="#c13-gpd-tail-splicing-with-estimated-threshold-and-penalized-shape" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Splice a GPD tail onto a body distribution at a smooth, estimated threshold, with the shape penalized per Coles &amp; Dixon so the fit is bounded.</p>
+<p><strong>What it unlocks.</strong> Principled large-loss modelling — the freMTPL2/actuarial core; directly resolves the GPD failure in C3.</p>
+<p><strong>Core mathematics.</strong> Body <code>F_B</code> for <code>y&lt;u</code>, GPD <code>(1−F_B(u))·G_ξ,σ(y−u)</code> above; continuity at u; threshold u itself a smooth function of x. Penalize ξ toward 0 (Coles &amp; Dixon 1999 exponential penalty on the shape; or PC-prior, Opitz et al. 2018).</p>
+<p><strong>References.</strong> Coles &amp; Dixon (1999) <em>Extremes</em> 2:5, doi:10.1023/A:1009905222644; Scarrott &amp; MacDonald (2012) threshold review. Permissive.</p>
+<p><strong>Effort.</strong> 4–6 pm. <strong>Fails loudly:</strong> refuse finite TVaR when ξ̂≥0.5 unless penalty binds; certify threshold identifiability.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 4 | Predictive 3 | Speed 2 | Feasibility 3 | Risk 4.</p>
+<hr />
+<h3 id="c14-adaptive-distributional-gam-via-conditional-exponential-family-transcript-ab-researchmoonshot">C14. Adaptive distributional GAM via conditional exponential family (transcript (a)+(b)) — research/moonshot<a class="headerlink" href="#c14-adaptive-distributional-gam-via-conditional-exponential-family-transcript-ab-researchmoonshot" title="Permanent link">&para;</a></h3>
+<p><strong>Pitch.</strong> Replace named parameters with <code>log p(y|x)=log p₀(y)+Σ_r T_r(y)η_r(x)−A(η(x))</code>, each <code>η_r</code> a structured additive predictor, so the model discovers <em>where in the response</em> each feature acts.</p>
+<p><strong>Honest quantitative verdict (this is the crux the brief asks for).</strong> The idea is real and has precedent (gss <code>sscden</code>/<code>ssden</code> penalized-likelihood conditional density, Gu 2014 <em>JSS</em> 58(5); the Expxorcist, Suggala, Kolar, Ravikumar NeurIPS 2017 30:4449; Bayesian structured additive density regression). But the <strong>per-row normalizing constant <code>A(η(x))</code> requires a quadrature over y for every row, every Newton step, every λ update</strong> — <code>O(n·Q·R)</code> with Q nodes and R response-basis terms — and <strong>this n·Q factor cannot be discretized away</strong>, because A depends on the full per-row <code>η(x)</code>. So C14 <em>defeats</em> the C1 speed argument that the transcript itself invoked to justify it: the transcript's "cross-block count grows like R²" understates the cost by the <code>n·Q</code> quadrature factor. The log-partition Hessian is <code>Cov_{p(y|x)}[T(y)]</code> (an R×R per row), which is dense and per-row, making the coupled K=R-predictor Hessian expensive, not tractable. <strong>Moment-existence trap:</strong> a finite polynomial T-basis forces a light (sub-exponential) tail — so on heavy-tailed severity it will <em>silently</em> impose a thin tail, violating the project's moment-existence rule. That alone disqualifies it as a default actuarial model.</p>
+<p><strong>Transcript (b) distributional-PCA</strong> reduced-rank <code>η(y,x)=B_y(y)ᵀLz(x)</code> overlaps VGAM <code>rrvglm</code> (Yee &amp; Hastie 2003) and suffers rotation non-identifiability <code>Lz=(LQ)(Q⁻¹z)</code> that breaks effect inference unless Fisher-orthogonalized — and Fisher-orthogonalization is ill-defined when <code>I(θ)</code> varies with x.</p>
+<p><strong>Verdict.</strong> Tier (c) moonshot, and <strong>only</strong> on bounded/light-tailed responses with a spline (not polynomial) T-basis to keep the tail honest. Do <strong>not</strong> ship as a pricing default. The functional compiler (C12) delivers most of the transcript's promised "where does the feature act" value at a fraction of the risk.</p>
+<p><strong>Rubric.</strong> Novelty 5 | StatValue 4 | Predictive 4 | Speed 1 | Feasibility 1 | Risk 5.</p>
+<hr />
+<h2 id="comparison-table">Comparison table<a class="headerlink" href="#comparison-table" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Capability</th>
+<th>Nov</th>
+<th>Stat</th>
+<th>Pred</th>
+<th>Speed</th>
+<th>Feas</th>
+<th>Risk</th>
+<th>Tier</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>C1</td>
+<td>Discrete multi-predictor assembly</td>
+<td>5</td>
+<td>5</td>
+<td>3</td>
+<td>5</td>
+<td>2</td>
+<td>4</td>
+<td>b</td>
+</tr>
+<tr>
+<td>C2</td>
+<td>Sparse AD-tape + Laplace core</td>
+<td>5</td>
+<td>5</td>
+<td>3</td>
+<td>3</td>
+<td>2</td>
+<td>4</td>
+<td>b</td>
+</tr>
+<tr>
+<td>C3</td>
+<td>Robust EFS/Newton + certification</td>
+<td>4</td>
+<td>4</td>
+<td>2</td>
+<td>2</td>
+<td>4</td>
+<td>3</td>
+<td>a</td>
+</tr>
+<tr>
+<td>C4</td>
+<td>Cross-predictor shared smooths</td>
+<td>5</td>
+<td>4</td>
+<td>2</td>
+<td>1</td>
+<td>3</td>
+<td>4</td>
+<td>b</td>
+</tr>
+<tr>
+<td>C5</td>
+<td>Shape constraints under LSS</td>
+<td>5</td>
+<td>4</td>
+<td>3</td>
+<td>1</td>
+<td>3</td>
+<td>3</td>
+<td>a/b</td>
+</tr>
+<tr>
+<td>C6</td>
+<td>Conditional transformation models</td>
+<td>5</td>
+<td>5</td>
+<td>4</td>
+<td>2</td>
+<td>3</td>
+<td>3</td>
+<td>b</td>
+</tr>
+<tr>
+<td>C7</td>
+<td>Non-crossing quantile GAM</td>
+<td>5</td>
+<td>4</td>
+<td>4</td>
+<td>2</td>
+<td>3</td>
+<td>3</td>
+<td>b</td>
+</tr>
+<tr>
+<td>C8</td>
+<td>Copula additive freq–severity</td>
+<td>5</td>
+<td>5</td>
+<td>3</td>
+<td>1</td>
+<td>2</td>
+<td>4</td>
+<td>b/c</td>
+</tr>
+<tr>
+<td>C9</td>
+<td>Boosting → LSS-refit builder</td>
+<td>4</td>
+<td>4</td>
+<td>5</td>
+<td>2</td>
+<td>3</td>
+<td>4</td>
+<td>b</td>
+</tr>
+<tr>
+<td>C10</td>
+<td>Conformal predictive wrapper</td>
+<td>4</td>
+<td>4</td>
+<td>3</td>
+<td>4</td>
+<td>4</td>
+<td>2</td>
+<td>a</td>
+</tr>
+<tr>
+<td>C11</td>
+<td>FFT/Panjer/saddlepoint aggregation</td>
+<td>4</td>
+<td>4</td>
+<td>2</td>
+<td>5</td>
+<td>4</td>
+<td>3</td>
+<td>a</td>
+</tr>
+<tr>
+<td>C12</td>
+<td>Functional inference compiler</td>
+<td>5</td>
+<td>5</td>
+<td>2</td>
+<td>3</td>
+<td>3</td>
+<td>4</td>
+<td>a/b</td>
+</tr>
+<tr>
+<td>C13</td>
+<td>GPD tail-splicing + penalized shape</td>
+<td>5</td>
+<td>4</td>
+<td>3</td>
+<td>2</td>
+<td>3</td>
+<td>4</td>
+<td>b</td>
+</tr>
+<tr>
+<td>C14</td>
+<td>Adaptive conditional-exp-family GAM</td>
+<td>5</td>
+<td>4</td>
+<td>4</td>
+<td>1</td>
+<td>1</td>
+<td>5</td>
+<td>c</td>
+</tr>
+</tbody>
+</table>
+<h2 id="dependency-graph-which-layers-unlock-which">Dependency graph (which layers unlock which)<a class="headerlink" href="#dependency-graph-which-layers-unlock-which" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>                 ┌─────────────────────────────┐
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>                 │ C3 Robust EFS/Newton + certs │  (foundational; fixes 2 failures)
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>                 └───────────┬─────────────────┘
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>                             │ underpins every iterative fit
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>        ┌────────────────────┼───────────────────────────┐
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>        ▼                    ▼                             ▼
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>┌───────────────┐   ┌──────────────────┐        ┌────────────────────┐
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>│ C1 Discrete    │   │ C2 AD-tape +     │        │ C5 Shape           │
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>│ multi-pred     │   │ sparse Laplace   │        │ constraints (LSS)  │
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>│ assembly       │   │ core             │        └─────────┬──────────┘
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>└───┬───────┬────┘   └───┬─────┬────┬───┘                  │
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    │       │            │     │    │                       ▼
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a> shares  scales      C6 trans- C8  C13 GPD        C6/C7 (monotonicity reuse)
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a> hardest C4/C8/C13   formation copula splice
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a> sub-prob            models    additive
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    │                │     │
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>    ▼                ▼     ▼
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a> C4 shared        C7 quantile (= inverse of C6)
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a> smooths          C12 functional compiler (cheap once C2 exists)
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a> Independent of the two flagships:
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>   C11 aggregation · C10 conformal · C9 builder (wants C1 for cheap incremental fits)
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>   C14 (needs C1+C2+C12; still moonshot)
+</code></pre></div>
+<p>Two layers unlock four-plus things each: <strong>C1</strong> (discrete assembly) shares its hardest sub-problem — cross-predictor constraint/centering — with C4, C8, C13 and makes C9's incremental search affordable; <strong>C2</strong> (AD tape) collapses the marginal cost of C6, C8, C12, C13 and is the only route to arbitrary random effects. <strong>C3</strong> underpins everything and is cheap. This is why C3 comes first and C1/C2 are the twin flagships.</p>
+<h2 id="sequenced-roadmap">Sequenced roadmap<a class="headerlink" href="#sequenced-roadmap" title="Permanent link">&para;</a></h2>
+<p><strong>Tier (a) — high-confidence ports of known-good methods (build now, ~6–9 months):</strong>
+- <strong>C3</strong> robust EFS/Newton + certified stationarity (fixes both named failures; foundational).
+- <strong>C11</strong> FFT/Panjer/saddlepoint aggregation (pure win, actuarial payoff, low risk).
+- <strong>C10</strong> conformal predictive wrapper (mostly permissive libraries, coverage guarantees).
+- <strong>C12</strong> functional inference compiler (delivers the transcript's real value; even richer once C2 lands).
+- <strong>C5</strong> shape constraints under LSS (extends existing scalar SCOP path).</p>
+<p><strong>Tier (b) — genuine research-and-build (the differentiators, ~12–24 months):</strong>
+- <strong>C1</strong> discrete multi-predictor assembly <em>(the flagship — start immediately in parallel with C3)</em>.
+- <strong>C2</strong> sparse AD-tape + Laplace core.
+- <strong>C4</strong> cross-predictor shared smooths (co-develop with C1).
+- <strong>C6</strong> conditional transformation models → <strong>C7</strong> quantiles as its inverse.
+- <strong>C13</strong> GPD tail-splicing + penalized shape.
+- <strong>C9</strong> boosting→refit builder.
+- <strong>C8</strong> bivariate copula freq–severity (multivariate d&gt;3 slips toward tier c).</p>
+<p><strong>Tier (c) — speculative moonshots (with stated failure modes):</strong>
+- <strong>C14</strong> adaptive conditional-exp-family GAM — <em>failure mode: per-row quadrature <code>O(n·Q·R)</code> kills the speed case; finite T-basis silently imposes a light tail, violating moment-existence.</em> Only attempt on bounded/light-tailed responses with a spline T-basis.
+- <strong>Truly-multivariate frequentist REML copula (d&gt;3)</strong> — <em>failure mode: <code>Σ(x)=L(x)L(x)ᵀ</code> identifiability and EFS conditioning at high d are unproven outside the Bayesian setting of Kock &amp; Klein 2025.</em></p>
+<h2 id="kill-list">KILL LIST<a class="headerlink" href="#kill-list" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Transcript (b) standalone "distributional PCA from likelihood geometry."</strong> Reduced-rank <code>η(y,x)=B_y(y)ᵀLz(x)</code> is VGAM <code>rrvglm</code> territory (Yee &amp; Hastie 2003) and carries the rotation ambiguity <code>Lz=(LQ)(Q⁻¹z)</code>, which destroys effect interpretability unless Fisher-orthogonalized — and Fisher-orthogonalization is ill-defined when <code>I(θ)</code> varies with x. Non-convex alternating estimation with no inference guarantees. <strong>Kill as a standalone feature</strong>; the low-rank idea can live <em>inside</em> C8's dependence structure where identifiability is handled by the copula.</li>
+<li><strong>Transcript (h) "GAM on the manifold of probability distributions"</strong> (Fisher–Rao exponential map). The transcript itself flags it as a not-to-start moonshot; it has no tractable estimator, no software precedent, and the Exp-map requires the same per-row partition-function quadrature as C14 plus geodesic solves. <strong>Kill.</strong> Failure mode: no finite-time algorithm and no loud-failure story.</li>
+<li><strong>Full INLA/SPDE nested-Laplace port.</strong> Enormous surface area (R-INLA is GPL and vast), and SuperGLM's domain (heavy-tailed pricing, not spatial latent Gaussian fields) does not need it. The useful 20% (sparse Laplace for random effects) is exactly C2. <strong>Kill the full port; keep C2.</strong></li>
+<li><strong>Isotonic distributional regression as a core model.</strong> IDR (Henzi, Ziegel, Gneiting 2021 <em>JRSSB</em> 83:963; Python <code>isodisreg</code>) is tuning-free and calibrated, but it is a nonparametric benchmark with a partial-order restriction, not a likelihood-inference model — it gives no effect inference and no smooth relativities. <strong>Kill as a core feature; adopt only as a built-in benchmark</strong> in <code>cross_validate</code> (a few days' work) to keep SuperLSS honest against a parameter-free competitor.</li>
+<li><strong>Naive dense scaling to R=5–8 learned predictors</strong> (the transcript's "worth measuring"). Quantitatively: dense assembly is <code>O(n·(Σqₖ)²)</code>; going from K=3 to R=8 at qₖ≈64 multiplies the <code>(Σqₖ)²</code> factor ~7× <em>and</em>, under C14's density formulation, adds the <code>O(n·Q·R)</code> quadrature — so the honest projection from the 9.7s benchmark is tens of seconds to minutes, not "worth measuring." <strong>Kill dense R=8</strong>; it is only viable after C1.</li>
+<li><strong>GPU/JAX/PyTorch GAM backends.</strong> Violate the CPU-only, structure-not-hardware constraint; also GPU-first frameworks give no asymptotic win on the sparse banded problems here. <strong>Kill.</strong></li>
+</ul>
+<h2 id="the-single-highest-leverage-thing-to-build-next">The single highest-leverage thing to build next<a class="headerlink" href="#the-single-highest-leverage-thing-to-build-next" title="Permanent link">&para;</a></h2>
+<p><strong>C1 — the discrete marginal cross-product assembly layer for multiple linear predictors — with C3's step-control as its immediate prerequisite.</strong></p>
+<p>The argument: (1) It is the one self-identified gap (#1) that is simultaneously <em>unique in Python</em> (mssm is sparse but not discretized; mgcv has the primitive but does not expose it for LSS families) and an <em>asymptotic</em> win (removes the <code>n</code> factor from the dominant <code>XⱼᵀWⱼₖXₖ</code> cost, the 9.7s→sub-second path). (2) Its hardest sub-problem — cross-predictor constraint/centering reparameterization — is <em>shared</em> with C4, C8, and C13, so solving it once pays down four capabilities. (3) It is the enabler for C9's incremental search to be affordable at portfolio scale. (4) The published primitive (<code>XWXd</code> with <code>lt</code>/<code>rt</code> + <code>lpip</code>, Li &amp; Wood 2020) means the algorithm is known and validated; the risk is implementation correctness, which the project's byte-identical refit-receipt culture is uniquely equipped to police. Everything else either rests on it, benefits from it, or is a lower-ceiling tier-(a) port.</p>
+<h2 id="recommendations">Recommendations<a class="headerlink" href="#recommendations" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong>Immediately:</strong> start C3 (target the two failure fixes first) and C1 in parallel; land the GPD penalty (Coles &amp; Dixon 1999) as the first C3 deliverable to unblock the reserving/GPD-cap benchmark.</li>
+<li><strong>Next quarter:</strong> ship tier (a) — C11, C12, C10, C5 — each independently valuable and low-risk; they make the package visibly ambitious while C1/C2 mature.</li>
+<li><strong>Then:</strong> C2, then C6→C7 and C13 on top of it; C4 co-developed with C1.</li>
+<li><strong>Benchmarks/thresholds that change the plan:</strong> if the C1 finer-grid refit receipt cannot match dense Vβ within a dimension-scaled tolerance, <em>stop and treat the coupled-constraint reparameterization as research</em> rather than shipping a biased covariance. If C9's split-refit intervals fail coverage on freMTPL2, drop the two-stage inference claim and market it as prediction-only. If C14 is ever attempted, gate it behind a moment-existence assertion on the T-basis and refuse heavy-tailed responses. Before claiming the GBM gap is closed, reproduce Chevalier &amp; Côté (arXiv:2412.14916, "From point to probabilistic gradient boosting for claim frequency and severity prediction," PMC12575580) — which finds "LightGBM stands out as the most computationally efficient with little or no loss in predictive performance" across five claim datasets — as the external yardstick.</li>
+<li><strong>License hygiene:</strong> every recommendation above requires clean-room reimplementation from papers because mgcv, gamlss, scam, mlt/tram, GJRM, gss, qgam, TMB/glmmTMB, mboost/gamboostLSS, and mssm are all GPL/AGPL. Do not read their source while implementing; cite the papers. <code>interpret</code> (MIT), <code>mapie</code> (BSD), <code>scoringrules</code>/<code>scores</code> are safe to depend on or reference.</li>
+</ol>
+<h2 id="caveats">Caveats<a class="headerlink" href="#caveats" title="Permanent link">&para;</a></h2>
+<ul>
+<li>The mgcv "discrete + multi-predictor LSS" status is asserted from the released documentation (<code>family.mgcv</code>: LSS families "currently only usable with <code>gam</code>, ... some ... with <code>bam</code>"; <code>twlss</code> "Can only be fitted using EFS method") plus the <code>XWXd</code> <code>lt</code>/<code>rt</code>/<code>lpip</code> primitive; I did not execute mgcv 1.9-4 to confirm a hard error, so treat "not exposed for discrete LSS" as strongly-evidenced-but-not-executed.</li>
+<li>Person-month estimates are engineering judgment, not measured; the tier-(b) research items (C8 d&gt;3, C14) could each expand indefinitely.</li>
+<li><code>mssm</code>'s exact feature set is from arXiv 2506.13132 / 2606.26804 and PyPI/GitHub metadata as of Aug 2026; a point release could add a Tweedie-LSS built-in family and narrow SuperLSS's family-set advantage. Its three built-in GAMMLSS families (Gaussian/Multinomial/Gamma) and GPL license are the load-bearing facts for the "SuperLSS is still differentiated" conclusion.</li>
+<li>Predictive-upside scores are directional: no head-to-head SuperLSS-vs-lightgbmlss study on freMTPL2 exists yet; the Chevalier &amp; Côté (2025) actuarial GBM comparison is the closest external benchmark and should be reproduced before any GBM-parity claim.</li>
+<li>The GPD penalty form (Coles &amp; Dixon 1999 exponential penalty restricting ξ&lt;1 and favouring smaller ξ) is confirmed from the paper and secondary sources (e.g., Extremal Random Forests, arXiv:2201.12865); the exact tuning-constant recommendation should be re-derived against SuperGLM's oracle before shipping.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

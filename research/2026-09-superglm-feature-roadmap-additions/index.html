@@ -1,0 +1,3735 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>SuperGLM Roadmap Additions — Numerical and Function-Space Frontier - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#superglm-roadmap-additions-numerical-and-function-space-frontier" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              SuperGLM Roadmap Additions — Numerical and Function-Space Frontier
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your First Distributional Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../models/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../models/distributional-inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking A Distributional Fit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/screening-evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/family-bound-predictors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: family-bound predictors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributional-family-development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Family Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperLSS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#candidate-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Candidate summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c15-matrix-free-large-p-superglm-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C15 — Matrix-free large-\(p\) SuperGLM backend
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C15 — Matrix-free large-\(p\) SuperGLM backend">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pitch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pitch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#core-algebra" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Core algebra
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-this-is-now-credible" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why this is now credible
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#smoothing-traces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Smoothing traces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#preconditioning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Preconditioning
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#certification-and-reproducibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Certification and reproducibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#open-question-can-c1-and-c15-compose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Open question: can C1 and C15 compose?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c16-adaptive-hierarchical-splines-as-statistical-mesh-refinement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C16 — Adaptive hierarchical splines as statistical mesh refinement
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C16 — Adaptive hierarchical splines as statistical mesh refinement">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pitch_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pitch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#local-refinement-indicator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local refinement indicator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-a-real-certificate-would-require" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a real certificate would require
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#existing-statistical-precedent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Existing statistical precedent
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#why-it-matters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why it matters
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c17-exploit-fisher-orthogonality-and-precondition-observed-lss-geometry" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C17 — Exploit Fisher orthogonality and precondition observed LSS geometry
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C17 — Exploit Fisher orthogonality and precondition observed LSS geometry">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#correction-to-the-original-proposal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Correction to the original proposal
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#two-geometries-should-be-measured-separately" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two geometries should be measured separately
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#hybrid-fisher-observed-newton" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hybrid Fisher / observed Newton
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#other-families" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Other families
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#schur-complement-solves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Schur-complement solves
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c18-multigrid-and-krylov-recycling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C18 — Multigrid and Krylov recycling
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C18 — Multigrid and Krylov recycling">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#multigrid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multigrid
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#krylov-recycling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Krylov recycling
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c19-qefs-and-safeguarded-fixed-point-acceleration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C19 — qEFS and safeguarded fixed-point acceleration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C19 — qEFS and safeguarded fixed-point acceleration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#qefs-structured-secant-updates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        qEFS / structured secant updates
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#anderson-acceleration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Anderson acceleration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#local-jacobian-diagnostics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local Jacobian diagnostics
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c20-progressive-exactification-and-inexact-newton" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C20 — Progressive exactification and inexact Newton
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C20 — Progressive exactification and inexact Newton">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pitch_2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pitch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#adaptive-sample-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adaptive sample size
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#adaptive-likelihood-precision" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adaptive likelihood precision
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-exact-final-cleanup-does-and-does-not-guarantee" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What "exact final cleanup" does and does not guarantee
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status_3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c21-higher-dimensional-smooth-interactions-without-full-tensor-explosion" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C21 — Higher-dimensional smooth interactions without full tensor explosion
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C21 — Higher-dimensional smooth interactions without full tensor explosion">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#sparse-grid-smolyak-smooths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sparse-grid / Smolyak smooths
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#failure-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure mode
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#factorized-spline-interactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Factorized spline interactions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status_4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c22-locally-adaptive-and-graph-structured-effects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C22 — Locally adaptive and graph-structured effects
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C22 — Locally adaptive and graph-structured effects">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#c22a-trend-filtering-smooths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C22a — Trend-filtering smooths
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C22a — Trend-filtering smooths">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inference-caveat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inference caveat
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#c22b-graph-effects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C22b — Graph effects
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status_5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c23-functional-and-compositional-predictors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C23 — Functional and compositional predictors
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C23 — Functional and compositional predictors">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#functional-predictors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Functional predictors
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#compositional-predictors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Compositional predictors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c24-test-whether-superglm-hessians-have-hierarchical-low-rank" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C24 — Test whether SuperGLM Hessians have hierarchical low rank
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C24 — Test whether SuperGLM Hessians have hierarchical low rank">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#experiment-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Experiment first
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status_6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c25-continuation-and-branch-following-for-difficult-distributional-likelihoods" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C25 — Continuation and branch following for difficult distributional likelihoods
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C25 — Continuation and branch following for difficult distributional likelihoods">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-this-buys-statistically" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What this buys statistically
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status_7" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#c26-semismooth-newton-primal-dual-active-set-backend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        C26 — Semismooth Newton / primal-dual active-set backend
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="C26 — Semismooth Newton / primal-dual active-set backend">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#requirements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Requirements
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#status_8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Status
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#strengthen-c3-adaptive-regularized-newton-controller" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Strengthen C3 — Adaptive regularized Newton controller
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Strengthen C3 — Adaptive regularized Newton controller">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#geometry-dependent-step-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Geometry-dependent step policy
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lazy-curvature-reuse" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Lazy curvature reuse
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#revised-computational-programme" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Revised computational programme
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Revised computational programme">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#front-a-compress-observations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Front A — Compress observations
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#front-b-stop-materializing-high-dimensional-algebra" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Front B — Stop materializing high-dimensional algebra
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#front-c-stop-wasting-coefficients" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Front C — Stop wasting coefficients
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#research-questions-worth-attacking-directly" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Research questions worth attacking directly
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Research questions worth attacking directly">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#r1-can-c1-and-c15-be-composed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        R1 — Can C1 and C15 be composed?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#r2-can-adaptive-spline-truncation-be-certified-relative-to-a-fixed-virtual-basis" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        R2 — Can adaptive spline truncation be certified relative to a fixed virtual basis?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#r3-can-expected-fisher-geometry-systematically-precondition-observed-lss-curvature" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        R3 — Can expected Fisher geometry systematically precondition observed LSS curvature?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#numerical-moonshot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numerical moonshot
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="superglm-roadmap-additions-numerical-and-function-space-frontier">SuperGLM Roadmap Additions — Numerical and Function-Space Frontier<a class="headerlink" href="#superglm-roadmap-additions-numerical-and-function-space-frontier" title="Permanent link">&para;</a></h1>
+<p><strong>Status:</strong> Research dossier / living roadmap addition
+<strong>Source technical review:</strong> 2026-09-09
+<strong>Repository alignment:</strong> <code>origin/master</code> at <code>7d054022</code> (C3+C1 merged in PR #379).
+<strong>Scope:</strong> Numerical optimization, scalable linear algebra, adaptive function spaces, and structured covariate types.</p>
+<p>This reviewed addition extends the <a href="../2026-09-superglm-feature-roadmap-dossier/">original C1–C14 dossier</a> with C15–C26. The <a href="../../ROADMAP/">main roadmap</a> records current priorities and delivered evidence. Readiness labels and the computational programme below are research recommendations; promotion requires a separately scoped decision. Example API names are proposals.</p>
+<p>This document records research directions rather than implementation commitments. A candidate marked <code>READY</code> is ready to <strong>scope or prototype</strong>, not automatically ready to ship. Anything that changes the estimator, uses stochastic approximations, or introduces data-driven active sets needs an explicit inference and certification story before becoming a default SuperGLM path.</p>
+<p>The central observation is that C1 improves row-side basis-product work and compressed support contraction, while retaining row likelihood and aggregation passes. SuperGLM is already strong in the large-<span class="arithmatex">\(n\)</span>, moderate-<span class="arithmatex">\(p\)</span> regime, but adaptive smooths, random effects, functional predictors, graph effects, and richer interactions can push the coefficient dimension <span class="arithmatex">\(p\)</span> from hundreds into thousands or tens of thousands. At that point, even a perfectly compressed data side can leave Hessian storage and factorization as the new bottleneck.</p>
+<p>The current architecture is repeated penalized WLS/Newton inside REML/EFS, with proximal Newton block-coordinate descent for nonsmooth selection penalties. The merged distributional path supports grouped/discrete execution with observed coefficient curvature. Dense coefficient factorizations, retained histories and other whole-fit allocations remain scaling limits; current evidence does not establish bounded whole-fit memory or remove all dependence on <span class="arithmatex">\(n\)</span>. See the <a href="../2026-09-c3-c1-completion-evidence/">C3+C1 implementation evidence</a> and <a href="../2026-09-discrete-performance-report/">discrete performance report</a>.</p>
+<p>The next mathematical generation of SuperGLM should therefore attack three dimensions simultaneously:</p>
+<div class="arithmatex">\[
+\boxed{
+\text{rows }n
+\quad\times\quad
+\text{coefficients }p
+\quad\times\quad
+\text{complexity of the function space}
+}
+\]</div>
+<p>C1 addresses the row-side cost of this interaction. The candidates below investigate coefficient dimension and representation efficiency, including whether their algorithms can compose with C1.</p>
+<h2 id="candidate-summary">Candidate summary<a class="headerlink" href="#candidate-summary" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Candidate</th>
+<th>Idea</th>
+<th>Main payoff</th>
+<th>Reviewed status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>C15</strong></td>
+<td>Matrix-free large-<span class="arithmatex">\(p\)</span> EFS/REML backend</td>
+<td>Avoid <span class="arithmatex">\(O(p^2)\)</span> Hessian storage and large direct factorizations</td>
+<td><strong>RESEARCH / NEXT prototype</strong></td>
+</tr>
+<tr>
+<td><strong>C16</strong></td>
+<td>Adaptive hierarchical splines with error control</td>
+<td>Spend basis resolution only where it is needed</td>
+<td><strong>RESEARCH — high value</strong></td>
+</tr>
+<tr>
+<td><strong>C17</strong></td>
+<td>Exploit Fisher orthogonality + observed-geometry preconditioning</td>
+<td>Reduce cross-predictor coupling in LSS solves</td>
+<td><strong>RESEARCH</strong></td>
+</tr>
+<tr>
+<td><strong>C18</strong></td>
+<td>Multigrid + recycled Krylov subspaces</td>
+<td>Reduce iteration growth as spline dimension increases</td>
+<td><strong>RESEARCH</strong>; recycling becomes <strong>READY</strong> after C15</td>
+</tr>
+<tr>
+<td><strong>C19</strong></td>
+<td>qEFS + safeguarded Anderson acceleration</td>
+<td>Faster, more principled smoothing iterations</td>
+<td><strong>qEFS: READY to benchmark; Anderson: RESEARCH</strong></td>
+</tr>
+<tr>
+<td><strong>C20</strong></td>
+<td>Progressive exactification / inexact Newton</td>
+<td>Avoid full-data/full-precision work when far from convergence</td>
+<td><strong>RESEARCH</strong></td>
+</tr>
+<tr>
+<td><strong>C21</strong></td>
+<td>Sparse-grid / Smolyak interaction smooths</td>
+<td>Higher-order smooth interactions without full tensor explosion</td>
+<td><strong>RESEARCH — high predictive upside</strong></td>
+</tr>
+<tr>
+<td><strong>C22</strong></td>
+<td>Trend filtering + graph-structured effects</td>
+<td>Local adaptivity, thresholds, structured categorical borrowing</td>
+<td><strong>GraphEffect: READY-ish; trend variants: RESEARCH</strong></td>
+</tr>
+<tr>
+<td><strong>C23</strong></td>
+<td>Functional + compositional predictors</td>
+<td>Curves, telemetry, histories, and mixtures as native covariates</td>
+<td><strong>Functional-linear: READY-ish; richer forms: RESEARCH</strong></td>
+</tr>
+<tr>
+<td><strong>C24</strong></td>
+<td>HODLR / HSS Hessian compression</td>
+<td>Fast solves/log-dets if hidden hierarchical rank exists</td>
+<td><strong>SPECULATIVE — test first</strong></td>
+</tr>
+<tr>
+<td><strong>C25</strong></td>
+<td>Continuation / branch following</td>
+<td>Robustness and branch diagnostics for difficult LSS likelihoods</td>
+<td><strong>RESEARCH</strong></td>
+</tr>
+<tr>
+<td><strong>C26</strong></td>
+<td>Semismooth Newton / primal-dual active-set backend</td>
+<td>Fast specialist solver for structured nonsmooth penalties</td>
+<td><strong>RESEARCH / NEXT when C22 requires it</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The first several are more consequential than adding another generic optimizer.</p>
+<hr />
+<h2 id="c15-matrix-free-large-p-superglm-backend">C15 — Matrix-free large-<span class="arithmatex">\(p\)</span> SuperGLM backend<a class="headerlink" href="#c15-matrix-free-large-p-superglm-backend" title="Permanent link">&para;</a></h2>
+<h3 id="pitch">Pitch<a class="headerlink" href="#pitch" title="Permanent link">&para;</a></h3>
+<p>Generalize SuperGLM from "assemble a penalized Hessian, then factorize it" to an <strong>operator backend</strong> that can solve Newton/Fisher systems and smoothing trace problems without materializing the full <span class="arithmatex">\(p\times p\)</span> matrix.</p>
+<p>This is not completely new territory inside the repository: the existing <a href="../../guide/scop-performance-prototype/#phase-3-controlled-approximation">SCOP performance prototype blueprint</a> already lists inexact Newton solves, matrix-free <code>H @ v</code>, block preconditioners, and exact fallback as staged targets. C15 is the proposal to turn that idea into a general scalar/LSS backend and add the smoothing-criterion machinery needed for production REML/EFS.</p>
+<h3 id="core-algebra">Core algebra<a class="headerlink" href="#core-algebra" title="Permanent link">&para;</a></h3>
+<p>For a <span class="arithmatex">\(K\)</span>-predictor LSS model, write the penalized coefficient curvature blockwise as</p>
+<div class="arithmatex">\[
+H_{jk}
+=
+X_j^\top W_{jk}X_k + S_{jk}.
+\]</div>
+<p>A Newton step does not intrinsically require explicit <span class="arithmatex">\(H\)</span>. It requires the action of <span class="arithmatex">\(H\)</span> on a vector:</p>
+<div class="arithmatex">\[
+(Hv)_j
+=
+\sum_k
+X_j^\top
+\left[
+w_{jk}\odot(X_kv_k)
+\right]
++
+(Sv)_j.
+\]</div>
+<p>That is a linear operator. The Newton equation</p>
+<div class="arithmatex">\[
+H\delta=-g
+\]</div>
+<p>can then be solved iteratively:</p>
+<ul>
+<li><strong>PCG</strong> when the operator is symmetric positive definite;</li>
+<li><strong>MINRES</strong>, truncated Newton, or a trust-region Krylov method when observed curvature is indefinite;</li>
+<li>direct Cholesky/QR should remain the default for small and moderate systems where it is cheaper and more deterministic.</li>
+</ul>
+<p>A fixed coefficient threshold such as "<span class="arithmatex">\(p&gt;5000\)</span> means matrix-free" should not be hard-coded from intuition. The backend switch should be benchmark-driven and depend on <span class="arithmatex">\(p\)</span>, sparsity/structure, estimated condition number, factorization fill, and the relative cost of one Hessian-vector product.</p>
+<h3 id="why-this-is-now-credible">Why this is now credible<a class="headerlink" href="#why-this-is-now-credible" title="Permanent link">&para;</a></h3>
+<p>Zimmermann, Collarin, Wood and Ziel presented a 2026 large-GAM method combining generalized Fellner–Schall, Hutch++ stochastic trace estimation, and PCG while avoiding explicit Hessian formation and Cholesky. Their conference abstract reports fits with more than one million observations and more than 20,000 coefficients in a little over half an hour. It does <strong>not</strong> establish a universal <span class="arithmatex">\(O(np)\)</span> complexity claim, so SuperGLM should not repeat that stronger statement without a derivation for its own operator. <a href="https://trr391.tu-dortmund.de/events/conferences/2026/abstracts/" title="Zimmermann, Collarin, Wood &amp; Ziel (2026), Scalable estimation of large generalized additive models: Extended Fellner-Schall via Hutch++ and conjugate gradients">Zimmermann et al. 2026</a></p>
+<h3 id="smoothing-traces">Smoothing traces<a class="headerlink" href="#smoothing-traces" title="Permanent link">&para;</a></h3>
+<p>EFS/LAML-style methods require quantities of the form</p>
+<div class="arithmatex">\[
+\operatorname{tr}(H^{-1}S_j).
+\]</div>
+<p>Those can be estimated from repeated solves with <span class="arithmatex">\(H\)</span> and random probe vectors instead of materializing <span class="arithmatex">\(H^{-1}\)</span>. Hutch++ gives improved query complexity for PSD trace-estimation problems relative to classical Hutchinson estimators. <a href="https://arxiv.org/abs/2010.09649" title="Meyer et al. (2021), Hutch++: Optimal Stochastic Trace Estimation">Meyer et al. 2021</a></p>
+<p>The exact implementation detail matters: <span class="arithmatex">\(H^{-1}S_j\)</span> is not generally represented as a symmetric PSD matrix even when <span class="arithmatex">\(H\)</span> is SPD and <span class="arithmatex">\(S_j\)</span> is PSD. The estimator should therefore be derived for a symmetric congruent operator or otherwise justified explicitly rather than assuming every Hutch++ theorem transfers verbatim.</p>
+<p>If an exact-LAML path or diagnostic needs</p>
+<div class="arithmatex">\[
+\log |H|
+=
+\operatorname{tr}(\log H),
+\]</div>
+<p>stochastic Lanczos quadrature is a natural matrix-free candidate for SPD <span class="arithmatex">\(H\)</span>. <a href="https://epubs.siam.org/doi/10.1137/16M1104974" title="Ubaru, Chen &amp; Saad (2017), Fast Estimation of tr(f(A)) via Stochastic Lanczos Quadrature">Ubaru, Chen &amp; Saad 2017</a></p>
+<h3 id="preconditioning">Preconditioning<a class="headerlink" href="#preconditioning" title="Permanent link">&para;</a></h3>
+<p>A useful hierarchy is</p>
+<div class="arithmatex">\[
+P^{-1}
+\approx
+\underbrace{D^{-1}}_{\text{term/predictor blocks}}
++
+\underbrace{\text{coarse spline correction}}_{\text{multigrid}}
++
+\underbrace{\text{spectral correction}}_{\text{optional low-rank/Nyström component}}.
+\]</div>
+<p>Randomized Nyström preconditioning is established for regularized SPD systems and is worth testing when a small spectral subspace dominates conditioning. <a href="https://epubs.siam.org/doi/10.1137/21M1466244" title="Frangella, Tropp &amp; Udell (2023), Randomized Nyström Preconditioning">Frangella, Tropp &amp; Udell 2023</a></p>
+<h3 id="certification-and-reproducibility">Certification and reproducibility<a class="headerlink" href="#certification-and-reproducibility" title="Permanent link">&para;</a></h3>
+<p>Stochastic traces introduce a new failure mode for SuperGLM: <strong>optimizer noise can masquerade as smoothing convergence</strong>. A production design should therefore include:</p>
+<ul>
+<li>fixed/common random probes across nearby <span class="arithmatex">\(\lambda\)</span> evaluations;</li>
+<li>deterministic seeds in reproducibility mode;</li>
+<li>increasing probe counts as the outer gradient shrinks;</li>
+<li>an estimated Monte Carlo error on every stochastic trace;</li>
+<li>a rule that the stochastic error must be small relative to the smoothing-gradient tolerance;</li>
+<li>an exact or higher-accuracy cleanup/certification route when feasible.</li>
+</ul>
+<p>The principle should be:</p>
+<blockquote>
+<p>approximate linear algebra may determine how we reach the solution; it must not silently weaken what <code>converged</code> or <code>certified</code> means.</p>
+</blockquote>
+<h3 id="open-question-can-c1-and-c15-compose">Open question: can C1 and C15 compose?<a class="headerlink" href="#open-question-can-c1-and-c15-compose" title="Permanent link">&para;</a></h3>
+<p>This is the important research problem.</p>
+<p>C1 compresses the row-side algebra through marginal discretization. C15 avoids forming large coefficient-space matrices. A naive matrix-free Hessian-vector product can reintroduce a full <span class="arithmatex">\(O(np)\)</span> data pass on every Krylov iteration, partly undoing C1's benefit.</p>
+<p>The research question is therefore:</p>
+<div class="arithmatex">\[
+\boxed{
+\text{Can the marginal-discrete representation apply }v\mapsto Hv
+\text{ cheaply without forming all }H_{jk}\text{ blocks?}
+}
+\]</div>
+<p>If yes, SuperGLM could attack both the large-<span class="arithmatex">\(n\)</span> and large-<span class="arithmatex">\(p\)</span> barriers in one solver architecture. If no, C1 and C15 should remain separate size-regime backends.</p>
+<hr />
+<h2 id="c16-adaptive-hierarchical-splines-as-statistical-mesh-refinement">C16 — Adaptive hierarchical splines as statistical mesh refinement<a class="headerlink" href="#c16-adaptive-hierarchical-splines-as-statistical-mesh-refinement" title="Permanent link">&para;</a></h2>
+<h3 id="pitch_1">Pitch<a class="headerlink" href="#pitch_1" title="Permanent link">&para;</a></h3>
+<p>Treat the spline space like an adaptive PDE discretization: start with a coarse nested basis and introduce finer-scale basis functions only where the current fit leaves statistically meaningful unresolved structure.</p>
+<p>The goal is not simply "automatic knot selection." The more ambitious target is an adaptive numerical approximation to a <strong>predeclared fine model</strong>, with an explicit bound on the error introduced by not activating the entire basis.</p>
+<h3 id="local-refinement-indicator">Local refinement indicator<a class="headerlink" href="#local-refinement-indicator" title="Permanent link">&para;</a></h3>
+<p>Let <span class="arithmatex">\(A\)</span> denote the active basis and <span class="arithmatex">\(B\)</span> a candidate set of finer child functions. At the current active optimum, let <span class="arithmatex">\(g_B\)</span> be the score in the omitted directions. Under a local quadratic model, the conditional curvature of <span class="arithmatex">\(B\)</span> after allowing the active coefficients to readjust is the Schur complement</p>
+<div class="arithmatex">\[
+C_B
+=
+H_{BB}
+-
+H_{BA}H_{AA}^{-1}H_{AB}.
+\]</div>
+<p>When <span class="arithmatex">\(C_B\)</span> is positive definite, the local quadratic model predicts an improvement of approximately</p>
+<div class="arithmatex">\[
+\Delta_B
+\approx
+\frac12
+g_B^\top C_B^{-1}g_B.
+\]</div>
+<p>This is a useful <strong>refinement indicator</strong>:</p>
+<blockquote>
+<p>after the existing fit is allowed to readjust, how much local objective improvement appears to remain in this finer function space?</p>
+</blockquote>
+<p>It is <strong>not</strong>, by itself, an a-posteriori error certificate. Different omitted blocks interact, the likelihood may be nonquadratic, smoothing parameters may reoptimize, and LSS objectives can be locally nonconvex.</p>
+<h3 id="what-a-real-certificate-would-require">What a real certificate would require<a class="headerlink" href="#what-a-real-certificate-would-require" title="Permanent link">&para;</a></h3>
+<p>Define a fixed, sufficiently rich space <span class="arithmatex">\(V_{\max}\)</span> and a fixed penalized objective <span class="arithmatex">\(F(\beta)\)</span> on that space. The adaptive algorithm should only change how the fixed problem is represented and solved; it must not silently change the underlying penalty each time the mesh is refined.</p>
+<p>If <span class="arithmatex">\(F\)</span> is differentiable and <span class="arithmatex">\(m\)</span>-strongly convex on the identifiable subspace, then a full residual at an adaptively truncated solution <span class="arithmatex">\(\tilde\beta\)</span> can support bounds of the form</p>
+<div class="arithmatex">\[
+\|\tilde\beta-\beta^\star\|
+\le
+\frac{\|\nabla F(\tilde\beta)\|}{m},
+\]</div>
+<p>and</p>
+<div class="arithmatex">\[
+F(\tilde\beta)-F(\beta^\star)
+\le
+\frac{\|\nabla F(\tilde\beta)\|^2}{2m}.
+\]</div>
+<p>That is much closer to the PDE notion of a certified discretization error than simply requiring</p>
+<div class="arithmatex">\[
+\sum_B\Delta_B&lt;\varepsilon.
+\]</div>
+<p>For nonconvex LSS fits, any analogous result would normally be <strong>local to a certified branch/neighbourhood</strong>, not a global guarantee.</p>
+<p>A useful SuperGLM-facing target would eventually be something like:</p>
+<blockquote>
+<p>numerical basis-truncation uncertainty is less than 0.03 posterior standard deviations over the requested prediction domain.</p>
+</blockquote>
+<p>That is a research target, not a currently justified guarantee.</p>
+<h3 id="existing-statistical-precedent">Existing statistical precedent<a class="headerlink" href="#existing-statistical-precedent" title="Permanent link">&para;</a></h3>
+<p>Automatic knot selection for GAMs remains active research. Carrizosa, Guerrero and Durbán (2026) extend adaptive-spline ideas to GAMs using an adaptive-ridge approximation and a customized Fellner–Schall scheme, obtaining substantially smaller bases in their examples. That supports the <em>direction</em>, but not the stronger hierarchical certification proposed here. <a href="https://arxiv.org/abs/2607.21083" title="Carrizosa, Guerrero &amp; Durbán (2026), Automatic knot selection in smooth additive models">Carrizosa, Guerrero &amp; Durbán 2026</a></p>
+<h3 id="why-it-matters">Why it matters<a class="headerlink" href="#why-it-matters" title="Permanent link">&para;</a></h3>
+<p>A conventional large basis allocates resolution everywhere. An adaptive hierarchy can spend coefficients where the function is difficult:</p>
+<div class="arithmatex">\[
+V_0\subset V_1\subset V_2\subset\cdots
+\]</div>
+<p>while activating only selected descendants. This can plausibly improve both runtime and predictive resolution, especially for localized curvature that ordinary globally regularized splines represent inefficiently.</p>
+<h3 id="status">Status<a class="headerlink" href="#status" title="Permanent link">&para;</a></h3>
+<p><strong>RESEARCH — high value.</strong> The local refinement indicator is reasonable to prototype. The certification layer requires substantially more theory, especially once <span class="arithmatex">\(\lambda\)</span> is estimated jointly.</p>
+<hr />
+<h2 id="c17-exploit-fisher-orthogonality-and-precondition-observed-lss-geometry">C17 — Exploit Fisher orthogonality and precondition observed LSS geometry<a class="headerlink" href="#c17-exploit-fisher-orthogonality-and-precondition-observed-lss-geometry" title="Permanent link">&para;</a></h2>
+<h3 id="correction-to-the-original-proposal">Correction to the original proposal<a class="headerlink" href="#correction-to-the-original-proposal" title="Permanent link">&para;</a></h3>
+<p>The initial draft asked whether Tweedie LSS might admit a new near-orthogonal parameterization. That is the wrong starting point.</p>
+<p>For the standard Tweedie parameterization, mean coefficients are Fisher-orthogonal to the variance-side block <span class="arithmatex">\((\phi,p)\)</span>. <a href="https://gksmyth.github.io/pubs/tweediepdf-series-preprint.pdf" title="Dunn &amp; Smyth (2005), Series evaluation of Tweedie exponential dispersion model densities">Dunn &amp; Smyth 2005</a> This does not justify assuming mutual orthogonality of dispersion and power: retain their coupled expected-information block unless its zeros are established for the chosen likelihood and coordinates. Delong, Lindholm and Wüthrich establish mean-side orthogonality for their joint count/amount likelihood; their fixed-<span class="arithmatex">\(p\)</span> information matrix does not settle every information term involving <span class="arithmatex">\(p\)</span>. <a href="https://link.springer.com/article/10.1007/s13385-021-00264-3" title="Delong, Lindholm &amp; Wüthrich (2021), Making Tweedie's compound Poisson model more accessible">Delong, Lindholm &amp; Wüthrich 2021</a></p>
+<p>So the interesting SuperGLM problem is <strong>not</strong> "discover Tweedie orthogonal coordinates." It is:</p>
+<ol>
+<li>exploit known expected-Fisher orthogonality computationally;</li>
+<li>understand why <strong>observed</strong> LSS curvature can still be strongly coupled;</li>
+<li>derive or import useful orthogonal coordinates for families that are not already orthogonal.</li>
+</ol>
+<h3 id="two-geometries-should-be-measured-separately">Two geometries should be measured separately<a class="headerlink" href="#two-geometries-should-be-measured-separately" title="Permanent link">&para;</a></h3>
+<p>Let <span class="arithmatex">\(H_{\text{obs}}\)</span> denote observed penalized curvature and <span class="arithmatex">\(I_F\)</span> expected Fisher information. Define block-normalized coupling diagnostics such as</p>
+<div class="arithmatex">\[
+R_{\text{obs}}
+=
+D_{\text{obs}}^{-1/2}
+H_{\text{obs}}
+D_{\text{obs}}^{-1/2},
+\]</div>
+<p>and</p>
+<div class="arithmatex">\[
+R_F
+=
+D_F^{-1/2}
+I_F
+D_F^{-1/2},
+\]</div>
+<p>where <span class="arithmatex">\(D\)</span> contains the predictor-diagonal blocks. These inverse square roots require every diagonal block to be positive definite. For singular or indefinite blocks, first specify an identifiable subspace or an SPD regularization; the diagnostic then refers to that choice. The full observed matrix may still be indefinite even with SPD diagonal blocks.</p>
+<p>Then</p>
+<div class="arithmatex">\[
+\chi_{\text{obs}}=\|R_{\text{obs}}-I\|_2
+\]</div>
+<p>can be used as a <strong>diagnostic of normalized observed coupling</strong>. A large value suggests that block-diagonal preconditioning may be weak; it does not by itself prove that a block method will converge badly.</p>
+<p>For a correctly implemented Tweedie expected-information geometry with separate predictor penalties, <span class="arithmatex">\(R_F\)</span> should expose the separation of the mean from the variance-side block, without assuming that all variance predictors are mutually uncoupled. If observed curvature remains strongly coupled, that gap itself is useful information.</p>
+<h3 id="hybrid-fisher-observed-newton">Hybrid Fisher / observed Newton<a class="headerlink" href="#hybrid-fisher-observed-newton" title="Permanent link">&para;</a></h3>
+<p>A promising solver policy is:</p>
+<ul>
+<li>use Fisher geometry as a stable block preconditioner or early-iteration metric;</li>
+<li>introduce observed-curvature corrections near the solution;</li>
+<li>use trust-region control when the observed Hessian becomes indefinite;</li>
+<li>record how much of the final step is caused by off-diagonal observed curvature.</li>
+</ul>
+<p>This resembles using a statistically meaningful metric rather than a generic diagonal scaling.</p>
+<h3 id="other-families">Other families<a class="headerlink" href="#other-families" title="Permanent link">&para;</a></h3>
+<p>Classical parameter orthogonality is due to Cox and Reid. <a href="https://doi.org/10.1111/j.2517-6161.1987.tb01422.x" title="Cox &amp; Reid (1987), Parameter Orthogonality and Approximate Conditional Inference">Cox &amp; Reid 1987</a> Recent work continues to derive global or local orthogonal parameterizations for multi-parameter distributions. <a href="https://arxiv.org/abs/2501.08093" title="Shen, Li &amp; Tong (2025), A note on parameter orthogonality for multi-parameter distributions">Shen, Li &amp; Tong 2025</a> Huet and Prosdocimi (2026) specifically derive orthogonal parameterizations for extreme-value families including the GPD. <a href="https://arxiv.org/abs/2602.16283" title="Huet &amp; Prosdocimi (2026), Orthogonal parametrisations of Extreme-Value distributions">Huet &amp; Prosdocimi 2026</a></p>
+<p>That makes the worthwhile family-by-family questions:</p>
+<ul>
+<li>Generalized Gamma: can a useful global or near-global orthogonal map be derived?</li>
+<li>GPD: does the new orthogonal parameterization materially improve additive scale/shape fitting?</li>
+<li>Two-piece families: can location/scale/skewness be separated enough to improve Newton geometry?</li>
+<li>Negative-binomial LSS: what expected cross-information remains under the chosen parameterization and links?</li>
+</ul>
+<h3 id="schur-complement-solves">Schur-complement solves<a class="headerlink" href="#schur-complement-solves" title="Permanent link">&para;</a></h3>
+<p>For a block system</p>
+<div class="arithmatex">\[
+H=
+\begin{pmatrix}
+A&amp;B\\
+B^\top&amp;C
+\end{pmatrix},
+\]</div>
+<p>the Schur complement</p>
+<div class="arithmatex">\[
+S=C-B^\top A^{-1}B
+\]</div>
+<p>gives <span class="arithmatex">\(\det H=\det A\,\det S\)</span> when <span class="arithmatex">\(A\)</span> is invertible. If <span class="arithmatex">\(H\)</span> is SPD, then <span class="arithmatex">\(A\)</span> and <span class="arithmatex">\(S\)</span> are SPD and the ordinary positive-curvature identity is</p>
+<p>$
+\log\det H
+=
+\log\det A+\log\det S.
+$</p>
+<p>For nonsingular indefinite systems, use log absolute determinants and retain determinant signs separately.</p>
+<p>If the mean predictor is very large and scale/shape predictors are smaller, this can be substantially more attractive than treating every coefficient identically. Fisher orthogonality or near-orthogonality can make the cross-block <span class="arithmatex">\(B\)</span> smaller and strengthen block preconditioners.</p>
+<h3 id="status_1">Status<a class="headerlink" href="#status_1" title="Permanent link">&para;</a></h3>
+<p><strong>RESEARCH.</strong> The potentially original contribution is an automatic expected-vs-observed geometry controller for distributional GAMs, not rediscovering Tweedie orthogonality.</p>
+<hr />
+<h2 id="c18-multigrid-and-krylov-recycling">C18 — Multigrid and Krylov recycling<a class="headerlink" href="#c18-multigrid-and-krylov-recycling" title="Permanent link">&para;</a></h2>
+<h3 id="multigrid">Multigrid<a class="headerlink" href="#multigrid" title="Permanent link">&para;</a></h3>
+<p>Spline spaces naturally possess resolution levels. A nested sequence such as</p>
+<div class="arithmatex">\[
+V_0\subset V_1\subset\cdots\subset V_L
+\]</div>
+<p>can support the usual multigrid pattern:</p>
+<div class="arithmatex">\[
+\text{fine relaxation}
+\rightarrow
+\text{restrict residual}
+\rightarrow
+\text{coarse solve}
+\rightarrow
+\text{prolongate correction}.
+\]</div>
+<p>Multigrid-preconditioned CG has already been developed for tensor-product spline smoothing, with grid-independent convergence under the assumptions studied there. <a href="https://arxiv.org/abs/1901.00654" title="Takacs &amp; Takacs, A Multigrid Preconditioner for Tensor Product Spline Smoothing">Takacs &amp; Takacs 2019/2021</a></p>
+<p>The important caveat is that those results do <strong>not</strong> automatically transfer to changing IRLS/LSS weights, arbitrary constraints, or indefinite observed curvature. SuperGLM must benchmark whether the coarse operator remains a good approximation as <span class="arithmatex">\(W\)</span> changes.</p>
+<p>If C16 exists, one hierarchical representation could support three roles:</p>
+<div class="arithmatex">\[
+\boxed{
+\text{representation}
++
+\text{adaptive refinement}
++
+\text{linear-solver preconditioning}
+}
+\]</div>
+<p>That architectural reuse is attractive.</p>
+<h3 id="krylov-recycling">Krylov recycling<a class="headerlink" href="#krylov-recycling" title="Permanent link">&para;</a></h3>
+<p>SuperGLM repeatedly solves related systems:</p>
+<div class="arithmatex">\[
+H_t x_t=b_t,
+\qquad
+H_{t+1}\approx H_t.
+\]</div>
+<p>IRLS weights and smoothing parameters often move gradually. Recycling methods retain selected subspaces from previous Krylov solves and use them in later systems. Parks et al. developed this specifically for sequences in which both the matrix and right-hand side may change. <a href="https://epubs.siam.org/doi/10.1137/040607277" title="Parks et al. (2006), Recycling Krylov Subspaces for Sequences of Linear Systems">Parks et al. 2006</a></p>
+<p>Candidate recycled directions include:</p>
+<ul>
+<li>difficult Ritz vectors;</li>
+<li>weakly identified null-space directions;</li>
+<li>strongly correlated smooth combinations;</li>
+<li>slow cross-predictor modes in LSS.</li>
+</ul>
+<h3 id="status_2">Status<a class="headerlink" href="#status_2" title="Permanent link">&para;</a></h3>
+<p><strong>Multigrid: RESEARCH.</strong>
+<strong>Krylov recycling: READY to prototype once C15 provides a general iterative operator backend.</strong></p>
+<hr />
+<h2 id="c19-qefs-and-safeguarded-fixed-point-acceleration">C19 — qEFS and safeguarded fixed-point acceleration<a class="headerlink" href="#c19-qefs-and-safeguarded-fixed-point-acceleration" title="Permanent link">&para;</a></h2>
+<p>EFS defines an outer fixed-point map on log smoothing parameters:</p>
+<div class="arithmatex">\[
+\rho_{k+1}=T(\rho_k),
+\qquad
+\rho=\log\lambda.
+\]</div>
+<p>That makes modern fixed-point acceleration relevant.</p>
+<h3 id="qefs-structured-secant-updates">qEFS / structured secant updates<a class="headerlink" href="#qefs-structured-secant-updates" title="Permanent link">&para;</a></h3>
+<p>The 2026 structured-secant work of Krause, Borst and van Rij develops a limited-memory quasi-Newton variant of EFS for general smooth models, reducing the need for expensive higher-order likelihood derivatives while retaining an EFS target under its stated conditions. <a href="https://arxiv.org/abs/2606.26804" title="Krause, Borst &amp; van Rij (2026), Structured Secant Methods to Select Smoothing Parameters For General Smooth Models">Krause, Borst &amp; van Rij 2026</a></p>
+<p>This deserves a first-class roadmap item rather than being mentioned only as competitor context.</p>
+<p><strong>Status: READY to reproduce and benchmark clean-room from the paper.</strong></p>
+<h3 id="anderson-acceleration">Anderson acceleration<a class="headerlink" href="#anderson-acceleration" title="Permanent link">&para;</a></h3>
+<p>Given residuals</p>
+<div class="arithmatex">\[
+r_i=T(\rho_i)-\rho_i,
+\]</div>
+<p>Anderson acceleration forms a small least-squares extrapolation from recent fixed-point iterates. There is theory showing improved local rates for linearly convergent fixed-point iterations under suitable assumptions. <a href="https://epubs.siam.org/doi/10.1137/19M1245384" title="Evans et al., A Proof That Anderson Acceleration Improves the Convergence Rate in Linearly Converging Fixed-Point Methods">Evans et al. 2020</a></p>
+<p>Raw Anderson is not safe enough for SuperGLM. A candidate design should include:</p>
+<ul>
+<li>small memory, e.g. <span class="arithmatex">\(m=3\)</span> to <span class="arithmatex">\(8\)</span>;</li>
+<li>conditioning checks on the residual-history least-squares problem;</li>
+<li>restart when the history becomes nearly singular;</li>
+<li>objective/residual acceptance;</li>
+<li>fallback to the unaccelerated EFS step;</li>
+<li>no claim of global convergence merely because the local fixed-point Jacobian looks stable.</li>
+</ul>
+<p>Safeguarded Anderson schemes using residual tests, conditioning controls and memory restarts are established in optimization. <a href="https://doi.org/10.23919/ECC55457.2022.9838320" title="Garstka, Cannon &amp; Goulart (2022), Safeguarded Anderson acceleration for parametric nonexpansive operators">Garstka, Cannon &amp; Goulart 2022</a></p>
+<p><strong>Status: RESEARCH.</strong> Cheap to prototype, but not a drop-in theorem for EFS.</p>
+<h3 id="local-jacobian-diagnostics">Local Jacobian diagnostics<a class="headerlink" href="#local-jacobian-diagnostics" title="Permanent link">&para;</a></h3>
+<p>Near a candidate fixed point,</p>
+<div class="arithmatex">\[
+\delta_{k+1}
+\approx
+J_T(\rho^\star)\delta_k.
+\]</div>
+<p>The spectral radius of <span class="arithmatex">\(J_T\)</span> is a useful <strong>local diagnostic</strong>:</p>
+<ul>
+<li><span class="arithmatex">\(\rho(J_T)&lt;1\)</span>: locally attracting fixed-point iteration;</li>
+<li>eigenvalues close to <span class="arithmatex">\(1\)</span>: slow/near-neutral smoothing directions;</li>
+<li><span class="arithmatex">\(\rho(J_T)&gt;1\)</span>: locally unstable plain fixed-point iteration.</li>
+</ul>
+<p>This can inform whether acceleration or a trust-region/Newton rescue is sensible. It is not a global convergence certificate.</p>
+<hr />
+<h2 id="c20-progressive-exactification-and-inexact-newton">C20 — Progressive exactification and inexact Newton<a class="headerlink" href="#c20-progressive-exactification-and-inexact-newton" title="Permanent link">&para;</a></h2>
+<h3 id="pitch_2">Pitch<a class="headerlink" href="#pitch_2" title="Permanent link">&para;</a></h3>
+<p>Do not spend full-data, full-precision work when the current iterate is obviously far from the final solution.</p>
+<p>There are two independent approximation budgets.</p>
+<h3 id="adaptive-sample-size">Adaptive sample size<a class="headerlink" href="#adaptive-sample-size" title="Permanent link">&para;</a></h3>
+<p>Early Newton/trust-region iterations can use a controlled subset and increase the sample size as stationarity improves. Adaptive-sample trust-region methods have global-convergence theory for finite-sum optimization and can eventually transition to full-batch evaluation. <a href="https://arxiv.org/abs/1910.03294" title="Mohr &amp; Stein (2019), An Adaptive Sample Size Trust-Region Method for Finite-Sum Minimization">Mohr &amp; Stein 2019</a></p>
+<p>For insurance data, uniform subsampling is usually a poor default. Candidate sampling should preserve important information through stratification or importance weights based on some combination of:</p>
+<ul>
+<li>exposure / case weight;</li>
+<li>response or tail region;</li>
+<li>approximate leverage;</li>
+<li>curvature contribution;</li>
+<li>important portfolio segments.</li>
+</ul>
+<h3 id="adaptive-likelihood-precision">Adaptive likelihood precision<a class="headerlink" href="#adaptive-likelihood-precision" title="Permanent link">&para;</a></h3>
+<p>For families involving a series, quadrature, CDF inversion, root solve, or expensive special functions, allow a numerical tolerance</p>
+<div class="arithmatex">\[
+\varepsilon_{\ell,k}
+\]</div>
+<p>to tighten with optimizer progress.</p>
+<p>For example, <strong>illustratively rather than as fixed defaults</strong>:</p>
+<div class="arithmatex">\[
+10^{-4}
+\rightarrow
+10^{-8}
+\rightarrow
+10^{-12}.
+\]</div>
+<p>The forcing rule should be tied to gradient/step accuracy, not hard-coded decimal stages.</p>
+<h3 id="what-exact-final-cleanup-does-and-does-not-guarantee">What "exact final cleanup" does and does not guarantee<a class="headerlink" href="#what-exact-final-cleanup-does-and-does-not-guarantee" title="Permanent link">&para;</a></h3>
+<p>The principle should be:</p>
+<blockquote>
+<p>approximations may guide the path, but final stationarity and inference are evaluated on the full-data/full-precision objective.</p>
+</blockquote>
+<p>For a convex problem, a sufficiently accurate final solve can recover the same unique optimizer as an exact-from-start path.</p>
+<p>For a nonconvex LSS model, this statement is weaker: an approximate path can enter a different basin and converge to a different legitimate stationary branch. Full-data cleanup preserves the <strong>objective definition</strong>, not necessarily the same branch that an exact path from another initialization would have reached.</p>
+<p>That caveat should be explicit.</p>
+<h3 id="status_3">Status<a class="headerlink" href="#status_3" title="Permanent link">&para;</a></h3>
+<p><strong>RESEARCH.</strong> Particularly attractive for expensive LSS likelihoods and future transformation/copula models.</p>
+<hr />
+<h2 id="c21-higher-dimensional-smooth-interactions-without-full-tensor-explosion">C21 — Higher-dimensional smooth interactions without full tensor explosion<a class="headerlink" href="#c21-higher-dimensional-smooth-interactions-without-full-tensor-explosion" title="Permanent link">&para;</a></h2>
+<p>Higher-dimensional tensor products eventually suffer basis growth resembling</p>
+<div class="arithmatex">\[
+M^d
+\]</div>
+<p>for <span class="arithmatex">\(d\)</span> dimensions and <span class="arithmatex">\(M\)</span> marginal resolution.</p>
+<h3 id="sparse-grid-smolyak-smooths">Sparse-grid / Smolyak smooths<a class="headerlink" href="#sparse-grid-smolyak-smooths" title="Permanent link">&para;</a></h3>
+<p>A sparse-grid hierarchy retains tensor levels satisfying a restriction such as</p>
+<div class="arithmatex">\[
+\ell_1+\cdots+\ell_d\le L
+\]</div>
+<p>instead of all combinations in the full tensor grid.</p>
+<p>Under the mixed-smoothness conditions for which sparse grids are designed, the number of degrees of freedom can scale like</p>
+<div class="arithmatex">\[
+O(N(\log N)^{d-1})
+\]</div>
+<p>rather than <span class="arithmatex">\(O(N^d)\)</span> for a corresponding full grid. Bungartz and Griebel give the classical approximation theory and make the required mixed-regularity assumptions explicit. <a href="https://doi.org/10.1017/S0962492904000182" title="Bungartz &amp; Griebel (2004), Sparse grids">Bungartz &amp; Griebel 2004</a></p>
+<p>The attraction for SuperGLM is that the model can remain <strong>linear in coefficients</strong>:</p>
+<div class="arithmatex">\[
+\eta=X\beta.
+\]</div>
+<p>That preserves the <em>possibility</em> of:</p>
+<ul>
+<li>quadratic smoothness penalties;</li>
+<li>REML/EFS smoothing;</li>
+<li>covariance calculations;</li>
+<li>matrix-free Hessian products;</li>
+<li>compatibility with a discrete assembly strategy.</li>
+</ul>
+<p>Those properties are <strong>not automatic</strong>. Rank constraints, centering, anisotropic penalties, tensor hierarchy bookkeeping, and C1-compatible cross-products still need to be derived.</p>
+<p>A possible user-facing term is</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>SparseTensor(x1, x2, x3, x4, level=..., adaptive=True)
+</code></pre></div>
+<p>with anisotropic refinement and strong heredity.</p>
+<p>C16 and C21 could eventually share a refinement engine.</p>
+<h3 id="failure-mode">Failure mode<a class="headerlink" href="#failure-mode" title="Permanent link">&para;</a></h3>
+<p>Sparse grids are strongest for functions with suitable mixed regularity. Non-axis-aligned ridges, sharp diagonal boundaries, and other adversarial structures can defeat the efficiency advantage. Benchmarks must therefore include such cases rather than only smooth separable test functions.</p>
+<h3 id="factorized-spline-interactions">Factorized spline interactions<a class="headerlink" href="#factorized-spline-interactions" title="Permanent link">&para;</a></h3>
+<p>Rügamer (2024) factorizes higher-order tensor-product spline interactions so that all nonlinear interactions can be represented at costs proportional to a model without explicit interaction enumeration under the proposed factorization. <a href="https://proceedings.mlr.press/v238/ruegamer24a.html" title="Rügamer (2024), Scalable Higher-Order Tensor Product Spline Models">Rügamer 2024</a></p>
+<p>That is highly interesting for prediction and structure discovery. The trade-off is different from sparse grids:</p>
+<ul>
+<li>factorization introduces nonconvex optimization;</li>
+<li>latent factors create non-identifiability/rotation issues;</li>
+<li>ordinary GAM effect inference does not transfer automatically.</li>
+</ul>
+<p>A sensible division is therefore:</p>
+<div class="arithmatex">\[
+\boxed{\text{sparse grid} \approx \text{candidate inferential model}}
+\]</div>
+<p>and</p>
+<div class="arithmatex">\[
+\boxed{\text{factorized spline interactions} \approx \text{predictive / discovery model}}
+\]</div>
+<p>The factorized model could screen interactions, followed by an inferential refit using ordinary or sparse-grid terms.</p>
+<h3 id="status_4">Status<a class="headerlink" href="#status_4" title="Permanent link">&para;</a></h3>
+<p><strong>RESEARCH — high predictive upside.</strong></p>
+<hr />
+<h2 id="c22-locally-adaptive-and-graph-structured-effects">C22 — Locally adaptive and graph-structured effects<a class="headerlink" href="#c22-locally-adaptive-and-graph-structured-effects" title="Permanent link">&para;</a></h2>
+<p>This candidate should be split conceptually because its two halves have different inference stories.</p>
+<h3 id="c22a-trend-filtering-smooths">C22a — Trend-filtering smooths<a class="headerlink" href="#c22a-trend-filtering-smooths" title="Permanent link">&para;</a></h3>
+<p>A conventional quadratic spline penalty such as</p>
+<div class="arithmatex">\[
+\lambda\int[f''(x)]^2\,dx
+\]</div>
+<p>encourages globally smooth changes in curvature.</p>
+<p>Trend filtering instead uses an <span class="arithmatex">\(\ell_1\)</span> penalty on discrete derivatives, schematically</p>
+<div class="arithmatex">\[
+\lambda\|D^{k+1}f\|_1.
+\]</div>
+<p>The result is an adaptively piecewise-polynomial effect:</p>
+<ul>
+<li><span class="arithmatex">\(k=0\)</span>: piecewise constant;</li>
+<li><span class="arithmatex">\(k=1\)</span>: piecewise linear;</li>
+<li><span class="arithmatex">\(k=2\)</span>: piecewise quadratic.</li>
+</ul>
+<p>Additive trend filtering has minimax-optimal rates over the corresponding bounded-variation additive classes, and the literature emphasizes its local adaptivity relative to smoothing splines. <a href="https://doi.org/10.1214/19-AOS1833" title="Sadhanala &amp; Tibshirani (2019), Additive Models with Trend Filtering">Sadhanala &amp; Tibshirani 2019</a></p>
+<p>For pricing, a particularly interesting structured variant is monotone trend filtering:</p>
+<div class="arithmatex">\[
+f'(x)\ge0,
+\qquad
+\|D^2f\|_1\ \text{penalized}.
+\]</div>
+<p>That can produce a monotone piecewise-linear tariff curve whose slope changes are data-adaptive.</p>
+<h4 id="inference-caveat">Inference caveat<a class="headerlink" href="#inference-caveat" title="Permanent link">&para;</a></h4>
+<p>This is a major difference from ordinary penalized splines. The <span class="arithmatex">\(\ell_1\)</span> penalty creates a data-dependent active set / knot pattern. A standard inverse-Hessian Wald covariance conditional on that active set is <strong>not automatically valid post-selection inference</strong>.</p>
+<p>Before trend filtering becomes an "inferential GAM term," SuperGLM needs one of:</p>
+<ul>
+<li>explicit post-selection/selective inference;</li>
+<li>sample splitting;</li>
+<li>bootstrap or other calibrated uncertainty;</li>
+<li>a prediction-only label;</li>
+<li>or a second-stage smooth refit with clearly stated inferential semantics.</li>
+</ul>
+<p>So <code>TrendFilter</code> should not be marked simply READY for the same inference contract as a normal spline.</p>
+<h3 id="c22b-graph-effects">C22b — Graph effects<a class="headerlink" href="#c22b-graph-effects" title="Permanent link">&para;</a></h3>
+<p>A structured categorical variable can be represented by a graph <span class="arithmatex">\(G\)</span>.</p>
+<p>For a quadratic graph smoother,</p>
+<div class="arithmatex">\[
+\beta^\top L_G\beta
+=
+\sum_{(u,v)\in E}
+w_{uv}(\beta_u-\beta_v)^2,
+\]</div>
+<p>where <span class="arithmatex">\(L_G\)</span> is the graph Laplacian. This is a quadratic penalty and fits much more naturally into SuperGLM's existing penalized-linear-algebra and REML machinery.</p>
+<p>Examples include:</p>
+<ul>
+<li>manufacturer <span class="arithmatex">\(\rightarrow\)</span> model <span class="arithmatex">\(\rightarrow\)</span> variant taxonomies;</li>
+<li>geographical adjacency;</li>
+<li>occupation or industry taxonomies;</li>
+<li>repair-component hierarchies.</li>
+</ul>
+<p>A stronger locally adaptive version uses graph trend filtering:</p>
+<div class="arithmatex">\[
+\lambda
+\sum_{(u,v)\in E}
+w_{uv}|\beta_u-\beta_v|.
+\]</div>
+<p>Connected levels can then fuse exactly while genuine boundaries remain. Graph trend filtering was designed to provide local adaptivity beyond <span class="arithmatex">\(\ell_2\)</span> graph smoothers. <a href="https://www.jmlr.org/papers/v17/15-147.html" title="Wang, Sharpnack, Smola &amp; Tibshirani (2016), Trend Filtering on Graphs">Wang et al. 2016</a></p>
+<p>A possible API is</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>GraphEffect(vehicle_model, graph=vehicle_taxonomy)
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>GraphTrend(area, graph=adjacency)
+</code></pre></div>
+<p><code>GraphEffect</code> is the lower-risk feature because it retains a quadratic penalty. <code>GraphTrend</code> inherits the nonsmooth/post-selection issues of trend filtering.</p>
+<h3 id="status_5">Status<a class="headerlink" href="#status_5" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>Quadratic <code>GraphEffect</code>: READY-ish to scope.</strong></li>
+<li><strong><code>TrendFilter</code> / <code>GraphTrend</code>: RESEARCH for inferential use; potentially earlier for prediction/structure discovery.</strong></li>
+</ul>
+<hr />
+<h2 id="c23-functional-and-compositional-predictors">C23 — Functional and compositional predictors<a class="headerlink" href="#c23-functional-and-compositional-predictors" title="Permanent link">&para;</a></h2>
+<h3 id="functional-predictors">Functional predictors<a class="headerlink" href="#functional-predictors" title="Permanent link">&para;</a></h3>
+<p>A functional predictor is a curve <span class="arithmatex">\(x_i(t)\)</span> rather than a scalar.</p>
+<p>Examples:</p>
+<ul>
+<li>journey telemetry;</li>
+<li>monthly claim-development history;</li>
+<li>warranty sensor trajectories;</li>
+<li>utilization/load curves;</li>
+<li>temporal exposure profiles.</li>
+</ul>
+<p>A functional linear term has the form</p>
+<div class="arithmatex">\[
+\eta_i
+=
+\int x_i(t)\beta(t)\,dt.
+\]</div>
+<p>After basis expansion and numerical integration this is still linear in the coefficient vector, so it is a natural fit for SuperGLM's existing penalty machinery.</p>
+<p>A richer functional GAM uses</p>
+<div class="arithmatex">\[
+\eta_i
+=
+\int F(x_i(t),t)\,dt,
+\]</div>
+<p>with a bivariate smooth <span class="arithmatex">\(F\)</span>. Functional generalized additive model theory already exists. <a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC3982924/" title="McLean et al. (2014), Functional Generalized Additive Models">McLean et al. 2014</a></p>
+<p>A practical implementation must specify:</p>
+<ul>
+<li>common versus irregular observation grids;</li>
+<li>quadrature rules;</li>
+<li>missing segments;</li>
+<li>measurement error;</li>
+<li>centering/identifiability;</li>
+<li>whether the functional design can be discretized or cached efficiently.</li>
+</ul>
+<p><strong>Functional-linear terms are READY-ish to scope. Full FGAM terms remain RESEARCH.</strong></p>
+<h3 id="compositional-predictors">Compositional predictors<a class="headerlink" href="#compositional-predictors" title="Permanent link">&para;</a></h3>
+<p>A composition lies on a simplex rather than ordinary Euclidean space. For strictly positive components,</p>
+<div class="arithmatex">\[
+x_j&gt;0,
+\qquad
+\sum_jx_j=1,
+\]</div>
+<p>log-ratio/Bayes-space geometry is the natural starting point; treating all parts as independent unconstrained regressors is generally inappropriate.</p>
+<p>Generalized functional additive mixed-model work has already incorporated finite and functional compositional covariates using geometry-respecting transformations and constrained basis representations. <a href="https://doi.org/10.1093/jrsssc/qlae016" title="Eckardt, Mateu &amp; Greven (2024), Generalized functional additive mixed models with (functional) compositional covariates">Eckardt, Mateu &amp; Greven 2024</a></p>
+<p>A production feature must address zeros explicitly. Many real insurance compositions contain structural or sampling zeros, so a strict <span class="arithmatex">\(x_j&gt;0\)</span> API without a declared zero-handling model would be insufficient.</p>
+<p><strong>Status: RESEARCH/READY depending on scope.</strong> A simple finite-composition linear effect is much closer than a nonlinear functional-composition term.</p>
+<hr />
+<h2 id="c24-test-whether-superglm-hessians-have-hierarchical-low-rank">C24 — Test whether SuperGLM Hessians have hierarchical low rank<a class="headerlink" href="#c24-test-whether-superglm-hessians-have-hierarchical-low-rank" title="Permanent link">&para;</a></h2>
+<p>This remains speculative and should stay cheap until evidence appears.</p>
+<p>HODLR/HSS methods exploit matrices whose off-diagonal blocks have low numerical rank recursively. PDE inverse problems provide examples where this can replace dense cubic operations with near-log-linear hierarchical operations. <a href="https://arxiv.org/abs/2301.03644" title="Hartland et al. (2023), Hierarchical off-diagonal low-rank approximation of Hessians in inverse problems, with application to ice sheet model initialization">Hartland et al. 2023</a></p>
+<p>That is precedent, not evidence that a GAM/LSS Hessian has the same structure.</p>
+<h3 id="experiment-first">Experiment first<a class="headerlink" href="#experiment-first" title="Permanent link">&para;</a></h3>
+<p>Order coefficients by</p>
+<div class="arithmatex">\[
+\text{predictor}
+\rightarrow
+\text{term}
+\rightarrow
+\text{local spline support}
+\]</div>
+<p>and recursively measure off-diagonal numerical rank at tolerances such as</p>
+<div class="arithmatex">\[
+10^{-3},\ 10^{-5},\ 10^{-7},\ 10^{-9}.
+\]</div>
+<p>Test across:</p>
+<ul>
+<li>scalar GAMs;</li>
+<li>dense LSS;</li>
+<li>tensor interactions;</li>
+<li>graph penalties;</li>
+<li>random-effect-heavy systems.</li>
+</ul>
+<p>If rank stays roughly bounded or grows slowly with block size, investigate HODLR/HSS arithmetic.</p>
+<p>If rank grows proportionally with block size, kill the idea.</p>
+<h3 id="status_6">Status<a class="headerlink" href="#status_6" title="Permanent link">&para;</a></h3>
+<p><strong>SPECULATIVE — test first.</strong></p>
+<hr />
+<h2 id="c25-continuation-and-branch-following-for-difficult-distributional-likelihoods">C25 — Continuation and branch following for difficult distributional likelihoods<a class="headerlink" href="#c25-continuation-and-branch-following-for-difficult-distributional-likelihoods" title="Permanent link">&para;</a></h2>
+<p>For GPD, generalized Gamma, coupled LSS and future copula models, the likelihood surface can become difficult enough that initialization and path dependence matter.</p>
+<p>Introduce a homotopy parameter</p>
+<div class="arithmatex">\[
+\tau\in[0,1],
+\]</div>
+<p>with an easy problem at <span class="arithmatex">\(\tau=0\)</span> and the requested model at <span class="arithmatex">\(\tau=1\)</span>.</p>
+<p>For example,</p>
+<div class="arithmatex">\[
+\eta_{\text{shape},\tau}
+=
+\tau\,\eta_{\text{shape}},
+\]</div>
+<p>or gradually introduce interaction, dependence, tail-shape, or constraint complexity.</p>
+<p>Then solve</p>
+<div class="arithmatex">\[
+F(\beta,\lambda,\tau)=0
+\]</div>
+<p>with predictor-corrector continuation. Pseudo-arclength continuation can follow a branch through a fold where naive parameter continuation fails.</p>
+<h3 id="what-this-buys-statistically">What this buys statistically<a class="headerlink" href="#what-this-buys-statistically" title="Permanent link">&para;</a></h3>
+<p>Continuation can expose multiple stationary branches that ordinary restart logic may hide.</p>
+<p>If two distinct locally stable branches are found, SuperGLM has positive evidence that uniqueness is not established and can report that explicitly.</p>
+<p>The converse is important:</p>
+<blockquote>
+<p>following one branch successfully does <strong>not</strong> prove that no other branch exists.</p>
+</blockquote>
+<p>Continuation is a branch-exploration and robustness tool, not an automatic global uniqueness certificate.</p>
+<h3 id="status_7">Status<a class="headerlink" href="#status_7" title="Permanent link">&para;</a></h3>
+<p><strong>RESEARCH.</strong> More valuable for robustness/certification than raw speed.</p>
+<hr />
+<h2 id="c26-semismooth-newton-primal-dual-active-set-backend">C26 — Semismooth Newton / primal-dual active-set backend<a class="headerlink" href="#c26-semismooth-newton-primal-dual-active-set-backend" title="Permanent link">&para;</a></h2>
+<p>C22 introduces structured nonsmooth penalties for which the current proximal Newton BCD path may not be the best specialist solver.</p>
+<p>Semismooth Newton and augmented-Lagrangian/primal-dual methods exploit generalized derivatives and "second-order sparsity" in structured <span class="arithmatex">\(\ell_1\)</span> problems. There is direct precedent for sparse-Hessian semismooth Newton augmented-Lagrangian methods for general <span class="arithmatex">\(\ell_1\)</span> trend filtering. <a href="https://www.crwweb.net/info/1090/6158.htm" title="Liu &amp; Zhang (2023), Sparse Hessian based semismooth Newton augmented Lagrangian algorithm for general L1 trend filtering, Pacific Journal of Optimization 19(2):187–204">Liu &amp; Zhang 2023</a></p>
+<p>This does <strong>not</strong> imply that one semismooth Newton implementation should replace BCD everywhere.</p>
+<p>A sensible solver policy is:</p>
+<ul>
+<li>ordinary smooth quadratic penalties <span class="arithmatex">\(\rightarrow\)</span> direct/iterative Newton;</li>
+<li>sparse-group selection where BCD is strong <span class="arithmatex">\(\rightarrow\)</span> keep proximal Newton BCD;</li>
+<li>fused/trend/graph-trend penalties with favorable generalized-Jacobian structure <span class="arithmatex">\(\rightarrow\)</span> benchmark SSN/augmented-Lagrangian or primal-dual active-set methods.</li>
+</ul>
+<h3 id="requirements">Requirements<a class="headerlink" href="#requirements" title="Permanent link">&para;</a></h3>
+<ul>
+<li>exact KKT residuals;</li>
+<li>warm starts along <span class="arithmatex">\(\lambda\)</span> paths;</li>
+<li>active-set diagnostics;</li>
+<li>deterministic fallback;</li>
+<li>no covariance claim until the nonsmooth/post-selection inference semantics are defined.</li>
+</ul>
+<h3 id="status_8">Status<a class="headerlink" href="#status_8" title="Permanent link">&para;</a></h3>
+<p><strong>RESEARCH / NEXT when C22 moves from model idea to implementation.</strong></p>
+<hr />
+<h2 id="strengthen-c3-adaptive-regularized-newton-controller">Strengthen C3 — Adaptive regularized Newton controller<a class="headerlink" href="#strengthen-c3-adaptive-regularized-newton-controller" title="Permanent link">&para;</a></h2>
+<p>This is prospective controller research beyond the <a href="../2026-09-pragmatic-convergence/">merged C3 follow-through</a>. It does not replace the delivered convergence evidence or automatically reopen resolved stress cases. Scope a reproduced remaining limitation before promoting regularization, trust-region/cubic steps or further curvature reuse.</p>
+<h3 id="geometry-dependent-step-policy">Geometry-dependent step policy<a class="headerlink" href="#geometry-dependent-step-policy" title="Permanent link">&para;</a></h3>
+<p>When ordinary Newton geometry is well behaved, use Newton.</p>
+<p>When curvature is poorly conditioned but essentially positive, use a regularized system such as</p>
+<div class="arithmatex">\[
+H+\gamma I.
+\]</div>
+<p>When meaningful negative curvature is present, use a trust-region or cubic-regularized model:</p>
+<div class="arithmatex">\[
+m(s)
+=
+g^\top s
++
+\frac12s^\top Hs
++
+\frac{\sigma}{3}\|s\|^3.
+\]</div>
+<p>Recent cubic-regularization work includes scalable subspace methods, which are relevant as inspiration for large coefficient systems. <a href="https://arxiv.org/abs/2501.09734" title="Cartis, Shao &amp; Tansley (2025), Random Subspace Cubic-Regularization Methods, with Applications to Low-Rank Functions">Cartis, Shao &amp; Tansley 2025</a></p>
+<h3 id="lazy-curvature-reuse">Lazy curvature reuse<a class="headerlink" href="#lazy-curvature-reuse" title="Permanent link">&para;</a></h3>
+<p>If curvature changes little between iterations, do not automatically rebuild/factorize it. "Lazy Hessian" methods have modern convergence theory in other second-order settings. <a href="https://proceedings.mlr.press/v202/doikov23a.html" title="Doikov et al. (2023), Second-Order Optimization with Lazy Hessians">Doikov et al. 2023</a></p>
+<p>This is inspiration rather than a drop-in theorem for IRLS/LSS. SuperGLM's weights, constraints and penalties create a different changing-curvature problem, so the reuse criterion must be derived and benchmarked in-model.</p>
+<p>The existing fREML philosophy already demonstrates the broader idea: reuse expensive geometry when the statistical quantities that generated it have barely moved.</p>
+<hr />
+<h2 id="revised-computational-programme">Revised computational programme<a class="headerlink" href="#revised-computational-programme" title="Permanent link">&para;</a></h2>
+<p>The roadmap is stronger if C1 is not described as the only flagship. There are three complementary fronts.</p>
+<h3 id="front-a-compress-observations">Front A — Compress observations<a class="headerlink" href="#front-a-compress-observations" title="Permanent link">&para;</a></h3>
+<p><strong>C1: discrete marginal multi-predictor assembly</strong></p>
+<p>Target: huge <span class="arithmatex">\(n\)</span> with moderate <span class="arithmatex">\(p\)</span>.</p>
+<h3 id="front-b-stop-materializing-high-dimensional-algebra">Front B — Stop materializing high-dimensional algebra<a class="headerlink" href="#front-b-stop-materializing-high-dimensional-algebra" title="Permanent link">&para;</a></h3>
+<p><strong>C15 + C18</strong>, supported by C3/C19.</p>
+<p>Target: large <span class="arithmatex">\(p\)</span> through operator Hessians, iterative solves, stochastic traces, multilevel preconditioning, and recycled subspaces.</p>
+<h3 id="front-c-stop-wasting-coefficients">Front C — Stop wasting coefficients<a class="headerlink" href="#front-c-stop-wasting-coefficients" title="Permanent link">&para;</a></h3>
+<p><strong>C16 + C21 + C22</strong>, with C26 as a solver enabler.</p>
+<p>Target: improve representational efficiency and predictive performance through local adaptivity, sparse higher-order interactions, and graph structure.</p>
+<p>These fronts should share infrastructure where the mathematics permits, but they should not be forced into one backend if the complexity regimes differ.</p>
+<h2 id="research-questions-worth-attacking-directly">Research questions worth attacking directly<a class="headerlink" href="#research-questions-worth-attacking-directly" title="Permanent link">&para;</a></h2>
+<h3 id="r1-can-c1-and-c15-be-composed">R1 — Can C1 and C15 be composed?<a class="headerlink" href="#r1-can-c1-and-c15-be-composed" title="Permanent link">&para;</a></h3>
+<p>Can a marginal-discrete design provide efficient Hessian-vector products for coupled LSS models without either:</p>
+<ul>
+<li>reconstructing <span class="arithmatex">\(O(p^2)\)</span> cross-product blocks, or</li>
+<li>reverting to a full <span class="arithmatex">\(O(np)\)</span> row pass at every Krylov iteration?</li>
+</ul>
+<p>A positive answer would attack large <span class="arithmatex">\(n\)</span> and large <span class="arithmatex">\(p\)</span> simultaneously.</p>
+<h3 id="r2-can-adaptive-spline-truncation-be-certified-relative-to-a-fixed-virtual-basis">R2 — Can adaptive spline truncation be certified relative to a fixed virtual basis?<a class="headerlink" href="#r2-can-adaptive-spline-truncation-be-certified-relative-to-a-fixed-virtual-basis" title="Permanent link">&para;</a></h3>
+<p>Predeclare a large <span class="arithmatex">\(V_{\max}\)</span>, solve only an adaptive subset, and bound the difference between the adaptive numerical solution and the full-basis penalized optimum in units relevant to inference.</p>
+<p>This is much stronger than automatic knot placement.</p>
+<h3 id="r3-can-expected-fisher-geometry-systematically-precondition-observed-lss-curvature">R3 — Can expected Fisher geometry systematically precondition observed LSS curvature?<a class="headerlink" href="#r3-can-expected-fisher-geometry-systematically-precondition-observed-lss-curvature" title="Permanent link">&para;</a></h3>
+<p>Tweedie supplies a known orthogonal test case. The research contribution is to turn expected-vs-observed geometry into an automatic solver diagnostic/controller and extend useful parameterizations to families such as GPD and generalized Gamma.</p>
+<h2 id="numerical-moonshot">Numerical moonshot<a class="headerlink" href="#numerical-moonshot" title="Permanent link">&para;</a></h2>
+<p>The computational moonshot is:</p>
+<div class="arithmatex">\[
+\boxed{
+\text{large }n
++
+\text{large }p
++
+\text{multiple predictors}
++
+\text{automatic smoothing}
++
+\text{full likelihood inference}
+}
+\]</div>
+<p>with exact or explicitly quantified approximation error.</p>
+<p>The predictive moonshot is:</p>
+<div class="arithmatex">\[
+\boxed{
+\text{adaptive hierarchical main effects}
++
+\text{sparse-grid interactions}
++
+\text{graph-structured factors}
++
+\text{distributional likelihood}
+}
+\]</div>
+<p>That remains recognizably additive and interpretable while acquiring several capabilities that make tree models strong: local adaptivity, sharp changes, structured categorical sharing, and richer interactions.</p>
+<hr />
+<h2 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

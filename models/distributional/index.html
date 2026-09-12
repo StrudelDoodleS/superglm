@@ -1,0 +1,4019 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+        <link rel="prev" href="../../guide/workflows/">
+      
+      
+        <link rel="next" href="../distributional-inference/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Distributional Models - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#distributional-models" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Distributional Models
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your First Distributional Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Models
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#first-gaussian-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        First Gaussian model
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="First Gaussian model">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#migrating-existing-construction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migrating existing construction
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#declaring-terms-and-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Declaring terms and parameters
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#family-predictor-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Family predictor names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gamma-meancv-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gamma mean–CV model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#negative-binomial-meantheta-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Negative-binomial mean–theta model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#generalized-gamma-meanscaleshape-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Generalized gamma mean–scale–shape model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#log-normal-meanscale-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log-normal mean–scale model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-piece-skew-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two-piece skew models
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#generalized-pareto-excess-scaleshape-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Generalized Pareto excess scale–shape model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tweedie-meandispersionpower-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tweedie mean–dispersion–power model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gaussian-parameterization-and-scale-floor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gaussian parameterization and scale floor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#weights-and-offsets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Weights and offsets
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#separated-cells" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Separated cells
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fixed-penalties-and-efs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed penalties and EFS
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Fixed penalties and EFS">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-smoothing-parameters-are-chosen" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How smoothing parameters are chosen
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prediction-and-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prediction and inference
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Prediction and inference">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inference-suite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inference suite
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-fremtpl2-severity-comparison" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked FreMTPL2 severity comparison
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#discrete-fitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discrete fitting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#curvature-choice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Curvature choice
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#derivative-orders-and-which-families-supply-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Derivative orders, and which families supply them
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#telemetry-and-serialization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Telemetry and serialization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Telemetry and serialization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#diagnosing-a-fit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Diagnosing a fit
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#current-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../distributional-inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking A Distributional Fit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/screening-evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/migrations/family-bound-predictors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: family-bound predictors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributional-family-development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Family Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperLSS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#first-gaussian-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        First Gaussian model
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="First Gaussian model">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#migrating-existing-construction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migrating existing construction
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#declaring-terms-and-parameters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Declaring terms and parameters
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#family-predictor-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Family predictor names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gamma-meancv-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gamma mean–CV model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#negative-binomial-meantheta-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Negative-binomial mean–theta model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#generalized-gamma-meanscaleshape-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Generalized gamma mean–scale–shape model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#log-normal-meanscale-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log-normal mean–scale model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-piece-skew-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two-piece skew models
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#generalized-pareto-excess-scaleshape-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Generalized Pareto excess scale–shape model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#tweedie-meandispersionpower-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tweedie mean–dispersion–power model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gaussian-parameterization-and-scale-floor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gaussian parameterization and scale floor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#weights-and-offsets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Weights and offsets
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#separated-cells" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Separated cells
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fixed-penalties-and-efs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed penalties and EFS
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Fixed penalties and EFS">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-smoothing-parameters-are-chosen" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How smoothing parameters are chosen
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prediction-and-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prediction and inference
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Prediction and inference">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#inference-suite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inference suite
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-fremtpl2-severity-comparison" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked FreMTPL2 severity comparison
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#discrete-fitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discrete fitting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#curvature-choice" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Curvature choice
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#derivative-orders-and-which-families-supply-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Derivative orders, and which families supply them
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#telemetry-and-serialization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Telemetry and serialization
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Telemetry and serialization">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#diagnosing-a-fit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Diagnosing a fit
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#current-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current limits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="distributional-models">Distributional models<a class="headerlink" href="#distributional-models" title="Permanent link">&para;</a></h1>
+<p><code>SuperLSS</code> fits several linked predictors jointly. <code>GaussianLS</code> has one predictor
+for conditional location and another for conditional standard deviation. Use it
+when a continuous response is reasonably Gaussian after any documented
+transformation but its spread changes with risk characteristics. The
+distributional surface also includes <code>GammaLS</code>, with predictors for conditional
+mean and coefficient of variation, for strictly positive responses. <code>TweedieLSS</code>
+adds a three-predictor model for nonnegative responses with a zero atom.
+<code>NegativeBinomialLS</code> jointly models the mean and NB2 size of count data.</p>
+<p>Do not use <code>GaussianLS</code> for raw claim counts. Use <code>NegativeBinomialLS</code> when both
+the count mean and overdispersion vary; use a Poisson or scalar
+negative-binomial <code>SuperGLM</code> when a second predictor is not needed.</p>
+<p>Start with <a href="../../getting-started/distributional/">Your first distributional model</a>
+for a runnable example with sample data. This page explains the families and
+modelling options. Method signatures are in the
+<a href="../../api/distributional/">SuperLSS API reference</a>.</p>
+<h2 id="first-gaussian-model">First Gaussian model<a class="headerlink" href="#first-gaussian-model" title="Permanent link">&para;</a></h2>
+<p>Create a family, then declare every parameter with helpers on that same instance.
+<code>SuperLSS</code> is the model entry point; helpers return declarations, not fitted models.
+Declarations may appear in any order. Results use the family's canonical order.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">GaussianLS</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">family</span> <span class="o">=</span> <span class="n">GaussianLS</span><span class="p">(</span><span class="n">scale_floor</span><span class="o">=</span><span class="mf">0.05</span><span class="p">)</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">family</span><span class="o">.</span><span class="n">location</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">),</span> <span class="n">s</span><span class="p">(</span><span class="s2">&quot;VehAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">)),</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">select</span><span class="o">=</span><span class="kc">True</span><span class="p">)),</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="p">)</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="n">model</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">train_df</span><span class="p">,</span> <span class="n">y_train</span><span class="p">,</span> <span class="n">method</span><span class="o">=</span><span class="s2">&quot;efs&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="n">parameters</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">predict_parameters</span><span class="p">(</span><span class="n">holdout_df</span><span class="p">)</span>
+</code></pre></div>
+<p><code>parameters</code> is a pandas DataFrame with columns <code>location</code> and <code>scale</code>.
+<code>predict_link()</code> returns the corresponding linear predictors. For Gaussian LS,
+<code>predict()</code> returns conditional location, not scale and not a transformed-response
+mean.</p>
+<h3 id="migrating-existing-construction">Migrating existing construction<a class="headerlink" href="#migrating-existing-construction" title="Permanent link">&para;</a></h3>
+<p>The former <code>SuperLSS(family=family, predictors=...)</code> constructor is removed.
+Pass the family positionally and replace predictor templates with declarations
+bound to that same family. The <a href="../../development/migrations/family-bound-predictors/">migration guide</a>
+shows the before and after forms, including term conversion, predictor controls
+and programmatic construction with <code>*declarations</code>.</p>
+<h2 id="declaring-terms-and-parameters">Declaring terms and parameters<a class="headerlink" href="#declaring-terms-and-parameters" title="Permanent link">&para;</a></h2>
+<p>Every parameter needs an explicit declaration. An empty helper, such as
+<code>family.scale()</code>, requests an intercept-only predictor. Pass <code>intercept=False</code>
+to omit that intercept. Omitting the helper entirely is an error. For example,
+<code>SuperLSS(family, family.location("age"))</code> with a Gaussian family reports:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>GaussianLS is missing a predictor for scale.
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>SuperLSS(
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    family,
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>    family.location(...),
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>    family.scale(...),  # &lt;--- missing predictor; add this
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>)
+</code></pre></div>
+<p>The <code>...</code> marks where to supply terms; it is not a term to copy into executable
+code. Call helpers with parentheses and use the same family instance throughout.
+The model snapshots the declarations and family configuration at construction.</p>
+<p>A bare string means a numeric linear term: <code>family.location("age")</code>. It never
+infers categories from the data. Use <code>cat("region")</code> for categorical encoding,
+<code>s("age")</code> for a spline, and <code>re("broker")</code> for a random effect. Existing feature
+specifications can be bound with <code>term("age", Numeric())</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">GaussianLS</span><span class="p">,</span> <span class="n">Numeric</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">cat</span><span class="p">,</span> <span class="n">re</span><span class="p">,</span> <span class="n">s</span><span class="p">,</span> <span class="n">term</span><span class="p">,</span> <span class="n">ti</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">family</span> <span class="o">=</span> <span class="n">GaussianLS</span><span class="p">()</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="n">family</span><span class="o">.</span><span class="n">location</span><span class="p">(</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>        <span class="n">s</span><span class="p">(</span><span class="s2">&quot;age&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">),</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>        <span class="n">s</span><span class="p">(</span><span class="s2">&quot;vehicle_age&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">),</span>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>        <span class="n">ti</span><span class="p">(</span><span class="s2">&quot;age&quot;</span><span class="p">,</span> <span class="s2">&quot;vehicle_age&quot;</span><span class="p">),</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>        <span class="n">cat</span><span class="p">(</span><span class="s2">&quot;region&quot;</span><span class="p">),</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>        <span class="n">re</span><span class="p">(</span><span class="s2">&quot;broker&quot;</span><span class="p">),</span>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>        <span class="n">term</span><span class="p">(</span><span class="s2">&quot;density&quot;</span><span class="p">,</span> <span class="n">Numeric</span><span class="p">()),</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a>    <span class="p">),</span>
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>    <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(),</span>
+<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a><span class="p">)</span>
+</code></pre></div>
+<p><code>ti(left, right)</code> adds an interaction-only tensor using two spline parents
+declared in that predictor. It does not add the parent main effects. Both
+parents must be splines; categorical and higher-order tensors are unsupported
+by this shorthand. Its optional <code>n_knots=(left, right)</code> and <code>decompose=</code> controls
+retain the existing tensor semantics. For other supported explicit interaction
+specifications, use <code>interaction(spec, name=...)</code> and declare their parents in
+the same predictor.</p>
+<p>Custom families need no helper methods. Bind each canonical parameter explicitly
+with <code>bind_predictor(family, "parameter_name", *terms, intercept=True, link=None)</code>;
+the <a href="../../distributional-family-development/">family development guide</a> includes
+a complete custom-family example.</p>
+<p>Custom families and links must keep executable settings in independently copyable
+instance state. Class-declared parameter metadata is copied onto the family
+snapshot when needed. Shared metadata that cannot be isolated raises <code>TypeError</code>.
+Snapshots do not isolate arbitrary mutable globals or state captured by closures.</p>
+<h2 id="family-predictor-names">Family predictor names<a class="headerlink" href="#family-predictor-names" title="Permanent link">&para;</a></h2>
+<p>These are the currently supported helper names. Call each helper with its
+terms, or with no terms for an intercept-only predictor. The result names
+also identify parameters in offsets and penalty keys.</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Helpers</th>
+<th>Result columns</th>
+<th>Parameter meanings</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GaussianLS</code></td>
+<td><code>location</code>, <code>scale</code></td>
+<td><code>location</code>, <code>scale</code></td>
+<td>Response mean and standard deviation</td>
+</tr>
+<tr>
+<td><code>GammaLS</code></td>
+<td><code>mean</code>, <code>scale</code></td>
+<td><code>mean</code>, <code>scale</code></td>
+<td>Response mean and coefficient of variation</td>
+</tr>
+<tr>
+<td><code>NegativeBinomialLS</code></td>
+<td><code>mean</code>, <code>theta</code></td>
+<td><code>mean</code>, <code>theta</code></td>
+<td>Response mean and NB2 size</td>
+</tr>
+<tr>
+<td><code>TweedieLSS</code></td>
+<td><code>mu</code>, <code>phi</code>, <code>p</code></td>
+<td><code>mean</code>, <code>dispersion</code>, <code>power</code></td>
+<td>Response mean, dispersion and variance power</td>
+</tr>
+<tr>
+<td><code>GeneralizedParetoLSS</code></td>
+<td><code>scale</code>, <code>shape</code></td>
+<td><code>scale</code>, <code>shape</code></td>
+<td>Excess scale and tail shape xi</td>
+</tr>
+<tr>
+<td><code>LogNormalLS</code></td>
+<td><code>mean</code>, <code>scale</code></td>
+<td><code>mean</code>, <code>scale</code></td>
+<td>Response mean and standard deviation of the log response</td>
+</tr>
+<tr>
+<td><code>GeneralizedGammaLSS</code></td>
+<td><code>mean</code>, <code>scale</code>, <code>shape</code></td>
+<td><code>mean</code>, <code>scale</code>, <code>shape</code></td>
+<td>Response mean, Prentice's sigma and Q</td>
+</tr>
+<tr>
+<td><code>TwoPieceNormalLSS</code></td>
+<td><code>location</code>, <code>scale</code>, <code>skew</code></td>
+<td><code>location</code>, <code>scale</code>, <code>skew</code></td>
+<td>Two-piece location, scale and epsilon asymmetry</td>
+</tr>
+<tr>
+<td><code>TwoPieceLogNormalLSS</code></td>
+<td><code>mean</code>, <code>scale</code>, <code>skew</code></td>
+<td><code>mean</code>, <code>scale</code>, <code>skew</code></td>
+<td>Response mean, log-response scale and epsilon asymmetry</td>
+</tr>
+</tbody>
+</table>
+<p><code>LogNormalLS</code>, <code>GeneralizedGammaLSS</code> and <code>TwoPieceLogNormalLSS</code> also accept
+<code>parametrisation="location"</code>. In that form, replace the first <code>mean</code> helper
+and result column with <code>location</code>. Their location belongs to the log-response
+law. It equals the mean log response for <code>LogNormalLS</code>; the other two families
+do not generally have that equality. The response supplied to fitting remains
+on its original positive scale in either form.</p>
+<p>The names follow each family's chosen parameters. Scale does not always mean
+standard deviation. Gamma's <code>scale</code> is CV, and its GLM dispersion is CV squared.
+The two-piece families' <code>skew</code> controls piece widths and is not the standardized
+third moment. See the family sections below for links, bounds and weight laws.</p>
+<p>The <a href="../../api/families/#distributional-families">family API reference</a> documents
+the constructor options and each helper. Mean and location are distinct
+parameters where a family offers both forms; choosing a form changes what the
+first additive predictor describes.</p>
+<h2 id="gamma-meancv-model">Gamma mean–CV model<a class="headerlink" href="#gamma-meancv-model" title="Permanent link">&para;</a></h2>
+<p>Gamma results are ordered <code>mean</code>, then <code>scale</code>, and <code>fit_reml()</code> estimates
+their smoothing parameters jointly:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">GammaLS</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">family</span> <span class="o">=</span> <span class="n">GammaLS</span><span class="p">()</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="n">family</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">)),</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">select</span><span class="o">=</span><span class="kc">True</span><span class="p">)),</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="p">)</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">train_df</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="n">parameters</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">predict_parameters</span><span class="p">(</span><span class="n">holdout_df</span><span class="p">)</span>
+</code></pre></div>
+<p><code>parameters</code> has columns <code>mean</code> and <code>scale</code>; <code>predict()</code> returns <code>mean</code>. Here
+<code>scale</code> is the coefficient of variation (CV), not variance and not Gamma shape.
+For a unit prior weight,</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>Var(Y | x) = mean² × scale²
+</code></pre></div>
+<p>and under prior precision weight <code>w</code>,</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>Var(Y | x, w) = mean² × scale² / w.
+</code></pre></div>
+<p>This is the parameterization used internally. Comparators such as mgcv and MSSM
+usually report dispersion <code>φ</code>, with the exact mapping <code>φ = scale²</code>.</p>
+<p>Gamma support is strictly positive. A zero response is not a small positive
+Gamma observation and is rejected; use a model whose law has mass at zero. Prior
+precision is the default weight semantics. Explicit
+<code>weight_semantics="frequency"</code> instead treats each integer weight as literal row
+replication.</p>
+<p><strong>Functionals.</strong> <code>predict_cdf(X, y)</code> and <code>predict_quantile(X, p)</code> use the gamma
+distribution functions in this mean–CV parametrisation. Certified expected
+shortfall is available for both the unit law and the prior-weighted row law.</p>
+<h2 id="negative-binomial-meantheta-model">Negative-binomial mean–theta model<a class="headerlink" href="#negative-binomial-meantheta-model" title="Permanent link">&para;</a></h2>
+<p><code>NegativeBinomialLS</code> is the NB2 family with canonical parameter/result order
+<code>mean</code>, then <code>theta</code>. Both use log links. For conditional mean <span class="arithmatex">\(\mu\)</span> and size
+<span class="arithmatex">\(\theta\)</span>,</p>
+<div class="arithmatex">\[
+E(Y)=\mu, \qquad \operatorname{Var}(Y)=\mu+\frac{\mu^2}{\theta}.
+\]</div>
+<p>Larger <code>theta</code> means less overdispersion. <code>predict_parameters()</code> returns columns
+<code>mean</code> and <code>theta</code>, while <code>predict()</code> returns the conditional mean in the
+observation coordinates supplied to the fit or prediction call.</p>
+<p>The primary actuarial representation models a rate and supplies exposure as the
+default prior weight:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">NegativeBinomialLS</span><span class="p">,</span> <span class="n">SuperLSS</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="k">def</span><span class="w"> </span><span class="nf">nb2_model</span><span class="p">():</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">family</span> <span class="o">=</span> <span class="n">NegativeBinomialLS</span><span class="p">()</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="k">return</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>        <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>        <span class="n">family</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="s2">&quot;VehAge&quot;</span><span class="p">),</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>        <span class="n">family</span><span class="o">.</span><span class="n">theta</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="s2">&quot;VehAge&quot;</span><span class="p">),</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>    <span class="p">)</span>
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="n">rate_model</span> <span class="o">=</span> <span class="n">nb2_model</span><span class="p">()</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a>    <span class="n">train_df</span><span class="p">,</span>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>    <span class="n">claim_count</span> <span class="o">/</span> <span class="n">exposure</span><span class="p">,</span>
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a>    <span class="n">sample_weight</span><span class="o">=</span><span class="n">exposure</span><span class="p">,</span>
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a><span class="p">)</span>
+</code></pre></div>
+<p><code>claim_count</code> must be a non-negative integer count; the prior route verifies
+that <code>exposure * (claim_count / exposure)</code> returns to that count lattice.</p>
+<p>If <span class="arithmatex">\(\lambda\)</span> is mean rate, <span class="arithmatex">\(\kappa\)</span> is size per unit exposure, and <span class="arithmatex">\(e\)</span>
+is exposure, this prior-weight construction is</p>
+<div class="arithmatex">\[
+\text{ClaimCount}\mid x,e \sim \operatorname{NB2}(e\lambda,e\kappa).
+\]</div>
+<p>The exactly equivalent raw-count fit uses unit likelihood weights and adds
+<code>log(exposure)</code> to both predictors:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">log_exposure</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">exposure</span><span class="p">)</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">raw_equivalent</span> <span class="o">=</span> <span class="n">nb2_model</span><span class="p">()</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>    <span class="n">train_df</span><span class="p">,</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>    <span class="n">claim_count</span><span class="p">,</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">offsets</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>        <span class="s2">&quot;mean&quot;</span><span class="p">:</span> <span class="n">log_exposure</span><span class="p">,</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>        <span class="s2">&quot;theta&quot;</span><span class="p">:</span> <span class="n">log_exposure</span><span class="p">,</span>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>    <span class="p">},</span>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="p">)</span>
+</code></pre></div>
+<p>Adding exposure only to the mean is supported, but it is a different model:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="n">persistent_frailty</span> <span class="o">=</span> <span class="n">nb2_model</span><span class="p">()</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>    <span class="n">train_df</span><span class="p">,</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>    <span class="n">claim_count</span><span class="p">,</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>    <span class="n">offsets</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;mean&quot;</span><span class="p">:</span> <span class="n">log_exposure</span><span class="p">},</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="p">)</span>
+</code></pre></div>
+<p>This specifies <span class="arithmatex">\(\operatorname{NB2}(e\lambda,\theta)\)</span>: heterogeneity persists
+as exposure grows instead of the NB2 size accumulating with exposure. Choose
+between these laws as a modeling assumption; the API does not infer one from a
+column name.</p>
+<p>Future raw-count predictions must receive offsets consistent with the fitted
+law. For the primary reproductive-exposure model, offset both parameters:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">future_log_exposure</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">future_exposure</span><span class="p">)</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="n">future_offsets</span> <span class="o">=</span> <span class="p">{</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>    <span class="s2">&quot;mean&quot;</span><span class="p">:</span> <span class="n">future_log_exposure</span><span class="p">,</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>    <span class="s2">&quot;theta&quot;</span><span class="p">:</span> <span class="n">future_log_exposure</span><span class="p">,</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="p">}</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="n">future_count_parameters</span> <span class="o">=</span> <span class="n">rate_model</span><span class="o">.</span><span class="n">predict_parameters</span><span class="p">(</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>    <span class="n">future_df</span><span class="p">,</span>
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>    <span class="n">offsets</span><span class="o">=</span><span class="n">future_offsets</span><span class="p">,</span>
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="p">)</span>
+<a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a><span class="n">future_count_mean</span> <span class="o">=</span> <span class="n">rate_model</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">future_df</span><span class="p">,</span> <span class="n">offsets</span><span class="o">=</span><span class="n">future_offsets</span><span class="p">)</span>
+</code></pre></div>
+<p>Omit those offsets for unit-exposure rate predictions. A persistent-frailty fit
+instead receives only the future <code>mean</code> offset.</p>
+<p>The likelihood's size terms are evaluated by an exact recurrence with one
+cell per count unit, so an evaluation costs <code>sum(claim_count)</code> recurrence
+cells in addition to its ordinary per-row work. The kernel refuses an
+evaluation above a budget of 2e8 cells. Both standard remedies keep the
+likelihood exact: aggregate identical rows and fit them with
+<code>weight_semantics="frequency"</code>, or move exposure into an offset so that the
+counts themselves stay small.</p>
+<p>The finite kernel permits <code>2**-52 &lt;= mean/theta &lt;= 2**26</code>, subject to its
+unchanged absolute/effective exponent, weight, overflow, and numerical
+retention checks. The extended low-mean range uses the existing checked
+finite-NB2 recurrences and series. It lets low-exposure rows remain in a
+distributional fit without substituting a Poisson density. Ratios below this
+range still raise <code>NegativeBinomialPoissonBoundaryError</code>.</p>
+<p>Fixed-smoothing and EFS fits support dense or grouped discrete execution with
+observed curvature. <code>NegativeBinomialLS</code> does not supply Fisher information. This family is not zero-inflated and does not claim an exact Poisson
+active face, CDF or quantile methods, random generation, or complete-fit speed.</p>
+<h2 id="generalized-gamma-meanscaleshape-model">Generalized gamma mean–scale–shape model<a class="headerlink" href="#generalized-gamma-meanscaleshape-model" title="Permanent link">&para;</a></h2>
+<p><code>GeneralizedGammaLSS</code> is Prentice's generalized gamma for a strictly positive
+severity, with canonical parameter/result order <code>mean</code> (log link), <code>scale</code>
+(log link with a floor, default 0.01) and <code>shape</code> (identity link, any real
+value). <code>shape = 0</code> is the log-normal, <code>shape = 1</code> the Weibull and
+<code>shape = scale</code> the gamma; a negative <code>shape</code> gives a power-law right tail with
+index <code>1/(scale·|shape|)</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">GeneralizedGammaLSS</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">cat</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="n">family</span> <span class="o">=</span> <span class="n">GeneralizedGammaLSS</span><span class="p">()</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a>    <span class="n">family</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">),</span> <span class="n">cat</span><span class="p">(</span><span class="s2">&quot;Region&quot;</span><span class="p">)),</span>
+<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>    <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">cat</span><span class="p">(</span><span class="s2">&quot;Region&quot;</span><span class="p">)),</span>
+<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a>    <span class="n">family</span><span class="o">.</span><span class="n">shape</span><span class="p">(),</span>
+<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="p">)</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="n">severity</span><span class="p">)</span>
+</code></pre></div>
+<p><strong>Mean form (default).</strong> The first predictor is <code>E[Y]</code>, so its relativities
+multiply the mean exactly as for <code>GammaLS</code>; the scale and shape predictors
+only redistribute mass within a cell and never touch the mean table. The mean
+must exist: cells with <code>shape &lt; 0</code> and <code>scale·|shape| ≥ 1</code> are outside the
+model, the solver's line search backs away from them, and a repeated curvature
+failure is diagnosed with a message naming that boundary. A book whose tail
+genuinely has no mean drives the intercept-only null fit into that boundary
+and the fit stops with <code>NullModelFitError</code>; use the location form for it.</p>
+<p><strong>Location form.</strong> <code>GeneralizedGammaLSS(parametrisation="location")</code> puts the
+identity-linked log-scale location first (<code>log Y = location + scale·W</code>); its
+relativities multiply every quantile, and an infinite mean is a legitimate
+fit. <code>predict()</code> returns the conditional mean in both forms (<code>inf</code> where it
+does not exist).</p>
+<p><strong>Weights.</strong> Frequency weights replicate rows. Non-unit prior weights are
+refused: the family is not reproductive, so there is no averaging law. Fit
+claim-level rows and carry exposure through offsets.</p>
+<p><strong>Functionals.</strong> <code>predict_cdf(X, y)</code> and <code>predict_quantile(X, p)</code> are closed
+form in the regularised incomplete gamma; <code>predict()</code> is the mean. Certified
+expected shortfall is available for the unit law. Non-unit prior weights are
+already refused by this family, so it has no prior-weighted tail functional.</p>
+<p><strong>Oracles.</strong> <code>scipy.stats.gengamma(a=shape⁻², c=shape/scale,
+scale=exp(location − scale·log(shape⁻²)/shape))</code>; gamlss <code>GG</code> with
+<code>mu = exp(location)</code>, <code>sigma = scale</code>, <code>nu = shape/scale</code>.</p>
+<h2 id="log-normal-meanscale-model">Log-normal mean–scale model<a class="headerlink" href="#log-normal-meanscale-model" title="Permanent link">&para;</a></h2>
+<p><code>LogNormalLS</code> is the two-parameter log-normal for a strictly positive severity:
+<code>log Y ~ N(mu, sigma^2)</code>, with predictors <code>mean</code> (log link) and <code>scale</code> (log
+link with a floor, default 0.01). It is the <code>shape = 0</code> member of
+<code>GeneralizedGammaLSS</code> and the <code>skew = 0</code> member of <code>TwoPieceLogNormalLSS</code>, and
+the tests pin both identities to 1e-14, so it is the right choice when the
+extra shape parameter is not paying for itself.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LogNormalLS</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">cat</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="n">family</span> <span class="o">=</span> <span class="n">LogNormalLS</span><span class="p">()</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>    <span class="n">family</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;vehicle_age&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">)),</span>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>    <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">cat</span><span class="p">(</span><span class="s2">&quot;region&quot;</span><span class="p">)),</span>
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="p">)</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">frame</span><span class="p">,</span> <span class="n">severity</span><span class="p">)</span>
+</code></pre></div>
+<p><strong>Mean form (default).</strong> The first predictor is <code>E[Y] = exp(mu + sigma^2 / 2)</code>,
+so its relativities multiply the mean exactly as for <code>GammaLS</code>, and the scale
+predictor redistributes mass within a cell without moving the mean table. The
+mean always exists, so -- unlike the generalized gamma -- neither form has an
+invalid region.</p>
+<p><strong>Location form.</strong> <code>LogNormalLS(parametrisation="location")</code> puts the
+identity-linked log-scale location first; its relativities multiply every
+quantile. Fitting this form on <code>y</code> is the same likelihood as fitting
+<code>GaussianLS</code> on <code>log y</code>, but <code>predict()</code> returns the mean on the <code>y</code> scale
+instead of the location on the log scale, which is the transformation the
+current-limits list warns about doing by hand.</p>
+<p><strong>Weights.</strong> Frequency weights replicate rows. Non-unit prior weights are
+refused: the family is not reproductive, so there is no averaging law. Fit
+claim-level rows and carry exposure through offsets.</p>
+<p><strong>Functionals.</strong> <code>predict_cdf(X, y)</code> and <code>predict_quantile(X, p)</code> are the
+normal cdf and its inverse on the log scale; <code>predict()</code> is the mean. Certified
+expected shortfall is available for the unit law, but not for a non-unit prior
+law that the family cannot represent.</p>
+<p><strong>Oracles.</strong> <code>scipy.stats.lognorm(s=scale, scale=exp(location))</code>; gamlss
+<code>LOGNO</code> with <code>mu = location</code> and <code>sigma = scale</code>.</p>
+<h2 id="two-piece-skew-models">Two-piece skew models<a class="headerlink" href="#two-piece-skew-models" title="Permanent link">&para;</a></h2>
+<p><code>TwoPieceLogNormalLSS</code> and <code>TwoPieceNormalLSS</code> are the two carriers of one
+epsilon-skew two-piece normal law. Writing <code>W</code> for the standard two-piece
+variate,</p>
+<div class="highlight"><pre><span></span><code>f_W(w) = phi(w / (1 - eps))   for w &lt;  0
+         phi(w / (1 + eps))   for w &gt;= 0
+</code></pre></div>
+<p>so the <strong>right piece is the wide one for a positive skew</strong>, and the density
+needs no extra normalising constant: each half contributes <code>(1 -/+ eps)/2</code>.
+<code>TwoPieceLogNormalLSS</code> puts <code>log Y = mu + scale * W</code> on <code>y &gt; 0</code>;
+<code>TwoPieceNormalLSS</code> puts <code>Y = location + scale * W</code> on the whole line. Positive
+<code>skew</code> therefore means a heavier right tail on the <strong>log</strong> scale for the
+log-normal family and on the <strong>response</strong> scale for the real-line one.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">TwoPieceLogNormalLSS</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="n">family</span> <span class="o">=</span> <span class="n">TwoPieceLogNormalLSS</span><span class="p">()</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="n">severity</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a>    <span class="n">family</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">)),</span>
+<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>    <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;VehAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">6</span><span class="p">)),</span>
+<a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a>    <span class="n">family</span><span class="o">.</span><span class="n">skew</span><span class="p">(),</span>
+<a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="p">)</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">claims</span><span class="p">,</span> <span class="n">claims</span><span class="p">[</span><span class="s2">&quot;loss&quot;</span><span class="p">])</span>
+</code></pre></div>
+<p><strong>Naming.</strong> Both classes end in <code>LSS</code>, including <code>TwoPieceNormalLSS</code>: the
+suffix records that the family carries a <em>shape</em> predictor, not that its
+response leaves the real line. <code>LogNormalLS</code>, which has no skew, is the <code>LS</code>
+sibling.</p>
+<p><strong>Parametrisation.</strong> <code>TwoPieceLogNormalLSS</code> is mean-parametrised by default:
+its first parameter is <code>E[Y]</code> under a log link, so a relativity on the <code>mean</code>
+predictor multiplies the fitted mean and the <code>scale</code> and <code>skew</code> predictors
+leave the mean table alone. That works because the mean loading</p>
+<div class="highlight"><pre><span></span><code>K(scale, skew) = (1 + eps) e^{s^2 (1+eps)^2 / 2} Phi(s (1+eps))
+               + (1 - eps) e^{s^2 (1-eps)^2 / 2} Phi(-s (1-eps))
+</code></pre></div>
+<p>is finite everywhere in the support, so <code>E[Y] = e^mu K</code> never diverges; there
+is no infinite-mean region to diagnose. Pass
+<code>TwoPieceLogNormalLSS(parametrisation="location")</code> for the location form
+(identity link on <code>mu</code>), which reaches the same fitted law.
+<code>TwoPieceNormalLSS</code> has no mean form: <code>E[Y] = location + 2 * skew * scale *
+sqrt(2/pi)</code> is a functional that <code>predict()</code> returns, not a natural parameter.</p>
+<p><strong>The skew wall.</strong> <code>skew</code> carries a two-wall logit on <code>(-skew_bound,
+skew_bound)</code> with <code>skew_bound = 0.9</code>. Both parametrisations are positive
+definite over the whole grid, and at the symmetric point the mean form is the
+better conditioned of the two (condition number 21.4 against the location
+form's 29.7 at <code>scale = 0.5</code>). Where the mean form degrades is the skew wall:
+at <code>scale = 1.5</code>, <code>skew = 0.9</code> its condition number is 3.2e3 against the
+location form's 56.8, which is why the wall stops at <code>0.9</code> rather than at
+<code>0.99</code>. Sample skewness is also bounded: the family reaches only <code>+/-0.9655</code>
+skewness at <code>|eps| = 0.899</code>, and the moment initialiser clamps beyond that
+with a warning rather than failing.</p>
+<p><strong>Weights.</strong> Frequency weights replicate rows exactly. Non-unit prior weights
+are refused: the family is not reproductive, so averaging has no likelihood
+law. Fit claim-level rows and carry exposure through offsets, or declare
+<code>weight_semantics="frequency"</code> for integer replication.</p>
+<p><strong>The kink.</strong> The log-likelihood is C1 and its Hessian jumps at <code>w = 0</code>. This
+is not smoothed away. Kimber (1985) proves the MLE remains asymptotically
+normal despite the break, and a refusal at the kink surfaces as a named
+<code>smoothing_convergence_reason_</code> rather than a silent flag.</p>
+<p><strong>Functionals.</strong> <code>predict_cdf(X, y)</code> and <code>predict_quantile(X, p)</code> are
+piecewise closed form, split at the mode; <code>predict()</code> is the conditional mean.
+The two-piece families do not currently certify expected shortfall, so the
+named posterior quantity refuses.</p>
+<p><strong>Oracles.</strong> At <code>skew = 0</code>, <code>TwoPieceLogNormalLSS</code> equals <code>GeneralizedGammaLSS</code>
+at shape 0 (the log-normal) and <code>TwoPieceNormalLSS</code> equals <code>GaussianLS</code>, both
+to 1e-14. Against gamlss <code>SN2</code> the mapping is exact, normalising constant
+included: <code>nu^2 = (1 + eps) / (1 - eps)</code> and <code>sigma_SN2 = scale * sqrt(1 -
+eps^2)</code>.</p>
+<p><strong>References.</strong> Mudholkar and Hutson (2000), <em>Journal of Statistical Planning
+and Inference</em> 83:291-309, for the epsilon-skew form; Arellano-Valle, Gomez and
+Quintana (2005), <em>Journal of Statistical Planning and Inference</em> 128:427-443;
+Rubio and Steel (2014), <em>Bayesian Analysis</em> 9:1-22, whose Theorem 3 and
+Corollary 2 give the two exact zeros in the expected information; Wallis (2014),
+<em>Statistical Science</em> 29:106-112, for the two-piece variance; Kimber (1985),
+<em>Journal of the Royal Statistical Society B</em> 47:16-19, for the MLE's asymptotic
+normality across the kink.</p>
+<h2 id="generalized-pareto-excess-scaleshape-model">Generalized Pareto excess scale–shape model<a class="headerlink" href="#generalized-pareto-excess-scaleshape-model" title="Permanent link">&para;</a></h2>
+<p><code>GeneralizedParetoLSS</code> is the generalized Pareto distribution of <strong>excesses
+over a threshold</strong>, with two predictors: <code>scale</code> (log link) and <code>shape</code> (a
+two-wall logit, default walls <code>(0, 1)</code>). The response is <code>y - u</code> for the rows
+above a threshold <code>u</code> that you choose; the threshold is not a family argument.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">GeneralizedParetoLSS</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="n">threshold</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">claims</span><span class="p">[</span><span class="s2">&quot;loss&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">quantile</span><span class="p">(</span><span class="mf">0.9</span><span class="p">))</span>
+<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="n">above</span> <span class="o">=</span> <span class="n">claims</span><span class="p">[</span><span class="s2">&quot;loss&quot;</span><span class="p">]</span> <span class="o">&gt;</span> <span class="n">threshold</span>
+<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a><span class="n">family</span> <span class="o">=</span> <span class="n">GeneralizedParetoLSS</span><span class="p">()</span>
+<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a><span class="n">tail</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a>    <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">)),</span>
+<a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>    <span class="n">family</span><span class="o">.</span><span class="n">shape</span><span class="p">(),</span>
+<a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a><span class="p">)</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">claims</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="n">above</span><span class="p">],</span> <span class="n">claims</span><span class="o">.</span><span class="n">loc</span><span class="p">[</span><span class="n">above</span><span class="p">,</span> <span class="s2">&quot;loss&quot;</span><span class="p">]</span> <span class="o">-</span> <span class="n">threshold</span><span class="p">)</span>
+</code></pre></div>
+<p><strong>Why the walls.</strong> A non-negative shape keeps the support <code>[0, inf)</code> for every
+row, so no row's support depends on its fitted parameters; a shape below one
+keeps the mean <code>scale / (1 - shape)</code> finite, which is what <code>predict()</code> returns.
+A negative lower wall is refused: it needs a response-dependent support slot the
+engine does not have yet. Narrow the walls with
+<code>GeneralizedParetoLSS(shape_lower=..., shape_upper=...)</code> when the tail index is
+known from elsewhere.</p>
+<p><strong>Weights.</strong> Frequency weights replicate rows. Non-unit prior weights are
+refused: the family is not reproductive, so there is no averaging law. Fit
+claim-level excess rows and carry exposure through offsets.</p>
+<p><strong>Functionals.</strong> <code>predict_cdf(X, y)</code> and <code>predict_quantile(X, p)</code> are closed
+form; <code>predict()</code> is the conditional mean of the excess. Certified expected
+shortfall is available for the unit excess law.</p>
+<p><strong>Splice recipe.</strong> A severity model for the whole book is three fits, not one:</p>
+<ol>
+<li>a body model on <code>y</code> for the rows at or below <code>u</code> (<code>GammaLS</code>,
+   <code>GeneralizedGammaLSS</code>, or a log-scale Gaussian);</li>
+<li>the exceedance probability <code>P(Y &gt; u | x)</code> from a binary GLM;</li>
+<li><code>GeneralizedParetoLSS</code> on <code>y - u</code> for the rows above <code>u</code>.</li>
+</ol>
+<p>The spliced survival above the threshold is
+<code>P(Y &gt; u | x) * (1 - predict_cdf(X, y - u))</code>, and a spliced quantile above <code>u</code>
+is <code>u + predict_quantile(X, 1 - q / P(Y &gt; u | x))</code> for <code>q &lt; P(Y &gt; u | x)</code>.
+Choosing <code>u</code> is a modelling decision (mean-residual-life or stability plots),
+not a fitted parameter, and the tail fit is conditional on it.</p>
+<p><strong>Oracles.</strong> <code>scipy.stats.genpareto(c=shape, scale=scale)</code>; gamlss <code>GP</code> with
+<code>mu = scale/shape</code>, <code>sigma = 1/shape</code>.</p>
+<h2 id="tweedie-meandispersionpower-model">Tweedie mean–dispersion–power model<a class="headerlink" href="#tweedie-meandispersionpower-model" title="Permanent link">&para;</a></h2>
+<p><code>TweedieLSS</code> has response support <code>[0, ∞)</code>, including a point mass at zero. Its
+construction helpers are <code>mu</code>, <code>phi</code>, and <code>p</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">LambdaPolicy</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">TweedieLSS</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a>
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="n">estimate</span> <span class="o">=</span> <span class="n">LambdaPolicy</span><span class="o">.</span><span class="n">estimate</span><span class="p">()</span>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="n">family</span> <span class="o">=</span> <span class="n">TweedieLSS</span><span class="p">(</span><span class="n">power_lower</span><span class="o">=</span><span class="mf">1.08</span><span class="p">,</span> <span class="n">power_upper</span><span class="o">=</span><span class="mf">1.92</span><span class="p">)</span>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a>    <span class="n">family</span><span class="o">.</span><span class="n">mu</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">lambda_policy</span><span class="o">=</span><span class="n">estimate</span><span class="p">)),</span>
+<a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a>    <span class="n">family</span><span class="o">.</span><span class="n">phi</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">lambda_policy</span><span class="o">=</span><span class="n">estimate</span><span class="p">)),</span>
+<a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a>    <span class="n">family</span><span class="o">.</span><span class="n">p</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">lambda_policy</span><span class="o">=</span><span class="n">estimate</span><span class="p">)),</span>
+<a id="__codelineno-14-10" name="__codelineno-14-10" href="#__codelineno-14-10"></a><span class="p">)</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span>
+<a id="__codelineno-14-11" name="__codelineno-14-11" href="#__codelineno-14-11"></a>    <span class="n">train_df</span><span class="p">,</span>
+<a id="__codelineno-14-12" name="__codelineno-14-12" href="#__codelineno-14-12"></a>    <span class="n">y_train</span><span class="p">,</span>
+<a id="__codelineno-14-13" name="__codelineno-14-13" href="#__codelineno-14-13"></a>    <span class="n">lambdas</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-14-14" name="__codelineno-14-14" href="#__codelineno-14-14"></a>        <span class="s2">&quot;mean:DrivAge#wiggle&quot;</span><span class="p">:</span> <span class="mf">1.0</span><span class="p">,</span>
+<a id="__codelineno-14-15" name="__codelineno-14-15" href="#__codelineno-14-15"></a>        <span class="s2">&quot;dispersion:DrivAge#wiggle&quot;</span><span class="p">:</span> <span class="mf">1.0</span><span class="p">,</span>
+<a id="__codelineno-14-16" name="__codelineno-14-16" href="#__codelineno-14-16"></a>        <span class="s2">&quot;power:DrivAge#wiggle&quot;</span><span class="p">:</span> <span class="mf">1.0</span><span class="p">,</span>
+<a id="__codelineno-14-17" name="__codelineno-14-17" href="#__codelineno-14-17"></a>    <span class="p">},</span>
+<a id="__codelineno-14-18" name="__codelineno-14-18" href="#__codelineno-14-18"></a>    <span class="n">max_reml_iter</span><span class="o">=</span><span class="mi">120</span><span class="p">,</span>
+<a id="__codelineno-14-19" name="__codelineno-14-19" href="#__codelineno-14-19"></a>    <span class="n">reml_tol</span><span class="o">=</span><span class="mf">1.0e-4</span><span class="p">,</span>
+<a id="__codelineno-14-20" name="__codelineno-14-20" href="#__codelineno-14-20"></a>    <span class="n">max_log_step</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span>
+<a id="__codelineno-14-21" name="__codelineno-14-21" href="#__codelineno-14-21"></a>    <span class="n">practical_reml</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<a id="__codelineno-14-22" name="__codelineno-14-22" href="#__codelineno-14-22"></a><span class="p">)</span>
+<a id="__codelineno-14-23" name="__codelineno-14-23" href="#__codelineno-14-23"></a>
+<a id="__codelineno-14-24" name="__codelineno-14-24" href="#__codelineno-14-24"></a><span class="n">parameters</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">predict_parameters</span><span class="p">(</span><span class="n">holdout_df</span><span class="p">)</span>
+</code></pre></div>
+<p><code>parameters</code> has columns <code>mean</code>, <code>dispersion</code>, and <code>power</code>; <code>predict()</code> returns
+the conditional mean. Construction helpers map <code>mu</code> to <code>mean</code>, <code>phi</code> to
+<code>dispersion</code>, and <code>p</code> to <code>power</code>. Offsets, prediction columns, fitted results,
+smoothing keys, and serialized parameter identities keep the canonical names
+<code>mean</code>, <code>dispersion</code>, and <code>power</code>.</p>
+<p>The configured power walls are part of the fitted family
+and artifact. They must satisfy <code>1 &lt; power_lower &lt; power_upper &lt; 2</code>, and the
+power link keeps fitted values strictly inside those walls.</p>
+<p>Both fixed smoothing parameters and automatic smoothing support dense or grouped
+discrete execution with observed coefficient curvature. There is no Fisher
+fallback for <code>TweedieLSS</code>.</p>
+<p>The example sets the outer iteration policy explicitly for reproducibility.
+Always inspect reported convergence, the terminal residual, and curvature
+provenance before relying on a fitted distributional model.</p>
+<p>Prior precision is the default weight semantics: a row weight <code>w</code> acts through
+Tweedie dispersion divided by <code>w</code>; it is not a row count. With explicit
+<code>weight_semantics="frequency"</code>, integer weights instead reproduce the complete
+normalized row law and learned geometry of literal replication.</p>
+<p><strong>Functionals.</strong> <code>predict_cdf(X, y)</code> and <code>predict_quantile(X, p)</code> evaluate the
+unit compound Poisson–gamma law, including its atom at zero. Weight-aware
+residual, scoring and posterior APIs use the separate prior-weighted CDF and
+quantile when prior weights change the row law. The Poisson sum has a
+20,000-order safety cap. At that cap the evaluator checks the actual omitted
+tail mass and continues only when it is at most 10⁻¹²; an uncertified tail is
+refused with the mass in the error. <code>TweedieLSS</code> does not currently certify
+expected shortfall.</p>
+<h2 id="gaussian-parameterization-and-scale-floor">Gaussian parameterization and scale floor<a class="headerlink" href="#gaussian-parameterization-and-scale-floor" title="Permanent link">&para;</a></h2>
+<p>For response <span class="arithmatex">\(y_i\)</span>,</p>
+<div class="arithmatex">\[
+y_i \mid x_i \sim N(\mu_i, \sigma_i^2), \qquad
+\mu_i = \eta_{\mu i}, \qquad
+\sigma_i = b + \exp(\eta_{\sigma i}).
+\]</div>
+<p><code>GaussianLS(scale_floor=b)</code> serializes <code>b</code> as family configuration. The floor is
+part of the model, not a post-fit clip. Consequently,</p>
+<div class="arithmatex">\[
+\frac{\partial \sigma}{\partial \eta_\sigma}
+= \frac{\partial^2 \sigma}{\partial \eta_\sigma^2}
+= \exp(\eta_\sigma)
+= \sigma-b.
+\]</div>
+<p>A scale coefficient therefore acts on <span class="arithmatex">\(\log(\sigma-b)\)</span>. For example, a
+coefficient of <code>-0.07</code> means a one-unit increase multiplies the excess scale
+<span class="arithmatex">\(\sigma-b\)</span> by <span class="arithmatex">\(\exp(-0.07)\)</span>, about <code>0.932</code>. It does not directly subtract
+<code>0.07</code> from standard deviation.</p>
+<h2 id="weights-and-offsets">Weights and offsets<a class="headerlink" href="#weights-and-offsets" title="Permanent link">&para;</a></h2>
+<p><code>weight_semantics</code> declares what a <code>sample_weight</code> entry says about a row, on the
+same contract the scalar path uses. Under <code>"prior"</code> — the default — a weight says
+how precisely that row was measured; under <code>"frequency"</code> it says how many
+identical rows it stands for. The proper prior-precision action is family
+specific: Gaussian variance and Gamma dispersion are divided by <code>w</code>, while an
+NB2 rate row obeys <code>wY ~ NB2(wμ, wθ)</code>. Frequency semantics instead repeats the
+complete normalized row law <code>w</code> times.</p>
+<p>The declaration decides one thing beyond bookkeeping: whether learned geometry —
+spline knot placement, discretized-bin geometry — follows weight mass or physical
+rows. Frequency weights are replication mass, so geometry follows them. Prior
+weights are not row counts, so under the default geometry follows physical rows
+instead, which is the geometry unweighted rows would have produced. Knot
+strategies that read the weight (<code>quantile_rows</code>, <code>quantile_tempered</code>) move under
+the declaration; <code>uniform</code> and plain <code>quantile</code> do not depend on it.</p>
+<p>Scores follow the same declaration. Prior weights change each row's predictive
+law, while score comparisons average over retained physical rows. Frequency
+weights leave the row law at unit weight and contribute literal replication
+mass to log score, CRPS, threshold-weighted CRPS, Murphy curves, paired standard
+errors and default Murphy thresholds. Zero-weight rows are omitted. Candidates
+with different declarations may be compared only when every retained weight is
+exactly one.</p>
+<p>Offsets are explicit and predictor-keyed:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="n">model</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>    <span class="n">X_train</span><span class="p">,</span>
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>    <span class="n">y_train</span><span class="p">,</span>
+<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>    <span class="n">sample_weight</span><span class="o">=</span><span class="n">case_weights</span><span class="p">,</span>
+<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>    <span class="n">offsets</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>        <span class="s2">&quot;location&quot;</span><span class="p">:</span> <span class="n">location_offset</span><span class="p">,</span>
+<a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>        <span class="s2">&quot;scale&quot;</span><span class="p">:</span> <span class="n">scale_offset</span><span class="p">,</span>
+<a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a>    <span class="p">},</span>
+<a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a><span class="p">)</span>
+</code></pre></div>
+<p>Offsets enter their named linear predictors. An ambiguous scalar <code>offset=</code> keyword
+is deliberately unavailable.</p>
+<h2 id="separated-cells">Separated cells<a class="headerlink" href="#separated-cells" title="Permanent link">&para;</a></h2>
+<p>A categorical level that carries exposure but whose responses all sit on the
+response boundary (every burn cost zero for Tweedie, every count zero for
+NB2) has no finite effect: the likelihood keeps increasing as the level's
+predictor walks to infinity. <code>separation="warn"</code> (the default)
+scans every <code>Categorical</code> term and <code>CategoricalInteraction</code> on every
+predictor the family says can escape (mean and dispersion for <code>TweedieLSS</code>,
+mean and theta for <code>NegativeBinomialLS</code>) before any coefficient is fitted and
+emits a <code>SeparationWarning</code> naming the levels and the remedies; <code>"error"</code>
+refuses the design; <code>"ignore"</code> skips the scan. <code>GaussianLS</code> and <code>GammaLS</code>
+have no reachable boundary and are never scanned. Ordered-categorical smooths
+are not scanned. The scan does not cover all separation patterns, and
+<code>fit.curvature_indefinite</code> is a curvature diagnostic, not a separation detector.
+The absence of either warning does not rule out separation.</p>
+<h2 id="fixed-penalties-and-efs">Fixed penalties and EFS<a class="headerlink" href="#fixed-penalties-and-efs" title="Permanent link">&para;</a></h2>
+<p><code>fit()</code> performs a fixed-smoothing-parameter fit. Fully qualified names prevent
+terms on different predictors from colliding:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">model</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>    <span class="n">X_train</span><span class="p">,</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>    <span class="n">y_train</span><span class="p">,</span>
+<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a>    <span class="n">lambdas</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a>        <span class="s2">&quot;location:DrivAge#wiggle&quot;</span><span class="p">:</span> <span class="mf">0.4</span><span class="p">,</span>
+<a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a>        <span class="s2">&quot;location:VehAge#wiggle&quot;</span><span class="p">:</span> <span class="mf">0.7</span><span class="p">,</span>
+<a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a>        <span class="s2">&quot;scale:DrivAge#wiggle&quot;</span><span class="p">:</span> <span class="mf">1.2</span><span class="p">,</span>
+<a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a>    <span class="p">},</span>
+<a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a><span class="p">)</span>
+</code></pre></div>
+<p>A <code>LambdaPolicy.fixed(value)</code> on a feature is authoritative and need not be
+duplicated in <code>lambdas</code>. Every other penalty component needs a supplied value for
+<code>fit()</code>.</p>
+<h3 id="how-smoothing-parameters-are-chosen">How smoothing parameters are chosen<a class="headerlink" href="#how-smoothing-parameters-are-chosen" title="Permanent link">&para;</a></h3>
+<p><code>fit_reml()</code> estimates every component whose policy is <code>LambdaPolicy.estimate()</code>
+by minimising the negative Laplace-approximate marginal likelihood (LAML) in
+log λ over the box <code>[1e-6, max_lambda]</code>. The default <code>outer="efs"</code> uses the
+generalised Fellner–Schall fixed-point iteration, safeguarded by objective
+backtracking. Set <code>outer="efs+newton"</code> to opt into a two-stage search:</p>
+<ol>
+<li><strong>Warm-up.</strong> The generalised Fellner–Schall (EFS) fixed-point iteration of
+   Wood and Fasiolo (2017), safeguarded by objective backtracking, moves λ from
+   its start while its steps are large. It hands over once its largest accepted
+   step falls to 0.5 in log λ, or after ten iterations, whichever comes first.
+   An interior practical plateau shortens this warm-up. A sustained outward
+   plateau can finish practically before the handoff, under the evidence checks
+   described below.</li>
+<li><strong>Endgame.</strong> Newton using the full LAML gradient and Hessian formulas in log λ,
+   the construction of Wood, Pya and Säfken (2016): the implicit derivative of
+   the coefficient mode through the observed penalised Hessian, the derivative
+   of <code>log|H|</code> through the third derivatives of the row log-likelihood
+   (analytic for <code>GaussianLS</code> and <code>GammaLS</code>, finite differences of the packed
+   row curvature otherwise, each carrying a certificate), and the fourth
+   derivatives by second differences of the same rows. The Hessian is made
+   positive definite by a growing ridge, the step is capped at <code>max_log_step</code>
+   and accepted by Armijo backtracking; when the Hessian's certificate exceeds
+   a tenth of its smallest active diagonal the iteration steps by damped BFGS
+   instead. The search stops at a stationary point of the box-constrained
+   problem: the largest projected gradient component below
+   <code>reml_tol * (1 + |LAML|)</code>, the objective change below the same bar, and the
+   estimated remaining quadratic improvement below the same bar.</li>
+</ol>
+<p>Here, <code>smoothing_certified_</code> reports the existing numerical stationarity
+contract in log smoothing parameters, together with converged coefficient fits
+and accepted curvature authority. For differenced derivatives, the reported
+certificates propagate refinement indicators; they are not complete error
+enclosures for the exact profiled gradient, coefficient-mode error and linear
+solves. Passing these checks is not a proof of a local or global LAML minimum
+or a bound on coefficient error. The objective-scaled stopping bar depends on
+the objective convention: adding a constant changes that bar without changing
+the gradient or optimum.</p>
+<p>The <a href="../../research/2026-09-c3-stress-evidence/">C3 stress evidence</a> reproduces
+the original correlated Tweedie and GPD failures, records the strict Newton
+settings that pass these checks, and reports across-start sensitivity and the
+limits of independent references.</p>
+<p>To compare a practical fit with a stricter smoothing search, set both options:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="n">model</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">,</span> <span class="n">outer</span><span class="o">=</span><span class="s2">&quot;efs+newton&quot;</span><span class="p">,</span> <span class="n">practical_reml</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">smoothing_convergence_reason_</span><span class="p">)</span>
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">smoothing_certified_</span><span class="p">)</span>
+<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="n">model</span><span class="o">.</span><span class="n">diagnose</span><span class="p">()</span>
+</code></pre></div>
+<p>Selecting <code>outer="efs+newton"</code> alone still permits the outward practical stop
+described above. Disabling practical stopping requests stronger completion
+checks; it does not guarantee that the fit will pass them. Inspect the returned
+reason and diagnostics, including iteration limits and unresolved derivatives.
+When assessing inference, compare predictions and their standard errors on the
+same rows. A small change in LAML alone does not bound their change, and a norm
+of the coefficient-covariance difference is not a percentage error in every
+prediction interval. The <a href="https://github.com/StrudelDoodleS/superglm/blob/master/benchmarks/lss_newton_completion.md">completion comparison</a>
+records examples where stricter search helps and where it remains unresolved.</p>
+<p>If fresh LAML gradients become unavailable after an accepted endgame fit, the
+solver retains that fit and resumes EFS for the remaining outer iterations,
+with further Newton handoffs disabled. Unavailable terminal derivative fields
+are cleared. A state already released beyond the configured upper bounds keeps
+an explicit <code>derivative_unavailable</code> stop instead of being clipped into the EFS box.
+Hessian-only failures retain the BFGS fallback.</p>
+<p>With the default <code>outer="efs"</code>, <code>practical_reml=True</code> permits a sustained
+objective-and-parameter plateau to stop the fit. <code>smoothing_convergence_reason_</code>
+reports how the search ended. <code>stationary</code> is the optional endgame's converged
+stop; <code>lambda_change</code> and <code>objective_plateau</code> are the Fellner–Schall fixed
+point's. <code>gradient_unresolved</code> carries evaluated gradient evidence whose
+certificate cannot resolve stationarity. <code>derivative_unavailable</code> means fresh
+derivative evaluation failed at a retained fit already released above the cap;
+smoothing remains nonconverged. Available certificates are published in
+<code>training_telemetry()</code>; unavailable derivatives are represented by <code>None</code>.</p>
+<p>A component at <code>max_lambda</code> whose gradient still points outward beyond the bar
+is assessed at the exact face: the endpoint LAML derivative at τ = 1/λ = 0
+decides whether the optimum is infinite (the term is linear and becomes an
+exact face, <code>exact_face_components_</code>, <code>converged=True</code>) or finite. A finite
+verdict with the cap still under pressure starts a bracketed search on
+dF/dτ between the cap and the conditioning limit <code>1e14</code>; a root there
+releases the component above <code>max_lambda</code> (<code>beyond_cap_components</code> on the
+smoothing result) and the endgame resumes. A cap never certifies an infinite
+optimum: without a root or an endpoint certificate the fit reports
+<code>lambda_cap_unresolved</code>, and <code>smoothing_unresolved_upper_bound_</code> names the
+component. A component at the cap whose gradient is within the bar is a
+stationary point of the box and is reported as such.</p>
+<p><code>smoothing_certified_</code> (<code>matched_certified</code>) means: the terminal stop carries
+its own authority — the projected gradient and every gradient certificate
+within the bar for <code>stationary</code>, the Fellner–Schall residual within <code>reml_tol</code>
+otherwise — no curvature fallback occurred, no endpoint assessment was refused,
+and every exact face carries analytic endpoint evidence. When the Newton
+endgame computes the exact Hessian of the LAML in log λ, it publishes that
+matrix as <code>smoothing_hessian</code>, with its certificate, for smoothing-parameter
+uncertainty. A stationary fit can stop before that Hessian pass. If it retained
+the authenticated training rows, corrected-covariance inference can replay the
+Hessian once without mutating or republishing fit state; a compact fit without
+a published Hessian refuses corrected covariance.</p>
+<p>With <code>practical_reml=True</code>, practical convergence requires small relative LAML
+and fitted-parameter changes over the configured number of accepted updates
+(default three). The rowwise parameter change from source <code>a</code> to candidate
+<code>b</code> is <code>abs(b - a) / (1 + max(abs(a), abs(b)))</code>; all natural parameters
+are checked, including scale and shape. The existing interior route also checks
+the trend in smoothing steps.</p>
+<p>An additional outward route permits lambda to keep growing when the fit is
+insensitive to that growth. Every exempt coordinate must have fresh outward EFS
+pressure, monotone accepted movement, and a total log-lambda increase of at least
+one (a factor of <code>e</code>) within the window. Both individual and cumulative
+objective/parameter changes must be small. Lower-bound pressure, oscillation,
+and duplicate states or proposed movement beyond the cap cannot substitute for
+actual accepted movement. Other
+coordinates retain their ordinary trend or small-residual checks. Saved results
+carry the full signed terminal EFS-step map so replay can check the same rules.</p>
+<p>This stop reports <code>practical_plateau</code>, retains the finite fitted penalties and
+any upper-pressure evidence, and leaves <code>matched_certified=False</code>. It is
+observed practical stability, not an exact infinite-penalty face or an error
+bound on inference. Tiny cap excursions retain the existing endpoint checks.
+<code>practical_reml=False</code> keeps the strict stopping policy. Fits can remain
+start-dependent; vary <code>initial_lambda</code> when comparing solutions.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="n">model</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a><span class="c1"># The Fellner--Schall fixed-point route without the exact-LAML endgame:</span>
+<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="n">efs_model</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">,</span> <span class="n">outer</span><span class="o">=</span><span class="s2">&quot;efs&quot;</span><span class="p">,</span> <span class="n">practical_reml</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</code></pre></div>
+<p>The coefficient engine is established IRLS/PIRLS/Fisher–Newton: repeated
+penalized weighted least-squares solves using the chosen joint curvature. The
+outer EFS/LAML layer chooses smoothing parameters around those coefficient fits.
+The engineering work is in normalized family laws and derivatives, weight and
+carrier contracts, joint curvature, automatic smoothing, assembly, inference,
+and certification. IRLS itself is old, standard machinery and is not an
+originality claim.</p>
+<h2 id="prediction-and-inference">Prediction and inference<a class="headerlink" href="#prediction-and-inference" title="Permanent link">&para;</a></h2>
+<p>The complete joint covariance and effective degrees of freedom use one terminal
+curvature source:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>
+<a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a><span class="n">result</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">result_</span>
+<a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a>
+<a id="__codelineno-19-6" name="__codelineno-19-6" href="#__codelineno-19-6"></a><span class="n">coefficient_table</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span>
+<a id="__codelineno-19-7" name="__codelineno-19-7" href="#__codelineno-19-7"></a>    <span class="p">{</span>
+<a id="__codelineno-19-8" name="__codelineno-19-8" href="#__codelineno-19-8"></a>        <span class="s2">&quot;estimate&quot;</span><span class="p">:</span> <span class="n">pd</span><span class="o">.</span><span class="n">Series</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">coef_</span><span class="p">),</span>
+<a id="__codelineno-19-9" name="__codelineno-19-9" href="#__codelineno-19-9"></a>        <span class="s2">&quot;standard_error&quot;</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">diag</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">covariance_</span><span class="p">)),</span>
+<a id="__codelineno-19-10" name="__codelineno-19-10" href="#__codelineno-19-10"></a>    <span class="p">},</span>
+<a id="__codelineno-19-11" name="__codelineno-19-11" href="#__codelineno-19-11"></a><span class="p">)</span>
+<a id="__codelineno-19-12" name="__codelineno-19-12" href="#__codelineno-19-12"></a>
+<a id="__codelineno-19-13" name="__codelineno-19-13" href="#__codelineno-19-13"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">total_effective_df</span><span class="p">)</span>
+<a id="__codelineno-19-14" name="__codelineno-19-14" href="#__codelineno-19-14"></a><span class="nb">print</span><span class="p">(</span><span class="nb">dict</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">predictor_edf</span><span class="p">))</span>
+<a id="__codelineno-19-15" name="__codelineno-19-15" href="#__codelineno-19-15"></a><span class="nb">print</span><span class="p">(</span><span class="nb">dict</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">intercept_edf</span><span class="p">))</span>
+<a id="__codelineno-19-16" name="__codelineno-19-16" href="#__codelineno-19-16"></a><span class="nb">print</span><span class="p">(</span><span class="nb">dict</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">term_edf</span><span class="p">))</span>
+<a id="__codelineno-19-17" name="__codelineno-19-17" href="#__codelineno-19-17"></a><span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">curvature_telemetry</span><span class="o">.</span><span class="n">to_dict</span><span class="p">())</span>
+</code></pre></div>
+<p>The covariance is in the same qualified global coordinates as <code>model.coef_</code> and
+retains location–scale cross-blocks. EDF is computed by solves from the joint
+influence matrix, with predictor intercepts and qualified terms separately
+attributed. Negative local EDF contributions, if present, are retained rather
+than clipped.</p>
+<p>Coefficient Wald calculations are possible from this state, but smooth-basis
+coefficients are not usually the scientific estimand. Prefer parameter surfaces,
+out-of-sample likelihood, interval calibration, and whole-term EDF when
+interpreting smooth distributional models.</p>
+<p>Distribution functions answer query points outside the response support. For a
+positive continuous law, every finite threshold <code>y ≤ 0</code> has CDF zero; this does
+not relax likelihood admission, which continues to enforce the family's
+declared response support. Tweedie's CDF instead includes its atom at zero.</p>
+<p>Expected shortfall is owned by <code>ExpectedShortfallFamily</code>, not synthesised by
+generic quantile quadrature. The certified unit-law implementations are
+<code>GaussianLS</code>, <code>GammaLS</code>, <code>LogNormalLS</code>, <code>GeneralizedGammaLSS</code> and
+<code>GeneralizedParetoLSS</code>. Only Gaussian and gamma also certify non-unit
+prior-weighted expected shortfall. <code>TweedieLSS</code>, both two-piece families and
+<code>NegativeBinomialLS</code> refuse it. Structural support does not promise that every
+float64 tail is resolvable: Gamma, log-normal and generalized-gamma rows refuse
+when their numerical tail certificate fails. Generalized-gamma location form
+returns <code>+∞</code> when the first moment does not exist, while mean form rejects that
+cell as outside its model. Named posterior intervals refuse a non-finite plug-in
+value or any non-finite posterior draw rather than reducing it.</p>
+<h3 id="inference-suite">Inference suite<a class="headerlink" href="#inference-suite" title="Permanent link">&para;</a></h3>
+<p><code>SuperLSS</code> carries checking, inference, and story-telling tools on top of the
+fitted state. Parameter and term inference use the fitted coefficient state.
+Quantile residuals, calibration, tail surfaces, predictive simulation, and
+non-log scores additionally require a family implementing
+<code>DistributionFunctionFamily</code>; methods refuse when that capability is absent.
+Available tools include the six-panel diagnostic, binned checks and calibration
+tables, per-parameter term effects with Wood (2013) tests and a summary table,
+posterior bounds on derived quantities, risk curves, the spread among
+identically priced rows, portfolio totals, and proper-score comparison between
+candidates.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="n">r</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">residuals</span><span class="p">(</span><span class="n">X_holdout</span><span class="p">,</span> <span class="n">y_holdout</span><span class="p">)</span>          <span class="c1"># randomised quantile residuals</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a><span class="n">figure</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">plot_diagnostics</span><span class="p">(</span><span class="n">X_holdout</span><span class="p">,</span> <span class="n">y_holdout</span><span class="p">)</span>
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a><span class="n">table</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">summary</span><span class="p">()</span>                            <span class="c1"># edf, statistic, p per (parameter, term)</span>
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="n">effect</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">term_inference</span><span class="p">(</span><span class="s2">&quot;scale&quot;</span><span class="p">,</span> <span class="s2">&quot;x&quot;</span><span class="p">)</span>        <span class="c1"># bands on one term of one parameter</span>
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a><span class="n">bounds</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">posterior_bounds</span><span class="p">(</span><span class="n">X_new</span><span class="p">,</span> <span class="p">(</span><span class="s2">&quot;quantile&quot;</span><span class="p">,</span> <span class="mf">0.99</span><span class="p">),</span> <span class="n">level</span><span class="o">=</span><span class="mf">0.9</span><span class="p">)</span>
+</code></pre></div>
+<p>By default the suite holds smoothing parameters fixed. With
+<code>covariance="corrected"</code>, it uses a trusted smoothing Hessian published by a
+stationary fit or performs one authenticated, on-demand replay from retained
+training rows. That replay is ephemeral. A compact fit without a published
+Hessian refuses, as does a fit whose terminal state cannot be authenticated.
+Term effects, plots and summaries validate their requested work before
+resolving the covariance, and resolve it at most once per top-level call. The
+simultaneous critical value is floored at the pointwise normal critical value,
+so simulation cannot produce a narrower simultaneous band.</p>
+<p>Every builder returns a payload with a JSON-clean <code>to_json()</code>, and
+<code>model.plot_data(kind, ...)</code> returns that dictionary directly.
+<a href="../distributional-inference/">Checking a distributional fit</a> walks the whole
+suite in the order a review asks its questions, with a "how to read it" box per
+figure and the papers each method comes from.</p>
+<h2 id="worked-fremtpl2-severity-comparison">Worked FreMTPL2 severity comparison<a class="headerlink" href="#worked-fremtpl2-severity-comparison" title="Permanent link">&para;</a></h2>
+<p>This example asks a concrete question: does policy information explain
+conditional variation in claim severity after it has already entered the mean?
+It aggregates multiple claim rows to one claimant policy, models
+<code>log(total claim amount)</code>, and compares:</p>
+<ol>
+<li>a conventional Gaussian location model with one constant scale; and</li>
+<li>the same location predictor plus policy features in the scale predictor.</li>
+</ol>
+<p>This is a severity example. Exposure is not used as a weight because the sample
+is already conditional on a claimant policy.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a>
+<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+<a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a><span class="kn">from</span><span class="w"> </span><span class="nn">scipy.stats</span><span class="w"> </span><span class="kn">import</span> <span class="n">chi2</span><span class="p">,</span> <span class="n">norm</span>
+<a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a>
+<a id="__codelineno-21-7" name="__codelineno-21-7" href="#__codelineno-21-7"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">GaussianLS</span><span class="p">,</span> <span class="n">SuperLSS</span>
+<a id="__codelineno-21-8" name="__codelineno-21-8" href="#__codelineno-21-8"></a>
+<a id="__codelineno-21-9" name="__codelineno-21-9" href="#__codelineno-21-9"></a><span class="n">data_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;data&quot;</span><span class="p">)</span>
+<a id="__codelineno-21-10" name="__codelineno-21-10" href="#__codelineno-21-10"></a><span class="n">frequency</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">data_dir</span> <span class="o">/</span> <span class="s2">&quot;freMTPL2freq.csv&quot;</span><span class="p">)</span>
+<a id="__codelineno-21-11" name="__codelineno-21-11" href="#__codelineno-21-11"></a><span class="n">severity</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">data_dir</span> <span class="o">/</span> <span class="s2">&quot;freMTPL2sev.csv&quot;</span><span class="p">)</span>
+<a id="__codelineno-21-12" name="__codelineno-21-12" href="#__codelineno-21-12"></a>
+<a id="__codelineno-21-13" name="__codelineno-21-13" href="#__codelineno-21-13"></a><span class="n">severity</span> <span class="o">=</span> <span class="n">severity</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s2">&quot;IDpol&quot;</span><span class="p">,</span> <span class="n">as_index</span><span class="o">=</span><span class="kc">False</span><span class="p">)[</span><span class="s2">&quot;ClaimAmount&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+<a id="__codelineno-21-14" name="__codelineno-21-14" href="#__codelineno-21-14"></a><span class="n">data</span> <span class="o">=</span> <span class="n">severity</span><span class="o">.</span><span class="n">merge</span><span class="p">(</span><span class="n">frequency</span><span class="p">,</span> <span class="n">on</span><span class="o">=</span><span class="s2">&quot;IDpol&quot;</span><span class="p">,</span> <span class="n">validate</span><span class="o">=</span><span class="s2">&quot;one_to_one&quot;</span><span class="p">)</span>
+<a id="__codelineno-21-15" name="__codelineno-21-15" href="#__codelineno-21-15"></a><span class="n">data</span><span class="p">[</span><span class="s2">&quot;LogDensity&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">log1p</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="s2">&quot;Density&quot;</span><span class="p">])</span>
+<a id="__codelineno-21-16" name="__codelineno-21-16" href="#__codelineno-21-16"></a><span class="n">data</span><span class="p">[</span><span class="s2">&quot;LogClaimAmount&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="s2">&quot;ClaimAmount&quot;</span><span class="p">])</span>
+<a id="__codelineno-21-17" name="__codelineno-21-17" href="#__codelineno-21-17"></a>
+<a id="__codelineno-21-18" name="__codelineno-21-18" href="#__codelineno-21-18"></a><span class="n">rng</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">default_rng</span><span class="p">(</span><span class="mi">20260723</span><span class="p">)</span>
+<a id="__codelineno-21-19" name="__codelineno-21-19" href="#__codelineno-21-19"></a><span class="n">order</span> <span class="o">=</span> <span class="n">rng</span><span class="o">.</span><span class="n">permutation</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">))</span>
+<a id="__codelineno-21-20" name="__codelineno-21-20" href="#__codelineno-21-20"></a><span class="n">train</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="n">order</span><span class="p">[:</span><span class="mi">20_000</span><span class="p">]]</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+<a id="__codelineno-21-21" name="__codelineno-21-21" href="#__codelineno-21-21"></a><span class="n">holdout</span> <span class="o">=</span> <span class="n">data</span><span class="o">.</span><span class="n">iloc</span><span class="p">[</span><span class="n">order</span><span class="p">[</span><span class="mi">20_000</span><span class="p">:]]</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+<a id="__codelineno-21-22" name="__codelineno-21-22" href="#__codelineno-21-22"></a>
+<a id="__codelineno-21-23" name="__codelineno-21-23" href="#__codelineno-21-23"></a><span class="n">columns</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="s2">&quot;VehAge&quot;</span><span class="p">,</span> <span class="s2">&quot;BonusMalus&quot;</span><span class="p">,</span> <span class="s2">&quot;LogDensity&quot;</span><span class="p">]</span>
+<a id="__codelineno-21-24" name="__codelineno-21-24" href="#__codelineno-21-24"></a><span class="k">for</span> <span class="n">column</span> <span class="ow">in</span> <span class="n">columns</span><span class="p">:</span>
+<a id="__codelineno-21-25" name="__codelineno-21-25" href="#__codelineno-21-25"></a>    <span class="n">centre</span> <span class="o">=</span> <span class="n">train</span><span class="p">[</span><span class="n">column</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+<a id="__codelineno-21-26" name="__codelineno-21-26" href="#__codelineno-21-26"></a>    <span class="n">scale</span> <span class="o">=</span> <span class="n">train</span><span class="p">[</span><span class="n">column</span><span class="p">]</span><span class="o">.</span><span class="n">std</span><span class="p">()</span>
+<a id="__codelineno-21-27" name="__codelineno-21-27" href="#__codelineno-21-27"></a>    <span class="n">train</span><span class="p">[</span><span class="n">column</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">train</span><span class="p">[</span><span class="n">column</span><span class="p">]</span> <span class="o">-</span> <span class="n">centre</span><span class="p">)</span> <span class="o">/</span> <span class="n">scale</span>
+<a id="__codelineno-21-28" name="__codelineno-21-28" href="#__codelineno-21-28"></a>    <span class="n">holdout</span><span class="p">[</span><span class="n">column</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="n">holdout</span><span class="p">[</span><span class="n">column</span><span class="p">]</span> <span class="o">-</span> <span class="n">centre</span><span class="p">)</span> <span class="o">/</span> <span class="n">scale</span>
+<a id="__codelineno-21-29" name="__codelineno-21-29" href="#__codelineno-21-29"></a>
+<a id="__codelineno-21-30" name="__codelineno-21-30" href="#__codelineno-21-30"></a>
+<a id="__codelineno-21-31" name="__codelineno-21-31" href="#__codelineno-21-31"></a><span class="k">def</span><span class="w"> </span><span class="nf">fit_candidate</span><span class="p">(</span><span class="n">scale_columns</span><span class="p">):</span>
+<a id="__codelineno-21-32" name="__codelineno-21-32" href="#__codelineno-21-32"></a>    <span class="n">family</span> <span class="o">=</span> <span class="n">GaussianLS</span><span class="p">(</span><span class="n">scale_floor</span><span class="o">=</span><span class="mf">0.05</span><span class="p">)</span>
+<a id="__codelineno-21-33" name="__codelineno-21-33" href="#__codelineno-21-33"></a>    <span class="k">return</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-21-34" name="__codelineno-21-34" href="#__codelineno-21-34"></a>        <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-21-35" name="__codelineno-21-35" href="#__codelineno-21-35"></a>        <span class="n">family</span><span class="o">.</span><span class="n">location</span><span class="p">(</span><span class="o">*</span><span class="n">columns</span><span class="p">),</span>
+<a id="__codelineno-21-36" name="__codelineno-21-36" href="#__codelineno-21-36"></a>        <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="o">*</span><span class="n">scale_columns</span><span class="p">),</span>
+<a id="__codelineno-21-37" name="__codelineno-21-37" href="#__codelineno-21-37"></a>    <span class="p">)</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-21-38" name="__codelineno-21-38" href="#__codelineno-21-38"></a>        <span class="n">train</span><span class="p">[</span><span class="n">columns</span><span class="p">],</span>
+<a id="__codelineno-21-39" name="__codelineno-21-39" href="#__codelineno-21-39"></a>        <span class="n">train</span><span class="p">[</span><span class="s2">&quot;LogClaimAmount&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">to_numpy</span><span class="p">(),</span>
+<a id="__codelineno-21-40" name="__codelineno-21-40" href="#__codelineno-21-40"></a>        <span class="n">retain_rows</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<a id="__codelineno-21-41" name="__codelineno-21-41" href="#__codelineno-21-41"></a>    <span class="p">)</span>
+<a id="__codelineno-21-42" name="__codelineno-21-42" href="#__codelineno-21-42"></a>
+<a id="__codelineno-21-43" name="__codelineno-21-43" href="#__codelineno-21-43"></a>
+<a id="__codelineno-21-44" name="__codelineno-21-44" href="#__codelineno-21-44"></a><span class="n">constant_scale</span> <span class="o">=</span> <span class="n">fit_candidate</span><span class="p">([])</span>
+<a id="__codelineno-21-45" name="__codelineno-21-45" href="#__codelineno-21-45"></a><span class="n">location_scale</span> <span class="o">=</span> <span class="n">fit_candidate</span><span class="p">(</span><span class="n">columns</span><span class="p">)</span>
+<a id="__codelineno-21-46" name="__codelineno-21-46" href="#__codelineno-21-46"></a>
+<a id="__codelineno-21-47" name="__codelineno-21-47" href="#__codelineno-21-47"></a>
+<a id="__codelineno-21-48" name="__codelineno-21-48" href="#__codelineno-21-48"></a><span class="k">def</span><span class="w"> </span><span class="nf">holdout_metrics</span><span class="p">(</span><span class="n">fitted</span><span class="p">):</span>
+<a id="__codelineno-21-49" name="__codelineno-21-49" href="#__codelineno-21-49"></a>    <span class="n">predicted</span> <span class="o">=</span> <span class="n">fitted</span><span class="o">.</span><span class="n">predict_parameters</span><span class="p">(</span><span class="n">holdout</span><span class="p">[</span><span class="n">columns</span><span class="p">])</span>
+<a id="__codelineno-21-50" name="__codelineno-21-50" href="#__codelineno-21-50"></a>    <span class="n">y</span> <span class="o">=</span> <span class="n">holdout</span><span class="p">[</span><span class="s2">&quot;LogClaimAmount&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">to_numpy</span><span class="p">()</span>
+<a id="__codelineno-21-51" name="__codelineno-21-51" href="#__codelineno-21-51"></a>    <span class="n">z</span> <span class="o">=</span> <span class="p">(</span><span class="n">y</span> <span class="o">-</span> <span class="n">predicted</span><span class="p">[</span><span class="s2">&quot;location&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">to_numpy</span><span class="p">())</span> <span class="o">/</span> <span class="n">predicted</span><span class="p">[</span><span class="s2">&quot;scale&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">to_numpy</span><span class="p">()</span>
+<a id="__codelineno-21-52" name="__codelineno-21-52" href="#__codelineno-21-52"></a>    <span class="n">nll</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span>
+<a id="__codelineno-21-53" name="__codelineno-21-53" href="#__codelineno-21-53"></a>        <span class="n">np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="n">predicted</span><span class="p">[</span><span class="s2">&quot;scale&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">to_numpy</span><span class="p">())</span>
+<a id="__codelineno-21-54" name="__codelineno-21-54" href="#__codelineno-21-54"></a>        <span class="o">+</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">log</span><span class="p">(</span><span class="mf">2.0</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">pi</span><span class="p">)</span>
+<a id="__codelineno-21-55" name="__codelineno-21-55" href="#__codelineno-21-55"></a>        <span class="o">+</span> <span class="mf">0.5</span> <span class="o">*</span> <span class="n">z</span><span class="o">**</span><span class="mi">2</span><span class="p">,</span>
+<a id="__codelineno-21-56" name="__codelineno-21-56" href="#__codelineno-21-56"></a>    <span class="p">)</span>
+<a id="__codelineno-21-57" name="__codelineno-21-57" href="#__codelineno-21-57"></a>    <span class="n">coverage_90</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">z</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">norm</span><span class="o">.</span><span class="n">ppf</span><span class="p">(</span><span class="mf">0.95</span><span class="p">))</span>
+<a id="__codelineno-21-58" name="__codelineno-21-58" href="#__codelineno-21-58"></a>    <span class="k">return</span> <span class="nb">float</span><span class="p">(</span><span class="n">nll</span><span class="p">),</span> <span class="nb">float</span><span class="p">(</span><span class="n">coverage_90</span><span class="p">)</span>
+<a id="__codelineno-21-59" name="__codelineno-21-59" href="#__codelineno-21-59"></a>
+<a id="__codelineno-21-60" name="__codelineno-21-60" href="#__codelineno-21-60"></a>
+<a id="__codelineno-21-61" name="__codelineno-21-61" href="#__codelineno-21-61"></a><span class="n">likelihood_ratio</span> <span class="o">=</span> <span class="mf">2.0</span> <span class="o">*</span> <span class="p">(</span>
+<a id="__codelineno-21-62" name="__codelineno-21-62" href="#__codelineno-21-62"></a>    <span class="n">location_scale</span><span class="o">.</span><span class="n">result_</span><span class="o">.</span><span class="n">log_likelihood</span>
+<a id="__codelineno-21-63" name="__codelineno-21-63" href="#__codelineno-21-63"></a>    <span class="o">-</span> <span class="n">constant_scale</span><span class="o">.</span><span class="n">result_</span><span class="o">.</span><span class="n">log_likelihood</span>
+<a id="__codelineno-21-64" name="__codelineno-21-64" href="#__codelineno-21-64"></a><span class="p">)</span>
+<a id="__codelineno-21-65" name="__codelineno-21-65" href="#__codelineno-21-65"></a><span class="n">p_value</span> <span class="o">=</span> <span class="n">chi2</span><span class="o">.</span><span class="n">sf</span><span class="p">(</span><span class="n">likelihood_ratio</span><span class="p">,</span> <span class="n">df</span><span class="o">=</span><span class="mi">4</span><span class="p">)</span>
+</code></pre></div>
+<p>Using local FreMTPL2 CSVs with SHA-256
+<code>0f363eca0bd43d3ab83c0f54bf99e7d0a328814cd6c0a1a3d1380de3032f471d</code>
+(frequency) and
+<code>7328d2ac07bfbb72aec7723982b8c60cfa626dbfd4946a10f75832d5d65a6f84</code>
+(severity), the deterministic 20,000/4,944 split produced:</p>
+<table>
+<thead>
+<tr>
+<th>Measure</th>
+<th style="text-align: right;">Constant scale</th>
+<th style="text-align: right;">Location–scale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Holdout mean Gaussian NLL</td>
+<td style="text-align: right;">1.53048</td>
+<td style="text-align: right;">1.52252</td>
+</tr>
+<tr>
+<td>Holdout nominal 90% interval coverage</td>
+<td style="text-align: right;">88.49%</td>
+<td style="text-align: right;">88.69%</td>
+</tr>
+<tr>
+<td>Predicted scale, 1st percentile</td>
+<td style="text-align: right;">1.13492</td>
+<td style="text-align: right;">0.89507</td>
+</tr>
+<tr>
+<td>Predicted scale, median</td>
+<td style="text-align: right;">1.13492</td>
+<td style="text-align: right;">1.14083</td>
+</tr>
+<tr>
+<td>Predicted scale, 99th percentile</td>
+<td style="text-align: right;">1.13492</td>
+<td style="text-align: right;">1.27924</td>
+</tr>
+<tr>
+<td>Training AIC</td>
+<td style="text-align: right;">61,831.92</td>
+<td style="text-align: right;">61,622.56</td>
+</tr>
+</tbody>
+</table>
+<p>The nested likelihood-ratio statistic is <code>217.35</code> on four added scale
+coefficients (<code>p = 6.96e-46</code> under the ordinary model assumptions). The fitted
+scale-link effects and joint observed-curvature standard errors were:</p>
+<table>
+<thead>
+<tr>
+<th>Scale term</th>
+<th style="text-align: right;">Estimate</th>
+<th style="text-align: right;">Standard error</th>
+<th style="text-align: right;">95% interval</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DrivAge</code></td>
+<td style="text-align: right;">-0.07223</td>
+<td style="text-align: right;">0.00576</td>
+<td style="text-align: right;">[-0.08351, -0.06095]</td>
+</tr>
+<tr>
+<td><code>VehAge</code></td>
+<td style="text-align: right;">0.00656</td>
+<td style="text-align: right;">0.00543</td>
+<td style="text-align: right;">[-0.00407, 0.01720]</td>
+</tr>
+<tr>
+<td><code>BonusMalus</code></td>
+<td style="text-align: right;">-0.07761</td>
+<td style="text-align: right;">0.00587</td>
+<td style="text-align: right;">[-0.08911, -0.06611]</td>
+</tr>
+<tr>
+<td><code>LogDensity</code></td>
+<td style="text-align: right;">0.01073</td>
+<td style="text-align: right;">0.00534</td>
+<td style="text-align: right;">[0.00027, 0.02120]</td>
+</tr>
+</tbody>
+</table>
+<p>On this standardized specification, older-driver and higher-bonus-malus rows
+have lower conditional variation in log severity after controlling for the
+location predictor. <code>VehAge</code> has no clear scale effect in this linear
+specification. These are associations, not causal effects.</p>
+<p>The terminal inference used observed curvature, rank <code>10/10</code>, condition estimate
+<code>2.20</code>, and zero fallback. The holdout log score improves and the model discovers
+material scale variation, but nominal coverage remains below 90%. That is useful
+model-risk evidence: location–scale structure helps, while a Gaussian model on
+log severity still does not fully describe the tail.</p>
+<p>This worked example is descriptive, not release-certification evidence. Its
+ordinary Wald and likelihood-ratio calculations assume independent policy rows
+and an adequate Gaussian log-severity likelihood. Model specification was
+explored on this dataset, so the displayed <code>p</code> value must not be presented as a
+preregistered confirmatory result.</p>
+<h2 id="discrete-fitting">Discrete fitting<a class="headerlink" href="#discrete-fitting" title="Permanent link">&para;</a></h2>
+<p>Set <code>discrete=True, n_bins=256</code> on <code>SuperLSS</code> to compile marginal spline designs
+and use bounded row chunks for joint fitting. This route assembles the coupled
+observed Hessian, including signed cross-predictor blocks, through the existing
+grouped design machinery. It supports observed-only <code>TweedieLSS</code> and
+<code>NegativeBinomialLS</code>; requesting Fisher curvature still requires the family's
+expected-information capability.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">GaussianLS</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a>
+<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="n">family</span> <span class="o">=</span> <span class="n">GaussianLS</span><span class="p">()</span>
+<a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a><span class="n">model</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span>
+<a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a>    <span class="n">family</span><span class="p">,</span>
+<a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a>    <span class="n">family</span><span class="o">.</span><span class="n">location</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">)),</span>
+<a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a>    <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">8</span><span class="p">)),</span>
+<a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a>    <span class="n">discrete</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a>    <span class="n">n_bins</span><span class="o">=</span><span class="mi">256</span><span class="p">,</span>
+<a id="__codelineno-22-10" name="__codelineno-22-10" href="#__codelineno-22-10"></a><span class="p">)</span>
+<a id="__codelineno-22-11" name="__codelineno-22-11" href="#__codelineno-22-11"></a><span class="n">model</span><span class="o">.</span><span class="n">fit_reml</span><span class="p">(</span><span class="n">train_df</span><span class="p">,</span> <span class="n">y_train</span><span class="p">,</span> <span class="n">outer</span><span class="o">=</span><span class="s2">&quot;efs+newton&quot;</span><span class="p">)</span>
+<a id="__codelineno-22-12" name="__codelineno-22-12" href="#__codelineno-22-12"></a><span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">training_telemetry</span><span class="p">()</span><span class="o">.</span><span class="n">execution_backend_identifier</span><span class="p">)</span>
+<a id="__codelineno-22-13" name="__codelineno-22-13" href="#__codelineno-22-13"></a><span class="nb">print</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">smoothing_convergence_reason_</span><span class="p">)</span>
+</code></pre></div>
+<p>The automatic chunk size limits row scratch space. Smoothing gradients,
+Hessians, stationarity checks and smoothing-uncertainty replay expand bounded
+row blocks instead of retaining full observation-by-coefficient designs.
+Conditional inference still uses the joint coefficient covariance. Prediction
+on new data evaluates the learned spline functions at the supplied covariates.</p>
+<p>Two comparisons answer different questions. Expanding the same compiled
+discrete design and comparing its algebra with grouped execution tests exact
+representation equivalence, subject to floating-point error. When a covariate
+has more unique values than <code>n_bins</code>, bin centers change its training design.
+Compare held-out predictions and uncertainty with a finer grid and with the
+continuous fit to assess that approximation. This grid sensitivity is not
+bounded by a machine-epsilon coefficient tolerance.</p>
+<p>Discrete execution retains row likelihood work and dense coefficient-space
+factors; it is not an out-of-core or sparse-factor solver. Smoothing history
+keeps complete coefficient and endpoint evidence, but releases obsolete
+<code>eta</code> and <code>theta</code> arrays during optimization. The terminal fit and recent
+plateau checks retain real rows. For debugging, pass
+<code>retain_history_rows=True</code> to <code>fit_reml</code>, or set it on
+<code>DistributionalEFSConfig</code>, to keep every historical fit's arrays. The separate
+<code>retain_rows</code> option still controls final row diagnostics and defaults to
+<code>True</code>. Rowless historical fits expose <code>eta=None</code>, <code>theta=None</code>, and their
+original <code>row_shape</code>. When using <code>dataclasses.replace</code> to give a solver result
+new <code>eta</code> and <code>theta</code> arrays with a different shape, also pass
+<code>row_shape=eta.shape</code>. Memory still grows with row count, predictor count and
+coefficient-space history. Report complete-fit memory and actual backend
+dispatch for the intended model. Practical plateaus,
+strict stationarity, unresolved caps and curvature refusals retain the same
+meaning on both execution routes.</p>
+<h2 id="curvature-choice">Curvature choice<a class="headerlink" href="#curvature-choice" title="Permanent link">&para;</a></h2>
+<p>The coefficient solve is Newton's method on the observed Hessian for
+every family. <code>coefficient_curvature="fisher"</code> on <code>SuperLSS</code> asks for Fisher
+scoring instead and is accepted only for a family that supplies expected
+information. Every current built-in except <code>NegativeBinomialLS</code> and
+<code>TweedieLSS</code> supplies it; a family implementing that capability does not change
+the default solve. Under either policy the accepted terminal point is
+re-examined with the penalized observed Hessian <code>A + S</code>, restricted to the
+active coefficient subspace when needed. If it is materially indefinite the
+solver retries with a tighter tolerance, then falls back to penalized expected
+information <code>F + S</code> when the family supplies it and refuses the fit otherwise.
+The requested policy
+is <code>training_telemetry().curvature_policy</code>;
+the terminal source and any fallback are in <code>training_telemetry().curvature</code>
+(<code>actual_source</code>, <code>fallback_count</code>, <code>matrix_kind</code>).</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superglm</span><span class="w"> </span><span class="kn">import</span> <span class="n">GammaLS</span><span class="p">,</span> <span class="n">SuperLSS</span><span class="p">,</span> <span class="n">s</span>
+<a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a>
+<a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a><span class="n">family</span> <span class="o">=</span> <span class="n">GammaLS</span><span class="p">()</span>
+<a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a><span class="n">predictors</span> <span class="o">=</span> <span class="p">(</span><span class="n">family</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">s</span><span class="p">(</span><span class="s2">&quot;DrivAge&quot;</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="s2">&quot;cr&quot;</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">)),</span> <span class="n">family</span><span class="o">.</span><span class="n">scale</span><span class="p">())</span>
+<a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a><span class="n">newton</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span><span class="n">family</span><span class="p">,</span> <span class="o">*</span><span class="n">predictors</span><span class="p">)</span>
+<a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a><span class="n">scoring</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="p">(</span><span class="n">family</span><span class="p">,</span> <span class="o">*</span><span class="n">predictors</span><span class="p">,</span> <span class="n">coefficient_curvature</span><span class="o">=</span><span class="s2">&quot;fisher&quot;</span><span class="p">)</span>
+</code></pre></div>
+<h2 id="derivative-orders-and-which-families-supply-them">Derivative orders, and which families supply them<a class="headerlink" href="#derivative-orders-and-which-families-supply-them" title="Permanent link">&para;</a></h2>
+<p>Each level of the fit asks the row log-likelihood for two more derivative
+orders than the level below it, and there are only two levels, so the ladder
+ends at four:</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>What is solved</th>
+<th>Orders of the row log-likelihood</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Coefficient solve at fixed λ (Newton)</td>
+<td>the penalised mode <code>β̂(λ)</code></td>
+<td>0, 1 and 2: value-only backtrack screens, then score and observed Hessian with every cross term included</td>
+</tr>
+<tr>
+<td>Fellner–Schall fixed point (<code>outer="efs"</code>)</td>
+<td>λ from <code>β̂(λ)</code> and <code>H</code></td>
+<td>2 only: it reuses the Hessian and never differentiates it</td>
+</tr>
+<tr>
+<td>LAML gradient in log λ (the Newton endgame's step direction, and the stationarity certificate)</td>
+<td><code>dV/dρ</code> through <code>dβ̂/dρ</code></td>
+<td>3: the derivative of <code>H</code> along the direction the mode moves, which is the third derivative contracted with <code>X dβ̂/dρ</code></td>
+</tr>
+<tr>
+<td>LAML Hessian in log λ (the Newton endgame's step, and <code>smoothing_hessian</code>)</td>
+<td><code>d²V/dρ²</code> through <code>d²β̂/dρ²</code></td>
+<td>4: the fourth derivative contracted with two such directions, plus the third contracted with <code>d²β̂/dρ²</code></td>
+</tr>
+</tbody>
+</table>
+<p>The third order appears because the coefficient mode is itself a solution of
+the inner problem: by the implicit function theorem its derivative in ρ is
+<code>−(H + S)⁻¹ S_j λ_j β̂</code>, and differentiating <code>log|H + S|</code> along that path
+differentiates <code>H</code>. The fourth appears the same way one level up. Nothing
+needs a fifth: the outer problem is the last one, and its Newton step is the
+most derivative-hungry thing anyone runs. Wood, Pya and Säfken (2016) is the
+reference for the whole construction.</p>
+<p>Every family supports orders 0, 1 and 2. Order 0 supplies likelihood values
+without derivatives for inexpensive rejection of repeated backtracks; every
+accepted point still receives a full order-2 evaluation. Wherever order 2 is
+valid, order 0 must also be valid and return the same optimizing values and
+carrier terms.
+Built-in families supply orders 1 and 2 analytically as one fused row kernel
+(<code>evaluate_natural</code>: log density, score and the packed cross-derivative
+Hessian in its natural parameters, chained through the links by the solver).
+Order 3 is optional (<code>PredictorCurvatureDirectionalFamily</code>, the directional
+derivative of the packed curvature along a predictor direction); when a family
+does not implement it the endgame differences the packed rows with a
+four-point stencil per axis and carries a certificate. Order 4 is always
+obtained by second differences of the packed rows today, on top of an analytic
+or differenced third. So the analytic hook makes the gradient exact and saves
+the third-order stencils, but the fourth-order stencils remain.</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Row log-likelihood</th>
+<th>Fused order-2 kernel</th>
+<th>Analytic order 3</th>
+<th>Order 4</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GaussianLS</code></td>
+<td>smooth to every order</td>
+<td>yes</td>
+<td>yes</td>
+<td>differenced</td>
+</tr>
+<tr>
+<td><code>GammaLS</code></td>
+<td>smooth to every order</td>
+<td>yes</td>
+<td>yes (built-in log links only)</td>
+<td>differenced</td>
+</tr>
+<tr>
+<td><code>NegativeBinomialLS</code></td>
+<td>smooth to every order in mean and size (log-gamma and its derivatives)</td>
+<td>yes</td>
+<td>not implemented; possible</td>
+<td>differenced</td>
+</tr>
+<tr>
+<td><code>TweedieLSS</code></td>
+<td>smooth in mean, dispersion and power on <code>1 &lt; p &lt; 2</code> (Wright function series)</td>
+<td>yes</td>
+<td>not implemented; possible but the power derivatives are series</td>
+<td>differenced</td>
+</tr>
+<tr>
+<td><code>LogNormalLS</code></td>
+<td>smooth to every order</td>
+<td>yes</td>
+<td>not implemented; short</td>
+<td>differenced</td>
+</tr>
+<tr>
+<td><code>GeneralizedGammaLSS</code></td>
+<td>smooth to every order; <code>Q = 0</code> is removable and the kernel's series cover it</td>
+<td>yes</td>
+<td>not implemented; needs the tetragamma remainder and one more derivative of each series function, and the mean form's third-order chain</td>
+<td>differenced</td>
+</tr>
+<tr>
+<td><code>GeneralizedParetoLSS</code></td>
+<td>smooth to every order on <code>0 &lt; ξ &lt; 1</code></td>
+<td>yes</td>
+<td>not implemented; short</td>
+<td>differenced</td>
+</tr>
+<tr>
+<td><code>TwoPieceNormalLSS</code>, <code>TwoPieceLogNormalLSS</code></td>
+<td><code>C¹</code> only: the curvature jumps at the mode <code>w = 0</code></td>
+<td>yes, away from the kink</td>
+<td><strong>not possible</strong>: the third derivative at the kink is a point mass, and the LAML gradient's true value includes the density at the kink times the curvature jump, which a pointwise formula drops</td>
+<td>differenced</td>
+</tr>
+</tbody>
+</table>
+<p>For the two-piece families the differenced route with its certificate is the
+correct method, not a shortcut: the engine sees rows cross the kink and the
+certificate reports when it cannot resolve the gradient (<code>gradient_unresolved</code>,
+seen at small <code>n</code>). The same holds for any likelihood with a kink or a
+boundary, the Laplace, quantile and Huber losses among them: they fit on the
+Fellner–Schall route and are certified by differences, and no analytic
+endgame exists for them. A family is a candidate for the analytic hook exactly
+when its row log-likelihood is <code>C³</code> in every natural parameter over the whole
+support the links can reach.</p>
+<h2 id="telemetry-and-serialization">Telemetry and serialization<a class="headerlink" href="#telemetry-and-serialization" title="Permanent link">&para;</a></h2>
+<p><code>training_telemetry()</code> returns compact immutable fit metadata without requiring
+retained training rows:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="n">telemetry</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">training_telemetry</span><span class="p">()</span>
+<a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">telemetry</span><span class="o">.</span><span class="n">curvature_policy</span><span class="p">)</span>
+<a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a><span class="nb">print</span><span class="p">(</span><span class="n">telemetry</span><span class="o">.</span><span class="n">curvature</span><span class="o">.</span><span class="n">actual_source</span><span class="p">)</span>
+<a id="__codelineno-24-4" name="__codelineno-24-4" href="#__codelineno-24-4"></a><span class="nb">print</span><span class="p">(</span><span class="n">telemetry</span><span class="o">.</span><span class="n">rank</span><span class="p">,</span> <span class="n">telemetry</span><span class="o">.</span><span class="n">converged</span><span class="p">)</span>
+<a id="__codelineno-24-5" name="__codelineno-24-5" href="#__codelineno-24-5"></a><span class="nb">print</span><span class="p">(</span><span class="n">telemetry</span><span class="o">.</span><span class="n">discrete</span><span class="p">,</span> <span class="n">telemetry</span><span class="o">.</span><span class="n">n_bins</span><span class="p">)</span>
+</code></pre></div>
+<p>Serialize the complete fitted revision with the versioned public artifact:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a>
+<a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;severity.superlss&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">write_bytes</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">to_bytes</span><span class="p">())</span>
+<a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a><span class="n">restored</span> <span class="o">=</span> <span class="n">SuperLSS</span><span class="o">.</span><span class="n">from_bytes</span><span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;severity.superlss&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">read_bytes</span><span class="p">())</span>
+<a id="__codelineno-25-5" name="__codelineno-25-5" href="#__codelineno-25-5"></a><span class="n">restored_parameters</span> <span class="o">=</span> <span class="n">restored</span><span class="o">.</span><span class="n">predict_parameters</span><span class="p">(</span><span class="n">scoring_data</span><span class="p">)</span>
+</code></pre></div>
+<p>The artifact preserves family configuration, links, compiled predictor state,
+penalties, coefficients, joint covariance, EDF, convergence and fallback
+telemetry, null model, and discrete configuration. Its JSON envelope and payload
+digests detect corruption. The payload contains Python pickle data for learned
+feature objects, so load artifacts only from trusted sources; a digest does not
+make hostile pickle safe.</p>
+<p>Artifacts carry two independent version numbers. The envelope's
+<code>schema_version</code> versions the fitted state itself, and <strong>MAJOR is a read
+barrier unless explicitly supported</strong>. This build writes envelope <code>10.0.0</code>
+and also reads <code>8.0.0</code> and <code>9.0.0</code>. Schema 10 permits compact historical row
+arrays and records the full-history opt-in; older readers refuse this format
+before loading its payload. New fits record whether curvature diagnostics assessed
+the data matrix or the penalized matrix; older fits keep their original
+family-dependent interpretation. Unsupported majors receive a version error
+naming both versions. MINOR and PATCH promise readability. Because the loader
+recomputes the manifest and compares it for
+equality, any change to what the manifest describes must be a MAJOR bump — so a
+manifest mismatch always means corruption or tampering, never age. The
+<code>public_api</code> block carries its own <code>schema_version</code> for the SuperLSS wrapper
+metadata alone; it moves independently of the envelope's, and both are written
+into every artifact so that whichever layer refuses a stale artifact names its
+own version. The wrapper remains at <code>2.0.0</code>. Envelope majors below 8 identify
+development-only shapes that are refused, not compatibility promises.</p>
+<h3 id="diagnosing-a-fit">Diagnosing a fit<a class="headerlink" href="#diagnosing-a-fit" title="Permanent link">&para;</a></h3>
+<p><code>diagnose()</code> explains solver and smoothing behaviour from the accepted fitted
+revision without reading any training rows:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="n">report</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">diagnose</span><span class="p">()</span>
+<a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">report</span><span class="p">)</span>  <span class="c1"># compact: the work profile, then finding headlines</span>
+<a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a><span class="nb">print</span><span class="p">(</span><span class="n">report</span><span class="o">.</span><span class="n">render</span><span class="p">(</span><span class="n">detail</span><span class="o">=</span><span class="s2">&quot;full&quot;</span><span class="p">))</span>  <span class="c1"># adds evidence, caveats, and limitations</span>
+<a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a><span class="n">payload</span> <span class="o">=</span> <span class="n">report</span><span class="o">.</span><span class="n">to_dict</span><span class="p">()</span>  <span class="c1"># plain JSON containers; report schema_version 2</span>
+</code></pre></div>
+<p>The report leads with the fit's work profile (<code>report.profile</code>):</p>
+<ul>
+<li>rows, coefficients, and the wall time of the fit this object ran;</li>
+<li>the work done: outer EFS iterations, coefficient fits, inner iterations,
+  and how many outer proposals were rejected or backtracked;</li>
+<li>the time distribution over the recorded phases (likelihood evaluation,
+  curvature and gradient assembly, decomposition solves, EFS updates and
+  backtracking, terminal inference, ...) with each phase's share of the fit
+  and its call count; time the phases do not cover is reported as
+  orchestration and unmeasured;</li>
+<li>one row per smoothing component: initial and final lambda, accepted moves,
+  how often it led the largest accepted move, iterations spent at the cap, the
+  term's terminal EDF, and its outcome: <code>finite</code>, <code>fixed</code> by the caller,
+  <code>upper_bound</code>, <code>unresolved_cap</code>, or <code>exact_face</code> with the iteration that
+  activated the face and what the face left (<code>linear_only</code> for a plain cubic
+  regression spline, <code>null_space_only</code>, <code>fully_suppressed</code>, or <code>unresolved</code>).</li>
+</ul>
+<p>Findings follow the profile, ranked as before. Phase timings are measurements
+of this fit on this machine, not benchmark claims or per-feature attribution.
+A model restored with <code>from_bytes</code> has no machine timing: its report renders
+the same work counts and smoothing metrics, says that timing is unavailable,
+and the artifact schema is unchanged.</p>
+<h2 id="current-limits">Current limits<a class="headerlink" href="#current-limits" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>TweedieLSS</code> and <code>NegativeBinomialLS</code> support dense and chunked observed
+  curvature, including discrete designs. Neither provides Fisher fallback;
+  an unresolved indefinite terminal observed curvature is refused.</li>
+<li><code>NegativeBinomialLS</code> has no zero-inflation component or exact Poisson active
+  face. The previously rejected large real-book NB2 example now reaches
+  configured stationarity after a finite-kernel range fix and EFS recovery
+  improvements; this does not establish a global smoothing optimum. See the <a href="../../research/2026-09-pragmatic-convergence/">practical convergence evidence</a>
+  for the corrected diagnosis and held-out prediction/uncertainty comparisons.</li>
+<li><code>GeneralizedGammaLSS</code>, <code>GeneralizedParetoLSS</code>, <code>TwoPieceLogNormalLSS</code> and
+  <code>TwoPieceNormalLSS</code> are certified through the generic
+  finite-difference endpoint authority, so a certified face is converged but
+  not <code>matched_certified</code>.</li>
+<li>Shape constraints (<code>Constraint.fit.*</code> and <code>Constraint.postfit.*</code> on a
+  feature) are not applied on the distributional path: the smooth is fitted
+  unconstrained and <code>ShapeConstraintIgnoredWarning</code> is emitted at compile time.
+  Constrained smooths on this path are a planned feature with their own design.</li>
+<li><code>LogNormalLS</code> is certified through the generic
+  finite-difference endpoint authority, so a certified face is converged but
+  not <code>matched_certified</code>.</li>
+<li>Cross-predictor penalties are not supported.</li>
+<li>A scalar offset is intentionally rejected.</li>
+<li><code>predict()</code> returns Gaussian location; transformations such as a lognormal
+  original-scale mean are the caller's explicit modeling decision. <code>LogNormalLS</code>
+  is the supported way to model that directly: it fits the same likelihood on
+  <code>y</code> and returns the original-scale mean from <code>predict()</code>.</li>
+<li>Dedicated higher-dimensional interaction-surface confidence-band helpers and
+  broader count LSS families are future work; the joint covariance needed for
+  downstream inference is retained.</li>
+</ul>
+<p>The scale predictor is not a second price. For an ordinary expected-loss tariff,
+the selected technical severity remains the conditional mean. Scale becomes
+decision input when an explicitly chosen business functional needs conditional
+quantiles, prediction intervals, layer costs, capital, or a risk margin.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

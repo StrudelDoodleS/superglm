@@ -1,0 +1,2698 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Penalised GLMs for insurance pricing">
+      
+      
+        <meta name="author" content="Max Hicks">
+      
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Roadmap - SuperGLM</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#roadmap" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SuperGLM" class="md-header__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SuperGLM
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Roadmap
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="orange"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SuperGLM" class="md-nav__button md-logo" aria-label="SuperGLM" data-md-component="logo">
+      
+  <img src="../images/logo.png" alt="logo">
+
+    </a>
+    SuperGLM
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/StrudelDoodleS/superglm" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    StrudelDoodleS/superglm
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Your First Distributional Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/workflows/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recommended Workflows
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../models/distributional-inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Checking A Distributional Fit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/editor/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing a Fitted Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/fitting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choosing A Fitting Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Feature Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/credibility/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Credibility Terms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/monotone/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Monotone Splines
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation And Model Comparison
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/results/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inspecting Results
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families & Dispersion
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/interactions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interactions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/screening/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Interaction Screening
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/screening-evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Screening Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/optimization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    REML & Solvers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/releases/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releases
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/migrations/group-pricing-rank/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: group pricing follows rank
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/migrations/weight-semantics-prior/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: sample_weight is a prior weight
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/migrations/family-bound-predictors/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Migration: family-bound predictors
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/cost-and-timing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Claims and the Clock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/python-support/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Support Policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/data-and-solver-boundaries/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data and Solver Boundaries
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../distributional-family-development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributional Family Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../editor_frontend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Frontend for Python Developers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/scop-performance-prototype/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SCOP Performance Prototype
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tabmat-integration-notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tabmat Integration Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Governance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Governance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../governance/model_risk_pack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Risk Pack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/editor_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Editor Demo
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/mtpl2_frequency_walkthrough/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MTPL2 Frequency Modelling Walkthrough
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/plotting_diagnostics_demo/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM Plotting Utilities — Full Inspection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/ordered_categorical_smoothing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Smoothing Ordered Categorical Variables
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/tweedie_profile_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tweedie Power Parameter Estimation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/model/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperGLM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/distributional/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SuperLSS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/families/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Families
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/penalties/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Penalties
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/inference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/plotting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plotting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../api/model_selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#current-position" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current position
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#implemented-foundation-c3-c1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implemented foundation: C3 + C1
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#separate-future-item-100-million-rowout-of-core-fitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Separate future item: 100-million-row/out-of-core fitting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#later" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Later
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#research" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Research
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Research">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#numerical-and-function-space-candidates-c15c26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numerical and function-space candidates: C15–C26
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#deferred" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Deferred
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#killed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Killed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-changes-the-order" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What changes the order
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dossier-corrections-to-retain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dossier corrections to retain
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="roadmap">Roadmap<a class="headerlink" href="#roadmap" title="Permanent link">&para;</a></h1>
+<p>Last strategic review: <strong>2026-09-11</strong>. Current implementation baseline:
+<code>origin/master</code> at <code>7d054022</code>, the merged C3+C1 checkpoint in PR #379.
+The starting baseline was <code>8962c452</code> (published v0.31.0); individual implementation
+and benchmark revisions remain pinned in the evidence below.</p>
+<p><strong>0.32 release target:</strong> finish the reviewed C1 core in PR #381. The user has
+separated 100-million-row/out-of-core fitting into the future item below.
+The 12.5-second latency target remains unmet; neither follow-up requires a new
+architecture in this closeout. This records release intent, not publication.</p>
+<p>This is <strong>directional project state, not an implementation specification</strong>,
+delivery commitment, or authorization to start a capability. Scope implementation
+separately. If code, tests, benchmarks, or user evidence contradict this roadmap,
+report the discrepancy and propose an update; do not change the implementation
+to satisfy an outdated assumption. Explicitly scoped user work takes precedence.</p>
+<p>The candidate catalogue covers <strong>C1–C26</strong>. The <a href="../research/2026-09-superglm-feature-roadmap-dossier/">original research dossier</a>
+contains C1–C14; the <a href="../research/2026-09-superglm-feature-roadmap-additions/">reviewed numerical and function-space additions</a> contain C15–C26.
+Their recommendations, estimates and readiness labels are research input;
+this file records the current ordering. <code>READY</code> means ready to scope or prototype,
+not an implementation commitment. Update the review date, revision and evidence
+when a capability lands or a gate changes; retire completed work from the queue.</p>
+<h2 id="current-position">Current position<a class="headerlink" href="#current-position" title="Permanent link">&para;</a></h2>
+<p>The priority is useful, trustworthy distributional modelling on CPU, building on
+the scalar engine's existing performance and interpretability.</p>
+<ul>
+<li><strong>Scalar foundations already exist:</strong> exact row-support compression, discrete
+  REML, structured random effects and FS/SZ smooths, shape constraints, and
+  <a href="../guide/screening/">interaction screening</a>. The <a href="https://github.com/StrudelDoodleS/superglm/blob/21007082/benchmarks/results/local_perf_baselines.json">historical benchmark record</a>
+  includes a 678,013-row fit at a 0.805 s median; its timing certification is
+  explicitly disabled pending a reproducible current machine profile.</li>
+<li><strong>LSS is substantial already:</strong> nine built-in families, coupled observed
+  curvature, fused family kernels, reused dense designs, cheap rejection of
+  backtracks, and joint inference. <a href="https://github.com/StrudelDoodleS/superglm/pull/376">PR #376</a> records a 100,000-row, 192-coefficient
+  Tweedie fit at 9.712 s, seven outer iterations, dense dispatch, and about
+  1.08 GiB whole-process peak RSS. This is an earlier single-pair receipt ending
+  at <code>practical_plateau</code>, not a current-head certified benchmark or an assembly
+  timing. Scalar and LSS timings describe different workloads.</li>
+<li><strong>Existing smoothing and inference:</strong> <a href="../models/distributional/#how-smoothing-parameters-are-chosen">smoothing</a>
+  has safeguarded EFS, optional Newton/BFGS, stationarity evidence, and exact
+  infinity-face decisions. <a href="../models/distributional-inference/">Inference</a>
+  already includes callable posterior bounds, supported tail functionals,
+  smoothing-uncertainty correction, proper scores, and portfolio simulation.</li>
+<li><strong>Production grouped LSS is implemented:</strong> public <code>discrete=True</code> supports
+  observed-curvature families, including Tweedie and NB2, with actual backend
+  telemetry. Smoothing and posterior derivative replay use bounded design
+  blocks; categorical spline chunks reuse row lookups. Existing <a href="https://github.com/StrudelDoodleS/superglm/blob/21007082/src/superglm/distributional/solver/assembly.py">grouped
+  assembly</a> and <a href="https://github.com/StrudelDoodleS/superglm/blob/21007082/src/superglm/_group_matrix/_cross_matrix_execution.py">rectangular cross-products</a> remain the
+  underlying architecture.</li>
+<li><strong>Real gaps remain:</strong> LSS shape constraints warn and fit unconstrained;
+  cross-predictor penalties are unsupported. Dense coefficient factors, family
+  derivative arrays and retained coefficient histories still limit size. Some
+  smoothing fits can still lack strict certification. The tested large real-book
+  NB2 configuration now reaches configured stationarity after a finite-NB2
+  numerical-range fix.</li>
+</ul>
+<h2 id="implemented-foundation-c3-c1">Implemented foundation: C3 + C1<a class="headerlink" href="#implemented-foundation-c3-c1" title="Permanent link">&para;</a></h2>
+<p>The user explicitly selected C3 and C1 on 2026-09-08, overriding the previous
+C5-before-C1 ordering. The <a href="../superpowers/plans/2026-09-08-c3-c1-completion/">implementation plan</a>,
+<a href="../superpowers/specs/2026-09-08-c3-c1-completion-design/">design</a> and
+<a href="../research/2026-09-c3-c1-completion-evidence/">completion evidence</a> record the
+bounded scope and validation. Original uncommitted strategy inputs remain
+unchanged in <code>.worktrees/roadmap-dossier</code>.</p>
+<p><strong>C3 follow-through:</strong> the original correlated Tweedie and GPD EFS failures
+reproduce on v0.31.0. Existing strict EFS plus Newton controls reach endpoints
+passing the current stationarity checks from three smoothing starts on both
+baseline and implementation. <a href="../research/2026-09-c3-stress-evidence/">Source-bound stress receipts</a>
+retain the failures, terminal checks, independent reference results and measured
+prediction/conditional-SE sensitivity. No new optimizer, shape penalty, relaxed
+tolerance or acceptance rule was needed. These checks establish the existing
+first-order numerical contract, not a rigorous enclosure of every derivative
+error or a local/global minimum guarantee. Unresolved reference probes remain
+visible.</p>
+<p>The <a href="../research/2026-09-pragmatic-convergence/">pragmatic convergence follow-through</a>
+adds practical stopping across substantial outward lambda movement, retained-fit
+EFS recovery when Newton derivatives are unavailable, and a bounded finite-NB2
+low-mean range extension. The last change removes a numerical guard that blocked
+an improving coefficient step on one policy. The 610,212-policy NB2 book now
+reaches configured coefficient and LAML stationarity in nine outer iterations.
+Its corrected uncertainty differs materially from the earlier stopped fits.
+This does not add an exact Poisson face or a global-minimum guarantee.</p>
+<p><strong>C1 production route:</strong> public observed chunking, bounded derivative replay and
+cached categorical row extraction are implemented and regression tested.
+Complete smoothing fits cover signed geometry, weight semantics, interactions,
+prediction/covariance and serialization. The insurance evidence shows a memory
+benefit on 449,000 synthetic rows formed by repeating 22,450 real severity
+policies; the smaller real book does not save RSS. The initial large real-book
+NB2 comparison stopped without strict certification. Its Newton derivative
+recovery and finite numerical range have since been corrected, and the same
+workload reaches configured stationarity;
+see the <a href="../research/2026-09-pragmatic-convergence/">follow-through evidence</a>.
+The historical RSS comparison remains separate from the new convergence result.</p>
+<p>Exact compiled-design checks and continuous-grid sensitivity are separate
+evidence. Continuous Gaussian grids of 64, 256 and 1,024 bins reduce held-out
+prediction differences in this fixture; they do not establish a universal
+approximation rate. Whole-process RSS, actual dispatch, complete-fit work and
+the timing audit are recorded in the completion report. This closes the chosen
+C1 implementation foundation without claiming constant memory, universal
+speedups or 10⁷–10⁸-row capability. The subsequently requested discrete
+performance gate below remains open within C1.</p>
+<p>The final-source <a href="https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/c3_pragmatic_performance_receipt.json">performance receipt</a>
+records three serial runs per arm on the replicated 449,000-row severity
+workload: median complete-fit time 25.56 → 20.96 s (18.0% lower), and process
+high-water RSS 1,490.48 → 1,007.39 MiB (32.4% lower). The independently
+reviewed result is a qualified local observation, with
+background CPU and screening changes recorded. The comparison changes both
+source version and <code>discrete=False</code> to <code>True</code>; observed numerical agreement
+does not replace separate discretization-error evidence. Final production
+validation passed 11,546 tests with 174 skips and mandatory real-data availability.</p>
+<h2 id="next">Next<a class="headerlink" href="#next" title="Permanent link">&para;</a></h2>
+<p><strong>Immediate execution gate: discrete performance.</strong> Before starting another
+capability, investigate and improve discrete complete-fit execution. The
+<a href="../research/2026-09-discrete-performance-plan/">implementation plan</a> covers
+cost-aware histogram dispatch and avoidable chunk preparation, with signed
+stored-design equivalence, bounded memory and complete-fit evidence required.
+Compact storage alone does not demonstrate faster fitting. The capabilities
+below remain the subsequent priority order until this gate is resolved.</p>
+<p>The fixed-layout size sweep at <code>ed84669a</code> through one million rows preserves a
+memory/time tradeoff: chunked discrete execution uses substantially less memory,
+while the same stored discrete basis runs faster through the existing dense
+backend. Controlled BLAS threading improves that dense route but provides no
+clear chunked speedup. Profiles identified repeated row preparation and rendering;
+the resulting bounded range and renderer changes reduce complete-fit medians by
+21% for ordinary chunks and 29% for explicit panels on the 262,144-row fixture.
+The constructor-inclusive raw-basis tabmat pilot is slower than those panels,
+so the existing signed matrix-product architecture is retained.</p>
+<p>Automatic panels now admit a narrow mixed ordinary layout supported by those
+measurements, with a separate 64 MiB workspace allowance and existing numerical
+refusal. Automatic dense selection remains deferred. Full non-browser validation
+passes 12,350 tests, including all 84 required real-data checks, with 109 other
+skips. Final actual-default validation completes 28 timed public fits and three
+separate dispatch witnesses. Discrete medians improve by 58.5% for fragmented
+Gaussian, 49.4% for support-32, and 76.6% for Gamma severity against the frozen
+post-C3 source; severity exact/discrete timing ranges overlap.</p>
+<p>The earlier mixed-layout comparison found discrete fitting taking 44.5% longer
+than exact while using 499.5 MiB less fit high-water RSS. The subsequent global
+moment implementation addresses that gap, with further latency work still
+required before another roadmap capability;
+see the <a href="../research/2026-09-discrete-performance-report/">performance report</a>.
+Scalar SuperGLM's cached-weight discrete REML optimizer remains a separate
+approximation contract.</p>
+<p>The implemented execution change computes on marginal supports at the chosen
+resolution: aggregate changing row scores and signed curvature weights before
+contracting the support bases. Earlier profiles confirmed repeated row
+expansion in mixed panels. A three-condition geometry-batch ablation confirmed
+lost support-contraction amortization, but using one whole-book batch still does
+not beat the current panels in those diagnostics. Remaining mixed pair work
+includes repeated weighted-column scans and spline-by-category expansion.
+A bounded global moment prototype now processes the small ordinary block
+together while preserving observation-level likelihood semantics and the
+distributional optimizer. Independent signed/masked rectangular oracles pass.
+Six controlled complete fits yield medians of 10.821 s for current discrete,
+7.781 s for the prototype and 7.639 s for exact; prototype/exact timing ranges
+overlap, while the prototype uses 496.79 MiB less median fit-end RSS. The stored
+discrete basis is identical and holdout differences are below 9e-16. This
+supports production integration with numerical guards, fallback and explicit
+size-selection evidence. That implementation now passes independent review and
+12,449 distinct latest tests across the broad run and documented followups,
+including all 84 required real-data cases. Fifteen actual-default timed fits and
+five separate witnesses now validate production <code>5c1ce17e</code>: the 262k discrete
+median falls 12.036 to 7.884 s, and the million-row/P102 sample falls 39.439 to
+29.321 s versus 31.956 s exact. The latter uses 1,869.37 MiB fit-end highwater
+versus 3,893.99 MiB exact. Same-discrete outputs agree at roundoff scale;
+discretization error remains separately measured. Global moments execute without
+refusal on the two large mixed cases; smaller controls retain existing routes.</p>
+<p>The user judged the 8% one-thread time advantage over exact insufficient and
+explicitly selected further latency reduction on 2026-09-09. Single-fit wall
+time is the objective; using more CPU is acceptable when it saves time. The C1
+gate stays active. An eight-fit screen on 262k/P102 and 1m/P182 shows that four
+BLAS threads substantially help dense execution but offer little discrete gain.
+At the wider million-row shape, exact/discrete one-thread samples are
+75.795/46.956 s, and four-thread samples 46.844/44.732 s. These are single
+observations at two coupled N/P shapes, not a full crossover study.</p>
+<p>The production profile and scalar policy control are complete. Scalar exact
+forced1/forced4/auto samples take 5.118/5.395/5.120 s; discrete auto takes
+0.648 s. A subsequent source audit corrects the optimizer interpretation:
+the discrete arm enters the direct-REML wrapper and delegates to cached-W;
+the witness missed the imported inner-function alias. Auto correctly selects
+one thread for that 79-coefficient fixture, but its exact/discrete speed ratio
+does not isolate representation cost or establish a universal scalar policy.
+LSS geometry's diagnostic 21.485 s divides mainly into 12.693 s accumulating
+global moments and 8.591 s producing chunks; only 1.619 s of chunk production
+is family evaluation. These instrumented intervals are not fit-time estimates.</p>
+<p>The four-condition full-pass comparison is complete with separate witnesses.
+Current / 65,536-row geometry / full geometry / all full-row passes take
+27.104 / 24.794 / 29.413 / 26.978 s, with fit highwaters
+1,869.01 / 1,894.90 / 2,460.33 / 2,461.75 MiB. Stored designs match,
+iterations remain unchanged and output differences are at rounding scale.
+These are single samples; full-row execution still constructs copied state.
+No default changed. A corrected scalar witness confirms the inner cached-W
+dispatch with saved outputs identical to the original control. The completed
+joint-state census finds no exact row reduction on the million-row fragmented
+fixture; the original severity book has 9,835 conservative states for 22,450
+training rows. A bounded Gamma sufficient-statistic oracle passes, but supplies
+no complete-fit speed result. Exact grouping is an optional accelerator.</p>
+<p>The user's stated objective is now explicit: scale GAMLSS end to end, including
+mostly distinct observations. Compact internal solver history is implemented in
+<a href="https://github.com/StrudelDoodleS/superglm/pull/381">PR #381</a>: obsolete historical
+row arrays are released during EFS/Newton optimization, while terminal and
+recent plateau rows remain available. <code>retain_history_rows=True</code> preserves full
+history for debugging. On the million-row C1 fixture, final source confirmation
+reduces historical row buffers from 256 to 128 MiB and peak process RSS by
+158.93 MiB, with bitwise-identical numerical outputs. Fit time is 14.727 versus
+14.564 seconds in that pair; no latency gain is claimed. Three dense pairs have
+median times of 2.292 versus 2.397 seconds. Lifetime regressions cover obsolete
+initial fits and session caches. New artifacts use schema 10, with schemas 8
+and 9 still readable. See the
+<a href="https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/compact_lss_history.md">compact-history report</a>.
+Exact Gaussian root preparation also removes its retained carrier array while
+preserving logical likelihood identity and immutable child reuse; its 411
+affected tests pass. The current 10-million-row Gaussian REML fit, already using
+<code>discrete=True</code>, completes in <strong>152.498 s</strong> with <strong>11.055 GB peak process RSS</strong>,
+13 inner iterations, five smoothing iterations and rank 102. See the
+<a href="https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/c1_current_10m_receipt.json">actual model receipt</a>.
+This is a demonstrated fixture-specific result, not a whole-fit RAM bound.
+On 2026-09-11 the user explicitly deferred the 100-million-row target and its
+storage/compiler/solver expansion to a separate item. Full-row inputs,
+initialization and live/output state remain known limits. The C1 core is
+substantially complete for the 0.32 target, subject to final PR review and CI;
+the 12.5-second goal remains a separate latency follow-up.
+The dossier's promised removal of the N factor does not describe total fitting:
+observation likelihood work remains, while support contraction reduces expensive
+basis-width dependence. Further grouping and pseudo-response experiments are held.</p>
+<p>A matched fixed-channel geometry control now isolates that width benefit:
+global setup plus accumulation takes 0.155/0.177 s at P102/P182, versus cached
+dense assembly 0.198/0.419 s on the same stored designs and signed channels.
+These are one-thread geometry diagnostics at N262,144, not complete fits. Dense
+fitting renders its matrices once per layout, so fresh rendering is recorded
+separately. Carrying the compressed benefit through predictor/likelihood row
+processing remains the immediate latency task; compact history addresses a
+separate capacity limit. Large N amplifies the avoided per-row basis work even
+though both routes remain linear in N at fixed model dimensions.</p>
+<p>The requested 20-second latency milestone is now met on the existing public
+million-row fragmented Gaussian workload (N=1,048,576, P=102, four knots,
+256 bins): three predeclared complete fits take 18.607, 19.270 and 19.665 s.
+Both matched baseline samples remain recorded, at 26.725 and 29.068 s. The
+measurement uses four native workers and one BLAS thread, with standard public
+warmup outside the fit clock. Direct row-range ingestion, parallel support
+moments, coherent workspace-sized batches, support prediction reuse and bounded
+immutable likelihood preparation preserve the chosen binned model. The last
+change reduces repeated child preparations from 560 to 16. Peak process memory
+is about 1.86 GiB, approximately 38 MiB above the baseline median; the prepared
+child cache has a separate 64 MiB retention allowance. This is a C1 latency
+milestone, not a universal thread policy or a bounded whole-fit RAM claim.
+Larger-N capacity work was subsequently deferred to the separate
+100-million-row/out-of-core item. See the current
+<a href="../research/2026-09-discrete-performance-report/">performance report</a>.</p>
+<p>A subsequent fair comparison uses the same production source <code>68bf3cd5</code> for
+both routes, screens 1/2/4/8/16 threads, then runs three new confirmations per
+selected setting. Dense with eight BLAS threads takes median 22.136 s; discrete
+with 16 Numba workers and one BLAS thread takes 18.379 s. Discrete reduces median
+wall time by 16.97% and process highwater at fit end by 50.79% (3,895.02 to
+1,916.58 MiB). Thus 16 workers help the current implementation, revising the
+earlier four-worker choice. The saved discrete outputs remain exactly equal
+across tested settings; the intended binning approximation against dense has
+maximum holdout parameter difference 3.23e-4. All fits retain 16 inner/seven
+smoothing iterations and <code>practical_plateau</code>. This is one shape on one machine,
+with screen-selected settings and standard warmup excluded. It establishes a
+moderate time advantage and a larger memory advantage, not a general optimum,
+an mgcv comparison or a whole-fit bounded-memory guarantee. Larger-N capacity,
+broader n-by-q validation and automatic threading are deferred follow-ups,
+outside the current C1 release closeout. See the
+<a href="https://github.com/StrudelDoodleS/superglm/blob/4c5783e4/benchmarks/discrete_thread_screen_receipt.json">thread receipt</a>.</p>
+<p>The selected latency targets are 15 seconds, then 12.5 seconds, on this
+same fixture. The C3/C1 implementation is consolidated in
+<a href="https://github.com/StrudelDoodleS/superglm/pull/379">PR #379</a>. At <code>37f4ecdb</code>,
+three fresh discrete confirmations take 14.807, 14.826 and 14.992 seconds;
+the 15-second target is met with exactly equal saved outputs and representation.
+Fresh dense controls have median 24.686 seconds. Parallel source certification,
+single-write ordinary panels and paired score/mass scans improve constant
+factors while preserving row summation order. A two-BLAS-thread control is
+slower. Two explicit native signatures fix the cold public-warmup regression:
+a controlled fresh-cache pair at <code>ae6a35d3</code> reduces warmup 84.367 to 32.944
+seconds, with exactly equal outputs and no new fit-time gain claimed.
+The 12.5-second target remains open. Keep larger-N capacity, controlled N-by-q
+scaling and general thread policy distinct from this latency result.
+Linear aggregation in N is compatible with BAM-style marginal discretization;
+the scaling target is cheaper row passes and reduced basis-width dependence,
+with measured memory and iteration counts, rather than sublinear full fitting.
+One fixed-channel categorical-support placement experiment at <code>beabd523</code>
+reduces estimated owned geometry arrays but takes 0.319 seconds versus 0.308
+seconds for the current representation. It supplies no latency improvement
+evidence, so defer this route for the current target and retain the workspace
+tradeoff as separate capacity evidence. This is a geometry comparison, not a
+complete-fit result.
+An ordinary-only BLAS8 geometry control also supplies no gain (0.443 versus
+0.427 seconds). Both candidate changes remain outside production. The completed
+N-by-width diagnostic at <code>751df3db</code> has discrete/dense times of 13.512/21.222
+seconds at one million rows/q102 and 17.474/44.792 seconds at q222. The latter
+uses 63.86% less fit-end process highwater with discrete execution. Both routes
+use the same iteration counts within each cell; single samples and changing
+iterations across cells limit scaling-law claims. The untimed q222 witness
+confirms actual grouped execution and exactly equal saved outputs. A separate
+PASSIVE OpenMP control lowers CPU but increases fit time, so retain the default
+waiting policy. Fusing first-trial likelihood and geometry at <code>06e1ccff</code> reduces
+one complete-fit comparison from 14.271 to 13.086 seconds, with exactly equal
+final arrays and unchanged iterations. Separate witnesses observe 15 fewer
+combined scalar/geometry predictor passes. Intermediate objective records differ
+by at most 2.33e-10. This is one pair, not a replicated speed estimate; unequal
+warmup/cache allocations prevent attributing its RSS difference to the fix.
+The 12.5-second target remains unmet. Close this implementation checkpoint with
+its edge-case regressions and evidence; further optimization, larger-N capacity
+and general thread-policy work remain deferred rather than claimed complete.</p>
+<p>The <code>41ae3960</code> review follow-up corrects predictor-state consistency across
+geometry, value screening and published predictions, and protects speculative
+cross-products against exponent overflow/underflow. Its 347 selected regression
+tests pass, including automatically admitted execution and unfixed boundary
+demonstrations. These corrections preserve the selected C3+C1 scope and do not
+establish a new latency milestone.</p>
+<p>The shared BLAS
+controller currently sees only a 1,500-coefficient threshold, with no row-count,
+backend or timing input; <code>-1</code> disables intervention rather than selecting an
+optimal count. It does not parallelize native moment loops. Use live
+<code>SuperLSS.diagnose()</code> alongside kernel profiles, captured after fit clocks/RSS.
+Any new threading/accumulator decision must preserve coupled signed curvature,
+numerical certification and bounded ownership. Initial admission remains a
+scope limit, without universal speed parity or a novelty claim. Wood's 2020
+review described the multiple-predictor large-data extension as not yet usable,
+not mathematically infeasible; references and complexity are in the report.</p>
+<h2 id="separate-future-item-100-million-rowout-of-core-fitting">Separate future item: 100-million-row/out-of-core fitting<a class="headerlink" href="#separate-future-item-100-million-rowout-of-core-fitting" title="Permanent link">&para;</a></h2>
+<p><strong>Deferred; not a condition of the current C1 closeout.</strong> A mostly-distinct
+100-million-row dataset requires its own memory, storage and I/O feasibility
+scope. The current 10-million-row peak makes an unbounded tenfold escalation
+inappropriate on the measured 62.8 GiB machine. No 100-million-row fit is claimed.</p>
+<p>Start any later work with a finite ownership/pass-cost analysis and a declared
+memory/time budget. Preserve one compiled model and the existing numerical
+contracts; do not turn the current release into a new data/storage API project.
+The reviewed row store and unfinished compiler are preserved locally on
+<code>deferred/c1-out-of-core</code> at <code>92f99dda</code>, outside PR #381's final code. No further
+analysis or implementation is active for this item.</p>
+<p>After the current C1 closeout, the candidate priority order is:</p>
+<p><strong>1. Shape-constrained LSS (C5).</strong> Close the explicit gap between scalar pricing
+constraints and distributional fits, starting with demanded monotone effects.
+Reuse scalar experience; settle the <a href="https://github.com/StrudelDoodleS/superglm/issues/366">SCOP acceptance/termination question</a>
+before transplanting its rules. <strong>Gate:</strong> demonstrated modelling need, joint
+likelihood/constraint correctness, and defensible inference at active boundaries.
+Constrained predictor shape must be distinguished from shape of a derived risk
+quantity. Use the relevant C3 convergence evidence above; constrained boundaries still
+need their own acceptance and inference contracts.</p>
+<p><strong>2. Extend functional inference for actuarial decisions (C12).</strong> Build on
+<code>posterior_bounds</code> and family-owned functionals for loss layers, risk contrasts,
+and feature effects; add derivative-based uncertainty only where it is useful
+and justified. <strong>Gate:</strong> a concrete quantity not adequately served today, checked
+moment existence, atom/boundary behaviour, and uncertainty calibration. Existing
+joint covariance is the dependency; neither C1 nor a general AD engine is needed.</p>
+<h2 id="later">Later<a class="headerlink" href="#later" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Rationale, dependency, and promotion gate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Shared smoothness or effects (C4)</td>
+<td>Useful parameter pooling. Separate shared bases, shared lambda, and shared coefficients: equal lambda alone does not require off-diagonal penalties. Scope a real model and prove identifiability/joint penalty traces. Existing <code>select=True</code> shrinkage is not missing. Does not require C1.</td>
+</tr>
+<tr>
+<td>Distributional structure discovery (C9)</td>
+<td>Extend the existing PSST/refit workflow when held-out residual structure shows predictive value. Require affordable candidate fits and separate selection from confirmatory inference; benchmark against distributional boosting. The booster scripts are experiments, not a public LSS builder.</td>
+</tr>
+<tr>
+<td>Conformal prediction wrapper (C10)</td>
+<td>Complement effect inference when likelihood prediction coverage is inadequate. Require a credible calibration split/exchangeability assumption and segment evaluation; promise only the coverage the chosen method supports. Independent of solver scaling.</td>
+</tr>
+<tr>
+<td>Deterministic portfolio aggregation (C11)</td>
+<td>Complement existing simulation when tail precision or simulation cost blocks a use case. Specify conditional independence/dependence and parameter uncertainty first; validate discretization and tail error against reference laws. FFT, Panjer, and saddlepoint have different applicability; heavy tails may have no usable CGF.</td>
+</tr>
+<tr>
+<td>Joint body–tail model (C13)</td>
+<td>Go beyond the documented fixed-threshold splice recipe only when threshold uncertainty or tail fit matters in held-out decisions. Requires normalized body/tail likelihoods and identifiable threshold treatment; shape regularization is a modelling choice, not a cap repair.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="research">Research<a class="headerlink" href="#research" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Sparse Laplace and small family-derivative tools (C2):</strong> investigate separately.
+  Structured scalar credibility is already available. Measure factor fill and
+  family-development cost before choosing either sparse factorization or AD;
+  neither guarantees the other pays. No core replacement without workload evidence.</li>
+<li><strong>Transformation models and non-crossing quantiles (C6/C7):</strong> first demonstrate
+  persistent family misspecification. Monotonicity and a response-dependent design
+  need their own contracts; the current observation contract supports complete
+  observations only. Censoring/truncation needs an extension. Inverting a fitted
+  CDF does not reproduce calibrated quantile-loss regression automatically.</li>
+<li><strong>Dependence-aware validation/NCV:</strong> assess when ordinary held-out validation
+  misrepresents the intended book. The dossier calls NCV already road-mapped, but
+  the repository has no public NCV implementation; it is not an assumed prerequisite.</li>
+</ul>
+<h3 id="numerical-and-function-space-candidates-c15c26">Numerical and function-space candidates: C15–C26<a class="headerlink" href="#numerical-and-function-space-candidates-c15c26" title="Permanent link">&para;</a></h3>
+<p>The reviewed additions organize computational research into three complementary
+directions: C1 reduces row-side basis-product work; C15/C18 target coefficient
+storage and iterative solves; C16/C21/C22 target representation efficiency, with
+C26 as a possible specialist solver. Composition is a research question, not an
+assumption that one backend should serve every size regime. These additions do
+not reorder the existing delivery queue or reopen the completed C3+C1 checkpoint.</p>
+<table>
+<thead>
+<tr>
+<th>Candidate</th>
+<th>Idea</th>
+<th>Reviewed readiness and promotion gate</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c15-matrix-free-large-p-superglm-backend">C15</a></td>
+<td>Matrix-free large-coefficient EFS/REML</td>
+<td>Research / candidate prototype. Measure operator, preconditioner and smoothing-trace costs; quantify stochastic error and test composition with C1.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c16-adaptive-hierarchical-splines-as-statistical-mesh-refinement">C16</a></td>
+<td>Adaptive hierarchical splines</td>
+<td>Research, high value. Separate refinement indicators from certificates relative to a fixed fine model; account for re-estimated smoothing.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c17-exploit-fisher-orthogonality-and-precondition-observed-lss-geometry">C17</a></td>
+<td>Fisher orthogonality and observed-geometry preconditioning</td>
+<td>Research. Measure expected and observed coupling separately; retain dispersion/power coupling unless zeros are established.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c18-multigrid-and-krylov-recycling">C18</a></td>
+<td>Multigrid and Krylov recycling</td>
+<td>Multigrid is research. Recycling is ready to prototype after C15 supplies an iterative operator backend; C16 may supply a shared hierarchy.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c19-qefs-and-safeguarded-fixed-point-acceleration">C19</a></td>
+<td>qEFS and safeguarded Anderson acceleration</td>
+<td>qEFS is ready to reproduce and benchmark; Anderson remains research. Preserve acceptance, fallback and convergence contracts.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c20-progressive-exactification-and-inexact-newton">C20</a></td>
+<td>Progressive exactification / inexact Newton</td>
+<td>Research. Budget sampling and likelihood error separately; full-objective cleanup does not guarantee the same nonconvex branch.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c21-higher-dimensional-smooth-interactions-without-full-tensor-explosion">C21</a></td>
+<td>Sparse-grid and factorized spline interactions</td>
+<td>Research, high predictive upside. Derive identifiability, penalties and C1 compatibility; keep factorized discovery distinct from inferential refitting.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c22-locally-adaptive-and-graph-structured-effects">C22</a></td>
+<td>Trend filtering and graph effects</td>
+<td>Quadratic graph effects are candidates for scoping. Trend and graph-trend effects need an active-set/post-selection inference contract.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c23-functional-and-compositional-predictors">C23</a></td>
+<td>Functional and compositional predictors</td>
+<td>Functional-linear terms are candidates for scoping; richer functional GAMs remain research. Specify grids, quadrature, identifiability and composition-zero handling.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c24-test-whether-superglm-hessians-have-hierarchical-low-rank">C24</a></td>
+<td>HODLR/HSS coefficient-matrix compression</td>
+<td>Speculative. Measure off-diagonal ranks first; reject the approach if ranks grow proportionally with block size.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c25-continuation-and-branch-following-for-difficult-distributional-likelihoods">C25</a></td>
+<td>Continuation and branch following</td>
+<td>Research for robustness and branch exploration. Finding one branch does not certify uniqueness.</td>
+</tr>
+<tr>
+<td><a href="../research/2026-09-superglm-feature-roadmap-additions/#c26-semismooth-newton-primal-dual-active-set-backend">C26</a></td>
+<td>Semismooth Newton / primal-dual active sets</td>
+<td>Research / candidate prototype when C22 requires it. Require KKT checks and defined nonsmooth inference; retain the existing BCD path where appropriate.</td>
+</tr>
+</tbody>
+</table>
+<p>The proposed <a href="../research/2026-09-superglm-feature-roadmap-additions/#strengthen-c3-adaptive-regularized-newton-controller">adaptive regularized C3 controller</a> is future research in
+trust-region/cubic steps and curvature reuse. Promotion
+requires a scoped remaining limitation; the merged convergence evidence remains
+the description of delivered behavior.</p>
+<h2 id="deferred">Deferred<a class="headerlink" href="#deferred" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Copula/multivariate LSS (C8):</strong> require stable marginal fits and evidence that
+  residual dependence changes decisions. Begin bivariately if promoted; flexible
+  high-dimensional dependence remains research, not a consequence of adding AD.</li>
+<li><strong>Adaptive density GAMs (C14):</strong> bounded/light-tailed feasibility studies only
+  after named families fail. Per-row normalization and dense response-basis
+  curvature need an affordable algorithm and an explicit tail model before a build.</li>
+</ul>
+<h2 id="killed">Killed<a class="headerlink" href="#killed" title="Permanent link">&para;</a></h2>
+<p>Standalone distributional PCA, Fisher–Rao manifold GAMs, and a full INLA/SPDE port:
+no sufficiently scoped actuarial payoff with tractable, identifiable inference.
+IDR as a core estimator: retain it as a possible comparator, not an effect model.
+A GPU-first rewrite or dense high-rank adaptive density as the default scaling
+strategy: no measured case over the CPU/structured approach. These are rejected
+project directions, not claims of mathematical impossibility or bans on testing
+another predictor count. Reopen only with a concrete use case and validating evidence.</p>
+<h2 id="what-changes-the-order">What changes the order<a class="headerlink" href="#what-changes-the-order" title="Permanent link">&para;</a></h2>
+<ul>
+<li>New demonstrated wrong-answer or uncertainty failures take precedence over
+  expansion. Reopen C3 when a scoped unsupported endpoint or reproduced
+  convergence failure blocks an intended model. The tested NB2 stop prompted
+  EFS recovery, pragmatic stopping and a bounded finite-NB2 range extension;
+  it now reaches configured stationarity.</li>
+<li>Finish the scoped C1 core without treating the open 12.5-second goal or
+  deferred out-of-core item as completed. Reopen scaling work when an intended
+  book exceeds its memory or latency
+  budget. Profile derivative evaluation, accumulation, retained history and
+  coefficient factors before selecting another execution change. Bin
+  sensitivity or covariance disagreement blocks a representation change even
+  if it improves speed.</li>
+<li>Promote C12/C11 for a blocked layer/capital decision, C10 for a demonstrated
+  coverage gap, and C9 for repeatable held-out predictive gains. Compare
+  log/tail scores, calibration and total cost on multiple books; novelty claims
+  do not establish predictive value. Revalidate the dossier's dated competitor
+  claims.</li>
+<li>Follow the <a href="../development/cost-and-timing/">cost and timing policy</a>: record
+  exact revision/data/configuration, stopping status, work/allocation and
+  dispatch. Use raw worker clocks and artifacts, with an activity audit during
+  each timing run; tool completion clocks are not fit timings.
+  Historical scalar timings and one dense LSS receipt
+  cannot justify 10⁷–10⁸-row or sub-second LSS promises.</li>
+</ul>
+<h2 id="dossier-corrections-to-retain">Dossier corrections to retain<a class="headerlink" href="#dossier-corrections-to-retain" title="Permanent link">&para;</a></h2>
+<p>Discretization reduces basis-product work but retains row likelihood and weight
+aggregation passes; it does not remove all dependence on row count or guarantee
+a sparse coefficient Hessian. C1 and C2 are not universal prerequisites.</p>
+<p>The current GPD link keeps <code>0 &lt; shape &lt; 1</code>: expected shortfall exists throughout
+that mathematical domain, while variance needs <code>shape &lt; 0.5</code>. The dossier's
+half-shape TVaR refusal and blanket second-moment requirement are incorrect.
+A bounded loss layer can have finite expectation even when the response mean
+diverges; finite CRPS can also coexist with infinite variance. Retain quantity-specific
+existence and numerical-resolution checks rather than the dossier's generic rules.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "search.highlight"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+        <script src="../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

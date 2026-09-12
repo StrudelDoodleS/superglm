@@ -1,0 +1,99 @@
+.sg-hero {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) 1fr;
+  gap: 2rem;
+  align-items: center;
+  margin: 1rem 0 2.5rem;
+}
+
+.sg-hero__logo img {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  margin: 0 auto;
+}
+
+.sg-hero__copy h1 {
+  margin: 0 0 0.75rem;
+  line-height: 1.05;
+}
+
+.sg-hero__copy p {
+  margin: 0 0 1rem;
+  font-size: 1.05rem;
+}
+
+.sg-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.sg-hero__actions .md-button,
+.sg-hero__actions .md-button:visited {
+  color: var(--md-primary-fg-color);
+}
+
+.sg-hero__actions .md-button--primary,
+.sg-hero__actions .md-button--primary:visited {
+  color: var(--md-primary-bg-color);
+}
+
+.sg-hero__actions .md-button:focus:not(:hover),
+.sg-hero__actions .md-button:focus-visible:not(:hover) {
+  background-color: transparent;
+  border-color: var(--md-primary-fg-color);
+  color: var(--md-primary-fg-color);
+  box-shadow: 0 0 0 0.2rem var(--md-accent-fg-color--transparent);
+  outline: none;
+}
+
+.sg-hero__actions .md-button--primary:focus:not(:hover),
+.sg-hero__actions .md-button--primary:focus-visible:not(:hover) {
+  background-color: var(--md-primary-fg-color);
+  border-color: var(--md-primary-fg-color);
+  color: var(--md-primary-bg-color);
+  box-shadow: 0 0 0 0.2rem var(--md-accent-fg-color--transparent);
+  outline: none;
+}
+
+.sg-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0 2rem;
+}
+
+.sg-feature-card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.8rem;
+  padding: 1rem 1.1rem;
+  background: var(--md-code-bg-color);
+}
+
+.sg-feature-card h3 {
+  margin-top: 0;
+  margin-bottom: 0.4rem;
+}
+
+.sg-feature-card p {
+  margin: 0;
+}
+
+@media screen and (max-width: 76.1875em) {
+  .sg-hero {
+    grid-template-columns: 1fr;
+    text-align: center;
+  }
+
+  .sg-hero__actions {
+    justify-content: center;
+  }
+}
+
+@media screen and (max-width: 44.9375em) {
+  .sg-feature-grid {
+    grid-template-columns: 1fr;
+  }
+}
