@@ -16,6 +16,10 @@ existing pytest fixtures and the strict MkDocs build.
 **Spec:** [Proof programme design](../specs/2026-09-12-algorithm-proofs-design.md).
 Read it alongside this plan; the equations and claim IDs below use its notation.
 
+The [companion PSST plan](2026-09-12-psst-proofs.md) executes P7 in the same
+proof programme. It covers the score's meaning, normalization and calibration,
+and can proceed alongside Tasks 2–3 below. This file remains the LSS plan.
+
 ## Global Constraints
 
 - Target Python 3.12+; retain the existing NumPy/SciPy/Numba/tabmat CPU stack.
@@ -67,7 +71,7 @@ NUMBA_NUM_THREADS=2` so the existing two-worker tests can run.
   `benchmarks/lss_newton_completion.md`, and the three primary papers linked
   by the design.
 
-**Interface:** Produce records P1–P6 with fields `status`, `statement`,
+**Interface:** Produce records P1–P7 with fields `status`, `statement`,
 `assumptions`, `source_symbols`, `argument`, `numerical_obligations`,
 `regression_evidence`, and `review_disposition`. These are document fields,
 not a proposed runtime type. Use only the five statuses defined in the design.
@@ -84,9 +88,10 @@ not a proposed runtime type. Use only the five statuses defined in the design.
   assumptions, to named source functions. List the implementation's grouped
   assembly, reuse, mixed-step and stopping modifications separately. A departure
   from a paper is not automatically a research novelty.
-- [ ] Create P1–P6 records with precise proposed statements and the unresolved
+- [ ] Create P1–P7 records with precise proposed statements and the unresolved
   obligations already identified in the design. For each assumption, distinguish
   runtime-checked, caller-supplied and analytically unestablished conditions.
+  P7 points to the companion plan's four component statements.
 - [ ] Review that `converged_`, `smoothing_certified_`, stationary point,
   local minimum, global minimum and interval coverage are distinct terms.
   Validate every source symbol and relative link.
@@ -318,7 +323,8 @@ exact infinite penalties or two-piece joins.
 
 - Update: `docs/research/proofs/index.md`, `docs/models/distributional.md`,
   `docs/ROADMAP.md` and `mkdocs.yml` if adding the proof index to navigation.
-- Review: all six claim records and their referenced evidence.
+- Review: P1–P6 and their referenced evidence; include the current P7 disposition
+  from the companion PSST work without requiring that independent work to finish.
 
 **Interface:** The public guide consumes reviewed claim statements and their
 applicability limits. It does not change the meaning of a fitted attribute.
