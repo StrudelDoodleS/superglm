@@ -133,7 +133,7 @@ protocols below. Do not add family-name branches to a solver or facade.
 | Protocol | Member and responsibility | Behavior when absent |
 | --- | --- | --- |
 | `LikelihoodPlanValidatingFamily` | `validate_likelihood_plan(y, plan)` performs one-shot family-owned plan validation and returns the canonical, finite, exact-shape, read-only `float64` response. | Fixed fitting validates the plan's structural invariants and freezes the supplied finite response itself. |
-| `ExpectedInformationFamily` | `expected_information_natural(theta, plan)` returns natural-scale Fisher information. The solver adds the penalty for fallback when the terminal penalized observed Hessian is materially indefinite; `SuperLSS(coefficient_curvature="fisher")` requests Fisher scoring for the whole solve. | The default coefficient solve is the same: Newton on the observed Hessian. `SuperLSS(coefficient_curvature="fisher")` refuses at construction, a route explicitly requesting Fisher chunking refuses, and repeated material indefiniteness of the terminal penalized observed Hessian refuses the fit instead of falling back. |
+| `ExpectedInformationFamily` | `expected_information_natural(theta, plan)` returns natural-scale Fisher information. The solver adds the penalty for fallback when the terminal penalized observed Hessian is materially indefinite; `coefficient_curvature="fisher"` on `SuperLSS` requests Fisher scoring for the whole solve. | The default coefficient solve is the same: Newton on the observed Hessian. `coefficient_curvature="fisher"` on `SuperLSS` refuses at construction, a route explicitly requesting Fisher chunking refuses, and repeated material indefiniteness of the terminal penalized observed Hessian refuses the fit instead of falling back. |
 | `PredictorCurvatureDirectionalFamily` | `predictor_curvature_directional_derivative(y, eta, eta_direction, links, plan)` supplies the exact directional derivative of `curvature_packed` (the negated predictor-scale Hessian, packed upper-triangular) along `eta_direction`. | The engine differences the family's own order-two evaluation along the unit direction (Richardson order four, link-scale step 1e-3) and carries an error certificate into the endpoint decision band; the evidence is labelled `finite-difference-curvature-direction/v1`. Implement the analytic method only when you need `matched_certified`. |
 | `DefaultPredictionFamily` | `default_prediction_name` names the response quantity and `default_prediction(theta)` computes it. | `predict_parameters()` remains available; `predict()` raises `NotImplementedError` and tells the caller to use `predict_parameters()`. |
 | `DistributionFunctionFamily` | `cdf(y, theta)` and `quantile(p, theta)` row-wise from natural parameters; backs `predict_cdf()` / `predict_quantile()`. | Both facade methods raise `NotImplementedError` naming `predict_parameters()`. |
@@ -263,7 +263,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from superglm import SuperLSS
+from superglm import SuperLSS, bind_predictor
 from superglm.distributional import (
     COMPLETE_OBSERVATION,
     FamilyLikelihoodPlan,
@@ -272,7 +272,6 @@ from superglm.distributional import (
     ObservationContract,
     ParameterSpec,
     ParameterSupport,
-    Predictor,
     ResolvedLikelihoodWeights,
     UnsupportedLikelihoodContractError,
 )
@@ -377,9 +376,10 @@ class FourParameterFamily:
 
 frame = pd.DataFrame({"row": np.linspace(-1.0, 1.0, 12)})
 response = np.linspace(-0.8, 1.2, len(frame))
+family = FourParameterFamily()
 model = SuperLSS(
-    family=FourParameterFamily(),
-    predictors=tuple(Predictor(name, {}) for name in ("a", "b", "c", "d")),
+    family,
+    *(bind_predictor(family, name) for name in ("a", "b", "c", "d")),
 ).fit(frame, response, lambdas={})
 parameters = model.predict_parameters(frame)
 ```

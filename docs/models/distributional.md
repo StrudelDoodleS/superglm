@@ -15,29 +15,18 @@ negative-binomial `SuperGLM` when a second predictor is not needed.
 
 ## First Gaussian model
 
-Predictors are ordered and their names must exactly match the family parameters:
+Create a family, then declare every parameter with helpers on that same instance.
+`SuperLSS` is the model entry point; helpers return declarations, not fitted models.
+Declarations may appear in any order. Results use the family's canonical order.
 
 ```python
-from superglm import Spline, SuperLSS
-from superglm.distributional import GaussianLS, Predictor
+from superglm import GaussianLS, SuperLSS, s
 
+family = GaussianLS(scale_floor=0.05)
 model = SuperLSS(
-    family=GaussianLS(scale_floor=0.05),
-    predictors=(
-        Predictor(
-            "location",
-            {
-                "DrivAge": Spline(kind="cr", k=10),
-                "VehAge": Spline(kind="cr", k=8),
-            },
-        ),
-        Predictor(
-            "scale",
-            {
-                "DrivAge": Spline(kind="cr", k=8, select=True),
-            },
-        ),
-    ),
+    family,
+    family.location(s("DrivAge", kind="cr", k=10), s("VehAge", kind="cr", k=8)),
+    family.scale(s("DrivAge", kind="cr", k=8, select=True)),
 )
 
 model.fit_reml(train_df, y_train, method="efs")
@@ -49,27 +38,76 @@ parameters = model.predict_parameters(holdout_df)
 `predict()` returns conditional location, not scale and not a transformed-response
 mean.
 
+## Declaring terms and parameters
+
+Every parameter needs an explicit declaration. An empty helper, such as
+`family.scale()`, requests an intercept-only predictor. Pass `intercept=False`
+to omit that intercept. Omitting the helper entirely is an error. For example,
+`SuperLSS(family, family.location("age"))` with a Gaussian family reports:
+
+```text
+GaussianLS is missing a predictor for scale.
+
+SuperLSS(
+    family,
+    family.location(...),
+    family.scale(...),  # <--- missing predictor; add this
+)
+```
+
+The `...` marks where to supply terms; it is not a term to copy into executable
+code. Call helpers with parentheses and use the same family instance throughout.
+The model snapshots the declarations and family configuration at construction.
+
+A bare string means a numeric linear term: `family.location("age")`. It never
+infers categories from the data. Use `cat("region")` for categorical encoding,
+`s("age")` for a spline, and `re("broker")` for a random effect. Existing feature
+specifications can be bound with `term("age", Numeric())`.
+
+```python
+from superglm import GaussianLS, Numeric, SuperLSS, cat, re, s, term, ti
+
+family = GaussianLS()
+model = SuperLSS(
+    family,
+    family.location(
+        s("age", kind="cr", k=10),
+        s("vehicle_age", kind="cr", k=8),
+        ti("age", "vehicle_age"),
+        cat("region"),
+        re("broker"),
+        term("density", Numeric()),
+    ),
+    family.scale(),
+)
+```
+
+`ti(left, right)` adds an interaction-only tensor using two spline parents
+declared in that predictor. It does not add the parent main effects. Both
+parents must be splines; categorical and higher-order tensors are unsupported
+by this shorthand. Its optional `n_knots=(left, right)` and `decompose=` controls
+retain the existing tensor semantics. For other supported explicit interaction
+specifications, use `interaction(spec, name=...)` and declare their parents in
+the same predictor.
+
+Custom families need no helper methods. Bind each canonical parameter explicitly
+with `bind_predictor(family, "parameter_name", *terms, intercept=True, link=None)`;
+the [family development guide](../distributional-family-development.md) includes
+a complete custom-family example.
+
 ## Gamma mean–CV model
 
-Gamma predictors are ordered `mean`, then `scale`, and `fit_reml()` estimates
+Gamma results are ordered `mean`, then `scale`, and `fit_reml()` estimates
 their smoothing parameters jointly:
 
 ```python
-from superglm import Spline, SuperLSS
-from superglm.distributional import GammaLS, Predictor
+from superglm import GammaLS, SuperLSS, s
 
+family = GammaLS()
 model = SuperLSS(
-    family=GammaLS(),
-    predictors=(
-        Predictor(
-            "mean",
-            {"DrivAge": Spline(kind="cr", k=10)},
-        ),
-        Predictor(
-            "scale",
-            {"DrivAge": Spline(kind="cr", k=8, select=True)},
-        ),
-    ),
+    family,
+    family.mean(s("DrivAge", kind="cr", k=10)),
+    family.scale(s("DrivAge", kind="cr", k=8, select=True)),
 ).fit_reml(train_df, y_train)
 
 parameters = model.predict_parameters(holdout_df)
@@ -122,17 +160,14 @@ default prior weight:
 ```python
 import numpy as np
 
-from superglm import Numeric, SuperLSS
-from superglm.distributional import NegativeBinomialLS, Predictor
-
+from superglm import NegativeBinomialLS, SuperLSS
 
 def nb2_model():
+    family = NegativeBinomialLS()
     return SuperLSS(
-        family=NegativeBinomialLS(),
-        predictors=(
-            Predictor("mean", {"DrivAge": Numeric(), "VehAge": Numeric()}),
-            Predictor("theta", {"DrivAge": Numeric(), "VehAge": Numeric()}),
-        ),
+        family,
+        family.mean("DrivAge", "VehAge"),
+        family.theta("DrivAge", "VehAge"),
     )
 
 
@@ -231,16 +266,14 @@ value). `shape = 0` is the log-normal, `shape = 1` the Weibull and
 index `1/(scale·|shape|)`.
 
 ```python
-from superglm import Categorical, Spline, SuperLSS
-from superglm.distributional import GeneralizedGammaLSS, Predictor
+from superglm import GeneralizedGammaLSS, SuperLSS, cat, s
 
+family = GeneralizedGammaLSS()
 model = SuperLSS(
-    family=GeneralizedGammaLSS(),
-    predictors=(
-        Predictor("mean", {"DrivAge": Spline(kind="cr", k=8), "Region": Categorical()}),
-        Predictor("scale", {"Region": Categorical()}),
-        Predictor("shape", {}),
-    ),
+    family,
+    family.mean(s("DrivAge", kind="cr", k=8), cat("Region")),
+    family.scale(cat("Region")),
+    family.shape(),
 ).fit_reml(frame, severity)
 ```
 
@@ -282,15 +315,13 @@ the tests pin both identities to 1e-14, so it is the right choice when the
 extra shape parameter is not paying for itself.
 
 ```python
-from superglm import Categorical, Spline, SuperLSS
-from superglm.distributional import LogNormalLS, Predictor
+from superglm import LogNormalLS, SuperLSS, cat, s
 
+family = LogNormalLS()
 model = SuperLSS(
-    family=LogNormalLS(),
-    predictors=(
-        Predictor("mean", {"vehicle_age": Spline(kind="cr", k=8)}),
-        Predictor("scale", {"region": Categorical()}),
-    ),
+    family,
+    family.mean(s("vehicle_age", kind="cr", k=8)),
+    family.scale(cat("region")),
 ).fit_reml(frame, severity)
 ```
 
@@ -336,16 +367,14 @@ needs no extra normalising constant: each half contributes `(1 -/+ eps)/2`.
 log-normal family and on the **response** scale for the real-line one.
 
 ```python
-from superglm import Spline, SuperLSS
-from superglm.distributional import Predictor, TwoPieceLogNormalLSS
+from superglm import SuperLSS, TwoPieceLogNormalLSS, s
 
+family = TwoPieceLogNormalLSS()
 severity = SuperLSS(
-    family=TwoPieceLogNormalLSS(),
-    predictors=(
-        Predictor("mean", {"DrivAge": Spline(kind="cr", k=8)}),
-        Predictor("scale", {"VehAge": Spline(kind="cr", k=6)}),
-        Predictor("skew", {}),
-    ),
+    family,
+    family.mean(s("DrivAge", kind="cr", k=8)),
+    family.scale(s("VehAge", kind="cr", k=6)),
+    family.skew(),
 ).fit_reml(claims, claims["loss"])
 ```
 
@@ -418,17 +447,15 @@ two-wall logit, default walls `(0, 1)`). The response is `y - u` for the rows
 above a threshold `u` that you choose; the threshold is not a family argument.
 
 ```python
-from superglm import Spline, SuperLSS
-from superglm.distributional import GeneralizedParetoLSS, Predictor
+from superglm import GeneralizedParetoLSS, SuperLSS, s
 
 threshold = float(claims["loss"].quantile(0.9))
 above = claims["loss"] > threshold
+family = GeneralizedParetoLSS()
 tail = SuperLSS(
-    family=GeneralizedParetoLSS(),
-    predictors=(
-        Predictor("scale", {"DrivAge": Spline(kind="cr", k=8)}),
-        Predictor("shape", {}),
-    ),
+    family,
+    family.scale(s("DrivAge", kind="cr", k=8)),
+    family.shape(),
 ).fit_reml(claims.loc[above], claims.loc[above, "loss"] - threshold)
 ```
 
@@ -467,23 +494,18 @@ not a fitted parameter, and the tail fit is conditional on it.
 ## Tweedie mean–dispersion–power model
 
 `TweedieLSS` has response support `[0, ∞)`, including a point mass at zero. Its
-predictors must appear in the exact order `mean`, `dispersion`, `power`:
+construction helpers are `mu`, `phi`, and `p`:
 
 ```python
-from superglm import LambdaPolicy, Spline, SuperLSS
-from superglm.distributional import Predictor, TweedieLSS
+from superglm import LambdaPolicy, SuperLSS, TweedieLSS, s
 
 estimate = LambdaPolicy.estimate()
+family = TweedieLSS(power_lower=1.08, power_upper=1.92)
 model = SuperLSS(
-    family=TweedieLSS(power_lower=1.08, power_upper=1.92),
-    predictors=(
-        Predictor("mean", {"DrivAge": Spline(kind="cr", k=10, lambda_policy=estimate)}),
-        Predictor(
-            "dispersion",
-            {"DrivAge": Spline(kind="cr", k=8, lambda_policy=estimate)},
-        ),
-        Predictor("power", {"DrivAge": Spline(kind="cr", k=8, lambda_policy=estimate)}),
-    ),
+    family,
+    family.mu(s("DrivAge", kind="cr", k=10, lambda_policy=estimate)),
+    family.phi(s("DrivAge", kind="cr", k=8, lambda_policy=estimate)),
+    family.p(s("DrivAge", kind="cr", k=8, lambda_policy=estimate)),
 ).fit_reml(
     train_df,
     y_train,
@@ -502,7 +524,12 @@ parameters = model.predict_parameters(holdout_df)
 ```
 
 `parameters` has columns `mean`, `dispersion`, and `power`; `predict()` returns
-the conditional mean. The configured power walls are part of the fitted family
+the conditional mean. Construction helpers map `mu` to `mean`, `phi` to
+`dispersion`, and `p` to `power`. Offsets, prediction columns, fitted results,
+smoothing keys, and serialized parameter identities keep the canonical names
+`mean`, `dispersion`, and `power`.
+
+The configured power walls are part of the fitted family
 and artifact. They must satisfy `1 < power_lower < power_upper < 2`, and the
 power link keeps fitted values strictly inside those walls.
 
@@ -601,7 +628,7 @@ is deliberately unavailable.
 A categorical level that carries exposure but whose responses all sit on the
 response boundary (every burn cost zero for Tweedie, every count zero for
 NB2) has no finite effect: the likelihood keeps increasing as the level's
-predictor walks to infinity. `SuperLSS(separation="warn")` (the default)
+predictor walks to infinity. `separation="warn"` (the default)
 scans every `Categorical` term and `CategoricalInteraction` on every
 predictor the family says can escape (mean and dispersion for `TweedieLSS`,
 mean and theta for `NegativeBinomialLS`) before any coefficient is fitted and
@@ -869,8 +896,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2, norm
 
-from superglm import Numeric, SuperLSS
-from superglm.distributional import GaussianLS, Predictor
+from superglm import GaussianLS, SuperLSS
 
 data_dir = Path("data")
 frequency = pd.read_csv(data_dir / "freMTPL2freq.csv")
@@ -894,17 +920,12 @@ for column in columns:
     holdout[column] = (holdout[column] - centre) / scale
 
 
-def linear_features():
-    return {column: Numeric() for column in columns}
-
-
-def fit_candidate(scale_features):
+def fit_candidate(scale_columns):
+    family = GaussianLS(scale_floor=0.05)
     return SuperLSS(
-        family=GaussianLS(scale_floor=0.05),
-        predictors=(
-            Predictor("location", linear_features()),
-            Predictor("scale", scale_features),
-        ),
+        family,
+        family.location(*columns),
+        family.scale(*scale_columns),
     ).fit(
         train[columns],
         train["LogClaimAmount"].to_numpy(),
@@ -912,8 +933,8 @@ def fit_candidate(scale_features):
     )
 
 
-constant_scale = fit_candidate({})
-location_scale = fit_candidate(linear_features())
+constant_scale = fit_candidate([])
+location_scale = fit_candidate(columns)
 
 
 def holdout_metrics(fitted):
@@ -981,7 +1002,7 @@ preregistered confirmatory result.
 
 ## Discrete fitting
 
-Set `SuperLSS(discrete=True, n_bins=256)` to compile marginal spline designs
+Set `discrete=True, n_bins=256` on `SuperLSS` to compile marginal spline designs
 and use bounded row chunks for joint fitting. This route assembles the coupled
 observed Hessian, including signed cross-predictor blocks, through the existing
 grouped design machinery. It supports observed-only `TweedieLSS` and
@@ -989,9 +1010,13 @@ grouped design machinery. It supports observed-only `TweedieLSS` and
 expected-information capability.
 
 ```python
+from superglm import GaussianLS, SuperLSS, s
+
+family = GaussianLS()
 model = SuperLSS(
-    family=GaussianLS(),
-    predictors=predictors,
+    family,
+    family.location(s("DrivAge", kind="cr", k=10)),
+    family.scale(s("DrivAge", kind="cr", k=8)),
     discrete=True,
     n_bins=256,
 )
@@ -1034,7 +1059,7 @@ meaning on both execution routes.
 ## Curvature choice
 
 The coefficient solve is Newton's method on the observed Hessian for
-every family. `SuperLSS(coefficient_curvature="fisher")` asks for Fisher
+every family. `coefficient_curvature="fisher"` on `SuperLSS` asks for Fisher
 scoring instead and is accepted only for a family that supplies expected
 information. Every current built-in except `NegativeBinomialLS` and
 `TweedieLSS` supplies it; a family implementing that capability does not change
@@ -1049,8 +1074,12 @@ the terminal source and any fallback are in `training_telemetry().curvature`
 (`actual_source`, `fallback_count`, `matrix_kind`).
 
 ```python
-newton = SuperLSS(family=GammaLS(), predictors=predictors)
-scoring = SuperLSS(family=GammaLS(), predictors=predictors, coefficient_curvature="fisher")
+from superglm import GammaLS, SuperLSS, s
+
+family = GammaLS()
+predictors = (family.mean(s("DrivAge", kind="cr", k=10)), family.scale())
+newton = SuperLSS(family, *predictors)
+scoring = SuperLSS(family, *predictors, coefficient_curvature="fisher")
 ```
 
 ## Derivative orders, and which families supply them

@@ -28,10 +28,7 @@ Everything on this page runs on simulated data with a known truth. Here `x` and
 import numpy as np
 import pandas as pd
 
-from superglm import Categorical, Spline, SuperLSS
-from superglm.distributional import Predictor
-from superglm.distributional.families.gamma import GammaLS
-
+from superglm import GammaLS, SuperLSS, cat, s
 rng = np.random.default_rng(20260903)
 n = 20_000
 frame = pd.DataFrame(
@@ -47,12 +44,11 @@ mean = np.exp(0.8 + 0.6 * np.sin(np.pi * frame["x"]) + 0.3 * frame["z"] ** 2)
 cv = np.exp(-0.4 + 0.3 * frame["x"])
 y = rng.gamma(exposure / cv**2, mean * cv**2 / exposure)
 
+family = GammaLS()
 model = SuperLSS(
-    family=GammaLS(),
-    predictors=[
-        Predictor("mean", {"x": Spline("cr", k=8), "z": Spline("cr", k=8), "band": Categorical()}),
-        Predictor("scale", {"x": Spline("cr", k=8)}),
-    ],
+    family,
+    family.mean(s("x", kind="cr", k=8), s("z", kind="cr", k=8), cat("band")),
+    family.scale(s("x", kind="cr", k=8)),
 ).fit_reml(frame, y, exposure)
 ```
 
