@@ -169,6 +169,11 @@ intercept-only scale predictor. Bare strings are numeric linear terms;
 `cat("Region")` declares categories and `s("DrivAge")` declares a spline.
 Each helper belongs to the family instance passed first to `SuperLSS`.
 
+Follow [Your first distributional model](docs/getting-started/distributional.md)
+for a runnable walkthrough with sample data, two fits and a held-out loss
+comparison. The [API reference](docs/api/distributional.md) documents constructor
+options, predictor declarations and predictions.
+
 Use this for heteroskedastic continuous outcomes, such as transformed claim
 severity. Raw claim frequency still requires a Poisson or negative-binomial
 model; Gaussian LS is not a count likelihood. See
@@ -197,10 +202,7 @@ unit prior weight, `Var(Y | x) = mean² × scale²`; under prior precision weigh
 The mgcv/MSSM dispersion is `φ = scale²`. Gamma support is strictly positive,
 so a zero response requires a different model.
 
-The coefficient core is established IRLS/PIRLS/Fisher–Newton repeated penalized
-weighted least squares, with EFS/LAML outside it for automatic smoothing; IRLS
-itself is not an originality claim. `GammaLS` provides CDF, quantile, and
-expected-shortfall calculations, and predictive simulation uses its quantile.
+`GammaLS` provides CDF, quantile and expected-shortfall calculations.
 
 `TweedieLSS` is the dense three-predictor model for a nonnegative response with
 a point mass at zero. Its construction helpers `mu`, `phi`, and `p` bind the

@@ -316,7 +316,23 @@ def _validated_response(y: NDArray) -> NDArray[np.float64]:
 
 @dataclass(frozen=True)
 class GaussianLS(LocationPredictor, ScalePredictor):
-    """Gaussian family parameterized by location and standard deviation."""
+    """Gaussian responses with separate mean and standard-deviation predictors.
+
+    Declare ``family.location(...)`` for the conditional mean and
+    ``family.scale(...)`` for the standard deviation. Location uses an
+    identity link. Scale uses ``log(scale - scale_floor)``. Results use the
+    column names ``location`` and ``scale`` in that order.
+
+    Parameters
+    ----------
+    scale_floor : float, default=0.01
+        Nonnegative lower bound on the standard deviation, in response units.
+        Fitted scale values stay strictly above this bound.
+
+    See Also
+    --------
+    SuperLSS : Construct and fit a model with these predictors.
+    """
 
     scale_floor: float = 0.01
 

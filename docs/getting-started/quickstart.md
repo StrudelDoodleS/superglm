@@ -1,5 +1,9 @@
 # Quick Start
 
+This page covers scalar-response `SuperGLM` models. To model several parameters
+of a response distribution, follow
+[Your first distributional model](distributional.md) with `SuperLSS`.
+
 ## Recommended Start: Explicit Features + REML
 
 For pricing models with spline terms, the default starting point is an explicit

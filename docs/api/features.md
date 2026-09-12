@@ -4,6 +4,24 @@ Feature specs define how raw columns become model terms. This page keeps the
 public `Spline(...)` factory separate from the concrete feature classes so the
 API reads in the same order users encounter it.
 
+## Predictor term helpers
+
+Use these declarations inside a `SuperLSS` family helper. Each term carries
+its input-column name. A bare string declares a numeric linear term;
+categorical encoding is explicit with `cat`.
+
+::: superglm.s
+
+::: superglm.cat
+
+::: superglm.re
+
+::: superglm.term
+
+::: superglm.ti
+
+::: superglm.interaction
+
 ## Factory
 
 `Spline(...)` is the public entry point for spline specs. Use `kind="ps"` for a
