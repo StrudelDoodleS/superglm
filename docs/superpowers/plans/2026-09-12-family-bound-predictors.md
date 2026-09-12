@@ -136,8 +136,8 @@ Each implementation task receives an independent task review. A final review che
 ## Validation receipt
 
 All four implementation tasks and their scoped reviews are complete. The final
-whole-branch review follows this receipt. The work remains on
-`work/fresh-0.32.0` for user review.
+whole-branch review and the scoped review of its fixes are approved with no
+blocking findings. The work remains on `work/fresh-0.32.0` for user review.
 
 The complete non-browser suite ran with both required real datasets and CI's
 mpmath overlay:
