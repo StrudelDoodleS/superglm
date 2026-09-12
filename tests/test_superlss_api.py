@@ -1516,6 +1516,7 @@ def test_expected_information_is_a_fallback_not_a_switch() -> None:
     assert telemetry.actual_source == "observed"
     assert telemetry.fallback_count == 0
     assert observed_spy.expected_information_calls == 0
+    assert fitted.family.expected_information_calls == 0
     assert fitted.fit_state.solver_result.converged
     observed_iterations = fitted.fit_state.solver_result.iterations
 
