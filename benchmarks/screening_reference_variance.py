@@ -46,14 +46,24 @@ def _sample(case, n, seed, strength):
             set(),
             {"candidates": [("x", "g")], "edf0": (2.0, 4.0, 8.0, 16.0)},
         )
-    if case == "structured":
+    if case in ("structured", "structured_wide"):
+        wide = case == "structured_wide"
         x = rng.integers(0, 101, n) / 100
-        group = rng.integers(0, 160, n)
+        group = rng.integers(0, 34 if wide else 160, n)
         frame = pd.DataFrame({"x": x, "g": [f"L{j}" for j in group]})
         mean = np.sin(3 * x) + 0.1 * np.sin(group)
         mean += strength * np.sin(5 * x) * np.cos(group)
-        features = {"x": Spline(kind="ps", k=8), "g": Categorical()}
-        return frame, mean + rng.normal(size=n), features, {("x", "g")}, {"max_cells": 50_000}
+        features = {
+            "x": Spline(kind="ps", n_knots=42) if wide else Spline(kind="ps", k=8),
+            "g": Categorical(),
+        }
+        return (
+            frame,
+            mean + rng.normal(size=n),
+            features,
+            {("x", "g")},
+            {"max_cells": 1_000_000 if wide else 50_000},
+        )
     x, z, v, w = rng.uniform(-1.0, 1.0, (4, n))
     g = rng.integers(0, 3, n)
     h = rng.integers(0, 5, n)
@@ -114,7 +124,9 @@ def _fit(frame, y, features, interactions=()):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--case", choices=("mixed", "structured", "variance_budget"), default="mixed"
+        "--case",
+        choices=("mixed", "structured", "structured_wide", "variance_budget"),
+        default="mixed",
     )
     parser.add_argument("--rows", type=int, default=40_000)
     parser.add_argument("--seed", type=int, default=20260912)

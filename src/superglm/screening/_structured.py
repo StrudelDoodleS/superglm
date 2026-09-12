@@ -600,7 +600,7 @@ import scipy.linalg
 from numpy.typing import NDArray
 
 from superglm.screening._factor_kernels import _combine_row_factors, _penalty_root
-from superglm.screening._score_stat import ScreenedPair
+from superglm.screening._score_stat import ScreenedPair, _lambda_bracket
 
 _EDF_TOL = 1e-6
 _EDF_ROUNDOFF_FACTOR = 64.0
@@ -2427,7 +2427,7 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     published an ``edf`` decided by the row-space factors beside a statistic
     decided by a pseudo-inverse of the pair's float64 moments, and
     ``screen_interactions`` then ranked on ``z = (T/phi - edf)/sqrt(2 edf)``,
-    which mixes the two.  What forming those moments costs is stated in the
+    which mixed the two. What forming those moments costs is stated in the
     module docstring under "WHAT THE MOMENTS COST" and it does not stop at the
     trace: the same three defensible ``M^+`` policies that move ``edf`` by a
     degree of freedom move ``T`` for the identical reason.
@@ -2694,7 +2694,7 @@ def structured_ladder(
     # this measurement rather than inherit it.
     tr_S = float(np.trace(p.S_a)) * p.dims[0]
     scale = max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300)
-    lo, hi = 1e-10 * scale, 1e10 * scale
+    lo, hi = _lambda_bracket(scale)
 
     evaluated_lo = evaluate(lo)
     evaluated_hi = evaluate(hi)

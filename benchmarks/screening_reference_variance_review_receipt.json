@@ -150,5 +150,261 @@
         "planted": false
       }
     ]
+  },
+  "wide_variance_cost": {
+    "finding": "https://github.com/StrudelDoodleS/superglm/pull/389#discussion_r3997653860",
+    "command": "OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=2 uv run --no-sync python /path/to/screening_reference_variance.py --case structured_wide --rows 200000 --repeats 3 --output /tmp/receipt.json",
+    "before": {
+      "case": "structured_wide",
+      "rows": 200000,
+      "holdout_rows": 200000,
+      "seed": 20260912,
+      "strength": 0.2,
+      "revision": "7bbb415c04f02d8ba31631cdcb0042d9d7d7774a",
+      "source_sha256": "d7da69b9cc1ff49c8f8ad3e8323a2269ebcfd46c9caeab99965eab115c02245d",
+      "python": "3.13.14",
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "threads": {
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "NUMBA_NUM_THREADS": "2"
+      },
+      "fit_seconds": [
+        0.3671916020102799,
+        0.38530820596497506,
+        0.36628861201461405
+      ],
+      "screen_seconds": [
+        0.21248364396160468,
+        0.20657577901147306,
+        0.24518392898608
+      ],
+      "process_peak_rss_mib": 513.77734375,
+      "dispatch": [
+        {
+          "structured_ladder": 1
+        },
+        {
+          "structured_ladder": 1
+        },
+        {
+          "structured_ladder": 1
+        }
+      ],
+      "load_before": [
+        0.267578125,
+        0.2685546875,
+        0.27001953125
+      ],
+      "load_after": [
+        0.267578125,
+        0.2685546875,
+        0.27001953125
+      ],
+      "prediction_sum": 133640.40145127094,
+      "prediction_sum_squares": 107579.23088729635,
+      "repeat_prediction_max_difference": 0.0,
+      "holdout_mains_loss": 201562.410774193,
+      "mains_edf": 44.942466888943315,
+      "mains_deviance": 201913.72836089408,
+      "phi": 1.0097955553210185,
+      "candidates": [
+        {
+          "feature_a": "x",
+          "feature_b": "g",
+          "kind": "spline_cat",
+          "statistic": 1373.4424361099202,
+          "z": 164.99615003385415,
+          "edf0": 33.00034616457344,
+          "lambda0": 98663330408.72372,
+          "n_cells": 3434,
+          "approx": false,
+          "planted": true
+        }
+      ]
+    },
+    "after": {
+      "case": "structured_wide",
+      "rows": 200000,
+      "holdout_rows": 200000,
+      "seed": 20260912,
+      "strength": 0.2,
+      "revision": "08a19c3e21603c7dbabee039fcf1d7c514901b2a",
+      "source_sha256": "747201ee1da3f7c9148a28b5f0e6ef62f0ee64ea0e4e67a87b8bdb3f4ca25929",
+      "python": "3.13.14",
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "threads": {
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "NUMBA_NUM_THREADS": "2"
+      },
+      "fit_seconds": [
+        0.35352081700693816,
+        0.38412083499133587,
+        0.35834046197123826
+      ],
+      "screen_seconds": [
+        0.2482372680096887,
+        0.2536806560237892,
+        0.2583392999949865
+      ],
+      "process_peak_rss_mib": 511.87890625,
+      "dispatch": [
+        {
+          "structured_ladder": 1
+        },
+        {
+          "structured_ladder": 1
+        },
+        {
+          "structured_ladder": 1
+        }
+      ],
+      "load_before": [
+        0.2880859375,
+        0.27197265625,
+        0.271484375
+      ],
+      "load_after": [
+        0.2880859375,
+        0.27197265625,
+        0.271484375
+      ],
+      "prediction_sum": 133640.40145127094,
+      "prediction_sum_squares": 107579.23088729635,
+      "repeat_prediction_max_difference": 0.0,
+      "holdout_mains_loss": 201562.410774193,
+      "mains_edf": 44.942466888943315,
+      "mains_deviance": 201913.72836089408,
+      "phi": 1.0097955553210185,
+      "candidates": [
+        {
+          "feature_a": "x",
+          "feature_b": "g",
+          "kind": "spline_cat",
+          "statistic": 1373.4424361099202,
+          "z": 164.99713843231302,
+          "edf0": 33.00034616457344,
+          "lambda0": 98663330408.72372,
+          "n_cells": 3434,
+          "approx": false,
+          "planted": true
+        }
+      ]
+    },
+    "profile_command": "OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=2 uv run --no-sync python -m cProfile -o /tmp/variance.prof benchmarks/screening_reference_variance.py --case structured_wide --rows 200000 --repeats 1 --output /tmp/profiled.json",
+    "profile_scope": "Separate profiled process; two complete screens (warmup plus one repeat). These timings are not the uninstrumented benchmark timings.",
+    "profile": {
+      "_merge": {
+        "calls": 66,
+        "self_seconds": 0.002846122,
+        "cumulative_seconds": 0.011100409
+      },
+      "spline_cat_moments": {
+        "calls": 2,
+        "self_seconds": 0.0011380490000000001,
+        "cumulative_seconds": 0.034337682
+      },
+      "configure": {
+        "calls": 2,
+        "self_seconds": 0.000189979,
+        "cumulative_seconds": 0.000248348
+      },
+      "_profile": {
+        "calls": 2,
+        "self_seconds": 0.0006774200000000001,
+        "cumulative_seconds": 0.006707273000000001
+      },
+      "add_low_rank": {
+        "calls": 6,
+        "self_seconds": 0.0022431580000000003,
+        "cumulative_seconds": 0.013056422000000002
+      },
+      "_filter_factor_sum": {
+        "calls": 6,
+        "self_seconds": 0.016112527,
+        "cumulative_seconds": 0.233151724
+      },
+      "structured_ladder": {
+        "calls": 2,
+        "self_seconds": 0.00011027000000000001,
+        "cumulative_seconds": 0.24060338
+      },
+      "_reference_variance": {
+        "calls": 2,
+        "self_seconds": 6.3701e-05,
+        "cumulative_seconds": 0.084972089
+      }
+    },
+    "recorded_shapes": {
+      "emitted_levels": 33,
+      "spline_width": 45,
+      "overlap_rank": 46,
+      "allowance": 3,
+      "lambda0": 98663330408.72372,
+      "ordinary": {
+        "qr_operand_shapes": {
+          "(31, 90, 91)": 1,
+          "(15, 92, 46)": 1,
+          "(8, 92, 46)": 1,
+          "(4, 92, 46)": 1,
+          "(2, 92, 46)": 1,
+          "(1, 92, 46)": 2,
+          "(2, 90, 91)": 1
+        },
+        "traced_peak_bytes": 11908113
+      },
+      "variance": {
+        "qr_operand_shapes": {
+          "(31, 90, 91)": 1,
+          "(15, 92, 46)": 1,
+          "(8, 92, 46)": 1,
+          "(4, 92, 46)": 1,
+          "(2, 92, 46)": 1,
+          "(1, 92, 46)": 2,
+          "(2, 90, 91)": 1,
+          "(180, 92)": 8,
+          "(184, 92)": 7,
+          "(183, 92)": 1
+        },
+        "traced_peak_bytes": 14298949
+      }
+    },
+    "notes": [
+      "The baseline source predates the variance correction. The after arm includes the endpoint fixes and oracle extensions, before subsequent documentation-only edits.",
+      "Both arms dispatch one structured ladder per screen and return finite scores without binning or refusal.",
+      "The ordinary block-angular QR already has 91 columns at spline width 45 and overlap rank 46. The variance tree adds up to 92-column QR work.",
+      "The allowance counts factor passes under a dimensional cost estimate. These measurements do not certify a floating-operation or wall-clock ceiling and do not justify universal recalibration from one geometry.",
+      "The traced peak allocation is from a separate linear-algebra instrumentation run of one evaluation. It is not process RSS."
+    ]
+  },
+  "review_regressions": {
+    "dense_endpoint_before": {
+      "failed": 3,
+      "passed": 4,
+      "cases": "Penalty roots 2**-500, 2**-537 and 2**-700 fail; other unit controls pass."
+    },
+    "structured_endpoint_before": {
+      "failed": 1,
+      "passed": 3,
+      "cases": "Penalty 2**-1000 fails with an infinite endpoint and SVD nonconvergence."
+    },
+    "truncated_qr_mutation": {
+      "failed": 12,
+      "passed": 6,
+      "mutation": "Replace the return of _ReferenceVariance._merge with joined[:joined.shape[1]]. The four-level oracle cases pass; all ten-level cases fail, including forced two-level chunks."
+    },
+    "focused_after": {
+      "passed": 106,
+      "command": "uv run --no-sync pytest tests/test_screening_reference_variance.py tests/test_structured_reference_variance.py tests/test_screening_worth_gate.py -q"
+    },
+    "broader_after": {
+      "passed": 413,
+      "warnings": 23,
+      "seconds": 301.72,
+      "scope": "All eleven screening test modules plus test_pair_design_factor.py, with SUPERGLM_REQUIRE_DATA=1. No skips."
+    }
   }
 }

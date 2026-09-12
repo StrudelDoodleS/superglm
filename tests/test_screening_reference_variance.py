@@ -8,6 +8,7 @@ import pytest
 import scipy.linalg
 
 import superglm.model.screening_ops as ops
+import superglm.screening._structured as st
 from superglm import SuperGLM
 from superglm.features import Spline
 from superglm.screening._pair_factor import PairFactor
@@ -45,7 +46,7 @@ def test_unpenalized_reference_variance_is_twice_the_identified_rank(width):
     assert getattr(result, "reference_variance", None) == 2.0 * width
 
 
-@pytest.mark.parametrize("exponent", [-300, 0, 300])
+@pytest.mark.parametrize("exponent", [-500, -300, 0, 300, 500])
 def test_reference_variance_does_not_depend_on_penalty_units(exponent):
     result = penalized_score_statistic_ladder(
         _identity_pair(4), np.ldexp(np.eye(4), exponent), budgets=(2.0,)
@@ -53,6 +54,27 @@ def test_reference_variance_does_not_depend_on_penalty_units(exponent):
     assert abs(result.edf0 - 2.0) <= _EDF_TOL
     bound = 4.0 * abs(result.edf0 - 2.0) + 64 * np.finfo(float).eps
     assert getattr(result, "reference_variance", None) == pytest.approx(2.0, abs=bound)
+
+
+@pytest.mark.parametrize("exponent", [-537, -700])
+def test_unrepresentable_penalty_target_clamps_to_a_finite_endpoint(exponent):
+    """An infinite endpoint must not turn four identified directions into zero.
+
+    For this root, lambda=2**(-2*exponent) would be needed to attain EDF 2,
+    beyond float64's range. Even the largest finite lambda leaves the
+    augmented identity well conditioned and its smoother near identity.
+    """
+    root = np.ldexp(np.eye(4), exponent)
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        result = penalized_score_statistic_ladder(_identity_pair(4), root, budgets=(2.0,))[0]
+    assert result.lambda0 == np.finfo(float).max
+    # Compute the tiny perturbation without squaring the original root.
+    penalty = np.sqrt(result.lambda0) * root
+    filter_value = 1 / (1 + penalty[0, 0] ** 2)
+    bound = 128 * np.finfo(float).eps
+    assert result.edf0 == pytest.approx(4 * filter_value, abs=4 * bound, rel=0)
+    assert result.reference_variance == pytest.approx(8 * filter_value**2, abs=8 * bound, rel=0)
+    assert result.statistic == pytest.approx(30 * filter_value, abs=30 * bound, rel=0)
 
 
 def test_unresolved_candidate_has_zero_reference_variance():
@@ -97,22 +119,22 @@ def test_public_z_uses_the_candidate_quadratic_variance(monkeypatch):
     assert row.z == pytest.approx(expected, abs=bound, rel=0)
 
 
-def _small_spline_cat(penalty_scale=1.0, *, base_mass=1.0, reverse=False):
+def _small_spline_cat(penalty_scale=1.0, *, base_mass=1.0, reverse=False, n_levels=4):
     x = np.linspace(-1.0, 1.0, 9)
     basis = np.column_stack((x, x**2))
-    weights = np.ones((len(x), 4))
+    weights = np.ones((len(x), n_levels))
     weights[:, 0] *= base_mass
-    emitted = np.arange(1, 4)
+    emitted = np.arange(1, n_levels)
     if reverse:
         weights = weights[:, ::-1]
-        emitted = 3 - emitted
+        emitted = n_levels - 1 - emitted
     pair = spline_cat_moments(
         basis, penalty_scale * np.eye(2), np.zeros_like(weights), weights, emitted
     )
     # Assemble the weighted observation design independently of the arrow
     # factors. The emitted interaction columns are ordered by level.
-    columns = np.vstack([basis for _ in range(4)])
-    levels = np.repeat(np.eye(4), len(x), axis=0)
+    columns = np.vstack([basis for _ in range(n_levels)])
+    levels = np.repeat(np.eye(n_levels), len(x), axis=0)
     overlap = np.column_stack((columns, levels))
     candidate = np.column_stack([columns * levels[:, j, None] for j in emitted])
     root_w = np.sqrt(weights.T.ravel())[:, None]
@@ -124,13 +146,23 @@ def _small_spline_cat(penalty_scale=1.0, *, base_mass=1.0, reverse=False):
 
 @pytest.mark.parametrize("budgets", [(2.0,), (0.1, 100.0), (2.0, 2.0, 100.0, 100.0)])
 @pytest.mark.parametrize("base_mass", [1.0, 0.0])
-def test_structured_variance_matches_the_observation_space_quadratic(budgets, base_mass):
-    """The arrow route must retain off-diagonal smoother contributions."""
-    pair, candidate = _small_spline_cat(base_mass=base_mass)
+@pytest.mark.parametrize("n_levels, chunk_width", [(4, None), (10, None), (10, 2)])
+def test_structured_variance_matches_the_observation_space_quadratic(
+    budgets, base_mass, n_levels, chunk_width, monkeypatch
+):
+    """Cross-level norms must survive QR compression and later chunk merges.
+
+    Four leaves only produce a compressed factor; ten also consume it in
+    later merges. Truncating rows in place of QR passes the four-leaf case
+    and fails the larger case against this observation-space oracle.
+    """
+    if chunk_width is not None:
+        monkeypatch.setattr(st, "_trace_chunk_width", lambda *args: chunk_width)
+    pair, candidate = _small_spline_cat(base_mass=base_mass, n_levels=n_levels)
     results = structured_ladder(pair, budgets=budgets)
     assert results is not None
     for result in results:
-        stacked = np.vstack((candidate, np.sqrt(result.lambda0) * np.eye(6)))
+        stacked = np.vstack((candidate, np.sqrt(result.lambda0) * np.eye(candidate.shape[1])))
         _, singular, right = scipy.linalg.svd(stacked, full_matrices=False)
         carried = (candidate @ right.T) / singular
         smoother = carried.T @ carried

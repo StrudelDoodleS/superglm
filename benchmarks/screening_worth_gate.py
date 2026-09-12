@@ -12,11 +12,11 @@ Two derived numbers close that gap.  Neither is new machinery, but they do not
 cost the same to obtain: the first is arithmetic on the returned screening row,
 the second needs one pass over the residuals the screen does not hand back.
 
-1. WORTH THRESHOLD.  Mallows' Cp says a term earns its place when its score
-   beats twice the df it spends, `T/phi > 2*edf0`.  The evaluation guide already
+1. WORTH THRESHOLD. For an unpenalized Gaussian block, the Cp score rule is
+   `T/phi > 2*edf0`. The evaluation guide already
    notes `gain - 2*edf` as a scoring variant; what is added here is the same
    rule on PSST's own z scale, plus a measurement of where the crossing lands.
-   Since `z = (T/phi - edf0) / sqrt(2*edf0)`,
+   For these unpenalized rows, `z = (T/phi - edf0) / sqrt(2*edf0)`, so
 
        T/phi > 2*edf0   <=>   z > sqrt(edf0 / 2)
 
@@ -25,6 +25,13 @@ the second needs one pass over the residuals the screen does not hand back.
    SAME `edf0`, and for an unpenalized `cat_cat` that is the block's achieved
    rank, not `(L-1)^2`; this file therefore takes `edf0` off the screening row
    rather than re-deriving it (see `_run_gate_ladder`).
+
+   The square-root threshold does not apply to penalized rows: their z uses
+   the reference variance `2*sum(a**2)`, and the same algebraic score rule
+   would require `z > edf0 / sqrt(2*sum(a**2))`. A caller can apply that rule
+   directly as `row.statistic > 2*row.edf0`; the returned statistic already
+   includes division by phi. This does not establish a Cp guarantee for a
+   penalized refit.
 
 2. CONCENTRATION.  Every chi^2-family score reads only the TOTAL: PSST's `T`,
    FAST's RSS gain, Information Value, mutual information, deviance change.
@@ -146,11 +153,12 @@ SHRINKAGE_ARMS: tuple[str, ...] = ("mains", "fixed", "pooled")
 
 
 def worth_threshold(edf0: float) -> float:
-    """z a pair must clear for a plain fixed refit to pay for its own df.
+    """The Gaussian Cp score threshold for an unpenalized candidate's z.
 
-    `T/phi > 2*edf0` (Mallows' Cp) expressed on the z scale the screen reports.
-    `edf0` must be the SAME value the screen normalized z by -- read it off the
-    returned row rather than re-deriving it from the factor widths.
+    Requires reference variance `2*edf0`, as in this benchmark's `cat_cat`
+    rows. Read the achieved EDF from the row. A penalized row's threshold
+    cannot be determined from EDF alone; compare its `statistic` with
+    `2*edf0` to apply the same algebraic score rule directly.
     """
     return float(np.sqrt(edf0 / 2.0))
 

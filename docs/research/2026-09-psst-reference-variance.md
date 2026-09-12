@@ -83,6 +83,13 @@ them. Forming `lo*hi` first can overflow or underflow even when that midpoint
 is representable. Extreme penalty-unit regressions reproduced this failure:
 the old search returned zero or infinite lambda and missed the requested EDF.
 
+Review exposed a separate failure in the endpoints themselves. Both ladders
+now clip the bracket to positive finite float64 values. The dense pencil
+also retains its unbalanced factors when their trace ratio cannot be
+represented as a positive finite number. A required lambda beyond float64's
+range cannot be recovered by better midpoint arithmetic; the ladder reports
+the EDF achieved at the finite edge instead of claiming target attainment.
+
 ## Structured calculation
 
 Let `G` be the profiled design in its orthogonally compressed row space and
@@ -140,6 +147,9 @@ keeps the projector terms `[[0, -1], [-1, 1-h]]`. Deleting those terms is
 incorrect even when the reciprocal is zero. This transformation bounds the
 metric; subtraction in the transformed leaf still amplifies error by
 `1/sqrt(h)`, which enters the consistency allowance.
+
+At `h=1/2`, the raw metric's eigenvalues are `(3 ± sqrt(17))/2`, giving
+norm 3.561553, still strictly below 4.
 
 A streaming binary QR tree evaluates the cross-level sum. At a merge of
 two disjoint leaf sets, their QR factors `R_left` and `R_right` contribute
@@ -323,3 +333,60 @@ compare a refusal with a completed binned calculation, so they establish no
 general speedup. RSS includes imports, warmup and complete models. Reproduce
 the receipt with the benchmark command above, replacing the case with
 `--case variance_budget --rows 5094 --seed 389`.
+
+## Further review checks
+
+[Claude's review](https://github.com/StrudelDoodleS/superglm/pull/389#issuecomment-5648671666)
+derived the dense reference moments, structured off-diagonal metric,
+base-level compaction and tree identity independently. Its environment had
+no shell, so the following are local executed checks of its findings.
+
+- Dense roots scaled by `2**-500`, `2**-537` and `2**-700` failed before the
+  endpoint fix. The first has a representable target lambda; the last two
+  require a finite-edge clamp. The structured penalty at `2**-1000` also
+  failed, with SVD nonconvergence after its endpoint overflowed. The extended
+  tests now pass, checking attained EDF or the independently computed
+  near-identity smoother as appropriate.
+- The observation-space oracle now includes ten levels and forced
+  two-level chunks. Replacing QR compression with row truncation leaves all
+  six original four-level cases passing but fails all twelve larger cases.
+  Those cases consume compressed factors in later merges, covering a path
+  the original oracle did not reach.
+- The benchmark's `sqrt(edf0/2)` Cp score threshold is now explicitly
+  restricted to unpenalized Gaussian rows. For penalized rows, the same
+  algebraic score rule can be applied through `statistic > 2*edf0` without
+  adding a variance column. It is not a guarantee about a penalized refit.
+
+The fixed-seed null smoke bounds remain unchanged. The review identified no
+failing null fixture, and these checks do not draw fresh seeds on each run.
+The guide continues to distinguish their bounds from calibrated thresholds.
+
+### Width-45 variance cost
+
+Codex's follow-up asked whether a variance pass costs several ordinary
+passes because the tree's width reaches `2*r`. The requested geometry was
+measured with 200,000 rows, 101 support points, spline width 45, 34 factor
+levels and overlap rank 46. At `max_cells=1_000_000`, it receives an allowance
+of three passes and uses the structured route on exact support.
+
+Three sequential complete-fit measurements per revision give fit medians
+of 0.367 seconds before the variance correction and 0.358 after, screening
+medians of 0.212 and 0.254 seconds, and process peak RSS of 513.8 and
+511.9 MiB. Recorded fit outputs are identical; both arms score the pair.
+
+A separate profiler run covers two complete screens. It records six calls
+to `_filter_factor_sum`, two final variance evaluations, and 66 tree merges.
+Per screen, merges take 5.55 milliseconds and the final variance evaluation
+42.49 milliseconds; the ordinary evaluations average 37.04 milliseconds.
+The recorded ordinary block QR is already 90 by 91, while the extra tree
+QRs have up to 184 rows and 92 columns. Comparing tree width 92 with the
+budget's dimensional proxy 46 does not compare two actual factorizations.
+
+The allowance continues to count factor passes under a dimensional estimate.
+It certifies neither floating-operation count nor elapsed time; the docstring
+now states both limits. The measured extra cost is retained explicitly rather
+than using this single geometry to recalibrate admissions. The paired raw
+receipts, profile counts and observed QR shapes are in
+`benchmarks/screening_reference_variance_review_receipt.json`. Reproduce the
+timings with `--case structured_wide --rows 200000 --repeats 3`; run the same
+command separately under `python -m cProfile` for attribution.

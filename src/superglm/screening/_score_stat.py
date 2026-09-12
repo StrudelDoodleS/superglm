@@ -631,7 +631,11 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
         root = np.asarray(penalty_root, dtype=np.float64)
         tr_s = float(np.sum(root**2))
         if tr_v > 0.0 and tr_s > 0.0:
-            balance = tr_v / tr_s
+            proposed = tr_v / tr_s
+            # Balancing is optional. A non-finite or zero ratio would erase
+            # finite factors; retain the unbalanced stack in that case.
+            if np.isfinite(proposed) and proposed > 0.0:
+                balance = proposed
         root = np.sqrt(balance) * root
     if k == 0:
         return _empty_pencil(tr_v)
@@ -789,6 +793,21 @@ def _pencil_reference_variance(p: _Pencil, lam: float) -> float:
     return 2.0 * float(np.sum(filters**2))
 
 
+def _lambda_bracket(scale: float) -> tuple[float, float]:
+    """Keep both search edges in the positive finite float64 range.
+
+    A change of penalty units can move an edge beyond that range while the
+    target remains reachable. If the target itself is unrepresentable, the
+    usual edge clamp reports the EDF achieved at a finite penalty instead.
+    """
+    limits = np.finfo(np.float64)
+    smallest, largest = float(limits.smallest_subnormal), float(limits.max)
+    return (
+        min(max(1e-10 * scale, smallest), largest),
+        min(max(1e10 * scale, smallest), largest),
+    )
+
+
 def _lambda_for_edf(p: _Pencil, edf0: float, scale: float) -> float:
     """Smallest-error ``lambda`` hitting ``edf0``, clamped to the bracket edges.
 
@@ -798,7 +817,7 @@ def _lambda_for_edf(p: _Pencil, edf0: float, scale: float) -> float:
     rather than failing it, and the achieved value is reported so a caller can
     see the budget was not met.
     """
-    lo, hi = 1e-10 * scale, 1e10 * scale
+    lo, hi = _lambda_bracket(scale)
     if _pencil_edf(p, lo) <= edf0:
         return lo
     if _pencil_edf(p, hi) >= edf0:
@@ -892,7 +911,7 @@ def penalized_score_statistic_ladder(
     # :func:`superglm.screening._pair_factor._pair_scale`.
     p = _pair_pencil(pair, root)
     scale = max(p.tr_v, 1e-300) / max(float(np.sum(root**2)), 1e-300)
-    lo, hi = 1e-10 * scale, 1e10 * scale
+    lo, hi = _lambda_bracket(scale)
     edf_lo, edf_hi = _pencil_edf(p, lo), _pencil_edf(p, hi)
 
     out: list[ScreenedPair] = []
