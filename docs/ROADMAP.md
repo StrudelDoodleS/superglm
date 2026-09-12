@@ -1,14 +1,16 @@
 # Roadmap
 
-Last strategic review: **2026-09-11**. Current implementation baseline:
-`origin/master` at `7d054022`, the merged C3+C1 checkpoint in PR #379.
+Last strategic review: **2026-09-12**. Current implementation baseline:
+`origin/master` at `c0ed3a62`, including the LSS API refinement in PR #386
+and Newton completion repair in PR #387.
 The starting baseline was `8962c452` (published v0.31.0); individual implementation
 and benchmark revisions remain pinned in the evidence below.
 
-**0.32 release target:** finish the reviewed C1 core in PR #381. The user has
-separated 100-million-row/out-of-core fitting into the future item below.
-The 12.5-second latency target remains unmet; neither follow-up requires a new
-architecture in this closeout. This records release intent, not publication.
+**Current direction:** the LSS API refinement and Newton completion repair are
+merged; next establish a scoped proof programme. The user identified 0.33 as a
+possible release target; this records intent, not a version decision or publication.
+The 12.5-second latency target remains unmet. Further performance work and
+100-million-row/out-of-core fitting remain separately scoped future work.
 
 This is **directional project state, not an implementation specification**,
 delivery commitment, or authorization to start a capability. Scope implementation
@@ -120,13 +122,33 @@ validation passed 11,546 tests with 174 skips and mandatory real-data availabili
 
 ## Next
 
-**Immediate execution gate: discrete performance.** Before starting another
-capability, investigate and improve discrete complete-fit execution. The
+**Selected on 2026-09-12: algorithm proof planning.** The
+[design](https://github.com/StrudelDoodleS/superglm/blob/master/docs/superpowers/specs/2026-09-12-algorithm-proofs-design.md) and
+[execution plan](https://github.com/StrudelDoodleS/superglm/blob/master/docs/superpowers/plans/2026-09-12-algorithm-proofs.md) start with
+fixed compiled-design assembly and reuse invariants, then derivative error
+bounds and a conditional convergence argument for the combined controller.
+Exact penalty faces, changing rank and two-piece joins need separate arguments.
+This is a research scope; no new theorem or stronger certification claim is
+established by selecting it. A counterexample or a narrower theorem is a valid
+result. Existing numerical checks, global optimality and interval coverage
+remain distinct claims.
+
+The first milestone is a source-to-claim ledger plus assembly and reuse
+arguments. A reliable bound on the true stopping residual is the next dependency;
+the current finite-difference indicators do not bound every source of error.
+Any resulting solver change needs a focused corrective specification and
+regression evidence. The API and completion repairs do not depend on finishing
+this broader programme.
+
+### Discrete performance checkpoint
+
+The completed C1 implementation work investigated discrete complete-fit
+execution. Its
 [implementation plan](research/2026-09-discrete-performance-plan.md) covers
 cost-aware histogram dispatch and avoidable chunk preparation, with signed
 stored-design equivalence, bounded memory and complete-fit evidence required.
-Compact storage alone does not demonstrate faster fitting. The capabilities
-below remain the subsequent priority order until this gate is resolved.
+Compact storage alone does not demonstrate faster fitting. The evidence below
+records the checkpoint and its remaining limits.
 
 The fixed-layout size sweep at `ed84669a` through one million rows preserves a
 memory/time tradeoff: chunked discrete execution uses substantially less memory,
@@ -358,7 +380,7 @@ The reviewed row store and unfinished compiler are preserved locally on
 `deferred/c1-out-of-core` at `92f99dda`, outside PR #381's final code. No further
 analysis or implementation is active for this item.
 
-After the current C1 closeout, the candidate priority order is:
+Beyond the selected proof work, the capability candidate priority order is:
 
 **1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing
 constraints and distributional fits, starting with demanded monotone effects.
