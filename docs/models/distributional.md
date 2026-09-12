@@ -1,4 +1,4 @@
-# Distributional Location–Scale Models
+# Distributional models
 
 `SuperLSS` fits several linked predictors jointly. `GaussianLS` has one predictor
 for conditional location and another for conditional standard deviation. Use it
@@ -12,6 +12,11 @@ adds a three-predictor model for nonnegative responses with a zero atom.
 Do not use `GaussianLS` for raw claim counts. Use `NegativeBinomialLS` when both
 the count mean and overdispersion vary; use a Poisson or scalar
 negative-binomial `SuperGLM` when a second predictor is not needed.
+
+Start with [Your first distributional model](../getting-started/distributional.md)
+for a runnable example with sample data. This page explains the families and
+modelling options. Method signatures are in the
+[SuperLSS API reference](../api/distributional.md).
 
 ## First Gaussian model
 
@@ -42,16 +47,9 @@ mean.
 
 The former `SuperLSS(family=family, predictors=...)` constructor is removed.
 Pass the family positionally and replace predictor templates with declarations
-bound to that same family. Unpack a sequence of declarations with `*`:
-
-```python
-family = GaussianLS()
-declarations = (family.location("age"), family.scale())
-model = SuperLSS(family, *declarations)
-```
-
-The removed `family=` and `predictors=` keywords raise Python's native
-`TypeError`. Passing the declaration sequence without unpacking it is also invalid.
+bound to that same family. The [migration guide](../development/migrations/family-bound-predictors.md)
+shows the before and after forms, including term conversion, predictor controls
+and programmatic construction with `*declarations`.
 
 ## Declaring terms and parameters
 
@@ -114,6 +112,41 @@ Custom families and links must keep executable settings in independently copyabl
 instance state. Class-declared parameter metadata is copied onto the family
 snapshot when needed. Shared metadata that cannot be isolated raises `TypeError`.
 Snapshots do not isolate arbitrary mutable globals or state captured by closures.
+
+## Family predictor names
+
+These are the currently supported helper names. Call each helper with its
+terms, or with no terms for an intercept-only predictor. The result names
+also identify parameters in offsets and penalty keys.
+
+| Family | Helpers | Result columns | Parameter meanings |
+| --- | --- | --- | --- |
+| `GaussianLS` | `location`, `scale` | `location`, `scale` | Response mean and standard deviation |
+| `GammaLS` | `mean`, `scale` | `mean`, `scale` | Response mean and coefficient of variation |
+| `NegativeBinomialLS` | `mean`, `theta` | `mean`, `theta` | Response mean and NB2 size |
+| `TweedieLSS` | `mu`, `phi`, `p` | `mean`, `dispersion`, `power` | Response mean, dispersion and variance power |
+| `GeneralizedParetoLSS` | `scale`, `shape` | `scale`, `shape` | Excess scale and tail shape xi |
+| `LogNormalLS` | `mean`, `scale` | `mean`, `scale` | Response mean and standard deviation of the log response |
+| `GeneralizedGammaLSS` | `mean`, `scale`, `shape` | `mean`, `scale`, `shape` | Response mean, Prentice's sigma and Q |
+| `TwoPieceNormalLSS` | `location`, `scale`, `skew` | `location`, `scale`, `skew` | Two-piece location, scale and epsilon asymmetry |
+| `TwoPieceLogNormalLSS` | `mean`, `scale`, `skew` | `mean`, `scale`, `skew` | Response mean, log-response scale and epsilon asymmetry |
+
+`LogNormalLS`, `GeneralizedGammaLSS` and `TwoPieceLogNormalLSS` also accept
+`parametrisation="location"`. In that form, replace the first `mean` helper
+and result column with `location`. Their location belongs to the log-response
+law. It equals the mean log response for `LogNormalLS`; the other two families
+do not generally have that equality. The response supplied to fitting remains
+on its original positive scale in either form.
+
+The names follow each family's chosen parameters. Scale does not always mean
+standard deviation. Gamma's `scale` is CV, and its GLM dispersion is CV squared.
+The two-piece families' `skew` controls piece widths and is not the standardized
+third moment. See the family sections below for links, bounds and weight laws.
+
+The [family API reference](../api/families.md#distributional-families) documents
+the constructor options and each helper. Mean and location are distinct
+parameters where a family offers both forms; choosing a form changes what the
+first additive predictor describes.
 
 ## Gamma mean–CV model
 

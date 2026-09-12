@@ -175,6 +175,24 @@ class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     form puts ``mu`` first under an identity link, where relativities multiply
     every quantile.  The mean always exists, so neither form has an invalid
     region.
+
+    Parameters
+    ----------
+    parametrisation : {"mean", "location"}, default="mean"
+        Choose the first modeled parameter. Use ``family.mean(...)`` for
+        ``E[Y]`` or, in location form, ``family.location(...)`` for
+        ``E[log Y]``. Declare ``family.scale(...)`` in either form; scale is
+        the standard deviation of the log response. Changing forms changes
+        which quantity the first additive predictor describes.
+    scale_floor : float, default=0.01
+        Nonnegative lower bound on scale. Its default link is
+        ``log(scale - scale_floor)``.
+
+    Notes
+    -----
+    Fit the positive response directly. Results contain ``mean, scale`` or
+    ``location, scale`` according to the selected form. ``predict`` returns
+    the response mean in both forms.
     """
 
     parametrisation: Parametrisation = "mean"

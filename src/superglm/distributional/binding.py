@@ -30,7 +30,16 @@ def _copy_template(template: Predictor) -> Predictor:
 
 @dataclass(frozen=True, eq=False)
 class BoundPredictor:
-    """A family-owned declaration with defensive access to its normalized template."""
+    """A predictor declaration tied to the family instance that created it.
+
+    Use a family helper or ``bind_predictor`` to create a declaration, then
+    pass it to ``SuperLSS`` after that same family instance. ``name`` is the
+    parameter's name in results and offsets. ``template`` returns an
+    independent copy of the normalized predictor configuration.
+
+    A declaration has no fitted state. ``SuperLSS`` copies its configuration
+    at construction and owns the resulting model fit.
+    """
 
     family: DistributionalFamily = field(repr=False)
     _template: Predictor = field(repr=False)
@@ -63,7 +72,43 @@ def bind_predictor(
     intercept: bool = True,
     link: str | Link | None = None,
 ) -> BoundPredictor:
-    """Bind terms to one canonical parameter of a built-in or custom family."""
+    """Declare a predictor by parameter name, including for custom families.
+
+    Built-in family helpers are the usual entry point. Use this function
+    when a custom family declares its parameters without helper methods.
+
+    Parameters
+    ----------
+    family : DistributionalFamily
+        The same family instance that will be passed to ``SuperLSS``.
+    name : str
+        A name from ``family.parameters``. This is also the name used in
+        model results and offsets.
+    *terms : str or BoundTerm or BoundInteraction
+        Numeric column names or declarations made by the term helpers.
+        Supply no terms for an intercept-only predictor.
+    intercept : bool, default=True
+        Include an intercept in this predictor.
+    link : str or Link, optional
+        Override the family's default link. The model checks compatibility
+        with the parameter's support.
+
+    Returns
+    -------
+    BoundPredictor
+        A declaration for one parameter. Every family parameter needs one.
+
+    Examples
+    --------
+    The generic binder and a built-in helper declare the same parameter:
+
+    >>> from superglm import GaussianLS, bind_predictor
+    >>> family = GaussianLS()
+    >>> bind_predictor(family, "location", "age").name
+    'location'
+    >>> family.location("age").name
+    'location'
+    """
     normalized = normalize_terms(terms)
     return BoundPredictor(
         family,

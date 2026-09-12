@@ -1,5 +1,9 @@
 # Family-bound predictors implementation plan
 
+Current workspace: `.worktrees/predictor-api-refinement`, branch
+`work/predictor-api-refinement`. The documentation follow-up is recorded at
+the end of this plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
 **Goal:** Construct models as `SuperLSS(family, *predictors, ...)` with typed family helpers, bound terms and actionable missing-predictor diagnostics.
@@ -205,3 +209,48 @@ and documentation fix. Numerical code, tolerances, public signatures, version
 fields and lock pins did not change. Custom executable state must remain in
 independently copyable instance configuration; arbitrary globals, closures, or
 custom copy methods that secretly retain nested mutable state are not certified.
+
+## Documentation follow-up, 2026-09-12
+
+The workspace was renamed to `.worktrees/predictor-api-refinement` on branch
+`work/predictor-api-refinement`. Its local Python environment was recreated
+because its launchers contained the former absolute path. Imports, pytest's
+launcher and dependency checks succeeded at the new location.
+
+The public documentation now includes:
+
+- a complete `SuperLSS` class docstring and explanations of construction,
+  fitting, prediction and configuration ownership;
+- docstrings for the family helpers, all nine families, the generic binder
+  and the six term helpers;
+- a runnable distributional walkthrough with generated data, two fitted
+  models, predictions and held-out log-score comparison;
+- dedicated model and family-helper API references, a current family-name
+  table and a constructor migration guide, linked from the site navigation,
+  README and quick start.
+
+This pass documents the implemented helper names. The later naming table
+discussed with the user remains a proposal and has not changed the API.
+
+Validation:
+
+- AST comparison after removing docstrings found no executable-code changes
+  in the 12 modified source files.
+- All 14 docstring example steps passed.
+- All six walkthrough blocks executed. Both models reached coefficient
+  convergence and certified stationary smoothing. Held-out mean negative
+  log-likelihoods were about 1.70687 for varying scale and 1.78534 for constant
+  scale on the documented split.
+- The walkthrough uses the existing `outer="efs+newton"` option. Its first
+  draft, with default EFS, stopped with `objective_rejected` in smoothing
+  despite coefficient convergence. Adding Newton refinement reached
+  stationarity on the same data without changing tolerances or numerical code.
+- The removed constructor raised the documented `TypeError`; all three
+  replacement migration examples executed.
+- The documentation site built with `mkdocs build --strict`. The build
+  reported notices from the theme and existing notebook conversions, but no
+  strict-mode build failure. Rendered pages contained all nine families,
+  their 25 helper entries, the six term helpers and the walkthrough links.
+- Ruff checks, formatting, `git diff --check`, `uv lock --check` and
+  `uv pip check` passed. The numerical test suite was not repeated for this
+  documentation-only follow-up.

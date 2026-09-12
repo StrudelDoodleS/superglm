@@ -86,6 +86,7 @@ nav:
   - Getting Started:
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quickstart.md
+    - Your First Distributional Model: getting-started/distributional.md
   - User Guide:
     - Recommended Workflows: guide/workflows.md
     - Distributional Models: models/distributional.md
@@ -107,6 +108,7 @@ nav:
     - Releases: development/releases.md
     - "Migration: group pricing follows rank": development/migrations/group-pricing-rank.md
     - "Migration: sample_weight is a prior weight": development/migrations/weight-semantics-prior.md
+    - "Migration: family-bound predictors": development/migrations/family-bound-predictors.md
     - Cost Claims and the Clock: development/cost-and-timing.md
     - Python Support Policy: development/python-support.md
     - Data and Solver Boundaries: development/data-and-solver-boundaries.md
@@ -124,6 +126,7 @@ nav:
     - Tweedie Profile Estimation: notebooks/tweedie_profile_estimation.ipynb
   - API Reference:
     - SuperGLM: api/model.md
+    - SuperLSS: api/distributional.md
     - Features: api/features.md
     - Families: api/families.md
     - Penalties: api/penalties.md

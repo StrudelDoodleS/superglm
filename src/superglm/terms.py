@@ -1,4 +1,4 @@
-"""Column-bound feature declarations, independent of likelihood families."""
+"""Declare linear, smooth, categorical and interaction terms for predictors."""
 
 from __future__ import annotations
 
@@ -54,7 +54,12 @@ def _validate_name(name: str) -> None:
 
 @dataclass(frozen=True)
 class BoundTerm:
-    """An owned feature configuration attached to one source column."""
+    """A feature specification attached to a named input column.
+
+    Create these declarations with ``s``, ``cat``, ``re`` or ``term`` and pass
+    them to a family predictor helper. A declaration stores a copy of the
+    specification. It reads no data and has no fitted coefficients.
+    """
 
     column: str
     _spec: FeatureSpec = field(repr=False)
@@ -75,7 +80,11 @@ class BoundTerm:
 
 @dataclass(frozen=True)
 class BoundInteraction:
-    """An owned explicit interaction with a stable public name."""
+    """An interaction declaration for use inside a family predictor.
+
+    Create one with ``ti`` or ``interaction``. Its parent terms must also be
+    declared in that predictor. ``name`` identifies the interaction in results.
+    """
 
     name: str
     _spec: InteractionSpec = field(repr=False)
@@ -108,7 +117,31 @@ class NormalizedTerms:
 
 
 def term(column: str, spec: FeatureSpec) -> BoundTerm:
-    """Bind an existing feature specification without building a design."""
+    """Attach an existing feature specification to an input column.
+
+    Use this for specifications without a shorthand, such as ``Polynomial``,
+    or to reuse a configured specification. The declaration owns a copy;
+    building the model's design happens during fitting.
+
+    Parameters
+    ----------
+    column : str
+        Name of a column in the fit and prediction frames.
+    spec : FeatureSpec
+        A main-effect specification. Use ``interaction`` for interactions.
+
+    Returns
+    -------
+    BoundTerm
+        A declaration accepted by family predictor helpers.
+
+    Examples
+    --------
+    >>> from superglm import Numeric, term
+    >>> density = term("density", Numeric())
+    >>> density.column
+    'density'
+    """
     return BoundTerm(column, spec)
 
 
@@ -132,7 +165,85 @@ def s(
     m: int | tuple[int, ...] = 2,
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None = None,
 ) -> BoundTerm:
-    """Bind a spline with the existing Spline factory's parameter meanings."""
+    """Describe a smooth effect of one numeric column.
+
+    For example, ``s("age", kind="cr", k=10)`` declares a cubic regression
+    spline inside a family predictor. The model learns its basis and
+    coefficients when fitted. All spline options have the same meaning as
+    in ``Spline``.
+
+    Parameters
+    ----------
+    column : str
+        Name of the numeric input column.
+    kind : str, default="ps"
+        Spline basis. Common choices are ``"ps"`` for P-splines and ``"cr"``
+        for cubic regression splines. See ``Spline`` for the other bases.
+    k : int, optional
+        Public basis size. This limits flexibility; it is not the fitted
+        effective degrees of freedom. Supply either ``k`` or ``n_knots``.
+    n_knots : int, optional
+        Number of interior knots, as an alternative to ``k``.
+    degree : int, default=3
+        Polynomial degree for bases that support this option. Cubic
+        regression splines remain cubic.
+    knot_strategy : str, default="uniform"
+        Knot-placement rule. ``"uniform"`` spaces knots evenly;
+        ``"quantile_rows"`` follows the training data and
+        ``"quantile_tempered"`` tempers that concentration.
+    penalty : {"ssp", "none"}, default="ssp"
+        Enable SSP basis reparametrization, or disable it with ``"none"``.
+    select : bool, default=False
+        Add a penalty on the spline's null space so that smoothing can also
+        shrink directions left unpenalized by the ordinary wiggle penalty.
+    knots : array-like, optional
+        Explicit interior knot positions, replacing automatic placement.
+    discrete : bool, optional
+        Request discrete evaluation for this term. ``None`` inherits the
+        model setting.
+    n_bins : int, optional
+        Bin count for discrete evaluation. ``None`` inherits the model
+        setting.
+    extrapolation : {"clip", "extend", "error"}, default="clip"
+        Prediction outside the fitted boundaries: hold the boundary value,
+        continue the basis, or raise an error.
+    boundary : tuple of float, optional
+        Explicit lower and upper spline boundaries. Otherwise use the
+        training range.
+    knot_alpha : float, default=0.2
+        Tempering control for ``"quantile_tempered"`` knot placement.
+    constraint : ConstraintSpec, optional
+        Requested shape constraint. See the SuperLSS limitation below.
+    m : int or tuple of int, default=2
+        Penalty order: a difference order for P-splines or a derivative order
+        for derivative-penalty bases. Multiple orders require a basis that
+        supports multiple penalty components.
+    lambda_policy : LambdaPolicy or dict of str to LambdaPolicy, optional
+        Control whether smoothing penalties are estimated or fixed. A mapping
+        sets policies for the spline's individual penalty components.
+
+    Returns
+    -------
+    BoundTerm
+        A spline declaration for the named column.
+
+    Notes
+    -----
+    ``SuperLSS`` currently warns and fits unconstrained when a term requests
+    shape constraints. A ``constraint`` argument does not enforce them there.
+
+    See Also
+    --------
+    Spline : Basis, knot, penalty and extrapolation options.
+    ti : An interaction between two declared spline terms.
+
+    Examples
+    --------
+    >>> from superglm import s
+    >>> age = s("age", kind="cr", k=10)
+    >>> age.column
+    'age'
+    """
     return term(
         column,
         Spline(
@@ -164,7 +275,38 @@ def cat(
     levels: Any = None,
     unseen: Literal["error", "base"] = "error",
 ) -> BoundTerm:
-    """Bind explicit categorical encoding, without dtype inference."""
+    """Declare a categorical effect with a reference level.
+
+    Use ``cat("region")`` for categories, including categories stored as
+    numbers. A bare string in a predictor always declares a numeric linear
+    term and does not infer categorical encoding from the column's dtype.
+
+    Parameters
+    ----------
+    column : str
+        Name of the categorical input column.
+    base : str, default="most_exposed"
+        Reference level. Use the level with the greatest total sample weight,
+        ``"first"`` for the first level, or a specific level name.
+    grouping : LevelGrouping, optional
+        Combine input levels into groups before encoding.
+    levels : sequence, data column or categorical dtype, optional
+        Declare the allowed input levels. With ``grouping``, these are the
+        original levels before grouping.
+    unseen : {"error", "base"}, default="error"
+        Prediction policy for levels outside the fitted level universe.
+        ``"base"`` uses the reference level and emits a warning.
+
+    Returns
+    -------
+    BoundTerm
+        A categorical declaration for the named column.
+
+    See Also
+    --------
+    Categorical : Encoding, grouping and level-universe rules.
+    re : A penalized effect with a coefficient for every level.
+    """
     return term(column, Categorical(base=base, grouping=grouping, levels=levels, unseen=unseen))
 
 
@@ -176,7 +318,36 @@ def re(
     missing: Literal["error"] = "error",
     lambda_policy: LambdaPolicy | None = None,
 ) -> BoundTerm:
-    """Bind an all-level random effect."""
+    """Declare a random effect with a coefficient for every group level.
+
+    For example, ``re("broker")`` lets broker effects shrink toward the
+    population value. Use ``fit_reml`` to estimate the variance component.
+    This encoding does not drop a reference level.
+
+    Parameters
+    ----------
+    column : str
+        Name of the grouping column.
+    levels : sequence, data column or categorical dtype, optional
+        Declare the allowed levels, including levels with no training rows.
+    unseen : {"population", "error"}, default="population"
+        Prediction policy for unknown levels. ``"population"`` gives the
+        random effect a contribution of zero on the predictor's link scale.
+    missing : {"error"}, default="error"
+        Missing group labels raise an error.
+    lambda_policy : LambdaPolicy, optional
+        Set the policy for the random effect's smoothing penalty.
+
+    Returns
+    -------
+    BoundTerm
+        A random-effect declaration for the named column.
+
+    See Also
+    --------
+    RandomEffect : Level handling and variance-component estimation.
+    cat : Categorical encoding relative to a reference level.
+    """
     return term(
         column,
         RandomEffect(
@@ -189,7 +360,30 @@ def re(
 
 
 def interaction(spec: InteractionSpec, *, name: str | None = None) -> BoundInteraction:
-    """Bind an existing explicit interaction, retaining its parent orientation."""
+    """Use an existing interaction specification inside a predictor.
+
+    Declare the specification's parent terms in the same predictor. Their
+    order within the specification is preserved, even when the predictor's
+    declarations appear in a different order.
+
+    Parameters
+    ----------
+    spec : InteractionSpec
+        A supported interaction, such as ``SplineCategorical`` or
+        ``FactorSmooth``.
+    name : str, optional
+        Name used in model results. By default, use the factor smooth's own
+        name or join a two-parent interaction's column names with ``":"``.
+
+    Returns
+    -------
+    BoundInteraction
+        An interaction declaration accepted by family predictor helpers.
+
+    See Also
+    --------
+    ti : Shorthand for a two-spline interaction-only tensor.
+    """
     if name is None and isinstance(spec, FactorSmooth):
         name = spec.name
     if name is None:
@@ -209,7 +403,33 @@ def ti(
     n_knots: tuple[int, int] | None = None,
     decompose: bool = False,
 ) -> BoundInteraction:
-    """Bind an interaction-only tensor of two declared spline parents."""
+    """Declare a tensor interaction between two smooth effects.
+
+    Both columns must have spline terms in the same predictor. For example,
+    use ``s("age"), s("value"), ti("age", "value")`` together. The tensor
+    describes their interaction; the two ``s`` terms provide the main effects.
+
+    Parameters
+    ----------
+    left, right : str
+        Names of two columns with declared spline terms.
+    n_knots : tuple of int, optional
+        Interior-knot counts for the left and right tensor margins. By
+        default, inherit the parent terms' counts.
+    decompose : bool, default=False
+        Separate the bilinear direction from the wiggly interaction so their
+        penalties can be controlled separately.
+
+    Returns
+    -------
+    BoundInteraction
+        A declaration named ``"left:right"`` using the supplied column names.
+
+    See Also
+    --------
+    TensorInteraction : Tensor construction and penalty details.
+    interaction : Other supported interaction specifications.
+    """
     _validate_name(left)
     _validate_name(right)
     return BoundInteraction(

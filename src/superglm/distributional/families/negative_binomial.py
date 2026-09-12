@@ -185,7 +185,22 @@ _PARAMETERS = (
 
 @dataclass(frozen=True)
 class NegativeBinomialLS(MeanPredictor, ThetaPredictor):
-    """NB2 family with natural parameters conditional mean and size theta."""
+    """Negative-binomial responses with mean and size predictors.
+
+    Declare ``family.mean(...)`` and ``family.theta(...)``. Both use log
+    links. The unit count law has variance ``mean + mean**2 / theta``, so
+    larger theta means less overdispersion. ``theta`` is the size parameter
+    in the NB2 parametrization.
+
+    Results use the column names ``mean`` and ``theta`` in that order.
+    ``family.theta()`` estimates a constant size; a declaration with terms
+    lets size vary between rows. The observation law for counts or weighted
+    rates follows the model's weight contract.
+
+    See Also
+    --------
+    SuperLSS : Construct and fit a model with these predictors.
+    """
 
     parameters = _PARAMETERS
     default_prediction_name = "conditional_mean"

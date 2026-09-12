@@ -1,23 +1,18 @@
 # Checking and Explaining a Distributional Fit
 
-A `SuperLSS` fit states a whole conditional distribution per row, so the
-questions you can ask of it are wider than the ones a mean model answers. This
-page walks the questions in the order a review actually asks them:
+A `SuperLSS` fit predicts a conditional distribution for each row. Check its
+spread and tails as well as its mean. This guide covers residual checks,
+calibration, parameter effects, portfolio predictions and model comparison.
 
-1. **Is the family right?** — Q-Q, worm and PIT.
-2. **Where is it wrong, and in which moment?** — binned checks, Q-statistics,
-   actual against expected, calibration.
-3. **What drives each parameter?** — term effects and the summary table.
-4. **What does it mean for a policy and for a book?** — risk curves, the
-   density fan, the spread among identically priced rows, the portfolio total.
-5. **How do candidates compare?** — proper scores, the Murphy diagram and the
-   tail tables.
+Start with [Your first distributional model](../getting-started/distributional.md)
+for a shorter example that includes a train/test split. The examples below
+show the available diagnostics on simulated Gamma data. Use held-out rows
+when assessing predictive performance.
 
-Every method below is a thin call on the fitted model. Underneath, one
-primitive does the work: draws from the Bayesian posterior of the coefficients,
-pushed through the family. Every builder returns a frozen payload with a
-`to_json()`, so a figure can be redrawn from its payload alone —
-[`plot_data`](#payloads-without-figures) hands you exactly that.
+The methods use different parts of the fitted model. Distributional residuals
+need a CDF; posterior intervals and simulations use coefficient uncertainty.
+Use [`plot_data`](#payloads-without-figures) to retrieve the data behind
+supported figures.
 
 ## The example
 
