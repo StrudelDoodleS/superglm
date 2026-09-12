@@ -126,15 +126,17 @@ FAST ranks it 3rd–4th, PSST 7th–9th, and the refit shows a 30.8-edf term tha
 gains 88 in training and **loses** it out of sample. FAST's probe explains only
 **1.7%** of that pair's shift — but 1.7% of 32,778 still exceeds 72.1% of 576.
 
-That is the whole mechanism: **FAST reports a raw average Newton gain — an
-effect size. PSST normalizes against the block's own noise floor — a
-signal-to-noise ratio.** A small, tightly identified, 10-edf effect worth +37
-out-of-sample deviance is exactly what an un-normalised measure buries.
+FAST reports an average Newton gain, while PSST subtracts the probe EDF and
+rescales its local score. That complexity adjustment can promote a smaller,
+lower-dimensional effect. It is a plausible explanation for the recorded
+ordering, not proof of its cause or of calibrated signal-to-noise ratios.
+The [reference-law limitation](screening.md#reference-distribution-and-current-limitation)
+explains why the current normalization does not supply those ratios.
 
-Corroborating this: FAST's `Purify` flag, which strips main-effect-shaped
-components out of the tensor, moves FAST *toward* PSST's ordering and is its
-best-performing variant. Purification is a coarse version of what PSST's
-efficient-score profiling does exactly.
+FAST's `Purify` flag removes main-effect-shaped components from the tensor.
+It moves FAST toward PSST's ordering and is its best-performing variant in
+this comparison. Removing additive components matters for both methods;
+their projection procedures need not be identical.
 
 The obvious alternative explanation was tested and **refuted**. 57% of rows
 share a single `BonusMalus` value, so tie-heavy quantile binning was the
@@ -173,9 +175,11 @@ Ten candidate pairs, n = 200,000:
 | FAST `measure_interactions` | 0.106 s | 0.113 s |
 | *one* confirmatory refit (full book, cheapest pair) | **733.8 s** | |
 
-FAST is **26–43× faster** than PSST. Both are irrelevant beside what they
-replace: on the full book the cheapest single refit costs 295× a whole PSST
-sweep and 2,320× a whole FAST sweep.
+In this recorded comparison, FAST was **26–43× faster** than PSST. The
+733.8-second refit used the full 678,013-row book, whereas the two screen
+timings above used 200,000 rows; they do not support a direct screen-to-refit
+speed ratio. These are historical measurements of the benchmarked versions,
+not timings of subsequent implementations.
 
 ## The baseline: deviance against shape
 

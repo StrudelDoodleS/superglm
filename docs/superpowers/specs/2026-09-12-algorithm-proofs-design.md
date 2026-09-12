@@ -1,9 +1,10 @@
-# Proof programme for SuperGLM's distributional solver
+# Proof programme for SuperGLM's distributional solver and PSST
 
 Date: 2026-09-12. Status: proposed research scope.
 
 The user selected proof planning after the LSS API refinement and Newton
-completion repair. This document defines claims worth investigating; it does
+completion repair, then included PSST's interpretation and calibration.
+This document defines claims worth investigating; it does
 not assert that the current implementation satisfies them.
 
 The implementation baseline is master at
@@ -28,6 +29,13 @@ reuse arguments. Error bounds for strict stopping precede a theorem about the
 combined EFS/Newton/BFGS controller. Exact penalty faces, changing numerical rank
 and two-piece families require separate arguments.
 
+PSST is a companion subproject in the same programme. Its first target is the
+meaning of the local quadratic score, followed by Gaussian-reference moments
+and the gap between that reference and the fitted-model sampling distribution.
+It can proceed alongside the distributional assembly and reuse work.
+The [PSST plan](../plans/2026-09-12-psst-proofs.md) keeps that execution scope
+separate from the LSS controller proof.
+
 A proof may reveal that code must change. Record a counterexample or restrict
 the claim when assumptions fail; do not describe an idealized algorithm as a
 proof of production code. Tests and numerical experiments support the mapping
@@ -45,7 +53,7 @@ from the argument to the implementation. They do not establish a theorem.
 - Performance changes require complete-fit timing, peak RSS, numerical outputs and actual dispatch.
 - A failed proof obligation may produce a counterexample or a narrower supported claim.
 
-## Mathematical target
+## Distributional mathematical target
 
 Fix the response, likelihood weights, offsets, links, compiled predictor
 matrices, constraints and penalty matrices. Eliminate fixed homogeneous
@@ -106,9 +114,10 @@ All entries below start with status **proposed**.
 | P4 | Newton's `stationary` outcome bounds a residual for the exact profiled objective on the stated branch. | `smoothing/endpoint_direction.py`, `smoothing/derivatives.py`, `reml/convergence.py` | An error budget and a conditional residual bound. |
 | P5 | A precisely specified safeguarded controller approaches first-order stationarity under verified assumptions. | `smoothing/newton.py`, `smoothing/loop.py`, `smoothing/objective.py` | A conditional theorem and a list of code obligations. |
 | P6 | Rank changes, exact penalty faces and piecewise-smooth families have appropriate separate contracts. | `smoothing/penalty_face.py`, `smoothing/endpoint_laml.py`, `smoothing/faces.py`, `kernels/two_piece.py` | Applicability results, counterexamples and separate follow-up scopes. |
+| P7 | PSST's local fitting interpretation, reference moments, calibration assumptions and ranking objective are explicit. | `screening/_pair_factor.py`, `screening/_score_stat.py`, `screening/_structured.py`, `model/screening_ops.py` | Component arguments, normalization repair scope, sampling counterexamples and an evaluation design. |
 
 Paths in this table are relative to `src/superglm/distributional/`, except
-`reml/convergence.py`, which is relative to `src/superglm/`.
+`reml/convergence.py` and all P7 paths, which are relative to `src/superglm/`.
 Shared scalar algebra may acquire a claim when the same assumptions and source
 actually apply. This is not a proof of the entire scalar optimizer.
 
@@ -288,6 +297,122 @@ continuity; finite differences do not restore smoothness. Establish the actual
 regularity before choosing a generalized derivative theorem or narrowing the
 supported regime. Support boundaries and family-specific series evaluation
 errors require their own analysis.
+
+### P7: PSST interpretation and calibration
+
+PSST screens candidate terms against one fitted scalar model. With 30 eligible
+features there are at most 435 pairs to assess, subject to supported kinds and
+resource limits. It does not enumerate subsets of interactions or solve the
+distributional structure-discovery problem in C9.
+
+Split P7 into four independently reviewable statements.
+
+**P7.S1: the local fitting problem.** On the identified candidate space, let
+\(U\) be the working score and \(V\) the Fisher working curvature after
+profiling unpenalized adjustments to the intercept and the pair's two margin
+blocks. Measure gain relative to that nuisance-only profiled optimum, rather
+than the unchanged fitted coefficients. For fixed \(\lambda\ge0\), penalty
+\(S\succeq0\), and positive-definite \(V+\lambda S\), derive
+
+\[
+ q_\lambda(b)=U^\top b-\tfrac12b^\top(V+\lambda S)b,\qquad
+ \max_b q_\lambda(b)=\tfrac12U^\top(V+\lambda S)^{-1}U=\tfrac12T_\lambda.
+\]
+
+Here \(q_\lambda(b)=\widetilde q_\lambda(b)-\widetilde q_\lambda(0)\),
+where \(\widetilde q_\lambda\) is the profiled Fisher working objective.
+This is an exact statement about that working quadratic.
+Its relationship to a complete likelihood refit is an approximation.
+The screen does not jointly
+reoptimize all mains coefficients, working weights and smoothing parameters
+for each candidate. Its overlap projection is not projection against the
+whole fitted nuisance space.
+
+Map compiled term spans, centering, score scaling and factor assembly to this
+identity. Record quantization and `approx` separately. Use the same retained
+space and penalty conventions in the dense and structured routes.
+
+**P7.S2: Gaussian-reference moments and ladder selection.** Under the explicit
+assumption \(U\sim N(0,\phi V)\), with fixed geometry, known dispersion and
+score-independent ladder choices, derive
+
+\[
+ T_\lambda/\phi\ \overset d=\ \sum_j a_{j\lambda}Z_j^2,\quad
+ E(T_\lambda/\phi)=\sum_j a_{j\lambda},\quad
+ \operatorname{Var}(T_\lambda/\phi)=2\sum_j a_{j\lambda}^2.
+\]
+
+For the stored pencil, \(a_j=v_j/(v_j+\lambda s_j)\), with
+\(0\le a_j\le1\) for \(S\succeq0\) and \(\lambda\ge0\).
+The current ranking denominator uses \(2\sum_j a_j\) under its square root.
+The intended first corrective scope is to
+establish and implement the appropriate Gaussian-reference normalization on
+both dense and structured paths, with regression and ranking evidence.
+The model-level `edf1` matrix is not the candidate's matrix.
+
+Gaussian ladder simulation must use \(u_j^*=\sqrt{\phi v_j}Z_j\), sharing the
+same normal draw across rungs. Unit variance alone does not equalize tails,
+and a maximum over rungs needs its joint reference distribution. The structured
+path does not expose one global GSVD, so its arithmetic and cost need a
+separate derivation. Preserve duplicate-rung and numerical-refusal behavior.
+
+**P7.S3: the fitted-model null.** Establish when the Gaussian score assumption
+is justified. In common whitened coordinates, let
+\(\widetilde y=X_0\beta_0+\sqrt\phi\,\varepsilon\), with
+\(\varepsilon\sim N(0,I)\), fixed baseline smoother \(H_0\), fixed nuisance
+design \(X_0\), and fixed candidate design \(A\) after pair projection. Analyse
+
+\[
+ E(U)=A^\top(I-H_0)X_0\beta_0,\qquad
+ \operatorname{Cov}(U)=\phi A^\top(I-H_0)(I-H_0)^\top A.
+\]
+
+These generally differ from zero and \(\phi A^\top A\). Conditioning on a
+response-estimated smoother does not establish this fixed-smoother model.
+Full nuisance projection must also update the candidate curvature.
+Include shrinkage bias, estimated smoothing, estimated dispersion,
+non-Gaussian higher moments and sparse cells in the applicability analysis.
+Conditioning on fitted Fisher weights does not make scores independent normal
+variables. A parametric bootstrap must repeat the relevant fitting and screening
+steps; its validity is an additional claim, not an automatic consequence of
+simulation.
+
+Define whether a null concerns a wholly additive model or one pair in the
+presence of other interactions. Require valid marginal p-values before any
+multiple-testing claim. Bonferroni/Holm, ordinary BH and joint maximum
+calibration have different dependence requirements. Monte Carlo resolution,
+including the \(1/(B+1)\) minimum for the usual exchangeable-rank construction,
+must match the intended tail threshold. Retain ranking-only semantics until
+the proposed stronger contract has an argument and enforcement.
+
+**P7.S4: predictive ranking and provenance.** Define the intended objective
+before changing the ranking: evidence against a null, expected held-out gain,
+or expected gain per refit cost. They are different quantities. The guide's
+43-versus-73 deviance example uses training gain; it does not identify which
+pair offers greater predictive return. Small p-values do not answer that
+question either.
+
+Compare current ranking, reference-variance normalization and FAST on the same
+baseline, candidate set, data split and refit classes. Refit every candidate,
+report held-out gain and cost, and use repeated data/split evidence as well as
+a wider candidate set. Overlapping pairs are not independent replicates.
+Retain null and signal cases, correlated mains, thin cells and mixed kinds.
+
+The theory has established antecedents. Rao score testing supplies the
+unpenalized quadratic form; smooth and variance-component score methods supply
+related testing constructions. These are not automatically the same statistic
+or nuisance treatment. The original FAST scheme ranks a four-region step
+approximation using cumulative tables. PSST combines term-specific candidate
+spaces with a screening-EDF ladder and stable factor arithmetic. Mapping that
+combination to the literature is required before any originality claim.
+
+References for P7:
+
+- [Lou et al. (2013), FAST and GA2M](https://www.cs.cornell.edu/~yinlou/papers/lou-kdd13.pdf).
+- [Zhang and Lin (2003), smooth-component testing](https://doi.org/10.1093/biostatistics/4.1.57).
+- [Lin et al. (2013), GESAT interaction testing](https://pubmed.ncbi.nlm.nih.gov/23462021/).
+- [Phipson and Smyth, Monte Carlo p-values](https://gksmyth.github.io/pubs/PermPValuesPreprint.pdf).
+- [Wang, BH and BY dependence results](https://arxiv.org/abs/2201.09350).
 
 ## Evidence and review
 

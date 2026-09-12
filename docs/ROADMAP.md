@@ -140,6 +140,15 @@ Any resulting solver change needs a focused corrective specification and
 regression evidence. The API and completion repairs do not depend on finishing
 this broader programme.
 
+PSST joins this programme as a
+[companion subproject](https://github.com/StrudelDoodleS/superglm/blob/master/docs/superpowers/plans/2026-09-12-psst-proofs.md).
+Start with the score's local fitting interpretation and Gaussian-reference
+variance on both execution paths. Then distinguish that reference from the
+null distribution after estimating mains, smoothing and dispersion, and
+evaluate the ranking against held-out refit gain and cost. The existing
+ranking-only contract remains in place. This does not start the broader C9
+model-structure search.
+
 ### Discrete performance checkpoint
 
 The completed C1 implementation work investigated discrete complete-fit
