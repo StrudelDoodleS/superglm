@@ -1,9 +1,8 @@
 # Interaction Screening (PSST)
 
-`SuperGLM.screen_interactions` ranks every candidate pair of fitted features
-by how much of the model's leftover signal the interaction *that pair would
-actually refit as* could absorb. Five pair kinds screen today, each probed as
-the block its own refit would build:
+`SuperGLM.screen_interactions` ranks candidate interactions to help choose
+which models to refit. It probes residual structure using the interaction
+terms SuperGLM would fit for each pair. Five pair kinds screen today:
 
 - **`ti`** — spline x spline: a `ti()`-style tensor deviation surface.
 - **`spline_cat`** — spline x factor: a reference-coded deviation curve for
@@ -17,9 +16,11 @@ An `OrderedCategorical` margin screens as a spline **on its mapped
 level scores** — the axis its own refit builds — so an OC x spline pair is a
 `ti` row and an OC x factor pair a `spline_cat` row.
 
-It is a Penalized Smooth Score Test (PSST): one O(n) pass per pair against the
-fitted mains model, no refits, so screening ten pairs costs a few seconds
-where fitting ten interaction terms would cost minutes.
+PSST stands for Penalized Smooth Score Test. It uses the fitted mains model
+to score candidate interactions without fitting a complete new model for each
+pair. Work includes passes over the observations and matrix calculations in
+each candidate's coefficient space; its cost depends on both row count and
+term size.
 
 ```python
 model = SuperGLM(
@@ -37,9 +38,62 @@ effects already explain, does the working residual carry structure shaped like
 the block this pair would refit as?* For the penalized kinds the probe is
 evaluated at a ladder of complexity budgets (`edf0`, default `(2, 4, 8, 16)`
 effective degrees of freedom) and each pair is ranked by its best
-noise-normalized score `z = (T - edf0) / sqrt(2 * edf0)`, so smooth surfaces
+ranking score `z = (T - edf0) / sqrt(2 * edf0)`, so smooth surfaces
 and high-frequency surfaces are both visible. The unpenalized kinds have no
 penalty to scan: they are evaluated once, at the block's own dimension.
+
+## What the screen does
+
+Suppose a claims model already has separate smooth effects for driver age and
+vehicle power. It can express an age effect that applies to every vehicle and
+a power effect that applies to every driver. An interaction can express
+something those two effects cannot: for example, high power having a larger
+effect among young drivers.
+
+PSST asks whether the fitted model's remaining errors contain that kind of
+joint structure. For each eligible pair it:
+
+1. Takes the fitted model's residual score and working weights.
+2. Builds the interaction shape that SuperGLM would use for that pair, such
+   as a smooth surface or a separate slope for each category.
+3. Removes directions the pair's own main effects can already represent.
+4. Calculates the candidate's extra gain in a penalized working quadratic,
+   beyond the pair's main-effect adjustments. Smooth candidates are tried at
+   several complexity budgets.
+5. Returns a ranking for deciding which complete models to fit and evaluate.
+
+Step 4 solves a small candidate problem while keeping the baseline working
+model fixed. It does not repeat likelihood fitting and smoothing selection
+for every pair. The pair projection also does not adjust jointly for every
+other fitted main effect. This is why the score is a useful probe of a refit,
+but does not tell us exactly what that refit will achieve.
+
+Thirty features give at most `30 * 29 / 2 = 435` pairs, before unsupported
+kinds and resource limits are excluded. PSST scores those pairs individually.
+It does not search all subsets of 435 interactions, assign features to LSS
+predictors, or find a globally best model. Adding an interaction and refitting
+can change which pair looks useful next.
+
+## How FAST differs
+
+The original [FAST algorithm](https://www.cs.cornell.edu/~yinlou/papers/lou-kdd13.pdf)
+also ranks interactions against an additive baseline. For a pair of features,
+it tries one split on each axis, forming four rectangles, and measures how
+well a constant residual prediction in each rectangle improves the fit.
+Cumulative tables let it evaluate split locations without scanning all rows
+again for each split. InterpretML's current implementation uses binned,
+objective-specific interaction gains and accepts a baseline through
+[`init_score`](https://raw.githubusercontent.com/interpretml/interpret/develop/python/interpret-core/interpret/utils/_measure_interactions.py).
+
+PSST instead evaluates the spline, slope or categorical term that the proposed
+SuperGLM refit would use, with a complexity ladder for penalized terms. That
+requires more matrix work. The intended benefit is a ranking suited to those
+refit shapes; superiority for other models or datasets does not follow.
+
+In the [recorded comparison](screening-evaluation.md#cost), screening ten pairs
+on 200,000 rows took 2.77–4.89 seconds for PSST and 0.106–0.113 seconds for
+FAST. These are historical measurements, not timings of every subsequent
+implementation. Both screens avoid the complete candidate-model refits.
 
 ## Pair kinds
 
@@ -170,12 +224,15 @@ Confirming each by refit — the gate, not the score:
 | `VehAge x BonusMalus` | `ti` | 1.85 | 2 | 43.0 |
 | `BonusMalus x VehBrand` | `spline_cat` | 0.44 | 10 | 73.0 |
 
-The second pair buys *more* deviance and ranks *below* the first. That is the
-design rather than a defect: 43.0 on 2 df is 21.5 per df against 7.3, and `z`
-normalizes each block against its own noise scale instead of reporting raw
-gain. A screen that ranked by gain would put the wider block first and spend
-the refit budget there. An independent holdout study of this ranking, against
-confirmatory refits on a 200,000-row split, is in
+The second pair buys *more* deviance and ranks *below* the first: 43.0 on 2 df
+is 21.5 per df against 7.3 for the second pair. The current `z` adjusts the
+local score for probe complexity; it does not rank by total refit gain or
+directly by gain per df.
+These two gains are measured on the training data. They show that complexity
+adjustment and total gain can disagree, but do not establish which pair is
+the better use of a refit budget. That requires held-out gains and refit
+costs. A holdout study of this ranking, against confirmatory refits on a
+200,000-row split, is in
 [Screening Evaluation](screening-evaluation.md).
 
 `statistic` is not comparable down that column: the `cat_cat` row's 39.9 is a
@@ -198,10 +255,9 @@ must beat, and the confirmatory refit is what settles the question.
 ## Reading the output
 
 - **`kind` names the block that was probed**, and with it the term you would
-  refit to confirm the row. Kinds share one sorted table because `z`
-  normalizes each block against its own scale — but that normalization is not
-  equal across probe df, so read the floors below before ranking a 1-df row
-  against a 16-df one.
+  refit to confirm the row. Kinds share one sorted table, but the current `z`
+  does not give them identical null distributions. Read the reference-law
+  limitation and measured floors below before comparing kinds.
 - **Rank by `z`, and only `z`.** For the penalized kinds (`ti`, `spline_cat`)
   `statistic`, `edf0` and `lambda0` describe the pair's *winning rung*, so
   they are not comparable between rows; at a clamped rung `edf0` holds the
@@ -210,12 +266,13 @@ must beat, and the confirmatory refit is what settles the question.
   `numeric_numeric`) there is a single rung: `edf0` reports the block's
   achieved rank and `lambda0` is `0`, and the `edf0=` argument does not apply
   to them. `statistic` is the dispersion-scaled score statistic.
-- **`z` is noise-floor-normalized, not a p-value.** Under the null each rung
-  has mean zero and unit-order scale, and the statistic is scaled by the
-  Pearson dispersion of the mains fit — so the same reading applies to
-  Poisson, Gamma, Gaussian, binomial, and overdispersed data. What the ladder
-  then reports is the best of four rungs, which is why the penalized kinds sit
-  a little above zero on a pure null. The measured floors are below.
+- **`z` is a ranking heuristic, not a p-value.** By default, the statistic is
+  scaled by the Pearson dispersion of the mains fit; `phi=` overrides it.
+  Its reference mean and variance
+  need additional assumptions, and the current denominator overstates the
+  fixed Gaussian reference variance when the penalty shrinks candidate
+  directions. Choosing the best rung changes the reference distribution too.
+  The mathematical distinction and measured floors are below.
 - **`n_cells` is the grid the probe assembled**: the product of the two
   margins' grid sizes, where a spline or OC margin contributes its support
   size, a factor contributes its level count `L`, and a numeric contributes 1
@@ -225,11 +282,10 @@ must beat, and the confirmatory refit is what settles the question.
   material `z`. A win at rung 2 means tilt-level evidence (a simple in-in
   surface); wins at 8-16 mean genuinely curved or high-frequency structure.
   Under the pure null the winning rung is meaningless.
-- **Confirm by refitting, always.** The screen is a ranking device. Refit the
-  top three pairs as their `kind`'s refit target and judge by deviance gain —
-  near-tied `z` values are common and the refit, not the screen, is the gate.
-  Evidence *density* is not payoff: a strong tilt (rung-2 win) can out-`z` a
-  curved surface that buys three times the deviance.
+- **Confirm by refitting.** Refit promising pairs as their `kind`'s refit
+  target and assess held-out predictive gain and cost. Near-tied `z` values
+  are common. A large score need not imply the greatest predictive gain,
+  and a refit on the same data does not remove selection bias.
 - **NaN rows are skipped or refused pairs**, not failures. A gridded pair
   (`ti`, `spline_cat`) is skipped when it exceeds the cell or intermediate
   budgets even after the quantile-binning fallback, when its tensor curvature
@@ -528,62 +584,80 @@ discretize at all, so OC pairs stay exact on both sides.
 
 ## Provenance
 
-The scan-over-budgets design follows the adaptive score-testing family
-(Eubank & Hart order selection; Fan's adaptive Neyman test; multiscale
-testing), applied to penalized tensor smooths with cell-collapsed
-assembly. The unpenalized kinds are classical Rao score tests (Rao 1948) on
-the refit term's own columns, profiled against the pair's mains and scaled by
-the fit's dispersion. The penalized kinds follow the score-test line for
-penalized smooths and their variance-component representation (Lin 1997;
-Zhang & Lin 2003), which is where normalizing `T` against `edf0` comes from.
-Screening an ordered factor on its level scores is the standard scoring device
-for ordered categorical predictors (Graubard & Korn 1987; Gertheiss & Tutz
-2009; Azzalini 2023/2024). The ranking-first stance — spend interaction
-complexity only where the main effects cannot explain the signal, and let the
-refit be the gate — has a complementary literature in reluctant interaction
-modeling and inference (Yu et al. 2019; Huang et al. 2025). Validated end to
-end on freMTPL2 frequency and severity, the Belgian beMTPL97 book (where it
-independently surfaces the long:lat spatial interaction the literature models
-on that data), the 2015 Pricing Game book, and a null/power gauntlet across
-families, dispersions, support geometries, and every pair kind. It is a
-screening tool: it orders the refit queue, it does not certify significance.
+The basic calculation has a direct mathematical interpretation. Let \(U\)
+be the candidate's profiled working score, \(V\) its Fisher working curvature
+and \(S\succeq0\) its penalty. Fix the penalty weight \(\lambda\ge0\).
+For each candidate coefficient vector \(b\), profile unpenalized adjustments
+to the intercept and the pair's main-effect columns.
+Relative to the nuisance-only profiled optimum, the remaining working gain is
 
-## Related tools, and what is new here
+\[
+q_\lambda(b)=U^\top b-\tfrac12 b^\top(V+\lambda S)b.
+\]
 
-The closest existing tool is the FAST algorithm behind GA2M (Lou, Caruana,
-Gehrke & Hooker 2013), shipped today as `measure_interactions` in
-InterpretML/EBM. It solves the same problem shape: rank every candidate pair
-against an already-fitted additive model, from one O(n) pass into per-pair
-cell tables, reporting a ranking whose gate is a subsequent refit. Its probe
-is a binned step function scored by a Newton gain carrying its own ridge, so
-it never evaluates the basis the refit will build and has no notion of a
-common complexity across candidates. Screening by a variance-component score
-test against a single null fit, with the pair's own mains profiled out by the
-same efficient-score algebra used here, is long established in genomics
-(GESAT/iSKAT, Lin et al. 2013); residual-table interaction screening goes back
-to GUIDE (Loh 2002). Within the penalized-GAM ecosystem there is no screening
-facility to compare against: the documented procedure is to fit the candidate
-term and read its p-value, one refit per pair. Actuarial practice is the same
-fit-and-test loop (Anderson et al., *A Practitioner's Guide to GLMs*; CAS
-Monograph 5), with the research frontier ranking pairs by black-box
-surrogates — gradient-boosting H-statistics or neural interaction detection —
-which report no null behaviour at all.
+When \(V+\lambda S\) is positive definite on the retained candidate space,
+completing the square gives
 
-What is new here is therefore narrow and specific. First, the probe is the
-exact basis the confirmatory refit builds, for every pair kind, rather than a
-binned or single-column surrogate for it. Second, candidates are compared at a
-solved-for common complexity: `lambda0` is chosen so
-`tr((V + lambda0 * S)^-1 V) = edf0`, scanned over a ladder of budgets and
-normalized against each rung's own null mean and scale. No precedent was found
-for that second device. The cell-collapsed assembly and the ranking-only
-stance are not new — FAST has both — and the null floors quoted above are
-measured here, not inherited from any of this work.
+\[
+\max_b q_\lambda(b)=\tfrac12U^\top(V+\lambda S)^{-1}U=\tfrac12T_\lambda.
+\]
 
-The two have been run head to head on freMTPL2, against confirmatory refits of
-every candidate pair on a held-out split, including a condition where FAST is
-given a stronger baseline than the one this screen is anchored to. The short
-version: against out-of-sample refit gain PSST ranks the queue better
-(Spearman +0.83 against FAST's best +0.66), against in-sample gain FAST ranks
-it better, and the disagreement between those two verdicts is itself the most
-useful result. FAST is also 26-43x faster. Full method, per-pair tables,
-mechanism and caveats: [Screening Evaluation](screening-evaluation.md).
+Thus the raw score is twice the candidate's extra quadratic gain beyond what
+those main-effect adjustments can achieve alone. It is not necessarily twice
+the total gain from the unchanged fitted coefficients. The table reports
+`statistic` after division by dispersion,
+estimated from the mains fit by default or supplied through `phi=`.
+The identity is exact for that quadratic; a complete refit changes
+the working model and need not achieve the same gain.
+
+Classical score testing uses this kind of slope-and-curvature calculation at
+the null fit, avoiding a fit under every alternative. There is also an
+established literature on testing smooth components, including
+[Zhang and Lin (2003)](https://doi.org/10.1093/biostatistics/4.1.57), and on
+score-based interaction tests, including
+[GESAT (Lin et al., 2013)](https://pubmed.ncbi.nlm.nih.gov/23462021/).
+These provide related constructions, not a theorem for PSST's particular
+penalty choice, pair-only projection and maximum over complexity budgets.
+
+### Reference distribution and current limitation
+
+If the geometry is fixed and \(U\sim N(0,\phi V)\) with known dispersion,
+the quadratic has a weighted chi-square reference law:
+
+\[
+T_\lambda/\phi\overset d=\sum_j a_j Z_j^2,\qquad
+E(T_\lambda/\phi)=\sum_j a_j=\mathrm{edf}_0,\qquad
+\operatorname{Var}(T_\lambda/\phi)=2\sum_j a_j^2.
+\]
+
+Here the \(Z_j\) are independent standard normals and the \(a_j\) are the
+candidate's shrinkage eigenvalues. The current denominator uses
+\(\sqrt{2\mathrm{edf}_0}\). This matches the reference variance for an
+unpenalized identified block, but is too large when directions are shrunk.
+Correcting it requires the candidate's trace-of-square quantity on both dense
+and structured execution paths; it cannot be replaced by the whole mains
+model's `edf1`.
+
+Even that correction would standardize only this fixed Gaussian reference.
+Fitting the baseline affects the score's mean and covariance; estimated
+dispersion and smoothing, non-Gaussian responses, and selecting the best rung
+introduce further questions. Simulating normal draws from a fixed candidate
+matrix does not automatically give exact p-values for the fitted-model
+procedure. PSST currently returns a ranking, with empirical checks of its
+behavior. Candidate refits and held-out evaluation are the next step.
+
+## What PSST combines, and what has been measured
+
+PSST combines candidate spaces tied to SuperGLM's refit terms, penalty weights
+chosen to attain screening-EDF budgets, a maximum over those budgets, and
+factor-based assembly. Quantized screens are identified by `approx`.
+This combination explains the design; establishing its originality requires
+a more complete literature comparison.
+
+The [FAST comparison](screening-evaluation.md) refits every candidate and
+measures held-out gain. In its two specifications, PSST's ranking agrees more
+closely with held-out refit gain; FAST is faster and agrees more closely with
+training gain. These are descriptive results from 8 and 10 pairs on one
+book, not evidence of a universal ranking advantage. Wider candidate sets and
+replicated data or splits are needed, with the dependence between overlapping
+pairs accounted for.
