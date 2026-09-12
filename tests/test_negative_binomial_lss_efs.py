@@ -23,6 +23,7 @@ from superglm.distributional.curvature import (
 from superglm.distributional.weights import WeightContract
 from superglm.features import Spline
 from superglm.types import LambdaPolicy
+from tests.bound_predictor_fixtures import model_from_templates
 
 _INITIAL_LAMBDAS = {
     "mean:x_mean#wiggle": 0.8,
@@ -60,7 +61,7 @@ def _poisson_like_fixture(n_rows: int = 256) -> tuple[pd.DataFrame, np.ndarray]:
 
 
 def _model() -> SuperLSS:
-    return SuperLSS(
+    return model_from_templates(
         family=NegativeBinomialLS(),
         predictors=tuple(
             Predictor(
@@ -297,7 +298,7 @@ def test_diagnostic_failure_preserves_the_original_curvature_failure(
         "fit_dense_distributional",
         Mock(side_effect=original),
     )
-    model = SuperLSS(
+    model = model_from_templates(
         family=_RaisingDiagnosticNegativeBinomial(),
         predictors=(Predictor("mean", {}), Predictor("theta", {})),
     )

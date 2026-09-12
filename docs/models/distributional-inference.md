@@ -1,23 +1,18 @@
 # Checking and Explaining a Distributional Fit
 
-A `SuperLSS` fit states a whole conditional distribution per row, so the
-questions you can ask of it are wider than the ones a mean model answers. This
-page walks the questions in the order a review actually asks them:
+A `SuperLSS` fit predicts a conditional distribution for each row. Check its
+spread and tails as well as its mean. This guide covers residual checks,
+calibration, parameter effects, portfolio predictions and model comparison.
 
-1. **Is the family right?** — Q-Q, worm and PIT.
-2. **Where is it wrong, and in which moment?** — binned checks, Q-statistics,
-   actual against expected, calibration.
-3. **What drives each parameter?** — term effects and the summary table.
-4. **What does it mean for a policy and for a book?** — risk curves, the
-   density fan, the spread among identically priced rows, the portfolio total.
-5. **How do candidates compare?** — proper scores, the Murphy diagram and the
-   tail tables.
+Start with [Your first distributional model](../getting-started/distributional.md)
+for a shorter example that includes a train/test split. The examples below
+show the available diagnostics on simulated Gamma data. Use held-out rows
+when assessing predictive performance.
 
-Every method below is a thin call on the fitted model. Underneath, one
-primitive does the work: draws from the Bayesian posterior of the coefficients,
-pushed through the family. Every builder returns a frozen payload with a
-`to_json()`, so a figure can be redrawn from its payload alone —
-[`plot_data`](#payloads-without-figures) hands you exactly that.
+The methods use different parts of the fitted model. Distributional residuals
+need a CDF; posterior intervals and simulations use coefficient uncertainty.
+Use [`plot_data`](#payloads-without-figures) to retrieve the data behind
+supported figures.
 
 ## The example
 
@@ -28,10 +23,7 @@ Everything on this page runs on simulated data with a known truth. Here `x` and
 import numpy as np
 import pandas as pd
 
-from superglm import Categorical, Spline, SuperLSS
-from superglm.distributional import Predictor
-from superglm.distributional.families.gamma import GammaLS
-
+from superglm import GammaLS, SuperLSS, cat, s
 rng = np.random.default_rng(20260903)
 n = 20_000
 frame = pd.DataFrame(
@@ -47,12 +39,11 @@ mean = np.exp(0.8 + 0.6 * np.sin(np.pi * frame["x"]) + 0.3 * frame["z"] ** 2)
 cv = np.exp(-0.4 + 0.3 * frame["x"])
 y = rng.gamma(exposure / cv**2, mean * cv**2 / exposure)
 
+family = GammaLS()
 model = SuperLSS(
-    family=GammaLS(),
-    predictors=[
-        Predictor("mean", {"x": Spline("cr", k=8), "z": Spline("cr", k=8), "band": Categorical()}),
-        Predictor("scale", {"x": Spline("cr", k=8)}),
-    ],
+    family,
+    family.mean(s("x", kind="cr", k=8), s("z", kind="cr", k=8), cat("band")),
+    family.scale(s("x", kind="cr", k=8)),
 ).fit_reml(frame, y, exposure)
 ```
 

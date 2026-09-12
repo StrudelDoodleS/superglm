@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Constraint, Spline, SuperLSS
+from superglm import Constraint, Spline
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional.predictor import ShapeConstraintIgnoredWarning
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _data(n: int = 200, seed: int = 4):
@@ -23,7 +24,7 @@ def test_a_shape_constraint_on_the_distributional_path_warns_and_fits_unconstrai
     frame, y = _data()
     spec = Spline(kind="ps", n_knots=6, constraint=constraint)
     with pytest.warns(ShapeConstraintIgnoredWarning, match="location:x"):
-        model = SuperLSS(
+        model = model_from_templates(
             family=GaussianLS(),
             predictors=(Predictor("location", {"x": spec}), Predictor("scale", {})),
         ).fit_reml(frame, y, method="efs")
@@ -36,7 +37,7 @@ def test_an_unconstrained_spline_does_not_warn():
     frame, y = _data()
     with warnings.catch_warnings():
         warnings.simplefilter("error", ShapeConstraintIgnoredWarning)
-        SuperLSS(
+        model_from_templates(
             family=GaussianLS(),
             predictors=(
                 Predictor("location", {"x": Spline(kind="ps", n_knots=6)}),

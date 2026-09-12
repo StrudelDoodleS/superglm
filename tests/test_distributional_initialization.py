@@ -8,6 +8,7 @@ import pytest
 
 from superglm import GaussianLS, Predictor, Spline, SuperLSS
 from superglm.types import LambdaPolicy
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _fit_start(
@@ -22,7 +23,7 @@ def _fit_start(
     rng = np.random.default_rng(81)
     x = np.linspace(0.0, 4.0, 240)
     y = np.sin(x) + rng.normal(scale=0.5, size=len(x))
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS() if family is None else family,
         predictors=[
             Predictor("location", {"x": Spline("cr", k=8, **(spline_kwargs or {}))}),
@@ -251,7 +252,7 @@ def test_public_automatic_start_artifact_preserves_config_numeric_starts_and_pre
     x = np.linspace(0.0, 1.0, 80)
     frame = pd.DataFrame({"x": x})
     y = np.sin(4 * x) + np.random.default_rng(814).normal(scale=0.3, size=len(x))
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=8)}),

@@ -99,9 +99,15 @@ def main() -> None:
     before_hash = source_digest(package)
     with threadpool_limits(limits=1, user_api="blas"):
         template, frame, y, holdout, provenance = gaussian_fragmented_fixture(args.n, 4)
+        from superglm.distributional.binding import _bind_predictor_template
+
+        bound_family = template.family
         model = superglm.SuperLSS(
-            family=template.family,
-            predictors=template.predictors,
+            bound_family,
+            *(
+                _bind_predictor_template(bound_family, predictor)
+                for predictor in template.predictors
+            ),
             discrete=args.discrete,
             n_bins=256,
         )

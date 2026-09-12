@@ -29,19 +29,20 @@ from superglm.diagnostics.discretize import DiscretizationResult, discretization
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
-from superglm.distributional import (
-    GammaLS,
-    GaussianLS,
-    GeneralizedGammaLSS,
-    GeneralizedParetoLSS,
-    LogNormalLS,
-    NegativeBinomialLS,
-    Predictor,
-    TweedieLSS,
+from superglm.distributional.api import SuperLSS
+from superglm.distributional.binding import BoundPredictor, bind_predictor
+from superglm.distributional.families.gamma import GammaLS
+from superglm.distributional.families.gaussian import GaussianLS
+from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
+from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
+from superglm.distributional.families.log_normal import LogNormalLS
+from superglm.distributional.families.negative_binomial import NegativeBinomialLS
+from superglm.distributional.families.tweedie import TweedieLSS
+from superglm.distributional.families.two_piece import (
     TwoPieceLogNormalLSS,
     TwoPieceNormalLSS,
 )
-from superglm.distributional.api import SuperLSS
+from superglm.distributional.predictor import Predictor
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
 from superglm.features.categorical import Categorical
@@ -127,6 +128,7 @@ from superglm.stats.model_tests import (
     zero_inflation_index,
 )
 from superglm.stats.wood_pvalue import wood_test_smooth
+from superglm.terms import BoundInteraction, BoundTerm, cat, interaction, re, s, term, ti
 from superglm.types import LambdaPolicy, LinearConstraintSet
 from superglm.validation import (
     DoubleLiftChartResult,
@@ -160,6 +162,16 @@ __all__ = [
     "warmup",
     "SuperGLM",
     "SuperLSS",
+    "BoundPredictor",
+    "bind_predictor",
+    "BoundTerm",
+    "BoundInteraction",
+    "term",
+    "s",
+    "cat",
+    "re",
+    "ti",
+    "interaction",
     "GaussianLS",
     "GammaLS",
     "GeneralizedGammaLSS",

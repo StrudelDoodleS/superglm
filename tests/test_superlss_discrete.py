@@ -21,6 +21,7 @@ from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.features import Categorical, Spline, SplineCategorical
 from superglm.features.interaction import TensorInteraction
 from superglm.types import LambdaPolicy
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _fixture(kind: str, semantics: str):
@@ -113,7 +114,7 @@ def test_public_discrete_observed_fixed_fit_parity(kind: str, semantics: str, mo
     monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 8192)
     frame, y, weights, offsets, family, predictors = _fixture(kind, semantics)
     models = [
-        SuperLSS(
+        model_from_templates(
             family=family,
             predictors=predictors,
             weight_semantics=semantics,
@@ -139,7 +140,7 @@ def test_public_discrete_complete_smoothing_and_roundtrip(
     monkeypatch.setattr(chunking, "AUTO_CHUNK_MEMORY_BYTES", 8192)
     frame, y, weights, offsets, family, predictors = _fixture(kind, semantics)
     models = [
-        SuperLSS(
+        model_from_templates(
             family=family,
             predictors=predictors,
             discrete=discrete,
@@ -172,7 +173,7 @@ def test_public_discrete_complete_smoothing_and_roundtrip(
         grouped.predict_parameters(frame, offsets=offsets),
     )
     # Predictor templates returned to callers are independent and can seed a fresh model.
-    clone = SuperLSS(
+    clone = model_from_templates(
         family=family,
         predictors=restored.predictors,
         discrete=True,
@@ -193,7 +194,7 @@ def test_public_discrete_complete_smoothing_and_roundtrip(
 def test_public_discrete_explicit_fisher_still_requires_capability(kind: str) -> None:
     _, _, _, _, family, predictors = _fixture(kind, "prior")
     with pytest.raises(ValueError, match="expected information"):
-        SuperLSS(
+        model_from_templates(
             family=family, predictors=predictors, discrete=True, coefficient_curvature="fisher"
         )
 
@@ -206,7 +207,7 @@ def test_public_serialization_size_ignores_primed_category_lookups(discrete) -> 
     )
 
     frame, y, _, _, family, _ = _fixture("gaussian", "frequency")
-    model = SuperLSS(
+    model = model_from_templates(
         family=family,
         predictors=(
             Predictor(
@@ -268,7 +269,7 @@ def test_public_discrete_tensor_and_categorical_interaction_parity() -> None:
         ),
     )
     models = [
-        SuperLSS(
+        model_from_templates(
             family=family,
             predictors=predictors,
             discrete=discrete,
@@ -335,7 +336,7 @@ def test_public_discrete_remaining_builtin_families(family) -> None:
     )
     offsets = {name: 0.005 * np.sin(np.arange(n) + i) for i, name in enumerate(names)}
     models = [
-        SuperLSS(
+        model_from_templates(
             family=family,
             predictors=predictors,
             discrete=discrete,
@@ -382,7 +383,9 @@ def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> Non
     monkeypatch.setattr(MatrixExecutionPlan, "moments", moments)
     monkeypatch.setattr(CrossMatrixExecutionPlan, "cross_moment", cross)
     monkeypatch.setattr(chunking, "assemble_chunked_geometry", geometry)
-    model = SuperLSS(family=family, predictors=predictors, discrete=True, n_bins=32).fit_reml(
+    model = model_from_templates(
+        family=family, predictors=predictors, discrete=True, n_bins=32
+    ).fit_reml(
         frame,
         y,
         sample_weight=weights,
@@ -398,7 +401,7 @@ def test_public_discrete_dispatches_compressed_signed_chunks(monkeypatch) -> Non
 
 def test_per_term_discrete_preserves_explicit_dense_execution_policy() -> None:
     frame, y, weights, offsets, family, _ = _fixture("gaussian", "prior")
-    model = SuperLSS(
+    model = model_from_templates(
         family=family,
         predictors=(
             Predictor("location", {"x": Spline(kind="cr", n_knots=4, discrete=True)}),

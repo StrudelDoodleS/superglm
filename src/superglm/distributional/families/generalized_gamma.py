@@ -17,6 +17,12 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import (
+    LocationPredictor,
+    MeanPredictor,
+    ScalePredictor,
+    ShapePredictor,
+)
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -164,7 +170,7 @@ class GeneralizedGammaLikelihoodPlan:
 
 
 @dataclass(frozen=True)
-class GeneralizedGammaLSS:
+class GeneralizedGammaLSS(MeanPredictor, LocationPredictor, ScalePredictor, ShapePredictor):
     """Generalized gamma with natural parameters ``(mean | location, scale, shape)``.
 
     Prentice's ``(mu, sigma, Q)`` law on ``y > 0``: ``shape = 0`` is the
@@ -172,6 +178,26 @@ class GeneralizedGammaLSS:
     default mean form puts ``E[Y]`` first under a log link, so its relativities
     multiply the mean; the location form puts the log-scale location first
     under an identity link and admits an infinite mean.
+
+    Parameters
+    ----------
+    parametrisation : {"mean", "location"}, default="mean"
+        Choose ``family.mean(...)`` for the conditional response mean or
+        ``family.location(...)`` for Prentice's log-scale location. Declare
+        ``family.scale(...)`` and ``family.shape(...)`` in either form.
+        Scale is Prentice's sigma and shape is Q. Scale need not equal the
+        standard deviation of the response or its logarithm.
+    scale_floor : float, default=0.01
+        Nonnegative lower bound on scale. Its default link is
+        ``log(scale - scale_floor)``. Shape uses an identity link.
+
+    Notes
+    -----
+    Changing the first parameter changes what its additive predictor
+    describes. The mean form requires a finite response mean. Results
+    contain ``mean, scale, shape`` or ``location, scale, shape``.
+    ``predict`` returns the response mean in both forms, including infinity
+    where the mean does not exist in the location form.
     """
 
     parametrisation: Parametrisation = "mean"

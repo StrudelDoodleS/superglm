@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from scipy import integrate
 
-from superglm import Categorical, Spline, SuperLSS
+from superglm import Categorical, Spline
 from superglm.distributional import Predictor
 from superglm.distributional.checks._aggregate import grouped_ratio
 from superglm.distributional.families.gamma import GammaLS
@@ -33,6 +33,7 @@ from superglm.distributional.surfaces import (
     portfolio,
     risk_curves,
 )
+from tests.bound_predictor_fixtures import model_from_templates
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -61,7 +62,7 @@ def _gamma_sample(n: int = 1000, seed: int = 20260904) -> tuple[pd.DataFrame, np
 @pytest.fixture(scope="module")
 def gaussian_case() -> tuple[DenseDistributionalModel, pd.DataFrame, np.ndarray]:
     X, y = _gaussian_sample()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=[
             Predictor("location", {"x": Spline("cr", k=8), "g": Categorical()}),
@@ -74,7 +75,7 @@ def gaussian_case() -> tuple[DenseDistributionalModel, pd.DataFrame, np.ndarray]
 @pytest.fixture(scope="module")
 def gamma_case() -> tuple[DenseDistributionalModel, pd.DataFrame, np.ndarray]:
     X, y = _gamma_sample()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=[
             Predictor("mean", {"x": Spline("cr", k=8), "g": Categorical()}),

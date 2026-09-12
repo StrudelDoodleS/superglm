@@ -39,6 +39,7 @@ from superglm.features.polynomial import Polynomial
 from superglm.features.spline import PSpline
 from superglm.group_matrix import SupportCompressedSSPGroupMatrix
 from superglm.links import IdentityLink, LogLink
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _parameter(name: str, default_link: str = "identity") -> ParameterSpec:
@@ -230,7 +231,7 @@ def _select_fixture(values: np.ndarray, n: int) -> tuple[pd.DataFrame, np.ndarra
 
 
 def _fit_select_location(feature, frame: pd.DataFrame, y: np.ndarray) -> SuperLSS:
-    return SuperLSS(
+    return model_from_templates(
         family=GaussianLS(scale_floor=0.01),
         predictors=(
             Predictor("location", {"g": feature}),
@@ -1931,8 +1932,10 @@ def test_superlss_declares_the_prior_contract_by_default() -> None:
         Predictor(name="scale", features={"z": Spline("cr", k=6)}),
     ]
 
-    default = SuperLSS(family=GaussianLS(), predictors=predictors)
-    declared = SuperLSS(family=GaussianLS(), predictors=predictors, weight_semantics="frequency")
+    default = model_from_templates(family=GaussianLS(), predictors=predictors)
+    declared = model_from_templates(
+        family=GaussianLS(), predictors=predictors, weight_semantics="frequency"
+    )
 
     assert default._weight_contract == WeightContract(semantics="prior")
     assert declared._weight_contract == WeightContract(semantics="frequency")
@@ -1948,4 +1951,6 @@ def test_superlss_declares_the_prior_contract_by_default() -> None:
     assert default._require_fitted().null_model.weight_semantics == "prior"
 
     with pytest.raises(UnsupportedLikelihoodContractError, match="semantics"):
-        SuperLSS(family=GaussianLS(), predictors=predictors, weight_semantics="frequency_case")
+        model_from_templates(
+            family=GaussianLS(), predictors=predictors, weight_semantics="frequency_case"
+        )

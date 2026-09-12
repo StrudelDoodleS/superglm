@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from superglm import GaussianLS, Predictor, RandomEffect, SuperLSS
+from superglm import GaussianLS, SuperLSS, re
 from superglm.distributional.smoothing import loop
 from tests.test_distributional_practical_stop import _preempt_fixture
 
@@ -28,10 +28,8 @@ def test_outward_practical_plateau_can_finish_before_newton(monkeypatch, outer, 
 
     monkeypatch.setattr(loop, "run_newton_endgame", record_endgame)
     frame, response = _preempt_fixture()
-    model = SuperLSS(
-        family=GaussianLS(scale_floor=1.0e-4),
-        predictors=(Predictor("location", {"effect": RandomEffect()}), Predictor("scale", {})),
-    )
+    family = GaussianLS(scale_floor=1.0e-4)
+    model = SuperLSS(family, family.location(re("effect")), family.scale())
     model.fit_reml(
         frame,
         response,

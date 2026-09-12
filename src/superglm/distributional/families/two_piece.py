@@ -18,6 +18,12 @@ from superglm.distributional.families._base import (
     validated_float_response,
 )
 from superglm.distributional.families._links import BoundedLogitLink
+from superglm.distributional.families._predictors import (
+    LocationPredictor,
+    MeanPredictor,
+    ScalePredictor,
+    SkewPredictor,
+)
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -217,13 +223,33 @@ def _scale_and_skew_specs(scale_floor: float, skew_bound: float) -> tuple[Parame
 
 
 @dataclass(frozen=True)
-class TwoPieceLogNormalLSS:
+class TwoPieceLogNormalLSS(MeanPredictor, LocationPredictor, ScalePredictor, SkewPredictor):
     """Two-piece log-normal with natural parameters ``(mean | location, scale, skew)``.
 
     ``log Y = mu + sigma W`` with ``W`` epsilon-skew two-piece standard normal;
     the right piece is the wide one, so a positive ``skew`` predictor means a
     heavier right tail on the log scale.  The default mean form puts ``E[Y]``
     first under a log link, so its relativities multiply the mean.
+
+    Parameters
+    ----------
+    parametrisation : {"mean", "location"}, default="mean"
+        Choose ``family.mean(...)`` for the conditional response mean or
+        ``family.location(...)`` for the location in the log-response law.
+        Declare ``family.scale(...)`` and ``family.skew(...)`` in either form.
+    scale_floor : float, default=0.01
+        Nonnegative lower bound on scale. Its default link is
+        ``log(scale - scale_floor)``.
+    skew_bound : float, default=0.9
+        Positive bound, less than one, on the magnitude of epsilon. The
+        default bounded link keeps skew strictly inside these limits.
+
+    Notes
+    -----
+    Fit the positive response directly. Location and scale are parameters
+    of the two-piece log-response law; they need not be its mean and standard
+    deviation. ``skew`` is epsilon, not the standardized third moment.
+    ``predict`` returns the response mean in either parametrization.
     """
 
     parametrisation: Parametrisation = "mean"
@@ -449,13 +475,33 @@ class TwoPieceLogNormalLSS:
 
 
 @dataclass(frozen=True)
-class TwoPieceNormalLSS:
+class TwoPieceNormalLSS(LocationPredictor, ScalePredictor, SkewPredictor):
     """Epsilon-skew two-piece normal on the real line, ``(location, scale, skew)``.
 
     The same kernel as ``TwoPieceLogNormalLSS`` with the identity variate and
     no mean loading: ``E[Y] = location + 2 skew * scale * sqrt(2/pi)`` is a
     functional rather than a natural parameter, so this family has no mean
     form.
+
+    Declare ``family.location(...)``, ``family.scale(...)`` and
+    ``family.skew(...)``. Results use those three names in that order.
+    Location uses an identity link; the other parameters use links that
+    respect their configured bounds.
+
+    Parameters
+    ----------
+    scale_floor : float, default=0.01
+        Nonnegative lower bound on scale, in response units. Its default
+        link is ``log(scale - scale_floor)``.
+    skew_bound : float, default=0.9
+        Positive bound, less than one, on the magnitude of epsilon. Positive
+        skew makes the right piece wider.
+
+    Notes
+    -----
+    Scale need not equal the response standard deviation, and ``skew`` is
+    epsilon rather than the standardized third moment. ``predict`` returns
+    the response mean, including the location adjustment given above.
     """
 
     scale_floor: float = 0.01

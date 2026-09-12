@@ -1,4 +1,4 @@
-"""Public model façade for auditable multi-predictor distributional fitting."""
+"""Fit and inspect distributional models with one predictor per parameter."""
 
 from __future__ import annotations
 
@@ -20,6 +20,12 @@ from numpy.typing import NDArray
 from superglm._blas_threads import solver_blas_threads
 from superglm._frame import EagerFrame, FrameLike, as_eager_frame
 from superglm.diagnostics.fit_report import FitDiagnosticReport
+from superglm.distributional.binding import (
+    BoundPredictor,
+    _bind_predictor_template,
+    _snapshot_family,
+    resolve_predictors,
+)
 from superglm.distributional.checks.binned import (
     BinnedCheck,
     BinnedCheck2D,
@@ -487,13 +493,87 @@ def _json_number(value: Any) -> float | None:
 
 
 class SuperLSS:
-    """Certification-aware distributional model with ordered family predictors."""
+    """Fit several parameters of a response distribution jointly.
+
+    Create a family, then pass it followed by one declaration for each of its
+    parameters. For example, a Gaussian model has a ``location`` predictor
+    for its conditional mean and a ``scale`` predictor for its standard
+    deviation. Each predictor can use its own linear terms, smooths and
+    categorical effects.
+
+    Parameters
+    ----------
+    family : DistributionalFamily
+        Response family, passed as the first positional argument. Create all
+        predictor declarations with helpers on this same family instance.
+    *predictors : BoundPredictor
+        One declaration per family parameter. A bare column name declares a
+        numeric linear term; use ``s`` for a spline, ``cat`` for categories
+        and ``re`` for a random effect. An empty helper call declares an
+        intercept-only predictor. Every parameter must be declared exactly
+        once, in any order. Unpack a sequence of declarations with ``*``.
+    weight_semantics : {"prior", "frequency"}, default="prior"
+        Meaning of ``sample_weight`` during fitting and scoring. Prior
+        weights describe precision under the family's observation law;
+        frequency weights count repeated observations. Families without a
+        prior-weight law require unit prior weights or frequency weights.
+    discrete : bool, default=False
+        Use grouped marginal designs and row chunks during fitting. This can
+        reduce design memory, but it does not make fitting out of core.
+    n_bins : int or mapping of str to int, default=256
+        Bin count for discrete fitting, shared by all features or supplied
+        by feature name. Check sensitivity to the grid for your data.
+    separation : {"warn", "error", "ignore"}, default="warn"
+        How to handle categorical cells whose response values imply no finite
+        coefficient for a predictor. The family defines these boundaries.
+    coefficient_curvature : {"observed", "fisher"}, default="observed"
+        Curvature used for coefficient updates. ``"fisher"`` requires a
+        family that supplies expected information.
+
+    Notes
+    -----
+    Construction copies the family configuration and predictor declarations.
+    Fitting one model does not fit the family or another model constructed
+    from it. Use ``fit_reml`` to estimate coefficients and smoothing
+    parameters, or ``fit`` to hold smoothing parameters fixed.
+
+    ``predict`` returns the conditional mean for the built-in families.
+    ``predict_parameters`` returns every fitted distribution parameter, and
+    ``predict_link`` returns their linear predictors. Result columns use
+    family parameter names. In particular, Tweedie's ``mu``, ``phi`` and
+    ``p`` helpers produce ``mean``, ``dispersion`` and ``power`` columns.
+
+    See Also
+    --------
+    GaussianLS : Gaussian location and standard deviation.
+    GammaLS : Positive responses with mean and coefficient of variation.
+    TweedieLSS : Nonnegative responses with mean, dispersion and power.
+    bind_predictor : Declare predictors for a custom family.
+
+    Examples
+    --------
+    Declare a Gaussian model whose mean varies with age and region, with
+    constant standard deviation:
+
+    >>> from superglm import GaussianLS, SuperLSS, cat, s
+    >>> family = GaussianLS()
+    >>> model = SuperLSS(
+    ...     family,
+    ...     family.location(s("age", kind="cr", k=8), cat("region")),
+    ...     family.scale(),
+    ... )
+    >>> tuple(p.name for p in model.predictors)
+    ('location', 'scale')
+
+    The model is ready for ``model.fit_reml(X, y)``. The fit and prediction
+    frames must contain the declared columns.
+    """
 
     def __init__(
         self,
-        *,
         family: DistributionalFamily,
-        predictors: Sequence[Predictor],
+        /,
+        *predictors: BoundPredictor,
         weight_semantics: Literal["prior", "frequency"] = "prior",
         discrete: bool = False,
         n_bins: int | Mapping[str, int] = 256,
@@ -503,9 +583,9 @@ class SuperLSS:
         if not isinstance(discrete, bool):
             raise TypeError("discrete must be bool")
         self._separation = validate_separation_policy(separation)
-        self._family = family
-        self._predictors = _owned_predictors(family, predictors)
-        self._coefficient_curvature = _coefficient_curvature(family, coefficient_curvature)
+        self._family, templates = resolve_predictors(family, predictors)
+        self._predictors = _owned_predictors(self._family, templates)
+        self._coefficient_curvature = _coefficient_curvature(self._family, coefficient_curvature)
         self._weight_contract = WeightContract(semantics=weight_semantics)
         self._discrete = discrete
         self._n_bins = _owned_n_bins(n_bins)
@@ -519,7 +599,8 @@ class SuperLSS:
 
     @property
     def family(self) -> DistributionalFamily:
-        return self._family
+        """Return an independent copy of the model's family configuration."""
+        return _snapshot_family(self._family)
 
     @property
     def weight_semantics(self) -> str:
@@ -560,6 +641,11 @@ class SuperLSS:
 
     @property
     def predictors(self) -> tuple[Predictor, ...]:
+        """Return independent predictor templates in family parameter order.
+
+        These templates describe the model's configuration. New construction
+        uses declarations from family helpers, rather than these templates.
+        """
         return _clone_predictor_templates(self._predictors)
 
     @property
@@ -649,7 +735,39 @@ class SuperLSS:
         inner_tol: float = 1.0e-7,
         retain_rows: bool = True,
     ) -> SuperLSS:
-        """Fit coefficients for caller-fixed, fully qualified smoothing parameters."""
+        """Fit coefficients while holding smoothing parameters fixed.
+
+        Parameters
+        ----------
+        X : DataFrame or EagerFrame
+            Input columns named in the predictor declarations.
+        y : array-like of shape (n_observations,)
+            Response values in the family's support, in the same row order
+            as ``X``.
+        sample_weight : array-like, optional
+            One weight per row, interpreted using ``weight_semantics``.
+        offsets : mapping of str to array-like, optional
+            Known additions to predictors on their link scales. Keys are
+            family parameter names, such as ``"mean"`` for Tweedie.
+        lambdas : mapping of str to float, optional
+            Smoothing strengths keyed by fully qualified penalty names, such
+            as ``"location:age#wiggle"`` for a Gaussian smooth.
+        max_inner_iter : int, default=100
+            Maximum number of coefficient iterations.
+        inner_tol : float, default=1e-7
+            Coefficient convergence tolerance.
+        retain_rows : bool, default=True
+            Retain fitted row arrays for training diagnostics.
+
+        Returns
+        -------
+        SuperLSS
+            This model, with its fitted state replaced by the new fit.
+
+        See Also
+        --------
+        fit_reml : Estimate smoothing parameters as part of the fit.
+        """
         return self._fit(
             X,
             y,
@@ -692,11 +810,17 @@ class SuperLSS:
         outer: Literal["efs", "efs+newton"] = "efs",
         phase_recorder: FitPhaseRecorder | None = None,
     ) -> SuperLSS:
-        """Fit coefficients and smoothing parameters by REML.
+        """Fit coefficients and estimate smoothing parameters jointly.
+
+        ``X`` supplies the declared columns and ``y`` supplies the response
+        in the same row order. ``sample_weight`` follows the model's
+        ``weight_semantics``. ``offsets`` maps family parameter names to
+        known additions on the link scale. This method updates the model and
+        returns it.
 
         ``outer`` selects the smoothing optimiser.  The default ``"efs"`` runs
-        the generalised Fellner--Schall fixed point.  ``"efs+newton"`` opts into
-        a Newton endgame on the exact LAML gradient and Hessian in log lambda.
+        generalised Fellner-Schall updates. ``"efs+newton"`` adds Newton
+        refinement using the LAML gradient and Hessian in log lambda.
 
         ``practical_reml`` stops the Fellner--Schall loop after sustained
         negligible objective and fitted-parameter movement. Set it to ``False``
@@ -784,7 +908,8 @@ class SuperLSS:
 
     @property
     def family_(self) -> DistributionalFamily:
-        return self._require_fitted().family
+        """Return an independent copy of the fitted family's configuration."""
+        return _snapshot_family(self._require_fitted().family)
 
     @property
     def predictors_(self) -> tuple[Predictor, ...]:
@@ -792,6 +917,7 @@ class SuperLSS:
 
     @property
     def parameter_names_(self) -> tuple[str, ...]:
+        """Return fitted parameter names in the order used by predictions."""
         return self._require_fitted().parameter_names
 
     @property
@@ -852,7 +978,12 @@ class SuperLSS:
         *,
         offsets: Mapping[str, NDArray] | None = None,
     ) -> pd.DataFrame:
-        """Return one link-scale column per family parameter."""
+        """Return each parameter's linear predictor as a DataFrame.
+
+        Columns follow ``parameter_names_`` and include any supplied offsets.
+        Values are on the link scale, before applying the inverse link. For
+        example, Tweedie's ``"mean"`` column contains the log of its mean.
+        """
         values = self._require_fitted().predict_eta(X, offsets=offsets)
         return pd.DataFrame(
             values,
@@ -866,7 +997,16 @@ class SuperLSS:
         *,
         offsets: Mapping[str, NDArray] | None = None,
     ) -> pd.DataFrame:
-        """Return one natural-parameter column per family parameter."""
+        """Return every fitted distribution parameter as a DataFrame.
+
+        Columns follow ``parameter_names_``. Values are on each parameter's
+        natural scale after applying its inverse link. Gaussian columns are
+        ``"location"`` and ``"scale"``; Tweedie columns are ``"mean"``,
+        ``"dispersion"`` and ``"power"``. Frame indices are preserved.
+
+        Supply prediction offsets by family parameter name when the model
+        uses them. Their values are additions on the link scale.
+        """
         values = self._require_fitted().predict_parameters(X, offsets=offsets)
         return pd.DataFrame(
             values,
@@ -880,7 +1020,17 @@ class SuperLSS:
         *,
         offsets: Mapping[str, NDArray] | None = None,
     ) -> NDArray[np.float64]:
-        """Return the family-defined default prediction quantity."""
+        """Return the conditional mean for each row with a built-in family.
+
+        Predictions use the response scale supplied to fitting. For example,
+        ``LogNormalLS`` returns a mean on the original positive response
+        scale. A Gaussian model fitted to a manually logged response returns
+        a mean of that logged response.
+
+        Custom families define their own default prediction quantity. Use
+        ``predict_parameters`` for the complete parameter table and
+        ``predict_quantile`` for a chosen conditional quantile.
+        """
         return self._require_fitted().predict(X, offsets=offsets)
 
     def predict_cdf(
@@ -1003,8 +1153,11 @@ class SuperLSS:
                 "SuperLSS fitted chunk policy is incompatible with its public configuration"
             )
         model = cls(
-            family=fitted.family,
-            predictors=fitted.fit_state.predictor_templates,
+            fitted.family,
+            *(
+                _bind_predictor_template(fitted.family, template)
+                for template in fitted.fit_state.predictor_templates
+            ),
             weight_semantics=state.weight_contract.semantics,
             discrete=state.requested_discrete,
             n_bins=state_n_bins,

@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from superglm import Spline, SuperLSS
+from superglm import Spline
 from superglm.distributional import Predictor
 from superglm.distributional.families.generalized_pareto import GeneralizedParetoLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
@@ -17,6 +17,7 @@ from superglm.distributional.kernels import generalized_pareto as gp
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Numeric
 from tests._generalized_pareto_lss_oracles import fit_scale_regression, profile_shape
+from tests.bound_predictor_fixtures import model_from_templates
 
 _TRUE_SHAPE = 0.3
 
@@ -36,7 +37,7 @@ def _predictors(k=6):
 
 def test_the_scale_surface_and_the_shape_are_recovered_under_reml():
     frame, y, log_scale = _simulate(12_000, 20260902)
-    model = SuperLSS(family=GeneralizedParetoLSS(), predictors=_predictors()).fit_reml(
+    model = model_from_templates(family=GeneralizedParetoLSS(), predictors=_predictors()).fit_reml(
         frame, y, method="efs"
     )
     fitted = model.predict_parameters(frame)
@@ -58,7 +59,7 @@ def test_the_predicted_quantile_round_trips_and_covers_the_sample():
     frame, y, _ = _simulate(12_000, 5)
     # _predictors() carries a penalised spline, so the fixed-lambda path needs the
     # lambda named; how the smoothing is chosen is not what this test is about.
-    model = SuperLSS(family=GeneralizedParetoLSS(), predictors=_predictors()).fit(
+    model = model_from_templates(family=GeneralizedParetoLSS(), predictors=_predictors()).fit(
         frame, y, lambdas={"scale:x#wiggle": 1.0}
     )
     p90 = model.predict_quantile(frame, 0.9)
@@ -72,7 +73,7 @@ def test_the_predicted_quantile_round_trips_and_covers_the_sample():
 def test_the_unpenalised_fit_matches_an_independent_scipy_maximum_likelihood_fit():
     frame, y, _ = _simulate(4_000, 11)
     x = frame["x"].to_numpy()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedParetoLSS(),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)
@@ -104,7 +105,7 @@ def test_the_unpenalised_fit_matches_an_independent_scipy_maximum_likelihood_fit
 
 def test_fisher_curvature_request_is_honoured():
     frame, y, _ = _simulate(2_000, 3)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedParetoLSS(), predictors=_predictors(), coefficient_curvature="fisher"
     ).fit(frame, y, lambdas={"scale:x#wiggle": 1.0})
     assert model.coefficient_curvature == "fisher"
@@ -113,7 +114,7 @@ def test_fisher_curvature_request_is_honoured():
 
 def test_narrow_walls_keep_an_interior_shape_inside_them():
     frame, y, _ = _simulate(6_000, 8, shape=0.3)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.5),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)
@@ -126,7 +127,7 @@ def test_data_beyond_the_upper_wall_presses_against_it_or_stops():
     """The wall is a hard constraint, so the honest outcome is a pressed fit or a named failure."""
     frame, y, _ = _simulate(3_000, 8, shape=0.7)
     try:
-        model = SuperLSS(
+        model = model_from_templates(
             family=GeneralizedParetoLSS(shape_lower=0.05, shape_upper=0.35),
             predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
         ).fit(frame, y)
@@ -143,7 +144,7 @@ def test_data_beyond_the_upper_wall_presses_against_it_or_stops():
 
 def test_the_density_agrees_with_scipy_genpareto_at_the_fitted_parameters():
     frame, y, _ = _simulate(1_000, 13)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedParetoLSS(),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)
@@ -170,7 +171,7 @@ def test_the_threshold_splice_recipe_composes_a_tail_probability():
     threshold = float(np.quantile(losses, 0.9))
     above = losses > threshold
     excess = losses[above] - threshold
-    tail = SuperLSS(
+    tail = model_from_templates(
         family=GeneralizedParetoLSS(),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame.loc[above], excess)
@@ -252,7 +253,7 @@ def test_the_fit_matches_gamlss_gp_at_a_parametric_specification():
     reference = json.loads(completed.stdout)
     # jsonlite boxes every scalar in a length-one array unless auto_unbox is set
     reference_log_likelihood = float(np.ravel(reference["loglik"])[0])
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedParetoLSS(),
         predictors=(Predictor("scale", {"x": Numeric()}), Predictor("shape", {})),
     ).fit(frame, y)

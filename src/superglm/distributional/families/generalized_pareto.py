@@ -23,6 +23,10 @@ from superglm.distributional.families._base import (
     validated_float_response,
 )
 from superglm.distributional.families._links import BoundedLogitLink
+from superglm.distributional.families._predictors import (
+    ScalePredictor,
+    ShapePredictor,
+)
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -150,14 +154,28 @@ class GeneralizedParetoLikelihoodPlan:
 
 
 @dataclass(frozen=True)
-class GeneralizedParetoLSS:
-    """Generalized Pareto on excesses with natural parameters ``(scale, shape)``.
+class GeneralizedParetoLSS(ScalePredictor, ShapePredictor):
+    """Threshold excesses with generalized Pareto scale and shape predictors.
 
-    The shape carries a two-wall logit.  This release enforces
-    ``0 <= shape_lower < shape_upper <= 1``: a non-negative shape keeps the
-    support ``[0, inf)`` for every row, and a shape below one keeps the mean
-    finite.  A negative lower wall needs the response-dependent support slot,
-    which this public family does not implement.
+    Choose the threshold before fitting and supply the nonnegative excesses
+    as the response. Declare ``family.scale(...)`` and ``family.shape(...)``.
+    Scale uses a log link; shape uses a bounded logit link. Results use
+    ``scale`` and ``shape`` in that order.
+
+    Parameters
+    ----------
+    shape_lower : float, default=0.0
+        Nonnegative lower bound on the tail-shape parameter xi.
+    shape_upper : float, default=1.0
+        Upper bound on xi. Must exceed ``shape_lower`` and be at most one.
+        Fitted shape stays strictly between the two bounds.
+
+    Notes
+    -----
+    The current shape domain gives every row nonnegative, unbounded support
+    and a finite mean. Negative shapes require response-dependent support
+    and are not supported. ``predict`` returns the mean excess,
+    ``scale / (1 - shape)``. The threshold is not a fitted parameter.
     """
 
     shape_lower: float = 0.0

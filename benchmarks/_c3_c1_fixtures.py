@@ -98,14 +98,20 @@ def marked_book(n, tail=False):
 
 
 def lss_model(family, knots):
+    from superglm.distributional.binding import _bind_predictor_template
+
+    bound_family = family
     return SuperLSS(
-        family=family,
-        predictors=[
-            Predictor(
-                p.name,
-                {"x": Spline(n_knots=knots), "z": Spline(n_knots=knots)},
-                interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(knots, knots))},
-            )
-            for p in family.parameters
-        ],
+        bound_family,
+        *(
+            _bind_predictor_template(bound_family, predictor)
+            for predictor in [
+                Predictor(
+                    p.name,
+                    {"x": Spline(n_knots=knots), "z": Spline(n_knots=knots)},
+                    interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(knots, knots))},
+                )
+                for p in family.parameters
+            ]
+        ),
     )

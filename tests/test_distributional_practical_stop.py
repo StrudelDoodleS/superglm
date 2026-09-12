@@ -9,7 +9,6 @@ import pandas as pd
 import pytest
 
 import superglm.distributional.efs as efs_module
-from superglm import SuperLSS
 from superglm.distributional import GaussianLS, Predictor
 from superglm.distributional import fit_diagnostics as diagnostics_module
 from superglm.distributional.fit_diagnostics import diagnose_distributional_fit
@@ -18,6 +17,7 @@ from superglm.distributional.smoothing.objective import _stable_isolated_gfs_upd
 from superglm.features import RandomEffect, Spline
 from superglm.reml.efs_update import EFSComponentState, wood_fasiolo_update
 from superglm.types import LambdaPolicy
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def test_saturated_update_checks_inverse_products_before_cancellation() -> None:
@@ -151,7 +151,7 @@ def _noise_random_effect_fit(*, practical: bool, max_lambda: float, levels: int 
     labels = np.repeat(np.array([f"l{i}" for i in range(levels)]), 20)
     y = rng.normal(size=len(labels))
     frame = pd.DataFrame({"effect": labels})
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=1.0e-4),
         predictors=(Predictor("location", {"effect": RandomEffect()}), Predictor("scale", {})),
     )
@@ -198,7 +198,7 @@ def _preempt_fixture():
 
 def _preempt_fit(practical: bool):
     frame, y = _preempt_fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=1.0e-4),
         predictors=(Predictor("location", {"effect": RandomEffect()}), Predictor("scale", {})),
     )
@@ -252,7 +252,7 @@ def _start_fixture():
 
 def _start_fit(**kwargs):
     frame, y = _start_fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {"x": Spline(kind="cr", k=8)}), Predictor("scale", {})),
     )
@@ -273,7 +273,7 @@ def test_fit_reml_initial_lambda_is_capped_by_max_lambda_and_validated() -> None
     capped = _start_fit(initial_lambda=10.0, max_lambda=5.0)
     assert capped.config.initial_lambda == 5.0
     frame, y = _start_fixture()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         predictors=(Predictor("location", {"x": Spline(kind="cr", k=8)}), Predictor("scale", {})),
     )
@@ -485,7 +485,7 @@ def _outward_random_effect_fit(*, practical=True, max_log_step=0.5, span=1.5, fi
     if fixed_lambda is not None:
         frame["fixed"] = np.tile(["u", "v"], len(frame) // 2)
         features["fixed"] = RandomEffect(lambda_policy=LambdaPolicy.fixed(fixed_lambda))
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(scale_floor=1.0e-4),
         predictors=(Predictor("location", features), Predictor("scale", {})),
     )

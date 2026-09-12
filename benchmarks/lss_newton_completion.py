@@ -28,12 +28,10 @@ import superglm
 from superglm import (
     GaussianLS,
     NegativeBinomialLS,
-    Numeric,
-    Predictor,
-    RandomEffect,
-    Spline,
     SuperLSS,
-    TensorInteraction,
+    re,
+    s,
+    ti,
 )
 from superglm.distributional.prediction_design import (
     build_joint_prediction_design,
@@ -102,16 +100,15 @@ def gaussian_fixture(crossed):
             "location": np.linspace(-0.08, 0.11, n),
             "scale": 0.03 * np.sin(np.linspace(0.0, 2.0 * np.pi, n)),
         }
+    family = GaussianLS(scale_floor=0.02)
     model = SuperLSS(
-        family=GaussianLS(scale_floor=0.02),
-        predictors=(
-            Predictor(
-                "location",
-                {"x": Spline(n_knots=4), "z": Spline(n_knots=4)},
-                interaction_specs={"x:z": TensorInteraction("x", "z", n_knots=(4, 4))},
-            ),
-            Predictor("scale", {"z": Numeric()}),
+        family,
+        family.location(
+            s("x", n_knots=4),
+            s("z", n_knots=4),
+            ti("x", "z", n_knots=(4, 4)),
         ),
+        family.scale("z"),
         discrete=True,
         n_bins=32,
     )
@@ -123,13 +120,8 @@ def make_fixture(case, data):
         labels = np.repeat(np.array(["a", "b", "c", "d"]), 10)
         frame = pd.DataFrame({"effect": labels})
         y = np.random.default_rng(7).normal(size=len(frame))
-        model = SuperLSS(
-            family=GaussianLS(scale_floor=1.0e-4),
-            predictors=(
-                Predictor("location", {"effect": RandomEffect()}),
-                Predictor("scale", {}),
-            ),
-        )
+        family = GaussianLS(scale_floor=1.0e-4)
+        model = SuperLSS(family, family.location(re("effect")), family.scale())
         return model, frame, y, None, None, frame, None, {"evaluation": "training rows"}
     if case == "nb2-interior":
         rng = np.random.default_rng(20260912)
@@ -138,12 +130,11 @@ def make_fixture(case, data):
         theta = np.exp(0.5 + 0.3 * x)
         frame = pd.DataFrame({"x": x})
         y = rng.negative_binomial(theta, theta / (theta + mu)).astype(float)
+        family = NegativeBinomialLS()
         model = SuperLSS(
-            family=NegativeBinomialLS(),
-            predictors=(
-                Predictor("mean", {"x": Spline(kind="cr", k=8)}),
-                Predictor("theta", {"x": Numeric()}),
-            ),
+            family,
+            family.mean(s("x", kind="cr", k=8)),
+            family.theta("x"),
             discrete=True,
             n_bins=256,
         )

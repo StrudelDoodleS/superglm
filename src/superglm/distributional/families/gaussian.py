@@ -19,6 +19,10 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import (
+    LocationPredictor,
+    ScalePredictor,
+)
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -311,8 +315,24 @@ def _validated_response(y: NDArray) -> NDArray[np.float64]:
 
 
 @dataclass(frozen=True)
-class GaussianLS:
-    """Gaussian family parameterized by location and standard deviation."""
+class GaussianLS(LocationPredictor, ScalePredictor):
+    """Gaussian responses with separate mean and standard-deviation predictors.
+
+    Declare ``family.location(...)`` for the conditional mean and
+    ``family.scale(...)`` for the standard deviation. Location uses an
+    identity link. Scale uses ``log(scale - scale_floor)``. Results use the
+    column names ``location`` and ``scale`` in that order.
+
+    Parameters
+    ----------
+    scale_floor : float, default=0.01
+        Nonnegative lower bound on the standard deviation, in response units.
+        Fitted scale values stay strictly above this bound.
+
+    See Also
+    --------
+    SuperLSS : Construct and fit a model with these predictors.
+    """
 
     scale_floor: float = 0.01
 

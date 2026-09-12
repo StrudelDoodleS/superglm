@@ -22,6 +22,7 @@ from superglm.distributional.weights import (
 )
 from superglm.features import Numeric
 from superglm.links import IdentityLink, LogLink
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _weights(values, semantics):
@@ -147,7 +148,7 @@ def test_a_narrow_skew_bound_clamps_the_start_inside_its_own_walls():
     reach = float(tp.standard_skewness(np.array([0.5 - 1e-6]))[0])
     assert float(pd.Series(np.log(y)).skew()) > reach
     with pytest.warns(tp.TwoPieceInitializationWarning, match="outside the two-piece range"):
-        model = SuperLSS(
+        model = model_from_templates(
             family=TwoPieceLogNormalLSS(skew_bound=0.5),
             predictors=(
                 Predictor("mean", {"x": Numeric()}),
@@ -320,7 +321,7 @@ def test_artifact_round_trip_preserves_predictions_and_config(family, config):
     )
     y = np.exp(variate) if isinstance(family, TwoPieceLogNormalLSS) else variate
     first = "mean" if family.to_config()["type"] == "TwoPieceLogNormalLSS" else "location"
-    model = SuperLSS(
+    model = model_from_templates(
         family=family,
         predictors=(
             Predictor(first, {"x": Numeric()}),

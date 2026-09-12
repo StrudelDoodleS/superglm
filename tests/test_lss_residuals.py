@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 from scipy import special, stats
 
-from superglm import Spline, SuperLSS
+from superglm import Spline
 from superglm.distributional import Predictor
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
@@ -23,6 +23,7 @@ from superglm.distributional.residuals import (
     residual_values,
 )
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _simulated(n: int = 1500, seed: int = 20260903) -> tuple[pd.DataFrame, np.ndarray]:
@@ -44,7 +45,7 @@ def _predictors(scale_features: dict | None = None) -> list[Predictor]:
 def fit_case():
     """The true data-generating process: a smooth location and a smooth scale."""
     X, y = _simulated()
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(), predictors=_predictors({"x": Spline("cr", k=6)})
     ).fit_reml(X, y)
     return model._require_fitted(), X, y
@@ -58,7 +59,7 @@ def misspecified_case():
     x = rng.uniform(-1.0, 1.0, n)
     y = np.exp(0.5 * x + 0.8 * rng.standard_normal(n))
     X = pd.DataFrame({"x": x})
-    model = SuperLSS(family=GaussianLS(), predictors=_predictors()).fit_reml(X, y)
+    model = model_from_templates(family=GaussianLS(), predictors=_predictors()).fit_reml(X, y)
     return model._require_fitted(), X, y
 
 
@@ -71,7 +72,7 @@ def frequency_case():
     y = 0.4 * x + 0.5 * rng.standard_normal(n)
     X = pd.DataFrame({"x": x})
     counts = rng.integers(1, 4, n).astype(np.float64)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GaussianLS(),
         weight_semantics="frequency",
         predictors=[Predictor("location", {"x": Spline("cr", k=4)}), Predictor("scale", {})],

@@ -10,6 +10,7 @@ from superglm import SuperLSS
 from superglm.distributional import GaussianLS, Predictor
 from superglm.features import Categorical, Numeric, Spline, SplineCategorical
 from superglm.features.interaction import TensorInteraction
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 @pytest.fixture(scope="module")
@@ -57,7 +58,7 @@ def fitted_joint_model() -> tuple[pd.DataFrame, SuperLSS]:
         "scale:x1:region[south]#wiggle",
         "scale:x1:region[urban]#wiggle",
     )
-    model = SuperLSS(family=GaussianLS(), predictors=predictors).fit(
+    model = model_from_templates(family=GaussianLS(), predictors=predictors).fit(
         frame,
         response,
         lambdas={name: 0.5 for name in penalty_names},

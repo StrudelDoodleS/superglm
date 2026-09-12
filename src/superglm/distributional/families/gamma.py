@@ -18,6 +18,10 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import (
+    MeanPredictor,
+    ScalePredictor,
+)
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
@@ -168,8 +172,22 @@ def _validated_plan(
 
 
 @dataclass(frozen=True)
-class GammaLS:
-    """Gamma family with natural parameters mean and coefficient of variation."""
+class GammaLS(MeanPredictor, ScalePredictor):
+    """Positive responses with mean and coefficient-of-variation predictors.
+
+    Declare ``family.mean(...)`` and ``family.scale(...)``. Both use log
+    links. Here ``scale`` is the coefficient of variation, so the unit-law
+    variance is ``mean**2 * scale**2``. It is the square root of GLM Gamma
+    dispersion, and differs from the scale argument of ``scipy.stats.gamma``.
+
+    Results use the column names ``mean`` and ``scale`` in that order.
+    Responses must be strictly positive. An empty helper call estimates a
+    constant parameter through an intercept-only predictor.
+
+    See Also
+    --------
+    SuperLSS : Construct and fit a model with these predictors.
+    """
 
     @property
     def parameters(self) -> tuple[ParameterSpec, ...]:

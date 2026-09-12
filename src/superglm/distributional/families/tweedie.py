@@ -18,6 +18,7 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import TweediePredictors
 from superglm.distributional.family import (
     COMPLETE_OBSERVATION,
     FamilyCapabilities,
@@ -565,8 +566,30 @@ def _validated_plan(plan: FamilyLikelihoodPlan, *, n_observations: int) -> Tweed
 
 
 @dataclass(frozen=True)
-class TweedieLSS:
-    """Three-parameter normalized Tweedie family on configured interior walls."""
+class TweedieLSS(TweediePredictors):
+    """Nonnegative responses with mean, dispersion and variance-power predictors.
+
+    Declare all three predictors with ``family.mu(...)``, ``family.phi(...)``
+    and ``family.p(...)``. Their result and offset names are ``mean``,
+    ``dispersion`` and ``power``. The mean and dispersion use log links;
+    power uses a bounded link between the configured limits.
+
+    For power between one and two, the distribution has a point mass at
+    zero and a continuous positive part. At unit prior weight, variance is
+    ``dispersion * mean**power``.
+
+    Parameters
+    ----------
+    power_lower : float, default=1.05
+        Lower bound on fitted power. Must be greater than one.
+    power_upper : float, default=1.95
+        Upper bound on fitted power. Must exceed ``power_lower`` and be less
+        than two. The fitted power stays strictly between the two bounds.
+
+    See Also
+    --------
+    SuperLSS : Construct and fit a model with these predictors.
+    """
 
     power_lower: float = 1.05
     power_upper: float = 1.95

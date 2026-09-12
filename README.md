@@ -28,6 +28,11 @@ pip install "superglm[plotting]"
 
 The local model editor is included in the normal installation.
 
+The wheel includes a `py.typed` marker for the public type annotations. From a
+development checkout, `uv run python scripts/check_installed_typing.py` builds
+and installs a wheel into a temporary environment, then checks valid and invalid
+consumer examples with the project's pinned type checker.
+
 ## Recommended Workflow
 
 For spline-based pricing models, the default path is:
@@ -146,41 +151,47 @@ model.fit_reml(df, y, sample_weight=exposure)
 LS models conditional location and standard deviation:
 
 ```python
-from superglm import Spline, SuperLSS
-from superglm.distributional import GaussianLS, Predictor
+from superglm import GaussianLS, SuperLSS, s
 
+family = GaussianLS(scale_floor=0.05)
 lss = SuperLSS(
-    family=GaussianLS(scale_floor=0.05),
-    predictors=(
-        Predictor("location", {"DrivAge": Spline(kind="cr", k=10)}),
-        Predictor("scale", {"DrivAge": Spline(kind="cr", k=8, select=True)}),
-    ),
+    family,
+    family.location(s("DrivAge", kind="cr", k=10)),
+    family.scale(s("DrivAge", kind="cr", k=8, select=True)),
 )
 lss.fit_reml(train_df, y_train)
 
 parameters = lss.predict_parameters(holdout_df)  # location and scale
 ```
 
+Declare every family parameter explicitly. Use `family.scale()` for an
+intercept-only scale predictor. Bare strings are numeric linear terms;
+`cat("Region")` declares categories and `s("DrivAge")` declares a spline.
+Each helper belongs to the family instance passed first to `SuperLSS`.
+
+Follow [Your first distributional model](docs/getting-started/distributional.md)
+for a runnable walkthrough with sample data, two fits and a held-out loss
+comparison. The [API reference](docs/api/distributional.md) documents constructor
+options, predictor declarations and predictions.
+
 Use this for heteroskedastic continuous outcomes, such as transformed claim
 severity. Raw claim frequency still requires a Poisson or negative-binomial
 model; Gaussian LS is not a count likelihood. See
 [distributional location–scale models](docs/models/distributional.md) for inference,
-diagnostics, and known limits. `SuperLSS(discrete=True)` uses grouped marginal designs with bounded row chunks
+diagnostics, and known limits. `discrete=True` on `SuperLSS` uses grouped marginal designs with bounded row chunks
 for fitting and smoothing validation. See the [discrete fitting contract](docs/models/distributional.md#discrete-fitting)
 for supported execution, memory limits, and grid sensitivity.
 
 `GammaLS` models a strictly positive response:
 
 ```python
-from superglm import Spline, SuperLSS
-from superglm.distributional import GammaLS, Predictor
+from superglm import GammaLS, SuperLSS, s
 
+family = GammaLS()
 gamma_lss = SuperLSS(
-    family=GammaLS(),
-    predictors=(
-        Predictor("mean", {"DrivAge": Spline(kind="cr", k=10)}),
-        Predictor("scale", {"DrivAge": Spline(kind="cr", k=8, select=True)}),
-    ),
+    family,
+    family.mean(s("DrivAge", kind="cr", k=10)),
+    family.scale(s("DrivAge", kind="cr", k=8, select=True)),
 ).fit_reml(train_df, y_train)
 ```
 
@@ -191,31 +202,25 @@ unit prior weight, `Var(Y | x) = mean² × scale²`; under prior precision weigh
 The mgcv/MSSM dispersion is `φ = scale²`. Gamma support is strictly positive,
 so a zero response requires a different model.
 
-The coefficient core is established IRLS/PIRLS/Fisher–Newton repeated penalized
-weighted least squares, with EFS/LAML outside it for automatic smoothing; IRLS
-itself is not an originality claim. `GammaLS` provides CDF, quantile, and
-expected-shortfall calculations, and predictive simulation uses its quantile.
+`GammaLS` provides CDF, quantile and expected-shortfall calculations.
 
 `TweedieLSS` is the dense three-predictor model for a nonnegative response with
-a point mass at zero. Its predictors are ordered `mean`, `dispersion`, then
-`power`; `power_lower` and `power_upper` configure an open interval strictly
+a point mass at zero. Its construction helpers `mu`, `phi`, and `p` bind the
+canonical parameters `mean`, `dispersion`, and `power`. Offsets, predictions,
+results, and saved artifacts retain those canonical names.
+`power_lower` and `power_upper` configure an open interval strictly
 inside `(1, 2)`:
 
 ```python
-from superglm import LambdaPolicy, Spline, SuperLSS
-from superglm.distributional import Predictor, TweedieLSS
+from superglm import LambdaPolicy, SuperLSS, TweedieLSS, s
 
 estimate = LambdaPolicy.estimate()
+family = TweedieLSS(power_lower=1.08, power_upper=1.92)
 tweedie_lss = SuperLSS(
-    family=TweedieLSS(power_lower=1.08, power_upper=1.92),
-    predictors=(
-        Predictor("mean", {"DrivAge": Spline(kind="cr", k=10, lambda_policy=estimate)}),
-        Predictor(
-            "dispersion",
-            {"DrivAge": Spline(kind="cr", k=8, lambda_policy=estimate)},
-        ),
-        Predictor("power", {"DrivAge": Spline(kind="cr", k=8, lambda_policy=estimate)}),
-    ),
+    family,
+    family.mu(s("DrivAge", kind="cr", k=10, lambda_policy=estimate)),
+    family.phi(s("DrivAge", kind="cr", k=8, lambda_policy=estimate)),
+    family.p(s("DrivAge", kind="cr", k=8, lambda_policy=estimate)),
 ).fit_reml(
     train_df,
     y_train,

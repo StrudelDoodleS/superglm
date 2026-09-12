@@ -57,6 +57,13 @@ model.fit_reml(X, y, outer="efs", practical_reml=True)
 model.fit_reml(X, y, outer="efs+newton", practical_reml=False)
 ```
 
+The recorded measurements used the
+[driver at commit `681939e6`](https://github.com/StrudelDoodleS/superglm/blob/681939e63084553ad82aa7e49c09642138245d34/benchmarks/lss_newton_completion.py),
+whose hash is retained in the receipt. Use that revision of the driver when
+replaying the comparison against 0.32.0. The current driver uses the family-bound
+predictor API introduced after these measurements; the fixtures and fitting
+options remain the same. The recorded timings describe the measured revisions.
+
 Each case uses identical data, terms, weights, offsets and starting-policy
 settings across the two routes. The outward-boundary control supplies an
 explicit start, cap, step size and tolerances. The other cases use the public

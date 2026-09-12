@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 from scipy import stats
 
-from superglm import Spline, SuperLSS
+from superglm import Spline
 from superglm.distributional import GammaLS, Predictor
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
 from superglm.distributional.family import COMPLETE_OBSERVATION
@@ -23,6 +23,7 @@ from superglm.distributional.weights import WeightContract, resolve_likelihood_w
 from superglm.features import Numeric
 from tests._generalized_gamma_lss_oracles import mp_log_density
 from tests._r_harness import ROOT, r_environment, require_r_harness
+from tests.bound_predictor_fixtures import model_from_templates
 
 
 def _simulate(n, seed, *, q=0.4):
@@ -54,7 +55,7 @@ def _frequency_weights(n):
 
 def test_mean_form_recovers_the_simulated_surfaces_under_reml():
     frame, y, log_mean, sigma = _simulate(4000, 20260902)
-    model = SuperLSS(family=GeneralizedGammaLSS(), predictors=_predictors()).fit_reml(
+    model = model_from_templates(family=GeneralizedGammaLSS(), predictors=_predictors()).fit_reml(
         frame, y, method="efs"
     )
     fitted = model.predict_parameters(frame)
@@ -79,8 +80,10 @@ def test_location_form_fits_and_agrees_with_the_mean_form_at_constant_scale_and_
         Predictor("scale", {}),
         Predictor("shape", {}),
     )
-    mean_form = SuperLSS(family=GeneralizedGammaLSS(), predictors=predictors_mean).fit(frame, y)
-    location_form = SuperLSS(
+    mean_form = model_from_templates(family=GeneralizedGammaLSS(), predictors=predictors_mean).fit(
+        frame, y
+    )
+    location_form = model_from_templates(
         family=GeneralizedGammaLSS(parametrisation="location"), predictors=predictors_location
     ).fit(frame, y)
     # same likelihood, same fitted law: the conditional means agree to solver tolerance
@@ -96,7 +99,7 @@ def test_location_form_fits_and_agrees_with_the_mean_form_at_constant_scale_and_
 def test_location_form_predict_returns_positive_infinity_when_the_mean_does_not_exist():
     frame = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 12)})
     response = np.exp(np.linspace(-0.4, 0.7, len(frame)))
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedGammaLSS(parametrisation="location"),
         predictors=(Predictor("location", {}), Predictor("scale", {}), Predictor("shape", {})),
     ).fit(frame, response)
@@ -125,7 +128,7 @@ def test_default_prediction_still_rejects_invalid_nonfinite_values(invalid):
 
 def test_fisher_curvature_request_is_honoured():
     frame, y, _, _ = _simulate(800, 3)
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedGammaLSS(), predictors=_predictors(), coefficient_curvature="fisher"
     ).fit(frame, y, lambdas={"mean:x#wiggle": 1.0})
     assert model.coefficient_curvature == "fisher"
@@ -213,7 +216,9 @@ def test_infinite_mean_data_either_diagnose_or_stop_at_the_boundary():
         Predictor("shape", {}),
     )
     try:
-        model = SuperLSS(family=GeneralizedGammaLSS(), predictors=predictors).fit(frame, y)
+        model = model_from_templates(family=GeneralizedGammaLSS(), predictors=predictors).fit(
+            frame, y
+        )
     except NullModelFitError as failure:
         # Measured outcome: the intercept-only joint null model walks into the
         # infinite-mean barrier, every further step is rejected as invalid, and the
@@ -279,7 +284,7 @@ def test_location_form_matches_gamlss_gg_at_a_parametric_specification():
         Predictor("scale", {}),
         Predictor("shape", {}),
     )
-    model = SuperLSS(
+    model = model_from_templates(
         family=GeneralizedGammaLSS(parametrisation="location"), predictors=predictors
     ).fit(frame, y)
     theta = model.predict_parameters(frame)

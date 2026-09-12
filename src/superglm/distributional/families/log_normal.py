@@ -17,6 +17,11 @@ from superglm.distributional.families._base import (
     typed_plan,
     validated_float_response,
 )
+from superglm.distributional.families._predictors import (
+    LocationPredictor,
+    MeanPredictor,
+    ScalePredictor,
+)
 from superglm.distributional.families._variance import _variance_product
 from superglm.distributional.families.gaussian import LowerBoundedLogLink
 from superglm.distributional.family import (
@@ -161,7 +166,7 @@ class LogNormalLikelihoodPlan:
 
 
 @dataclass(frozen=True)
-class LogNormalLS:
+class LogNormalLS(MeanPredictor, LocationPredictor, ScalePredictor):
     """Log-normal with natural parameters ``(mean | location, scale)``.
 
     ``log Y ~ N(mu, sigma^2)`` on ``y > 0``.  The default mean form puts
@@ -170,6 +175,24 @@ class LogNormalLS:
     form puts ``mu`` first under an identity link, where relativities multiply
     every quantile.  The mean always exists, so neither form has an invalid
     region.
+
+    Parameters
+    ----------
+    parametrisation : {"mean", "location"}, default="mean"
+        Choose the first modeled parameter. Use ``family.mean(...)`` for
+        ``E[Y]`` or, in location form, ``family.location(...)`` for
+        ``E[log Y]``. Declare ``family.scale(...)`` in either form; scale is
+        the standard deviation of the log response. Changing forms changes
+        which quantity the first additive predictor describes.
+    scale_floor : float, default=0.01
+        Nonnegative lower bound on scale. Its default link is
+        ``log(scale - scale_floor)``.
+
+    Notes
+    -----
+    Fit the positive response directly. Results contain ``mean, scale`` or
+    ``location, scale`` according to the selected form. ``predict`` returns
+    the response mean in both forms.
     """
 
     parametrisation: Parametrisation = "mean"

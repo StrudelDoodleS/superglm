@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from superglm import Categorical, GammaLS, Predictor, Spline, SuperLSS
+from superglm import Categorical, GammaLS, Predictor, Spline
+from tests.bound_predictor_fixtures import model_from_templates
 
 from . import _datasets
 
@@ -61,7 +62,7 @@ def test_uncapped_gamma_mean_and_scale_converge(uncapped_claims, case):
     all_features = _NUMERIC + _CATEGORICAL
     scale_features = ["DrivAge", "VehPower"] if case == "selected_full" else all_features
     options = {"initial_lambda": 0.1} if case == "selected_full" else {}
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=[
             Predictor("mean", features(all_features)),
@@ -102,7 +103,7 @@ def test_uncapped_gamma_explicit_weak_start_refuses_unresolved_stationarity(unca
             for name in all_features
         }
 
-    model = SuperLSS(
+    model = model_from_templates(
         family=GammaLS(),
         predictors=[Predictor("mean", features()), Predictor("scale", features())],
     ).fit_reml(train[all_features], train.y.to_numpy(), initial_lambda=0.1)
