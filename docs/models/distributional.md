@@ -758,6 +758,25 @@ the original correlated Tweedie and GPD failures, records the strict Newton
 settings that pass these checks, and reports across-start sensitivity and the
 limits of independent references.
 
+To compare a practical fit with a stricter smoothing search, set both options:
+
+```python
+model.fit_reml(X_train, y_train, outer="efs+newton", practical_reml=False)
+print(model.smoothing_convergence_reason_)
+print(model.smoothing_certified_)
+model.diagnose()
+```
+
+Selecting `outer="efs+newton"` alone still permits the outward practical stop
+described above. Disabling practical stopping requests stronger completion
+checks; it does not guarantee that the fit will pass them. Inspect the returned
+reason and diagnostics, including iteration limits and unresolved derivatives.
+When assessing inference, compare predictions and their standard errors on the
+same rows. A small change in LAML alone does not bound their change, and a norm
+of the coefficient-covariance difference is not a percentage error in every
+prediction interval. The [completion comparison](https://github.com/StrudelDoodleS/superglm/blob/master/benchmarks/lss_newton_completion.md)
+records examples where stricter search helps and where it remains unresolved.
+
 If fresh LAML gradients become unavailable after an accepted endgame fit, the
 solver retains that fit and resumes EFS for the remaining outer iterations,
 with further Newton handoffs disabled. Unavailable terminal derivative fields

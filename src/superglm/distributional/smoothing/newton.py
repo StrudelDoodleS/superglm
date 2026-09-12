@@ -250,8 +250,10 @@ def should_hand_off(
 ) -> bool:
     """Whether the EFS warm-up hands over to the Newton endgame now.
 
-    ``reason`` is the EFS stop the loop is about to return with (``None`` at
-    the tail of an accepted iteration).  Under ``outer="efs+newton"`` every
+    ``reason`` is the EFS stop being considered (``None`` at the tail of an
+    accepted iteration). The loop may finish an outward practical plateau
+    before consulting this function. Set ``practical_convergence=False`` to
+    disable that exception. Under ``outer="efs+newton"`` every consulted
     stop in :data:`HANDOFF_REASONS` hands off; the stops in
     :data:`NO_HANDOFF_REASONS` never do; an accepted iteration hands off once
     its largest accepted ``|delta log lambda|`` is at most ``handoff_step`` or
@@ -935,6 +937,17 @@ def run_newton_endgame(
                 return finish("gradient_unresolved", derivatives, norm)
         if remaining <= 0:
             return finish("max_iterations", derivatives, norm)
+
+        if (
+            candidate.converged
+            and remaining_gain <= tolerance * score_scale
+            and last_exact_positive_definite is False
+        ):
+            # Accepted BFGS steps can leave the region where the last exact
+            # Hessian was indefinite. Refresh it before the next step instead
+            # of letting that old verdict prevent every later stop. Keep the
+            # inverse memory for the existing unavailable-Hessian fallback.
+            memory_reusable = False
 
         # The step.  A quasi-Newton step from the memory when one holds; else one
         # exact Hessian pass on the gradient pass's stencils.  A refused
