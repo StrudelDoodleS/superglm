@@ -118,6 +118,46 @@ def _missing_message(
     return "\n".join(lines)
 
 
+def _snapshot_family(family: DistributionalFamily) -> DistributionalFamily:
+    """Copy instance configuration and detach shared parameter metadata.
+
+    Custom families and links must keep executable settings in independently
+    copyable instance state. This does not copy arbitrary globals or closures.
+    Read-only metadata is supported when copying the family already isolates it.
+    """
+    try:
+        parameters = family.parameters
+        memo: dict[int, object] = {}
+        owned = deepcopy(family, memo)
+        if owned is family:
+            raise TypeError("family deepcopy returned the original instance")
+        owned_parameters = owned.parameters
+        source_links = {
+            id(parameter.default_link)
+            for parameter in parameters
+            if not isinstance(parameter.default_link, str)
+        }
+
+        def shares_links() -> bool:
+            return any(id(parameter.default_link) in source_links for parameter in owned.parameters)
+
+        if shares_links():
+            # Class attributes are not part of deepcopy(instance). Shadow ordinary
+            # class metadata on the new copy, including frozen dataclasses. A
+            # read-only descriptor can still refuse the independent metadata.
+            # Reuse the memo to retain aliases with the copied instance state.
+            object.__setattr__(owned, "parameters", deepcopy(owned_parameters, memo))
+            if shares_links():
+                raise TypeError("parameter metadata remains shared after copying")
+        validate_family(owned)
+    except Exception as exc:
+        raise TypeError(
+            "family configuration could not be independently snapshotted; "
+            "parameters and default links must support independent copies"
+        ) from exc
+    return owned
+
+
 def resolve_predictors(
     family: DistributionalFamily, predictors: Sequence[BoundPredictor]
 ) -> tuple[DistributionalFamily, tuple[Predictor, ...]]:
@@ -140,12 +180,7 @@ def resolve_predictors(
                 f"Predictor {predictor.name!r} belongs to a different family instance; "
                 "use helpers on the family instance passed to SuperLSS"
             )
-    try:
-        owned_family = deepcopy(family)
-    except Exception as exc:
-        raise TypeError("family configuration could not be independently snapshotted") from exc
-    if owned_family is family:
-        raise TypeError("family configuration must support an independent snapshot")
+    owned_family = _snapshot_family(family)
     names = tuple(parameter.name for parameter in validate_family(owned_family))
     by_name: dict[str, BoundPredictor] = {}
     for predictor in values:

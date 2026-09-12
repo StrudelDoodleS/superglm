@@ -149,8 +149,8 @@ SUPERGLM_REQUIRE_DATA=1 uv run --with mpmath pytest tests/ -q -m "not browser"
 It reported 14,896 passed, one failed, eight skipped and 69 browser cases
 deselected in 26m58s. The sole failure was the old architecture import allowlist
 rejecting the new family-helper module. Its explicit allowed edges were updated,
-and all seven architecture tests then passed. No production code changed after
-the full run, and that run was not repeated for the test-policy correction.
+and all seven architecture tests then passed. That correction changed no
+production code, so the full run was not repeated for the test-policy correction.
 All three mandatory real-data suites ran without skips. Four optional R
 comparisons skipped because R with mgcv and jsonlite was unavailable; four
 storage-mutation cases did not apply to a spline-category lookup without a
@@ -172,3 +172,36 @@ Ruff checks, formatting, lock consistency, dependency consistency and
 an assertion of shape recovery. Repository-wide ty diagnostics remain exactly
 at the pre-change baseline of 891 after normalizing source positions; the
 installed-consumer check is clean. No version field or lock pin changed.
+
+### Final review ownership fix
+
+The final review reproduced shared class-declared parameter links that changed
+fitted predictions after caller or accessor mutation. The snapshot helper now
+detaches shared parameter metadata at construction and in both family accessors,
+using one deepcopy memo to preserve aliases within each independent snapshot.
+Frozen class metadata remains supported. Read-only shared metadata and links
+that refuse independent copies raise `TypeError`. The live guide now includes
+the removed-keyword migration and the custom snapshot contract.
+
+Before the fix, seven ownership cases failed, including three real-fit cases
+whose predictions changed by 7. Two independent read-only/frozen controls passed.
+A separate regression first failed when copying split an internal link alias.
+All ten ownership cases now pass. The final affected-suite command was:
+
+```sh
+uv run pytest tests/test_bound_predictors.py tests/test_bound_superlss.py tests/test_distributional_family_contract.py tests/test_superlss_api.py tests/test_fit_ownership.py tests/test_distributional_family_kernel_architecture.py tests/test_distributional_serialization.py -q
+```
+
+It passed 375 tests in 30.34 seconds, with one existing `splines=` deprecation
+warning and no skips. This covers structural four-parameter families, built-in
+families, dense/discrete fixed-smoothing and REML parity, ownership, architecture,
+and serialization. The final installed-wheel typing check passed again, including
+all five expected negative diagnostics. Repository Ruff checks and formatting,
+`uv lock --check`, `uv pip check`, and a targeted ty check of `binding.py` passed.
+The new migration constructor example executed successfully.
+
+The full non-browser suite and `run_test.py` were not repeated for this ownership
+and documentation fix. Numerical code, tolerances, public signatures, version
+fields and lock pins did not change. Custom executable state must remain in
+independently copyable instance configuration; arbitrary globals, closures, or
+custom copy methods that secretly retain nested mutable state are not certified.

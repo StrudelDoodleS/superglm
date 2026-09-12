@@ -1,9 +1,11 @@
 """Regression coverage for family-bound public construction."""
 
 import inspect
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from superglm import (
@@ -27,9 +29,11 @@ from superglm import (
     ti,
 )
 from superglm.distributional.families.tweedie import TweedieLSS
+from superglm.distributional.family import ParameterSpec, ParameterSupport
 from superglm.distributional.model import fit_dense_distributional
 from superglm.distributional.result import DenseSolverConfig, DistributionalEFSConfig
 from superglm.distributional.weights import WeightContract
+from superglm.links import IdentityLink
 from tests.test_bound_predictors import _FourParameterFamily
 from tests.test_superlss_api import _ExpectedInformationSpy, _fixture, _roundoff_factor
 
@@ -155,6 +159,128 @@ def test_family_and_predictor_accessors_isolate_mutable_configuration():
     assert model.family_.base.scale_floor == 0.02
     np.testing.assert_array_equal(model.predict(frame), expected)
     assert isinstance(location, BoundPredictor)
+
+
+class _ShiftedIdentityLink(IdentityLink):
+    def __init__(self, shift=0.0):
+        self.shift = shift
+
+    def link(self, value):
+        return super().link(value) - self.shift
+
+    def inverse(self, value):
+        return super().inverse(value) + self.shift
+
+
+def _shifted_parameters(link=None):
+    return (
+        ParameterSpec(
+            "location",
+            _ShiftedIdentityLink() if link is None else link,
+            "location",
+            ParameterSupport(),
+        ),
+        GaussianLS().parameters[1],
+    )
+
+
+@pytest.fixture
+def class_metadata_family():
+    # Each test owns its class too, so caller mutations cannot leak between tests.
+    class CustomGaussian(GaussianLS):
+        parameters = _shifted_parameters()
+
+    return CustomGaussian()
+
+
+@pytest.mark.parametrize("source", ["caller", "family", "family_"])
+def test_class_metadata_mutation_does_not_change_fitted_predictions(class_metadata_family, source):
+    family = class_metadata_family
+    model = SuperLSS(family, family.location("x"), family.scale())
+    x = np.linspace(-1, 1, 30)
+    frame = pd.DataFrame({"x": x})
+    response = 1.0 + 2.0 * x + np.random.default_rng(1).normal(scale=0.3, size=len(x))
+    model.fit(frame, response, lambdas={})
+    expected = model.predict(frame)
+    target = family if source == "caller" else getattr(model, source)
+    target.parameters[0].default_link.shift = 7.0
+    np.testing.assert_array_equal(model.predict(frame), expected)
+
+
+@pytest.mark.parametrize("source", ["caller", "family"])
+def test_class_metadata_is_owned_before_fit(class_metadata_family, source):
+    family = class_metadata_family
+    model = SuperLSS(family, family.location("x"), family.scale())
+    target = family if source == "caller" else model.family
+    target.parameters[0].default_link.shift = 7.0
+    assert model.family.parameters[0].default_link.shift == 0.0
+
+
+def test_snapshot_preserves_link_aliases_within_its_own_configuration(class_metadata_family):
+    family = class_metadata_family
+    family.location_link = family.parameters[0].default_link
+    model = SuperLSS(family, family.location(), family.scale())
+    owned = model.family
+    owned.location_link.shift = 3.0
+    assert owned.parameters[0].default_link.shift == 3.0
+    assert family.location_link.shift == 0.0
+    assert model.family.parameters[0].default_link.shift == 0.0
+
+
+def test_read_only_shared_parameter_metadata_is_refused():
+    parameters = _shifted_parameters()
+
+    class SharedMetadataGaussian(GaussianLS):
+        @property
+        def parameters(self):
+            return parameters
+
+    family = SharedMetadataGaussian()
+    with pytest.raises(TypeError, match="family.*snapshot"):
+        SuperLSS(family, family.location(), family.scale())
+
+
+def test_link_that_returns_itself_from_deepcopy_is_refused():
+    class SharedLink(_ShiftedIdentityLink):
+        def __deepcopy__(self, memo):
+            return self
+
+    class SharedLinkGaussian(GaussianLS):
+        parameters = _shifted_parameters(SharedLink())
+
+    family = SharedLinkGaussian()
+    with pytest.raises(TypeError, match="family.*snapshot"):
+        SuperLSS(family, family.location(), family.scale())
+
+
+@pytest.mark.parametrize("storage", ["read_only", "frozen"])
+def test_independent_read_only_and_frozen_metadata_remains_supported(storage):
+    if storage == "read_only":
+
+        class IndependentGaussian(GaussianLS):
+            def __init__(self):
+                super().__init__()
+                self._parameters = _shifted_parameters()
+
+            @property
+            def parameters(self):
+                return self._parameters
+
+    else:
+
+        @dataclass(frozen=True)
+        class IndependentGaussian(GaussianLS):
+            _parameters: tuple = field(default_factory=_shifted_parameters)
+
+            @property
+            def parameters(self):
+                return self._parameters
+
+    family = IndependentGaussian()
+    model = SuperLSS(family, family.location(), family.scale())
+    family.parameters[0].default_link.shift = 7.0
+    model.family.parameters[0].default_link.shift = 9.0
+    assert model.family.parameters[0].default_link.shift == 0.0
 
 
 @pytest.mark.parametrize("discrete", [False, True])

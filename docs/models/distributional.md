@@ -38,6 +38,21 @@ parameters = model.predict_parameters(holdout_df)
 `predict()` returns conditional location, not scale and not a transformed-response
 mean.
 
+### Migrating existing construction
+
+The former `SuperLSS(family=family, predictors=...)` constructor is removed.
+Pass the family positionally and replace predictor templates with declarations
+bound to that same family. Unpack a sequence of declarations with `*`:
+
+```python
+family = GaussianLS()
+declarations = (family.location("age"), family.scale())
+model = SuperLSS(family, *declarations)
+```
+
+The removed `family=` and `predictors=` keywords raise Python's native
+`TypeError`. Passing the declaration sequence without unpacking it is also invalid.
+
 ## Declaring terms and parameters
 
 Every parameter needs an explicit declaration. An empty helper, such as
@@ -94,6 +109,11 @@ Custom families need no helper methods. Bind each canonical parameter explicitly
 with `bind_predictor(family, "parameter_name", *terms, intercept=True, link=None)`;
 the [family development guide](../distributional-family-development.md) includes
 a complete custom-family example.
+
+Custom families and links must keep executable settings in independently copyable
+instance state. Class-declared parameter metadata is copied onto the family
+snapshot when needed. Shared metadata that cannot be isolated raises `TypeError`.
+Snapshots do not isolate arbitrary mutable globals or state captured by closures.
 
 ## Gamma mean–CV model
 

@@ -9,7 +9,6 @@ import json
 import math
 import operator
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal, cast
@@ -24,6 +23,7 @@ from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.distributional.binding import (
     BoundPredictor,
     _bind_predictor_template,
+    _snapshot_family,
     resolve_predictors,
 )
 from superglm.distributional.checks.binned import (
@@ -525,7 +525,7 @@ class SuperLSS:
 
     @property
     def family(self) -> DistributionalFamily:
-        return deepcopy(self._family)
+        return _snapshot_family(self._family)
 
     @property
     def weight_semantics(self) -> str:
@@ -790,7 +790,7 @@ class SuperLSS:
 
     @property
     def family_(self) -> DistributionalFamily:
-        return deepcopy(self._require_fitted().family)
+        return _snapshot_family(self._require_fitted().family)
 
     @property
     def predictors_(self) -> tuple[Predictor, ...]:
