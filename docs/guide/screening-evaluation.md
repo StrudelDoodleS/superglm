@@ -10,6 +10,15 @@ record next to the places it does not.
 It is a point-in-time study on one book and one family. Read
 [Caveats](#caveats) before quoting any number here.
 
+The PSST-versus-FAST rankings below used the earlier PSST denominator,
+`sqrt(2 * edf0)`. The current screen uses the candidate's squared shrinkage
+factors for its reference variance. These historical correlations have not
+been recomputed with that correction. The unpenalized categorical examples
+later on this page retain the same normalization.
+The [reference-variance follow-up](../research/2026-09-psst-reference-variance.md)
+records the derivation, regenerated guide and null battery, a small paired
+ranking experiment, and the correction's measured cost.
+
 ## What was compared
 
 [FAST](https://doi.org/10.1145/2487575.2487579) (Lou, Caruana, Gehrke &
@@ -126,12 +135,12 @@ FAST ranks it 3rd–4th, PSST 7th–9th, and the refit shows a 30.8-edf term tha
 gains 88 in training and **loses** it out of sample. FAST's probe explains only
 **1.7%** of that pair's shift — but 1.7% of 32,778 still exceeds 72.1% of 576.
 
-FAST reports an average Newton gain, while PSST subtracts the probe EDF and
+FAST reports an average Newton gain, while the benchmarked PSST subtracts the probe EDF and
 rescales its local score. That complexity adjustment can promote a smaller,
 lower-dimensional effect. It is a plausible explanation for the recorded
 ordering, not proof of its cause or of calibrated signal-to-noise ratios.
 The [reference-law limitation](screening.md#reference-distribution-and-current-limitation)
-explains why the current normalization does not supply those ratios.
+explains why reference standardization alone does not establish fitted-model calibration.
 
 FAST's `Purify` flag removes main-effect-shaped components from the tensor.
 It moves FAST toward PSST's ordering and is its best-performing variant in

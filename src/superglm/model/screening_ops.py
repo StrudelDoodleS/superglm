@@ -27,14 +27,13 @@ A spline-mode ``OrderedCategorical`` margin rides the spline arm on its
 MAPPED level scores — the geometry its own refit builds — so its pairs are
 ``ti`` and ``spline_cat`` like any other spline margin's, gridded on at most
 ``n_levels`` support points.
-``z`` normalizes each kind against its own noise floor, so a single sorted
-table ranks them together — but not on equal terms, and not simply by df.
-The measured null maxima span 3.98 to 7.53 across kinds; the heaviest tails
-sit at low probe df, yet "neither kind is monotone in df", and the headline
-maxima read as "Gaussian-driven rather than as something every family
-reproduces".  A maximum also grows with the number of draws, so a wide sweep
-draws more null rows than a narrow one.  Compare like with like before
-spending a refit, against the measured floors in the screening guide.
+``z`` centers and scales the score using its fixed Gaussian reference mean
+and variance. The variance is twice the sum of the candidate's squared
+shrinkage factors. This does not give candidates
+identical null tails or account for estimating the baseline model and
+selecting the best complexity budget. A maximum also grows with the number
+of candidates. Consult the measured floors in the screening guide before
+choosing candidate refits.
 A pair with no penalty anywhere
 in its block has
 no bandwidth to scan and is evaluated at a single rung: ``edf0`` then reports
@@ -59,9 +58,9 @@ row exactly as an unaffordable allocation is, and refused immediately:
 binning cannot shrink a basis dimension, so no fallback is attempted first.
 
 The statistic is reported on the ``T / phi`` scale, with ``phi`` the mains
-fit's Pearson dispersion estimate: under the null ``E[T] = phi * edf0``, so
-without this scaling the ``edf0`` noise floor is only honest for
-unit-dispersion families and a dispersed Gaussian null would swamp the scan.
+fit's Pearson dispersion estimate by default. Under the fixed Gaussian
+reference, ``E[T] = phi * edf0``. The estimated dispersion supplies the same
+scale correction across families, without establishing a fitted-model null law.
 The Pearson denominator follows the fitted model's declared weight contract:
 ``sum(w) - edf`` under ``"frequency"``, the positive-weight row count minus
 ``edf`` under ``"prior"``.  Keeping the screen and published fit on one scale
@@ -552,28 +551,25 @@ def screen_interactions(
     for a per-level numeric slope and ``numeric_numeric`` for a product of two
     numerics.  A spline-mode ``OrderedCategorical`` margin screens as a spline
     on its mapped level scores, so its pairs carry the spline kinds.
-    ``z`` normalizes each kind against its own noise floor, so one
-    sorted table ranks them together — but not on equal terms, and not simply
-    by df: the measured null maxima span 3.98 to 7.53 across kinds.  The
-    heaviest tails sit at low probe df, yet "neither kind is monotone in df",
-    and the headline maxima read as "Gaussian-driven rather than as something
-    every family reproduces".  Compare like with like before spending a
-    refit — see the measured floors in the screening guide.
+    ``z`` uses the candidate's fixed Gaussian reference mean and variance.
+    The resulting ranking does not provide calibrated p-values: estimating
+    the baseline, selecting a complexity budget and comparing many pairs
+    affect the sampling distribution. See the screening guide for measured
+    null behavior and evaluate promising candidate refits on held-out data.
     A kind whose block carries no penalty
     (``cat_cat``, ``numeric_cat``, ``numeric_numeric``) has no bandwidth to
     scan and is evaluated at a single rung — ``edf0`` then reports the block's
     achieved rank and ``lambda0`` is 0, so the ``edf0`` argument does not
     apply to it.
 
-    ``edf0`` is the probe bandwidth: a smooth surface is detected best by a
-    small budget, a high-frequency one only by a budget at least as complex
-    as its shape (measured: a sin x sin signal is invisible at edf0<=4).  The
-    default is therefore a LADDER — each pair is evaluated at every budget,
-    each T is normalized against its own noise floor,
-    ``z = (T - edf0) / sqrt(2 * edf0)``, and the pair is ranked by its best
-    normalized score, a scan statistic over bandwidths.  Pass a single float
-    to probe one bandwidth.  The expensive per-pair work (cells, menus,
-    profiling) happens once; the ladder re-solves a small system per rung.
+    ``edf0`` specifies screening complexity. The default ladder probes both
+    simple and more flexible shapes. For candidate shrinkage factors ``a``,
+    each rung uses ``z = (T / phi - sum(a)) / sqrt(2 * sum(a**2))``;
+    ``sum(a)`` is its achieved EDF. The pair reports the rung with the largest
+    ``z``. Pass a single float to probe one budget. Cell assembly and
+    profiling are shared across the ladder; the dense route also shares one
+    decomposition. The structured route evaluates its block factors at each
+    trial penalty and computes the variance at the emitted penalties.
 
     ``offset`` and ``sample_weight`` both default to the values the model
     was fitted with (weights only when the fit's were non-unit), so the
@@ -1125,41 +1121,23 @@ def screen_interactions(
         return cells_ok and inter_ok
 
     def _structured_evaluation_budget(n_a, k_s, n_levels):
-        """How many arrow factorizations a structured pair may spend.
+        """Factor-pass allowance after paying for structured setup.
 
-        Budgets the pair's SOLVE TIME, which the allocation gates do not —
-        the same job ``_within_cubic_budget`` does for a dense block, and for
-        the same reason: one evaluation batches ``n_levels`` eigendecomposit-
-        ions of ``(k_s + 1)`` blocks, so it costs ``n_levels * k_s^3`` where
-        the gates above cost ``n_levels * k_s^2``.  A pair that cannot afford
-        two of them cannot even bracket the ladder and is refused outright.
+        Allocation gates scale quadratically in spline width; each arrow
+        factorization scales cubically. The work estimate first deducts
+        compressed-cell QR setup and per-level merges, then converts the
+        remaining work to a factor-pass count.
 
-        Issue #204 adds work before those factorizations: two stable
-        centered-row QR passes over the compressed cells, plus seven
-        conservative ``(k_s + 1)^3`` units per level for the suffix/prefix
-        QR merges, aligned representative QR, products and solve.  They cost
-        ``2*n_a*n_levels*k_s^2 + 7*n_levels*(k_s+1)^3`` work units here.
-        That setup is subtracted first, so a pair must still afford the two
-        real endpoint factorizations after paying for its profiled trace; the
-        count passed to ``structured_ladder`` continues to mean actual
-        ``_evaluate`` calls.
+        The kernel evaluates two bracket endpoints before it knows which
+        EDF targets require bisection. It reserves the worst-case search
+        cost plus a final variance pass for each distinct emitted lambda.
+        A ladder clamped to one edge therefore needs three passes. Final
+        variance passes also add linear-in-levels QR-tree work; this count
+        is a work estimate, not a wall-clock guarantee.
 
-        How many MORE evaluations it needs is not a function of its
-        dimensions.  A rung
-        whose budget lands inside the bracket bisects, at one factorization
-        per step, and whether one does turns on the penalty's null space
-        rather than on any size: measured on a 400-level pair, a ``ps``
-        margin clamps every rung and the whole ladder is 2 evaluations, while
-        an ``ns`` margin — whose penalty is full rank, so ``edf`` at maximum
-        penalty is 0 and no rung can clamp — took 106.  Same dimensions, 53x
-        the work.  So the ceiling is passed to the kernel, which brackets
-        first, then checks the worst case for the rungs that genuinely have
-        to search before spending anything on them.
-
-        The setup charge also depends on ``n_a``, so an exact support that
-        cannot afford it is allowed to reach spline binning and is retried on
-        the compressed support.  A pair is refused only when the compressed
-        setup plus two endpoints still exceeds the same work ceiling.
+        Exact support that cannot afford setup may be retried after spline
+        binning. The kernel makes the final admission decision once it knows
+        which targets need a search and which share a clamp.
         """
         return _structured_evaluation_allowance(max_cells, n_a, k_s, n_levels)
 
@@ -1506,9 +1484,9 @@ def screen_interactions(
             )
         best_z, best = -np.inf, None
         for result in results:
-            if not result.edf0 > 0.0:
+            if not result.edf0 > 0.0 or not result.reference_variance > 0.0:
                 # A rung that resolved NO direction at all has no test to run,
-                # and the normalization divides by sqrt(2 * edf0) -- so scoring
+                # and the normalization divides by its reference deviation -- so scoring
                 # it would report z = inf and sort a pair carrying no
                 # information to the TOP of the table.  Skipped, and if no rung
                 # survives the pair falls through to the NaN row every other
@@ -1522,7 +1500,7 @@ def screen_interactions(
                 # block with no resolvable direction whatsoever.
                 continue
             statistic = result.statistic / phi_hat
-            z = (statistic - result.edf0) / np.sqrt(2.0 * result.edf0)
+            z = (statistic - result.edf0) / np.sqrt(result.reference_variance)
             if z > best_z:
                 best_z, best = z, (statistic, result.edf0, result.lambda0)
         if best is None:

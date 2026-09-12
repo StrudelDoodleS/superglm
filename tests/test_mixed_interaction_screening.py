@@ -922,11 +922,11 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
     single rung, so the same dimension buys less time, and the gate charges it
     _PENALIZED_LADDER_COST times the work.
 
-    All three pairs below sit at exactly k = 144, which is deliberately
+    All three pairs below sit at exactly k = 169, which is deliberately
     between the two ceilings the charge creates.  What separates them is what
     each one has to solve:
 
-      * ``cat_cat`` is unpenalized, so k = 144 is inside its budget;
+      * ``cat_cat`` is unpenalized, so k = 169 is inside its budget;
       * ``ti`` is penalized and has no structure to exploit -- refused;
       * ``spline_cat`` is penalized too, but its bordered system is an arrow
         matrix, so being over the DENSE budget routes it to the structured
@@ -935,17 +935,18 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
     That last one is the whole point of the arrow path: the charge still
     applies, it just no longer terminates the pair.
     """
-    # k = 12 * 12 = 144 for every pair.  max_cells is chosen so 144 lands
-    # between the unpenalized ceiling (5.8e6^(1/3) = 179) and the penalized
-    # one (2.9e6^(1/3) = 142), and still clears the (k^2 <= 4*max_cells)
-    # intermediate gate at 20736 <= 23200.  The spline margins are carried on
+    # k = 13 * 13 = 169 for every pair.  max_cells is chosen so 169 lands
+    # between the unpenalized ceiling (9.5e6^(1/3) = 211) and the penalized
+    # one (4.75e6^(1/3) = 168), and still clears the (k^2 <= 4*max_cells)
+    # intermediate gate at 28561 <= 38000.  The spline margins are carried on
     # a 7-point grid so that every pair also clears the SUPPORT-scaled
     # intermediate budgets (dense and structured alike), and the structured
-    # setup still has two endpoint evaluations left after its two QR passes
-    # and seven factor-work units.  The subject here is the cubic charge, and
+    # setup still leaves the two endpoint evaluations and a final variance
+    # pass after its two QR passes and seven factor-work units. The subject
+    # here is the cubic charge, and
     # either an allocation or setup refusal would mask it.
-    max_cells = 5_800
-    n_levels, reps = 13, 14
+    max_cells = 9_500
+    n_levels, reps = 14, 14
     rng = np.random.default_rng(23)
     n = n_levels * n_levels * reps
     a = np.repeat(np.arange(n_levels), n_levels * reps)
@@ -965,12 +966,12 @@ def test_penalized_blocks_are_charged_the_ladder_they_run():
         features={
             "g": Categorical(),
             "h": Categorical(),
-            "x1": Spline(kind="ps", n_knots=9),  # centered width 12
-            "x2": Spline(kind="ps", n_knots=9),
+            "x1": Spline(kind="ps", n_knots=10),  # centered width 13
+            "x2": Spline(kind="ps", n_knots=10),
         },
     )
     model.fit_reml(df, y)
-    # edf at maximum penalty is about L - 1 = 12 for the spline_cat pair, so
+    # edf at maximum penalty is about L - 1 = 13 for the spline_cat pair, so
     # the default ladder's top rung would bisect and be charged for it.  The
     # subject here is the CUBIC charge; capping the ladder at 8 keeps every
     # rung clamped so the structured evaluation budget stays out of the way.

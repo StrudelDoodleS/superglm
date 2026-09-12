@@ -29,8 +29,6 @@ model = SuperGLM(
 table = model.screen_interactions(X, y, sample_weight=exposure)
 print(table.head())
 #  feature_a feature_b kind  statistic      z  edf0  lambda0  n_cells  approx
-#       long       lat   ti     98.252 14.540  16.0    0.673   339889   False
-#         bm      agec   ti     23.592 10.796   2.0  110.156     1127   False
 ```
 
 The test asks, for each pair: *after profiling out what the pair's own main
@@ -38,8 +36,8 @@ effects already explain, does the working residual carry structure shaped like
 the block this pair would refit as?* For the penalized kinds the probe is
 evaluated at a ladder of complexity budgets (`edf0`, default `(2, 4, 8, 16)`
 effective degrees of freedom) and each pair is ranked by its best
-ranking score `z = (T - edf0) / sqrt(2 * edf0)`, so smooth surfaces
-and high-frequency surfaces are both visible. The unpenalized kinds have no
+ranking score `z`, using the candidate's Gaussian-reference mean and variance.
+Different budgets probe simple and more flexible shapes. The unpenalized kinds have no
 penalty to scan: they are evaluated once, at the block's own dimension.
 
 ## What the screen does
@@ -198,18 +196,18 @@ features = {
 table = model.screen_interactions(df, y, sample_weight=exposure)
 print(table.to_string(index=False))
 #  feature_a  feature_b        kind  statistic         z       edf0      lambda0  n_cells  approx
-#     VehAge BonusMalus          ti   5.691019  1.845510   1.999999 1.023168e+02     5244   False
-# BonusMalus   VehBrand  spline_cat  11.960557  0.438409   9.999937 7.818059e+09     1012   False
-#    DrivAge BonusMalus          ti   1.810771 -0.094615   2.000001 2.611293e+02     7360   False
-#     VehAge   VehBrand  spline_cat   7.805321 -0.490661   9.999576 3.779926e+09      627   False
-#    DrivAge     VehAge          ti   0.547723 -0.726139   2.000001 5.044218e+01     4560   False
-#    DrivAge   VehBrand  spline_cat   1.958228 -1.798185   9.999927 1.301005e+10      880   False
-# LogDensity   VehBrand numeric_cat   1.087366 -1.992925  10.000000 0.000000e+00       11   False
-# BonusMalus     Region  spline_cat   6.972190 -2.164527  20.999891 4.198786e+09     2024   False
-#    DrivAge     Region  spline_cat   6.753990 -2.198193  20.999860 6.858867e+09     1760   False
-# LogDensity     Region numeric_cat   5.266162 -2.427784  21.000000 0.000000e+00       22   False
-#     VehAge     Region  spline_cat   2.008917 -2.930281  20.998740 2.449233e+09     1254   False
-#   VehBrand     Region     cat_cat  39.860759 -8.243705 208.000000 0.000000e+00      242   False
+#     VehAge BonusMalus           ti   5.691019  2.323521   1.999999 1.023168e+02     5244   False
+# BonusMalus   VehBrand   spline_cat  11.960557  0.438411   9.999937 7.818059e+09     1012   False
+#    DrivAge BonusMalus           ti   1.810771 -0.121587   2.000001 2.611293e+02     7360   False
+#     VehAge   VehBrand   spline_cat   7.805321 -0.490671   9.999576 3.779926e+09      627   False
+#    DrivAge     VehAge           ti   0.547723 -0.925665   2.000001 5.044218e+01     4560   False
+#    DrivAge   VehBrand   spline_cat   1.958228 -1.798192   9.999927 1.301005e+10      880   False
+# LogDensity   VehBrand  numeric_cat   1.087366 -1.992925  10.000000 0.000000e+00       11   False
+# BonusMalus     Region   spline_cat   6.972190 -2.164533  20.999891 4.198786e+09     2024   False
+#    DrivAge     Region   spline_cat   6.753990 -2.198200  20.999860 6.858867e+09     1760   False
+# LogDensity     Region  numeric_cat   5.266162 -2.427784  21.000000 0.000000e+00       22   False
+#     VehAge     Region   spline_cat   2.008917 -2.930369  20.998740 2.449233e+09     1254   False
+#   VehBrand     Region      cat_cat  39.860759 -8.243705 208.000000 0.000000e+00      242   False
 ```
 
 Every eligible pair, four kinds, one ranking by `z` alone. Twelve rows, not
@@ -221,7 +219,7 @@ Confirming each by refit — the gate, not the score:
 
 | row | kind | `z` | probe df | refit gain |
 |---|---|---:|---:|---:|
-| `VehAge x BonusMalus` | `ti` | 1.85 | 2 | 43.0 |
+| `VehAge x BonusMalus` | `ti` | 2.32 | 2 | 43.0 |
 | `BonusMalus x VehBrand` | `spline_cat` | 0.44 | 10 | 73.0 |
 
 The second pair buys *more* deviance and ranks *below* the first: 43.0 on 2 df
@@ -246,8 +244,8 @@ global `phi` is conservative for that block. A large negative `z` only pushes
 a pair down the queue; it never promotes one. Nothing here was binned or
 refused (`approx` is False throughout, no NaN rows).
 
-Read the top row against its own kind's measured noise maximum below (7.31 for
-`ti`): 1.85 does not clear it — and the refit bought 43.0 deviance anyway. That
+Read the top row against its own kind's measured noise maximum below (9.48 for
+`ti`): 2.32 does not clear it — and the refit bought 43.0 deviance anyway. That
 is the screen working as described rather than a contradiction: the floor is
 the largest value a wide null battery produced, not a threshold a real pair
 must beat, and the confirmatory refit is what settles the question.
@@ -268,11 +266,10 @@ must beat, and the confirmatory refit is what settles the question.
   to them. `statistic` is the dispersion-scaled score statistic.
 - **`z` is a ranking heuristic, not a p-value.** By default, the statistic is
   scaled by the Pearson dispersion of the mains fit; `phi=` overrides it.
-  Its reference mean and variance
-  need additional assumptions, and the current denominator overstates the
-  fixed Gaussian reference variance when the penalty shrinks candidate
-  directions. Choosing the best rung changes the reference distribution too.
-  The mathematical distinction and measured floors are below.
+  Each rung uses the mean and variance of its fixed Gaussian reference law.
+  Estimating the baseline and choosing the best rung affect the sampling
+  distribution, so this standardization does not give a normal score or a
+  p-value. The mathematical distinction and measured floors are below.
 - **`n_cells` is the grid the probe assembled**: the product of the two
   margins' grid sizes, where a spline or OC margin contributes its support
   size, a factor contributes its level count `L`, and a numeric contributes 1
@@ -310,36 +307,37 @@ must beat, and the confirmatory refit is what settles the question.
 
 ### Measured null floors
 
-These are **measured maxima over a null battery, not calibrated quantiles** —
-no probability statement is attached to any number here.
+These are **measured maxima over a null battery, not calibrated quantiles**.
 `benchmarks/screening_null_floors.py --seeds 40` fits 160 mains models (four
-families x 40 seeds, n=8000 rows each) with no interaction anywhere in the
-truth, and screens 3520 pairs:
+families x 40 seeds, n=8000 rows each) with no interactions in the truth,
+and screens 3520 pairs. The battery was rerun after correcting the reference
+variance; all fits completed, with no non-finite scores or warnings.
+The [paired measurement](../research/2026-09-psst-reference-variance.md)
+records both normalizations.
 
 | kind | rows | mean `z` | p90 `z` | max `z` | probe df |
 |---|---|---|---|---|---|
-| `ti` | 480 | 0.42 | 1.56 | 7.31 | 2-16 |
-| `spline_cat` | 1440 | 0.42 | 1.82 | 5.53 | 2-16 |
-| `numeric_cat` | 960 | 0.00 | 1.19 | 7.53 | 1-3 |
+| `ti` | 480 | 0.52 | 1.93 | 9.48 | 2-16 |
+| `spline_cat` | 1440 | 0.44 | 1.89 | 5.66 | 2-16 |
+| `numeric_cat` | 960 | 0.00 | 1.19 | 7.54 | 1-3 |
 | `cat_cat` | 480 | -0.01 | 1.20 | 3.98 | 2-6 |
 | `numeric_numeric` | 160 | -0.07 | 1.07 | 4.91 | 1 |
 
-Read the last three columns together: nine of every ten rows in the battery
-fell below 1.1-1.8 depending on kind, and yet the largest single row of each
-kind reached 3.98-7.53, two of the five kinds above 6. **A `z` of 5 is
-therefore not evidence by itself.** This supersedes the earlier reading of
-this guide ("the best null `z` never exceeded ~4.5; treat `z` below 4-5 as
-noise-level"), which came from a smaller, splines-only battery — a maximum
-grows with the number of draws, so that is a sample-size correction rather
-than a regression.
+Nine of every ten rows fall below 1.1-1.9, depending on kind, yet the maxima
+reach 3.98-9.48. A `z` of 5 is therefore not evidence by itself. The correction
+raises the `ti` maximum from 7.31 to 9.48 and the `spline_cat` maximum from
+5.53 to 5.66. The three unpenalized kinds retain their normalization. Larger
+scores after this change do not by themselves demonstrate greater detection
+power: null scores rise too.
 
-The heaviest tails sit at low probe df. The two largest rows in the battery
-are a 1-df `numeric_cat` (a slope on a two-level factor) and a rung-2 `ti`,
-and all six of the largest sit at `edf0 <= 3`.
+The two largest rows are a rung-2 `ti` and a 1-df `numeric_cat` (a slope on a
+two-level factor). All six largest rows have `edf0 <= 4`. Low-dimensional
+quadratics can have substantial right skew even after mean and variance
+standardization. The unpenalized kinds show this directly:
 
 | kind | probe df | rows | max `z` |
 |---|---|---|---|
-| `numeric_cat` | 1 | 320 | 7.53 |
+| `numeric_cat` | 1 | 320 | 7.54 |
 | `numeric_cat` | 2 | 320 | 4.45 |
 | `numeric_cat` | 3 | 320 | 4.78 |
 | `cat_cat` | 2 | 160 | 3.18 |
@@ -347,45 +345,32 @@ and all six of the largest sit at `edf0 <= 3`.
 | `cat_cat` | 6 | 160 | 2.90 |
 | `numeric_numeric` | 1 | 160 | 4.91 |
 
-That is a statement about the *probe's* df, not about the kind, and it is a
-tendency at the extreme rather than a law: `numeric_cat`'s 1-df row tops every
-other configuration in the table by 2.6, but neither kind is monotone in df
-(`numeric_cat` 7.53 / 4.45 / 4.78 at df 1 / 2 / 3; `cat_cat` 3.18 / 3.98 /
-2.90 at df 2 / 3 / 6). Rank a 1-df `numeric_cat` on a two-level factor against
-a 16-df `ti` and the low-df row can win on noise alone, so compare like with
-like before spending a refit. None of this makes `numeric_numeric` the heavy
-kind: at 4.91 it sits below the `numeric_cat` maximum on the same 1 df, and on
-the fewest draws — one pair per sweep, 160 rows.
+These maxima are not monotone in df and depend on the number of draws. They
+do not establish a universal ordering of the kinds' tails.
 
-The families do not agree on the floor, and the dispersed Gaussian carries it:
-Gaussian tops three of the five kinds and holds both maxima above 6 (7.53 on
-`numeric_cat`, 7.31 on `ti`), where no other family reached beyond 5.53
-anywhere in the battery (Poisson at most 4.08, gamma 5.34, binomial 5.53).
-Read the headline maxima as Gaussian-driven rather than as something every
-family reproduces — the quoted floor is the maximum over all four, so for any
-one family it is the conservative reading.
+The dispersed Gaussian arm has the largest score in four of the five kinds,
+including both maxima above 6: 7.54 on `numeric_cat` and 9.48 on `ti`.
+The other families reach at most 4.59 (Poisson), 5.34 (gamma) and 5.53
+(binomial). A maximum over these four fitted scenarios is not a bound for a
+new dataset or a different fitted baseline.
 
-Ordered-categorical margins do not move it. Against the plain spline margins
-of the same kind the four bulk gaps sit within 0.11 on the means and 0.09 on
-the p90s (`spline_cat` mean 0.11 and p90 0.05; `ti` mean 0.10 and p90 0.09),
-and the direction is not consistent: OC is *lower* on the `spline_cat` mean
-and *higher* on the `ti` one, while the maxima disagree with the means on both
-kinds (`spline_cat` OC 5.53 against plain 5.34; `ti` OC 4.25 against plain
-7.31). The p90 is the one statistic where OC sits above plain on both kinds,
-by 0.05 and 0.09 against p90s of 1.5-1.9. Differences that small, with no
-direction that survives across kinds, are sampling noise rather than a short
-score grid inflating anything.
+Ordered-categorical (OC) and plain spline margins give the following results:
 
-The release gate uses `z < 10`; the measured maxima are below it. The suite's null gates
-cover every kind and every probe df this battery measures — `spline_cat`,
-`cat_cat` at df 6 and `numeric_cat` at df 2 and 3 in both gates, `ti` in the
-Poisson gate only, and `numeric_cat` at df 1, `cat_cat` at df 2 and 3 and
-`numeric_numeric` in the Gaussian one — against a battery whose widest single
-row anywhere was 7.53
-over 3520 rows. But a floor is a maximum, so it grows with the width of the
-sweep: a wide book screened in one pass draws more null rows than this whole
-battery did. Treat 10 as generous for a handful of pairs and thin for
-hundreds.
+| kind | margins | mean `z` | p90 `z` | max `z` |
+|---|---|---|---|---|
+| `ti` | plain | 0.45 | 1.90 | 9.48 |
+| `ti` | OC | 0.56 | 1.96 | 5.57 |
+| `spline_cat` | plain | 0.48 | 1.89 | 5.66 |
+| `spline_cat` | OC | 0.36 | 1.89 | 5.53 |
+
+The bulk differences are small in this battery, but these measurements do
+not establish equivalent tails or isolate the effect of a short score grid.
+
+The regression suite uses `z < 10` on its specified null fixtures. This is a
+test bound, not a screening threshold or a probability guarantee. The observed
+maximum of 9.48 already approaches it, and widening a sweep gives noise more
+opportunities to produce a large score. Select candidates for refitting using
+the ranking and the modelling context; assess the refits on held-out data.
 
 ## What it inherits from the fit
 
@@ -527,15 +512,19 @@ discretize at all, so OC pairs stay exact on both sides.
 
   Three things bound the structured path, and `max_cells` scales all three.
   The level blocks are `L x (k_spline + 1)^2`, which at the default and a
-  width-11 spline admits 34,722 levels — the kernel alone measured there at
+  width-11 spline admits 34,722 levels. Before the reference-variance correction,
+  the kernel alone measured there at
   1.22 s and 201 MB for a four-rung ladder, and linear below it at 0.16 s for
   5,000 and 0.63 s for 20,000. The cell table is `support x L`, and beside it
   the spline menu's outer products are `support x k_spline^2`; a pair over
   either is quantile-binned on its spline margin and flagged `approx`, the
   same degradation the dense path applies to its own intermediate. And the
-  ladder itself is budgeted in *arrow factorizations*: a clamped ladder is
-  two, but a rung whose budget lands inside the bracket bisects and costs
-  tens, so a pair that cannot afford the search is refused with a NaN row.
+  ladder itself is budgeted in *arrow factorizations*: two evaluate the bracket,
+  each distinct emitted lambda needs one final variance pass, and a rung
+  inside the bracket needs bisection as well. A ladder clamped to one edge
+  therefore costs three passes. Each final variance pass also adds a QR tree
+  over the levels. A pair that cannot afford the reserved work is refused
+  with a NaN row; the work estimate is not a wall-clock guarantee.
   Which of those a pair hits depends on its shape — a narrow spline against a
   huge factor is bounded by the block stacks, a wide spline against a small
   one by the ladder, since one evaluation is cubic in `k_spline` where every
@@ -552,26 +541,19 @@ discretize at all, so OC pairs stay exact on both sides.
   `ps`, `bs` and `cr` margins, whose penalties have a null space, and not for
   `ns`, whose penalty is full rank. A `spline_cat` pair on an `ns` margin has
   `edf0 = 0` at maximum penalty, so every rung genuinely searches and the
-  ladder costs tens of arrow factorizations rather than two — measured 106
-  against 2 on the same 400-level pair. That is the cost the evaluation
-  budget above exists to bound.
-  Calibration is unharmed: `z` is standardized against its own `edf0`, and
-  measured `mean 0.13, sd 1.12` at `edf0 = 499` — closer to normal than the
-  low-df rows, not further, since the chi-square skew is `sqrt(8/edf0)`.
-  Power is what suffers, at `E[z] = lambda / sqrt(2*edf0)`, measured decaying
-  as `1/sqrt(edf0)` to within 1.5% over a 125-fold range of df. Two
-  consequences, both worth stating plainly. A wide row and a narrow row are
-  not on the same footing — the wide one needs `sqrt(edf0_wide /
-  edf0_narrow)` times the signal to tie. And a CONCENTRATED interaction, a
-  few unusual levels against a quiet background, can vanish outright:
-  measured at 500 levels, three levels carrying a large slope scored
-  `z = 2.68` against a null maximum of `2.79`, while the same total signal
-  spread across every level scored `26.8`. **A near-zero `z` on a wide factor
-  is evidence about diffuse structure only. It is not evidence that no
-  interaction is present.** If a few deviating levels is the hypothesis, the
-  model class to reach for is `FactorSmooth(basis="fs")`, which penalizes
-  every direction (nullity 0) and so shrinks level curves toward a common
-  one rather than leaving each free.
+  ladder costs tens of arrow factorizations. The earlier measurement was 106
+  against 2 on the same 400-level pair, before final variance passes were
+  added. That difference is why the evaluation budget includes search work.
+  Under a fixed Gaussian reference with `d` unpenalized identified directions
+  and profiled noncentrality `Lambda`, the expected score is
+  `Lambda / sqrt(2*d)`. Adding directions while holding that noncentrality
+  fixed reduces the expected score. At fixed dimension and noncentrality,
+  concentrating the interaction in a few levels does not change this
+  omnibus statistic's distribution. A low score therefore does not establish
+  that every level-specific effect is absent or that a candidate refit would
+  be useless. A pooled or fully penalized refit changes the alternative and
+  its regularization; it does not guarantee stronger screening. Check its
+  benefit against the intended alternative and held-out performance.
 - **Factor and numeric margins have no such cardinality limit.** A factor
   margin never bins — its support *is* the fitted level set — and a numeric
   margin never grids at all: it enters its probe linearly, so moments of the
@@ -631,14 +613,19 @@ E(T_\lambda/\phi)=\sum_j a_j=\mathrm{edf}_0,\qquad
 \]
 
 Here the \(Z_j\) are independent standard normals and the \(a_j\) are the
-candidate's shrinkage eigenvalues. The current denominator uses
-\(\sqrt{2\mathrm{edf}_0}\). This matches the reference variance for an
-unpenalized identified block, but is too large when directions are shrunk.
-Correcting it requires the candidate's trace-of-square quantity on both dense
-and structured execution paths; it cannot be replaced by the whole mains
-model's `edf1`.
+candidate's shrinkage eigenvalues. Both execution paths use
 
-Even that correction would standardize only this fixed Gaussian reference.
+\[
+z_\lambda=\frac{T_\lambda/\phi-\mathrm{edf}_0}{\sqrt{2\sum_j a_j^2}}.
+\]
+
+For an identified unpenalized block, every retained \(a_j=1\), so this reduces
+to the usual \(\sqrt{2\mathrm{edf}_0}\) denominator. With shrinkage, that
+old denominator was too large. The dense path obtains the sum of squares from
+its existing decomposition. The structured path computes the same quantity
+from diagonal and cross-level blocks, without assembling the full smoother.
+
+This standardizes the fixed Gaussian reference at one rung.
 Fitting the baseline affects the score's mean and covariance; estimated
 dispersion and smoothing, non-Gaussian responses, and selecting the best rung
 introduce further questions. Simulating normal draws from a fixed candidate
@@ -654,8 +641,9 @@ factor-based assembly. Quantized screens are identified by `approx`.
 This combination explains the design; establishing its originality requires
 a more complete literature comparison.
 
-The [FAST comparison](screening-evaluation.md) refits every candidate and
-measures held-out gain. In its two specifications, PSST's ranking agrees more
+The [FAST comparison](screening-evaluation.md) used the earlier normalization,
+refits every candidate, and measures held-out gain. In its two specifications,
+that PSST ranking agrees more
 closely with held-out refit gain; FAST is faster and agrees more closely with
 training gain. These are descriptive results from 8 and 10 pairs on one
 book, not evidence of a universal ranking advantage. Wider candidate sets and

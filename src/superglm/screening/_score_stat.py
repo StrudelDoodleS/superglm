@@ -16,11 +16,15 @@ directions the overlap never spanned, and everything below reads ITS block --
 ``tr(V_eff)`` included.)  ``lambda0`` is chosen so the
 smooth is compared at a fixed screening complexity:
 ``tr((V_eff + lambda0 S)^{-1} V_eff) = edf0``.  Fixing the effective degrees of
-freedom across pairs makes raw ``T`` values comparable regardless of each
-pair's basis size or penalty scaling — at a COMMON budget; across different
-budgets compare the normalized ``z`` the ladder scan reports, never raw ``T``.
+freedom fixes the Gaussian-reference mean. Variance still depends on the
+candidate's shrinkage spectrum, even at a common budget.
 
-Ranking-only: calibration is by confirmatory refit, never by this number.
+For fixed geometry and ``U_eff ~ N(0, phi V_eff)``, let
+``a_j = c_j^2 / (c_j^2 + lambda s_j^2)``. Then ``T/phi`` has the reference
+law ``sum_j a_j Z_j^2``: its mean is ``sum(a)`` and its variance is
+``2 * sum(a**2)``. Each rung carries both moments into the public ranking.
+This is a reference calculation, not a calibrated p-value after fitting the
+baseline and selecting a rung. Assess candidate refits on held-out data.
 
 **How lambda0 is found.**  Both quantities the search needs are closed forms in
 one generalized singular value decomposition of the PAIR OF FACTORS
@@ -508,11 +512,12 @@ _MAX_BISECT = 200
 
 @dataclass(frozen=True)
 class ScreenedPair:
-    """Ranking output for one candidate pair."""
+    """One rung, including Var(T/phi) under U ~ N(0, phi V)."""
 
     statistic: float
     edf0: float
     lambda0: float
+    reference_variance: float
 
 
 @dataclass(frozen=True)
@@ -776,6 +781,14 @@ def _pencil_stat(p: _Pencil, lam: float) -> float:
     return float(np.sum(p.u[ok] ** 2 / den[ok]))
 
 
+def _pencil_reference_variance(p: _Pencil, lam: float) -> float:
+    """Twice the sum of squared filters, for fixed Gaussian score geometry."""
+    den = p.v + lam * p.s
+    ok = den > 0.0
+    filters = p.v[ok] / den[ok]
+    return 2.0 * float(np.sum(filters**2))
+
+
 def _lambda_for_edf(p: _Pencil, edf0: float, scale: float) -> float:
     """Smallest-error ``lambda`` hitting ``edf0``, clamped to the bracket edges.
 
@@ -794,7 +807,9 @@ def _lambda_for_edf(p: _Pencil, edf0: float, scale: float) -> float:
     for _ in range(_MAX_BISECT):
         if hi <= lo * (1.0 + 1e-12):
             break  # bracket exhausted at float resolution; nearest lam wins
-        lam = float(np.sqrt(lo * hi))
+        # The geometric mean is representable whenever both endpoints are;
+        # their product can overflow or underflow after a change of units.
+        lam = float(np.sqrt(lo) * np.sqrt(hi))
         achieved = _pencil_edf(p, lam)
         if abs(achieved - edf0) <= _EDF_TOL:
             break
@@ -859,7 +874,10 @@ def penalized_score_statistic_ladder(
         # ``(k, k)`` block.
         p = _pair_pencil(pair, None)
         stat, rank = _pencil_stat(p, 0.0), _pencil_edf(p, 0.0)
-        return [ScreenedPair(statistic=stat, edf0=rank, lambda0=0.0) for _ in budgets]
+        return [
+            ScreenedPair(statistic=stat, edf0=rank, lambda0=0.0, reference_variance=2.0 * rank)
+            for _ in budgets
+        ]
 
     # ``tr(S)`` off the factor: ``||rootS||_F**2``, which is the trace of the
     # penalty it roots and never assembles it.  The structured ladder's bracket
@@ -889,6 +907,7 @@ def penalized_score_statistic_ladder(
                 statistic=_pencil_stat(p, lam),
                 edf0=_pencil_edf(p, lam),
                 lambda0=float(lam),
+                reference_variance=_pencil_reference_variance(p, lam),
             )
         )
     return out

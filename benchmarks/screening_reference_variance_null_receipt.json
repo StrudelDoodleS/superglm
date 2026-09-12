@@ -1,0 +1,434 @@
+{
+  "measurement": "Paired rerun of benchmarks/screening_null_floors.py::_collect(40, 8000)",
+  "baseline_commit": "7bbb415c04f02d8ba31631cdcb0042d9d7d7774a",
+  "baseline_source_tree": "cb06e71ec9ae8dfda4d03c8cf7e0bd5ddd864c10",
+  "corrected_source": "Reference-variance correction accompanying this receipt; these small candidates use the dense route.",
+  "date": "2026-09-12",
+  "rows_per_dataset": 8000,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39
+  ],
+  "families": [
+    "poisson",
+    "gamma",
+    "binomial",
+    "gaussian"
+  ],
+  "threads": {
+    "OPENBLAS_NUM_THREADS": 1,
+    "OMP_NUM_THREADS": 1,
+    "NUMBA_NUM_THREADS": 2
+  },
+  "diagnostics_per_arm": {
+    "fits_attempted": 160,
+    "fits_failed": 0,
+    "screened_pairs": 3520,
+    "nonfinite_z": 0,
+    "warnings": 0
+  },
+  "unpenalized_max_abs_z_change": 0.0,
+  "changed_winning_lambda_count": 105,
+  "baseline": {
+    "by_kind": {
+      "cat_cat": {
+        "rows": 480,
+        "mean_z": -0.006972067566041671,
+        "p90_z": 1.1954152217300003,
+        "max_z": 3.9818909673
+      },
+      "numeric_cat": {
+        "rows": 960,
+        "mean_z": 0.0027703810382291565,
+        "p90_z": 1.1852025532200001,
+        "max_z": 7.5361423882
+      },
+      "numeric_numeric": {
+        "rows": 160,
+        "mean_z": -0.07213624919250003,
+        "p90_z": 1.0703016204799998,
+        "max_z": 4.9073552997
+      },
+      "spline_cat": {
+        "rows": 1440,
+        "mean_z": 0.42251624651423614,
+        "p90_z": 1.8233671045600004,
+        "max_z": 5.5296305589
+      },
+      "ti": {
+        "rows": 480,
+        "mean_z": 0.41769651610520836,
+        "p90_z": 1.56274476511,
+        "max_z": 7.3100926067
+      }
+    },
+    "max_z_by_family": {
+      "cat_cat": {
+        "binomial": 2.8951237608,
+        "gamma": 3.1991883618,
+        "gaussian": 3.1761385207,
+        "poisson": 3.9818909673
+      },
+      "numeric_cat": {
+        "binomial": 4.1690570916,
+        "gamma": 4.6629269986,
+        "gaussian": 7.5361423882,
+        "poisson": 3.1650374943
+      },
+      "numeric_numeric": {
+        "binomial": 2.8675548229,
+        "gamma": 3.400218266,
+        "gaussian": 4.9073552997,
+        "poisson": 3.7416593589
+      },
+      "spline_cat": {
+        "binomial": 5.5296305589,
+        "gamma": 5.34336037,
+        "gaussian": 4.9661931226,
+        "poisson": 4.0805230066
+      },
+      "ti": {
+        "binomial": 3.4879460578,
+        "gamma": 3.0938733882,
+        "gaussian": 7.3100926067,
+        "poisson": 3.5596714234
+      }
+    },
+    "by_margin": {
+      "spline_cat": {
+        "plain": {
+          "rows": 960,
+          "mean_z": 0.45696040558052087,
+          "p90_z": 1.7952122131900001,
+          "max_z": 5.34336037
+        },
+        "oc": {
+          "rows": 480,
+          "mean_z": 0.3536279283816667,
+          "p90_z": 1.8530818006700005,
+          "max_z": 5.5296305589
+        }
+      },
+      "ti": {
+        "plain": {
+          "rows": 160,
+          "mean_z": 0.34959901709187496,
+          "p90_z": 1.4871962856299996,
+          "max_z": 7.3100926067
+        },
+        "oc": {
+          "rows": 320,
+          "mean_z": 0.451745265611875,
+          "p90_z": 1.5830470859200012,
+          "max_z": 4.2491520312
+        }
+      }
+    },
+    "largest_rows": [
+      {
+        "feature_a": "fuel",
+        "feature_b": "bm",
+        "kind": "numeric_cat",
+        "statistic": 11.6577147733,
+        "z": 7.5361423882,
+        "edf0": 1.0,
+        "lambda0": 0.0,
+        "n_cells": 2,
+        "approx": false,
+        "seed": 15,
+        "family": "gaussian",
+        "oc": false
+      },
+      {
+        "feature_a": "age",
+        "feature_b": "power",
+        "kind": "ti",
+        "statistic": 16.6201851349,
+        "z": 7.3100926067,
+        "edf0": 1.9999999831,
+        "lambda0": 153.4328990957,
+        "n_cells": 1904384,
+        "approx": true,
+        "seed": 37,
+        "family": "gaussian",
+        "oc": false
+      },
+      {
+        "feature_a": "region",
+        "feature_b": "band",
+        "kind": "spline_cat",
+        "statistic": 16.5447624769,
+        "z": 5.5296305589,
+        "edf0": 2.9999966666,
+        "lambda0": 15566106226.125868,
+        "n_cells": 20,
+        "approx": false,
+        "seed": 15,
+        "family": "binomial",
+        "oc": true
+      },
+      {
+        "feature_a": "age",
+        "feature_b": "brand",
+        "kind": "spline_cat",
+        "statistic": 12.6867211484,
+        "z": 5.34336037,
+        "edf0": 2.0000001112,
+        "lambda0": 7178080722.04972,
+        "n_cells": 24000,
+        "approx": false,
+        "seed": 12,
+        "family": "gamma",
+        "oc": false
+      },
+      {
+        "feature_a": "age",
+        "feature_b": "fuel",
+        "kind": "spline_cat",
+        "statistic": 11.9323869809,
+        "z": 4.9661931226,
+        "edf0": 2.0000002112,
+        "lambda0": 567.151304354,
+        "n_cells": 16000,
+        "approx": false,
+        "seed": 3,
+        "family": "gaussian",
+        "oc": false
+      },
+      {
+        "feature_a": "brand",
+        "feature_b": "band",
+        "kind": "spline_cat",
+        "statistic": 11.8514509659,
+        "z": 4.9257254681,
+        "edf0": 2.0000000086,
+        "lambda0": 9245075618.138014,
+        "n_cells": 15,
+        "approx": false,
+        "seed": 12,
+        "family": "gaussian",
+        "oc": true
+      }
+    ]
+  },
+  "corrected": {
+    "by_kind": {
+      "cat_cat": {
+        "rows": 480,
+        "mean_z": -0.006972067566041671,
+        "p90_z": 1.1954152217300003,
+        "max_z": 3.9818909673
+      },
+      "numeric_cat": {
+        "rows": 960,
+        "mean_z": 0.0027703810382291565,
+        "p90_z": 1.1852025532200001,
+        "max_z": 7.5361423882
+      },
+      "numeric_numeric": {
+        "rows": 160,
+        "mean_z": -0.07213624919250003,
+        "p90_z": 1.0703016204799998,
+        "max_z": 4.9073552997
+      },
+      "spline_cat": {
+        "rows": 1440,
+        "mean_z": 0.44288468298881944,
+        "p90_z": 1.8925016518200013,
+        "max_z": 5.6550855673000004
+      },
+      "ti": {
+        "rows": 480,
+        "mean_z": 0.5195784287793751,
+        "p90_z": 1.9311617877900007,
+        "max_z": 9.4762871593
+      }
+    },
+    "max_z_by_family": {
+      "cat_cat": {
+        "binomial": 2.8951237608,
+        "gamma": 3.1991883618,
+        "gaussian": 3.1761385207,
+        "poisson": 3.9818909673
+      },
+      "numeric_cat": {
+        "binomial": 4.1690570916,
+        "gamma": 4.6629269986,
+        "gaussian": 7.5361423882,
+        "poisson": 3.1650374943
+      },
+      "numeric_numeric": {
+        "binomial": 2.8675548229,
+        "gamma": 3.400218266,
+        "gaussian": 4.9073552997,
+        "poisson": 3.7416593589
+      },
+      "spline_cat": {
+        "binomial": 5.5296336576,
+        "gamma": 5.3433612092,
+        "gaussian": 5.6550855673000004,
+        "poisson": 4.574489124
+      },
+      "ti": {
+        "binomial": 4.0281079536,
+        "gamma": 3.9616362232,
+        "gaussian": 9.4762871593,
+        "poisson": 4.5923808377
+      }
+    },
+    "by_margin": {
+      "spline_cat": {
+        "plain": {
+          "rows": 960,
+          "mean_z": 0.4830105584117709,
+          "p90_z": 1.8910011564300002,
+          "max_z": 5.6550855673000004
+        },
+        "oc": {
+          "rows": 480,
+          "mean_z": 0.36263293214291664,
+          "p90_z": 1.8936242137500006,
+          "max_z": 5.5296336576
+        }
+      },
+      "ti": {
+        "plain": {
+          "rows": 160,
+          "mean_z": 0.447759536655625,
+          "p90_z": 1.89937714592,
+          "max_z": 9.4762871593
+        },
+        "oc": {
+          "rows": 320,
+          "mean_z": 0.5554878748412501,
+          "p90_z": 1.961147650810001,
+          "max_z": 5.5692000855
+        }
+      }
+    },
+    "largest_rows": [
+      {
+        "feature_a": "age",
+        "feature_b": "power",
+        "kind": "ti",
+        "statistic": 16.6201851349,
+        "z": 9.4762871593,
+        "edf0": 1.9999999831,
+        "lambda0": 153.4328990957,
+        "n_cells": 1904384,
+        "approx": true,
+        "seed": 37,
+        "family": "gaussian",
+        "oc": false
+      },
+      {
+        "feature_a": "fuel",
+        "feature_b": "bm",
+        "kind": "numeric_cat",
+        "statistic": 11.6577147733,
+        "z": 7.5361423882,
+        "edf0": 1.0,
+        "lambda0": 0.0,
+        "n_cells": 2,
+        "approx": false,
+        "seed": 15,
+        "family": "gaussian",
+        "oc": false
+      },
+      {
+        "feature_a": "age",
+        "feature_b": "fuel",
+        "kind": "spline_cat",
+        "statistic": 11.9323869809,
+        "z": 5.6550855673000004,
+        "edf0": 2.0000002112,
+        "lambda0": 567.151304354,
+        "n_cells": 16000,
+        "approx": false,
+        "seed": 3,
+        "family": "gaussian",
+        "oc": false
+      },
+      {
+        "feature_a": "age",
+        "feature_b": "band",
+        "kind": "ti",
+        "statistic": 16.0184176781,
+        "z": 5.5692000855,
+        "edf0": 4.0000003261,
+        "lambda0": 123.4169711313,
+        "n_cells": 40000,
+        "approx": false,
+        "seed": 5,
+        "family": "gaussian",
+        "oc": true
+      },
+      {
+        "feature_a": "region",
+        "feature_b": "band",
+        "kind": "spline_cat",
+        "statistic": 16.5447624769,
+        "z": 5.5296336576,
+        "edf0": 2.9999966666,
+        "lambda0": 15566106226.125868,
+        "n_cells": 20,
+        "approx": false,
+        "seed": 15,
+        "family": "binomial",
+        "oc": true
+      },
+      {
+        "feature_a": "age",
+        "feature_b": "power",
+        "kind": "ti",
+        "statistic": 10.33453276,
+        "z": 5.3614184969,
+        "edf0": 2.0000002423,
+        "lambda0": 131.5633853172,
+        "n_cells": 1895424,
+        "approx": true,
+        "seed": 34,
+        "family": "gaussian",
+        "oc": false
+      }
+    ]
+  }
+}
