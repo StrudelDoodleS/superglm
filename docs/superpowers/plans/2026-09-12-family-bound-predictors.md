@@ -12,7 +12,7 @@
 
 ## Global constraints
 
-- Work only in `.worktrees/fresh-0.32.0`, branch `work/fresh-0.32.0`, baseline `087d5983d1cba9823014c73eb8400b593a8c9217`.
+- Work only in `.worktrees/predictor-api-refinement`, branch `work/predictor-api-refinement`, baseline `087d5983d1cba9823014c73eb8400b593a8c9217`.
 - Keep `SuperGLM` and `SuperLSS` as the model construction entry points.
 - Require every predictor exactly once; argument order never assigns parameter meaning.
 - Error arrows flag omissions without choosing terms or constant/intercept behavior.
@@ -137,7 +137,7 @@ Each implementation task receives an independent task review. A final review che
 
 All four implementation tasks and their scoped reviews are complete. The final
 whole-branch review and the scoped review of its fixes are approved with no
-blocking findings. The work remains on `work/fresh-0.32.0` for user review.
+blocking findings. The work remains on `work/predictor-api-refinement` for user review.
 
 The complete non-browser suite ran with both required real datasets and CI's
 mpmath overlay:
