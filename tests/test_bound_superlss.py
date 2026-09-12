@@ -350,7 +350,12 @@ def test_bound_smooth_interaction_matches_internal_fit(discrete, reml):
         )
         assert tuple(p.name for p in actual.penalties) == tuple(p.name for p in expected.penalties)
         for a, b in zip(actual.penalties, expected.penalties, strict=True):
-            np.testing.assert_array_equal(a.omega_ssp, b.omega_ssp)
+            assert a.rank == b.rank
+            # Independent penalty factorizations can differ at roundoff. Use
+            # the dimension/epsilon budget and matrix norm, including at zeros.
+            tolerance = _roundoff_factor(a.omega_ssp, b.omega_ssp)
+            scale = max(1.0, np.linalg.norm(b.omega_ssp, ord=np.inf))
+            np.testing.assert_allclose(a.omega_ssp, b.omega_ssp, rtol=0.0, atol=tolerance * scale)
     for actual, expected in (
         (model.predict(frame, offsets=offsets), baseline.predict(frame, offsets=offsets)),
         (model.covariance_, baseline.covariance),
