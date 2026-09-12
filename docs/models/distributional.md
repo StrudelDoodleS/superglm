@@ -142,7 +142,7 @@ shortfall is available for both the unit law and the prior-weighted row law.
 
 ## Negative-binomial mean–theta model
 
-`NegativeBinomialLS` is the NB2 family with predictors in the exact order
+`NegativeBinomialLS` is the NB2 family with canonical parameter/result order
 `mean`, then `theta`. Both use log links. For conditional mean \(\mu\) and size
 \(\theta\),
 
@@ -259,7 +259,7 @@ active face, CDF or quantile methods, random generation, or complete-fit speed.
 ## Generalized gamma mean–scale–shape model
 
 `GeneralizedGammaLSS` is Prentice's generalized gamma for a strictly positive
-severity, with three predictors in the exact order `mean` (log link), `scale`
+severity, with canonical parameter/result order `mean` (log link), `scale`
 (log link with a floor, default 0.01) and `shape` (identity link, any real
 value). `shape = 0` is the log-normal, `shape = 1` the Weibull and
 `shape = scale` the gamma; a negative `shape` gives a power-law right tail with
