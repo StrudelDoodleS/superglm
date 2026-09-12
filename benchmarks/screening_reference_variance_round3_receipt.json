@@ -1,0 +1,1218 @@
+{
+  "baseline_revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+  "after_source_note": "After runs use the working source tree identified by source_sha256; revision records its parent commit.",
+  "validation": {
+    "screening_and_pair_design_tests_passed": 423,
+    "real_data_required": true,
+    "data_skips": 0,
+    "range_regressions_failed_before": 8,
+    "routing_regressions_failed_before": 2,
+    "routing_controls_passed_before": 3,
+    "final_structured_and_variance_tests_passed": 165,
+    "ty_diagnostics": 892
+  },
+  "performance": {
+    "mixed": {
+      "before": {
+        "case": "mixed",
+        "rows": 200000,
+        "holdout_rows": 200000,
+        "seed": 20260912,
+        "strength": 0.2,
+        "revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+        "source_sha256": "64390f0a52ba502326c8d1921ffe21120b1cf6f01fc0461acc91a71e0263f198",
+        "python": "3.13.14",
+        "numpy": "2.5.2",
+        "scipy": "1.18.0",
+        "threads": {
+          "OPENBLAS_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "NUMBA_NUM_THREADS": "2"
+        },
+        "fit_seconds": [
+          3.315592063998338,
+          3.611403874005191,
+          3.4023399190045893
+        ],
+        "screen_seconds": [
+          0.2323461800115183,
+          0.20574854098958895,
+          0.2182509070262313
+        ],
+        "process_peak_rss_mib": 517.46875,
+        "dispatch": [
+          {
+            "penalized_score_statistic_ladder": 11
+          },
+          {
+            "penalized_score_statistic_ladder": 11
+          },
+          {
+            "penalized_score_statistic_ladder": 11
+          }
+        ],
+        "load_before": [
+          1.01513671875,
+          1.01904296875,
+          0.66552734375
+        ],
+        "load_after": [
+          1.01220703125,
+          1.01806640625,
+          0.66943359375
+        ],
+        "prediction_sum": 19604.360539751196,
+        "prediction_sum_squares": 17186.970948330345,
+        "repeat_prediction_max_difference": 0.0,
+        "holdout_mains_loss": 206033.6071206705,
+        "mains_edf": 15.420850127884012,
+        "mains_deviance": 206656.03570427306,
+        "phi": 1.0333598549586227,
+        "candidates": [
+          {
+            "feature_a": "v",
+            "feature_b": "g",
+            "kind": "numeric_cat",
+            "statistic": 1684.6119612421132,
+            "z": 841.3059806210566,
+            "edf0": 2.0,
+            "lambda0": 0.0,
+            "n_cells": 3,
+            "approx": false,
+            "planted": true
+          },
+          {
+            "feature_a": "x",
+            "feature_b": "z",
+            "kind": "ti",
+            "statistic": 1063.2796222555019,
+            "z": 679.9168501752325,
+            "edf0": 2.000000804504647,
+            "lambda0": 6236.660197991593,
+            "n_cells": 40401,
+            "approx": false,
+            "planted": true
+          },
+          {
+            "feature_a": "g",
+            "feature_b": "h",
+            "kind": "cat_cat",
+            "statistic": 2527.08938027446,
+            "z": 629.772345068615,
+            "edf0": 8.0,
+            "lambda0": 0.0,
+            "n_cells": 15,
+            "approx": false,
+            "planted": true
+          },
+          {
+            "feature_a": "x",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 6.067808825984073,
+            "z": 2.033905129584031,
+            "edf0": 1.9999996020881428,
+            "lambda0": 209204852830.52853,
+            "n_cells": 603,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "z",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 3.9673655723200985,
+            "z": 0.9836828838616871,
+            "edf0": 1.9999999566241435,
+            "lambda0": 208894582080.86203,
+            "n_cells": 603,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "x",
+            "feature_b": "h",
+            "kind": "spline_cat",
+            "statistic": 20.848943200364108,
+            "z": 0.9271588711241229,
+            "edf0": 16.00000021810791,
+            "lambda0": 60.82451058806336,
+            "n_cells": 1005,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "w",
+            "feature_b": "h",
+            "kind": "numeric_cat",
+            "statistic": 5.909916364013813,
+            "z": 0.6752574062466608,
+            "edf0": 4.0,
+            "lambda0": 0.0,
+            "n_cells": 5,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "z",
+            "feature_b": "h",
+            "kind": "spline_cat",
+            "statistic": 3.729085626711215,
+            "z": -0.09578265177269316,
+            "edf0": 3.9999998519608546,
+            "lambda0": 150366195036.1305,
+            "n_cells": 1005,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "v",
+            "feature_b": "w",
+            "kind": "numeric_numeric",
+            "statistic": 0.27825908972386726,
+            "z": -0.5103478919160049,
+            "edf0": 1.0,
+            "lambda0": 0.0,
+            "n_cells": 1,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "w",
+            "feature_b": "g",
+            "kind": "numeric_cat",
+            "statistic": 0.9275603520796322,
+            "z": -0.5362198239601839,
+            "edf0": 2.0,
+            "lambda0": 0.0,
+            "n_cells": 3,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "v",
+            "feature_b": "h",
+            "kind": "numeric_cat",
+            "statistic": 2.1547322543304994,
+            "z": -0.6524006680338587,
+            "edf0": 4.0,
+            "lambda0": 0.0,
+            "n_cells": 5,
+            "approx": false,
+            "planted": false
+          }
+        ]
+      },
+      "after": {
+        "case": "mixed",
+        "rows": 200000,
+        "holdout_rows": 200000,
+        "seed": 20260912,
+        "strength": 0.2,
+        "revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+        "source_sha256": "9fd6a157abde5d65379328ac4668360b95d9a04fe935e71cb0927f58be428d0c",
+        "python": "3.13.14",
+        "numpy": "2.5.2",
+        "scipy": "1.18.0",
+        "threads": {
+          "OPENBLAS_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "NUMBA_NUM_THREADS": "2"
+        },
+        "fit_seconds": [
+          3.233218831010163,
+          3.3851219239877537,
+          3.233560187043622
+        ],
+        "screen_seconds": [
+          0.22013257903745398,
+          0.2098794340272434,
+          0.2198885980178602
+        ],
+        "process_peak_rss_mib": 502.28515625,
+        "dispatch": [
+          {
+            "penalized_score_statistic_ladder": 11
+          },
+          {
+            "penalized_score_statistic_ladder": 11
+          },
+          {
+            "penalized_score_statistic_ladder": 11
+          }
+        ],
+        "load_before": [
+          0.603515625,
+          0.85302734375,
+          0.666015625
+        ],
+        "load_after": [
+          0.9052734375,
+          0.90771484375,
+          0.68603515625
+        ],
+        "prediction_sum": 19604.360539751196,
+        "prediction_sum_squares": 17186.970948330345,
+        "repeat_prediction_max_difference": 0.0,
+        "holdout_mains_loss": 206033.6071206705,
+        "mains_edf": 15.420850127884012,
+        "mains_deviance": 206656.03570427306,
+        "phi": 1.0333598549586227,
+        "candidates": [
+          {
+            "feature_a": "v",
+            "feature_b": "g",
+            "kind": "numeric_cat",
+            "statistic": 1684.6119612421132,
+            "z": 841.3059806210566,
+            "edf0": 2.0,
+            "lambda0": 0.0,
+            "n_cells": 3,
+            "approx": false,
+            "planted": true
+          },
+          {
+            "feature_a": "x",
+            "feature_b": "z",
+            "kind": "ti",
+            "statistic": 1063.2796222555019,
+            "z": 679.9168501752325,
+            "edf0": 2.000000804504647,
+            "lambda0": 6236.660197991593,
+            "n_cells": 40401,
+            "approx": false,
+            "planted": true
+          },
+          {
+            "feature_a": "g",
+            "feature_b": "h",
+            "kind": "cat_cat",
+            "statistic": 2527.08938027446,
+            "z": 629.772345068615,
+            "edf0": 8.0,
+            "lambda0": 0.0,
+            "n_cells": 15,
+            "approx": false,
+            "planted": true
+          },
+          {
+            "feature_a": "x",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 6.067808825984073,
+            "z": 2.033905129584031,
+            "edf0": 1.9999996020881428,
+            "lambda0": 209204852830.52853,
+            "n_cells": 603,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "z",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 3.9673655723200985,
+            "z": 0.9836828838616871,
+            "edf0": 1.9999999566241435,
+            "lambda0": 208894582080.86203,
+            "n_cells": 603,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "x",
+            "feature_b": "h",
+            "kind": "spline_cat",
+            "statistic": 20.848943200364108,
+            "z": 0.9271588711241229,
+            "edf0": 16.00000021810791,
+            "lambda0": 60.82451058806336,
+            "n_cells": 1005,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "w",
+            "feature_b": "h",
+            "kind": "numeric_cat",
+            "statistic": 5.909916364013813,
+            "z": 0.6752574062466608,
+            "edf0": 4.0,
+            "lambda0": 0.0,
+            "n_cells": 5,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "z",
+            "feature_b": "h",
+            "kind": "spline_cat",
+            "statistic": 3.729085626711215,
+            "z": -0.09578265177269316,
+            "edf0": 3.9999998519608546,
+            "lambda0": 150366195036.1305,
+            "n_cells": 1005,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "v",
+            "feature_b": "w",
+            "kind": "numeric_numeric",
+            "statistic": 0.27825908972386726,
+            "z": -0.5103478919160049,
+            "edf0": 1.0,
+            "lambda0": 0.0,
+            "n_cells": 1,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "w",
+            "feature_b": "g",
+            "kind": "numeric_cat",
+            "statistic": 0.9275603520796322,
+            "z": -0.5362198239601839,
+            "edf0": 2.0,
+            "lambda0": 0.0,
+            "n_cells": 3,
+            "approx": false,
+            "planted": false
+          },
+          {
+            "feature_a": "v",
+            "feature_b": "h",
+            "kind": "numeric_cat",
+            "statistic": 2.1547322543304994,
+            "z": -0.6524006680338587,
+            "edf0": 4.0,
+            "lambda0": 0.0,
+            "n_cells": 5,
+            "approx": false,
+            "planted": false
+          }
+        ]
+      }
+    },
+    "structured_wide": {
+      "before": {
+        "case": "structured_wide",
+        "rows": 200000,
+        "holdout_rows": 200000,
+        "seed": 20260912,
+        "strength": 0.2,
+        "revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+        "source_sha256": "64390f0a52ba502326c8d1921ffe21120b1cf6f01fc0461acc91a71e0263f198",
+        "python": "3.13.14",
+        "numpy": "2.5.2",
+        "scipy": "1.18.0",
+        "threads": {
+          "OPENBLAS_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "NUMBA_NUM_THREADS": "2"
+        },
+        "fit_seconds": [
+          0.4291694510029629,
+          0.4657043230254203,
+          0.4179886379861273
+        ],
+        "screen_seconds": [
+          0.28001695597777143,
+          0.288054432021454,
+          0.29518161702435464
+        ],
+        "process_peak_rss_mib": 512.11328125,
+        "dispatch": [
+          {
+            "structured_ladder": 1
+          },
+          {
+            "structured_ladder": 1
+          },
+          {
+            "structured_ladder": 1
+          }
+        ],
+        "load_before": [
+          1.08740234375,
+          1.03271484375,
+          0.6845703125
+        ],
+        "load_after": [
+          1.08740234375,
+          1.03271484375,
+          0.6845703125
+        ],
+        "prediction_sum": 133640.40145127094,
+        "prediction_sum_squares": 107579.23088729635,
+        "repeat_prediction_max_difference": 0.0,
+        "holdout_mains_loss": 201562.410774193,
+        "mains_edf": 44.942466888943315,
+        "mains_deviance": 201913.72836089408,
+        "phi": 1.0097955553210185,
+        "candidates": [
+          {
+            "feature_a": "x",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 1373.4424361099202,
+            "z": 164.99713843231302,
+            "edf0": 33.00034616457344,
+            "lambda0": 98663330408.72372,
+            "n_cells": 3434,
+            "approx": false,
+            "planted": true
+          }
+        ]
+      },
+      "after": {
+        "case": "structured_wide",
+        "rows": 200000,
+        "holdout_rows": 200000,
+        "seed": 20260912,
+        "strength": 0.2,
+        "revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+        "source_sha256": "9fd6a157abde5d65379328ac4668360b95d9a04fe935e71cb0927f58be428d0c",
+        "python": "3.13.14",
+        "numpy": "2.5.2",
+        "scipy": "1.18.0",
+        "threads": {
+          "OPENBLAS_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "NUMBA_NUM_THREADS": "2"
+        },
+        "fit_seconds": [
+          0.44738900900119916,
+          0.4063286040327512,
+          0.361734863021411
+        ],
+        "screen_seconds": [
+          0.2692642569891177,
+          0.24616400594823062,
+          0.25818570103729144
+        ],
+        "process_peak_rss_mib": 513.71875,
+        "dispatch": [
+          {
+            "structured_ladder": 1
+          },
+          {
+            "structured_ladder": 1
+          },
+          {
+            "structured_ladder": 1
+          }
+        ],
+        "load_before": [
+          0.9130859375,
+          0.90966796875,
+          0.68798828125
+        ],
+        "load_after": [
+          0.9130859375,
+          0.90966796875,
+          0.68798828125
+        ],
+        "prediction_sum": 133640.40145127094,
+        "prediction_sum_squares": 107579.23088729635,
+        "repeat_prediction_max_difference": 0.0,
+        "holdout_mains_loss": 201562.410774193,
+        "mains_edf": 44.942466888943315,
+        "mains_deviance": 201913.72836089408,
+        "phi": 1.0097955553210185,
+        "candidates": [
+          {
+            "feature_a": "x",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 1373.4424361099202,
+            "z": 164.99713843231302,
+            "edf0": 33.00034616457344,
+            "lambda0": 98663330408.72372,
+            "n_cells": 3434,
+            "approx": false,
+            "planted": true
+          }
+        ]
+      }
+    },
+    "variance_budget": {
+      "before": {
+        "case": "variance_budget",
+        "rows": 5094,
+        "holdout_rows": 5094,
+        "seed": 389,
+        "strength": 0.2,
+        "revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+        "source_sha256": "64390f0a52ba502326c8d1921ffe21120b1cf6f01fc0461acc91a71e0263f198",
+        "python": "3.13.14",
+        "numpy": "2.5.2",
+        "scipy": "1.18.0",
+        "threads": {
+          "OPENBLAS_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "NUMBA_NUM_THREADS": "2"
+        },
+        "fit_seconds": [
+          0.10650364198954776,
+          0.10487608204130083,
+          0.3079639809438959
+        ],
+        "screen_seconds": [
+          0.09001630498096347,
+          0.08500865800306201,
+          0.09585254598641768
+        ],
+        "process_peak_rss_mib": 410.9453125,
+        "dispatch": [
+          {
+            "structured_ladder": 1
+          },
+          {
+            "structured_ladder": 1
+          },
+          {
+            "structured_ladder": 1
+          }
+        ],
+        "load_before": [
+          1.0732421875,
+          1.03076171875,
+          0.6884765625
+        ],
+        "load_after": [
+          1.0732421875,
+          1.03076171875,
+          0.6884765625
+        ],
+        "prediction_sum": 3355.353918412019,
+        "prediction_sum_squares": 2822.2462340686393,
+        "repeat_prediction_max_difference": 0.0,
+        "holdout_mains_loss": 5197.0374339100945,
+        "mains_edf": 204.89011030973,
+        "mains_deviance": 4847.90696749038,
+        "phi": 0.9915725105122355,
+        "candidates": [
+          {
+            "feature_a": "x",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 221.51649400686486,
+            "z": 1.128655161587346,
+            "edf0": 198.99990550359038,
+            "lambda0": 1516635284.3504133,
+            "n_cells": 51200,
+            "approx": true,
+            "planted": false
+          }
+        ]
+      },
+      "after": {
+        "case": "variance_budget",
+        "rows": 5094,
+        "holdout_rows": 5094,
+        "seed": 389,
+        "strength": 0.2,
+        "revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+        "source_sha256": "9fd6a157abde5d65379328ac4668360b95d9a04fe935e71cb0927f58be428d0c",
+        "python": "3.13.14",
+        "numpy": "2.5.2",
+        "scipy": "1.18.0",
+        "threads": {
+          "OPENBLAS_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "NUMBA_NUM_THREADS": "2"
+        },
+        "fit_seconds": [
+          0.11399072199128568,
+          0.12433910596882924,
+          0.138292035961058
+        ],
+        "screen_seconds": [
+          0.09076234995154664,
+          0.10564422101015225,
+          0.11907700099982321
+        ],
+        "process_peak_rss_mib": 400.1875,
+        "dispatch": [
+          {
+            "structured_ladder": 1
+          },
+          {
+            "structured_ladder": 1
+          },
+          {
+            "structured_ladder": 1
+          }
+        ],
+        "load_before": [
+          0.92041015625,
+          0.91162109375,
+          0.68994140625
+        ],
+        "load_after": [
+          0.92041015625,
+          0.91162109375,
+          0.68994140625
+        ],
+        "prediction_sum": 3355.353918412019,
+        "prediction_sum_squares": 2822.2462340686393,
+        "repeat_prediction_max_difference": 0.0,
+        "holdout_mains_loss": 5197.0374339100945,
+        "mains_edf": 204.89011030973,
+        "mains_deviance": 4847.90696749038,
+        "phi": 0.9915725105122355,
+        "candidates": [
+          {
+            "feature_a": "x",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 221.51649400686486,
+            "z": 1.128655161587346,
+            "edf0": 198.99990550359038,
+            "lambda0": 1516635284.3504133,
+            "n_cells": 51200,
+            "approx": true,
+            "planted": false
+          }
+        ]
+      }
+    },
+    "variance_budget_two_edges": {
+      "before": {
+        "case": "variance_budget_two_edges",
+        "rows": 5094,
+        "holdout_rows": 5094,
+        "seed": 389,
+        "strength": 0.2,
+        "revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+        "source_sha256": "64390f0a52ba502326c8d1921ffe21120b1cf6f01fc0461acc91a71e0263f198",
+        "python": "3.13.14",
+        "numpy": "2.5.2",
+        "scipy": "1.18.0",
+        "threads": {
+          "OPENBLAS_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "NUMBA_NUM_THREADS": "2"
+        },
+        "fit_seconds": [
+          0.11394435702823102,
+          0.09958156698849052,
+          0.11110265098977834
+        ],
+        "screen_seconds": [
+          0.25688823097152635,
+          0.27834876195993274,
+          0.3002920859726146
+        ],
+        "process_peak_rss_mib": 442.01953125,
+        "dispatch": [
+          {
+            "structured_ladder": 1,
+            "structured_ladder_refused": 1
+          },
+          {
+            "structured_ladder": 1,
+            "structured_ladder_refused": 1
+          },
+          {
+            "structured_ladder": 1,
+            "structured_ladder_refused": 1
+          }
+        ],
+        "load_before": [
+          1.0615234375,
+          1.02880859375,
+          0.6923828125
+        ],
+        "load_after": [
+          1.0615234375,
+          1.02880859375,
+          0.6923828125
+        ],
+        "prediction_sum": 3355.353918412019,
+        "prediction_sum_squares": 2822.2462340686393,
+        "repeat_prediction_max_difference": 0.0,
+        "holdout_mains_loss": 5197.0374339100945,
+        "mains_edf": 204.89011030973,
+        "mains_deviance": 4847.90696749038,
+        "phi": 0.9915725105122355,
+        "candidates": [
+          {
+            "feature_a": "x",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": null,
+            "z": null,
+            "edf0": null,
+            "lambda0": null,
+            "n_cells": 1018800,
+            "approx": false,
+            "planted": false
+          }
+        ]
+      },
+      "after": {
+        "case": "variance_budget_two_edges",
+        "rows": 5094,
+        "holdout_rows": 5094,
+        "seed": 389,
+        "strength": 0.2,
+        "revision": "9817a76c04798a8bd689f8a6783874e80fc0200c",
+        "source_sha256": "9fd6a157abde5d65379328ac4668360b95d9a04fe935e71cb0927f58be428d0c",
+        "python": "3.13.14",
+        "numpy": "2.5.2",
+        "scipy": "1.18.0",
+        "threads": {
+          "OPENBLAS_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "NUMBA_NUM_THREADS": "2"
+        },
+        "fit_seconds": [
+          0.14435403404058889,
+          0.10664307000115514,
+          0.1039407349890098
+        ],
+        "screen_seconds": [
+          0.4250338340061717,
+          0.3560865860199556,
+          0.34008212899789214
+        ],
+        "process_peak_rss_mib": 442.203125,
+        "dispatch": [
+          {
+            "structured_ladder": 2,
+            "structured_ladder_budget_refused": 1
+          },
+          {
+            "structured_ladder": 2,
+            "structured_ladder_budget_refused": 1
+          },
+          {
+            "structured_ladder": 2,
+            "structured_ladder_budget_refused": 1
+          }
+        ],
+        "load_before": [
+          0.92724609375,
+          0.91357421875,
+          0.69189453125
+        ],
+        "load_after": [
+          0.92724609375,
+          0.91357421875,
+          0.69189453125
+        ],
+        "prediction_sum": 3355.353918412019,
+        "prediction_sum_squares": 2822.2462340686393,
+        "repeat_prediction_max_difference": 0.0,
+        "holdout_mains_loss": 5197.0374339100945,
+        "mains_edf": 204.89011030973,
+        "mains_deviance": 4847.90696749038,
+        "phi": 0.9915725105122355,
+        "candidates": [
+          {
+            "feature_a": "x",
+            "feature_b": "g",
+            "kind": "spline_cat",
+            "statistic": 2249.233673275484,
+            "z": 1.4226487946007103,
+            "edf0": 2155.849206978892,
+            "lambda0": 1.5166352843504132e-11,
+            "n_cells": 51200,
+            "approx": true,
+            "planted": false
+          }
+        ]
+      }
+    }
+  },
+  "exceptional_pencil_probe": {
+    "source_path": "/home/max/projects/superglm/.worktrees/psst-reference-variance/src/superglm/screening/_score_stat.py",
+    "source_sha256": "89c28652c16ce395416033a3382f394b33f29d2df62b4062044d3cee8cc757d0",
+    "numpy_version": "2.5.2",
+    "scipy_version": "1.18.0",
+    "scope": "Five tiny fixtures; residual diagnostics do not certify arbitrary ill-conditioned factors.",
+    "orthogonality_formula": "||[Q1;Q2].T@[Q1;Q2]-I||_2 / (d*eps*cond_2(R11))",
+    "reconstruction_formula": "(||Qi@R11-Ai_selected||_F/||Ai_selected||_F)/(d*eps)",
+    "dimension_formula": "d=max(shape(vstack((R_eff,balanced_penalty_root))))",
+    "fixtures": [
+      {
+        "fixture": "uniform-huge",
+        "R_eff_input": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "physical_penalty_root": [
+          [
+            8.997827589086393e+161,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            8.997827589086393e+161,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            8.997827589086393e+161,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            8.997827589086393e+161
+          ]
+        ],
+        "lambda": 5e-324,
+        "stack_shape": [
+          8,
+          4
+        ],
+        "rank": 4,
+        "dimension": 8,
+        "epsilon": 2.220446049250313e-16,
+        "condition_R11_2": 1.0,
+        "orthogonality_defect_2": 2.220446049250313e-16,
+        "orthogonality_over_dimension_epsilon_condition": 0.125,
+        "relative_data_reconstruction_F": 0.0,
+        "relative_penalty_reconstruction_F": 0.0,
+        "data_reconstruction_over_dimension_epsilon": 0.0,
+        "penalty_reconstruction_over_dimension_epsilon": 0.0,
+        "moments_order": [
+          "EDF",
+          "statistic",
+          "reference_variance"
+        ],
+        "actual_moments": [
+          0.7999999999999999,
+          0.7999999999999999,
+          0.31999999999999995
+        ],
+        "oracle_moments": [
+          0.8,
+          0.8,
+          0.32000000000000006
+        ],
+        "oracle_description": "Diagonal analytic filters with z=ones; moments=(sum(a),sum(a),2*sum(a^2)). For mixed-magnitudes the first contribution is below float64's minimum subnormal and cannot change these rounded totals.",
+        "maximum_absolute_moment_error": 1.1102230246251565e-16,
+        "moment_error_over_dimension_epsilon_condition_squared_scale": 0.0625
+      },
+      {
+        "fixture": "mixed-null-huge",
+        "R_eff_input": [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "physical_penalty_root": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            4.4989137945431964e+161,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            8.997827589086393e+161,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.7995655178172786e+162
+          ]
+        ],
+        "lambda": 5e-324,
+        "stack_shape": [
+          8,
+          4
+        ],
+        "rank": 4,
+        "dimension": 8,
+        "epsilon": 2.220446049250313e-16,
+        "condition_R11_2": 2.0118695404073916,
+        "orthogonality_defect_2": 5.357315408879604e-16,
+        "orthogonality_over_dimension_epsilon_condition": 0.1499053690768313,
+        "relative_data_reconstruction_F": 0.0,
+        "relative_penalty_reconstruction_F": 2.254633818874049e-16,
+        "data_reconstruction_over_dimension_epsilon": 0.0,
+        "penalty_reconstruction_over_dimension_epsilon": 0.12692460033172606,
+        "moments_order": [
+          "EDF",
+          "statistic",
+          "reference_variance"
+        ],
+        "actual_moments": [
+          1.7588235294117647,
+          1.7588235294117651,
+          2.5869204152249132
+        ],
+        "oracle_moments": [
+          1.7588235294117647,
+          1.7588235294117647,
+          2.5869204152249137
+        ],
+        "oracle_description": "Diagonal analytic filters with z=ones; moments=(sum(a),sum(a),2*sum(a^2)). For mixed-magnitudes the first contribution is below float64's minimum subnormal and cannot change these rounded totals.",
+        "maximum_absolute_moment_error": 4.440892098500626e-16,
+        "moment_error_over_dimension_epsilon_condition_squared_scale": 0.023875765763355702
+      },
+      {
+        "fixture": "mixed-magnitudes",
+        "R_eff_input": [
+          [
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0
+          ]
+        ],
+        "physical_penalty_root": [
+          [
+            8.997827589086393e+161,
+            0.0
+          ],
+          [
+            0.0,
+            1.0
+          ]
+        ],
+        "lambda": 1.0,
+        "stack_shape": [
+          4,
+          2
+        ],
+        "rank": 2,
+        "dimension": 4,
+        "epsilon": 2.220446049250313e-16,
+        "condition_R11_2": 1.7320508075688772,
+        "orthogonality_defect_2": 2.220446049250313e-16,
+        "orthogonality_over_dimension_epsilon_condition": 0.14433756729740646,
+        "relative_data_reconstruction_F": 0.0,
+        "relative_penalty_reconstruction_F": 0.0,
+        "data_reconstruction_over_dimension_epsilon": 0.0,
+        "penalty_reconstruction_over_dimension_epsilon": 0.0,
+        "moments_order": [
+          "EDF",
+          "statistic",
+          "reference_variance"
+        ],
+        "actual_moments": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "oracle_moments": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "oracle_description": "Diagonal analytic filters with z=ones; moments=(sum(a),sum(a),2*sum(a^2)). For mixed-magnitudes the first contribution is below float64's minimum subnormal and cannot change these rounded totals.",
+        "maximum_absolute_moment_error": 0.0,
+        "moment_error_over_dimension_epsilon_condition_squared_scale": 0.0
+      },
+      {
+        "fixture": "tiny-curvature",
+        "R_eff_input": [
+          [
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            2.778448436856347e-163
+          ]
+        ],
+        "physical_penalty_root": [
+          [
+            2.778448436856347e-163,
+            0.0
+          ],
+          [
+            0.0,
+            2.778448436856347e-163
+          ]
+        ],
+        "lambda": 1.0,
+        "stack_shape": [
+          4,
+          2
+        ],
+        "rank": 2,
+        "dimension": 4,
+        "epsilon": 2.220446049250313e-16,
+        "condition_R11_2": 1.732050807568877,
+        "orthogonality_defect_2": 2.220446049250313e-16,
+        "orthogonality_over_dimension_epsilon_condition": 0.14433756729740646,
+        "relative_data_reconstruction_F": 0.0,
+        "relative_penalty_reconstruction_F": 0.0,
+        "data_reconstruction_over_dimension_epsilon": 0.0,
+        "penalty_reconstruction_over_dimension_epsilon": 0.0,
+        "moments_order": [
+          "EDF",
+          "statistic",
+          "reference_variance"
+        ],
+        "actual_moments": [
+          1.5,
+          1.5,
+          2.5
+        ],
+        "oracle_moments": [
+          1.5,
+          1.5,
+          2.5
+        ],
+        "oracle_description": "Diagonal analytic filters with z=ones; moments=(sum(a),sum(a),2*sum(a^2)). For mixed-magnitudes the first contribution is below float64's minimum subnormal and cannot change these rounded totals.",
+        "maximum_absolute_moment_error": 0.0,
+        "moment_error_over_dimension_epsilon_condition_squared_scale": 0.0
+      },
+      {
+        "fixture": "rotated-full-rank",
+        "R_eff_input": [
+          [
+            1.0,
+            0.3,
+            -0.2,
+            0.1
+          ],
+          [
+            0.0,
+            1.5,
+            0.4,
+            -0.1
+          ],
+          [
+            0.0,
+            0.0,
+            0.8,
+            0.2
+          ],
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.2
+          ]
+        ],
+        "physical_penalty_root": [
+          [
+            -4.3982462449481474e+161,
+            4.6748259847741616e+160,
+            5.362638981183287e+160,
+            6.241284733340716e+160
+          ],
+          [
+            -1.5537118910655599e+161,
+            -5.328929409550207e+161,
+            -7.020946338740431e+161,
+            -9.25042993078688e+160
+          ],
+          [
+            1.612623225410665e+160,
+            1.0000159228707165e+162,
+            -7.655332259002593e+161,
+            2.237508905844995e+160
+          ],
+          [
+            2.149727821589553e+161,
+            -1.6336704594394155e+161,
+            -1.5707842844578793e+161,
+            1.772247254607652e+162
+          ]
+        ],
+        "lambda": 5e-324,
+        "stack_shape": [
+          8,
+          4
+        ],
+        "rank": 4,
+        "dimension": 8,
+        "epsilon": 2.220446049250313e-16,
+        "condition_R11_2": 2.07161223635212,
+        "orthogonality_defect_2": 5.665103345217366e-16,
+        "orthogonality_over_dimension_epsilon_condition": 0.1539462650564765,
+        "relative_data_reconstruction_F": 1.3185110574389952e-16,
+        "relative_penalty_reconstruction_F": 1.3079873984275308e-16,
+        "data_reconstruction_over_dimension_epsilon": 0.07422557383707672,
+        "penalty_reconstruction_over_dimension_epsilon": 0.07363314450204415,
+        "moments_order": [
+          "EDF",
+          "statistic",
+          "reference_variance"
+        ],
+        "actual_moments": [
+          1.0146632541306988,
+          1.0484635770559334,
+          0.7758148757346286
+        ],
+        "oracle_moments": [
+          1.014663254130699,
+          1.048463577055933,
+          0.7758148757346293
+        ],
+        "oracle_description": "Finite SPD oracle: A=R.T@R+4*P.T@P; H=solve(cholesky(A),R.T); EDF=tr(H@H.T), T=(R.T@ones).T@solve(A,R.T@ones), variance=2*||H@H.T||_F^2.",
+        "maximum_absolute_moment_error": 6.661338147750939e-16,
+        "moment_error_over_dimension_epsilon_condition_squared_scale": 0.08334143703001962
+      }
+    ]
+  }
+}

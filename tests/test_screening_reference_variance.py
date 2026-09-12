@@ -12,7 +12,15 @@ import superglm.screening._structured as st
 from superglm import SuperGLM
 from superglm.features import Spline
 from superglm.screening._pair_factor import PairFactor
-from superglm.screening._score_stat import _EDF_TOL, penalized_score_statistic_ladder
+from superglm.screening._score_stat import (
+    _EDF_TOL,
+    _lambda_bracket,
+    _pair_pencil,
+    _pencil_edf,
+    _pencil_reference_variance,
+    _pencil_stat,
+    penalized_score_statistic_ladder,
+)
 from superglm.screening._structured import spline_cat_moments, structured_ladder
 
 
@@ -77,11 +85,90 @@ def test_unrepresentable_penalty_target_clamps_to_a_finite_endpoint(exponent):
     assert result.statistic == pytest.approx(30 * filter_value, abs=30 * bound, rel=0)
 
 
+@pytest.mark.parametrize("root_diagonal", [[1.0, 1.0, 1.0, 1.0], [0.0, 0.5, 1.0, 2.0]])
+def test_finite_large_penalty_root_retains_information_at_the_subnormal_edge(root_diagonal):
+    """Squaring a finite factor must not turn an identified candidate into zero.
+
+    At lambda=2**-1074, roots scaled by 2**538 give penalty eigenvalues
+    4*root_diagonal**2. These small products provide an independent oracle.
+    The mixed case also preserves the penalty's exact null direction.
+    """
+    root = np.ldexp(np.diag(root_diagonal), 538)
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        result = penalized_score_statistic_ladder(_identity_pair(4), root, budgets=(2.0,))[0]
+    filters = 1 / (1 + 4 * np.square(root_diagonal))
+    assert result.lambda0 == np.finfo(float).smallest_subnormal
+    bound = 128 * 4 * np.finfo(float).eps
+    assert result.edf0 == pytest.approx(float(np.sum(filters)), abs=bound, rel=0)
+    assert result.reference_variance == pytest.approx(
+        2 * float(np.sum(filters**2)), abs=bound, rel=0
+    )
+    assert result.statistic == pytest.approx(
+        float(np.arange(1, 5) ** 2 @ filters), abs=30 * bound, rel=0
+    )
+
+
 def test_unresolved_candidate_has_zero_reference_variance():
     pair = PairFactor(joint=np.zeros((3, 3)), overlap_width=0, tensor_width=2)
     result = penalized_score_statistic_ladder(pair, None)[0]
     assert result.edf0 == 0.0
     assert getattr(result, "reference_variance", None) == 0.0
+
+
+def test_large_root_preserves_a_smaller_penalty_direction():
+    """A global rescaling must not erase a sine before its square is restored."""
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        pencil = _pair_pencil(_identity_pair(2), np.diag([np.ldexp(1.0, 538), 1.0]))
+        moments = (_pencil_edf(pencil, 1.0), _pencil_reference_variance(pencil, 1.0))
+        statistic = _pencil_stat(pencil, 1.0)
+    bound = 128 * 2 * np.finfo(float).eps
+    assert moments == pytest.approx((0.5, 0.5), abs=bound, rel=0)
+    assert statistic == pytest.approx(2.0, abs=4 * bound, rel=0)
+
+
+def test_extreme_pencil_sums_before_rounding_subnormal_terms():
+    """Individually unrepresentable filters can have a representable total."""
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        pencil = _pair_pencil(_identity_pair(4), np.ldexp(np.eye(4), 538))
+        edf = _pencil_edf(pencil, 1.0)
+        variance = _pencil_reference_variance(pencil, np.ldexp(1.0, -538))
+    # Four filters near 2**-1076 sum to 2**-1074. At the second lambda,
+    # 2*sum(a**2) is near 8*2**-1076. Both round to these exact floats.
+    assert edf == np.finfo(float).smallest_subnormal
+    assert variance == 2 * np.finfo(float).smallest_subnormal
+
+
+def test_tiny_root_preserves_a_small_curvature_and_score_direction():
+    """The balanced stack is well conditioned even though c**2 underflows."""
+    tiny = np.ldexp(1.0, -540)
+    joint = np.eye(3)
+    joint[1, 1] = tiny
+    joint[:2, -1] = 1.0
+    pair = PairFactor(joint=joint, overlap_width=0, tensor_width=2)
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        pencil = _pair_pencil(pair, tiny * np.eye(2))
+        moments = (
+            _pencil_edf(pencil, 1.0),
+            _pencil_stat(pencil, 1.0),
+            _pencil_reference_variance(pencil, 1.0),
+        )
+    # The diagonal filters round to (1, 1/2); the row score is (1, 1).
+    assert moments == pytest.approx((1.5, 1.5, 2.5), abs=128 * 2 * np.finfo(float).eps, rel=0)
+
+
+@pytest.mark.parametrize("target, multiple", [(0.7, 1), (0.6, 2)])
+def test_unattainable_subnormal_target_chooses_the_closest_endpoint(target, multiple):
+    result = penalized_score_statistic_ladder(
+        _identity_pair(4), np.ldexp(np.eye(4), 538), budgets=(target,)
+    )[0]
+    assert result.lambda0 == multiple * np.finfo(float).smallest_subnormal
+    assert result.edf0 == pytest.approx(4 / (1 + 4 * multiple), abs=128 * np.finfo(float).eps)
+
+
+def test_scaled_lambda_bracket_recovers_an_underflowing_trace_quotient():
+    # (2**-1074 / 4) * 2**1076 = 1, although the quotient alone is zero.
+    bracket = _lambda_bracket(np.finfo(float).smallest_subnormal, denominator=4.0, exponent=1076)
+    assert bracket == pytest.approx((1e-10, 1e10), rel=4 * np.finfo(float).eps, abs=0)
 
 
 def test_public_z_uses_the_candidate_quadratic_variance(monkeypatch):
