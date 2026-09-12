@@ -21,6 +21,7 @@ import scipy.linalg
 import superglm.model.screening_ops as ops
 from superglm import SuperGLM
 from superglm.features import Categorical, Spline
+from superglm.features.spline import PSpline
 from superglm.model.screening_ops import _contrast_menu, _contrast_rows
 from superglm.screening._arrow import factor_arrow
 from superglm.screening._factor_kernels import _factor_rank_floor, _rank_floor
@@ -5091,6 +5092,43 @@ def _routed_shapes(model, df, y, monkeypatch, **kw):
     monkeypatch.setattr(ops, "spline_cat_moments", spy)
     row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=BUDGETS, **kw).iloc[0]
     return row, seen
+
+
+class _UnpenalizedPSpline(PSpline):
+    def _build_penalty(self):
+        return np.zeros_like(super()._build_penalty())
+
+
+@pytest.mark.parametrize(
+    "max_cells, unpenalized, approximate",
+    [(5_000_000, False, True), (5_010_000, False, False), (5_000_000, True, False)],
+)
+def test_variance_pass_budget_reaches_the_spline_binning_fallback(
+    monkeypatch, max_cells, unpenalized, approximate
+):
+    """Two affordable passes cannot score a penalized pair; three can.
+
+    The exact 5094-point support fits the allocation gates, but leaves only
+    two factor passes at the default budget. Binning must remain reachable
+    so the final variance pass can be paid for. A slightly larger budget
+    affords all three passes and must keep the exact support. A zero penalty
+    needs only two passes and must also keep the exact support.
+    """
+    rng = np.random.default_rng(389)
+    n = 5094
+    groups = np.arange(n) % 200
+    rng.shuffle(groups)
+    df = pd.DataFrame({"x": np.linspace(0, 1, n), "g": groups.astype(str)})
+    y = np.sin(3 * df["x"].to_numpy()) + rng.normal(size=n)
+    spline = _UnpenalizedPSpline(n_knots=8) if unpenalized else Spline(kind="ps", n_knots=8)
+    model = SuperGLM(family="gaussian", features={"g": Categorical(), "x": spline}).fit_reml(df, y)
+
+    row, seen = _routed_shapes(model, df, y, monkeypatch, max_cells=max_cells)
+
+    assert np.isfinite(row["z"]), row.to_dict()
+    assert bool(row["approx"]) is approximate
+    assert seen["width"] == 11
+    assert seen["support"] == (256 if approximate else n)
 
 
 def test_the_structured_path_bins_rather_than_allocate_its_own_intermediate(monkeypatch):

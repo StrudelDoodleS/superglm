@@ -1,0 +1,154 @@
+{
+  "finding": "https://github.com/StrudelDoodleS/superglm/pull/389#discussion_r3997115819",
+  "notes": [
+    "Both processes used the same benchmark file and environment, sequentially, with one warmup and three repeated complete fits and screens.",
+    "The after arm is a working-tree fix over c2be0f6; source_sha256 identifies its exact production source.",
+    "At 5094 support points, width 11 and 200 levels, max_cells=5000000 affords two factor passes. Binning to 256 affords 680.",
+    "Null scores record a refused pair. Timing a refusal and a completed binned score does not establish a general screening speedup.",
+    "Process peak RSS includes imports, data, warmup, models and screening; it is not an isolated allocation measurement."
+  ],
+  "command": "OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=2 uv run --no-sync python /path/to/screening_reference_variance.py --case variance_budget --rows 5094 --seed 389 --repeats 3 --output /tmp/receipt.json",
+  "before": {
+    "case": "variance_budget",
+    "rows": 5094,
+    "holdout_rows": 5094,
+    "seed": 389,
+    "strength": 0.2,
+    "revision": "c2be0f6c5129512f1a40d31c55ff97d3340c5641",
+    "source_sha256": "d60813f5b5755e6ac19ae75f66ea2b47a69556203a8c268963df9ecbc68ff84f",
+    "python": "3.13.14",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0",
+    "threads": {
+      "OPENBLAS_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "NUMBA_NUM_THREADS": "2"
+    },
+    "fit_seconds": [
+      0.09751238202443346,
+      0.1067892350256443,
+      0.09653060999698937
+    ],
+    "screen_seconds": [
+      0.24821806704858318,
+      0.25641034898580983,
+      0.23699584399582818
+    ],
+    "process_peak_rss_mib": 460.71484375,
+    "dispatch": [
+      {
+        "structured_ladder": 1,
+        "structured_ladder_refused": 1
+      },
+      {
+        "structured_ladder": 1,
+        "structured_ladder_refused": 1
+      },
+      {
+        "structured_ladder": 1,
+        "structured_ladder_refused": 1
+      }
+    ],
+    "load_before": [
+      0.328125,
+      0.2353515625,
+      0.11962890625
+    ],
+    "load_after": [
+      0.328125,
+      0.2353515625,
+      0.11962890625
+    ],
+    "prediction_sum": 3355.353918412019,
+    "prediction_sum_squares": 2822.2462340686393,
+    "repeat_prediction_max_difference": 0.0,
+    "holdout_mains_loss": 5197.0374339100945,
+    "mains_edf": 204.89011030973,
+    "mains_deviance": 4847.90696749038,
+    "phi": 0.9915725105122355,
+    "candidates": [
+      {
+        "feature_a": "x",
+        "feature_b": "g",
+        "kind": "spline_cat",
+        "statistic": null,
+        "z": null,
+        "edf0": null,
+        "lambda0": null,
+        "n_cells": 1018800,
+        "approx": false,
+        "planted": false
+      }
+    ]
+  },
+  "after": {
+    "case": "variance_budget",
+    "rows": 5094,
+    "holdout_rows": 5094,
+    "seed": 389,
+    "strength": 0.2,
+    "revision": "c2be0f6c5129512f1a40d31c55ff97d3340c5641",
+    "source_sha256": "68cb4a7a57f304a076b53514547bbea5a26f6086c8b38f290db9939282328d4f",
+    "python": "3.13.14",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0",
+    "threads": {
+      "OPENBLAS_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "NUMBA_NUM_THREADS": "2"
+    },
+    "fit_seconds": [
+      0.11775045102695003,
+      0.12102243897970766,
+      0.10469391505466774
+    ],
+    "screen_seconds": [
+      0.11008008499629796,
+      0.10253194899996743,
+      0.09622328000841662
+    ],
+    "process_peak_rss_mib": 400.49609375,
+    "dispatch": [
+      {
+        "structured_ladder": 1
+      },
+      {
+        "structured_ladder": 1
+      },
+      {
+        "structured_ladder": 1
+      }
+    ],
+    "load_before": [
+      0.234375,
+      0.21923828125,
+      0.11572265625
+    ],
+    "load_after": [
+      0.234375,
+      0.21923828125,
+      0.11572265625
+    ],
+    "prediction_sum": 3355.353918412019,
+    "prediction_sum_squares": 2822.2462340686393,
+    "repeat_prediction_max_difference": 0.0,
+    "holdout_mains_loss": 5197.0374339100945,
+    "mains_edf": 204.89011030973,
+    "mains_deviance": 4847.90696749038,
+    "phi": 0.9915725105122355,
+    "candidates": [
+      {
+        "feature_a": "x",
+        "feature_b": "g",
+        "kind": "spline_cat",
+        "statistic": 221.51649400686486,
+        "z": 1.128655161587346,
+        "edf0": 198.99990550359038,
+        "lambda0": 1516635284.3504133,
+        "n_cells": 51200,
+        "approx": true,
+        "planted": false
+      }
+    ]
+  }
+}

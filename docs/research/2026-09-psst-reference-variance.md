@@ -281,3 +281,45 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=2 \
   uv run --no-sync python /path/to/screening_reference_variance.py \
   --case structured --rows 200000 --repeats 3 --output /tmp/receipt.json
 ```
+
+## Review regression: an affordable binned pair was refused
+
+[Codex identified a routing gap](https://github.com/StrudelDoodleS/superglm/pull/389#discussion_r3997115819)
+in the extra-pass accounting. At the default `max_cells=5_000_000`, a
+width-11 spline with 5,094 support points and 200 factor levels fits the
+allocation gates but has work allowance for only two factor passes. The
+penalized ladder needs at least three. The caller admitted the exact support,
+received a refusal and returned `NaN` without reaching its binning fallback.
+
+The caller now checks whether two passes can suffice after the allocation
+gates, using the built marginal penalty. A nonzero penalty reaches binning;
+a zero penalty can still use two passes on the exact support. The marginal
+cache avoids building that menu twice. Search and numerical refusals retain
+their existing contract.
+
+The public regression failed against `c2be0f6` with a non-finite score before
+the routing fix. It now passes, alongside controls that keep the exact
+support when the allowance is raised to three or the penalty is zero.
+`test_variance_pass_budget_reaches_the_spline_binning_fallback` runs a complete
+Gaussian fit and the real structured kernel in all three cases.
+
+`benchmarks/screening_reference_variance_review_receipt.json` records three
+complete fits and screens per revision after warmup, using the same
+5,094-row dataset and seed 389:
+
+| Measurement | Before routing fix | After routing fix |
+|---|---|---|
+| Structured support | 5,094 | 256 |
+| Work allowance | 2 passes | 680 passes |
+| Pair outcome | Refused, `NaN` | `z = 1.128655`, `approx=True` |
+| Fit median | 0.098 s | 0.118 s |
+| Screen median | 0.248 s | 0.103 s |
+| Process peak RSS | 460.715 MiB | 400.496 MiB |
+
+The recorded fit EDF, deviance, dispersion and prediction summaries are
+identical. Each screen used one structured ladder call; all three baseline
+calls refused and all three corrected calls returned a score. These timings
+compare a refusal with a completed binned calculation, so they establish no
+general speedup. RSS includes imports, warmup and complete models. Reproduce
+the receipt with the benchmark command above, replacing the case with
+`--case variance_budget --rows 5094 --seed 389`.

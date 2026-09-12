@@ -1317,6 +1317,16 @@ def screen_interactions(
                     if structured
                     else _within_budget(n_l, n_r, k_l, k_r)
                 )
+                if fits and structured and arrow_budget == 2:
+                    # Two passes suffice only without a penalty. A penalized
+                    # ladder needs two bracket passes and at least one variance
+                    # pass. Check its penalty after the allocation gates, then
+                    # let an unaffordable exact support reach binning below.
+                    _, _, _, S_l = _margin(left, bin_flag[left])
+                    fits = not np.any(S_l)
+                    if not fits and arrow_lookahead:
+                        allow_dense, arrow_lookahead = True, False
+                        continue
                 if fits:
                     _, _, menu_l, S_l = _margin(left, bin_flag[left])
                     if structured:
