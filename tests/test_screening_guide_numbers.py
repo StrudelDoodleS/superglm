@@ -28,17 +28,15 @@ measurement from the freMTPL2 parquet, so the fixture cannot itself go stale
 behind a code change.  It skips when the (gitignored) parquet is absent, so it
 runs in the Real data CI workflow, which fetches the pinned public data.
 
-One number the closing paragraph reads against — the ``ti`` null floor, 7.31 —
-comes from a *different* measurement, the 160-fit null battery in
-``benchmarks/screening_null_floors.py``, which was not regenerated.
-``test_screening_guide_ti_floor_survives_the_dispersion_contract_change``
-pins the argument for why it did not have to be.
+The null maxima come from the separate 160-fit battery in
+``benchmarks/screening_null_floors.py``. That battery was rerun after the
+reference-variance correction. Its compact receipt records both versions;
+the guide's current per-kind summary is checked against the corrected arm.
 """
 
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 import re
 from pathlib import Path
@@ -49,10 +47,6 @@ import pytest
 from superglm import Categorical, SuperGLM
 from superglm.features.numeric import Numeric
 from superglm.features.spline import Spline
-from superglm.solvers.dispersion import (
-    dispersion_likelihood_size,
-    pearson_residual_degrees_of_freedom,
-)
 
 from . import _datasets
 
@@ -281,7 +275,7 @@ def test_screening_guide_top_row_is_read_against_the_published_ti_floor(guide, m
     rows = measured["rows"]
     first = measured["confirmatory_refits"][0]
 
-    # "(7.31 for `ti`): 1.85 does not clear it -- and the refit bought 43.0
+    # "(9.48 for `ti`): 2.32 does not clear it -- and the refit bought 43.0
     # deviance anyway."
     floor = _search(
         guide,
@@ -302,65 +296,19 @@ def test_screening_guide_top_row_is_read_against_the_published_ti_floor(guide, m
     )
 
 
-def test_screening_guide_ti_floor_survives_the_dispersion_contract_change(guide) -> None:
-    """The `ti` floor is a unit-weight measurement, so the new phi cannot move it.
-
-    Everything the worked example prints moved when the screen's Pearson
-    denominator moved.  The closing paragraph reads its top row against a
-    number from a *different* measurement — the null battery's ``ti`` maximum —
-    which was not regenerated.  This pins the argument that it did not have to
-    be, entirely from published numbers plus the battery's own construction:
-
-    1. the guide attributes both maxima above 6, the ``ti`` one included, to
-       the dispersed Gaussian arm of the battery;
-    2. only the Poisson arm of that battery screens with a ``sample_weight``
-       at all, and the guide publishes its maximum anywhere as well below the
-       ``ti`` floor, so the floor cannot have been Poisson-carried and a
-       Poisson row cannot become the maximum by moving *down*;
-    3. under unit weights the two denominators are the same number, so no
-       unweighted arm's ``z`` moved at all.
-
-    Give the battery's Gaussian arm a ``sample_weight`` and step 2 fails: the
-    floor would then be contract-sensitive and would have to be re-measured
-    alongside the worked example.
-    """
-    battery = importlib.import_module("benchmarks.screening_null_floors")
-    text = " ".join(guide.split())
-
-    # (1) the published attribution, cross-checked against the per-kind table.
-    carried = _search(
-        guide,
-        r"dispersed Gaussian carries it: [^.]*?both maxima above 6 "
-        r"\(([0-9.]+) on `numeric_cat`, ([0-9.]+) on `ti`\)",
+def test_screening_guide_null_floors_match_the_remeasured_battery(guide) -> None:
+    """Published maxima must follow the rerun when normalization changes."""
+    receipt = json.loads(
+        (_ROOT / "benchmarks/screening_reference_variance_null_receipt.json").read_text()
     )
-    ti_floor = _search(guide, r"\| `ti` \| 480 \| [0-9.]+ \| [0-9.]+ \| ([0-9.]+) \|").group(1)
-    numeric_cat_floor = _search(
-        guide, r"\| `numeric_cat` \| 960 \| [0-9.]+ \| [0-9.]+ \| ([0-9.]+) \|"
-    ).group(1)
-    assert carried.group(2) == ti_floor
-    assert carried.group(1) == numeric_cat_floor
-    assert f"({ti_floor} for `ti`)" in text
-
-    # (2) the battery's weighted arm is the Poisson one, and only that one.
-    df, exposure = battery._frame(64, np.random.default_rng(0))
-    weighted = {}
-    for family in battery.FAMILIES:
-        _, weight = battery._null_response(df, exposure, family, np.random.default_rng(0))
-        weighted[family] = weight is not None
-    assert weighted == {"poisson": True, "gamma": False, "binomial": False, "gaussian": False}
-    poisson_max = float(_search(guide, r"\(Poisson at most ([0-9.]+),").group(1))
-    assert poisson_max < float(ti_floor)
-
-    # (3) with unit weights the retired and current denominators coincide, so
-    #     the Gaussian arm that carries the floor is untouched by the change.
-    ones = np.ones(64, dtype=np.float64)
-    for semantics in ("prior", "frequency"):
-        assert dispersion_likelihood_size(ones, weight_semantics=semantics) == pytest.approx(
-            float(np.count_nonzero(ones))
+    for kind, row in receipt["corrected"]["by_kind"].items():
+        match = _search(
+            guide,
+            rf"\| `{kind}` \| ([0-9]+) \| (-?[0-9.]+) \| ([0-9.]+) \| ([0-9.]+) \|",
         )
-        assert pearson_residual_degrees_of_freedom(
-            ones, 4.0, weight_semantics=semantics
-        ) == pytest.approx(64.0 - 4.0)
+        assert int(match.group(1)) == row["rows"]
+        for group, key in ((2, "mean_z"), (3, "p90_z"), (4, "max_z")):
+            assert float(match.group(group)) == pytest.approx(row[key], abs=5e-3)
 
 
 # ── the fixture is anchored to the real book (skips without the parquet) ────

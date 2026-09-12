@@ -4796,7 +4796,8 @@ def test_the_zero_penalty_family_is_not_refused_wholesale():
 def test_the_ladder_refuses_a_search_it_cannot_afford(monkeypatch):
     """``max_evaluations`` is checked BEFORE the first bisection step.
 
-    A clamping ladder is two arrow factorizations; a searching one is tens.
+    A clamping ladder is two bracket factorizations and one variance
+    factorization; a searching one is tens.
     A caller that budgeted for the first must get a refusal rather than the
     second, and must pay only the bracket to find out.
     """
@@ -4815,7 +4816,7 @@ def test_the_ladder_refuses_a_search_it_cannot_afford(monkeypatch):
     monkeypatch.setattr(st, "_evaluate", counted)
     # edf at maximum penalty is about L - 1 = 19 here, so 16 clamps and 24
     # has to search.
-    assert structured_ladder(p, budgets=(16.0,), max_evaluations=2) is not None
+    assert structured_ladder(p, budgets=(16.0,), max_evaluations=3) is not None
     assert calls == 2
     calls = 0
     assert structured_ladder(p, budgets=(24.0,), max_evaluations=2) is None
@@ -4880,12 +4881,12 @@ def test_repeating_a_budget_does_not_change_whether_a_pair_is_screenable(monkeyp
         return real(*args, **kwargs)
 
     monkeypatch.setattr(st, "_evaluate", counted)
-    once = structured_ladder(p, budgets=(24.0,), max_evaluations=48)
+    once = structured_ladder(p, budgets=(24.0,), max_evaluations=49)
     assert once is not None
     once_calls = calls
     for repeats in (2, 3):
         calls = 0
-        many = structured_ladder(p, budgets=(24.0,) * repeats, max_evaluations=48)
+        many = structured_ladder(p, budgets=(24.0,) * repeats, max_evaluations=49)
         assert many is not None
         assert calls == once_calls
         assert len(many) == repeats
@@ -4910,8 +4911,8 @@ def test_profiled_scale_preserves_the_lower_edge_clamp(monkeypatch, moderate_pai
         return real(*args, **kwargs)
 
     monkeypatch.setattr(st, "_evaluate", counted)
-    rungs = st.structured_ladder(p, budgets=(1e6,), max_evaluations=2)
-    assert rungs is not None, "structured_ladder refused under max_evaluations=2"
+    rungs = st.structured_ladder(p, budgets=(1e6,), max_evaluations=3)
+    assert rungs is not None, "structured_ladder refused under max_evaluations=3"
     result = rungs[0]
     expected_lo = 1e-10 * p.profiled_trace / (np.trace(p.S_a) * p.dims[0])
     assert calls == 2

@@ -361,8 +361,8 @@ publishes.  The statistic was the last holdout and issue #298 is that gap: it
 went through a second, moment-space arrow factorization and ``M^+``, both
 pseudo-inverses of those Grams,
 so a 1e-8 perturbation of them left ``edf`` bit-identical and moved the
-statistic by up to 1.5e-05 relative -- on two numbers ``screen_interactions``
-divides into each other as ``z = (T/phi - edf0)/sqrt(2 edf0)``.  That is not a tidiness argument: forming the
+statistic by up to 1.5e-05 relative -- on two numbers then used in
+``z = (T/phi - edf0)/sqrt(2 edf0)`` (the earlier normalization). Forming the
 pair's moments in float64 destroys the quantity before any screening rule
 runs.  Measured on the starved family, three defensible exact-arithmetic
 policies for ``M^+`` applied to the SAME delivered float64 moments -- invert
@@ -1899,8 +1899,156 @@ def _absorption_floor(n_terms: int, rank: int) -> float:
     return float(np.sqrt(dimension * eps)) + dimension * eps
 
 
+class _ReferenceVariance:
+    """Squared smoother norm from diagonal blocks and a streaming QR tree.
+
+    Off-diagonal blocks have the form ``Z_q M Z_t'``. Each tree merge adds
+    their squared norms before compressing the joined rows, so no large
+    traces are subtracted. Only final ladder rungs construct this collector.
+    """
+
+    def __init__(self, geometry: _PairGeometry):
+        self.geometry = geometry
+        self.squared_norm = 0.0
+        self.correction = 0.0
+        self.diagonal_error = 0.0
+        self.leaf_norm_squared = 0.0
+        self.leaf_error_squared = 0.0
+        self.leaves = 0
+        self.tree: list[NDArray | None] = []
+
+    def configure(self, singular: NDArray, right: NDArray, keep: NDArray) -> None:
+        self.rotation = right.T
+        self.singular = singular
+        self.small = keep & (singular < np.sqrt(0.5))
+        r = singular.size
+        occupied = singular * singular
+        free = (1.0 - singular) * (1.0 + singular)
+        large = keep & ~self.small
+        safe = np.where(large, occupied, 1.0)
+        first = np.where(self.small, 1.0, np.where(large, 1.0 / safe, 0.0))
+        crossed = np.where(self.small, 0.0, np.where(large, -1.0 / safe, -1.0))
+        second = np.where(self.small, -1.0, np.where(large, free / safe, free))
+        self.metric = np.zeros((2 * r, 2 * r), dtype=np.float64)
+        index = np.arange(r)
+        self.metric[index, index] = first
+        self.metric[index, r + index] = crossed
+        self.metric[r + index, index] = crossed
+        self.metric[r + index, r + index] = second
+        self.metric_norm = float(
+            np.max(
+                0.5 * (np.abs(first + second) + np.hypot(first - second, 2 * crossed)), initial=0.0
+            )
+        )
+        self.amplification = (
+            max(1.0, 1.0 / float(np.min(singular[self.small]))) if np.any(self.small) else 1.0
+        )
+
+    def _add(self, term: float) -> None:
+        updated = self.squared_norm + term
+        if abs(self.squared_norm) >= abs(term):
+            self.correction += (self.squared_norm - updated) + term
+        else:
+            self.correction += (term - updated) + self.squared_norm
+        self.squared_norm = updated
+
+    def add_diagonal(self, factor: NDArray, allowance: NDArray) -> None:
+        gram = factor @ np.swapaxes(factor, -1, -2)
+        self._add(float(np.sum(np.square(gram))))
+        # Include the within-bound clip and the subsequent Gram product.
+        mass = np.sum(np.square(factor), axis=(-2, -1))
+        operation = _PSD_CLIP_FACTOR * factor.shape[-1] * np.finfo(np.float64).eps
+        self.diagonal_error += float(np.sum(allowance + operation * mass))
+
+    def _merge(self, left: NDArray, right: NDArray) -> NDArray:
+        self._add(2.0 * float(np.sum(np.square(left @ self.metric @ right.T))))
+        joined = np.vstack((left, right))
+        return np.linalg.qr(joined, mode="r") if joined.shape[0] > joined.shape[1] else joined
+
+    def add_low_rank(self, local: NDArray, overlap: NDArray, error_scale: NDArray) -> None:
+        if not self.singular.size:
+            return
+        first = local @ self.rotation
+        second = overlap @ self.rotation
+        # The small-h metric is diag(1,-1). Its factor residual is amplified
+        # by 1/sigma, rather than multiplying a raw inverse of size 1/h.
+        first[..., self.small] = (first[..., self.small] - second[..., self.small]) / self.singular[
+            self.small
+        ]
+        rows = np.concatenate((first, second), axis=-1)
+        self.leaf_norm_squared += float(np.sum(np.square(rows)))
+        operation = (
+            _PSD_CLIP_FACTOR
+            * (overlap.shape[-2] + 2 * self.singular.size)
+            * np.finfo(np.float64).eps
+            * self.amplification
+        )
+        self.leaf_error_squared += float(np.sum(np.square(operation * error_scale)))
+        for leaf in rows:
+            self.leaves += 1
+            level = 0
+            while level < len(self.tree) and (sibling := self.tree[level]) is not None:
+                leaf = self._merge(sibling, leaf)
+                self.tree[level] = None
+                level += 1
+            if level == len(self.tree):
+                self.tree.append(leaf.copy())
+            else:
+                self.tree[level] = leaf.copy()
+
+    def finish(self) -> None:
+        joined = None
+        for factor in self.tree:
+            if factor is not None:
+                joined = factor if joined is None else self._merge(factor, joined)
+        self.tree.clear()
+        self.squared_norm += self.correction
+        self.correction = 0.0
+
+    def value(self, edf: float) -> float:
+        if edf == 0.0:
+            return 0.0
+        square = self.squared_norm
+        if not np.isfinite(square) or square <= 0.0:
+            raise _UnstableStructuredEDFError(
+                "structured reference variance is not positive and finite"
+            )
+
+        # A consistency allowance under the existing assembly-error model,
+        # not a complete forward-error certificate for the original pencil.
+        # QR depth, factor residual amplification and PSD assembly all enter;
+        # an eps*EDF-only check is too strict near an absorbed direction.
+        width = max(2 * self.singular.size, 1)
+        depth = max(self.leaves, 1).bit_length()
+        rounding = _PSD_CLIP_FACTOR * width**2 * (depth + 1) * np.finfo(np.float64).eps
+        rounding = rounding / (1.0 - rounding) if rounding < 1.0 else np.inf
+        mass = self.leaf_norm_squared
+        leaf_error = np.sqrt(self.leaf_error_squared) + rounding * np.sqrt(mass)
+        diagonal_error = self.diagonal_error + _edf_roundoff(edf, self.geometry.ceiling)
+        matrix_error = (
+            diagonal_error
+            + self.metric_norm * (2.0 * np.sqrt(mass) * leaf_error + leaf_error**2)
+            + rounding * self.metric_norm * mass
+        )
+        ceiling = self.geometry.ceiling
+        upper = min(ceiling, edf + diagonal_error)
+        allowance = 2.0 * np.sqrt(max(upper, 0.0)) * matrix_error + matrix_error**2
+        allowance += rounding * square
+        lower = max(edf - diagonal_error, 0.0) ** 2 / ceiling
+        if not np.isfinite(allowance) or square < lower - allowance or square > upper + allowance:
+            raise _UnstableStructuredEDFError(
+                f"structured squared filter sum {square} is inconsistent with EDF {edf} "
+                f"(allowance={allowance}, ceiling={ceiling})"
+            )
+        return 2.0 * square
+
+
 def _filter_factor_sum(
-    p: SplineCatPair, geometry: _PairGeometry, lam: float
+    p: SplineCatPair,
+    geometry: _PairGeometry,
+    lam: float,
+    *,
+    variance: _ReferenceVariance | None = None,
 ) -> tuple[float, float, float, float]:
     """``(T, edf, clip bound, cut margin)`` at one lambda, all from ONE QR.
 
@@ -2155,6 +2303,12 @@ def _filter_factor_sum(
         deflation = 1.0
         margin = np.inf
 
+    if variance is not None:
+        if r:
+            variance.configure(singular, right, keep)
+        else:
+            variance.configure(np.empty(0), np.empty((0, 0)), np.empty(0, dtype=bool))
+
     # ``||H^(+/2) v||^2`` for ``v = Psi N^+ U_eff``, taken through ``H^+``'s
     # own spectral factor so the border's share of the statistic is a squared
     # norm too.  ``resolved`` is exactly ``H^+``: a direction the absorption
@@ -2194,7 +2348,8 @@ def _filter_factor_sum(
         view[:, k_a:, k_a:] = coupled
         rows = np.concatenate((contract, carried), axis=2)
         factor, negative, top = _psd_factor(view)
-        term = float(np.sum(np.square(rows @ factor)))
+        carried_factor = rows @ factor
+        term = float(np.sum(np.square(carried_factor)))
         # What the clip removed BEYOND what roundoff explains, carried into
         # the units of the answer: for the excess ``e_q``,
         # ``|tr(F_q (W - W_+) F_q')| <= ||F_q||_F^2 e_q`` by Weyl plus the
@@ -2219,6 +2374,16 @@ def _filter_factor_sum(
         allowance = _psd_clip_allowance(width, scale, geometry.orthonormality * deflation)
         excess = np.maximum(negative - allowance, 0.0)
         uncertified += float(np.sum(np.sum(np.square(rows), axis=(1, 2)) * excess))
+        if variance is not None:
+            variance.add_diagonal(
+                carried_factor, np.sum(np.square(rows), axis=(1, 2)) * (allowance + negative)
+            )
+            variance.add_low_rank(
+                contract @ Y,
+                carried,
+                np.linalg.norm(contract, axis=(1, 2)) * np.linalg.norm(Y, axis=(1, 2))
+                + np.linalg.norm(carried, axis=(1, 2)),
+            )
         # Neumaier-style compensated accumulation: the chunk totals are
         # nonnegative, so this only keeps the scalar independent of chunking.
         updated = total + term
@@ -2232,13 +2397,24 @@ def _filter_factor_sum(
     # their whole contribution is one term against the compacted Gram factor
     # rather than one term per level.
     factor, negative, top = _psd_factor(coupled)
-    total += float(np.sum(np.square(geometry.base_gram @ factor)))
-    excess = np.maximum(
-        negative
-        - _psd_clip_allowance(r, np.maximum(top, deflation), geometry.orthonormality * deflation),
-        0.0,
+    base_factor = geometry.base_gram @ factor
+    total += float(np.sum(np.square(base_factor)))
+    allowance = _psd_clip_allowance(
+        r, np.maximum(top, deflation), geometry.orthonormality * deflation
     )
+    excess = np.maximum(negative - allowance, 0.0)
     uncertified += float(np.sum(np.square(geometry.base_gram)) * float(excess))
+    if variance is not None:
+        variance.add_diagonal(
+            base_factor[None, ...],
+            np.asarray([np.sum(np.square(geometry.base_gram)) * (allowance + negative)]),
+        )
+        variance.add_low_rank(
+            np.zeros_like(geometry.base_gram)[None, ...],
+            geometry.base_gram[None, ...],
+            np.asarray([np.linalg.norm(geometry.base_gram)]),
+        )
+        variance.finish()
     return statistic, total + correction, uncertified, margin
 
 
@@ -2261,7 +2437,14 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     two level-sized stacks (``Ginv`` and ``Y``) it held while the filter pass
     was allocating its own.
     """
-    T, edf, uncertified, margin = _filter_factor_sum(p, geometry, lam)
+    return _checked_evaluation(geometry, lam, _filter_factor_sum(p, geometry, lam))
+
+
+def _checked_evaluation(
+    geometry: _PairGeometry, lam: float, evaluated: tuple[float, float, float, float]
+) -> tuple[float, float]:
+    """Apply the same EDF and rank guards to search and final evaluations."""
+    T, edf, uncertified, margin = evaluated
 
     # **THE DEFLATION COUNT IS ONLY AN ANSWER WHERE THE CUT SEPARATES.**  #280
     # measured a direction sitting 1.00489x above the floor on one microkernel
@@ -2367,15 +2550,22 @@ def _evaluate(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> tuple[fl
     # ``[-roundoff, roundoff]`` was just declared indistinguishable from zero;
     # returning the positive half of it as a value would be the guard
     # contradicting itself one line later, and the contradiction is not
-    # cosmetic.  ``screen_interactions`` divides by ``sqrt(2 * edf0)``, so a
-    # published ``edf0`` of 3e-17 -- the same measurement as -3e-17, which
-    # collapses to 0.0 and skips the rung -- inflates that pair's ``z`` by
-    # ~1e8 and sorts a pair that resolved nothing to the top of the screen.
+    # cosmetic. A numerical remnant must not supply a positive reference
+    # variance and a tiny denominator for a pair that resolved no direction.
+    # Under the earlier sqrt(2*edf0) normalization, publishing 3e-17 inflated
+    # z by about 1e8, while -3e-17 collapsed to zero and skipped the rung.
     # Which side of zero a cancellation residue lands on is not something this
     # module gets to decide, so it must not be what decides a ranking.
     if abs(edf) <= roundoff:
         return T, 0.0
     return T, min(edf, geometry.ceiling)
+
+
+def _reference_variance(p: SplineCatPair, geometry: _PairGeometry, lam: float) -> float:
+    variance = _ReferenceVariance(geometry)
+    evaluated = _filter_factor_sum(p, geometry, lam, variance=variance)
+    _, edf = _checked_evaluation(geometry, lam, evaluated)
+    return variance.value(edf)
 
 
 def structured_ladder(
@@ -2391,64 +2581,24 @@ def structured_ladder(
     actually achieved — but every evaluation is an arrow factorization rather
     than a dense one.
 
-    **Whether the ladder searches is not a function of the pair's dimensions,
-    so the caller caps it and the decision is taken here.**  A rung whose
-    budget falls inside the bracket bisects, and each step of that bisection
-    is a fresh arrow factorization where the dense ladder's equivalent is
-    ``O(k)`` on a prebuilt pencil.  Whether any rung does depends on ``edf``
-    at maximum penalty, which is the dimension of the penalty's null space
-    per level: measured at ``L - 1`` for ``ps``, ``bs`` and ``cr`` margins,
-    where every rung clamps and the whole ladder is 2 evaluations — but at
-    ZERO for ``ns``, whose penalty is full rank, so every rung searches and a
-    400-level pair measured 106.  ``max_evaluations`` bounds the arrow
-    factorizations this call may spend.  The bracket settles which rungs
-    search, and the worst case for those is checked against the ceiling
-    BEFORE the first bisection step, so a pair that cannot afford its search
-    pays only for the bracket and returns ``None`` — the caller's cue for the
-    same NaN row an unaffordable dense pair gets.  ``max_evaluations=None``
-    means unbounded.
+    Search evaluations compute the statistic and EDF from one block-angular
+    factorization. After a rung is selected, one additional factorization
+    computes its reference variance, including cross-level smoother blocks.
+    Repeated budgets and repeated final lambdas share their results.
 
-    **EVERY EVALUATION NOW COSTS THE SAME, BECAUSE NOTHING LAMBDA-DEPENDENT IS
-    COUNTED.**  The form this replaces ran a batched eigendecomposition per
-    evaluation to count the level ranks at that lambda; this one contracts
-    ``V_eff`` against the factorization the evaluation already built.  Whole
-    ladders, ``time.process_time`` with all six thread pools pinned to one,
-    median of five, filter factors against ``rank - lambda tr(A^-1 S)``:
-    clamped ``ps(8)`` at ``L = 200`` 5.51 ms against 5.97 (0.92x), the same at
-    ``L = 2000`` 50.87 against 45.52 (1.12x), clamped ``cr(3)`` at ``L = 2000``
-    7.03 against 7.26 (0.97x), a ``ps(8)`` ladder driven to bisect four rungs
-    345.2 against 318.5 (1.08x), and ``ns(8)``, whose full-rank penalty makes
-    every rung search, 195.8 against 176.4 (1.11x).  0.92x to 1.12x, and the
-    +9.2% a searching ladder used to pay for its per-lambda count is gone.
+    ``max_evaluations`` bounds these factor passes. Two bracket evaluations
+    establish which targets need bisection. Before searching, the ladder
+    reserves the worst-case search cost and one variance pass per distinct
+    final lambda. A pair that cannot fit this budget returns ``None``.
+    ``None`` as the budget means unbounded work.
 
-    **THAT IS THE KERNEL, WHICH IS NOT THE THING A CALLER PAYS.**  The same
-    four configurations through the PUBLIC entry -- ``fit_reml`` then
-    ``screen_interactions`` -- with dispatch counted at both kernels, CPU the
-    median of five whole screens, memory the ``tracemalloc`` peak over one:
-
-      ps(8) L=400     198.86 ms against 210.13   0.95x   peak 34.42 MiB
-      ps(8) L=2000    294.76 against 293.00      1.01x   peak 25.42 MiB
-      cr(3) L=2000    248.11 against 240.74      1.03x   peak 22.07 MiB
-      ns(8) L=200     238.30 against 232.36      1.03x   peak 11.91 MiB
-
-    Peak allocation is IDENTICAL TO THE BYTE on all four, so the per-level
-    ``D`` and the contraction temporaries do not move it; the arrays they
-    replace were the same size.  Dispatch is identical too -- one structured
-    call, zero dense calls, zero refusals on every configuration -- so the
-    production route is unchanged and these are the same pairs being scored.
-    Of the published columns, ``statistic`` and ``lambda0`` are BIT-IDENTICAL
-    on all four; ``edf0`` moves 1.75e-03, 1.18e-02, 4.75e-03 and 4.8e-12, and
-    the ``z`` the screen ranks on moves 9.11e-05, 2.81e-04, 1.13e-04 and
-    1.3e-12.  That is the user-visible size of this change on wide pairs.
-
-    Factorizations for a WHOLE ladder at the default ``(2, 4, 8, 16)``, counted
-    by instrumenting the per-lambda block-angular pass: 2 for ``ps(8)`` at
-    ``L = 50`` and ``L = 100``, ``cr(6)`` at ``L = 100``, ``bs(6)`` at
-    ``L = 50`` and ``ps(8)`` at ``L = 20``.  Their edf at maximum penalty is far above every
-    budget in use, so no rung's target falls inside the bracket and every one
-    of them clamps.  The one margin that searches by default is ``ns``: its
-    penalty is full rank, edf at maximum penalty is 0, and ``L = 100`` pays
-    106.
+    For example, if all targets clamp to one edge, there are three passes:
+    two bracket evaluations and one final variance evaluation. With zero
+    penalty there are two passes at lambda zero. Each final variance pass
+    adds local contractions and a QR tree, with O(L*(k_a+r)**3) total extra
+    work for L levels, spline width k_a and overlap rank r. Tree state is
+    O(k_a*r + r**2 * log(L)), beside the existing chunk buffers; no full
+    cross-level smoother matrix is formed.
 
     A numerical failure reached while bisecting one target refuses that target,
     not independent targets or already certified edge clamps.  The returned
@@ -2474,6 +2624,21 @@ def structured_ladder(
         except _UnstableStructuredEDFError:
             return None
 
+    variances: dict[float, float | None] = {}
+
+    def screened(stat: float, edf: float, lam: float) -> ScreenedPair | None:
+        if lam not in variances:
+            try:
+                variances[lam] = _reference_variance(p, geometry, lam)
+            except _UnstableStructuredEDFError:
+                variances[lam] = None
+        reference_variance = variances[lam]
+        if reference_variance is None:
+            return None
+        return ScreenedPair(
+            statistic=stat, edf0=edf, lambda0=float(lam), reference_variance=reference_variance
+        )
+
     if not np.any(p.S_a):
         # No penalty to scan, exactly the predicate the dense ladder applies:
         # one rung, at the block's own achieved edf, with lambda0 = 0.  That
@@ -2487,11 +2652,14 @@ def structured_ladder(
         # two Grams.  A
         # zero penalty would otherwise make the bracket below infinite and
         # every rung NaN, since inf * 0 is not a number.
+        if max_evaluations is not None and max_evaluations < 2:
+            return None
         evaluated = evaluate(0.0)
         if evaluated is None:
             return None
         stat, edf = evaluated
-        return [ScreenedPair(statistic=stat, edf0=edf, lambda0=0.0) for _ in budgets]
+        result = screened(stat, edf, 0.0)
+        return [result for _ in budgets] if result is not None else None
 
     # Use the curvature the pencil actually turns on.  ``profiled_trace`` is
     # assembled from nonnegative centered residual energies in
@@ -2546,7 +2714,10 @@ def structured_ladder(
     # screenable at all.  The same set drives the cache below, so a repeat
     # costs nothing rather than a second bisection.
     searchable = {float(b) for b in budgets if edf_hi < float(b) < edf_lo}
-    if max_evaluations is not None and 2 + _MAX_STEPS_PER_RUNG * len(searchable) > max_evaluations:
+    clamped = {lo if float(b) >= edf_lo else hi for b in budgets if float(b) not in searchable}
+    # Each distinct emitted lambda also needs one variance factorization.
+    required = 2 + (_MAX_STEPS_PER_RUNG + 1) * len(searchable) + len(clamped)
+    if max_evaluations is not None and required > max_evaluations:
         return None
 
     solved: dict[float, ScreenedPair | None] = {}
@@ -2556,7 +2727,9 @@ def structured_ladder(
         if edf0 not in searchable:
             lam = lo if edf0 >= edf_lo else hi
             stat, achieved = (stat_lo, edf_lo) if lam == lo else (stat_hi, edf_hi)
-            out.append(ScreenedPair(statistic=stat, edf0=achieved, lambda0=float(lam)))
+            result = screened(stat, achieved, lam)
+            if result is not None:
+                out.append(result)
             continue
         if edf0 not in solved:
             a, b = lo, hi
@@ -2566,7 +2739,7 @@ def structured_ladder(
             for _ in range(_MAX_BISECT):
                 if b <= a * (1.0 + 1e-12):
                     break
-                lam = float(np.sqrt(a * b))
+                lam = float(np.sqrt(a) * np.sqrt(b))
                 evaluated = evaluate(lam)
                 if evaluated is None:
                     refused = True
@@ -2595,11 +2768,7 @@ def structured_ladder(
             if refused or abs(achieved - edf0) > _EDF_TOL:
                 solved[edf0] = None
             else:
-                solved[edf0] = ScreenedPair(
-                    statistic=stat,
-                    edf0=achieved,
-                    lambda0=float(lam),
-                )
+                solved[edf0] = screened(stat, achieved, lam)
         result = solved[edf0]
         if result is not None:
             out.append(result)
