@@ -207,9 +207,11 @@ identity, retained-state and prediction checks. The ordinary controls retain
 one Hessian pass each. Their call counts do not indicate discarded work added
 by the repair.
 
-All returned fitted objects recorded the `distributional-chunked-v1` terminal
-coefficient backend. This label identifies that terminal fit, not every
-internal operation. The separate profiles confirm the bounded predictor and
+The four profiled comparison cases recorded `distributional-chunked-v1` as the
+terminal coefficient backend. The outward Gaussian policy control used
+`distributional-dense-v1`; the NB2 book refusal produced no terminal backend.
+These labels identify the terminal fit, not every internal operation. The
+separate profiles confirm the bounded predictor and
 existing coefficient-reuse paths. These fixtures do not measure ten-million-row
 memory behavior.
 
