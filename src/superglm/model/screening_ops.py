@@ -109,7 +109,11 @@ from superglm.screening import (
     working_score,
 )
 from superglm.screening._overlap import tensor_penalty_root
-from superglm.screening._structured import spline_cat_moments, structured_ladder
+from superglm.screening._structured import (
+    _StructuredBudgetExceededError,
+    spline_cat_moments,
+    structured_ladder,
+)
 from superglm.solvers.dispersion import (
     model_weight_semantics,
     pearson_residual_degrees_of_freedom,
@@ -968,9 +972,10 @@ def screen_interactions(
     def _margin_support(name, binned):
         """(codes, support size) for one margin, WITHOUT building its menu.
 
-        The budget gates run on support sizes alone, so an over-budget pair
-        must never pay for a menu it is about to bin or skip away — which for
-        a wide factor means never allocating its dense (L, L-1) contrast block.
+        Allocation gates run before menu construction. In particular, a wide
+        factor need not allocate its dense (L, L-1) contrast block. Structured
+        search admission also depends on the fitted marginal penalty, so it
+        can build and cache a spline menu before deciding to bin its support.
         """
         if margin_kinds[name] == "categorical":
             return _levels_of(name)
@@ -1326,16 +1331,6 @@ def screen_interactions(
                     if structured
                     else _within_budget(n_l, n_r, k_l, k_r)
                 )
-                if fits and structured and arrow_budget == 2:
-                    # Two passes suffice only without a penalty. A penalized
-                    # ladder needs two bracket passes and at least one variance
-                    # pass. Check its penalty after the allocation gates, then
-                    # let an unaffordable exact support reach binning below.
-                    _, _, _, S_l = _margin(left, bin_flag[left])
-                    fits = not np.any(S_l)
-                    if not fits and arrow_lookahead:
-                        allow_dense, arrow_lookahead = True, False
-                        continue
                 if fits:
                     _, _, menu_l, S_l = _margin(left, bin_flag[left])
                     if structured:
@@ -1356,33 +1351,52 @@ def screen_interactions(
                         # back, exactly as the width and support exits already
                         # do, rather than deleting a pair the dense path could
                         # still score.
-                        S_cell, W_cell = pair_cell_moments(
-                            codes_l,
-                            codes_r,
-                            n_l,
-                            n_r,
-                            score,
-                            working_weights,
-                            max_cells=max_cells,
-                        )
-                        structured_results = structured_ladder(
-                            spline_cat_moments(menu_l, S_l, S_cell, W_cell, level_rows),
-                            budgets=budgets,
-                            max_evaluations=arrow_budget,
-                        )
-                        if structured_results is None and arrow_lookahead:
-                            allow_dense, arrow_lookahead = True, False
-                            arrow_refused = True
+                        try:
+                            # Two endpoints and a final variance pass are a
+                            # lower bound for any penalized ladder. Reject
+                            # this case before allocating its cell tables;
+                            # other budget refusals come from the ladder.
+                            if arrow_budget < 3 and np.any(S_l):
+                                raise _StructuredBudgetExceededError
+                            S_cell, W_cell = pair_cell_moments(
+                                codes_l,
+                                codes_r,
+                                n_l,
+                                n_r,
+                                score,
+                                working_weights,
+                                max_cells=max_cells,
+                            )
+                            structured_results = structured_ladder(
+                                spline_cat_moments(menu_l, S_l, S_cell, W_cell, level_rows),
+                                budgets=budgets,
+                                max_evaluations=arrow_budget,
+                                raise_on_budget=True,
+                            )
+                        except _StructuredBudgetExceededError:
+                            # Binning can free work for search and variance
+                            # passes. A speculative refusal must also latch,
+                            # or the unchanged dense state immediately tries
+                            # the same unaffordable handoff again.
+                            if arrow_lookahead:
+                                allow_dense, arrow_lookahead = True, False
+                                arrow_refused = True
+                                continue
+                        else:
+                            if structured_results is None and arrow_lookahead:
+                                allow_dense, arrow_lookahead = True, False
+                                arrow_refused = True
+                                continue
+                            margins = ((menu_l, S_l), (level_rows, None))
+                            break
+                    else:
+                        _, _, menu_r, S_r = _margin(right, bin_flag[right])
+                        if (menu_l.shape[1], menu_r.shape[1]) != (k_l, k_r):
+                            # Re-run the gates with the built menus' dimensions.
+                            k_l, k_r = menu_l.shape[1], menu_r.shape[1]
                             continue
-                        margins = ((menu_l, S_l), (level_rows, None))
+                        margins = ((menu_l, S_l), (menu_r, S_r))
                         break
-                    _, _, menu_r, S_r = _margin(right, bin_flag[right])
-                    if (menu_l.shape[1], menu_r.shape[1]) != (k_l, k_r):
-                        # authoritative dims from the built menus; re-run the gates
-                        k_l, k_r = menu_l.shape[1], menu_r.shape[1]
-                        continue
-                    margins = ((menu_l, S_l), (menu_r, S_r))
-                    break
                 # bin the largest not-yet-binned margin that binning can shrink;
                 # a categorical margin is never binnable, whatever its level count
                 binnable = sorted(
@@ -1453,13 +1467,9 @@ def screen_interactions(
             (menu_l, S_l), (menu_r, S_r) = margins
             if structured:
                 if structured_results is None:
-                    # The ladder can refuse for a search that exceeds its
-                    # evaluation allowance, or for a numerical rank/EDF
-                    # certificate that is not trustworthy enough to publish.
-                    # Either is refused the way an unaffordable dense block
-                    # is: a NaN row.  Reaching here means the dense track was
-                    # already exhausted, since a SPECULATIVE handoff hands it
-                    # back above instead.
+                    # Numerical certification refused every rung. Budget
+                    # refusals already tried binning inside the routing loop.
+                    # A speculative refusal restores the dense track above.
                     rows.append(
                         (feat_a, feat_b, kind, np.nan, np.nan, np.nan, np.nan, n_cells, approx)
                     )

@@ -5090,7 +5090,8 @@ def _routed_shapes(model, df, y, monkeypatch, **kw):
         return real(B_a, S_a, S_cell, W_cell, level_rows)
 
     monkeypatch.setattr(ops, "spline_cat_moments", spy)
-    row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=BUDGETS, **kw).iloc[0]
+    budgets = kw.pop("edf0", BUDGETS)
+    row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=budgets, **kw).iloc[0]
     return row, seen
 
 
@@ -5100,19 +5101,25 @@ class _UnpenalizedPSpline(PSpline):
 
 
 @pytest.mark.parametrize(
-    "max_cells, unpenalized, approximate",
-    [(5_000_000, False, True), (5_010_000, False, False), (5_000_000, True, False)],
+    "max_cells, unpenalized, approximate, budgets",
+    [
+        (5_000_000, False, True, BUDGETS),
+        (5_010_000, False, False, BUDGETS),
+        (5_000_000, True, False, BUDGETS),
+        (5_005_000, False, True, (2.0, 3000.0)),
+    ],
 )
 def test_variance_pass_budget_reaches_the_spline_binning_fallback(
-    monkeypatch, max_cells, unpenalized, approximate
+    monkeypatch, max_cells, unpenalized, approximate, budgets
 ):
-    """Two affordable passes cannot score a penalized pair; three can.
+    """Binning must remain reachable when the ladder's full cost does not fit.
 
     The exact 5094-point support fits the allocation gates, but leaves only
     two factor passes at the default budget. Binning must remain reachable
     so the final variance pass can be paid for. A slightly larger budget
-    affords all three passes and must keep the exact support. A zero penalty
-    needs only two passes and must also keep the exact support.
+    affords a single edge's variance and must keep the exact support. A zero
+    penalty needs only two passes and must also keep the exact support. Two
+    different clamped edges need four passes, so an allowance of three bins.
     """
     rng = np.random.default_rng(389)
     n = 5094
@@ -5123,12 +5130,37 @@ def test_variance_pass_budget_reaches_the_spline_binning_fallback(
     spline = _UnpenalizedPSpline(n_knots=8) if unpenalized else Spline(kind="ps", n_knots=8)
     model = SuperGLM(family="gaussian", features={"g": Categorical(), "x": spline}).fit_reml(df, y)
 
-    row, seen = _routed_shapes(model, df, y, monkeypatch, max_cells=max_cells)
+    row, seen = _routed_shapes(model, df, y, monkeypatch, max_cells=max_cells, edf0=budgets)
 
     assert np.isfinite(row["z"]), row.to_dict()
     assert bool(row["approx"]) is approximate
     assert seen["width"] == 11
     assert seen["support"] == (256 if approximate else n)
+
+
+def test_unaffordable_speculative_variance_reaches_dense_binning(monkeypatch):
+    """Restoring an unchanged dense state must not repeat the same handoff."""
+    rng = np.random.default_rng(390)
+    df = pd.DataFrame({"x": np.linspace(0, 1, 1000), "g": (np.arange(1000) % 6).astype(str)})
+    y = rng.normal(size=len(df))
+    model = SuperGLM(
+        family="gaussian", features={"x": Spline(kind="ps", n_knots=2), "g": Categorical()}
+    ).fit_reml(df, y)
+    visits = {}
+    real = ops._structured_evaluation_allowance
+
+    def finite_progress(*args):
+        visits[args] = visits.get(args, 0) + 1
+        # Guard the regression against hanging. On this fixed geometry,
+        # repeated visits without changing support or width make no progress.
+        assert visits[args] <= 8, f"Repeated unchanged routing state: {args}"
+        return real(*args)
+
+    monkeypatch.setattr(ops, "_structured_evaluation_allowance", finite_progress)
+    row = model.screen_interactions(df, y, candidates=[("x", "g")], max_cells=6250).iloc[0]
+    assert bool(row["approx"])
+    assert row["n_cells"] == 256 * 6
+    assert np.isfinite(row["z"])
 
 
 def test_the_structured_path_bins_rather_than_allocate_its_own_intermediate(monkeypatch):

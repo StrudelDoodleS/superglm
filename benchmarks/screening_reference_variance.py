@@ -33,7 +33,7 @@ from superglm.features import Categorical, Numeric, Spline
 
 def _sample(case, n, seed, strength):
     rng = np.random.default_rng(seed)
-    if case == "variance_budget":
+    if case in ("variance_budget", "variance_budget_two_edges"):
         x = np.linspace(0, 1, 5094)[np.arange(n) % 5094]
         group = np.arange(n) % 200
         rng.shuffle(group)
@@ -44,7 +44,9 @@ def _sample(case, n, seed, strength):
             np.sin(3 * x) + rng.normal(size=n),
             features,
             set(),
-            {"candidates": [("x", "g")], "edf0": (2.0, 4.0, 8.0, 16.0)},
+            {"candidates": [("x", "g")], "edf0": (2.0, 3000.0), "max_cells": 5_005_000}
+            if case == "variance_budget_two_edges"
+            else {"candidates": [("x", "g")], "edf0": (2.0, 4.0, 8.0, 16.0)},
         )
     if case in ("structured", "structured_wide"):
         wide = case == "structured_wide"
@@ -95,7 +97,12 @@ def _dispatch_counts():
     def wrap(name, function):
         def record(*args, **kwargs):
             counts[name] += 1
-            result = function(*args, **kwargs)
+            try:
+                result = function(*args, **kwargs)
+            except RuntimeError as error:
+                if type(error).__name__ == "_StructuredBudgetExceededError":
+                    counts[name + "_budget_refused"] += 1
+                raise
             if result is None:
                 counts[name + "_refused"] += 1
             return result
@@ -125,7 +132,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--case",
-        choices=("mixed", "structured", "structured_wide", "variance_budget"),
+        choices=(
+            "mixed",
+            "structured",
+            "structured_wide",
+            "variance_budget",
+            "variance_budget_two_edges",
+        ),
         default="mixed",
     )
     parser.add_argument("--rows", type=int, default=40_000)

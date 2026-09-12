@@ -2568,11 +2568,16 @@ def _reference_variance(p: SplineCatPair, geometry: _PairGeometry, lam: float) -
     return variance.value(edf)
 
 
+class _StructuredBudgetExceededError(RuntimeError):
+    """The ladder needs more factor passes than the routing budget allows."""
+
+
 def structured_ladder(
     p: SplineCatPair,
     *,
     budgets: tuple[float, ...] = (4.0,),
     max_evaluations: int | None = None,
+    raise_on_budget: bool = False,
 ) -> list[ScreenedPair] | None:
     """Score one spline x categorical pair at every budget, structurally.
 
@@ -2590,6 +2595,9 @@ def structured_ladder(
     establish which targets need bisection. Before searching, the ladder
     reserves the worst-case search cost and one variance pass per distinct
     final lambda. A pair that cannot fit this budget returns ``None``.
+    With ``raise_on_budget=True`` it raises ``_StructuredBudgetExceededError``
+    instead, so the caller can try binning without treating a numerical
+    certification failure as a work-budget refusal.
     ``None`` as the budget means unbounded work.
 
     For example, if all targets clamp to one edge, there are three passes:
@@ -2653,6 +2661,8 @@ def structured_ladder(
         # zero penalty would otherwise make the bracket below infinite and
         # every rung NaN, since inf * 0 is not a number.
         if max_evaluations is not None and max_evaluations < 2:
+            if raise_on_budget:
+                raise _StructuredBudgetExceededError
             return None
         evaluated = evaluate(0.0)
         if evaluated is None:
@@ -2718,6 +2728,8 @@ def structured_ladder(
     # Each distinct emitted lambda also needs one variance factorization.
     required = 2 + (_MAX_STEPS_PER_RUNG + 1) * len(searchable) + len(clamped)
     if max_evaluations is not None and required > max_evaluations:
+        if raise_on_budget:
+            raise _StructuredBudgetExceededError
         return None
 
     solved: dict[float, ScreenedPair | None] = {}

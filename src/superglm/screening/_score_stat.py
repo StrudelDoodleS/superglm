@@ -522,43 +522,44 @@ class ScreenedPair:
 
 @dataclass(frozen=True)
 class _Pencil:
-    """The pair ``(V_eff, S)`` diagonalized once, with ``U_eff`` rotated in.
+    """One factor decomposition for the pair's entire penalty ladder.
 
-    ``v`` and ``s`` are the two transformed diagonal terms and ``u`` the
-    rotated score, so a rung costs no arithmetic beyond
-    ``edf(lam) = sum v / (v + lam s)`` and ``T(lam) = sum u^2 / (v + lam s)``.
+    Normally ``v = cosine**2``, ``s = sine**2 / balance`` and ``u`` is the
+    rotated score. Each rung then evaluates ``sum(v / (v + lam*s))`` and
+    ``sum(u**2 / (v + lam*s))``. Both factors come from their own blocks in
+    the penalty singular-vector basis; neither is obtained by subtraction
+    from one. Before undoing balance, their squared sum is one.
 
-    **NEITHER TERM IS DERIVED FROM THE OTHER, AND THAT IS NEW.**  They are the
-    squared cosines and sines of the CS decomposition of one orthonormal
-    factor, taken from two independent singular value decompositions -- so
-    ``v + s == 1`` holds by orthonormality of that factor rather than being
-    imposed, and there is no ``1 - v`` anywhere for a direction with ``v``
-    rounding to 1 to fall through.  The form this replaces returned
-    ``s = (1 - share) / balance`` and had to argue, from measurement, that the
-    subtraction happened to be harmless; SCALE DISCIPLINE rule 2's one
-    tolerated site is closed rather than re-argued.
+    Exceptional penalty units use ``square_exponents``. The three arrays
+    then hold mantissas of the squared terms, including the squared score,
+    and the evaluators combine exponents before rounding the final moments.
 
-    ``v`` is ``c**2`` and ``s`` is ``s**2 / balance``, the balance being the
-    scaling that put the two blocks of the stack on one scale before they were
-    reduced together.  Undoing it is one division on a quantity that never
-    cancelled.
-
-    ``tr_v`` is ``tr(V_eff)`` of the block this pencil was built from, carried
-    out rather than recomputed by the caller.  It is the bracket's numerator
-    AND this pencil's own balance, and computing it twice is exactly how the
-    two came to disagree: the balance read :func:`_profiled_factor`'s block and
-    the bracket re-sliced ``joint``, which is a different matrix whenever the
-    overlap is rank deficient.  One field, one value, one place it is formed.
+    ``tr_v`` comes from the profiled design used here. ``tr_s`` is the
+    penalty factor's squared norm, with an optional power of two held in
+    ``penalty_exponent``. Balancing and the search bracket share these values.
     """
 
     v: NDArray
     s: NDArray
     u: NDArray
     tr_v: float
+    tr_s: float = 0.0
+    penalty_exponent: int = 0
+    # Exceptional penalty units require mantissa/exponent pairs. In that
+    # case v, s and u hold mantissas of the three squared terms, including
+    # the squared score. Ordinary pencils keep the direct representation.
+    square_exponents: tuple[NDArray, NDArray, NDArray] | None = None
 
 
-def _empty_pencil(tr_v: float = 0.0) -> _Pencil:
-    return _Pencil(v=np.zeros(0), s=np.zeros(0), u=np.zeros(0), tr_v=float(tr_v))
+def _empty_pencil(tr_v: float = 0.0, tr_s: float = 0.0, penalty_exponent: int = 0) -> _Pencil:
+    return _Pencil(
+        v=np.zeros(0),
+        s=np.zeros(0),
+        u=np.zeros(0),
+        tr_v=float(tr_v),
+        tr_s=tr_s,
+        penalty_exponent=penalty_exponent,
+    )
 
 
 def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
@@ -625,28 +626,48 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     tr_v = _pair_scale(R_eff)
     k = int(pair.tensor_width)
     balance = 1.0
+    tr_s = 0.0
+    penalty_exponent = 0
+    scaled = False
     if penalty_root is None or penalty_root.size == 0:
         root = np.zeros((0, k), dtype=np.float64)
     else:
         root = np.asarray(penalty_root, dtype=np.float64)
-        tr_s = float(np.sum(root**2))
+        with np.errstate(over="ignore", under="ignore"):
+            tr_s = float(np.sum(root**2))
+        proposed = tr_v / tr_s if tr_s > 0.0 else 1.0
+        scaled = (
+            not np.isfinite(tr_s)
+            or (tr_v > 0.0 and tr_s > 0.0 and not np.finfo(float).tiny <= proposed < np.inf)
+            or (tr_s == 0.0 and bool(np.any(root)))
+        )
+        if scaled:
+            # R_S = 2**e * root. Keep that power outside the squared terms:
+            # both a finite root's norm and its balancing ratio can exceed
+            # float64's range while lambda*S remains moderate.
+            peak = float(np.max(np.abs(root), initial=0.0))
+            if not np.isfinite(peak):
+                raise ValueError("penalty_root must contain only finite values")
+            exponent = int(np.frexp(peak)[1]) - 1
+            with np.errstate(under="ignore"):
+                root = np.ldexp(root, -exponent)
+            penalty_exponent = 2 * exponent
+            tr_s = float(np.sum(root**2))
         if tr_v > 0.0 and tr_s > 0.0:
             proposed = tr_v / tr_s
-            # Balancing is optional. A non-finite or zero ratio would erase
-            # finite factors; retain the unbalanced stack in that case.
             if np.isfinite(proposed) and proposed > 0.0:
                 balance = proposed
         root = np.sqrt(balance) * root
     if k == 0:
-        return _empty_pencil(tr_v)
+        return _empty_pencil(tr_v, tr_s, penalty_exponent)
 
     stack = np.concatenate((R_eff, root), axis=0)
-    orthonormal, triangular, _pivot = scipy.linalg.qr(
+    orthonormal, triangular, pivot = scipy.linalg.qr(
         stack, mode="economic", pivoting=True, check_finite=False
     )
     diagonal = np.abs(np.diag(triangular))
     if diagonal.size == 0 or float(diagonal[0]) <= np.finfo(np.float64).tiny:
-        return _empty_pencil(tr_v)
+        return _empty_pencil(tr_v, tr_s, penalty_exponent)
     # TWO DIFFERENT QUESTIONS, AND THEY GET TWO DIFFERENT REFERENCES.
     #
     # With a penalty, the cut asks what neither operand resolves: a direction
@@ -721,10 +742,20 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     )
     rank = int(np.count_nonzero(diagonal > cut))
     if rank == 0:
-        return _empty_pencil(tr_v)
+        return _empty_pencil(tr_v, tr_s, penalty_exponent)
 
     top = orthonormal[: R_eff.shape[0], :rank]
     bottom = orthonormal[R_eff.shape[0] :, :rank]
+    if scaled:
+        # Explicit Householder Q can round a tiny leading-block entry to
+        # zero. Recover Q1 from R_eff[:, pivot] = Q1 @ Rg on the retained
+        # columns, preserving the original small curvature and row score.
+        top = scipy.linalg.solve_triangular(
+            triangular[:rank, :rank].T,
+            R_eff[:, pivot[:rank]].T,
+            lower=True,
+            check_finite=False,
+        ).T
     # THE COMMON BASIS COMES FROM THE PENALTY BLOCK, AND WHICH BLOCK IT COMES
     # FROM IS THE WHOLE OF THE CONSTRUCTION'S ACCURACY.
     #
@@ -764,22 +795,79 @@ def _pair_pencil(pair: PairFactor, penalty_root: NDArray | None) -> _Pencil:
     else:
         sines = np.zeros(rank, dtype=np.float64)
         carried = top
+    if scaled:
+        # Squaring a small sine or cosine here would lose information before
+        # its physical exponent is restored. hypot also avoids squaring the
+        # columns while measuring their norms.
+        cosines = np.hypot.reduce(carried, axis=0)
+        cm, ce = np.frexp(np.clip(cosines, 0.0, 1.0))
+        sm, se = np.frexp(np.clip(sines, 0.0, 1.0))
+        um, ue = np.frexp(carried.T @ z_t)
+        bm, be = np.frexp(balance)
+        return _Pencil(
+            v=cm**2,
+            s=sm**2 / bm,
+            u=um**2,
+            tr_v=tr_v,
+            tr_s=tr_s,
+            penalty_exponent=penalty_exponent,
+            square_exponents=(2 * ce, 2 * se - be + penalty_exponent, 2 * ue),
+        )
     cosines = np.linalg.norm(carried, axis=0)
     return _Pencil(
         v=np.clip(cosines**2, 0.0, 1.0),
         s=np.clip(sines**2, 0.0, 1.0) / balance,
         u=carried.T @ z_t,
         tr_v=tr_v,
+        tr_s=tr_s,
+    )
+
+
+def _sum_scaled_positive(mantissas: NDArray, exponents: NDArray) -> float:
+    """Sum before final rounding, including individually subnormal terms."""
+    nonzero = mantissas > 0.0
+    if not np.any(nonzero):
+        return 0.0
+    exponent = int(np.max(exponents[nonzero]))
+    with np.errstate(under="ignore", over="ignore"):
+        total = np.sum(np.ldexp(mantissas[nonzero], exponents[nonzero] - exponent))
+        return float(np.ldexp(total, exponent))
+
+
+def _scaled_pencil_moments(p: _Pencil, lam: float) -> tuple[float, float, float]:
+    """EDF, statistic and variance without forming unrepresentable squares."""
+    assert p.square_exponents is not None
+    ve, se, ue = p.square_exponents
+    lm, le = np.frexp(lam)
+    penalty = lm * p.s
+    pe = se + le
+    de = np.maximum(ve, pe)
+    # A zero term's exponent carries no scale and must not set the divisor.
+    de = np.where(p.v == 0.0, pe, de)
+    de = np.where(penalty == 0.0, ve, de)
+    with np.errstate(under="ignore"):
+        den = np.ldexp(p.v, ve - de) + np.ldexp(penalty, pe - de)
+    filters = np.divide(p.v, den, out=np.zeros_like(p.v), where=den > 0.0)
+    scores = np.divide(p.u, den, out=np.zeros_like(p.u), where=den > 0.0)
+    fe = ve - de
+    return (
+        _sum_scaled_positive(filters, fe),
+        _sum_scaled_positive(scores, ue - de),
+        _sum_scaled_positive(filters**2, 2 * fe + 1),
     )
 
 
 def _pencil_edf(p: _Pencil, lam: float) -> float:
+    if p.square_exponents is not None:
+        return _scaled_pencil_moments(p, lam)[0]
     den = p.v + lam * p.s
     ok = den > 0.0
     return float(np.sum(p.v[ok] / den[ok]))
 
 
 def _pencil_stat(p: _Pencil, lam: float) -> float:
+    if p.square_exponents is not None:
+        return _scaled_pencil_moments(p, lam)[1]
     den = p.v + lam * p.s
     ok = den > 0.0
     return float(np.sum(p.u[ok] ** 2 / den[ok]))
@@ -787,13 +875,17 @@ def _pencil_stat(p: _Pencil, lam: float) -> float:
 
 def _pencil_reference_variance(p: _Pencil, lam: float) -> float:
     """Twice the sum of squared filters, for fixed Gaussian score geometry."""
+    if p.square_exponents is not None:
+        return _scaled_pencil_moments(p, lam)[2]
     den = p.v + lam * p.s
     ok = den > 0.0
     filters = p.v[ok] / den[ok]
     return 2.0 * float(np.sum(filters**2))
 
 
-def _lambda_bracket(scale: float) -> tuple[float, float]:
+def _lambda_bracket(
+    scale: float, *, denominator: float = 1.0, exponent: int = 0
+) -> tuple[float, float]:
     """Keep both search edges in the positive finite float64 range.
 
     A change of penalty units can move an edge beyond that range while the
@@ -802,13 +894,23 @@ def _lambda_bracket(scale: float) -> tuple[float, float]:
     """
     limits = np.finfo(np.float64)
     smallest, largest = float(limits.smallest_subnormal), float(limits.max)
+    if denominator != 1.0 or exponent != 0:
+        numerator_m, numerator_e = np.frexp(scale)
+        denominator_m, denominator_e = np.frexp(denominator)
+        ratio_m = numerator_m / denominator_m
+        ratio_e = int(numerator_e) - int(denominator_e) + exponent
+        with np.errstate(over="ignore", under="ignore"):
+            edges = np.ldexp(np.array([1e-10, 1e10]) * ratio_m, ratio_e)
+        return float(np.clip(edges[0], smallest, largest)), float(
+            np.clip(edges[1], smallest, largest)
+        )
     return (
         min(max(1e-10 * scale, smallest), largest),
         min(max(1e10 * scale, smallest), largest),
     )
 
 
-def _lambda_for_edf(p: _Pencil, edf0: float, scale: float) -> float:
+def _lambda_for_edf(p: _Pencil, edf0: float, bracket: tuple[float, float]) -> float:
     """Smallest-error ``lambda`` hitting ``edf0``, clamped to the bracket edges.
 
     ``edf(lambda)`` decreases monotonically from ``rank(V_eff)`` toward the
@@ -817,26 +919,29 @@ def _lambda_for_edf(p: _Pencil, edf0: float, scale: float) -> float:
     rather than failing it, and the achieved value is reported so a caller can
     see the budget was not met.
     """
-    lo, hi = _lambda_bracket(scale)
-    if _pencil_edf(p, lo) <= edf0:
+    lo, hi = bracket
+    edf_lo, edf_hi = _pencil_edf(p, lo), _pencil_edf(p, hi)
+    if edf_lo <= edf0:
         return lo
-    if _pencil_edf(p, hi) >= edf0:
+    if edf_hi >= edf0:
         return hi
-    lam = lo
     for _ in range(_MAX_BISECT):
         if hi <= lo * (1.0 + 1e-12):
-            break  # bracket exhausted at float resolution; nearest lam wins
+            break
         # The geometric mean is representable whenever both endpoints are;
         # their product can overflow or underflow after a change of units.
         lam = float(np.sqrt(lo) * np.sqrt(hi))
+        if not lo < lam < hi:
+            break  # Adjacent subnormal lambdas need not attain the target.
         achieved = _pencil_edf(p, lam)
         if abs(achieved - edf0) <= _EDF_TOL:
-            break
+            return lam
         if achieved > edf0:
-            lo = lam
+            lo, edf_lo = lam, achieved
         else:
-            hi = lam
-    return lam
+            hi, edf_hi = lam, achieved
+    # Choose by achieved EDF, with the smaller lambda breaking an exact tie.
+    return lo if abs(edf_lo - edf0) <= abs(edf_hi - edf0) else hi
 
 
 def penalized_score_statistic_ladder(
@@ -910,15 +1015,22 @@ def penalized_score_statistic_ladder(
     # ``OrderedCategorical`` geometry where it is not.  See
     # :func:`superglm.screening._pair_factor._pair_scale`.
     p = _pair_pencil(pair, root)
-    scale = max(p.tr_v, 1e-300) / max(float(np.sum(root**2)), 1e-300)
-    lo, hi = _lambda_bracket(scale)
+    if p.square_exponents is not None or p.penalty_exponent:
+        lo, hi = _lambda_bracket(
+            p.tr_v if p.tr_v > 0.0 else 1e-300,
+            denominator=p.tr_s if p.tr_s > 0.0 else 1e-300,
+            exponent=-p.penalty_exponent,
+        )
+    else:
+        scale = max(p.tr_v, 1e-300) / max(p.tr_s, 1e-300)
+        lo, hi = _lambda_bracket(scale)
     edf_lo, edf_hi = _pencil_edf(p, lo), _pencil_edf(p, hi)
 
     out: list[ScreenedPair] = []
     for budget in budgets:
         edf0 = float(budget)
         if edf_hi < edf0 < edf_lo:
-            lam = _lambda_for_edf(p, edf0, scale)
+            lam = _lambda_for_edf(p, edf0, (lo, hi))
         else:
             lam = lo if edf0 >= edf_lo else hi
         out.append(

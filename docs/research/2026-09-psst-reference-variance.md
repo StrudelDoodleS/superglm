@@ -301,20 +301,23 @@ allocation gates but has work allowance for only two factor passes. The
 penalized ladder needs at least three. The caller admitted the exact support,
 received a refusal and returned `NaN` without reaching its binning fallback.
 
-The caller now checks whether two passes can suffice after the allocation
-gates, using the built marginal penalty. A nonzero penalty reaches binning;
-a zero penalty can still use two passes on the exact support. The marginal
-cache avoids building that menu twice. Search and numerical refusals retain
-their existing contract.
+The first routing fix, `08a19c3e`, checked whether two passes could suffice
+after the allocation gates, using the built marginal penalty. A later review
+found that this special case did not cover every work-budget refusal. The
+current caller uses a distinct budget signal and resumes binning. A cheap
+minimum-pass check still runs before allocating cell tables; the ladder
+determines additional search and variance costs. Numerical certification
+failures retain their refusal contract.
 
 The public regression failed against `c2be0f6` with a non-finite score before
 the routing fix. It now passes, alongside controls that keep the exact
-support when the allowance is raised to three or the penalty is zero.
+support when the allowance is raised to four or the penalty is zero.
 `test_variance_pass_budget_reaches_the_spline_binning_fallback` runs a complete
 Gaussian fit and the real structured kernel in all three cases.
 
-`benchmarks/screening_reference_variance_review_receipt.json` records three
-complete fits and screens per revision after warmup, using the same
+`benchmarks/screening_reference_variance_review_receipt.json` records the
+original comparison against `08a19c3e`: three complete fits and screens per
+revision after warmup, using the same
 5,094-row dataset and seed 389:
 
 | Measurement | Before routing fix | After routing fix |
@@ -390,3 +393,100 @@ receipts, profile counts and observed QR shapes are in
 `benchmarks/screening_reference_variance_review_receipt.json`. Reproduce the
 timings with `--case structured_wide --rows 200000 --repeats 3`; run the same
 command separately under `python -m cProfile` for attribution.
+
+## Follow-up review: routing progress and extreme penalty units
+
+[Codex reproduced an infinite routing loop](https://github.com/StrudelDoodleS/superglm/pull/389#discussion_r3997759709)
+at 1,000 spline support points, width five, six factor levels and
+`max_cells=6250`. The dense path tried the structured path before binning.
+Its two-pass special case restored the unchanged dense state, which tried
+the same handoff again. A regression limits repeated visits to an unchanged
+routing state so this defect fails without hanging the test process.
+
+The ladder now distinguishes work-budget refusals from numerical refusals.
+A budget refusal resumes binning, and a failed speculative handoff latches
+so the caller cannot repeat it. This also addresses
+[Claude's two-edge concern](https://github.com/StrudelDoodleS/superglm/pull/389#issuecomment-5648872796).
+On the 5,094-point, width-11, 200-level fixture, `max_cells=5_005_000` affords
+three passes. Budgets `(2, 3000)` clamp to different edges and need four.
+The previous commit returned `NaN`; the new path bins and scores the pair.
+Both public failures were reproduced against `9817a76c`, with the three
+existing routing controls passing.
+
+[Codex also found a finite-root overflow](https://github.com/StrudelDoodleS/superglm/pull/389#discussion_r3997759711).
+For an identity design and penalty root `2**538 * I`, squaring the root
+overflows. Yet at the smallest positive float64 lambda, the physical penalty
+is `4*I`. The correct filters are all `1/5`, giving EDF `0.8`, reference
+variance `0.32`, and statistic `6` for row score `(1, 2, 3, 4)`.
+
+When the penalty norm or balancing ratio exceeds the ordinary representation,
+the dense path now writes `rootS = 2**e * scaled_rootS`. It carries that
+exponent through balancing and the lambda bracket. Each squared cosine,
+sine and rotated score keeps its own mantissa and exponent. Thus a small
+direction survives until multiplication by the physical lambda. The
+denominator contains only nonnegative aligned terms. Moment terms are summed
+before final float64 rounding, since several individually unrepresentable
+terms can have a representable total.
+
+The exceptional path also recovers the curvature block of Q by solving
+against the retained triangular factor. Forming Q explicitly can round a
+tiny entry to zero even when the balanced stack is well conditioned. The
+ordinary path retains its existing arithmetic and rank policy. This change
+does not certify arbitrary ill-conditioned factors or recover information
+already lost in the input or decomposition.
+
+Independent diagonal regressions cover the uniform example, a penalty null
+direction, `diag(2**538, 1)` at lambda one, and a tiny curvature and score
+direction whose correct moments are `(1.5, 1.5, 2.5)`. Further cases preserve
+subnormal moment totals and recover a bracket whose intermediate trace
+quotient underflows. All eight added range cases fail on the previous code.
+
+At extreme scales, a requested EDF can lie between adjacent representable
+lambdas. For the uniform example, EDF is `0.8` at the smallest lambda and
+`4/9` at twice that lambda. Targets `0.7` and `0.6` therefore select different
+endpoints. The dense search chooses the closest achieved EDF when its
+midpoint cannot advance, breaking an exact tie with the smaller lambda.
+The structured path's separate numerical certification policy is unchanged.
+
+Five small factor-reconstruction probes include a rotated full-rank case.
+Their retained triangular condition numbers range from 1 to 2.072. With
+`d = max(stack.shape)`, the measured orthogonality defect divided by
+`d*eps*cond(R11)` is at most 0.154; relative reconstruction residuals divided
+by `d*eps` are at most 0.127. The largest absolute moment error against the
+analytic or positive-definite oracle is `6.67e-16`. These scaled residuals
+are diagnostics, not proved error bounds. Reproduce them with:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 \
+  uv run --no-sync python benchmarks/screening_extreme_penalty.py \
+  --output /tmp/closure.json
+```
+
+### Cost after the follow-up fixes
+
+The same complete-fit benchmark compared `9817a76c` with the follow-up
+source in separate processes, with three fits and screens after warmup.
+The first two cases use 200,000 rows; the budget cases use 5,094 rows and
+seed 389. The thread limits and package versions are those reported above.
+
+| Case | Fit median, before / after | Screen median, before / after | Process peak RSS, before / after |
+|---|---|---|---|
+| Eleven dense pairs | 3.402 / 3.234 s | 0.218 / 0.220 s | 517.469 / 502.285 MiB |
+| Width 45, 34 levels | 0.429 / 0.406 s | 0.288 / 0.258 s | 512.113 / 513.719 MiB |
+| One clamped edge, two affordable passes | 0.107 / 0.124 s | 0.090 / 0.106 s | 410.945 / 400.188 MiB |
+| Two clamped edges, three affordable passes | 0.111 / 0.107 s | 0.278 / 0.356 s | 442.020 / 442.203 MiB |
+
+Recorded fit EDF, deviance, dispersion, held-out loss and prediction
+summaries are identical in all four comparisons. Screening tables and
+dispatch are identical in the first three. The last case changes from a
+refusal to a finite binned score, `z=1.422649`. It pays for an exact budget
+refusal and then a binned structured call. The cheap minimum-pass check
+keeps the third case at one binned call. These repetitions support no
+general speed or memory improvement claim.
+
+`benchmarks/screening_reference_variance_round3_receipt.json` contains the
+paired runs, source hashes and factor-reconstruction results. The benchmark
+case names are `mixed`, `structured_wide`, `variance_budget` and
+`variance_budget_two_edges`. Local verification passed 423 screening and
+design-factor tests with real data required and no skips. After restoring
+the cheap preflight check, all 165 structured and variance tests passed again.

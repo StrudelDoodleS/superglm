@@ -288,8 +288,8 @@ constant cutoff gets wrong here and the width-scaled bar gets right.
 Two things that follow are established and one is not, so it is worth
 separating them up front.
 
-**Established.** Mallows' Cp, written on PSST's own `z` scale, is an *exact*
-restatement rather than an approximation — `z > sqrt(edf0/2)` is the same
+**Established.** For the unpenalized Gaussian rows measured here, Mallows' Cp
+has an exact restatement on PSST's `z` scale. `z > sqrt(edf0/2)` is the same
 statement as `T/φ > 2·edf0`, and the bar it implies grows with the block's df.
 The *shape* of a score carries information its total does not: at deliberately
 matched `z`, a truth concentrated in five cells and a diffuse one are separated
