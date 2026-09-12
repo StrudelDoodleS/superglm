@@ -434,6 +434,11 @@ tiny entry to zero even when the balanced stack is well conditioned. The
 ordinary path retains its existing arithmetic and rank policy. This change
 does not certify arbitrary ill-conditioned factors or recover information
 already lost in the input or decomposition.
+The recovered Q1 block has a conditioning-dependent solve error and need
+not share the explicit Q's orthogonality error. Root entries outside float64's
+range after rescaling can round to zero. These range regressions exercise
+the internal factor-scoring functions; they do not establish an extreme-value
+failure reached through `screen_interactions`.
 
 Independent diagonal regressions cover the uniform example, a penalty null
 direction, `diag(2**538, 1)` at lambda one, and a tiny curvature and score
@@ -490,3 +495,39 @@ case names are `mixed`, `structured_wide`, `variance_budget` and
 `variance_budget_two_edges`. Local verification passed 423 screening and
 design-factor tests with real data required and no skips. After restoring
 the cheap preflight check, all 165 structured and variance tests passed again.
+
+## Final routing check: retry after support changes
+
+Both [Codex](https://github.com/StrudelDoodleS/superglm/pull/389#discussion_r3997877878)
+and [Claude](https://github.com/StrudelDoodleS/superglm/pull/389#discussion_r3997883761)
+found that the speculative refusal flag survived binning. If the dense
+intermediate still did not fit, it blocked an affordable structured retry.
+The budget flag now clears when a support is binned. Numerical certification
+failures keep their existing refusal policy for the pair. Each reset follows
+a monotone bin flag change, so it cannot reintroduce the loop on unchanged
+support.
+
+Two complete-fit regressions fail against `9af47afe` and pass with the fix:
+
+- A width-six natural spline, 71 levels and 1,557 support points at
+  `max_cells=221206` has 120 structured passes before binning and 393 after.
+  Its four searchable targets become affordable on 256 points, while the
+  dense intermediate remains too large.
+- A width-five P-spline, 20 levels and 300 support points at `max_cells=6800`
+  has two passes before binning and twelve after. The cheap preflight refuses
+  the exact support; the binned structured route can score it.
+
+A third case injects a geometry certification failure on the exact support.
+It remains refused after binning. Clearing a shared budget/numerical flag
+makes this control fail by publishing a score, which is why the two flags
+are separate. All 124 structured, routing and cost tests pass after the fix.
+
+Three complete fits and screens per revision on the natural-spline fixture
+preserve the recorded fit summaries. The previous screen returns `NaN` in
+0.029 seconds; the corrected screen returns `z=2.272069` in 0.251 seconds,
+including the exact budget refusal and the successful binned search. Fit
+medians are 0.177 and 0.173 seconds. Process peak RSS is 407.621 and
+393.965 MiB; these process measurements establish no memory improvement.
+The raw runs and source hashes are in
+`benchmarks/screening_reference_variance_routing_receipt.json`. Reproduce
+with `--case structured_search_retry --rows 1557 --seed 391 --repeats 3`.
