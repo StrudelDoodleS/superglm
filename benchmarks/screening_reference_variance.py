@@ -33,6 +33,19 @@ from superglm.features import Categorical, Numeric, Spline
 
 def _sample(case, n, seed, strength):
     rng = np.random.default_rng(seed)
+    if case == "variance_budget":
+        x = np.linspace(0, 1, 5094)[np.arange(n) % 5094]
+        group = np.arange(n) % 200
+        rng.shuffle(group)
+        frame = pd.DataFrame({"x": x, "g": group.astype(str)})
+        features = {"g": Categorical(), "x": Spline(kind="ps", n_knots=8)}
+        return (
+            frame,
+            np.sin(3 * x) + rng.normal(size=n),
+            features,
+            set(),
+            {"candidates": [("x", "g")], "edf0": (2.0, 4.0, 8.0, 16.0)},
+        )
     if case == "structured":
         x = rng.integers(0, 101, n) / 100
         group = rng.integers(0, 160, n)
@@ -100,7 +113,9 @@ def _fit(frame, y, features, interactions=()):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", choices=("mixed", "structured"), default="mixed")
+    parser.add_argument(
+        "--case", choices=("mixed", "structured", "variance_budget"), default="mixed"
+    )
     parser.add_argument("--rows", type=int, default=40_000)
     parser.add_argument("--seed", type=int, default=20260912)
     parser.add_argument("--strength", type=float, default=0.2)
@@ -132,6 +147,11 @@ def main():
     baseline_loss = float(np.sum((y_holdout - predictions[-1]) ** 2))
     candidates = table.to_dict(orient="records")
     for row in candidates:
+        # Refused pairs remain in the receipt as null scores, rather than
+        # making a before/after regression measurement impossible to save.
+        for key, value in row.items():
+            if isinstance(value, float) and not np.isfinite(value):
+                row[key] = None
         pair = (row["feature_a"], row["feature_b"])
         row["planted"] = pair in planted or pair[::-1] in planted
         if args.refit:
