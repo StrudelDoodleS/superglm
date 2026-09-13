@@ -507,13 +507,6 @@ def draw(ax, title, model):
     ax.set_xlabel("x")
 
 
-fig_pair, axes = plt.subplots(1, 2, figsize=(9, 3.8), sharey=True)
-for ax, (title, model) in zip(axes, fits[:2]):
-    draw(ax, title, model)
-axes[0].set_ylabel("y")
-axes[0].legend(loc="upper right")
-fig_pair.tight_layout()
-
 fig_three, axes = plt.subplots(1, 3, figsize=(9, 3.0), sharey=True)
 for ax, (title, model) in zip(axes, fits):
     draw(ax, title, model)
@@ -521,32 +514,6 @@ axes[0].set_ylabel("y")
 axes[0].legend(loc="upper right")
 fig_three.tight_layout()
 glue("lambda-triptych", fig_three, display=False)
-```
-
-```{code-cell} ipython3
-:tags: [remove-cell]
-
-# The landing page pastes fig_pair from here with MyST-NB's cross-document
-# glue, which carries HTML across documents but not image files, so the figure
-# travels as an inline data URI.
-import base64
-import io
-
-from IPython.display import HTML
-
-buffer = io.BytesIO()
-fig_pair.savefig(buffer, format="png")
-encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-glue(
-    "lambda-zero-vs-reml",
-    HTML(
-        f'<img src="data:image/png;base64,{encoded}" '
-        'alt="Two fits of the same data: no penalty on the left, the REML penalty on the right" '
-        'style="max-width: 100%; height: auto;">'
-    ),
-    display=False,
-)
-plt.close(fig_pair)
 ```
 
 ```{glue:figure} lambda-triptych

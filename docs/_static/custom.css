@@ -267,30 +267,6 @@ html[data-theme="dark"] .bd-content .sg-hero .sg-hero__logo img {
   }
 }
 
-/* A figure pasted across documents by MyST-NB's glue arrives as a container
-   holding an image and a paragraph, not as a <figure>/<figcaption>; style the
-   container so the caption reads as a caption. */
-.sg-figure {
-  margin: 1.75rem 0;
-  text-align: center;
-}
-
-.sg-figure img {
-  max-width: 100%;
-  height: auto;
-  border: 2px solid var(--sg-ink);
-  box-shadow: 4px 4px 0 var(--sg-shadow);
-}
-
-.sg-figure > p:last-child {
-  margin-top: 0.75rem;
-  margin-bottom: 0;
-  font-size: 0.9em;
-  line-height: 1.5;
-  color: var(--pst-color-text-muted);
-  text-align: left;
-}
-
 /* Plain-words and tariff callouts on explanation pages. */
 div.admonition.sg-plain > .admonition-title,
 div.admonition.sg-pricing > .admonition-title {
