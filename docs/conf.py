@@ -50,15 +50,6 @@ exclude_patterns = [
 # docs/ until Task 10 moves and converts them. Excluding them keeps the
 # strict build to the new tree. Delete this block in Task 10.
 exclude_patterns += [
-    "api/diagnostics.md",
-    "api/distributional.md",
-    "api/families.md",
-    "api/features.md",
-    "api/inference.md",
-    "api/model_selection.md",
-    "api/penalties.md",
-    "api/plotting.md",
-    "api/validation.md",
     "audit/**",
     "development/**",
     "getting-started/**",
@@ -146,14 +137,50 @@ nitpick_ignore_regex = [
     ("py:class", r"_(CoefRow|BasisDetailRow)"),
     # Display helper for summary levels; not exported, so no page.
     ("py:class", r"SummaryLevelDisplay"),
-    # TEMPORARY: these four ARE in ``superglm.__all__`` and get their pages
-    # from the twelve API pages Task 9 writes; until those pages exist the
-    # unqualified references in docstrings have nothing to bind to.
-    # Delete these two lines in Task 9 and confirm the strict build stays
-    # green; if an unqualified name still does not bind, qualify it in the
-    # docstring rather than restoring the ignore.
-    ("py:class", r"FactorSmoothResult|RandomEffectResult"),
-    ("py:class", r"TermInference|InteractionInference"),
+    # NumPy scalar types and the private array-like alias: numpy's inventory
+    # carries no page for them, so an annotation can never bind.
+    ("py:class", r"numpy\.(float64|int64)"),
+    ("py:class", r"numpy\._typing\._array_like\.ArrayLike"),
+    # Abbreviated module alias used in hand-written docstring type lines.
+    ("py:class", r"pd\.(DataFrame|Series)"),
+    # numpydoc splits a type line at the first comma, so a subscripted generic
+    # arrives truncated (``dict[str``) and is not a name at all.
+    ("py:class", r"(dict|tuple|list|set|frozenset|collections\.abc\.Mapping)\[.*"),
+    ("py:obj", r"typing\.Literal\[.*"),
+    # Third-party objects named without their module in a type line:
+    # matplotlib's ``Figure`` and ``Axes``, and ``pathlib``'s ``Path``.
+    ("py:class", r"Figure|Axes|Path"),
+    # Bare spellings of the internal types dispositioned just below, as they
+    # appear in hand-written type lines: ``Link`` (link base), ``TermInput``
+    # (term alias), ``GroupSlice`` (design-matrix record), ``_SplineBase``.
+    ("py:class", r"Link|TermInput|GroupSlice|_SplineBase"),
+    # Internal implementation types that ``superglm.__all__`` does not export,
+    # so autosummary makes no page and a reference can never bind: the
+    # distributional engine's family plans, parameter predictors, fit results
+    # and check records under ``superglm.distributional`` (including
+    # ``SuperLSSTrainingTelemetry``); the design-matrix records
+    # ``DiscreteTensorBuildResult`` / ``GroupInfo`` / ``GroupSlice`` /
+    # ``TensorMarginalInfo`` under ``superglm.types``; ``EagerFrame``;
+    # ``InteractionSpec`` and the ``TermInput`` alias under ``superglm.terms``;
+    # the spline base classes and ``StructuralContrastRow`` under
+    # ``superglm.features``; ``Flavor`` under ``superglm.penalties.base``;
+    # ``_CPGRNG`` under ``superglm.profiling.tweedie``; and
+    # ``EditMaterializationRequest`` under ``superglm.editor``.
+    (
+        "py:class",
+        r"superglm\.(distributional\..*"
+        r"|types\.(DiscreteTensorBuildResult|GroupInfo|GroupSlice"
+        r"|TensorMarginalInfo)"
+        r"|_frame\.EagerFrame"
+        r"|terms\.(InteractionSpec|TermInput)"
+        r"|features\.(piecewise\.StructuralContrastRow|spline\._B?SplineBase)"
+        r"|penalties\.base\.Flavor"
+        r"|profiling\.tweedie\._CPGRNG"
+        r"|editor\.evaluation_cache\.EditMaterializationRequest)",
+    ),
+    # The ``superglm.families`` module page summarises its factory functions;
+    # they are module members rather than exported names, so they get no page.
+    ("py:obj", r"superglm\.families\.(binomial|gamma|gaussian|nb2|poisson|tweedie)"),
 ]
 
 # Redirects from the MkDocs site's URLs

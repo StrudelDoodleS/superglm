@@ -1843,7 +1843,7 @@ class SuperGLM:
         *,
         n_grid: int = 500,
     ) -> SuperGLM:
-        """Compatibility alias for :meth:`monotonize`."""
+        """Compatibility alias for :meth:`superglm.SuperGLM.monotonize`."""
         return self.monotonize(X, sample_weight, offset, n_grid=n_grid)
 
     # ── Diagnostics ───────────────────────────────────────────────

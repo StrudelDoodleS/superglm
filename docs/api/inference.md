@@ -1,36 +1,22 @@
-# Inference
+# Inference results
 
-## Term inference
+The objects returned by `term_inference`, `random_effects`, `factor_smooth`,
+the shape-repair methods and the spline diagnostics. They are plain data
+containers; the model methods that produce them are documented on the
+[model page](model.md).
 
-::: superglm.TermInference
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
 
-::: superglm.InteractionInference
-
-::: superglm.SplineMetadata
-
-## Credibility
-
-::: superglm.RandomEffectResult
-
-`FactorSmoothResult` is basis-aware. FS tables include local credibility,
-shrinkage, and collapse diagnostics. SZ tables report symmetric raw-level EDF
-and support without those labels; `collapsed` is `None`, and
-`diagnostics["max_abs_level_effect_sum"]` audits the pointwise constraint.
-
-::: superglm.FactorSmoothResult
-
-## REML
-
-::: superglm.REMLResult
-
-## Profile estimation
-
-::: superglm.NBProfileResult
-
-::: superglm.TweedieProfileResult
-
-::: superglm.estimate_nb_theta
-
-::: superglm.estimate_tweedie_p
-
-::: superglm.estimate_phi
+   superglm.TermInference
+   superglm.SmoothCurve
+   superglm.InteractionInference
+   superglm.SplineMetadata
+   superglm.RandomEffectResult
+   superglm.FactorSmoothResult
+   superglm.MonotoneRepairer
+   superglm.MonotoneRepairResult
+   superglm.SplineRedundancyReport
+```

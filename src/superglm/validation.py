@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class LiftChartResult:
-    """Result from :func:`lift_chart`.
+    """Result from :func:`superglm.lift_chart`.
 
     Attributes
     ----------
@@ -42,7 +42,7 @@ class LiftChartResult:
 
 @dataclass(frozen=True)
 class DoubleLiftChartResult:
-    """Result from :func:`double_lift_chart`.
+    """Result from :func:`superglm.double_lift_chart`.
 
     Attributes
     ----------
@@ -62,7 +62,7 @@ class DoubleLiftChartResult:
 
 @dataclass(frozen=True)
 class LorenzCurveResult:
-    """Result from :func:`lorenz_curve`.
+    """Result from :func:`superglm.lorenz_curve`.
 
     Attributes
     ----------
@@ -90,7 +90,7 @@ class LorenzCurveResult:
 
 @dataclass(frozen=True)
 class LossRatioChartResult:
-    """Result from :func:`loss_ratio_chart`.
+    """Result from :func:`superglm.loss_ratio_chart`.
 
     Attributes
     ----------
