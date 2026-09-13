@@ -457,7 +457,7 @@ elsewhere, URL redirected), notes (moved to `notes/`, not built).
 | models/distributional-inference.md | how-to/check-a-distributional-fit.md | keep, light edit | PR-10 |
 | development/releases.md | development/releases.md | keep; agent runbook lines → `.codex/agents` reference | PR-12 |
 | development/migrations/*.md (3) | development/migrations/*.md | keep; stamp versions | PR-12 |
-| development/cost-and-timing.md | governance/reproducibility.md | split → internals/benchmarking-policy | PR-12 |
+| development/cost-and-timing.md | development/cost-and-timing.md | stays under Development until PR-12 splits it: policy half → governance/reproducibility.md, machine half → internals/benchmarking-policy.md | PR-12 |
 | development/python-support.md | governance/python-support.md | keep | — |
 | development/data-and-solver-boundaries.md | development/internals/ | keep | — |
 | distributional-family-development.md | development/internals/ | keep | — |

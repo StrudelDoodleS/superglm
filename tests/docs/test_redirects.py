@@ -7,6 +7,7 @@ map lists the source document rediraffe writes for each one
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,3 +42,15 @@ def test_every_legacy_url_has_a_redirect() -> None:
 def test_every_redirect_target_exists() -> None:
     dangling = [new for new in redirect_map().values() if not (DOCS / new).exists()]
     assert dangling == [], f"redirect targets that are not pages: {dangling}"
+
+
+CONF = ROOT / "docs" / "conf.py"
+
+
+def test_conf_loads_the_redirect_file_this_test_reads() -> None:
+    """A rename of either side would leave a green test and zero emitted redirects."""
+    match = re.search(
+        r'^rediraffe_redirects\s*=\s*"([^"]+)"', CONF.read_text(encoding="utf-8"), re.M
+    )
+    assert match is not None, "docs/conf.py does not set rediraffe_redirects"
+    assert match.group(1) == REDIRECTS.name

@@ -63,7 +63,7 @@ nb_execution_mode = os.environ.get("SUPERGLM_DOCS_EXECUTE", "cache")
 nb_execution_cache_path = str(HERE / "_build" / ".jupyter_cache")
 nb_execution_timeout = 900
 nb_execution_raise_on_error = True
-nb_execution_excludepatterns = ["examples/*.ipynb"]
+nb_execution_excludepatterns = ["examples/*.ipynb", "*/examples/*.ipynb", "**/examples/*.ipynb"]
 nb_merge_streams = True
 
 # docs/examples/mtpl2_frequency_walkthrough.ipynb carries two stored figures in
@@ -140,11 +140,11 @@ nitpick_ignore_regex = [
     ("py:obj", r"typing\.Literal\[.*"),
     # Third-party objects named without their module in a type line:
     # matplotlib's ``Figure`` and ``Axes``, and ``pathlib``'s ``Path``.
-    ("py:class", r"Figure|Axes|Path"),
+    ("py:class", r"^(Figure|Axes|Path)$"),
     # Bare spellings of the internal types dispositioned just below, as they
     # appear in hand-written type lines: ``Link`` (link base), ``TermInput``
     # (term alias), ``GroupSlice`` (design-matrix record), ``_SplineBase``.
-    ("py:class", r"Link|TermInput|GroupSlice|_SplineBase"),
+    ("py:class", r"^(Link|TermInput|GroupSlice|_SplineBase)$"),
     # Internal implementation types that ``superglm.__all__`` does not export,
     # so autosummary makes no page and a reference can never bind: the
     # distributional engine's family plans, parameter predictors, fit results
@@ -159,7 +159,7 @@ nitpick_ignore_regex = [
     # ``EditMaterializationRequest`` under ``superglm.editor``.
     (
         "py:class",
-        r"superglm\.(distributional\..*"
+        r"superglm\.(" + "distributional\\.(api\\.SuperLSSTrainingTelemetry|checks\\.(binned\\.BinnedCheck(2D)?|calibration\\.(ActualExpected|CalibrationPayload)|compare\\.Comparison)|families\\._predictors\\.(LocationPredictor|MeanPredictor|ScalePredictor|ShapePredictor|SkewPredictor|ThetaPredictor|TweediePredictors)|family\\.(DistributionalFamily|FamilyLikelihoodPlan)|model\\.DenseDistributionalModel|posterior\\.PosteriorDraws|residuals\\.ResidualSet|results\\.fit\\.DistributionalFitResult|surfaces\\.(DensityFan|Portfolio|RiskCurves|Spread)|terms\\.(ParameterTermEffect|TermTest)|timing\\.FitPhaseRecorder)"
         r"|types\.(DiscreteTensorBuildResult|GroupInfo|GroupSlice"
         r"|TensorMarginalInfo)"
         r"|_frame\.EagerFrame"

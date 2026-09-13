@@ -53,26 +53,29 @@ class _PythonBlock:
         return f"{self.path.relative_to(_ROOT)}#python-{self.index}-line-{self.line}"
 
 
-# The narrative guide, page by page. These are the former ``guide/`` tree's
-# pages after the Diátaxis move; listing them keeps the covered pages identical
-# to what the directory glob used to select, since ``docs/how-to`` and
-# ``docs/explanation`` also received pages from elsewhere in the old tree.
-_PUBLISHED_GUIDE_PAGES = (
-    "docs/explanation/credibility-as-smoothing.md",
-    "docs/explanation/families-and-weights.md",
-    "docs/explanation/solvers-and-internals.md",
-    "docs/explanation/what-screening-does.md",
-    "docs/how-to/choose-a-fitting-path.md",
-    "docs/how-to/compare-models-on-holdout.md",
-    "docs/how-to/constrain-a-smooth.md",
-    "docs/how-to/deploy-a-fitted-model.md",
-    "docs/how-to/read-a-summary-and-plot-effects.md",
-    "docs/how-to/recommended-workflows.md",
-    "docs/how-to/screen-interactions.md",
-    "docs/how-to/specify-features.md",
-    "docs/how-to/specify-interactions.md",
-    "docs/tutorials/edit-a-model-in-the-browser.md",
-)
+# Every how-to and explanation page is covered by default, plus the editor
+# tutorial. A page whose Python blocks cannot run as published is listed in
+# ``_EXEMPT_PAGES`` with the reason, so each gap is one visible line here rather
+# than a silent omission when a new page lands.
+_EXEMPT_PAGES: dict[str, str] = {
+    "docs/how-to/fit-a-distributional-model.md": (
+        "documents SuperLSS; this harness doubles SuperGLM fitting only, so blocks "
+        "that call SuperLSS methods cannot execute here"
+    ),
+    "docs/how-to/check-a-distributional-fit.md": (
+        "documents SuperLSS; its second block calls residuals(), which the SuperGLM "
+        "doubles do not provide"
+    ),
+}
+
+
+def _published_pages() -> list[Path]:
+    sections = (_ROOT / "docs" / "how-to", _ROOT / "docs" / "explanation")
+    candidates = [
+        p for section in sections for p in sorted(section.glob("*.md")) if p.name != "index.md"
+    ]
+    candidates.append(_ROOT / "docs" / "tutorials" / "edit-a-model-in-the-browser.md")
+    return [p for p in candidates if str(p.relative_to(_ROOT)) not in _EXEMPT_PAGES]
 
 
 def _python_blocks(path: Path) -> list[str]:
@@ -80,7 +83,7 @@ def _python_blocks(path: Path) -> list[str]:
 
 
 def _published_python_blocks() -> list[_PythonBlock]:
-    paths = [_ROOT / "README.md", *(_ROOT / name for name in _PUBLISHED_GUIDE_PAGES)]
+    paths = [_ROOT / "README.md", *_published_pages()]
     published: list[_PythonBlock] = []
     for path in paths:
         text = path.read_text(encoding="utf-8")

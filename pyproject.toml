@@ -135,7 +135,7 @@ norecursedirs = ["scratch"]
 markers = [
     "browser: runs real-browser editor integration tests",
     "slow: marks tests that fit real models (deselect with '-m \"not slow\"')",
-    "docs: executes documentation notebooks and checks docs conventions (deselect with '-m \"not docs\"')",
+    "docs: executes documentation notebooks (deselect with '-m \"not docs\"')",
 ]
 filterwarnings = [
     "ignore:Spline\\(kind='bs'\\):FutureWarning",

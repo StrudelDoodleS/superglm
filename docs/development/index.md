@@ -8,6 +8,7 @@ repository under [`notes/`](https://github.com/StrudelDoodleS/superglm/tree/mast
 :maxdepth: 1
 
 releases
+cost-and-timing
 migrations/group-pricing-rank
 migrations/weight-semantics-prior
 migrations/family-bound-predictors

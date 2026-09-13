@@ -499,7 +499,7 @@ another predictor count. Reopen only with a concrete use case and validating evi
   log/tail scores, calibration and total cost on multiple books; novelty claims
   do not establish predictive value. Revalidate the dossier's dated competitor
   claims.
-- Follow the [cost and timing policy](../docs/governance/reproducibility.md): record
+- Follow the [cost and timing policy](../docs/development/cost-and-timing.md): record
   exact revision/data/configuration, stopping status, work/allocation and
   dispatch. Use raw worker clocks and artifacts, with an activity audit during
   each timing run; tool completion clocks are not fit timings.

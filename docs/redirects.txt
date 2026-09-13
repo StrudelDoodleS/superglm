@@ -9,7 +9,7 @@ api/model_selection/index.md                          api/validation-and-diagnos
 api/penalties/index.md                                api/penalties.md
 api/plotting/index.md                                 api/plotting.md
 api/validation/index.md                               api/validation-and-diagnostics.md
-development/cost-and-timing/index.md                  governance/reproducibility.md
+development/cost-and-timing/index.md                  development/cost-and-timing.md
 development/data-and-solver-boundaries/index.md       development/internals/data-and-solver-boundaries.md
 development/migrations/family-bound-predictors/index.md development/migrations/family-bound-predictors.md
 development/migrations/group-pricing-rank/index.md    development/migrations/group-pricing-rank.md

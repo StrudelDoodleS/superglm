@@ -14,7 +14,8 @@ on:
 
 concurrency:
   group: docs-deploy
-  cancel-in-progress: true
+  # Never cancel an in-flight production deploy; queued runs still serialise.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -29,10 +30,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
 
-      - run: uv python install 3.12
+      - run: uv python install 3.14
 
       - name: Install docs dependencies
-        run: uv sync --python 3.12 --group docs --extra plotting
+        run: uv sync --locked --python 3.14 --group docs --extra plotting
 
       - name: Cache OpenML downloads
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -69,7 +70,5 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
-
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
