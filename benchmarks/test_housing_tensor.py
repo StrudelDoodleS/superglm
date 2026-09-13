@@ -1,8 +1,11 @@
 """Protect the benchmark's timeout and data-identity boundaries."""
 
+import json
 import os
 import sys
+from types import SimpleNamespace
 
+import benchmark_housing_tensor as benchmark
 import numpy as np
 import pandas as pd
 import pytest
@@ -63,3 +66,41 @@ def test_import_from_another_checkout_is_not_attributed_to_this_source(tmp_path)
     (package / "__init__.py").write_text("__version__ = 'different'\n")
     with pytest.raises(RuntimeError, match="imported SuperGLM"):
         source_fingerprint(package)
+
+
+@pytest.mark.parametrize("change", ["columns", "operation"])
+def test_changed_preprocessing_is_refused(monkeypatch, change):
+    frame = pd.DataFrame(np.full((20640, len(COLUMNS)), 2.0), columns=COLUMNS)
+    frame["MedHouseVal"] = 1.0
+    raw_identity = data_fingerprint(frame)
+    splits, _ = prepare_data(frame, expected_fingerprint=raw_identity)
+    feature_identity = benchmark.feature_fingerprint(splits)
+    if change == "columns":
+        monkeypatch.setattr(benchmark, "LOG_COLUMNS", ("AveRooms", "AveBedrms", "AveOccup"))
+    else:
+        monkeypatch.setattr(np, "log1p", np.sqrt)
+    with pytest.raises(ValueError, match="transformed feature fingerprint"):
+        prepare_data(frame, expected_fingerprint=raw_identity, expected_features=feature_identity)
+
+
+def test_worker_checks_transformed_inputs_before_building_the_model(monkeypatch, tmp_path):
+    frame = pd.DataFrame(np.full((20640, len(COLUMNS)), 2.0), columns=COLUMNS)
+    frame["MedHouseVal"] = 1.0
+    reference = json.loads(benchmark.REFERENCE.read_text())
+    reference["data_fingerprint"] = data_fingerprint(frame)
+    splits, reference["split_sha256"] = prepare_data(
+        frame, expected_fingerprint=reference["data_fingerprint"]
+    )
+    reference["transformed_features_sha256"] = benchmark.feature_fingerprint(splits)
+    reference_path = tmp_path / "reference.json"
+    reference_path.write_text(json.dumps(reference))
+    monkeypatch.setattr(benchmark, "REFERENCE", reference_path)
+    monkeypatch.setattr(pd, "read_parquet", lambda path: frame)
+    monkeypatch.setattr(benchmark, "LOG_COLUMNS", ("AveRooms", "AveBedrms", "AveOccup"))
+
+    def unexpected_build(case):
+        raise AssertionError("The model must not be built with changed benchmark inputs")
+
+    monkeypatch.setattr(benchmark, "build_model", unexpected_build)
+    with pytest.raises(ValueError, match="transformed feature fingerprint"):
+        benchmark.worker(SimpleNamespace(data="in-memory.parquet", case="rows20"))

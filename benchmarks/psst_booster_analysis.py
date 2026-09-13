@@ -24,6 +24,36 @@ NAMES = {
 }
 
 
+def validate_fast_reference(psst_manifest, fast_manifest, metadata):
+    """Require the same simulation and the declared FAST implementation."""
+
+    def comparable(manifest):
+        return {
+            **manifest,
+            "arguments": {
+                key: value for key, value in manifest["arguments"].items() if key != "output"
+            },
+        }
+
+    if comparable(psst_manifest) != comparable(fast_manifest):
+        raise ValueError("FAST reference manifest differs from the PSST study")
+    root = Path(__file__).parent
+    expected = {
+        "wrapper_sha256": hashlib.sha256(
+            (root / "psst_fast_comparison.py").read_bytes()
+        ).hexdigest(),
+        "protocol_sha256": hashlib.sha256(
+            (root / "psst_fast_protocol.md").read_bytes()
+        ).hexdigest(),
+        "methods": {"old": "FAST default", "corrected": "FAST Purify"},
+        "native_purify_flag": 1,
+        "interpret_core": "0.7.8",
+    }
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            raise ValueError(f"FAST wrapper metadata differs from the frozen protocol: {key}")
+
+
 def read_references(psst, fast):
     reference = {}
     for path, methods in (
@@ -195,6 +225,9 @@ def main():
     parser.add_argument(
         "--reference", type=Path, default=Path(".benchmark-artifacts/psst-detection-study")
     )
+    parser.add_argument(
+        "--output", type=Path, help="Analysis directory; defaults to INPUT/analysis"
+    )
     args = parser.parse_args()
     paths = {
         "boosters": args.input / "study.jsonl",
@@ -203,7 +236,14 @@ def main():
     }
     records = [json.loads(line) for line in paths["boosters"].read_text().splitlines()]
     manifest = json.loads((args.input / "study-manifest.json").read_text())
-    reference_manifest = json.loads((args.reference / "final/study-manifest.json").read_text())
+    metadata_paths = {
+        "psst_manifest": args.reference / "final/study-manifest.json",
+        "fast_manifest": args.reference / "fast-final/study-manifest.json",
+        "fast_metadata": args.reference / "fast-final/fast-metadata.json",
+    }
+    context = {name: json.loads(path.read_text()) for name, path in metadata_paths.items()}
+    reference_manifest = context["psst_manifest"]
+    validate_fast_reference(reference_manifest, context["fast_manifest"], context["fast_metadata"])
     if len(records) != manifest["tasks"] or manifest["tasks"] != 1800:
         raise ValueError("Expected 1800 completed library/dataset jobs")
     if (
@@ -216,6 +256,12 @@ def main():
     result = {
         "manifest": manifest,
         "reference_manifest": reference_manifest,
+        "fast_reference_manifest": context["fast_manifest"],
+        "fast_metadata": context["fast_metadata"],
+        "reference_metadata_hashes": {
+            name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for name, path in metadata_paths.items()
+        },
         "raw_hashes": {
             name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()
         },
@@ -288,7 +334,7 @@ def main():
             "warning_jobs": sum(bool(r["warnings"]) for r in group),
             "sum_job_elapsed_seconds": sum(r["elapsed_seconds"] for r in group),
         }
-    output = args.input / "analysis"
+    output = args.output or args.input / "analysis"
     output.mkdir(parents=True, exist_ok=True)
     (output / "receipt.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     plot(result, output)

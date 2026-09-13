@@ -60,7 +60,7 @@ boosters have higher average risk than PSST in each of the 30 case/strength
 cells. The additive baseline's risk rises with interaction strength, while
 the screened refits recover much of that increase. These curves average
 20 datasets per point; per-cell paired intervals are in the
-[receipt](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_receipt.json).
+[receipt](https://github.com/StrudelDoodleS/superglm/blob/master/benchmarks/psst_booster_receipt.json).
 
 ![Prediction risk by interaction strength](figures/2026-09-psst-boosters-prediction.svg)
 
@@ -101,7 +101,9 @@ this run cannot tell whether more rounds would improve their test results.
 ## Time and memory
 
 The main run took 1,448 seconds, about 24 minutes, with eight concurrent
-jobs. The table gives medians over all 600 jobs per library. Tuning includes
+jobs. That wall-clock total was observed in the run log and is not recorded
+in the committed receipt; summed job times exclude interpreter startup and
+cannot reconstruct it. The table gives medians over all 600 jobs per library. Tuning includes
 all three depth candidates, preprocessing and validation predictions. Test
 prediction uses 8,000 observations.
 
@@ -166,15 +168,21 @@ require a separate evaluation on fresh data.
 
 The runner and analysis are
 [psst_booster_study.py](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_study.py) and
-[psst_booster_analysis.py](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_analysis.py).
+[psst_booster_analysis.py](https://github.com/StrudelDoodleS/superglm/blob/master/benchmarks/psst_booster_analysis.py).
 The earlier study's raw records must be present before running the paired
 analysis; its report gives their reproduction commands.
 
-The [receipt](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_receipt.json) records source and
+The [receipt](https://github.com/StrudelDoodleS/superglm/blob/master/benchmarks/psst_booster_receipt.json) records source and
 raw-input hashes, execution summaries and all matched comparisons. SuperGLM
 numerical source matches revision
-`22662a09c612f5fa9b5eb364e07ec8f8ac0a0d21` from the earlier study. The run used
-Python 3.13.14, NumPy 2.5.2 and pandas 3.0.5.
+`22662a09c612f5fa9b5eb364e07ec8f8ac0a0d21` from the earlier study. The booster
+manifest records NumPy 2.5.2 and pandas 3.0.5. It did not record that run's
+Python version or platform; the earlier PSST manifest cannot establish them.
+
+Before joining the reference results, the analysis checks the FAST manifest
+against PSST's simulation and runtime settings, and checks FAST's wrapper,
+protocol, method mapping and InterpretML version. The receipt includes both
+reference manifests, FAST's metadata and their file hashes.
 
 Adapter tests compare response predictions with each library's native
 interface for both objectives. An early-stopped XGBoost fixture verifies that

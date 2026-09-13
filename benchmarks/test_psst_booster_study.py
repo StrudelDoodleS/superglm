@@ -65,3 +65,29 @@ def test_xgboost_uses_best_iteration_not_patience_trees():
     all_trees = fitted.model.predict(matrix)
     np.testing.assert_array_equal(fitted.predict(valid), first)
     assert np.max(np.abs(first - all_trees)) > 0.01
+
+
+@pytest.mark.parametrize("backend", ["lightgbm", "catboost"])
+@pytest.mark.parametrize(
+    "target_scale", [pytest.param(-1.0, id="first"), pytest.param(0.3, id="interior")]
+)
+def test_booster_iteration_selection_matches_retained_model(backend, target_scale):
+    frame, _ = data()
+    train, valid = category_frames(frame, frame)
+    y = frame["x"].to_numpy()
+    fitted = fit_candidate(
+        backend, "gaussian", train, y, valid, target_scale * y, depth=2, seed=9, rounds=60
+    )
+    # Both libraries retain only their selected trees with these fit settings.
+    # Count the actual trees, independently of the adapter's best_rounds value.
+    if backend == "lightgbm":
+        retained = fitted.model.current_iteration()
+    else:
+        retained = fitted.model.tree_count_
+    if target_scale < 0:
+        assert retained == 1
+    else:
+        assert retained > 1
+    assert retained < fitted.trained_rounds
+    assert fitted.best_rounds == retained
+    np.testing.assert_array_equal(fitted.predict(valid), fitted.model.predict(valid))

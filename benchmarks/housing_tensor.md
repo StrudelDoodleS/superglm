@@ -60,7 +60,10 @@ Use all 20,640 rows of the California housing dataset, in its original order.
 The target is `MedHouseVal` in units of $100,000. The numeric data fingerprint
 includes the eight raw predictors and the response, so parquet metadata does
 not affect identity. Row reorderings and response changes are refused before
-the split.
+the split. A second fingerprint checks the transformed feature values and
+column order in all three splits before constructing the model. Removing a
+transformation or changing its operation is refused even when raw data and
+split indices still match.
 
 Apply `log1p` to `AveRooms`, `AveBedrms`, `Population` and `AveOccup`. The other
 predictors are `MedInc`, `HouseAge`, `Latitude` and `Longitude`. Use NumPy's
@@ -113,7 +116,10 @@ The fit clock excludes imports, data loading, prediction, telemetry export
 and profile-file writing. Peak RSS covers the worker process through
 prediction export, including its runtime and data. It is not the model's
 retained memory. A successful run requires convergence, finite predictions,
-the expected basis width, and matching data/split identity. Prediction
+the expected basis width, and matching raw-data, split and transformed-input
+identity. The input fingerprints require identical floating-point values;
+math-library differences that change transformation rounding are reported as
+an input mismatch. This keeps solver comparisons on the same inputs. Prediction
 differences are measured, not silently accepted as numerically equivalent.
 For a solver change, justify comparison tolerances from its numerical
 contracts and certify stable observables. Exact equality is a useful replay

@@ -1,6 +1,12 @@
 """Keep joins and shared-seed uncertainty valid for the booster comparison."""
 
+import copy
+import json
+import sys
+from pathlib import Path
+
 import numpy as np
+import psst_booster_analysis as analysis
 import pytest
 from psst_booster_analysis import clustered_difference, join_boosters
 
@@ -49,3 +55,66 @@ def test_shared_booster_seed_is_clustered_across_designs():
     # Both design contributions cancel within each shared random-seed block.
     result = clustered_difference(rows, "xgboost", "test_risk")
     np.testing.assert_array_equal(result["difference_ci"], [0.0, 0.0])
+
+
+@pytest.fixture
+def reference_context():
+    receipt = json.loads(Path(__file__).with_name("psst_fast_receipt.json").read_text())
+    return receipt["manifests"], receipt["fast_metadata"]
+
+
+def test_matching_reference_provenance_accepts_different_output_directories(reference_context):
+    manifests, metadata = reference_context
+    analysis.validate_fast_reference(manifests["psst"], manifests["fast"], metadata)
+
+
+@pytest.mark.parametrize("field", ["package_source_sha256", "script_sha256", "numpy", "arguments"])
+def test_different_fast_manifest_is_refused(reference_context, field):
+    manifests, metadata = copy.deepcopy(reference_context)
+    if field == "arguments":
+        manifests["fast"][field]["refit_replicates"] += 1
+    else:
+        manifests["fast"][field] = "different execution"
+    with pytest.raises(ValueError, match="FAST reference manifest"):
+        analysis.validate_fast_reference(manifests["psst"], manifests["fast"], metadata)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["wrapper_sha256", "protocol_sha256", "methods", "native_purify_flag", "interpret_core"],
+)
+def test_different_fast_wrapper_metadata_is_refused(reference_context, field):
+    manifests, metadata = copy.deepcopy(reference_context)
+    metadata[field] = "different wrapper"
+    with pytest.raises(ValueError, match="FAST wrapper metadata"):
+        analysis.validate_fast_reference(manifests["psst"], manifests["fast"], metadata)
+
+
+def test_main_rejects_fast_provenance_before_joining_rows(reference_context, monkeypatch, tmp_path):
+    manifests, metadata = copy.deepcopy(reference_context)
+    inputs = tmp_path / "boosters"
+    inputs.mkdir()
+    manifest = {
+        "tasks": 1800,
+        "source_hashes": {"psst_detection_study.py": manifests["psst"]["script_sha256"]},
+        "package_source_sha256": manifests["psst"]["package_source_sha256"],
+        "numpy": manifests["psst"]["numpy"],
+    }
+    (inputs / "study-manifest.json").write_text(json.dumps(manifest))
+    (inputs / "study.jsonl").write_text("{}\n" * 1800)
+    manifests["fast"]["package_source_sha256"] = "another implementation"
+    for name, directory in (("psst", "final"), ("fast", "fast-final")):
+        path = tmp_path / directory
+        path.mkdir()
+        (path / "study-manifest.json").write_text(json.dumps(manifests[name]))
+    (tmp_path / "fast-final/fast-metadata.json").write_text(json.dumps(metadata))
+    monkeypatch.setattr(
+        sys, "argv", ["analysis", "--input", str(inputs), "--reference", str(tmp_path)]
+    )
+
+    def unexpected_join(*paths):
+        raise AssertionError("Reference rows must not be joined with different FAST provenance")
+
+    monkeypatch.setattr(analysis, "read_references", unexpected_join)
+    with pytest.raises(ValueError, match="FAST reference manifest"):
+        analysis.main()

@@ -211,7 +211,8 @@ It does not resemble every frequency dataset.
 
 Two of the 3,900 baseline fits exceed the default 20 REML iterations. They
 remain in the primary result as missed recoveries. Separate diagnostic fits
-converge at 21 and 30 iterations when given a larger limit. Their replacement
+converge at 21 and 30 iterations when given a larger limit. Those diagnostic
+reruns are not included in the committed receipt, and their replacement
 outcomes do not enter the study. There are no candidate-refit or test
 evaluation failures in the normalization run; all 600 planned prediction
 evaluations are measured.
@@ -224,7 +225,9 @@ for shared baseline or candidate fits match exactly across the two runs.
 All 3,391,260 recorded FAST scores are finite and nonnegative.
 
 Six worker processes use one BLAS, OpenMP and Numba thread each. The PSST
-run takes 940 seconds and the FAST run 744 seconds. The runs include different
+run takes 940 seconds and the FAST run 744 seconds. These wall-clock totals
+were observed in the run logs and are not recorded in the committed receipts;
+they cannot be reconstructed from summed worker times. The runs include different
 unions of candidate refits. Median screening time is 0.537 seconds for one
 PSST screen with both normalizations computed, and 0.122 seconds for both
 FAST variants together. FAST has lower observed screening cost in this setup.
