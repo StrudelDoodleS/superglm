@@ -333,11 +333,19 @@ figure.sg-slider {
   .sg-slider__panels { grid-template-columns: 1fr; }
 }
 
-/* Narrow screens: show that a wide display equation scrolls. */
+/* Narrow screens: a wide display equation scrolls inside its own box, so give
+   it a scrollbar that is always painted rather than an overlay one that only
+   appears once the reader already guessed. */
 @media (max-width: 700px) {
   div.math mjx-container {
     overflow-x: auto;
     scrollbar-width: thin;
-    padding-bottom: 0.25rem;
+    background-image:
+      linear-gradient(to left, var(--pst-color-background) 62%, transparent),
+      linear-gradient(to left, var(--sg-yellow), transparent);
+    background-position: right center, right center;
+    background-repeat: no-repeat;
+    background-size: 26px 100%, 14px 100%;
+    background-attachment: local, scroll;
   }
 }
