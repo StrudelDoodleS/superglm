@@ -344,18 +344,47 @@ exceptions.
 
 ## 9. Look and feel
 
-Landing page: logo, one-paragraph pitch, the install line, a twelve-line
-worked example, four route cards (get started, tutorials, how-to,
-explanation) plus API and governance links, and one real fitted curve from
-T0 on MTPL2 with its confidence band. Built with sphinx-design grids; the
-only page allowed theme-specific markup.
+Identity brief, from Max on 2026-09-13: superglm is a product for everyone
+(MIT), and the pulp comic-book styling of the logo is the identity, not
+something to tame. The site leans into it where a comic would and stays
+disciplined where a statistics manual must. Reference board: the mood
+board artifact published the same day.
 
-Visual system: one matplotlib style for every figure on the site; light and
-dark logo variants; a small `custom.css` for palette and spacing; the
-theme's own dark mode.
+- Palette, from the logo: ink `#15171C` for text, rules and panel borders;
+  red `#D6402B` as the single accent for links, buttons and the challenger
+  series in figures; yellow `#F4B942` for halftone fills, the exposure
+  histogram and one highlight per page; white ground with off-white
+  `#F7F5F0` for alternating sections. Dark mode: ink ground, cream text,
+  red and yellow unchanged, panel shadows in yellow.
+- Type: Bangers (SIL Open Font Licence, Google Fonts) for the hero
+  headline, the landing-page section titles and the tutorial gallery
+  headings only. Source Sans 3 for all reading text and every heading in
+  how-to, explanation and reference pages. IBM Plex Mono for code. Served
+  from Google Fonts with fallback stacks; the woff2 files may be vendored
+  under the OFL if offline builds ever matter.
+- Logo: the full burst in the hero, untouched. A small burst beside a plain
+  wordmark in the top bar, light and dark variants.
+- Comic panels as the recurring component: a 2px ink border and a hard 4px
+  offset shadow on landing cards, buttons and admonitions; warning
+  admonitions carry a small starburst icon. This is the mechanism that
+  carries the identity onto every page at low cost.
+- Landing page: hero band on ink with a halftone dot field fading in from
+  the right edge into red and yellow; the burst on the left, one sentence
+  and two buttons on the right, then one line: MIT licensed, free for
+  everyone, built on NumPy, SciPy and pandas. Below it four panels (get
+  started, tutorials, how-to, explanation), each with a real fitted curve
+  from the tutorials; then the twelve-line example. Built with
+  sphinx-design grids and `custom.css`; the only page allowed
+  theme-specific markup.
+- Figures: one matplotlib style for the whole site, `superglm.mplstyle`:
+  ink axes and fitted curve, red challenger, yellow exposure histogram
+  behind the curve at 40% alpha, confidence band in ink at 12%.
+- Copy voice: confident and plain, a little punchy on the landing page and
+  section indexes, never in reference or how-to pages.
 
 Theme choice: the spike builds the same skeleton under pydata-sphinx-theme
-and shibuya and captures Playwright screenshots of the landing page, a
+(default) and shibuya, with the identity above applied through
+`custom.css`, and captures Playwright screenshots of the landing page, a
 tutorial page and an API page in light and dark. Max picks from the
 pictures. If no preference, pydata stays.
 
