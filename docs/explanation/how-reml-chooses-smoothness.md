@@ -12,22 +12,6 @@ kernelspec:
 
 # How REML chooses smoothness
 
-A spline can follow the data as closely as you let it. The smoothing penalty
-decides how closely, and REML decides the penalty. This page shows what that
-means on data where the true curve is known, so every fit can be judged
-against it.
-
-Four words carry the page. The **penalty** is a charge on how much the fitted
-curve bends. **Lambda** is the size of that charge: zero lets the curve do
-what it likes, a large value forces it towards a straight line. The
-**effective degrees of freedom** (EDF) count how many parameters a fit is
-really using once the penalty has done its work; it runs from the basis size
-at lambda zero down to the null space at lambda infinity. **REML** is the
-criterion that picks lambda from the data alone, treating the spline
-coefficients as random effects and choosing the lambda that makes the
-observed data most probable; the criterion itself is in
-[Solvers and internals](solvers-and-internals.md).
-
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
@@ -45,13 +29,155 @@ for candidate in (Path("../_static/superglm.mplstyle"), Path("docs/_static/super
         break
 ```
 
-## Data with a known truth
+A spline can follow the data as closely as you let it. The smoothing penalty
+decides how closely, and REML decides the penalty. This page says what that
+means, first in plain words, then in the maths, then in pictures on data
+where the true curve is known.
+
+```{admonition} In plain words
+:class: tip sg-plain
+
+A spline with forty pieces can copy the noise in the data as easily as the
+signal. The penalty charges the fit for wiggliness, and lambda is the price
+per unit of wiggle. REML sets the price by asking one question of the data:
+which amount of smoothness makes what we observed most probable, once the
+curve's own uncertainty has been averaged out? No holdout set, no grid
+search; one criterion, maximised.
+```
+
+## The maths
+
+The model is an additive predictor with one smooth per covariate:
+
+$$
+g(\mu_i) = \eta_i = \beta_0 + \sum_j f_j(x_{ij}), \qquad
+f_j(x) = \sum_{k=1}^{K_j} \beta_{jk}\, b_{jk}(x),
+$$
+
+where the $b_{jk}$ are basis functions (here B-splines) and $K_j$ is the
+basis size, the `k` you pass to `Spline`. Fitting maximises a penalised
+log-likelihood,
+
+$$
+\ell_p(\boldsymbol\beta; \boldsymbol\lambda)
+= \ell(\boldsymbol\beta)
+- \tfrac{1}{2} \sum_j \lambda_j\, \boldsymbol\beta^\top \mathbf S_j\, \boldsymbol\beta ,
+$$
+
+in which $\ell$ is the ordinary log-likelihood of the family and each
+$\mathbf S_j$ is a penalty matrix measuring the wiggliness of $f_j$. For a
+P-spline the penalty is the sum of squared second differences of
+neighbouring coefficients,
+
+$$
+\boldsymbol\beta^\top \mathbf S\, \boldsymbol\beta
+= \sum_{k=3}^{K} \left(\beta_k - 2\beta_{k-1} + \beta_{k-2}\right)^2 ,
+$$
+
+a discrete stand-in for $\int f''(x)^2\,\mathrm{d}x$. A straight line has
+zero second differences, so the penalty cannot charge for one: lines are the
+penalty's *null space*.
+
+How much of the basis the fit actually uses is the **effective degrees of
+freedom**,
+
+$$
+\tau(\boldsymbol\lambda) = \operatorname{tr}(\mathbf F), \qquad
+\mathbf F = \left(\mathbf X^\top \mathbf W \mathbf X + \mathbf S_{\boldsymbol\lambda}\right)^{-1}
+\mathbf X^\top \mathbf W \mathbf X, \qquad
+\mathbf S_{\boldsymbol\lambda} = \sum_j \lambda_j \mathbf S_j ,
+$$
+
+where $\mathbf X$ holds the basis functions evaluated at the data and
+$\mathbf W$ the working weights of the fit. With $\lambda = 0$ the trace is
+the full basis size; as $\lambda \to \infty$ it falls to the size of the null
+space, one line's worth. The EDF in every figure title below is this number.
+
+REML chooses $\boldsymbol\lambda$ by maximising the criterion Wood (2011)
+writes, for a fitted $\hat{\boldsymbol\beta}$ at the given
+$\boldsymbol\lambda$, as
+
+$$
+\mathcal V(\boldsymbol\lambda)
+= \ell(\hat{\boldsymbol\beta})
+- \tfrac{1}{2}\hat{\boldsymbol\beta}^\top \mathbf S_{\boldsymbol\lambda}\hat{\boldsymbol\beta}
++ \tfrac{1}{2}\log\left|\mathbf S_{\boldsymbol\lambda}\right|_+
+- \tfrac{1}{2}\log\left|\mathbf H + \mathbf S_{\boldsymbol\lambda}\right|
++ \tfrac{M_p}{2}\log(2\pi),
+$$
+
+with $\mathbf H$ the negative Hessian of $\ell$ at $\hat{\boldsymbol\beta}$
+(for a GLM, $\mathbf X^\top \mathbf W \mathbf X$), $|\cdot|_+$ the product
+of the non-zero eigenvalues, and $M_p$ the dimension of the null space. For
+a Gaussian response this is exactly the restricted likelihood; for every
+other family it is the Laplace approximation to it, which is what
+`fit_reml` maximises.
+
+| Term | What it does | Why it matters |
+|---|---|---|
+| $\ell(\hat{\boldsymbol\beta})$ | Rewards a fit that follows the data. | On its own it would always choose $\lambda = 0$. |
+| $-\tfrac12 \hat{\boldsymbol\beta}^\top \mathbf S_{\boldsymbol\lambda} \hat{\boldsymbol\beta}$ | Charges the fitted curve for its wiggle at the current price. | The price is what is being chosen. |
+| $+\tfrac12 \log\lvert\mathbf S_{\boldsymbol\lambda}\rvert_+$ | Grows with $\lambda$: the volume of curves the penalty considers plausible shrinks as the price rises. | This is the term that rewards simplicity. |
+| $-\tfrac12 \log\lvert\mathbf H + \mathbf S_{\boldsymbol\lambda}\rvert$ | Falls with $\lambda$: the volume of curves the data leave plausible. | Together with the previous term it is the Occam factor: complexity is paid for automatically. |
+
+The Bayesian reading makes the balance intuitive. The penalty is a prior
+$\boldsymbol\beta \sim N(\mathbf 0, \mathbf S_{\boldsymbol\lambda}^{-})$ that
+prefers smooth curves, and $\mathcal V$ is the log probability of the data
+with the curve integrated out. Maximising it is asking which smoothness
+makes the observed data most probable.
+
+## Why REML and not a holdout
+
+Cross-validation needs many refits and a holdout that is not always
+available. Generalised cross-validation is a single criterion but Reiss and
+Ogden (2009) showed it has more local optima than REML and tends to
+under-smooth. Wood (2011) gave a stable Newton method for $\mathcal V$ that
+also yields the smoothing-parameter uncertainty, and Wood, Pya and Säfken
+(2016) extended it to any regular likelihood. The holdout curve in the
+figures below is the check an actuary still trusts; on this data REML lands
+where it bottoms out.
+
+## Removing a term altogether
+
+The penalty cannot shrink its own null space, so an ordinary smooth can
+never disappear: at most it becomes a straight line. Marra and Wood (2011)
+add a second penalty on that null space, $\lambda_j^{*} \mathbf S_j^{*}$
+with $\mathbf S_j^{*} = \mathbf U_j \mathbf U_j^\top$ built from the
+null-space eigenvectors of $\mathbf S_j$, and let REML estimate both
+prices. That is `select=True`: a term with no signal can then be shrunk to
+zero, which the last figure shows.
+
+```{admonition} What this means for a tariff
+:class: note sg-pricing
+
+A curve that follows noise is a price that follows noise, and a price that
+follows noise is one a competitor can pick off. REML gives a reproducible,
+defensible choice of smoothness that a reviewer can read off the summary:
+the penalty, the effective degrees of freedom, and the criterion value at
+the optimum.
+```
+
+## Words used above
+
+| Word | Meaning here |
+|---|---|
+| Basis size, `k` | How many pieces the spline is built from; the most flexible the curve can be. |
+| Penalty | A number that grows with the wiggliness of the curve. |
+| Lambda | The price per unit of penalty; large means smooth. |
+| EDF | Effective degrees of freedom: how many of the `k` pieces the fit really uses. |
+| Null space | The shapes the penalty cannot charge for: straight lines. |
+| REML | The criterion that chooses lambda from the data; for non-Gaussian families its Laplace approximation, sometimes written LAML. |
+| Holdout deviance | The model's error on rows it never saw; lower is better. |
+
+## See it happen
 
 Four hundred points on a sine wave with a gentle slope, plus Gaussian noise
 with standard deviation 0.45. The basis is a P-spline with 40 functions,
 deliberately generous, so that an unpenalised fit has room to misbehave.
 
 ```{code-cell} ipython3
+:tags: [hide-input]
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
@@ -82,16 +208,17 @@ def truth_on(frame):
     return np.sin(2 * np.pi * xs) + 0.6 * xs
 ```
 
-## No penalty, REML, far too much penalty
+### No penalty, REML, far too much penalty
 
 Three fits of the same model. The first fixes lambda at zero, the second lets
 `fit_reml` choose it, the third fixes it at ten thousand.
 
 ```{code-cell} ipython3
+:tags: [hide-input]
+
 def fit_at(lam):
     model = SuperGLM(
         family="gaussian",
-        selection_penalty=0.0,
         spline_penalty=lam,
         features={"x": Spline(kind="ps", k=k)},
     )
@@ -100,7 +227,6 @@ def fit_at(lam):
 
 reml = SuperGLM(
     family="gaussian",
-    selection_penalty=0.0,
     features={"x": Spline(kind="ps", k=k)},
 ).fit_reml(X, y)
 
@@ -114,7 +240,7 @@ for title, model in fits:
 ```
 
 ```{code-cell} ipython3
-:tags: [remove-output]
+:tags: [hide-input, remove-output]
 
 def draw(ax, title, model):
     ax.scatter(x, y, s=6, color="#C9CCD3", label="data", zorder=1)
@@ -135,7 +261,7 @@ axes[0].set_ylabel("y")
 axes[0].legend(loc="upper right")
 fig_pair.tight_layout()
 
-fig_three, axes = plt.subplots(1, 3, figsize=(12, 3.8), sharey=True)
+fig_three, axes = plt.subplots(1, 3, figsize=(9, 3.0), sharey=True)
 for ax, (title, model) in zip(axes, fits):
     draw(ax, title, model)
 axes[0].set_ylabel("y")
@@ -182,20 +308,21 @@ noise. With the REML lambda it spends about eight, and the curve sits on the
 truth. At lambda ten thousand it has two left, enough for a slope and a
 little bend, and misses the peaks entirely.
 
-## What the penalty buys
+### What the penalty buys
 
 Now sweep lambda over a log grid of twelve fixed values and ask two things of
 each fit: how many effective degrees of freedom it keeps, and how well it
 predicts rows it did not see, measured by mean deviance over five folds.
 
 ```{code-cell} ipython3
+:tags: [hide-input]
+
 lambdas = np.logspace(-4, 4, 12)
 edf = []
 holdout = []
 for lam in lambdas:
     model = SuperGLM(
         family="gaussian",
-        selection_penalty=0.0,
         spline_penalty=lam,
         features={"x": Spline(kind="ps", k=k)},
     )
@@ -212,7 +339,7 @@ print(f"REML chose lambda = {reml_lambda:.1f}")
 ```
 
 ```{code-cell} ipython3
-:tags: [remove-output]
+:tags: [hide-input, remove-output]
 
 fig_sweep, axes = plt.subplots(1, 2, figsize=(9, 3.6))
 for ax, values, label in zip(axes, (edf, holdout), ("EDF", "Held-out deviance")):
@@ -242,7 +369,7 @@ falls to a minimum, and rises steeply on the right, where the fits are too
 stiff to reach the peaks. REML never touched a fold and still landed at the
 bottom.
 
-## How REML gets there
+### How REML gets there
 
 REML is an optimisation the solver drives directly, not a grid search.
 superglm minimises the negative REML criterion, so lower is better and the
@@ -251,7 +378,7 @@ took: one lambda per outer step plus the starting value, and one criterion
 value per step.
 
 ```{code-cell} ipython3
-:tags: [remove-output]
+:tags: [hide-input, remove-output]
 
 diag = reml.reml_diagnostics()
 path = [step["x"] for step in diag["lambda_history"]]
@@ -277,7 +404,7 @@ glue("reml-path", fig_path, display=False)
 :name: fig-reml-path
 :alt: Two panels: lambda after each outer step on a log axis, and the REML criterion per step, both ending in a red marker.
 
-REML is an optimisation the solver drives directly, not a grid search: a handful of steps from the starting value to the optimum on this example. Left, lambda after each step, where step 0 is the starting value, so the left panel carries one point more than the right. Right, the criterion superglm minimises, which is why the curve falls.
+REML is an optimisation the solver drives directly, not a grid search: a handful of steps from the starting value to the optimum on this example. Left, lambda after each step, where step 0 is the starting value, so the left panel carries one point more than the right. Right, the criterion superglm minimises, which is why the curve falls. In both panels the red marker is the value REML settled on.
 ```
 
 The path is not a steady climb. The optimiser probes downwards once, then
@@ -288,7 +415,7 @@ everything past that is refinement. A grid over twelve values, as in the
 previous figure, costs twelve fits and five folds each; the optimiser costs a
 handful of fits and no folds.
 
-## Removing a term that carries no signal
+### Removing a term that carries no signal
 
 Add a second column `z` that has nothing to do with `y`, and fit both columns
 as splines. The ordinary penalty charges for bending, so a term it cannot
@@ -297,6 +424,8 @@ that penalty, so it stays. `select=True` adds a second penalty on the straight
 part as well, and REML can then take the term out altogether.
 
 ```{code-cell} ipython3
+:tags: [hide-input]
+
 z = rng.uniform(0.0, 1.0, n)
 X2 = pd.DataFrame({"x": x, "z": z})
 
@@ -304,7 +433,6 @@ selected = {}
 for sel in (False, True):
     selected[sel] = SuperGLM(
         family="gaussian",
-        selection_penalty=0.0,
         features={
             "x": Spline(kind="ps", k=12, select=sel),
             "z": Spline(kind="ps", k=12, select=sel),
@@ -315,7 +443,7 @@ for sel in (False, True):
 ```
 
 ```{code-cell} ipython3
-:tags: [remove-output]
+:tags: [hide-input, remove-output]
 
 fig_select, axes = plt.subplots(2, 2, figsize=(9, 6), sharex="col", sharey=True)
 for row, sel in enumerate((False, True)):
@@ -344,8 +472,17 @@ glue("select-shrinkage", fig_select, display=False)
 :name: fig-select-shrinkage
 :alt: A two-by-two grid of fitted effects with confidence bands: the x term and the z term, fitted with select off and on.
 
-A term with no signal. All four panels share one y axis, so the `z` term's effect can be compared with the `x` term's. Without the double penalty the `z` term keeps a slope and one degree of freedom, because the ordinary penalty cannot charge for a straight line; with `select=True` REML shrinks it to flat and its EDF to zero. The `x` term is untouched either way.
+A term with no signal. The black curve is the fitted effect and the yellow band its 95% confidence interval. All four panels share one y axis, so the `z` term's effect can be compared with the `x` term's. Without the double penalty the `z` term keeps a slope and one degree of freedom, because the ordinary penalty cannot charge for a straight line; with `select=True` REML shrinks it to flat and its EDF to zero. The `x` term is untouched either way.
 ```
+
+## References
+
+- Wood, S. N. (2011). Fast stable restricted maximum likelihood and marginal likelihood estimation of semiparametric generalized linear models. *Journal of the Royal Statistical Society: Series B*, 73(1), 3–36. [doi:10.1111/j.1467-9868.2010.00749.x](https://doi.org/10.1111/j.1467-9868.2010.00749.x)
+- Wood, S. N., Pya, N., and Säfken, B. (2016). Smoothing parameter and model selection for general smooth models. *Journal of the American Statistical Association*, 111(516), 1548–1563. [doi:10.1080/01621459.2016.1180986](https://doi.org/10.1080/01621459.2016.1180986)
+- Marra, G., and Wood, S. N. (2011). Practical variable selection for generalized additive models. *Computational Statistics & Data Analysis*, 55(7), 2372–2387. [doi:10.1016/j.csda.2011.02.004](https://doi.org/10.1016/j.csda.2011.02.004)
+- Reiss, P. T., and Ogden, R. T. (2009). Smoothing parameter selection for a class of semiparametric linear models. *Journal of the Royal Statistical Society: Series B*, 71(2), 505–523. [doi:10.1111/j.1467-9868.2008.00695.x](https://doi.org/10.1111/j.1467-9868.2008.00695.x)
+- Wood, S. N. (2017). *Generalized Additive Models: An Introduction with R*, 2nd edition. Chapman and Hall/CRC. [doi:10.1201/9781315370279](https://doi.org/10.1201/9781315370279)
+- Wahba, G. (1985). A comparison of GCV and GML for choosing the smoothing parameter in the generalized spline smoothing problem. *Annals of Statistics*, 13(4), 1378–1402. [doi:10.1214/aos/1176349743](https://doi.org/10.1214/aos/1176349743)
 
 ## Main takeaways
 
