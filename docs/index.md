@@ -73,6 +73,21 @@ model.fit_reml(df, y, sample_weight=exposure)
 print(model.summary())
 ```
 
+```{rst-class} sg-section-title
+```
+
+## What REML does
+
+:::{container} sg-figure
+:name: fig-landing-lambda
+
+```{glue:any} lambda-zero-vs-reml
+:doc: explanation/how-reml-chooses-smoothness.md
+```
+
+The same data twice. Left, no penalty: the spline chases every point. Right, the penalty REML chose. [How it chooses](explanation/how-reml-chooses-smoothness.md).
+:::
+
 The [API reference](api/index.md) documents every public name. The
 [governance section](governance/index.md) is for model-risk reviewers.
 
