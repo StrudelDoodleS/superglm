@@ -13,7 +13,7 @@ predictions outperform the additive SuperGLM baseline or the SuperGLM models
 selected after interaction screening. This run does not rank GBM interactions
 or measure their planted-pair recovery.
 
-The [protocol](../../benchmarks/psst_booster_protocol.md) fixed the data and
+The [protocol](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_protocol.md) fixed the data and
 search settings before the main booster results. Each library uses all 600
 previously selected prediction datasets, covering six cases, five strengths
 and 20 replicates. Training, validation and test sizes remain 4,000, 2,000
@@ -60,7 +60,7 @@ boosters have higher average risk than PSST in each of the 30 case/strength
 cells. The additive baseline's risk rises with interaction strength, while
 the screened refits recover much of that increase. These curves average
 20 datasets per point; per-cell paired intervals are in the
-[receipt](../../benchmarks/psst_booster_receipt.json).
+[receipt](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_receipt.json).
 
 ![Prediction risk by interaction strength](figures/2026-09-psst-boosters-prediction.svg)
 
@@ -165,12 +165,12 @@ require a separate evaluation on fresh data.
 ## Reproduction
 
 The runner and analysis are
-[psst_booster_study.py](../../benchmarks/psst_booster_study.py) and
-[psst_booster_analysis.py](../../benchmarks/psst_booster_analysis.py).
+[psst_booster_study.py](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_study.py) and
+[psst_booster_analysis.py](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_analysis.py).
 The earlier study's raw records must be present before running the paired
 analysis; its report gives their reproduction commands.
 
-The [receipt](../../benchmarks/psst_booster_receipt.json) records source and
+The [receipt](https://github.com/StrudelDoodleS/superglm/blob/9b325f35586a5ae60a7c3fc3f559f26a1a64c953/benchmarks/psst_booster_receipt.json) records source and
 raw-input hashes, execution summaries and all matched comparisons. SuperGLM
 numerical source matches revision
 `22662a09c612f5fa9b5eb364e07ec8f8ac0a0d21` from the earlier study. The run used

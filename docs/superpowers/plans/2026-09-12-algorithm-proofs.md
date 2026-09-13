@@ -110,6 +110,7 @@ assumptions behind every proposed claim. No proof status is inferred from CI.
   `_global_moments.py`, `_batched_moments.py`, `curvature.py`, and
   `src/superglm/distributional/smoothing/penalty_geometry.py`.
 - Inspect tests: `tests/test_distributional_chunking.py`,
+  `tests/test_distributional_grouped_assembly.py`,
   `tests/test_distributional_global_moments.py`,
   `tests/test_distributional_global_moment_ranges.py`,
   `tests/test_distributional_global_moment_integration.py`.
@@ -136,7 +137,7 @@ unverified backend assumptions. Task 4 must not treat an unbounded term as zero.
   rank decisions and coefficient-forward error. Mark uncovered BLAS/native
   assumptions or range regimes `unsupported`; do not extrapolate a bound from
   a single observed roundoff residual.
-- [ ] Run the four listed suites and record exact commands and outcomes. Match
+- [ ] Run the five listed suites and record exact commands and outcomes. Match
   each relevant assertion to the claimed invariant. Identify any claim lacking
   a witness; specify its mathematical counterexample before scoping a new test.
 - [ ] Obtain mathematical and source-mapping review, update P1/P2 independently,
@@ -152,11 +153,13 @@ An incomplete P2 does not invalidate a correctly qualified P1.
 
 - Create: `docs/research/proofs/reuse.md`.
 - Update: P3 in `docs/research/proofs/index.md`.
-- Read: `src/superglm/distributional/solver/_reuse_digest.py`, `solver.py`,
+- Read: `src/superglm/distributional/solver/_reuse_digest.py`, `_likelihood_cache.py`, `solver.py`,
   `src/superglm/distributional/smoothing/derivatives.py` and `newton.py`.
 - Inspect tests: `tests/test_distributional_reuse_digest.py`,
   `tests/test_distributional_chunk_reuse.py`,
   `tests/test_distributional_fisher_geometry_reuse.py`,
+  `tests/test_distributional_likelihood_cache.py`,
+  `tests/test_distributional_likelihood_cache_integration.py`,
   `tests/test_distributional_newton_curvature_refresh.py` and
   `tests/test_distributional_newton_practical_handoff.py`.
 
@@ -175,7 +178,7 @@ quantity reused. This table is the provenance assumption used by P4 and P5.
 - [ ] Map the two completion regressions to the unfixed revision and the
   practical-handoff controls to their recorded mutation. Do not replace the
   mathematical state argument with those examples.
-- [ ] Run the five listed suites with the declared thread limits. Review
+- [ ] Run the seven listed suites with the declared thread limits. Review
   alias/mutation, changed penalty, rejected trial and unavailable-Hessian cases.
 - [ ] Obtain source and mathematical review, record unresolved guard gaps, and
   commit as `docs: specify reuse and Newton curvature provenance`.
@@ -191,11 +194,12 @@ promise positive curvature or eventual convergence for every fit.
 - Create: `docs/research/proofs/stopping.md`.
 - Update: P4 in `docs/research/proofs/index.md`.
 - Read: `src/superglm/distributional/smoothing/endpoint_direction.py`,
-  `derivatives.py`, `penalty_geometry.py`, and
+  `derivatives.py`, `penalty_geometry.py`, `newton.py`, and
   `src/superglm/reml/convergence.py`.
 - Inspect tests: `tests/test_distributional_endpoint_direction.py`,
   `tests/test_distributional_endpoint_roundoff.py`,
   `tests/test_distributional_bounded_derivatives.py`,
+  `tests/test_distributional_newton_endgame.py`,
   `tests/test_distributional_endpoint_laml.py`.
 
 **Interface:** Produce an inequality
@@ -223,7 +227,7 @@ it. P5 consumes this result; a refinement indicator is not a substitute.
   the exact-bound projection and frozen-coordinate recheck. Account for
   \(\max(\tau,\phi)+\delta\) with the design's definitions, rather than treating
   separate tolerance checks as one true-residual guarantee.
-- [ ] Run the four listed suites. Use their exact polynomial/derivative,
+- [ ] Run the five listed suites. Use their exact polynomial/derivative,
   cancellation and endpoint cases as witnesses; record uncovered assumptions.
 - [ ] Obtain mathematical and source review. If an enforceable bound is found,
   write a separate specification for the smallest runtime enforcement change,
@@ -287,10 +291,12 @@ changed algorithm. It makes no global-optimality claim.
 - Create: `docs/research/proofs/boundaries.md`.
 - Update: P6 in `docs/research/proofs/index.md`.
 - Read: `src/superglm/distributional/smoothing/penalty_face.py`,
-  `endpoint_laml.py`, `faces.py`, `penalty_geometry.py` and
+  `endpoint_laml.py`, `faces.py`, `authority.py`, `penalty_geometry.py` and
   `src/superglm/distributional/kernels/two_piece.py`.
 - Inspect tests: `tests/test_distributional_endpoint_context.py`,
   `tests/test_distributional_endpoint_summary.py`,
+  `tests/test_distributional_penalty_face.py`,
+  `tests/test_distributional_public_face.py`,
   `tests/test_distributional_curvature_policy.py` and
   `tests/test_two_piece_lss_kernel.py`.
 
@@ -309,7 +315,7 @@ identifying which of P1–P5 remain valid and which assumptions break.
 - [ ] List family support restrictions and unresolved family evaluation bounds.
   Choose a separate restricted theorem or future nonsmooth analysis only after
   establishing the relevant regularity.
-- [ ] Run the four listed suites. Use stable subspaces, reconstruction and
+- [ ] Run the six listed suites. Use stable subspaces, reconstruction and
   one-sided identities; near-rank coefficient agreement is not an acceptance test.
 - [ ] Review the applicability table, record counterexamples and bounded
   follow-up scopes, and commit as `docs: delimit boundary proof assumptions`.
