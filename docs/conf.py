@@ -219,6 +219,7 @@ if html_theme == "pydata_sphinx_theme":
         "navbar_align": "left",
         "header_links_before_dropdown": 8,
         "show_toc_level": 2,
+        "navigation_depth": 1,
         "use_edit_page_button": False,
         "footer_start": ["copyright"],
         "footer_end": [],
