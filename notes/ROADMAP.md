@@ -32,7 +32,7 @@ the scalar engine's existing performance and interpretability.
 
 - **Scalar foundations already exist:** exact row-support compression, discrete
   REML, structured random effects and FS/SZ smooths, shape constraints, and
-  [interaction screening](guide/screening.md). The [historical benchmark record]
+  [interaction screening](../docs/how-to/screen-interactions.md). The [historical benchmark record]
   includes a 678,013-row fit at a 0.805 s median; its timing certification is
   explicitly disabled pending a reproducible current machine profile.
 - **LSS is substantial already:** nine built-in families, coupled observed
@@ -42,9 +42,9 @@ the scalar engine's existing performance and interpretability.
   1.08 GiB whole-process peak RSS. This is an earlier single-pair receipt ending
   at `practical_plateau`, not a current-head certified benchmark or an assembly
   timing. Scalar and LSS timings describe different workloads.
-- **Existing smoothing and inference:** [smoothing](models/distributional.md#how-smoothing-parameters-are-chosen)
+- **Existing smoothing and inference:** [smoothing](../docs/how-to/fit-a-distributional-model.md#how-smoothing-parameters-are-chosen)
   has safeguarded EFS, optional Newton/BFGS, stationarity evidence, and exact
-  infinity-face decisions. [Inference](models/distributional-inference.md)
+  infinity-face decisions. [Inference](../docs/how-to/check-a-distributional-fit.md)
   already includes callable posterior bounds, supported tail functionals,
   smoothing-uncertainty correction, proper scores, and portfolio simulation.
 - **Production grouped LSS is implemented:** public `discrete=True` supports
@@ -63,8 +63,8 @@ the scalar engine's existing performance and interpretability.
 ## Implemented foundation: C3 + C1
 
 The user explicitly selected C3 and C1 on 2026-09-08, overriding the previous
-C5-before-C1 ordering. The [implementation plan](superpowers/plans/2026-09-08-c3-c1-completion.md),
-[design](superpowers/specs/2026-09-08-c3-c1-completion-design.md) and
+C5-before-C1 ordering. The [implementation plan](../docs/superpowers/plans/2026-09-08-c3-c1-completion.md),
+[design](../docs/superpowers/specs/2026-09-08-c3-c1-completion-design.md) and
 [completion evidence](research/2026-09-c3-c1-completion-evidence.md) record the
 bounded scope and validation. Original uncommitted strategy inputs remain
 unchanged in `.worktrees/roadmap-dossier`.
@@ -499,7 +499,7 @@ another predictor count. Reopen only with a concrete use case and validating evi
   log/tail scores, calibration and total cost on multiple books; novelty claims
   do not establish predictive value. Revalidate the dossier's dated competitor
   claims.
-- Follow the [cost and timing policy](development/cost-and-timing.md): record
+- Follow the [cost and timing policy](../docs/governance/reproducibility.md): record
   exact revision/data/configuration, stopping status, work/allocation and
   dispatch. Use raw worker clocks and artifacts, with an activity audit during
   each timing run; tool completion clocks are not fit timings.

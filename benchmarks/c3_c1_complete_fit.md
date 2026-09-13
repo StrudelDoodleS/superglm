@@ -67,7 +67,7 @@ actual compiled-design equality before treating a finite-support comparison as
 exact, particularly if a grid has fewer cells than the support.
 
 Wall time defaults to **unmeasured**. Coordinate an exclusive run and follow
-[`cost-and-timing.md`](../docs/development/cost-and-timing.md), then add
+[`cost-and-timing.md`](../docs/governance/reproducibility.md), then add
 `--measure-time --quiet-profile 'operator/session identifying a quiet host'`.
 The worker refuses measured mode when load exceeds twice the available CPU count
 and records load and all processes' CPU ticks around the

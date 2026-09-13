@@ -33,7 +33,7 @@ features = {
     "Area": Categorical(base="most_exposed"),
     "LogDensity": Numeric(),
 }
-model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+model = SuperGLM(family="poisson", features=features)
 model.fit_reml(train_df, y_train, sample_weight=exposure_train)
 print(model.summary())
 ```

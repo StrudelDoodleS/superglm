@@ -26,7 +26,7 @@ The driver, native-observation helper and generated data have separate hashes.
 A label never substitutes for source identity.
 
 Arrange exclusive numerical execution and follow
-[the timing policy](../docs/development/cost-and-timing.md) before adding
+[the timing policy](../docs/governance/reproducibility.md) before adding
 `--measure-time`. Compare five fresh-process baseline/candidate pairs in
 alternating order using the same interpreter, driver and data. Inspect both
 the absolute difference and baseline median absolute deviation. A slowdown

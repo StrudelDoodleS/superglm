@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   build:
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -43,16 +44,15 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: docs/_build/.jupyter_cache
-          key: docs-notebooks-${{ hashFiles('docs/tutorials/**', 'docs/how-to/**', 'uv.lock') }}
-          restore-keys: |
-            docs-notebooks-
+          # The key carries the library source: a cached render is only valid
+          # for the build that produced it, so any source change re-executes.
+          key: docs-notebooks-${{ hashFiles('docs/tutorials/**', 'docs/how-to/**', 'docs/explanation/**', 'src/**', 'uv.lock') }}
 
       - name: Build with execution
         env:
           SUPERGLM_DOCS_EXECUTE: cache
         run: uv run sphinx-build -b html -n -W --keep-going -d docs/_build/doctrees docs docs/_build/html
 
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
         with:
@@ -60,6 +60,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -68,5 +69,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
+
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
