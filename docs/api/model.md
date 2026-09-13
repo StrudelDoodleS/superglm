@@ -108,13 +108,13 @@ one feature's fitted curve or effect on its original scale.
 Start with {py:meth}`~superglm.SuperGLM.summary`, the statsmodels-style
 coefficient table. {py:meth}`~superglm.SuperGLM.term_inference` is the object
 behind every curve and band, the per-term curve, uncertainty and metadata in
-one place; {py:meth}`~superglm.SuperGLM.simultaneous_bands` widens a spline's
-bands to hold jointly. {py:meth}`~superglm.SuperGLM.metrics` computes the fit
+one place; {py:meth}`~superglm.SuperGLM.simultaneous_bands` returns simultaneous
+confidence bands for a spline feature, which hold jointly across the curve. {py:meth}`~superglm.SuperGLM.metrics` computes the fit
 statistics and {py:meth}`~superglm.SuperGLM.drop1` the drop-one deviance per
-feature; {py:meth}`~superglm.SuperGLM.term_importance` ranks terms by the
-weighted variance of their contribution to the linear predictor, and
-{py:meth}`~superglm.SuperGLM.term_drop_diagnostics` by what dropping them
-costs in AIC, BIC or holdout loss. {py:meth}`~superglm.SuperGLM.random_effects`
+feature; {py:meth}`~superglm.SuperGLM.term_importance` scores each term by the
+weighted variance of its contribution to the linear predictor, and
+{py:meth}`~superglm.SuperGLM.term_drop_diagnostics` by what dropping it
+costs in AIC, BIC or holdout loss; both return one row per term, unsorted. {py:meth}`~superglm.SuperGLM.random_effects`
 and {py:meth}`~superglm.SuperGLM.factor_smooth` report variance components,
 level diagnostics and smooth curves for random-effect and factor-smooth terms,
 while {py:meth}`~superglm.SuperGLM.knot_summary`,

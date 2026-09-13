@@ -3,7 +3,9 @@
 `SuperLSS` fits several parameters of a response distribution together, one
 predictor per parameter. Pass a family first, then one predictor declaration
 per parameter using the family's helper methods; build the terms inside each
-declaration with `s`, `cat`, `re`, `ti`, `term` and `interaction`. Start
+declaration with {py:func}`~superglm.s`, {py:func}`~superglm.cat`,
+{py:func}`~superglm.re`, {py:func}`~superglm.ti`, {py:func}`~superglm.term`
+and {py:func}`~superglm.interaction`. Start
 with the [tutorial](../tutorials/distributional-model.md). The strip below
 follows a model through its life; each section under it opens with the
 members you reach for first, and its table lists every member in the group,
