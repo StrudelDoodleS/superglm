@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-13",
+  "source_base_commit": "7c4e70ffac99c9a70adf90e5b21d9735109c4675",
+  "project_directory": "docs/research/lean-gaussian-certificate",
+  "lean_version": "Lean (version 4.33.1, x86_64-unknown-linux-gnu, commit 819816b2e0a3bf405af45ae5c7af2491d8f5bee6, Release)",
+  "lake_version": "Lake version 5.0.0-src+819816b (Lean version 4.33.1)",
+  "mathlib_commit": "0df444a360eaa60ab8c11dca51a86af692955474",
+  "formal_scope": "Four exact finite-dimensional quadratic identities under explicit symmetry/stationarity/supplied-left-inverse assumptions, plus two beginner algebra examples. No formalization of PSD/coercivity, Schur bound, floating-point kernels, smoothing or coverage.",
+  "proof_placeholders_found": false,
+  "reported_axioms": [
+    "propext",
+    "Classical.choice",
+    "Quot.sound"
+  ],
+  "source_sha256": {
+    "Certificate.lean": "887356aa33dce90017c1fc7f125d9186332f8e939ccf792fd8a717c9ccfa4718",
+    "ProofTour.lean": "cfaaf5e9a6a80f0ea1893ef12b8f0917875e8940aceb33590736b47910cdecda",
+    "ProofTourInvalid.lean.txt": "a4d08f196a96e16860e8edd3a1d636494da8ce9e10699b78dae1cbf9ee0dab96",
+    "lean-toolchain": "3aac669c7a910ec2389f4e4f921b605adf6ebf2d1e0c9b9cd0be4d33f3f5db71",
+    "lakefile.toml": "f47111517c74581d74122bc9ea94775e91d7008d674d731429487c95e0799d71",
+    "lake-manifest.json": "bab2f39ee243741cbcdde55de9a67c5470181dfb96142b691ba214ea760835b6"
+  },
+  "checks": [
+    {
+      "name": "gaussian_identities",
+      "command": [
+        "/home/max/.elan/bin/lake",
+        "env",
+        "lean",
+        "Certificate.lean"
+      ],
+      "stdin_file": null,
+      "expected_exit_code": 0,
+      "exit_code": 0,
+      "output": "'SuperGLM.residual_identity' depends on axioms: [propext, Classical.choice, Quot.sound]\n'SuperGLM.quadratic_gap' depends on axioms: [propext, Classical.choice, Quot.sound]\n'SuperGLM.residual_energy_of_left_inverse' depends on axioms: [propext, Classical.choice, Quot.sound]\n'SuperGLM.quadratic_gap_residual' depends on axioms: [propext, Classical.choice, Quot.sound]\n"
+    },
+    {
+      "name": "beginner_examples",
+      "command": [
+        "/home/max/.elan/bin/lake",
+        "env",
+        "lean",
+        "ProofTour.lean"
+      ],
+      "stdin_file": null,
+      "expected_exit_code": 0,
+      "exit_code": 0,
+      "output": "square_sum (a b : ℝ) : (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2\nscalar_quadratic_gap (h b x xStar : ℝ) (stationary : h * xStar = b) :\n  h * x ^ 2 / 2 - b * x - (h * xStar ^ 2 / 2 - b * xStar) = h * (x - xStar) ^ 2 / 2\n'square_sum' depends on axioms: [propext, Classical.choice, Quot.sound]\n'scalar_quadratic_gap' depends on axioms: [propext, Classical.choice, Quot.sound]\n"
+    },
+    {
+      "name": "deliberate_false_identity",
+      "command": [
+        "/home/max/.elan/bin/lake",
+        "env",
+        "lean",
+        "--stdin"
+      ],
+      "stdin_file": "ProofTourInvalid.lean.txt",
+      "expected_exit_code": 1,
+      "exit_code": 1,
+      "output": "Try this:\n  [apply] ring_nf\n  \n  The `ring` tactic failed to close the goal. Use `ring_nf` to obtain a normal form.\n    \n  Note that `ring` works primarily in *commutative* rings. If you have a noncommutative ring, abelian group or module, consider using `noncomm_ring`, `abel` or `module` instead.\n<stdin>:5:35: error: unsolved goals\na b : ℝ\n⊢ a * b * 2 + a ^ 2 + b ^ 2 = a ^ 2 + b ^ 2\n"
+    }
+  ]
+}

@@ -1,0 +1,676 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-13",
+  "purpose": "Initial serial housing baseline and separate profile for adaptive-interaction research; no optimization measured.",
+  "base_commit": "7c4e70ffac99c9a70adf90e5b21d9735109c4675",
+  "branch": "research/adaptive-interactions",
+  "protocol": {
+    "case_count": 2,
+    "unprofiled_observations_per_case": 1,
+    "profiled_observations": {
+      "rows30": 1
+    },
+    "process_deadline_seconds": 180,
+    "native_threads": 1,
+    "deliberate_warmup": false,
+    "dataset_rows": 20640,
+    "training_rows": 12384,
+    "validation_rows": 4128,
+    "test_rows": 4128,
+    "shared_host": true,
+    "background_load_monitoring": "Pre-run process inspection only; no continuous host-load monitor. No other fit workers launched by this session.",
+    "cache_state": "Fresh worktree and environment; on-disk/JIT cache effects not separately measured.",
+    "fit_clock_scope": "Complete fit_reml including build, optimizer and finalization; excludes imports, loading and post-fit prediction/export.",
+    "rss_scope": "Whole worker peak through prediction/export, including runtime and inputs; retained model bytes were not separately measured.",
+    "profile_scope": "Cumulative profile times overlap and must not be summed as disjoint phases. Profiled wall clocks are not speed comparisons."
+  },
+  "hardware_reported": {
+    "cpu_model": "AMD EPYC 9645 96-Core Processor",
+    "visible_logical_cpus": 16,
+    "architecture": "x86_64"
+  },
+  "runtime": {
+    "python": "3.13.14",
+    "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+    "cpu_count": 16,
+    "packages": {
+      "superglm": "0.33.0",
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "pandas": "3.0.5",
+      "scikit-learn": "1.9.0",
+      "threadpoolctl": "3.6.0"
+    },
+    "threadpools_before_fit": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      }
+    ],
+    "threadpools_after_fit": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      }
+    ]
+  },
+  "identities": {
+    "package_source_sha256": "0696a00a2e3f43d0a54f2e94a99bb76abb38b26177ff6fe941800ebf00dd9c47",
+    "benchmark_script_sha256": "82bba8865dc2f6d48d6ef8e01a287959496d56160ac46e2a6860c5027fab6923",
+    "reference_json_sha256": "dae642454b9940ac4aecd9ce3108f93efeaccf34e66bd6fb5cea9f554b7cb44d",
+    "reference_predictions_sha256": "50bc6b86b64022e6a8e5fe9896ca0dada1d13cfc9083533f45d18a7d4a19e3f5",
+    "data_fingerprint": "97b51f1dcea2cfc6ca34858a9f3f867826091d4ffdbd2b06f86cc7b612b3ba79",
+    "transformed_features_sha256": "14bb8779e4e52acc7deed8b8870f2cdacd9a4b47927a55549fae67c3139f36f2",
+    "split_sha256": "b6636f12fd2167618d26247e636d8f195f59a2c52b60195ecde005da044bbd69"
+  },
+  "runs": [
+    {
+      "case": "rows20",
+      "status": "success",
+      "profiled": false,
+      "fit_seconds": 10.053859207953792,
+      "peak_process_rss_mib": 565.0390625,
+      "coefficient_count_without_intercept": 513,
+      "mse": {
+        "train": 0.23088656801038826,
+        "valid": 0.24777169778663752,
+        "test": 0.2544978955927369
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "backend_groups": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "warnings": [],
+      "artifact_directory": ".benchmark-artifacts/housing-tensor/baseline-rows20",
+      "process_seconds": 13.466545605042484,
+      "fit": {
+        "method": "fit_reml",
+        "fit_meta": {
+          "method": "fit_reml",
+          "discrete": true,
+          "direct_backend": "gram",
+          "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+        },
+        "deviance": 2909.497382773643,
+        "effective_df": 236.65586685760132,
+        "phi": 0.23951716117668606,
+        "n_iter": 1,
+        "converged": true,
+        "intercept": 0.32125381760897814
+      },
+      "edf_total_excluding_intercept": 235.65586685760135,
+      "rank_policy": {
+        "version": 4,
+        "coordinate_space": "solver"
+      },
+      "reml": {
+        "n_reml_iter": 9,
+        "converged": true,
+        "termination_reason": "score_objective_tolerance",
+        "objective": 9325.158020517123,
+        "lambdas": {
+          "MedInc": 16.48145125711514,
+          "HouseAge": 780.73326595459,
+          "AveRooms": 0.11062410096659546,
+          "AveBedrms": 0.012818683735741652,
+          "Population": 5.897428499424516,
+          "AveOccup": 0.015146050385936999,
+          "Latitude": 0.011769605375490452,
+          "Longitude": 0.04954324068403073,
+          "Latitude:Longitude:margin_Latitude": 57.41702991266852,
+          "Latitude:Longitude:margin_Longitude": 5.723736611640011
+        }
+      },
+      "timers": {
+        "dm_build_s": 0.12709850998362526,
+        "irls_total_s": 1.869641291035805,
+        "irls_finalize_s": 0.7389114680117927,
+        "reml_optimizer_s": 6.398934722004924,
+        "reml_n_linesearch_fits": 10,
+        "reml_n_outer_iter": 9,
+        "total_s": 10.05018589401152,
+        "fit_runtime_canonicalize_s": 0.05473830102710053
+      },
+      "artifact_sha256": {
+        "result.json": "562463d48ddec5f449f91afa86239634d6d6dd44d74fe0e9296f90428dd35ca3",
+        "run.json": "1a26a06b55405824130dbf4c674b1999c0f2d4b512e1cabf4954d4941e49b1d5",
+        "predictions.npz": "6b7a90ad4a110c3f5f65618e9eac80548fa1ab3107696b5e48b4403fa89076aa",
+        "worker.log": "6c3047aa0886a73be2f7015dcac40d521a0623469d9715991e781b4c08c7570f"
+      }
+    },
+    {
+      "case": "rows30",
+      "status": "success",
+      "profiled": false,
+      "fit_seconds": 117.27918661799049,
+      "peak_process_rss_mib": 900.609375,
+      "coefficient_count_without_intercept": 1013,
+      "mse": {
+        "train": 0.21322959430325328,
+        "valid": 0.22850544346181947,
+        "test": 0.23744908041783022
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "backend_groups": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "warnings": [],
+      "artifact_directory": ".benchmark-artifacts/housing-tensor/baseline-rows30",
+      "process_seconds": 120.83460588398157,
+      "fit": {
+        "method": "fit_reml",
+        "fit_meta": {
+          "method": "fit_reml",
+          "discrete": true,
+          "direct_backend": "gram",
+          "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+        },
+        "deviance": 2699.379962415671,
+        "effective_df": 360.6404010933385,
+        "phi": 0.22451123949450683,
+        "n_iter": 1,
+        "converged": true,
+        "intercept": 3.316921431660684
+      },
+      "edf_total_excluding_intercept": 359.6404010933384,
+      "rank_policy": {
+        "version": 4,
+        "coordinate_space": "solver"
+      },
+      "reml": {
+        "n_reml_iter": 10,
+        "converged": true,
+        "termination_reason": "score_objective_tolerance",
+        "objective": 9092.128990580406,
+        "lambdas": {
+          "MedInc": 14.63473653605989,
+          "HouseAge": 943.7777139560716,
+          "AveRooms": 0.1254494926088654,
+          "AveBedrms": 0.01046273028972635,
+          "Population": 3.976016413396018,
+          "AveOccup": 0.01770819180213519,
+          "Latitude": 126.52808285090823,
+          "Longitude": 76.40768869746361,
+          "Latitude:Longitude:margin_Latitude": 224.75846104543746,
+          "Latitude:Longitude:margin_Longitude": 41.6749083734457
+        }
+      },
+      "timers": {
+        "dm_build_s": 0.16452720598317683,
+        "irls_total_s": 1.8838196040596813,
+        "irls_finalize_s": 4.361337991897017,
+        "reml_optimizer_s": 61.956480028049555,
+        "reml_n_linesearch_fits": 9,
+        "reml_n_outer_iter": 10,
+        "total_s": 117.27382031298475,
+        "fit_runtime_canonicalize_s": 0.05362146097468212
+      },
+      "artifact_sha256": {
+        "result.json": "7ccc541a96eac58f194c0fd6057d07e02378c89b6691c720bd39d3397a866591",
+        "run.json": "15e7b8c18b88fd7fbdb6b8adf7c09b12657404763d41e6cf77efe2cbaedebb45",
+        "predictions.npz": "aafcb1ce10e2829a07063e19b9cfac4e1327481eaaca4c2bc8a27cf723a7ec5d",
+        "worker.log": "3818fc1a00a778771f3a9de32abc136066e65459d5a099498af4e979deefbdfa"
+      }
+    },
+    {
+      "case": "rows30",
+      "status": "success",
+      "profiled": true,
+      "fit_seconds": 116.54104198300047,
+      "peak_process_rss_mib": 906.5390625,
+      "coefficient_count_without_intercept": 1013,
+      "mse": {
+        "train": 0.21322959430325328,
+        "valid": 0.22850544346181947,
+        "test": 0.23744908041783022
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "backend_groups": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "warnings": [],
+      "artifact_directory": ".benchmark-artifacts/housing-tensor/profile-rows30",
+      "process_seconds": 120.3215292620007,
+      "fit": {
+        "method": "fit_reml",
+        "fit_meta": {
+          "method": "fit_reml",
+          "discrete": true,
+          "direct_backend": "gram",
+          "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+        },
+        "deviance": 2699.379962415671,
+        "effective_df": 360.6404010933385,
+        "phi": 0.22451123949450683,
+        "n_iter": 1,
+        "converged": true,
+        "intercept": 3.316921431660684
+      },
+      "edf_total_excluding_intercept": 359.6404010933384,
+      "rank_policy": {
+        "version": 4,
+        "coordinate_space": "solver"
+      },
+      "reml": {
+        "n_reml_iter": 10,
+        "converged": true,
+        "termination_reason": "score_objective_tolerance",
+        "objective": 9092.128990580406,
+        "lambdas": {
+          "MedInc": 14.63473653605989,
+          "HouseAge": 943.7777139560716,
+          "AveRooms": 0.1254494926088654,
+          "AveBedrms": 0.01046273028972635,
+          "Population": 3.976016413396018,
+          "AveOccup": 0.01770819180213519,
+          "Latitude": 126.52808285090823,
+          "Longitude": 76.40768869746361,
+          "Latitude:Longitude:margin_Latitude": 224.75846104543746,
+          "Latitude:Longitude:margin_Longitude": 41.6749083734457
+        }
+      },
+      "timers": {
+        "dm_build_s": 0.31211870204424486,
+        "irls_total_s": 1.977288455935195,
+        "irls_finalize_s": 4.415953940944746,
+        "reml_optimizer_s": 60.53734856698429,
+        "reml_n_linesearch_fits": 9,
+        "reml_n_outer_iter": 10,
+        "total_s": 116.52986463397974,
+        "fit_runtime_canonicalize_s": 0.06270713696721941
+      },
+      "artifact_sha256": {
+        "profile.txt": "c6cd54121ec53ce9ca3bdf88d9dab9d370af18b5e4025f9ed308a004975fd810",
+        "result.json": "a38f0e39e04088bb5753e03eb5fa27ad18a822472e6847d92ebf18d289709365",
+        "run.json": "c67da4ad76c92dd23788b2148998322a59d321a4472e2d6e2039bff957860200",
+        "fit.prof": "d2b81a73126a7c27803987974086b110a4ce9ec268f9cfc8e38be45561c5b710",
+        "predictions.npz": "aafcb1ce10e2829a07063e19b9cfac4e1327481eaaca4c2bc8a27cf723a7ec5d",
+        "worker.log": "c46ce6dbe238cc096115363db3c38440d5c4cb9e5a10f02114bda32fb36bf1f4"
+      }
+    }
+  ],
+  "checks": {
+    "benchmark_boundary_tests": "8 passed",
+    "uv_lock_check": "passed",
+    "uv_pip_check": "passed",
+    "production_source_modified": false
+  },
+  "profile_functions": [
+    {
+      "file": "src/superglm/reml/penalty_algebra.py",
+      "line": 650,
+      "function": "get_support",
+      "primitive_calls": 631,
+      "total_calls": 631,
+      "self_seconds": 0.0011276790000000001,
+      "cumulative_seconds": 103.593544287,
+      "callers": [
+        {
+          "file": "src/superglm/reml/penalty_algebra.py",
+          "line": 657,
+          "function": "evaluate",
+          "primitive_calls": 96,
+          "total_calls": 96,
+          "self_seconds": 0.000078125,
+          "cumulative_seconds": 0.000078125
+        },
+        {
+          "file": "src/superglm/reml/penalty_algebra.py",
+          "line": 2072,
+          "function": "_group_penalty_rank",
+          "primitive_calls": 207,
+          "total_calls": 207,
+          "self_seconds": 0.000179122,
+          "cumulative_seconds": 103.33488270900001
+        },
+        {
+          "file": "src/superglm/reml/penalty_algebra.py",
+          "line": 2237,
+          "function": "_compute_penalty_logdet_evaluation",
+          "primitive_calls": 328,
+          "total_calls": 328,
+          "self_seconds": 0.0008704320000000001,
+          "cumulative_seconds": 0.258583453
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/reml/penalty_support.py",
+      "line": 136,
+      "function": "_penalty_support",
+      "primitive_calls": 98,
+      "total_calls": 98,
+      "self_seconds": 0.00215432,
+      "cumulative_seconds": 103.59241660800001,
+      "callers": [
+        {
+          "file": "src/superglm/reml/penalty_algebra.py",
+          "line": 650,
+          "function": "get_support",
+          "primitive_calls": 98,
+          "total_calls": 98,
+          "self_seconds": 0.00215432,
+          "cumulative_seconds": 103.59241660800001
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/reml/penalty_algebra.py",
+      "line": 2072,
+      "function": "_group_penalty_rank",
+      "primitive_calls": 207,
+      "total_calls": 207,
+      "self_seconds": 0.00039641100000000005,
+      "cumulative_seconds": 103.336641512,
+      "callers": [
+        {
+          "file": "src/superglm/reml/penalty_algebra.py",
+          "line": 2134,
+          "function": "_structural_active_penalty_rank",
+          "primitive_calls": 198,
+          "total_calls": 198,
+          "self_seconds": 0.000339142,
+          "cumulative_seconds": 51.735680862
+        },
+        {
+          "file": "src/superglm/reml/penalty_algebra.py",
+          "line": 2089,
+          "function": "compute_total_penalty_rank",
+          "primitive_calls": 9,
+          "total_calls": 9,
+          "self_seconds": 0.000057269000000000003,
+          "cumulative_seconds": 51.600960650000005
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/reml/penalty_support.py",
+      "line": 152,
+      "function": "_penalty_support_from_roots",
+      "primitive_calls": 98,
+      "total_calls": 98,
+      "self_seconds": 58.66152459600001,
+      "cumulative_seconds": 78.898406651,
+      "callers": [
+        {
+          "file": "src/superglm/reml/penalty_support.py",
+          "line": 136,
+          "function": "_penalty_support",
+          "primitive_calls": 98,
+          "total_calls": 98,
+          "self_seconds": 58.66152459600001,
+          "cumulative_seconds": 78.898406651
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/model/reml_execute.py",
+      "line": 312,
+      "function": "optimize_reml_best",
+      "primitive_calls": 1,
+      "total_calls": 1,
+      "self_seconds": 0.000021533000000000002,
+      "cumulative_seconds": 60.541236165,
+      "callers": [
+        {
+          "file": "src/superglm/model/fit_ops.py",
+          "line": 1724,
+          "function": "_fit_reml_in_workspace",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "self_seconds": 0.000021533000000000002,
+          "cumulative_seconds": 60.541236165
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/model/reml_finalize.py",
+      "line": 348,
+      "function": "finalize_reml_fit",
+      "primitive_calls": 1,
+      "total_calls": 1,
+      "self_seconds": 0.000297241,
+      "cumulative_seconds": 55.433370198000006,
+      "callers": [
+        {
+          "file": "src/superglm/model/fit_ops.py",
+          "line": 1724,
+          "function": "_fit_reml_in_workspace",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "self_seconds": 0.000297241,
+          "cumulative_seconds": 55.433370198000006
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/reml/objective.py",
+      "line": 56,
+      "function": "reml_laml_objective",
+      "primitive_calls": 21,
+      "total_calls": 21,
+      "self_seconds": 0.000928333,
+      "cumulative_seconds": 52.689501934000006,
+      "callers": [
+        {
+          "file": "src/superglm/reml/discrete.py",
+          "line": 174,
+          "function": "optimize_discrete_reml_cached_w",
+          "primitive_calls": 20,
+          "total_calls": 20,
+          "self_seconds": 0.0008535480000000001,
+          "cumulative_seconds": 0.871059251
+        },
+        {
+          "file": "src/superglm/model/reml_finalize.py",
+          "line": 348,
+          "function": "finalize_reml_fit",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "self_seconds": 0.00007478500000000001,
+          "cumulative_seconds": 51.818442683
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/reml/penalty_algebra.py",
+      "line": 2155,
+      "function": "compute_penalty_nullity",
+      "primitive_calls": 22,
+      "total_calls": 22,
+      "self_seconds": 0.000142249,
+      "cumulative_seconds": 51.73677076600001,
+      "callers": [
+        {
+          "file": "src/superglm/reml/discrete.py",
+          "line": 174,
+          "function": "optimize_discrete_reml_cached_w",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "self_seconds": 0.000013721000000000001,
+          "cumulative_seconds": 0.000180852
+        },
+        {
+          "file": "src/superglm/reml/objective.py",
+          "line": 56,
+          "function": "reml_laml_objective",
+          "primitive_calls": 21,
+          "total_calls": 21,
+          "self_seconds": 0.000128528,
+          "cumulative_seconds": 51.73658991400001
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/reml/penalty_algebra.py",
+      "line": 2134,
+      "function": "_structural_active_penalty_rank",
+      "primitive_calls": 22,
+      "total_calls": 22,
+      "self_seconds": 0.000576567,
+      "cumulative_seconds": 51.73660841,
+      "callers": [
+        {
+          "file": "src/superglm/reml/penalty_algebra.py",
+          "line": 2155,
+          "function": "compute_penalty_nullity",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "self_seconds": 0.000576567,
+          "cumulative_seconds": 51.73660841
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/reml/penalty_algebra.py",
+      "line": 2089,
+      "function": "compute_total_penalty_rank",
+      "primitive_calls": 1,
+      "total_calls": 1,
+      "self_seconds": 0.000053561000000000004,
+      "cumulative_seconds": 51.601030687000005,
+      "callers": [
+        {
+          "file": "src/superglm/reml/discrete.py",
+          "line": 174,
+          "function": "optimize_discrete_reml_cached_w",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "self_seconds": 0.000053561000000000004,
+          "cumulative_seconds": 51.601030687000005
+        }
+      ]
+    },
+    {
+      "file": "src/superglm/reml/penalty_support.py",
+      "line": 102,
+      "function": "_component_root",
+      "primitive_calls": 100,
+      "total_calls": 100,
+      "self_seconds": 23.802170154000002,
+      "cumulative_seconds": 24.687443652000002,
+      "callers": [
+        {
+          "file": "src/superglm/reml/penalty_support.py",
+          "line": 139,
+          "function": "<genexpr>",
+          "primitive_calls": 100,
+          "total_calls": 100,
+          "self_seconds": 23.802170154000002,
+          "cumulative_seconds": 24.687443652000002
+        }
+      ]
+    }
+  ]
+}

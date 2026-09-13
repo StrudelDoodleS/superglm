@@ -1,16 +1,17 @@
 # Roadmap
 
-Last strategic review: **2026-09-12**. Current implementation baseline:
-`origin/master` at `c0ed3a62`, including the LSS API refinement in PR #386
+Last strategic review: **2026-09-13**. Current research baseline:
+`v0.33.0` at `7c4e70ff`, including the LSS API refinement in PR #386
 and Newton completion repair in PR #387.
 The starting baseline was `8962c452` (published v0.31.0); individual implementation
 and benchmark revisions remain pinned in the evidence below.
 
-**Current direction:** the LSS API refinement and Newton completion repair are
-merged; next establish a scoped proof programme. The user identified 0.33 as a
-possible release target; this records intent, not a version decision or publication.
-The 12.5-second latency target remains unmet. Further performance work and
-100-million-row/out-of-core fitting remain separately scoped future work.
+**Current direction:** the user selected affordable locally adaptive interactions,
+with predictive accuracy, complete-fit time, peak RSS and system-specific error
+bounds as joint objectives. Start with the housing performance investigation and
+a fixed Gaussian representation/certification pilot. The proof programme remains
+part of these numerical claims. The separate 12.5-second C1 latency target remains
+unmet; 100-million-row/out-of-core fitting remains deferred.
 
 This is **directional project state, not an implementation specification**,
 delivery commitment, or authorization to start a capability. Scope implementation
@@ -121,6 +122,22 @@ does not replace separate discretization-error evidence. Final production
 validation passed 11,546 tests with 174 skips and mandatory real-data availability.
 
 ## Next
+
+**Selected on 2026-09-13: adaptive interactions and coefficient scaling research.**
+The [research design](research/2026-09-13-adaptive-interactions-research-design.md)
+promotes bounded C16/C21 work and the necessary C15/C18 analysis. Keep every
+observation; allocate interaction basis resolution where it is useful. Validate
+the first numerical reduction against a fixed rich Gaussian problem, then assess
+automatic smoothing and fresh held-out accuracy. A fixed-parameter mean-error
+bound does not certify covariance or the smoothing optimum.
+
+The initial serial [housing receipt](../benchmarks/adaptive_interactions_baseline.json)
+records `rows20` at 10.05 seconds/565 MiB and `rows30` at 117.28 seconds/901 MiB,
+with exact local prediction replay. A separate profile identifies two expensive
+tensor support constructions across optimizer/finalization ownership. This is a
+measured optimization hypothesis, not an implemented speedup. The adaptive
+representation, finite-precision certificates and large-coefficient backend
+remain research. General C9 search follows validated, affordable candidate fits.
 
 **Selected on 2026-09-12: algorithm proof planning.** The
 [design](https://github.com/StrudelDoodleS/superglm/blob/master/docs/superpowers/specs/2026-09-12-algorithm-proofs-design.md) and
@@ -389,7 +406,8 @@ The reviewed row store and unfinished compiler are preserved locally on
 `deferred/c1-out-of-core` at `92f99dda`, outside PR #381's final code. No further
 analysis or implementation is active for this item.
 
-Beyond the selected proof work, the capability candidate priority order is:
+Beyond the selected adaptive-interaction research and proof work, the capability
+candidate priority order is:
 
 **1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing
 constraints and distributional fits, starting with demanded monotone effects.
@@ -438,8 +456,9 @@ The reviewed additions organize computational research into three complementary
 directions: C1 reduces row-side basis-product work; C15/C18 target coefficient
 storage and iterative solves; C16/C21/C22 target representation efficiency, with
 C26 as a possible specialist solver. Composition is a research question, not an
-assumption that one backend should serve every size regime. These additions do
-not reorder the existing delivery queue or reopen the completed C3+C1 checkpoint.
+assumption that one backend should serve every size regime. The additions alone
+did not reorder the delivery queue. The explicit 2026-09-13 selection above now
+promotes bounded C15/C16/C18/C21 research and preserves the completed C3+C1 checkpoint.
 
 | Candidate | Idea | Reviewed readiness and promotion gate |
 | --- | --- | --- |
