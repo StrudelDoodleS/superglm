@@ -1402,7 +1402,7 @@ Expected: PASS. If a name is reported missing, it was added to `__all__` after t
 
 Run: `SUPERGLM_DOCS_EXECUTE=off uv run sphinx-build -b html -n -W --keep-going docs docs/_build/html 2>&1 | grep -E 'WARNING|ERROR' | sort | uniq -c | sort -rn | head -40`
 
-Work through the output. Rules: a shorthand type name gets a `nitpick_ignore_regex` entry; a genuine dotted path that does not resolve means the docstring names a private or moved object, fix the docstring; a numpydoc section warning is a docstring format fix. Repeat until the command prints nothing, then run the full strict build once and confirm `build succeeded`.
+Work through the output. Rules: a shorthand type name gets a `nitpick_ignore_regex` entry; a genuine dotted path that does not resolve means the docstring names a private or moved object, fix the docstring, unless it is one of the paths already dispositioned in `conf.py` per Task 4 Step 3 rule 2 (leave those); delete the TEMPORARY two-entry ignore block in `conf.py` for the four exported bare names before this step and re-verify; a numpydoc section warning is a docstring format fix. Repeat until the command prints nothing, then run the full strict build once and confirm `build succeeded`.
 
 - [ ] **Step 6: Commit**
 
