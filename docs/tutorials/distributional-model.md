@@ -1,4 +1,26 @@
+---
+jupytext:
+  text_representation:
+    extension: .md
+    format_name: myst
+    format_version: 0.13
+    jupytext_version: 1.19.1
+kernelspec:
+  display_name: Python 3
+  language: python
+  name: python3
+---
+
 # Your first distributional model
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/StrudelDoodleS/superglm/blob/master/docs/tutorials/distributional-model.ipynb)
+[Download the notebook](https://raw.githubusercontent.com/StrudelDoodleS/superglm/master/docs/tutorials/distributional-model.ipynb)
+
+```{code-cell} ipython3
+:tags: [skip-execution]
+
+%pip install -q superglm
+```
 
 `SuperLSS` fits several parameters of a response distribution together. A
 Gaussian model, for example, can let both the mean and the standard deviation
@@ -14,7 +36,7 @@ Here the response mean depends on age and region. Its standard deviation also
 increases with age. These are simulated continuous measurements, so a Gaussian
 response is appropriate.
 
-```python
+```{code-cell} ipython3
 import numpy as np
 import pandas as pd
 
@@ -43,7 +65,7 @@ and smoothing parameters from the training rows.
 
 ## Declare the predictors
 
-```python
+```{code-cell} ipython3
 family = GaussianLS()
 
 model = SuperLSS(
@@ -79,7 +101,7 @@ put the declarations in any order; names identify their parameters.
 
 ## Fit the model
 
-```python
+```{code-cell} ipython3
 model.fit_reml(X_train, y_train, outer="efs+newton")
 print(model.summary())
 print(model.diagnose())
@@ -99,7 +121,7 @@ linked quantity.
 
 ## Predict the mean, spread and a quantile
 
-```python
+```{code-cell} ipython3
 parameters = model.predict_parameters(X_test)
 predicted_mean = model.predict(X_test)
 upper_quantile = model.predict_quantile(X_test, 0.95)
@@ -124,7 +146,7 @@ distribution. It is not a confidence bound on the estimated mean.
 
 Keep the same mean terms and estimate one standard deviation for all rows:
 
-```python
+```{code-cell} ipython3
 constant_scale = SuperLSS(
     family,
     family.location(s("age", kind="cr", k=8), cat("region")),
@@ -161,7 +183,7 @@ because their parameters differ.
 
 For example, a Tweedie declaration uses three helpers:
 
-```python
+```{code-cell} ipython3
 from superglm import TweedieLSS
 
 tweedie = TweedieLSS()
@@ -178,11 +200,11 @@ results and offsets are `mean`, `dispersion` and `power`. The empty `p()` call
 estimates one power value for all rows. This code only constructs the model;
 fit it to a response for which the Tweedie law is appropriate.
 
-See [family predictor names](../models/distributional.md#family-predictor-names)
-for all nine families, including what their scale and shape parameters mean.
-For fitting options and return values, use the
-[SuperLSS API reference](../api/distributional.md). The
-[distributional model guide](../models/distributional.md) covers weights,
-offsets, interactions and discrete fitting; the
-[checking guide](../models/distributional-inference.md) covers calibration and
-predictive diagnostics.
+% See [family predictor names](../how-to/fit-a-distributional-model.md#family-predictor-names)
+% for all nine families, including what their scale and shape parameters mean.
+% For fitting options and return values, use the
+% [SuperLSS API reference](../api/distributional.md). The
+% [distributional model guide](../how-to/fit-a-distributional-model.md) covers weights,
+% offsets, interactions and discrete fitting; the
+% [checking guide](../how-to/check-a-distributional-fit.md) covers calibration and
+% predictive diagnostics.
