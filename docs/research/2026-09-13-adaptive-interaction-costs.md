@@ -6,8 +6,11 @@ SuperGLM 0.33.0. This note preserves the read-only cost investigation for the
 Source pointers below are relative to `src/superglm/` at that base.
 
 The source inspection and archived profile establish the current allocation
-paths and repeated work. The context transfer is an unimplemented performance
-hypothesis. The operator costs are conditional models, not measured adaptive
+paths and repeated work. At that audited base, the context transfer was an
+unimplemented performance hypothesis. The
+[follow-through](2026-09-13-tensor-support-handoff-performance.md) records its
+implementation and complete-fit measurements. The operator costs below are
+conditional models, not measured adaptive
 fit results or numerical guarantees. No new fits or production changes were
 made for this note.
 

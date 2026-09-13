@@ -131,13 +131,21 @@ the first numerical reduction against a fixed rich Gaussian problem, then assess
 automatic smoothing and fresh held-out accuracy. A fixed-parameter mean-error
 bound does not certify covariance or the smoothing optimum.
 
-The initial serial [housing receipt](../benchmarks/adaptive_interactions_baseline.json)
-records `rows20` at 10.05 seconds/565 MiB and `rows30` at 117.28 seconds/901 MiB,
-with exact local prediction replay. A separate profile identifies two expensive
-tensor support constructions across optimizer/finalization ownership. This is a
-measured optimization hypothesis, not an implemented speedup. The adaptive
-representation, finite-precision certificates and large-coefficient backend
-remain research. General C9 search follows validated, affordable candidate fits.
+The first existing-tensor performance step is implemented and measured in
+`306f12e0`: exact admission carries selected penalty support from optimizer to
+finalization, reducing the expensive tensor builds from two to one. The
+[complete-fit results](research/2026-09-13-tensor-support-handoff-performance.md)
+record median time reductions of 34.0% for `rows20` and 44.8% for `rows30`,
+with exact numerical replay and unchanged retained model payload. Small-case
+peak RSS is 2.4% higher; large-case RSS ranges overlap the baseline. Two
+observations per version on a shared host do not establish a general speedup
+or improved asymptotic scaling. The initial baseline remains archived.
+
+The next implementation gate is the small C16/C21 hierarchy prototype: nested
+transfer, product centering, penalty pullbacks, nullspaces and adjoints before
+adaptive fitting. Its finite-precision certificates and the C15/C18
+large-coefficient backend remain research. General C9 search follows validated,
+affordable candidate fits.
 
 **Selected on 2026-09-12: algorithm proof planning.** The
 [design](https://github.com/StrudelDoodleS/superglm/blob/master/docs/superpowers/specs/2026-09-12-algorithm-proofs-design.md) and

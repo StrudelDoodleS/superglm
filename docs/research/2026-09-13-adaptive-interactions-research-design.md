@@ -6,13 +6,17 @@ Base: `7c4e70ffac99c9a70adf90e5b21d9735109c4675`, `v0.33.0`
 
 Worktree: `.worktrees/adaptive-interactions`
 
-Status: research direction approved; implementation guarantees require the gates below.
+Status: research direction approved; the first tensor-support optimization is
+implemented and measured in `306f12e0`. Adaptive guarantees require the gates below.
 
 Mathematical details belong in the companion
 [representation memo](2026-09-13-adaptive-interaction-representation.md) and
 [Gaussian error-bound memo](2026-09-13-adaptive-gaussian-error-bounds.md).
 The [cost audit](2026-09-13-adaptive-interaction-costs.md) records the source-level
 allocation and reuse analysis.
+The [performance follow-through](2026-09-13-tensor-support-handoff-performance.md)
+records the first implemented change, numerical checks and memory tradeoffs.
+The [tool setup](research-tools-setup.md) records the installed Lean and SymPy tools.
 Keep future derivations, counterexamples and formal proof scope under
 `docs/research` with their assumptions, source revisions and references.
 
@@ -37,6 +41,20 @@ affordable, validated representation. Coupled LSS curvature, general structure
 search, and 100-million-row/out-of-core fitting have separate scopes.
 
 ## First performance investigation
+
+**Completed first step.** The optimizer-to-finalizer handoff now reduces the
+expensive tensor support constructions from two to one while preserving the
+selected numerical support and error ledger. Matched complete-fit medians
+improve by 34.0% (rows20) and 44.8% (rows30); all recorded non-timing numerical
+outputs match and retained model payload is unchanged. Small-case peak RSS
+remains 2.4% higher, while large-case ranges overlap baseline. See the
+[final report and receipt](2026-09-13-tensor-support-handoff-performance.md).
+This removes repeated work without changing dense asymptotic scaling.
+
+### Preserved baseline investigation at 7c4e70ff
+
+The following records the investigation before implementation. Its proposed
+handoff is now implemented as described above.
 
 The committed housing runner supplies a frozen input/model workload, one owned
 worker per invocation, a 180-second whole-worker deadline, source/input hashes,
@@ -76,7 +94,7 @@ preparation on optimizer and finalization paths. Source and call counts identify
 tensor decompositions. Profiled clocks are diagnostic, not a timing comparison
 with the unprofiled observations.
 
-The first investigation ends with these baselines, a complete-fit profile,
+The first investigation ended with these baselines, a complete-fit profile,
 producer/consumer analysis and one bounded optimization hypothesis. Any patch
 must then demonstrate a complete-fit benefit with numerical evidence and actual
 dispatch, including retained-memory and lifetime costs. A support-cache change
@@ -85,8 +103,8 @@ can remove repeated work without changing the asymptotic cost of its first build
 The measured first hypothesis is to carry the optimizer-owned positive tensor
 penalty family into finalization. `reml/discrete.py:446` first builds its support
 for bootstrap rank and retains that geometry across lambda iterations. The
-discrete result currently does not return that family; `fit_ops.py:2020` passes
-the original entry family to finalization. `reml_finalize.py:404` builds another
+discrete result at that base did not return that family; `fit_ops.py:2020` passed
+the original entry family to finalization. `reml_finalize.py:404` built another
 context, whose terminal objective requests nullity and builds support again.
 Seeding from the entry family alone would miss the expensive producer. Existing
 raw-family support transfer explicitly excludes discrete tensors; its other
@@ -98,7 +116,7 @@ component order/placement, penalty values, dtype and arithmetic/rank policy.
 Weighted summaries have a separate lambda-key lifetime. Keep changed zero faces
 outside the first positive-family transfer unless separately justified. Count
 snapshots and overlapping contexts in retained and peak memory. No measured
-speedup or production change is claimed in this report.
+speedup or production change had been established at that investigation stage.
 
 ## Representation contract
 
@@ -319,9 +337,9 @@ large-coefficient scalability. Keep direct solvers when their complete cost wins
 
 ## Bounded experiment and decision gates
 
-1. Complete the unchanged housing baseline/profile and nominate one measured
-   reuse or allocation change. Any patch gets focused numerical/mutation tests
-   and matched complete-fit comparisons, including retained memory.
+1. **Completed:** unchanged housing baseline/profile, exact support handoff,
+   focused numerical/mutation tests and matched complete-fit comparisons,
+   including peak and retained memory. The measured tradeoff is recorded above.
 2. Demonstrate nested transfer, product centering, penalty pullbacks, nullspace
    preservation and adjoint consistency for one small two-dimensional hierarchy.
    Keep a dense reference only at these small sizes. Report raw frame count,

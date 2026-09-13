@@ -16,6 +16,11 @@ support and error ledger. This report establishes focused correctness and
 dispatch evidence. It does not claim a complete-fit speedup or successful
 housing memory gate.
 
+Parent follow-through is now complete in `306f12e0`. The
+[performance report](2026-09-13-tensor-support-handoff-performance.md) records
+independent review, broader validation and final complete-fit measurements.
+The worker-stage evidence and measurement gates below are preserved as history.
+
 ## Change and ownership
 
 `optimize_discrete_reml_cached_w` now returns its final `penalties` family through
