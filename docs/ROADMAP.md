@@ -131,6 +131,44 @@ the first numerical reduction against a fixed rich Gaussian problem, then assess
 automatic smoothing and fresh held-out accuracy. A fixed-parameter mean-error
 bound does not certify covariance or the smoothing optimum.
 
+The user clarified the practical target: many useful interactions for a modest
+multiple of the matching additive fit's time. The 2×, 5× and 10× additive-cost
+budgets are exploratory guides, with held-out loss, peak RSS and retained
+payload recorded alongside them. The
+[additive-normalized baseline](research/2026-09-13-cheap-interaction-additive-baseline.md)
+and [representation analysis](research/2026-09-13-cheap-interaction-representations.md)
+now separate unchanged-model reuse from smaller ordinary tensors, nested
+product dictionaries, local refinement and shared-factor models.
+
+Cheap discovery is part of the selected scope. Find a small, adaptively chosen
+set of useful interactions among many possible pairs; charge candidate
+generation, score refinement, joint refits and validation to the cost. Preserve
+the possibility of strong interactions with weak main effects. The
+[discovery analysis](research/2026-09-13-cheap-interaction-discovery.md) scopes
+this bounded scalar use of the existing C9/PSST workflow alongside C16/C21.
+Fitting every possible tensor interaction is not the target.
+PSST's winning EDF rung does not select basis resolution or establish that an
+interaction is useful. The selected search must assess both pair inclusion and
+resolution through bounded joint refits and held-out predictive gain.
+
+Choosing a method requires broad real-data trials. The
+[public corpus](research/2026-09-13-interaction-dataset-corpus.md) and
+[Kaggle corpus](research/2026-09-13-interaction-kaggle-corpus.md) cover housing,
+credit/default, claims severity, fraud, small classification controls and
+larger tabular problems. Their receipts distinguish validated data from
+catalogued or access-blocked sources; fabricated schema fixtures do not count
+as real data. The
+[row and coefficient scaling design](research/2026-09-13-real-data-scaling-design.md)
+distinguishes raw rows, input predictors and compiled coefficients, including
+dense storage and penalty-nullity constraints for the selected model.
+No general cross-dataset interaction performance claim has been made.
+The [first real trials](research/2026-09-13-real-interaction-trials.md) contain
+seven fits across breast cancer, credit default, Ames and bike sharing. Four
+converged and three reached the unchanged REML iteration limit; a dependent
+credit interaction arm was not fitted. Bike's selected interactions worsened
+chronological test loss. These fixed-count, fixed-resolution controls do not
+establish useful discovery or adaptive basis selection.
+
 The first existing-tensor performance step is implemented and measured in
 `306f12e0`: exact admission carries selected penalty support from optimizer to
 finalization, reducing the expensive tensor builds from two to one. The
@@ -163,7 +201,8 @@ adaptive fitting. C15/C18 must also address many coupled terms, including
 preconditioning, smoothing traces and requested uncertainty. The
 [Lean-checked operator identity](research/2026-09-13-interaction-operator-proof.md)
 preserves every cross-group contribution, but does not prove a solver's runtime
-or floating-point error. General C9 search follows validated, affordable fits.
+or floating-point error. Bounded scalar discovery is active; general
+distributional C9 structure search still requires validated, affordable fits.
 
 **Selected on 2026-09-12: algorithm proof planning.** The
 [design](https://github.com/StrudelDoodleS/superglm/blob/master/docs/superpowers/specs/2026-09-12-algorithm-proofs-design.md) and

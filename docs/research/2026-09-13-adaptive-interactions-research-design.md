@@ -36,6 +36,57 @@ Investigate both better representations and cheaper coefficient algebra, with
 error bounds derived for the actual compiled problem and executed arithmetic.
 Measure their composition instead of assuming the gains multiply.
 
+The user's clarified operational metric is `T(M) / T0`, where `T0` is the
+matching additive fit and `M` is the number of retained interactions. Treat
+2×, 5× and 10× as exploratory budget guides, not promised bounds. Report
+absolute time, incremental/retained memory, fit convergence and appropriate
+held-out loss as well. The
+[normalized baseline](2026-09-13-cheap-interaction-additive-baseline.md) supplies
+initial controls, and the [budget memo](2026-09-13-cheap-interaction-budget.md)
+derives the conditions needed for those ratios to remain small.
+
+The later clarification makes cheap discovery central: propose and assess
+potential interactions among many predictors, retain an adaptively chosen small
+set, and jointly fit it. The potential pair count is not the fitted term count.
+Charge discovery, all candidate refits and stopping/model-size selection to the
+procedure. Protect weak-main-effect interactions from a hard marginal screen.
+The [discovery memo](2026-09-13-cheap-interaction-discovery.md) and
+[real-data scaling design](2026-09-13-real-data-scaling-design.md) specify this
+bounded scalar search work; no exhaustive all-pairs fit is a research target.
+PSST supplies candidate evidence, not proof of predictive usefulness or a
+choice of basis dimension. Jointly select retained pairs and a bounded set of
+resolutions using training-generated models and held-out loss, with an untouched
+outer test. Preserve richer-direction exploration for pairs missed by coarse
+probes, and distinguish numerical certification from statistical uncertainty.
+
+Broaden the trials to real housing, credit/default, claims severity, fraud,
+larger mixed/high-dimensional tables and small classification controls.
+Use the [public data registry](2026-09-13-interaction-dataset-corpus.md) and
+[Kaggle registry](2026-09-13-interaction-kaggle-corpus.md), with verified
+source hashes, target/feature exclusions and time/group splits where required.
+Record authentication or source failures explicitly. Multiple targets, copied
+worktrees and fabricated schema fixtures are not independent real datasets.
+Controlled synthetic regimes remain useful for known truth and adverse
+geometry, but cannot establish cross-dataset superiority. Once a test split
+has informed method design, use fresh confirmation data for final claims.
+
+The first corpus delivery verifies 37 independent real sources across the
+core and Kaggle registries. Five requested Kaggle competitions remain
+access-blocked and are excluded from that count. The
+[four-table pilot](2026-09-13-real-interaction-trials.md) records seven fits,
+four converged results and three unchanged REML iteration-limit terminations.
+Bike's interaction arm improved validation loss and worsened chronological
+test loss. It is a fixed-count, fixed-resolution control, with no superiority
+or adaptive-selection claim.
+
+Integration verification for these research additions passed 35 focused
+dataset/trial tests and Ruff checks on seven Python files. Independent checks
+matched 34 core source files, 21 Kaggle source/receipt hashes, all seven real
+fit records and four test-prediction archives. The synthetic receipt rebuilds
+exactly, with 100 raw artifact hashes, 24 converged fits and two preserved
+setup failures. Production and dependency files are unchanged in this batch;
+no full production-test rerun is claimed.
+
 The user selected a locally adaptive two-dimensional spline experiment, with a
 fixed Gaussian problem as the first numerical validation and automatic smoothing
 plus fresh held-out evaluation as the modelling test. The fixed rich model is an
@@ -43,10 +94,11 @@ engineering reference; matching it does not establish population accuracy.
 Use `gpt-6-astra` at `max` for mathematical agents and no more than three concurrent
 subagents. Keep benchmark workers sequential, separate from other heavy work.
 
-This promotes bounded C16/C21 work and the necessary C15/C18 analysis. The proof
-programme supplies requirements for these claims. C9 integration follows an
-affordable, validated representation. Coupled LSS curvature, general structure
-search, and 100-million-row/out-of-core fitting have separate scopes.
+This promotes bounded C16/C21 work, scalar interaction discovery using C9's
+existing PSST/refit workflow, and the necessary C15/C18 analysis. The proof
+programme supplies requirements for these claims. Discovery and representation
+research proceed together. Coupled LSS curvature, general distributional
+structure search, and 100-million-row/out-of-core fitting have separate scopes.
 
 ## First performance investigation
 

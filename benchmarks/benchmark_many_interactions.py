@@ -68,18 +68,22 @@ def worker(args):
     train, response, data_hash = fixture(args.rows)
     test, test_response, test_hash = fixture(1024, held_out=True)
     pairs = interaction_pairs()[: args.interactions]
+    interaction_k = args.k if args.interaction_k is None else args.interaction_k
     model = SuperGLM(
         family="gaussian",
         features={
             name: Spline(kind="cr", k=args.k, knot_strategy="uniform", penalty="ssp")
             for name in FEATURES
         },
-        interactions=pairs,
+        interactions=pairs if args.interaction_k is None else [],
         selection_penalty=0.0,
         spline_penalty=0.1,
         discrete=True,
         n_bins=64,
     )
+    if args.interaction_k is not None:
+        for left, right in pairs:
+            model._add_interaction(left, right, n_knots=(interaction_k - 2, interaction_k - 2))
     profiler = cProfile.Profile() if args.profile else None
     started_utc = datetime.now(UTC).isoformat()
     with warnings.catch_warnings(record=True) as caught:
@@ -101,7 +105,7 @@ def worker(args):
     finished_utc = datetime.now(UTC).isoformat()
     retained = retained_model_storage(model)
     telemetry = model.training_telemetry()
-    width = 8 * (args.k - 1) + args.interactions * (args.k - 1) ** 2
+    width = 8 * (args.k - 1) + args.interactions * (interaction_k - 1) ** 2
     assert len(model.result.beta) == width
     train_prediction = model.predict(train)
     test_prediction = model.predict(test)
@@ -118,6 +122,7 @@ def worker(args):
         "status": "converged" if converged else "not_converged",
         "rows": args.rows,
         "k": args.k,
+        "interaction_k": interaction_k,
         "interactions": args.interactions,
         "pairs": pairs,
         "mode": args.mode,
@@ -167,6 +172,12 @@ def main():
     parser.add_argument("--rows", type=int, default=2048)
     parser.add_argument("--interactions", type=int, choices=range(29), default=1)
     parser.add_argument("--k", type=int, choices=range(4, 11), default=6)
+    parser.add_argument(
+        "--interaction-k",
+        type=int,
+        choices=range(4, 11),
+        help="Override tensor marginal width using its existing knot option; additive k stays fixed",
+    )
     parser.add_argument("--mode", choices=("fixed", "reml"), default="reml")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--profile", action="store_true")
@@ -197,6 +208,8 @@ def main():
     ]
     if args.profile:
         command.append("--profile")
+    if args.interaction_k is not None:
+        command.extend(["--interaction-k", str(args.interaction_k)])
     env = os.environ.copy()
     for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "NUMBA_NUM_THREADS", "MKL_NUM_THREADS"):
         env[name] = "1"
