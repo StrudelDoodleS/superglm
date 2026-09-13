@@ -594,6 +594,8 @@ def write_rating_table_workbook(
     summary_sheet_name: str,
     impact_sheet_name: str,
 ) -> None:
+    """Write an exported rating table to an Excel workbook."""
+
     from openpyxl import Workbook
     from openpyxl.styles import Font
 

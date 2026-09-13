@@ -96,6 +96,8 @@ def initialize_tweedie(
     power_lower: float,
     power_upper: float,
 ) -> NDArray[np.float64]:
+    """Return starting mean and scale values for a Tweedie fit."""
+
     response_values = _strict_float64_vector(response, name="response")
     weight_values = _strict_float64_vector(weights, name="weights")
     if not response_values.size:

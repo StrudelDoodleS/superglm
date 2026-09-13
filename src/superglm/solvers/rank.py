@@ -548,6 +548,8 @@ def _exact_orthogonal_columns(coordinates: NDArray) -> tuple[NDArray, float]:
 
 @dataclass(frozen=True)
 class RankDecomposition:
+    """The rank-revealing decomposition chosen for one design matrix."""
+
     policy_version: int
     method: Literal["empty", "cholesky", "pivoted_cholesky", "gram_eigh", "qr_svd"]
     column_scale: NDArray

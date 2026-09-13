@@ -270,6 +270,8 @@ class IterationDiagnostics:
 
 @dataclass
 class PIRLSResult:
+    """The coefficients, fit statistics and REML geometry returned by PIRLS."""
+
     beta: NDArray
     intercept: float
     n_iter: int

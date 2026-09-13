@@ -28,3 +28,26 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-push]
+
+  # ── Docstrings and documentation notebooks ──────────────────
+  - repo: https://github.com/numpy/numpydoc
+    rev: v1.10.0
+    hooks:
+      - id: numpydoc-validation
+        files: ^src/superglm/
+        # The editor is a browser application, not part of the documented
+        # modelling API, so its handlers are not held to numpydoc rules.
+        exclude: ^src/superglm/editor/
+
+  - repo: https://github.com/mwouts/jupytext
+    rev: v1.19.5
+    hooks:
+      - id: jupytext
+        args: [--sync]
+        files: ^docs/tutorials/.*\.md$
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.9.1
+    hooks:
+      - id: nbstripout
+        files: ^docs/tutorials/.*\.ipynb$
