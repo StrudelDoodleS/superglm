@@ -99,3 +99,8 @@ test-results/
 
 # Build caches (mkdocs-jupyter writes here during `mkdocs build`)
 .cache/
+
+# Sphinx build output and generated API pages
+docs/_build/
+docs/api/generated/
+docs/jupyter_execute/

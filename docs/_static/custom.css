@@ -1,0 +1,249 @@
+/* superglm documentation identity: pulp comic energy from the logo,
+   disciplined typography for the maths (spec §9). One loud element, the
+   hero; every other panel is 2px ink border + 4px hard offset, no soft shadows. */
+
+html {
+  --pst-font-family-base: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+  --pst-font-family-heading: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+  --pst-font-family-monospace: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --pst-font-weight-heading: 600;
+  --sg-display: "Bangers", Impact, "Arial Black", sans-serif;
+  --sg-red: #d6402b;
+  --sg-yellow: #f4b942;
+  --sg-paper: #f2efe6;
+}
+
+html[data-theme="light"] {
+  --pst-color-primary: #d6402b;
+  --pst-color-secondary: #15171c;
+  --pst-color-accent: #f4b942;
+  --pst-color-text-base: #15171c;
+  --pst-color-background: #ffffff;
+  --pst-color-on-background: #f7f5f0;
+  --pst-color-surface: #f7f5f0;
+  --pst-color-link: #b8321f;
+  --pst-color-link-hover: #15171c;
+  --sg-ink: #15171c;
+  --sg-shadow: #15171c;
+}
+
+html[data-theme="dark"] {
+  --pst-color-primary: #f4b942;
+  --pst-color-secondary: #f26b52;
+  --pst-color-accent: #f4b942;
+  --pst-color-text-base: #f2efe6;
+  --pst-color-background: #15171c;
+  --pst-color-on-background: #1c1f26;
+  --pst-color-surface: #1c1f26;
+  --pst-color-link: #f4b942;
+  --pst-color-link-hover: #ffffff;
+  --sg-ink: #f2efe6;
+  --sg-shadow: #f4b942;
+}
+
+/* Comic panels: the recurring component. */
+.sd-card,
+div.admonition {
+  border: 2px solid var(--sg-ink);
+  border-radius: 4px;
+  box-shadow: 4px 4px 0 var(--sg-shadow);
+}
+
+div.admonition {
+  margin: 1.5rem 0.25rem 1.75rem 0;
+}
+
+div.admonition.warning,
+div.admonition.danger {
+  border-color: var(--sg-red);
+}
+
+div.admonition > .admonition-title {
+  font-weight: 600;
+}
+
+.sd-card {
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.sd-card:hover,
+.sd-card:focus-within {
+  transform: translate(-1px, -1px);
+  box-shadow: 6px 6px 0 var(--sg-shadow);
+}
+
+.sd-card .sd-card-title,
+.sg-display {
+  font-family: var(--sg-display);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  line-height: 1.05;
+}
+
+.sd-card .sd-card-title {
+  font-size: 1.5rem;
+}
+
+.sg-display {
+  font-size: 2rem;
+}
+
+/* Hero band on the landing page only: the one loud panel. */
+.sg-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) 1fr;
+  gap: 2.5rem;
+  align-items: center;
+  padding: 2.75rem 2.5rem;
+  margin: 0 0.375rem 2.5rem 0;
+  border: 2px solid var(--sg-ink);
+  border-radius: 6px;
+  box-shadow: 6px 6px 0 var(--sg-shadow);
+  background: linear-gradient(100deg, #15171c 0%, #15171c 48%, #8c2418 78%, #d6402b 100%);
+  color: #ffffff;
+  overflow: hidden;
+}
+
+/* Ben-Day dot screen, densest in the top-right corner and gone before it
+   reaches the logo, so the copy sits on a printed halftone rather than a
+   flat gradient. */
+.sg-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 1.5px 1.5px, rgba(244, 185, 66, 0.7) 1.2px, transparent 1.9px) 0 0 / 9px 9px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 120% at 100% 0%, #000 0%, rgba(0, 0, 0, 0.55) 45%, transparent 75%);
+  mask-image: radial-gradient(ellipse 80% 120% at 100% 0%, #000 0%, rgba(0, 0, 0, 0.55) 45%, transparent 75%);
+}
+
+.sg-hero > * {
+  position: relative;
+}
+
+.sg-hero__logo img {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  margin: 0 auto;
+  animation: sg-pop 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+/* pydata boxes content images in dark mode; the starburst carries its own ink. */
+html[data-theme="dark"] .bd-content .sg-hero .sg-hero__logo img {
+  background: transparent; filter: none; border-radius: 0;
+}
+
+.sg-hero__title {
+  font-family: var(--sg-display);
+  font-weight: 400;
+  font-size: clamp(2.6rem, 6vw, 4.2rem);
+  line-height: 0.95;
+  letter-spacing: 0.03em;
+  color: var(--sg-yellow);
+  text-shadow: 2px 2px 0 var(--sg-red), 4px 4px 0 #15171c;
+  margin: 0 0 0.75rem;
+}
+
+.sg-hero__copy p {
+  font-size: 1.15rem;
+  line-height: 1.45;
+  color: var(--sg-paper);
+  max-width: 36rem;
+  margin: 0 0 1.25rem;
+}
+
+.sg-hero__meta {
+  display: block;
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+  color: var(--sg-yellow);
+}
+
+.sg-btn,
+.sg-btn:visited {
+  display: inline-block;
+  padding: 0.5rem 1rem;
+  margin: 0 0.6rem 0.6rem 0;
+  border: 2px solid #15171c;
+  border-radius: 3px;
+  background: var(--sg-yellow);
+  color: #15171c !important;
+  font-weight: 600;
+  text-decoration: none !important;
+  box-shadow: 3px 3px 0 #15171c;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.sg-btn--ghost,
+.sg-btn--ghost:visited {
+  background: transparent;
+  color: #ffffff !important;
+  border-color: #ffffff;
+  box-shadow: 3px 3px 0 var(--sg-yellow);
+}
+
+.sg-btn:hover,
+.sg-btn:focus-visible {
+  transform: translate(-1px, -1px);
+  box-shadow: 5px 5px 0 #15171c;
+}
+
+.sg-btn--ghost:hover,
+.sg-btn--ghost:focus-visible {
+  box-shadow: 5px 5px 0 var(--sg-yellow);
+}
+
+/* Keyboard focus: a ring the hero's dark ground cannot swallow. */
+.sg-btn:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 3px;
+}
+
+.sg-btn--ghost:focus-visible {
+  outline-color: var(--sg-yellow);
+}
+
+@keyframes sg-pop {
+  from {
+    transform: scale(0.92) rotate(-6deg);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sg-hero__logo img {
+    animation: none;
+  }
+  .sd-card,
+  .sg-btn {
+    transition: none;
+  }
+  .sd-card:hover,
+  .sd-card:focus-within,
+  .sg-btn:hover,
+  .sg-btn:focus-visible {
+    transform: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .sg-hero {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+    text-align: center;
+    padding: 2rem 1.25rem;
+  }
+  .sg-hero__logo img {
+    max-width: 200px;
+  }
+  .sg-hero__copy p {
+    margin-inline: auto;
+  }
+}
