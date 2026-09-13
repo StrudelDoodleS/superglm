@@ -202,17 +202,5 @@ if html_theme == "pydata_sphinx_theme":
         "footer_start": ["copyright"],
         "footer_end": [],
     }
-elif html_theme == "shibuya":
-    html_theme_options = {
-        "github_url": "https://github.com/StrudelDoodleS/superglm",
-        "accent_color": "red",
-        "nav_links": [
-            {"title": "Get started", "url": "get-started/index"},
-            {"title": "Tutorials", "url": "tutorials/index"},
-            {"title": "How-to", "url": "how-to/index"},
-            {"title": "Explanation", "url": "explanation/index"},
-            {"title": "API", "url": "api/index"},
-        ],
-    }
 
 copybutton_exclude = ".linenos, .gp, .go"

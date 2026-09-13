@@ -876,7 +876,9 @@ Expected: twelve `.jpg` files. Note: pydata's dark mode is chosen by its own tog
 
 Assemble them into one HTML page (same pattern as the mood board: one frame per screenshot, theme and page labelled) and publish it as an artifact, or send the twelve files with SendUserFile. Ask one question: A (pydata) or B (Shibuya). Default on silence: A.
 
-- [ ] **Step 5: Record the decision**
+- [x] **Step 5: Record the decision**
+
+Decided on 2026-09-13: **A (pydata)**. The `elif html_theme == "shibuya"` block was removed from `conf.py` by the coordinator and Shibuya is not added to the project; the `SUPERGLM_DOCS_THEME` switch stays for future comparisons.
 
 If A: remove the `elif html_theme == "shibuya":` block from `conf.py`. If B: add `shibuya>=2026.7` to the docs group, set the default theme name to `shibuya`, and port the `--pst-*` variables in `custom.css` to Shibuya's `--sy-*` variables per <https://shibuya.lepture.com/customisation/colors/>. Commit either way:
 
@@ -924,6 +926,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import superglm
 
 DOCS_API = Path(__file__).resolve().parents[2] / "docs" / "api"
@@ -946,12 +949,43 @@ def documented_names() -> set[str]:
 def test_every_public_name_has_a_reference_entry() -> None:
     missing = sorted(set(superglm.__all__) - documented_names())
     assert missing == [], f"public names without an API reference entry: {missing}"
+
+
+MEMBER_PAGES = {
+    "SuperGLM": DOCS_API / "model.md",
+    "SuperLSS": DOCS_API / "distributional.md",
+}
+
+
+def listed_members(page: Path, cls_name: str) -> list[str]:
+    prefix = f"superglm.{cls_name}."
+    members: list[str] = []
+    for block in AUTOSUMMARY_BLOCK.findall(page.read_text(encoding="utf-8")):
+        for raw in block.splitlines():
+            line = raw.strip()
+            if line.startswith(prefix):
+                members.append(line.removeprefix(prefix))
+    return members
+
+
+@pytest.mark.parametrize("cls_name", sorted(MEMBER_PAGES))
+def test_every_public_member_is_grouped_exactly_once(cls_name: str) -> None:
+    """The two big classes list every public member once, under a task heading."""
+    cls = getattr(superglm, cls_name)
+    public = {name for name in dir(cls) if not name.startswith("_")}
+    listed = listed_members(MEMBER_PAGES[cls_name], cls_name)
+    duplicates = sorted({m for m in listed if listed.count(m) > 1})
+    missing = sorted(public - set(listed))
+    unknown = sorted(set(listed) - public)
+    assert duplicates == [], f"{cls_name} members listed twice: {duplicates}"
+    assert missing == [], f"{cls_name} members with no grouped entry: {missing}"
+    assert unknown == [], f"{cls_name} entries that are not public members: {unknown}"
 ```
 
 - [ ] **Step 3: Run it to verify it fails**
 
 Run: `uv run pytest tests/docs/test_api_reference.py -q`
-Expected: FAIL listing about 120 missing names (everything except the ten on `api/model.md`).
+Expected: FAIL. The first test lists about 120 missing names (everything except the ten on `api/model.md`); the two member tests fail because neither class page lists `superglm.SuperGLM.<member>` entries yet.
 
 - [ ] **Step 4: Commit the failing test**
 
@@ -1015,7 +1049,8 @@ git commit -m "Move research reports, audits and the roadmap out of the publishe
 **Files:**
 - Create: `docs/api/distributional.md`, `docs/api/features.md`, `docs/api/families-and-links.md`, `docs/api/penalties.md`, `docs/api/inference.md`, `docs/api/validation-and-diagnostics.md`, `docs/api/plotting.md`, `docs/api/export.md`, `docs/api/sklearn.md`, `docs/api/stats.md`, `docs/api/editor.md`, `docs/api/warnings-and-exceptions.md`
 - Delete: `docs/api/diagnostics.md`, `docs/api/model_selection.md`, `docs/api/validation.md` (the old mkdocstrings stubs; the other old stubs are overwritten by name)
-- Modify: `docs/api/index.md`
+- Modify: `docs/api/index.md`, `docs/api/model.md`
+- Create: `docs/_templates/autosummary/class-no-members.rst`
 
 **Interfaces:**
 - Consumes: the block shape from Task 4.
@@ -1042,14 +1077,157 @@ Each page is one orientation paragraph followed by an `{eval-rst}` fence holding
 predictor per parameter. Pass a family first, then one predictor declaration
 per parameter using the family's helper methods; build the terms inside each
 declaration with `s`, `cat`, `re`, `ti`, `term` and `interaction`. Start
-with the [tutorial](../tutorials/distributional-model.md).
+with the [tutorial](../tutorials/distributional-model.md). The members of
+`SuperLSS` are grouped below by what you do with them; each has its own page.
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+   :template: autosummary/class-no-members.rst
+
+   superglm.SuperLSS
+```
+
+## Declare and fit
 
 ```{eval-rst}
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
-   superglm.SuperLSS
+   superglm.SuperLSS.fit
+   superglm.SuperLSS.fit_reml
+   superglm.SuperLSS.diagnose
+   superglm.SuperLSS.predictors
+   superglm.SuperLSS.family
+```
+
+## Predict
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperLSS.predict
+   superglm.SuperLSS.predict_parameters
+   superglm.SuperLSS.predict_link
+   superglm.SuperLSS.predict_cdf
+   superglm.SuperLSS.predict_quantile
+   superglm.SuperLSS.posterior_predictive
+   superglm.SuperLSS.posterior_draws
+   superglm.SuperLSS.posterior_bounds
+```
+
+## Read the fit
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperLSS.summary
+   superglm.SuperLSS.term_inference
+   superglm.SuperLSS.term_test
+   superglm.SuperLSS.parameter_names_
+   superglm.SuperLSS.family_
+   superglm.SuperLSS.predictors_
+   superglm.SuperLSS.coef_
+   superglm.SuperLSS.coef_by_predictor_
+   superglm.SuperLSS.covariance_
+   superglm.SuperLSS.result_
+   superglm.SuperLSS.smoothing_parameters_
+```
+
+## Check the fit
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperLSS.residuals
+   superglm.SuperLSS.residual_set
+   superglm.SuperLSS.check
+   superglm.SuperLSS.check_2d
+   superglm.SuperLSS.actual_expected
+   superglm.SuperLSS.calibration
+   superglm.SuperLSS.scores
+   superglm.SuperLSS.compare
+```
+
+## Price and portfolio views
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperLSS.risk_curves
+   superglm.SuperLSS.density_fan
+   superglm.SuperLSS.parameter_spread
+   superglm.SuperLSS.portfolio
+```
+
+## Plot
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperLSS.plot
+   superglm.SuperLSS.plot_data
+   superglm.SuperLSS.plot_diagnostics
+```
+
+## Smoothing certification and telemetry
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperLSS.smoothing_certified_
+   superglm.SuperLSS.smoothing_convergence_reason_
+   superglm.SuperLSS.smoothing_unresolved_upper_bound_
+   superglm.SuperLSS.exact_face_components_
+   superglm.SuperLSS.coefficient_curvature
+   superglm.SuperLSS.training_telemetry
+```
+
+## Save and load
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperLSS.to_bytes
+   superglm.SuperLSS.from_bytes
+```
+
+## Configuration
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperLSS.discrete
+   superglm.SuperLSS.n_bins
+   superglm.SuperLSS.separation
+   superglm.SuperLSS.weight_semantics
+```
+
+## Declarations and families
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
    superglm.Predictor
    superglm.BoundPredictor
    superglm.bind_predictor
@@ -1364,6 +1542,200 @@ silence. Each docstring says when it fires and what to do about it.
    superglm.PriorWeightLatticeWarning
 ```
 ````
+
+- [ ] **Step 2b: Regroup the model page and add the no-members template**
+
+The class template from Task 2 lists every method and attribute in one
+alphabetical table, which for a class with 47 public members is a phone book.
+For `SuperGLM` and `SuperLSS` the class page shows the docstring only, and the
+API page groups the members by task, the way pandas documents `DataFrame`.
+
+Create `docs/_templates/autosummary/class-no-members.rst`:
+
+```rst
+{{ fullname | escape | underline }}
+
+.. currentmodule:: {{ module }}
+
+.. autoclass:: {{ objname }}
+
+.. seealso::
+
+   The methods and attributes of this class are grouped by task on the
+   :doc:`API reference </api/index>` page that lists it. Each has its own page.
+```
+
+Overwrite `docs/api/model.md` (the Task 4 version) with:
+
+````markdown
+# Model
+
+`SuperGLM` is the estimator for penalised GLMs and GAM-style pricing models.
+Construct it with a family and a feature specification, fit it with
+`fit_reml` for REML smoothness selection or `fit` for fixed penalties, then
+read the fit through `summary`, `term_inference` and the plotting methods.
+Its members are grouped below by what you do with them; each has its own
+page.
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+   :template: autosummary/class-no-members.rst
+
+   superglm.SuperGLM
+```
+
+## Fit
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.fit
+   superglm.SuperGLM.fit_reml
+   superglm.SuperGLM.fit_path
+   superglm.SuperGLM.refit_unpenalised
+   superglm.SuperGLM.estimate_p
+   superglm.SuperGLM.estimate_theta
+   superglm.SuperGLM.bind_levels
+   superglm.SuperGLM.clone_unfitted
+```
+
+## Predict
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.predict
+   superglm.SuperGLM.relativities
+   superglm.SuperGLM.reconstruct_feature
+```
+
+## Read the fit
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.summary
+   superglm.SuperGLM.term_inference
+   superglm.SuperGLM.simultaneous_bands
+   superglm.SuperGLM.random_effects
+   superglm.SuperGLM.factor_smooth
+   superglm.SuperGLM.metrics
+   superglm.SuperGLM.drop1
+   superglm.SuperGLM.term_importance
+   superglm.SuperGLM.term_drop_diagnostics
+   superglm.SuperGLM.knot_summary
+   superglm.SuperGLM.design_summary
+   superglm.SuperGLM.result
+```
+
+## Plot
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.plot
+   superglm.SuperGLM.plot_data
+   superglm.SuperGLM.plot_diagnostics
+```
+
+## Diagnose
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.diagnostics
+   superglm.SuperGLM.spline_redundancy
+   superglm.SuperGLM.discretization_impact
+   superglm.SuperGLM.iteration_diagnostics
+   superglm.SuperGLM.reml_diagnostics
+   superglm.SuperGLM.training_telemetry
+```
+
+## Constrain shapes after fitting
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.apply_shape_postfit
+   superglm.SuperGLM.monotonize
+   superglm.SuperGLM.apply_monotone_postfit
+```
+
+## Screen interactions
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.screen_interactions
+```
+
+## Export for deployment
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.export_rating_tables
+   superglm.SuperGLM.rating_table_payload
+```
+
+## Configuration and fitted attributes
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.SuperGLM.family
+   superglm.SuperGLM.link
+   superglm.SuperGLM.features
+   superglm.SuperGLM.penalty
+   superglm.SuperGLM.lambda2
+   superglm.SuperGLM.selection_penalty
+   superglm.SuperGLM.selection_penalty_
+   superglm.SuperGLM.distribution_
+   superglm.SuperGLM.theta_
+```
+
+## Related objects
+
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.PathResult
+   superglm.REMLResult
+   superglm.LambdaPolicy
+   superglm.warmup
+   superglm.ModelSummary
+   superglm.ModelMetrics
+   superglm.FitDiagnosticReport
+   superglm.DiscretizationResult
+   superglm.discretization_impact
+```
+````
+
+If a member is added to or removed from `SuperGLM` or `SuperLSS` after this
+plan was written, the member test from Task 6 says which name to add or drop;
+place a new member under the heading that describes what it is for.
 
 - [ ] **Step 3: Rewrite `docs/api/index.md`**
 
