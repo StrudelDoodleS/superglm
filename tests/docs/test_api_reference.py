@@ -23,7 +23,7 @@ def documented_names() -> set[str]:
     for page in DOCS_API.glob("*.md"):
         for block in AUTOSUMMARY_BLOCK.findall(page.read_text(encoding="utf-8")):
             for raw in block.splitlines():
-                line = raw.strip()
+                line = raw.strip().lstrip("~")
                 if line and not line.startswith(":"):
                     names.add(line.removeprefix("superglm."))
     return names
@@ -45,7 +45,7 @@ def listed_members(page: Path, cls_name: str) -> list[str]:
     members: list[str] = []
     for block in AUTOSUMMARY_BLOCK.findall(page.read_text(encoding="utf-8")):
         for raw in block.splitlines():
-            line = raw.strip()
+            line = raw.strip().lstrip("~")
             if line.startswith(prefix):
                 members.append(line.removeprefix(prefix))
     return members
