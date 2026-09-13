@@ -159,6 +159,112 @@ def source_fingerprint(package_directory=None):
     return digest.hexdigest()
 
 
+def retained_model_storage(model):
+    """Count reachable NumPy/byte owner payloads, not the Python heap or RSS.
+
+    Views retain their full owners. A bytes-backed array is charged in the
+    bytes category, including when the same snapshot is also stored directly.
+    Unknown external buffers are reported without estimating their allocation.
+    """
+    from collections import Counter, deque
+    from types import (
+        BuiltinFunctionType,
+        CodeType,
+        FrameType,
+        FunctionType,
+        MemberDescriptorType,
+        MethodType,
+        ModuleType,
+        TracebackType,
+    )
+    from weakref import ProxyTypes, ReferenceType
+
+    import numpy as np
+
+    report = {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 0,
+        "numpy_owner_count": 0,
+        "bytes_payload_bytes": 0,
+        "bytes_owner_count": 0,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+    }
+    pending = [model]
+    seen = set()
+    unmeasured_buffers = {}
+    code_types = (
+        type,
+        ModuleType,
+        FunctionType,
+        BuiltinFunctionType,
+        MethodType,
+        CodeType,
+        FrameType,
+        TracebackType,
+    )
+
+    def queue_buffer(owner):
+        if not isinstance(owner, (np.ndarray, bytes, bytearray, memoryview)):
+            cls = type(owner)
+            unmeasured_buffers[id(owner)] = f"{cls.__module__}.{cls.__qualname__}"
+        pending.append(owner)
+
+    while pending:
+        value = pending.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        if type(value) in ProxyTypes or isinstance(value, ReferenceType):
+            continue
+        if isinstance(value, code_types) or isinstance(
+            value, (str, int, float, complex, np.generic)
+        ):
+            continue
+        if isinstance(value, np.ndarray):
+            if value.flags.owndata:
+                report["numpy_owned_bytes"] += value.nbytes
+                report["numpy_owner_count"] += 1
+            elif value.base is not None:
+                queue_buffer(value.base)
+            if value.dtype.kind == "O":
+                pending.extend(value.flat)
+        elif isinstance(value, memoryview):
+            queue_buffer(value.obj)
+        elif isinstance(value, bytes):
+            report["bytes_payload_bytes"] += len(value)
+            report["bytes_owner_count"] += 1
+        elif isinstance(value, bytearray):
+            report["bytearray_payload_bytes"] += len(value)
+            report["bytearray_owner_count"] += 1
+        elif isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple, set, frozenset, deque)):
+            pending.extend(value)
+
+        try:
+            pending.append(object.__getattribute__(value, "__dict__"))
+        except AttributeError:
+            pass
+        for cls in type(value).__mro__:
+            for descriptor in cls.__dict__.values():
+                if isinstance(descriptor, MemberDescriptorType):
+                    try:
+                        pending.append(descriptor.__get__(value, type(value)))
+                    except AttributeError:
+                        pass  # An unset slot retains nothing.
+
+    report["total_payload_bytes"] = (
+        report["numpy_owned_bytes"]
+        + report["bytes_payload_bytes"]
+        + report["bytearray_payload_bytes"]
+    )
+    report["unmeasured_buffer_count"] = len(unmeasured_buffers)
+    report["unmeasured_buffer_types"] = dict(sorted(Counter(unmeasured_buffers.values()).items()))
+    return report
+
+
 def worker(args):
     import resource
     import warnings
@@ -195,6 +301,7 @@ def worker(args):
     train, y = splits["train"]
     threadpools_before = threadpool_info()
     profiler = cProfile.Profile() if args.profile else None
+    rss_divisor = 1024**2 if sys.platform == "darwin" else 1024
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         start = time.perf_counter()
@@ -204,6 +311,8 @@ def worker(args):
             model.fit_reml(train, y, sample_weight=np.ones(len(y)))
         finally:
             elapsed = time.perf_counter() - start
+            # This high-water includes runtime/data, but no post-fit inspection or export.
+            fit_end_peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_divisor
             if profiler is not None:
                 profiler.disable()
                 profiler.dump_stats(args.output / "fit.prof")
@@ -212,6 +321,7 @@ def worker(args):
                     stats.print_stats(50)
                     stats.print_callers(25)
                     stats.print_callees(25)
+    retained_storage = retained_model_storage(model)
     telemetry = model.training_telemetry()
     if not model.result.converged or not telemetry["reml"]["converged"]:
         raise RuntimeError("The benchmark fit did not converge")
@@ -241,13 +351,14 @@ def worker(args):
                     "mse_difference": losses[split] - reference["cases"][args.case][f"{split}_mse"],
                 }
     np.savez_compressed(args.output / "predictions.npz", **arrays)
-    divisor = 1024**2 if sys.platform == "darwin" else 1024
     result = {
         "case": args.case,
         "status": "success",
         "profiled": args.profile,
         "fit_seconds": elapsed,
-        "peak_process_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / divisor,
+        "fit_end_peak_process_rss_mib": fit_end_peak_rss,
+        "peak_process_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_divisor,
+        "retained_model_storage": retained_storage,
         "coefficient_count_without_intercept": len(model.result.beta),
         "mse": losses,
         "reference_comparison": comparison,
