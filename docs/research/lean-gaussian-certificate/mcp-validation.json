@@ -1,0 +1,211 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-13",
+  "command": [
+    "/home/max/.local/bin/uvx",
+    "--from",
+    "lean-lsp-mcp==0.30.0",
+    "--with",
+    "leanclient==0.13.2",
+    "lean-lsp-mcp",
+    "--transport",
+    "stdio"
+  ],
+  "project_directory": "docs/research/lean-gaussian-certificate",
+  "lean_version": "Lean (version 4.33.1, x86_64-unknown-linux-gnu, commit 819816b2e0a3bf405af45ae5c7af2491d8f5bee6, Release)",
+  "mathlib_commit": "0df444a360eaa60ab8c11dca51a86af692955474",
+  "environment_overrides": {
+    "LEAN_PROJECT_PATH": "/home/max/projects/superglm/.worktrees/adaptive-interactions/docs/research/lean-gaussian-certificate",
+    "LEAN_MCP_INSTRUCTIONS": "",
+    "LEAN_REPL": "false",
+    "LEAN_LOOGLE_LOCAL": "false",
+    "LEAN_MCP_DISABLED_TOOLS": "lean_run_code,lean_verify,lean_minimal_hypotheses,lean_profile_proof,lean_build,lean_file_outline,lean_code_actions,lean_term_goal,lean_completions,lean_declaration_file,lean_references,lean_leansearch,lean_loogle,lean_leanfinder,lean_state_search,lean_hammer_premise,lean_get_widgets,lean_get_widget_source"
+  },
+  "path_note": "Smoke run prepended /home/max/.elan/bin to the inherited PATH. The configuration example instead supplies an explicit process-local executable search path.",
+  "initialization": {
+    "capabilities": {
+      "experimental": {},
+      "prompts": {
+        "listChanged": false
+      },
+      "resources": {
+        "listChanged": false,
+        "subscribe": false
+      },
+      "tools": {
+        "listChanged": false
+      }
+    },
+    "instructions": "",
+    "protocolVersion": "2024-11-05",
+    "serverInfo": {
+      "name": "Lean LSP",
+      "version": "0.30.0"
+    }
+  },
+  "advertised_tools": [
+    "lean_diagnostic_messages",
+    "lean_goal",
+    "lean_hover_info",
+    "lean_local_search",
+    "lean_multi_attempt"
+  ],
+  "source_sha256_after_test": {
+    "Certificate.lean": "887356aa33dce90017c1fc7f125d9186332f8e939ccf792fd8a717c9ccfa4718",
+    "ProofTour.lean": "cfaaf5e9a6a80f0ea1893ef12b8f0917875e8940aceb33590736b47910cdecda"
+  },
+  "checks": [
+    {
+      "tool": "lean_goal",
+      "arguments": {
+        "file_path": "/home/max/projects/superglm/.worktrees/adaptive-interactions/docs/research/lean-gaussian-certificate/ProofTour.lean",
+        "line": 6,
+        "column": 3
+      },
+      "elapsed_seconds": 11.525988151028287,
+      "result": {
+        "line_context": "  ring",
+        "goals": [
+          "a b : ℝ\n⊢ (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2"
+        ],
+        "goals_before": null,
+        "goals_after": null,
+        "status": "goals"
+      }
+    },
+    {
+      "tool": "lean_diagnostic_messages",
+      "arguments": {
+        "file_path": "/home/max/projects/superglm/.worktrees/adaptive-interactions/docs/research/lean-gaussian-certificate/ProofTour.lean"
+      },
+      "elapsed_seconds": 0.003904867044184357,
+      "result": {
+        "result": {
+          "partial": false,
+          "still_elaborating_lines": null,
+          "success": true,
+          "timed_out": false,
+          "items": [
+            {
+              "severity": "info",
+              "message": "square_sum (a b : ℝ) : (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2",
+              "line": 16,
+              "column": 1,
+              "lean_tags": null
+            },
+            {
+              "severity": "info",
+              "message": "scalar_quadratic_gap (h b x xStar : ℝ) (stationary : h * xStar = b) :\n  h * x ^ 2 / 2 - b * x - (h * xStar ^ 2 / 2 - b * xStar) = h * (x - xStar) ^ 2 / 2",
+              "line": 17,
+              "column": 1,
+              "lean_tags": null
+            },
+            {
+              "severity": "info",
+              "message": "'square_sum' depends on axioms: [propext, Classical.choice, Quot.sound]",
+              "line": 18,
+              "column": 1,
+              "lean_tags": null
+            },
+            {
+              "severity": "info",
+              "message": "'scalar_quadratic_gap' depends on axioms: [propext, Classical.choice, Quot.sound]",
+              "line": 19,
+              "column": 1,
+              "lean_tags": null
+            }
+          ],
+          "failed_dependencies": []
+        }
+      }
+    },
+    {
+      "tool": "lean_hover_info",
+      "arguments": {
+        "file_path": "/home/max/projects/superglm/.worktrees/adaptive-interactions/docs/research/lean-gaussian-certificate/ProofTour.lean",
+        "line": 4,
+        "column": 10
+      },
+      "elapsed_seconds": 0.010154522024095058,
+      "result": {
+        "symbol": "square_sum",
+        "info": "square_sum (a b : ℝ) : (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2",
+        "diagnostics": []
+      }
+    },
+    {
+      "tool": "lean_local_search",
+      "arguments": {
+        "query": "quadratic_gap",
+        "limit": 5
+      },
+      "elapsed_seconds": 0.492541998042725,
+      "result": {
+        "items": [
+          {
+            "name": "SuperGLM.quadratic_gap_residual",
+            "kind": "theorem",
+            "file": "Certificate.lean"
+          },
+          {
+            "name": "scalar_quadratic_gap",
+            "kind": "declaration",
+            "file": "ProofTour.lean"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "lean_multi_attempt",
+      "arguments": {
+        "file_path": "/home/max/projects/superglm/.worktrees/adaptive-interactions/docs/research/lean-gaussian-certificate/ProofTour.lean",
+        "line": 6,
+        "snippets": [
+          "ring",
+          "rfl"
+        ]
+      },
+      "elapsed_seconds": 13.376017253031023,
+      "result": {
+        "items": [
+          {
+            "snippet": "ring",
+            "goals": [],
+            "diagnostics": [],
+            "timed_out": false,
+            "proof_status": null
+          },
+          {
+            "snippet": "rfl",
+            "goals": [
+              "a b : ℝ\n⊢ (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2"
+            ],
+            "diagnostics": [
+              {
+                "severity": "error",
+                "message": "Tactic `rfl` failed: The left-hand side\n  (a + b) ^ 2\nis not definitionally equal to the right-hand side\n  a ^ 2 + 2 * a * b + b ^ 2\n\na b : ℝ\n⊢ (a + b) ^ 2 = a ^ 2 + 2 * a * b + b ^ 2",
+                "line": 6,
+                "column": 3,
+                "lean_tags": null
+              },
+              {
+                "severity": "info",
+                "message": "'square_sum' depends on axioms: [propext, sorryAx, Classical.choice, Quot.sound]",
+                "line": 18,
+                "column": 1,
+                "lean_tags": null
+              }
+            ],
+            "timed_out": false,
+            "proof_status": null
+          }
+        ]
+      }
+    }
+  ],
+  "deliberate_failure_note": "The rfl trial is expected to fail on a true polynomial identity; its error-recovery sorryAx diagnostic belongs to a rejected temporary LSP buffer. Archived source hashes were unchanged and a subsequent direct ProofTour.lean check reported no sorryAx.",
+  "model_quality_comparison_run": false,
+  "agent_configuration_registered": false,
+  "raw_local_artifact": ".benchmark-artifacts/agent-tools/mcp-smoke.json",
+  "raw_artifact_sha256": "66466e69de2205cffc6be4b26a083d845dfe5827e03f6b3ea876939e1cce9140"
+}

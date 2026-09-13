@@ -114,3 +114,13 @@ after installing [Lean through the official instructions](https://lean-lang.org/
 
 The [validation receipt](validation.json) records the commands, source hashes,
 exit statuses and compiler output from this checkout.
+
+## Optional live proof feedback
+
+The [tool assessment](../2026-09-13-agent-research-tools.md) records a tested
+five-tool Lean MCP setup with its startup instructions cleared. It can inspect
+the current goal, report diagnostics, look up types/declarations and try tactics.
+The [configuration example](codex-mcp.toml.example) is ready for review but is not
+a live agent configuration. The [MCP receipt](mcp-validation.json) records the
+successful local calls and a rejected tactic trial. Completed proof validation
+remains in the separate compiler receipt above.
