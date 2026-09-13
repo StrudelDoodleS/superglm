@@ -88,7 +88,7 @@ text can label the worker itself as a proxy process. A quiet preflight does not
 establish quietness during the fit. Inspect fit-period CPU deltas as well as load;
 shared cache or memory-bandwidth interference can occur below oversubscription.
 Retain rejected timing receipts as observations and mark the speed benefit
-unmeasured. The [completion evidence](../docs/research/2026-09-c3-c1-completion-evidence.md)
+unmeasured. The [completion evidence](../notes/research/2026-09-c3-c1-completion-evidence.md)
 records this distinction for the two local timing series.
 
 Run `--instrument` separately, without measured mode. Python profiling counts

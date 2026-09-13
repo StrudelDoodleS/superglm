@@ -8,7 +8,7 @@ C: worst case -- a jittered (continuous) covariate, where the gate must
    decline; measures the residual cost of the uncompressed tensor path.
 D: two tensors sharing a marginal -- cross-gram cell pressure.
 
-Recorded results for this box live in docs/audit/2026-07-28/architecture-audit.md
+Recorded results for this box live in notes/audit/2026-07-28/architecture-audit.md
 section J.5.
 """
 
