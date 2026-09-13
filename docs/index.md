@@ -20,6 +20,11 @@ html_theme.sidebar_secondary.remove: true
 ```{toctree}
 :hidden:
 
+get-started/index
 tutorials/index
+how-to/index
+explanation/index
 api/index
+governance/index
+development/index
 ```
