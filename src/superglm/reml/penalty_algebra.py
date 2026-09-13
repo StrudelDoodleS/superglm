@@ -443,30 +443,52 @@ def _component_geometry_key(component: PenaltyComponent) -> tuple:
     )
 
 
-def _raw_evidence_value(value):
-    """Own exact static values for the one explicit raw-context handoff."""
+def _raw_evidence_value(value, *, include_layout=False):
+    """Own exact static values for explicit fit-local handoffs."""
     if isinstance(value, np.ndarray):
-        return (np.ndarray, value.dtype.str, value.shape, value.tobytes())
+        layout = (value.strides,) if include_layout else ()
+        return (np.ndarray, value.dtype.str, value.shape, *layout, value.tobytes())
     if isinstance(value, tuple):
-        return (tuple, tuple(_raw_evidence_value(item) for item in value))
+        return (
+            tuple,
+            tuple(_raw_evidence_value(item, include_layout=include_layout) for item in value),
+        )
     if is_dataclass(value):
         return (
             type(value),
             tuple(
-                (item.name, _raw_evidence_value(getattr(value, item.name)))
+                (
+                    item.name,
+                    _raw_evidence_value(getattr(value, item.name), include_layout=include_layout),
+                )
                 for item in fields(value)
             ),
         )
     return (type(value), value)
 
 
-def _raw_evidence_readonly(value) -> bool:
+def _raw_evidence_readonly(value, *, include_bases=False) -> bool:
     if isinstance(value, np.ndarray):
-        return not value.flags.writeable
+        if not include_bases:
+            return not value.flags.writeable
+        backing = value
+        while isinstance(backing, np.ndarray | memoryview):
+            if isinstance(backing, np.ndarray):
+                if backing.flags.writeable:
+                    return False
+                backing = backing.base
+            else:
+                if not backing.readonly:
+                    return False
+                backing = backing.obj
+        return backing is None or isinstance(backing, bytes)
     if isinstance(value, tuple):
-        return all(_raw_evidence_readonly(item) for item in value)
+        return all(_raw_evidence_readonly(item, include_bases=include_bases) for item in value)
     if is_dataclass(value):
-        return all(_raw_evidence_readonly(getattr(value, item.name)) for item in fields(value))
+        return all(
+            _raw_evidence_readonly(getattr(value, item.name), include_bases=include_bases)
+            for item in fields(value)
+        )
     return True
 
 
@@ -519,13 +541,13 @@ def _raw_penalty_arithmetic() -> tuple:
     )
 
 
-def _raw_family_inputs(grouped: Sequence[PenaltyComponent]) -> tuple:
+def _raw_family_inputs(grouped: Sequence[PenaltyComponent], *, include_layout=False) -> tuple:
     return tuple(
         (
             _component_geometry_key(component),
             _raw_evidence_value(component.component_type),
             _raw_evidence_value(component.lambda_policy),
-            _raw_evidence_value(np.asarray(component.omega_raw)),
+            _raw_evidence_value(np.asarray(component.omega_raw), include_layout=include_layout),
         )
         for component in grouped
     )
@@ -534,27 +556,35 @@ def _raw_family_inputs(grouped: Sequence[PenaltyComponent]) -> tuple:
 @dataclass(frozen=True)
 class _RawPenaltyFamilyReceipt:
     support: object
-    inputs: tuple
+    inputs: tuple | _FixedPenaltyInputs
     support_values: tuple
     arithmetic: tuple
+    strict_arrays: bool = False
 
     @classmethod
-    def capture(cls, support, grouped):
+    def capture(cls, support, grouped=None, *, inputs=None, arithmetic=None, strict_arrays=False):
         return cls(
             support,
-            _raw_family_inputs(grouped),
-            _raw_evidence_value(_raw_support_values(support)),
-            _raw_penalty_arithmetic(),
+            _raw_family_inputs(grouped) if inputs is None else inputs,
+            _raw_evidence_value(_raw_support_values(support), include_layout=strict_arrays),
+            _raw_penalty_arithmetic() if arithmetic is None else arithmetic,
+            strict_arrays,
         )
 
-    def matches(self, geometry, source, target) -> bool:
+    def matches_support(self, geometry) -> bool:
         values = _raw_support_values(self.support)
         return bool(
             geometry.support is self.support
             and self.arithmetic == _raw_penalty_arithmetic()
+            and _raw_evidence_readonly(values, include_bases=self.strict_arrays)
+            and self.support_values
+            == _raw_evidence_value(values, include_layout=self.strict_arrays)
+        )
+
+    def matches(self, geometry, source, target) -> bool:
+        return bool(
+            self.matches_support(geometry)
             and self.inputs == _raw_family_inputs(source) == _raw_family_inputs(target)
-            and _raw_evidence_readonly(values)
-            and self.support_values == _raw_evidence_value(values)
         )
 
 
@@ -617,6 +647,114 @@ def _reusable_raw_geometry(source, target):
     return geometry
 
 
+def _fixed_tensor_target(index, group, gm) -> tuple:
+    # The unchanged GM and marginal-column identities bind the local tensor
+    # basis. Observation rows, bins and weights do not determine its penalty
+    # support and are deliberately not copied into this receipt.
+    return (
+        _penalty_group_cache_key(index, group, gm),
+        gm.tensor_id,
+        id(gm.B1_unique_t),
+        gm.B1_unique_t.shape[1],
+        id(gm.B2_unique_t),
+        gm.B2_unique_t.shape[1],
+        _raw_evidence_value(gm.R_inv, include_layout=True),
+    )
+
+
+def _fixed_component_summaries(grouped) -> tuple:
+    return _raw_evidence_value(
+        tuple((item.rank, item.log_det_omega_plus, item.eigvals_omega) for item in grouped),
+        include_layout=True,
+    )
+
+
+@dataclass(frozen=True)
+class _FixedPenaltyInputs:
+    """Construction-time inputs, before a fixed tensor needs its lazy support."""
+
+    target: tuple
+    family: tuple
+    matrices: tuple
+    summaries: tuple
+    arithmetic: tuple
+
+    @classmethod
+    def capture(cls, index, group, gm, grouped):
+        return cls(
+            _fixed_tensor_target(index, group, gm),
+            _raw_family_inputs(grouped, include_layout=True),
+            _raw_evidence_value(tuple(item.omega_ssp for item in grouped), include_layout=True),
+            _fixed_component_summaries(grouped),
+            _raw_penalty_arithmetic(),
+        )
+
+    def matches_support_inputs(self, geometry) -> bool:
+        return bool(
+            geometry.coordinate_map is None
+            and geometry.repeat == 1
+            and not geometry.matrix_error_bounds
+            and not geometry.ssp_roots
+            and not geometry.ssp_root_errors
+            and _raw_evidence_readonly(geometry.matrices, include_bases=True)
+            and self.matrices == _raw_evidence_value(geometry.matrices, include_layout=True)
+            and self.arithmetic == _raw_penalty_arithmetic()
+        )
+
+
+def _reuse_fixed_tensor_components(source, index, group, gm):
+    if not source or not _can_cache_penalty_group(gm):
+        return None
+    originals = [item for item in source if item.group_name == group.name]
+    if not originals:
+        return None
+    geometry = _context_geometry(originals)
+    if geometry is None or geometry.fixed_inputs is None or geometry.fixed_family is None:
+        return None
+    inputs = geometry.fixed_inputs
+    component_types = gm.component_types or {}
+    policies = gm.lambda_policies or {}
+    targets = [
+        PenaltyComponent(
+            name=f"{group.name}:{suffix}",
+            group_name=group.name,
+            group_index=index,
+            group_sl=group.sl,
+            omega_raw=omega,
+            component_type=component_types.get(suffix),
+            lambda_policy=policies.get(suffix),
+        )
+        for suffix, omega in gm.omega_components
+    ]
+    if not (
+        inputs.target == _fixed_tensor_target(index, group, gm)
+        and inputs.family
+        == _raw_family_inputs(originals, include_layout=True)
+        == _raw_family_inputs(targets, include_layout=True)
+        and inputs.summaries == _fixed_component_summaries(originals)
+        and _raw_evidence_readonly(
+            tuple(item.eigvals_omega for item in originals), include_bases=True
+        )
+        and inputs.matches_support_inputs(geometry)
+        and geometry.fixed_family.inputs is inputs
+        and geometry.fixed_family.matches_support(geometry)
+    ):
+        return None
+    # Copy descriptors and mutable owner state, but keep the admitted immutable
+    # solver matrices and selected support. The target consumes the receipt;
+    # no later handoff, weighted evaluation or face state inherits authority.
+    copied = [replace(item) for item in originals]
+    owner = _PenaltyGroupGeometry(
+        matrices=geometry.matrices,
+        keys=geometry.keys,
+        repeat=geometry.repeat,
+        support=geometry.support,
+    )
+    for item in copied:
+        item._penalty_geometry = owner
+    return copied
+
+
 @dataclass
 class _PenaltyGroupGeometry:
     """Immutable context inputs and one retained weight/volume evaluation."""
@@ -639,19 +777,31 @@ class _PenaltyGroupGeometry:
     volume: tuple[float, float] | None = None
     raw_family: _RawPenaltyFamilyReceipt | None = None
     raw_summary: _RawPenaltySummaryReceipt | None = None
+    fixed_inputs: _FixedPenaltyInputs | None = None
+    fixed_family: _RawPenaltyFamilyReceipt | None = None
 
     def __getstate__(self) -> dict:
         # Function identities certify this fit's arithmetic. Pickle resolves
         # names in the loading process, so it cannot retain that receipt.
         state = self.__dict__.copy()
         state["raw_family"] = state["raw_summary"] = None
+        state["fixed_inputs"] = state["fixed_family"] = None
         return state
 
     def get_support(self):
         from superglm.reml.penalty_support import _penalty_support
 
         if self.support is None:
+            inputs = self.fixed_inputs
+            admitted = inputs is not None and inputs.matches_support_inputs(self)
             self.support = _penalty_support(self.matrices)
+            if admitted and inputs.matches_support_inputs(self):
+                self.fixed_family = _RawPenaltyFamilyReceipt.capture(
+                    self.support,
+                    inputs=inputs,
+                    arithmetic=inputs.arithmetic,
+                    strict_arrays=True,
+                )
         return self.support
 
     def evaluate(self, values: NDArray):
@@ -1567,6 +1717,7 @@ def build_penalty_components(
     cache: dict | None = None,
     *,
     _reuse_raw_from: Sequence[PenaltyComponent] | None = None,
+    _reuse_fixed_from: Sequence[PenaltyComponent] | None = None,
 ) -> list[PenaltyComponent]:
     """Build PenaltyComponent list — the single source of penalty eigenstructure.
 
@@ -1680,6 +1831,12 @@ def build_penalty_components(
         cache_key = _penalty_group_cache_key(idx, g, gm) if can_cache_group else None
         if cache_key is not None and cache_key in component_cache:
             components.extend(component_cache[cache_key])
+            continue
+        fixed_components = _reuse_fixed_tensor_components(_reuse_fixed_from, idx, g, gm)
+        if fixed_components is not None:
+            if cache_key is not None:
+                component_cache[cache_key] = tuple(fixed_components)
+            components.extend(fixed_components)
             continue
 
         group_components: list[PenaltyComponent] = []
@@ -1896,6 +2053,14 @@ def build_penalty_components(
             ssp_errors=group_ssp_errors,
             raw_family=raw_family,
         )
+        if _can_cache_penalty_group(gm) and _reuse_fixed_from is None:
+            # A handoff destination, including a refused transfer's fresh
+            # fallback, needs no receipt for another boundary crossing.
+            for component in group_components:
+                if component.eigvals_omega is not None:
+                    component.eigvals_omega = _frozen_array(component.eigvals_omega)
+            geometry = _context_geometry(group_components)
+            geometry.fixed_inputs = _FixedPenaltyInputs.capture(idx, g, gm, group_components)
         if reused_geometry is not None:
             receipt = reused_geometry.raw_summary
             if receipt is not None and receipt.matches(reused_geometry):
@@ -1999,10 +2164,15 @@ def build_penalty_context(
     cache: dict | None = None,
     *,
     _reuse_raw_from: Sequence[PenaltyComponent] | None = None,
+    _reuse_fixed_from: Sequence[PenaltyComponent] | None = None,
 ) -> tuple[list[PenaltyComponent], dict[str, PenaltyCache], dict[str, float]]:
     """Build penalty components, caches, and rank lookup in one pass."""
     components = build_penalty_components(
-        group_matrices, reml_groups, cache=cache, _reuse_raw_from=_reuse_raw_from
+        group_matrices,
+        reml_groups,
+        cache=cache,
+        _reuse_raw_from=_reuse_raw_from,
+        _reuse_fixed_from=_reuse_fixed_from,
     )
     caches = {
         c.name: PenaltyCache(

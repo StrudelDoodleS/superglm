@@ -402,9 +402,16 @@ def finalize_reml_fit(
         old_gms = model._dm.group_matrices
         model._dm = rebuild_dm_with_lambdas(model, lambdas, sample_weight)
         reml_penalties, _, _ = build_penalty_context(
-            model._dm.group_matrices, reml_groups, _reuse_raw_from=reml_penalties
+            model._dm.group_matrices,
+            reml_groups,
+            _reuse_raw_from=reml_penalties,
+            _reuse_fixed_from=reml_penalties,
         )
         model._reml_penalties = reml_penalties
+        if getattr(best, "reml_penalties", None) is not None:
+            # The carrier must not keep obsolete optimizer owners and their
+            # weighted evaluations alive alongside the terminal context.
+            best.reml_penalties = reml_penalties
 
         beta_init = _map_beta_between_bases(
             solver_result.beta,
