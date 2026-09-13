@@ -101,7 +101,7 @@ def test_sdist_uses_a_small_explicit_allowlist() -> None:
 
 def test_installation_docs_are_pypi_first() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    installation = (ROOT / "docs/getting-started/installation.md").read_text(encoding="utf-8")
+    installation = (ROOT / "docs/get-started/installation.md").read_text(encoding="utf-8")
 
     assert "pip install superglm" in readme
     assert "pip install superglm" in installation
@@ -111,11 +111,11 @@ def test_installation_docs_are_pypi_first() -> None:
 
 
 def test_dataframe_boundary_documentation_is_discoverable() -> None:
-    installation = (ROOT / "docs/getting-started/installation.md").read_text(encoding="utf-8")
-    quickstart = (ROOT / "docs/getting-started/quickstart.md").read_text(encoding="utf-8")
+    installation = (ROOT / "docs/get-started/installation.md").read_text(encoding="utf-8")
+    quickstart = (ROOT / "docs/get-started/quickstart.md").read_text(encoding="utf-8")
     model_api = (ROOT / "docs/api/model.md").read_text(encoding="utf-8")
-    mkdocs = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
-    developer_path = ROOT / "docs/development/data-and-solver-boundaries.md"
+    internals_toctree = (ROOT / "docs/development/internals/index.md").read_text(encoding="utf-8")
+    developer_path = ROOT / "docs/development/internals/data-and-solver-boundaries.md"
 
     assert developer_path.exists()
     developer = developer_path.read_text(encoding="utf-8")
@@ -128,7 +128,7 @@ def test_dataframe_boundary_documentation_is_discoverable() -> None:
     assert "model = SuperGLM" in quickstart
     assert "model.predict(X)" in quickstart
     assert "design_summary" in model_api
-    assert "development/data-and-solver-boundaries.md" in mkdocs
+    assert "data-and-solver-boundaries" in internals_toctree
     assert "User layer" in developer
     assert "Developer layer" in developer
     assert "Where to make a change" in developer

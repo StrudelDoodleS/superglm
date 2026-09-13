@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import jupytext
 import pytest
-from nbclient import NotebookClient
+
+# The ``docs`` dependency group is absent from the test matrix environment, and
+# a module-level import would error at collection time — before ``-m "not
+# docs"`` deselects anything. Skipping keeps parametrisation (pathlib only).
+jupytext = pytest.importorskip("jupytext")
+nbclient = pytest.importorskip("nbclient")
 
 DOCS = Path(__file__).resolve().parents[2] / "docs"
 SKIP_DIRS = {"superpowers", "_build", "api"}
@@ -33,7 +37,7 @@ def myst_notebooks() -> list[Path]:
 def test_notebook_executes(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MPLBACKEND", "Agg")
     notebook = jupytext.read(path)
-    client = NotebookClient(
+    client = nbclient.NotebookClient(
         notebook,
         timeout=900,
         kernel_name="python3",

@@ -156,9 +156,7 @@ constant_scale = SuperLSS(
 held_out_loss = pd.Series(
     {
         "varying_scale": model.scores(X_test, y_test, which=("log",))["log"].mean(),
-        "constant_scale": constant_scale.scores(
-            X_test, y_test, which=("log",)
-        )["log"].mean(),
+        "constant_scale": constant_scale.scores(X_test, y_test, which=("log",))["log"].mean(),
     },
     name="mean_negative_log_likelihood",
 )

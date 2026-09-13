@@ -2021,10 +2021,26 @@ Expected categories and fixes:
 
 Stop when the only remaining warnings are the toctree ones.
 
+- [ ] **Step 9a: Repoint the existing test modules that read docs paths by name**
+
+Ten pre-existing modules open moved pages by path; `tests/test_documentation_examples.py` also globs the `docs/guide` directory, and two modules assert against `mkdocs.yml`, which this task deletes. Missing this reds the whole `test-compatibility` matrix with `FileNotFoundError`, and neither Task 20's three-module list nor the "never run the full test suite" constraint would show it. Apply the mechanical rewrite:
+
+```bash
+sed -i -e 's#docs/guide/families\.md#docs/explanation/families-and-weights.md#g' -e 's#docs/guide/fitting\.md#docs/how-to/choose-a-fitting-path.md#g' -e 's#docs/guide/screening-evaluation\.md#docs/explanation/what-screening-does.md#g' -e 's#docs/guide/screening\.md#docs/how-to/screen-interactions.md#g' -e 's#docs/guide/validation\.md#docs/how-to/compare-models-on-holdout.md#g' -e 's#docs/guide/workflows\.md#docs/how-to/recommended-workflows.md#g' -e 's#docs/guide/results\.md#docs/how-to/read-a-summary-and-plot-effects.md#g' -e 's#docs/guide/monotone\.md#docs/how-to/constrain-a-smooth.md#g' -e 's#docs/guide/interactions\.md#docs/how-to/specify-interactions.md#g' -e 's#docs/guide/deployment\.md#docs/how-to/deploy-a-fitted-model.md#g' -e 's#docs/guide/optimization\.md#docs/explanation/solvers-and-internals.md#g' -e 's#docs/getting-started/installation\.md#docs/get-started/installation.md#g' -e 's#docs/getting-started/quickstart\.md#docs/get-started/quickstart.md#g' -e 's#docs/notebooks/editor_demo\.ipynb#docs/examples/editor_demo.ipynb#g' -e 's#docs/notebooks/tweedie_profile_estimation\.ipynb#docs/examples/tweedie_profile_estimation.ipynb#g' -e 's#docs/development/data-and-solver-boundaries\.md#docs/development/internals/data-and-solver-boundaries.md#g' tests/test_documentation_examples.py tests/test_editor.py tests/test_factor_smooth_sz_feature.py tests/test_mixed_interaction_screening.py tests/test_rating_table_export.py tests/test_release_management.py tests/test_release_packaging.py tests/test_screening_guide_numbers.py tests/test_tweedie_profile_docs.py tests/test_weight_semantics.py
+```
+
+Then three edits `sed` cannot make:
+
+- `tests/test_documentation_examples.py` `_published_python_blocks`: replace the single `docs/guide` glob with `docs/how-to/*.md` plus `docs/explanation/*.md`.
+- `tests/test_release_management.py` `test_release_documentation_explains_release_bearing_invocations`: read `docs/development/index.md` instead of `mkdocs.yml` and assert `"releases"` is in its toctree.
+- `tests/test_release_packaging.py` `test_dataframe_boundary_documentation_is_discoverable`: read `docs/development/internals/index.md` instead of `mkdocs.yml` and assert `"data-and-solver-boundaries"` is in its toctree.
+
+Confirm with `grep -rn 'docs/guide\|docs/getting-started\|docs/notebooks\|mkdocs.yml' tests/ --include=*.py` — only prose comments may remain — then run the ten modules to green.
+
 - [ ] **Step 10: Commit**
 
 ```bash
-git add -A docs mkdocs.yml
+git add -A docs mkdocs.yml tests
 git commit -m "Docs: move every page into the Diátaxis tree and convert MkDocs syntax"
 ```
 
@@ -2752,6 +2768,17 @@ Resolve `ACTIONS_CACHE_SHA` with `gh api repos/actions/cache/commits/v4 --jq .sh
 
 In `dev-ci.yml` change both `-m "not browser"` occurrences to `-m "not browser and not docs"`. In `ci.yml` change lines 66 and 75 the same way. In `.pre-commit-config.yaml` change `-m "not slow"` to `-m "not slow and not docs"`.
 
+- [ ] **Step 3a: Update the four CI contracts that pin the old strings**
+
+`tests/test_supply_chain_governance.py` asserts the exact CI text this task changes, so it reds unless it is updated with it:
+
+- the `test-compatibility` matrix assertion `'-m "not browser"'` becomes `'-m "not browser and not docs"'`;
+- the dev-ci `docs` job assertion `"mkdocs build --strict"` becomes `"sphinx-build -b html -n -W --keep-going"`;
+- the pre-push hook assertion `'entry: uv run --extra dev python -m pytest tests/ -q -m "not slow"'` becomes the `"not slow and not docs"` spelling (wrap it to stay inside the ruff line length);
+- `test_docs_workflow_scopes_write_permission_to_deploy_job` asserts `"contents: write" in deploy_job`; Task 18 replaces that permission, so assert `"pages: write"` and `"id-token: write"` are present and `"contents: write"` is not.
+
+Run `uv run pytest tests/test_supply_chain_governance.py -q` and confirm it is green.
+
 - [ ] **Step 4: Validate the YAML**
 
 Run: `uv run python -c "import yaml, pathlib; [yaml.safe_load(pathlib.Path(p).read_text()) for p in ('.github/workflows/dev-ci.yml', '.github/workflows/ci.yml', '.pre-commit-config.yaml')]; print('ok')"`
@@ -2950,6 +2977,19 @@ Expected: PASS for API coverage, both redirect tests, the conventions test and t
 Run: `uv run python run_test.py | tail -1 && uv run pytest tests/test_reml_tol_determination.py tests/test_nb_theta_estimation_correctness.py tests/test_tweedie_reml_exact_scale.py -q -m "not slow" | tail -1`
 Expected: `END-TO-END COMPLETE`; the three modules pass or skip.
 
+- [ ] **Step 3a: The eleven pre-existing modules that name a docs path or a CI string**
+
+Run: `uv run pytest tests/test_documentation_examples.py tests/test_editor.py tests/test_factor_smooth_sz_feature.py tests/test_mixed_interaction_screening.py tests/test_rating_table_export.py tests/test_release_management.py tests/test_release_packaging.py tests/test_screening_guide_numbers.py tests/test_supply_chain_governance.py tests/test_tweedie_profile_docs.py tests/test_weight_semantics.py -q -m "not slow and not browser"`
+Expected: green. These are the modules Task 10 step 9a and Task 17 step 3a repoint; they are the `test-compatibility` matrix's exposure to the page moves, and nothing else in this plan runs them.
+
+- [ ] **Step 3b: Collection under the CI environment's import surface**
+
+The test matrix installs `--extra dev --extra bench --extra plotting` and no `docs` group, so any module-level `jupytext`/`nbclient` import errors at collection, before `-m "not docs"` can deselect it. Reproduce the matrix environment by blocking those two packages on `PYTHONPATH` (a directory holding `jupytext.py` and `nbclient.py` that each `raise ModuleNotFoundError("No module named '<name>'", name="<name>")` — pytest 9's `importorskip` re-raises a plain `ImportError`, so only `ModuleNotFoundError` reproduces a genuinely absent package) and run:
+
+`uv run --no-sync pytest tests/ -q -m "not browser and not docs" --collect-only`
+
+Expected: exit 0 with no collection errors. `tests/docs/test_notebooks.py` must guard those imports with `pytest.importorskip` rather than importing them at module scope.
+
 - [ ] **Step 4: Lint**
 
 Run: `uv run ruff check tests/docs src/superglm/features/constraint.py && uv run ruff format --check tests/docs`
@@ -2967,9 +3007,11 @@ git push -u origin worktree-docs-rebuild-sphinx
 
 Open the PR with `gh pr create` against `master`. Title: `Rebuild the documentation on Sphinx: structure, API reference, execution, deploy`. Body sections: what changed (the spec's summary), the spike measurements (T5 execution time, numpydoc warning count settled, theme chosen), the one manual step (Pages source → GitHub Actions), the published-site size measured by `du -sh docs/_build/html`, and the follow-up PRs from spec §12.
 
+The body must also note that this branch is to be **squash-merged**, the repository's convention. Two intermediate commits each record a ~54k-line churn of `docs/examples/mtpl2_frequency_walkthrough.ipynb` (a delete-and-re-add that a later commit reverses); the net branch diff is a zero-line rename and HEAD's copy is byte-identical to the original, so a reviewer scanning per-commit stats should not read it as a rewrite. A rebase merge would need the notebook hunks of those two commits squashed together first.
+
 The body must also carry this paragraph verbatim, so the two deferred spec success criteria are on the record rather than discovered by the reviewer:
 
-> **Success criteria not yet met.** Spec §15 criterion 5 (the discrete-REML fit block appears on exactly one page) and criterion 6 (no user page exceeds 3,000 words except explanation essays) are not met by this PR, by design. The identical `SuperGLM(family="poisson", selection_penalty=0.0, discrete=True, n_bins=256, ...)` block still appears on both `get-started/quickstart.md` and `how-to/choose-a-fitting-path.md`, a second block is shared by those two plus `how-to/recommended-workflows.md`, and seven pages carry a `discrete=True` + `fit_reml` block. Seven pages exceed 3,000 words: `how-to/fit-a-distributional-model.md` 8,536, `explanation/what-screening-does.md` 7,503, `how-to/screen-interactions.md` 5,910, `explanation/solvers-and-internals.md` 6,276, `how-to/check-a-distributional-fit.md` 4,745, `how-to/specify-features.md` 4,107, `how-to/read-a-summary-and-plot-effects.md` 3,417 — the two explanation essays are exempt, the five how-tos are not. This PR moves and converts existing pages without rewriting them; both criteria close in the how-to split and explanation carving PRs listed in spec §12. End the body with the attribution lines from the session's system reminder. Both review bots run on the PR; read their summary comments as well as their review threads, and resolve threads only after fixing.
+> **Success criteria not yet met.** Spec §15 criterion 5 (the discrete-REML fit block appears on exactly one page) and criterion 6 (no user page exceeds 3,000 words except explanation essays) are not met by this PR, by design. The identical `SuperGLM(family="poisson", selection_penalty=0.0, discrete=True, n_bins=256, ...)` block still appears on both `get-started/quickstart.md` and `how-to/choose-a-fitting-path.md`, a second block is shared by those two plus `how-to/recommended-workflows.md`, and seven pages carry a `discrete=True` + `fit_reml` block. Seven pages exceed 3,000 words: `how-to/fit-a-distributional-model.md` 8,536, `explanation/what-screening-does.md` 7,503, `how-to/screen-interactions.md` 5,910, `explanation/solvers-and-internals.md` 6,276, `how-to/check-a-distributional-fit.md` 4,745, `how-to/specify-features.md` 4,107, `how-to/read-a-summary-and-plot-effects.md` 3,417 — the two explanation essays are exempt, the five how-tos are not; an eighth page, `development/internals/distributional-family-development.md` at 3,071 words, is a contributor page and outside criterion 6's scope. This PR moves and converts existing pages without rewriting them; both criteria close in the how-to split and explanation carving PRs listed in spec §12. End the body with the attribution lines from the session's system reminder. Both review bots run on the PR; read their summary comments as well as their review threads, and resolve threads only after fixing.
 
 ---
 

@@ -1373,7 +1373,9 @@ def test_the_unbounded_tails_survive_the_workbook_as_text(tmp_path):
             # ``None``, which is how a non-finite number arrives.
             assert isinstance(value, int | float), f"blank coefficient at row {row}"
 
-    guide = _flat((_ROOT / "docs/guide/results.md").read_text(encoding="utf-8"))
+    guide = _flat(
+        (_ROOT / "docs/how-to/read-a-summary-and-plot-effects.md").read_text(encoding="utf-8")
+    )
     columns = ", ".join(f"`{column}`" for column in _PPFORM_COLUMNS)
     for claim in (
         '`continuous_kind="ppform"`',
@@ -1615,7 +1617,9 @@ def test_the_offset_documentation_states_the_one_rule_for_both_paths():
         assert claim in doc, claim
     assert "only while there are fewer than 20 of them" not in doc
 
-    guide = _flat((_ROOT / "docs/guide/results.md").read_text(encoding="utf-8"))
+    guide = _flat(
+        (_ROOT / "docs/how-to/read-a-summary-and-plot-effects.md").read_text(encoding="utf-8")
+    )
     for claim in (
         '`offset_kind="binned"`',
         "`offset_max_exact_levels` governs both paths",

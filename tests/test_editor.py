@@ -36,7 +36,7 @@ from superglm.inference.summary import ModelSummary, _BasisDetailRow, _CoefRow
 
 
 def test_editor_demo_notebook_includes_k_adequacy_sweep():
-    notebook_path = Path(__file__).resolve().parents[1] / "docs/notebooks/editor_demo.ipynb"
+    notebook_path = Path(__file__).resolve().parents[1] / "docs/examples/editor_demo.ipynb"
     notebook = json.loads(notebook_path.read_text())
     source = "\n".join("".join(cell["source"]) for cell in notebook["cells"])
 

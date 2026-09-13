@@ -1404,7 +1404,7 @@ class TestTheContractsAgreeAtUnitWeightNotAtIntegerWeight:
         ]
         root = Path(dispersion_module.__file__).resolve().parents[3]
         for relative in (
-            "docs/guide/families.md",
+            "docs/explanation/families-and-weights.md",
             "docs/development/migrations/weight-semantics-prior.md",
         ):
             path = root / relative

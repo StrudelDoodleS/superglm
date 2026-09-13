@@ -1,6 +1,6 @@
 """The screening guide's worked freMTPL example is a published measurement.
 
-``docs/guide/screening.md`` prints a twelve-row sweep table and then reasons
+``docs/how-to/screen-interactions.md`` prints a twelve-row sweep table and then reasons
 about individual cells of it: the top row's ``z`` against the measured ``ti``
 noise maximum, the ``cat_cat`` row's ``z`` and ``statistic``, how many rows
 carry a negative ``z``, and two confirmatory refit gains.  Every one of those
@@ -51,7 +51,7 @@ from superglm.features.spline import Spline
 from . import _datasets
 
 _ROOT = Path(__file__).resolve().parents[1]
-_GUIDE_PATH = _ROOT / "docs/guide/screening.md"
+_GUIDE_PATH = _ROOT / "docs/how-to/screen-interactions.md"
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "screening_guide_fremtpl.json"
 
 _WORD_NUMBERS = {
