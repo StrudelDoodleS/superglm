@@ -26,33 +26,29 @@ html_theme.sidebar_secondary.remove: true
 :::{grid-item-card} Get started
 :link: get-started/index
 :link-type: doc
-:img-bottom: images/readme_vehage.png
 
-Install, then fit and validate a frequency model on French motor data.
+Install, then the quick start: which fit to call, and how to read the summary it prints.
 :::
 
 :::{grid-item-card} Tutorials
 :link: tutorials/index
 :link-type: doc
-:img-bottom: images/readme_bonusmalus.png
 
-Frequency, severity, pure premium, constraints and rating tables, executed on every build.
+Executed notebooks you can open in Colab. First, a distributional model; pricing tutorials on French motor data follow.
 :::
 
 :::{grid-item-card} How-to guides
 :link: how-to/index
 :link-type: doc
-:img-bottom: images/readme_drivage_bands.png
 
-One goal per page: weights and offsets, credibility, constraints, screening, deployment.
+One goal per page: choosing a fit path, features and levels, constraints, screening, validation, deployment.
 :::
 
 :::{grid-item-card} Explanation
 :link: explanation/index
 :link-type: doc
-:img-bottom: images/readme_mtpl2_relativities.png
 
-Why REML, why penalties, why the constraints are stricter than the literature.
+Why REML, what weights mean, how credibility becomes smoothing, what screening can and cannot detect.
 :::
 
 ::::

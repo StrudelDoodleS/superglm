@@ -371,10 +371,14 @@ board artifact published the same day.
 - Landing page: hero band on ink with a halftone dot field fading in from
   the right edge into red and yellow; the burst on the left, one sentence
   and two buttons on the right, then one line: MIT licensed, free for
-  everyone, built on NumPy, SciPy and pandas. Below it four panels (get
-  started, tutorials, how-to, explanation), each with a real fitted curve
-  from the tutorials; then the twelve-line example. Built with
-  sphinx-design grids and `custom.css`; the only page allowed
+  everyone, built on NumPy, SciPy and pandas. Below it four text panels
+  (get started, tutorials, how-to, explanation) whose copy describes what
+  the section holds today, never what is planned; then the twelve-line
+  example; then, once the first pricing tutorial exists, one real fitted
+  curve with a caption saying what it shows ("what a fit looks like").
+  Max on 2026-09-13: four bare charts under the cards read as decoration
+  and the old README plots were dated, so the cards carry no images.
+  Built with sphinx-design grids and `custom.css`; the only page allowed
   theme-specific markup.
 - Figures: one matplotlib style for the whole site, `superglm.mplstyle`:
   ink axes and fitted curve, red challenger, yellow exposure histogram
