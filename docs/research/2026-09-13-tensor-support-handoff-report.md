@@ -4,7 +4,9 @@ Date: 2026-09-13
 
 Worktree: `.worktrees/adaptive-interactions`, branch `research/adaptive-interactions`
 
-Reviewed working diff against `074d999a501b4752fd6c06d52e2be81d7bc01b7c`.
+The initial implementation was reviewed as a working diff against
+`074d999a501b4752fd6c06d52e2be81d7bc01b7c`. The producer-scope amendment below
+follows the preliminary measurements of `90f519f39ec3f1a7b1b9a3a2ff13d1c96ababd21`.
 This worker created no commits. The parent owns integration review, broader
 suites and serial housing measurements.
 
@@ -26,7 +28,8 @@ and cannot substitute for the optimizer's populated family.
 unprojected discrete tensor families with the original fixed group cache key.
 The existing `_reuse_raw_from` route and its tensor exclusion remain intact.
 
-`_FixedPenaltyInputs` records construction-time input evidence. The existing
+`_FixedPenaltyInputs` records construction-time input evidence only for a
+cache-backed producer. The existing
 `_RawPenaltyFamilyReceipt` owns the support snapshot. `get_support` captures that
 snapshot only during its already required first support construction, after
 checking the original solver matrices and arithmetic both before and after the
@@ -98,13 +101,14 @@ The original Poisson variant was ineffective for the count assertion: it built
 support once because fixed dispersion did not require terminal nullity.
 Gaussian exercises the consumer observed in the housing profile.
 
-The final focused command passed 138 tests in 6.02 seconds:
+After the producer-scope amendment, the final focused command passed 139 tests
+in 8.83 seconds:
 
 ```sh
 uv run pytest tests/test_penalty_fixed_tensor_reuse.py tests/test_penalty_raw_context_reuse.py tests/test_penalty_algebra_support.py tests/test_distributional_penalty_context.py tests/test_discretize_fit.py::TestDiscretizedTensorInteraction::test_rebuild_design_matrix_freezes_unprojected_tensor_basis tests/test_discretize_fit.py::TestDiscretizedTensorInteraction::test_penalty_context_cache_reuses_frozen_tensor_components tests/test_discretize_fit.py::TestDiscretizedTensorInteraction::test_tensor_pair_summary_cache_reuses_static_marginal_eigenvalues -q
 ```
 
-The new module includes 59 tests after parametrization. The analytic four-column
+The new module includes 60 tests after parametrization. The analytic four-column
 fixture has positive spectrum `(2, 3, 5)` at lambdas `(2, 3)`. It verifies rank 3,
 log determinant `log(30)`, log-lambda gradient `(7/5, 8/5)` and diagonal curvature
 `6/25`, with negative cross curvature. It checks the selected projector and
@@ -124,7 +128,8 @@ Six in-process mutations were each rejected by an existing regression:
 | Erase component-summary evidence | Changed declared component rank |
 | Use union rank for an active face | One-component face nullity |
 
-The mutation driver patched functions in process and restored each with
+The mutation driver was rerun after the producer-scope amendment. It patched
+functions in process and restored each with
 `pytest.MonkeyPatch.context`; it did not edit production files. All six printed
 `Mutation killed` and the final driver completed successfully. Additional red
 runs exposed retained target receipts, writable spectra, writable array backing
@@ -144,16 +149,75 @@ object overhead, measured these additional fixed-handoff authorization bytes:
 | Fixture/context | Construction inputs | Support snapshot | Terminal authorization |
 | --- | ---: | ---: | ---: |
 | Analytic width 4 | 672 | 1,048 | 0 |
-| Public width 64 entry family | 164,736 | 0 | 0 |
+| Public width 64 entry family | 0 | 0 | 0 |
 | Public width 64 optimizer family | 164,736 | 390,808 | 0 |
 
 Input snapshots include two raw penalties, two solver penalties, the map and
 small spectral arrays. Support snapshots include the existing selected support
-and its error ledger. Entry and optimizer input snapshots can overlap in
-lifetime. Validation also temporarily materializes exact comparison bytes.
-The target does not copy the immutable solver matrices or support arrays.
+and its error ledger. Only the optimizer retains fixed input snapshots after
+the producer-scope amendment. Validation still temporarily materializes exact
+comparison bytes. The target does not copy the immutable solver matrices or
+support arrays.
 
-These small-fixture payload counts do not establish a lower peak RSS. The first
+## Cache-backed producer amendment
+
+The preliminary `90f519f3` implementation gave uncached entry families input
+snapshots. The entry list remains live through optimization, although
+finalization consumes the optimizer's later family. The small width-64 entry
+held 164,736 unnecessary bytes, independently of the optimizer's exact evidence.
+The parent's preliminary matched measurements showed lower complete-fit times,
+exact outputs and unchanged retained model payload, but higher peak RSS.
+Those measurements describe the earlier commit and do not establish the
+amended candidate's peak-memory behavior.
+
+The approved amendment changes only the provenance-capture guard from
+`_can_cache_penalty_group(gm)` to the existing `can_cache_group` flag. This flag
+requires a non-`None` component cache, including an initially empty dictionary.
+The discrete optimizer is the sole current production caller that constructs
+contexts with that cache. Its bootstrap, iteration and final rebuilds all use
+`penalty_context_cache`. The uncached entry, EFS, NB-profiling and distributional
+builders have no fixed-handoff production consumer.
+
+The supported contract now requires cache-backed source construction. An
+uncached context remains numerically usable and can construct its own support,
+but cannot later acquire transfer authority. A cache hit never adds new
+authority to an existing owner. Targets still consume eligibility, including
+fresh fallbacks. The source's exact input, mutation and arithmetic checks do
+not change. No new public argument or numerical tolerance was introduced.
+
+Before the guard edit, both the new small allocation regression and the public
+ownership regression failed because `initial.fixed_inputs` was non-`None`.
+The red run finished in 2.97 seconds. After the one guard edit they pass within
+the 139-test focused run. Direct source fixtures now explicitly use `cache={}`.
+The new regression also verifies that an ordinary uncached support evaluation
+cannot create a receipt, that such an entry cannot authorize a handoff, and
+that the cached source still authenticates. The public fit retains support
+count one and preserves owner lifetime, predictions and dispersion.
+
+For a float64 tensor of width `p` with component spectrum lengths `r1`, `r2`,
+the eliminated live input byte payload is
+
+```text
+8 * (5 * p**2 + r1 + r2)
+```
+
+The five dense matrices are two raw penalties, two solver penalties and the
+coordinate map. The published housing widths and recorded component ranks give:
+
+| Case | Tensor width | Component spectrum lengths | Removed live input bytes | MiB |
+| --- | ---: | ---: | ---: | ---: |
+| `rows20` | 361 | 342 + 342 | 5,218,312 | 4.97657 |
+| `rows30` | 841 | 812 + 812 | 28,304,232 | 26.99302 |
+
+These are exact array-byte savings, excluding small Python-object overhead.
+They remove no optimizer support/error evidence and no entry support snapshot,
+because the entry support remained lazy. The width-64 byte inspection after
+the amendment confirmed zero entry input/support authorization bytes, unchanged
+optimizer input/support snapshots of 164,736 and 390,808 bytes, and zero terminal
+authorization bytes. Allocator behavior and overlapping work still determine
+peak RSS; these payload savings are not a measured peak-RSS reduction.
+
+The first
 support construction retains its original asymptotic cost, and authorization
 adds transient storage. The parent must compare complete-fit time, fit/process
 peak RSS, retained model payload, numerical outputs and actual dispatch on the

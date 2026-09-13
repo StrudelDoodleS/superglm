@@ -2053,9 +2053,10 @@ def build_penalty_components(
             ssp_errors=group_ssp_errors,
             raw_family=raw_family,
         )
-        if _can_cache_penalty_group(gm) and _reuse_fixed_from is None:
-            # A handoff destination, including a refused transfer's fresh
-            # fallback, needs no receipt for another boundary crossing.
+        if can_cache_group and _reuse_fixed_from is None:
+            # Only the cache-backed producer needs handoff authority. Entry
+            # descriptors and handoff destinations, including fresh fallbacks,
+            # must not retain these duplicate input snapshots.
             for component in group_components:
                 if component.eigvals_omega is not None:
                     component.eigvals_omega = _frozen_array(component.eigvals_omega)

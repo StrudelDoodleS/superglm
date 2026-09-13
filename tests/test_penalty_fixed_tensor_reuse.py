@@ -44,7 +44,7 @@ def _tensor_inputs():
 
 
 def _build(gm, group, source=None):
-    kwargs = {} if source is None else {"_reuse_fixed_from": source}
+    kwargs = {"cache": {}} if source is None else {"_reuse_fixed_from": source}
     return algebra.build_penalty_context([gm], [(0, group)], **kwargs)[0]
 
 
@@ -52,6 +52,33 @@ def _evaluate(components, weights=(2.0, 3.0)):
     return algebra._compute_penalty_logdet_evaluation(
         dict(zip(("tensor:left", "tensor:right"), weights, strict=True)), components
     )
+
+
+def test_only_cache_backed_tensor_producers_own_handoff_evidence():
+    """Unused entry descriptors must not retain duplicate input snapshots."""
+    gm, group = _tensor_inputs()
+    entry = algebra.build_penalty_context([gm], [(0, group)])[0]
+    initial = algebra._context_geometry(entry)
+    assert initial.fixed_inputs is None
+    assert initial.fixed_family is None
+    assert initial.support is None
+    _evaluate(entry)
+    assert initial.fixed_inputs is None
+    assert initial.fixed_family is None
+
+    source = _build(gm, group)
+    produced = algebra._context_geometry(source)
+    assert produced.fixed_inputs is not None
+    assert produced.fixed_family is None
+    assert produced.support is None
+    _evaluate(source)
+    assert produced.fixed_family is not None
+    target = _build(gm, group, source)
+    assert algebra._context_geometry(target).support is produced.support
+
+    refused = _build(gm, group, entry)
+    assert algebra._context_geometry(refused).support is not initial.support
+    assert _evaluate(refused) == _evaluate(entry)
 
 
 def test_fixed_tensor_support_is_lazy_and_shared_with_a_new_owner(monkeypatch):
@@ -509,8 +536,13 @@ def test_public_fit_releases_the_optimizer_owner_after_terminal_handoff(monkeypa
         assert best.reml_penalties is not None
         entry = [item for item in kwargs["reml_penalties"] if item.group_name == "x1:x2"]
         produced = [item for item in best.reml_penalties if item.group_name == "x1:x2"]
+        initial = algebra._context_geometry(entry)
+        assert initial.fixed_inputs is None
+        assert initial.fixed_family is None
         old = algebra._context_geometry(produced)
-        assert old is not algebra._context_geometry(entry)
+        assert old is not initial
+        assert old.fixed_inputs is not None
+        assert old.fixed_family is not None
         assert old.support is not None
         previous["owner"] = weakref.ref(old)
         previous["support"] = weakref.ref(old.support)

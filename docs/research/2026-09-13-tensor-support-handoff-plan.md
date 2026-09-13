@@ -122,3 +122,41 @@ The initial plan shared the exact receipt with the target. The final implementat
 Layout capture and backing-owner checks are explicit fixed-path options on the existing evidence helpers. The raw-coordinate route keeps its prior defaults. Tensor marginal object identities and column widths bind basis identity; observation rows, bin arrays and weights are outside this penalty-support record.
 
 Execution evidence, the exact test command and remaining measurement gates are recorded in [the implementation report](2026-09-13-tensor-support-handoff-report.md). No implementation commit was created by this worker.
+
+## Task 5: Restrict provenance to cache-backed producers
+
+The parent approved this follow-up after preliminary measurements of commit
+`90f519f39ec3f1a7b1b9a3a2ff13d1c96ababd21` showed a peak-RSS increase despite
+exact outputs and unchanged retained model payload. The entry family is built
+without a component cache and never supplies the populated fixed tensor to
+finalization. Its input snapshots live through optimization but authorize no
+production handoff.
+
+The sole production cache-backed context producer is the discrete optimizer.
+Its bootstrap, iteration and terminal rebuilds all use `penalty_context_cache`.
+Capture provenance only at construction inside that cache. An uncached family
+remains numerically usable but cannot gain handoff authority when support is
+later requested. The source's exact mutation/arithmetic checks and the
+destination's consumed eligibility remain unchanged.
+
+- [x] Adapt direct test sources to explicit `cache={}` construction and add a
+  regression that requires no pending or completed fixed receipt on an uncached
+  entry, even after an ordinary support evaluation. Require the cached source
+  to authenticate and transfer its support normally.
+- [x] Run the new regression and the public ownership regression before the
+  source edit; record failure from the unused entry provenance.
+- [x] Make the one guard change in `build_penalty_components`:
+
+```python
+if can_cache_group and _reuse_fixed_from is None:
+```
+
+- [x] Run the same focused suites, preserve public support count one,
+  lifetime/numerical assertions, and verify that removing this guard fails the
+  new allocation regression. Recheck the existing receipt mutations.
+- [x] Update the report with the removed live byte formula and preserve
+  preliminary measurements as historical evidence. The exact float64 input
+  payload saved is `8 * (5 * p**2 + r1 + r2)` bytes, where `p` is tensor width
+  and `r1`, `r2` are the component spectrum lengths. This is 5,218,312 bytes
+  at width 361 and 28,304,232 bytes at width 841. Peak-RSS benefit remains an
+  unmeasured hypothesis until the parent's new matched runs finish.
