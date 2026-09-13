@@ -114,7 +114,7 @@ statistics and {py:meth}`~superglm.SuperGLM.drop1` the drop-one deviance per
 feature; {py:meth}`~superglm.SuperGLM.term_importance` scores each term by the
 weighted variance of its contribution to the linear predictor, and
 {py:meth}`~superglm.SuperGLM.term_drop_diagnostics` by what dropping it
-costs in AIC, BIC or holdout loss; both return one row per term, unsorted. {py:meth}`~superglm.SuperGLM.random_effects`
+costs in AIC, BIC or holdout loss. {py:meth}`~superglm.SuperGLM.random_effects`
 and {py:meth}`~superglm.SuperGLM.factor_smooth` report variance components,
 level diagnostics and smooth curves for random-effect and factor-smooth terms,
 while {py:meth}`~superglm.SuperGLM.knot_summary`,
