@@ -55,7 +55,6 @@ exclude_patterns += [
     "api/families.md",
     "api/features.md",
     "api/inference.md",
-    "api/model.md",
     "api/model_selection.md",
     "api/penalties.md",
     "api/plotting.md",
@@ -124,6 +123,8 @@ nitpick_ignore_regex = [
     ("py:class", r"default .*"),
     ("py:class", r"(list|dict|tuple|sequence|iterable|mapping) of .*"),
     ("py:class", r"DataFrame|Series|ndarray"),
+    ("py:class", r"(numpy\._typing\._array_like\.)?NDArray"),
+    ("py:class", r"FrameLike"),
 ]
 
 # Redirects from the MkDocs site's URLs
