@@ -2,6 +2,9 @@
 html_theme.sidebar_secondary.remove: true
 ---
 
+```{rst-class} sg-visually-hidden
+```
+
 # superglm
 
 ```{raw} html
@@ -10,12 +13,72 @@ html_theme.sidebar_secondary.remove: true
   <div class="sg-hero__copy">
     <div class="sg-hero__title">Super GLM</div>
     <p>Penalised GLMs and GAM pricing models for insurance, with the smoothness chosen by REML and the constraints you would otherwise enforce by hand.</p>
-    <a class="sg-btn" href="tutorials/distributional-model.html">Fit your first model</a>
-    <a class="sg-btn sg-btn--ghost" href="api/index.html">API reference</a>
+    <a class="sg-btn" href="get-started/index.html">Get started</a>
+    <a class="sg-btn sg-btn--ghost" href="tutorials/index.html">Tutorials</a>
     <span class="sg-hero__meta">MIT licensed · free for everyone · built on NumPy, SciPy and pandas</span>
   </div>
 </div>
 ```
+
+::::{grid} 1 2 2 4
+:gutter: 3
+
+:::{grid-item-card} Get started
+:link: get-started/index
+:link-type: doc
+:img-bottom: images/readme_vehage.png
+
+Install, then fit and validate a frequency model on French motor data.
+:::
+
+:::{grid-item-card} Tutorials
+:link: tutorials/index
+:link-type: doc
+:img-bottom: images/readme_bonusmalus.png
+
+Frequency, severity, pure premium, constraints and rating tables, executed on every build.
+:::
+
+:::{grid-item-card} How-to guides
+:link: how-to/index
+:link-type: doc
+:img-bottom: images/readme_drivage_bands.png
+
+One goal per page: weights and offsets, credibility, constraints, screening, deployment.
+:::
+
+:::{grid-item-card} Explanation
+:link: explanation/index
+:link-type: doc
+:img-bottom: images/readme_mtpl2_relativities.png
+
+Why REML, why penalties, why the constraints are stricter than the literature.
+:::
+
+::::
+
+```{rst-class} sg-section-title
+```
+
+## Twelve lines to a fitted model
+
+```python
+from superglm import Categorical, Numeric, Spline, SuperGLM
+
+features = {
+    "DrivAge": Spline(kind="ps", k=14, knot_strategy="quantile_rows"),
+    "VehAge": Spline(kind="cr", k=10, knot_strategy="quantile_rows"),
+    "BonusMalus": Spline(kind="cr", k=12, knot_strategy="quantile_tempered"),
+    "Area": Categorical(base="most_exposed"),
+    "LogDensity": Numeric(),
+}
+model = SuperGLM(family="poisson", selection_penalty=0.0, features=features)
+model.fit_reml(df, y, sample_weight=exposure)
+print(model.summary())
+```
+
+The [API reference](api/index.md) documents every public name. The
+[governance section](governance/index.md) is for model-risk reviewers.
 
 ```{toctree}
 :hidden:

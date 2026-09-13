@@ -73,6 +73,7 @@ div.admonition > .admonition-title {
 }
 
 .sd-card .sd-card-title,
+.sg-section-title > h2,
 .sg-display {
   font-family: var(--sg-display);
   font-weight: 400;
@@ -84,8 +85,26 @@ div.admonition > .admonition-title {
   font-size: 1.5rem;
 }
 
+.sg-section-title > h2,
 .sg-display {
   font-size: 2rem;
+}
+
+/* The landing page's document title exists for Sphinx (tab title, search,
+   breadcrumbs); the hero already shows it in the display face, so keep it
+   in the accessibility tree and out of the layout. */
+.sg-visually-hidden > h1,
+h1.sg-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* Hero band on the landing page only: the one loud panel. */
