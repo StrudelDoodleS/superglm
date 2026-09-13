@@ -4,7 +4,7 @@ A `SuperLSS` fit predicts a conditional distribution for each row. Check its
 spread and tails as well as its mean. This guide covers residual checks,
 calibration, parameter effects, portfolio predictions and model comparison.
 
-Start with [Your first distributional model](../getting-started/distributional.md)
+Start with [Your first distributional model](../tutorials/distributional-model.md)
 for a shorter example that includes a train/test split. The examples below
 show the available diagnostics on simulated Gamma data. Use held-out rows
 when assessing predictive performance.
@@ -52,13 +52,15 @@ The response is a rate: each row's gamma has an exposure inside its own law, so
 fact decides how every weight on this page is read; the
 [weights section](#weights-rates-are-ratios-of-sums) says how.
 
-!!! note "Capabilities differ by family"
-    Methods that need a fitted CDF or quantile refuse a family that does not
-    implement `DistributionFunctionFamily`; predictive simulation also draws
-    through that quantile. In particular, `NegativeBinomialLS` supports log
-    scores and parameter-based inference but not distributional residuals,
-    calibration, tail surfaces, or predictive simulation. Check the family
-    guide or the method's documented requirement before choosing a diagnostic.
+```{admonition} Capabilities differ by family
+:class: note
+Methods that need a fitted CDF or quantile refuse a family that does not
+implement `DistributionFunctionFamily`; predictive simulation also draws
+through that quantile. In particular, `NegativeBinomialLS` supports log
+scores and parameter-based inference but not distributional residuals,
+calibration, tail surfaces, or predictive simulation. Check the family
+guide or the method's documented requirement before choosing a diagnostic.
+```
 
 Hold out a sample and check on that, exactly as you would for a mean model. The
 methods take any frame the model can predict on.
@@ -88,35 +90,41 @@ histogram, the residual density against the standard normal, the residuals
 against the first parameter's linear predictor, and the residual standard
 deviation in bins of the second's.
 
-!!! note "How to read the Q-Q panel"
-    The points are the sorted quantile residuals against their theoretical
-    order statistics; the shaded band is the envelope of Fasiolo, Nedellec,
-    Goude and Wood (2020), simulated from the fitted model itself, so it is a
-    statement about *this* fit at *this* sample size rather than a generic
-    reference line. Points inside the envelope mean the family is not
-    contradicted. A run of points above the band at the right-hand end is a
-    tail heavier than the family allows; below it, a tail that is too light.
-    Curvature through the middle is a shape problem, not a tail problem.
+```{admonition} How to read the Q-Q panel
+:class: note
+The points are the sorted quantile residuals against their theoretical
+order statistics; the shaded band is the envelope of Fasiolo, Nedellec,
+Goude and Wood (2020), simulated from the fitted model itself, so it is a
+statement about *this* fit at *this* sample size rather than a generic
+reference line. Points inside the envelope mean the family is not
+contradicted. A run of points above the band at the right-hand end is a
+tail heavier than the family allows; below it, a tail that is too light.
+Curvature through the middle is a shape problem, not a tail problem.
+```
 
-!!! note "How to read the worm"
-    The worm is the Q-Q plot with the diagonal subtracted (van Buuren and
-    Fredriks 2001), which is what makes small departures visible at all. A
-    flat worm inside its band is a fit with nothing to explain. The shape
-    names the defect: a rising line means the residuals are shifted, a U means
-    they are too spread out (or too tight, inverted), and an S means the
-    skewness is wrong. Passing a covariate splits it into one panel per
-    interval of that covariate, so the defect can be located:
+```{admonition} How to read the worm
+:class: note
+The worm is the Q-Q plot with the diagonal subtracted (van Buuren and
+Fredriks 2001), which is what makes small departures visible at all. A
+flat worm inside its band is a fit with nothing to explain. The shape
+names the defect: a rising line means the residuals are shifted, a U means
+they are too spread out (or too tight, inverted), and an S means the
+skewness is wrong. Passing a covariate splits it into one panel per
+interval of that covariate, so the defect can be located:
 
-    ```python
-    worm = model.plot_data("worm", X=frame, y=y, covariate="x", sample_weight=exposure)
-    ```
+```python
+worm = model.plot_data("worm", X=frame, y=y, covariate="x", sample_weight=exposure)
+```
+```
 
-!!! note "How to read the PIT histogram"
-    The bars are the PIT values in twenty bins with a binomial band
-    (Gneiting, Balabdaoui and Raftery 2007). Flat is calibrated. A U shape
-    means the predictive distributions are too narrow — reality lands in the
-    tails more often than the model says. A hump in the middle means they are
-    too wide. A slope means a systematic bias in location.
+```{admonition} How to read the PIT histogram
+:class: note
+The bars are the PIT values in twenty bins with a binomial band
+(Gneiting, Balabdaoui and Raftery 2007). Flat is calibrated. A U shape
+means the predictive distributions are too narrow — reality lands in the
+tails more often than the model says. A hump in the middle means they are
+too wide. A slope means a systematic bias in location.
+```
 
 For a family with a point mass — `TweedieLSS` has one at zero — the transform
 is *randomised* across the jump, which is what keeps it uniform; the payload
@@ -140,17 +148,19 @@ check = model.check(frame, y, "x", sample_weight=exposure)     # column name or 
 pair = model.check_2d(frame, y, "x", "z", sample_weight=exposure)
 ```
 
-!!! note "How to read a binned check"
-    Three rows of panels against the covariate: the mean should sit at zero,
-    the standard deviation at one, the skewness at zero, each within its
-    bootstrap band. A band clear of its reference marks both *where* the fit is
-    wrong and *in which moment*. A mean away from zero over part of the range
-    is a location term that has not been given enough freedom; a standard
-    deviation away from one is the scale predictor missing that covariate; a
-    skewness away from zero is a family that cannot bend that far, which is an
-    argument for a three-parameter family rather than for another knot. The
-    two-dimensional version shows drift in a joint region that neither
-    one-dimensional check reveals.
+```{admonition} How to read a binned check
+:class: note
+Three rows of panels against the covariate: the mean should sit at zero,
+the standard deviation at one, the skewness at zero, each within its
+bootstrap band. A band clear of its reference marks both *where* the fit is
+wrong and *in which moment*. A mean away from zero over part of the range
+is a location term that has not been given enough freedom; a standard
+deviation away from one is the scale predictor missing that covariate; a
+skewness away from zero is a family that cannot bend that far, which is an
+argument for a three-parameter family rather than for another knot. The
+two-dimensional version shows drift in a joint region that neither
+one-dimensional check reveals.
+```
 
 The same question, asked in the money units rather than in residual units, is
 the actual-versus-expected table:
@@ -159,14 +169,16 @@ the actual-versus-expected table:
 table = model.actual_expected(frame, y, "band", sample_weight=exposure)
 ```
 
-!!! note "How to read actual against expected"
-    Per bin or level: the realised total `Σ w y`, the predicted total
-    `Σ w μ̂`, their ratio, and the standard error of that ratio under the
-    fitted law. Every number is a ratio of **sums**, never a mean of per-row
-    ratios. A ratio more than about three standard errors from one is a bin
-    the model is not paying for correctly. The `variance_law` field on the
-    payload names which law the standard error was read from, so a table built
-    on simulated variance is never mistaken for one built on a closed form.
+```{admonition} How to read actual against expected
+:class: note
+Per bin or level: the realised total `Σ w y`, the predicted total
+`Σ w μ̂`, their ratio, and the standard error of that ratio under the
+fitted law. Every number is a ratio of **sums**, never a mean of per-row
+ratios. A ratio more than about three standard errors from one is a bin
+the model is not paying for correctly. The `variance_law` field on the
+payload names which law the standard error was read from, so a table built
+on simulated variance is never mistaken for one built on a closed form.
+```
 
 Calibration asks the four questions a review asks of the *whole* distribution
 rather than of its mean:
@@ -181,25 +193,27 @@ calibration.quantiles     # realised exceedance rate of each predicted quantile
 calibration.reliability   # CORP reliability curve per threshold
 ```
 
-!!! note "How to read the calibration panels"
-    *Coverage*: the realised share of rows inside each central predictive
-    interval against its nominal level — a 90 % interval that holds 78 % of
-    rows is a model that is too confident, and the per-decile rows say for
-    which kinds of row. *Tails*: `Σ P(Y > t)` against the realised count, with
-    a Poisson-binomial standard error; this is the number a reinsurance
-    conversation actually turns on. *Quantiles*: each predicted `p`-quantile
-    should leave `1 - p` of the rows above it. On a family with a point mass
-    (a Tweedie burn-cost model is mostly zeros) both of these are read on the
-    randomised PIT rather than on the response: a zero response would
-    otherwise count as inside every central interval whose quantiles sit on
-    the atom, and the 50 % interval would read 0.85 on an 83 %-zero book.
-    `calibration.calibration_law` says which reading was used
-    (`"response"` or `"randomised_pit"`). *Reliability*: the CORP diagram
-    of Dimitriadis, Gneiting and Jordan (2021) recalibrates the exceedance
-    forecast by isotonic regression, which chooses its own binning rather than
-    taking one from you; the consistency bands show how far a diagram can
-    stray while the forecast is in fact calibrated. A curve below the diagonal
-    at high forecast probabilities means the model over-predicts that event.
+```{admonition} How to read the calibration panels
+:class: note
+*Coverage*: the realised share of rows inside each central predictive
+interval against its nominal level — a 90 % interval that holds 78 % of
+rows is a model that is too confident, and the per-decile rows say for
+which kinds of row. *Tails*: `Σ P(Y > t)` against the realised count, with
+a Poisson-binomial standard error; this is the number a reinsurance
+conversation actually turns on. *Quantiles*: each predicted `p`-quantile
+should leave `1 - p` of the rows above it. On a family with a point mass
+(a Tweedie burn-cost model is mostly zeros) both of these are read on the
+randomised PIT rather than on the response: a zero response would
+otherwise count as inside every central interval whose quantiles sit on
+the atom, and the 50 % interval would read 0.85 on an 83 %-zero book.
+`calibration.calibration_law` says which reading was used
+(`"response"` or `"randomised_pit"`). *Reliability*: the CORP diagram
+of Dimitriadis, Gneiting and Jordan (2021) recalibrates the exceedance
+forecast by isotonic regression, which chooses its own binning rather than
+taking one from you; the consistency bands show how far a diagram can
+stray while the forecast is in fact calibrated. A curve below the diagonal
+at high forecast probabilities means the model over-predicts that event.
+```
 
 The worm plot's numeric companion is the set of Q-statistics of Royston and
 Wright (2000): per interval, the standardised mean, variance, skewness and
@@ -224,28 +238,30 @@ defaults. Excluded outliers and later edits to the caller's training frame do
 not change the term range or reference values. An explicit `X_train=` still
 uses the supplied post-fit frame, including its row index.
 
-!!! note "How to read a term panel"
-    The curve is the term's contribution to its parameter's linear predictor;
-    the filled band is the Bayesian pointwise interval of Marra and Wood
-    (2012), and the outlined one is the max-deviation simultaneous band of
-    Ruppert, Wand and Carroll (2003). Use the pointwise band to read one point
-    and the simultaneous band to make a claim about the whole curve — "the
-    effect is not flat" is a whole-curve claim, and the pointwise band will
-    tell you so too often. Where the link is a log-type link the payload also
-    carries `multiplier = exp(effect)`, which is the relativity a rating table
-    would print. A categorical term reports one entry per fitted level with the
-    reference level reading back as an exact zero. An ordered band declared
-    with `specials=` carries its special levels as extra entries, flagged in
-    `effect.special` and drawn in the flagged-point style, because their
-    coefficients live in a separate `<term>:special` block of the layout.
-    The simultaneous critical value is floored at the pointwise normal critical value,
-    so Monte Carlo variation can never make the
-    simultaneous band narrower than the pointwise band.
-    In `model.summary()` those rows are labelled `"<term> (special level)"`,
-    and the `note` column says `"absorbed by <interaction>"` when a
-    categorical's coefficients are aliased by a factor-smooth deviation on the
-    same feature: the coefficient is then a by-product to rebase, never a
-    number to read.
+```{admonition} How to read a term panel
+:class: note
+The curve is the term's contribution to its parameter's linear predictor;
+the filled band is the Bayesian pointwise interval of Marra and Wood
+(2012), and the outlined one is the max-deviation simultaneous band of
+Ruppert, Wand and Carroll (2003). Use the pointwise band to read one point
+and the simultaneous band to make a claim about the whole curve — "the
+effect is not flat" is a whole-curve claim, and the pointwise band will
+tell you so too often. Where the link is a log-type link the payload also
+carries `multiplier = exp(effect)`, which is the relativity a rating table
+would print. A categorical term reports one entry per fitted level with the
+reference level reading back as an exact zero. An ordered band declared
+with `specials=` carries its special levels as extra entries, flagged in
+`effect.special` and drawn in the flagged-point style, because their
+coefficients live in a separate `<term>:special` block of the layout.
+The simultaneous critical value is floored at the pointwise normal critical value,
+so Monte Carlo variation can never make the
+simultaneous band narrower than the pointwise band.
+In `model.summary()` those rows are labelled `"<term> (special level)"`,
+and the `note` column says `"absorbed by <interaction>"` when a
+categorical's coefficients are aliased by a factor-smooth deviation on the
+same feature: the coefficient is then a by-product to rebase, never a
+number to read.
+```
 
 The table over all of them:
 
@@ -258,17 +274,19 @@ degrees of freedom, the smoothing parameter, and the Wood (2013) test that the
 term is flat, with its rank and p-value. Because the scale is itself modelled,
 the reference distribution is a chi-squared and not an F.
 
-!!! note "The training frame"
-    Term grids need the frame the model was fitted on. It is kept **by
-    reference** at `fit`/`fit_reml` — not copied — and it does not survive
-    `to_bytes()`. A model restored with `from_bytes` must be given the frame
-    explicitly, on any of the three methods:
+```{admonition} The training frame
+:class: note
+Term grids need the frame the model was fitted on. It is kept **by
+reference** at `fit`/`fit_reml` — not copied — and it does not survive
+`to_bytes()`. A model restored with `from_bytes` must be given the frame
+explicitly, on any of the three methods:
 
-    ```python
-    restored = SuperLSS.from_bytes(model.to_bytes())
-    restored.summary(X_train=frame)
-    restored.term_inference("mean", "x", X_train=frame)
-    ```
+```python
+restored = SuperLSS.from_bytes(model.to_bytes())
+restored.summary(X_train=frame)
+restored.term_inference("mean", "x", X_train=frame)
+```
+```
 
 Bands and tests treat the smoothing parameters as fixed at their estimates.
 Passing `covariance="corrected"` asks instead for the first-order correction of
@@ -306,16 +324,18 @@ length. These weights select each point's prior-weighted response law, as in
 A family without the required weighted CDF/quantile methods refuses non-unit
 weights.
 
-!!! note "How to read the risk curves and the density fan"
-    The curves are predicted quantiles of the **response** along one covariate,
-    with everything else held at a reference row, each with a posterior band
-    from one shared draw set (so the curves are coherent with one another, not
-    independently simulated). A median that barely moves while the 99th
-    percentile doubles is the whole argument for modelling the scale: the
-    average policy is unchanged and the tail is not. The density fan shows the
-    same sweep as a whole conditional density per point, which is where a shape
-    change — mass moving into the tail, a mode splitting — becomes visible at
-    all.
+```{admonition} How to read the risk curves and the density fan
+:class: note
+The curves are predicted quantiles of the **response** along one covariate,
+with everything else held at a reference row, each with a posterior band
+from one shared draw set (so the curves are coherent with one another, not
+independently simulated). A median that barely moves while the 99th
+percentile doubles is the whole argument for modelling the scale: the
+average policy is unchanged and the tail is not. The density fan shows the
+same sweep as a whole conditional density per point, which is where a shape
+change — mass moving into the tail, a mode splitting — becomes visible at
+all.
+```
 
 ```python
 spread = model.parameter_spread(frame, threshold=25.0, sample_weight=exposure)
@@ -332,13 +352,15 @@ Zero-weight rows are removed before prediction or simulation, together with
 their offsets and external segment labels; call-time weights belong to this
 book, independently of the original training rows.
 
-!!! note "How to read the spread"
-    Rows are binned by predicted mean, so every row in a bin is priced alike.
-    Within each bin the table reports the 5th and 95th percentiles of
-    `P(Y > threshold)` and their ratio. A ratio of 20 says that among rows a
-    mean model prices identically, one is twenty times likelier to breach the
-    threshold than another. That number is invisible to a mean model by
-    construction: it is the quantity the second predictor exists to see.
+```{admonition} How to read the spread
+:class: note
+Rows are binned by predicted mean, so every row in a bin is priced alike.
+Within each bin the table reports the 5th and 95th percentiles of
+`P(Y > threshold)` and their ratio. A ratio of 20 says that among rows a
+mean model prices identically, one is twenty times likelier to breach the
+threshold than another. That number is invisible to a mean model by
+construction: it is the quantity the second predictor exists to see.
+```
 
 ```python
 book = model.portfolio(frame, by="band", sample_weight=exposure)
@@ -346,13 +368,15 @@ book.total_quantiles       # median, 90th and 99th percentile of the simulated b
 book.by_segment            # the same per segment, means summing to the book mean
 ```
 
-!!! note "How to read the portfolio total"
-    Each row is simulated on its own predictive law and the draws are summed
-    across rows, so the reported quantiles are of the **book** total and carry
-    the dependence the shared coefficient draws induce — which is why the book
-    99th percentile is not the sum of the rows' 99th percentiles. With prior
-    weights, what the book pays is `Σ w y`: the rate times the exposure that
-    bought it.
+```{admonition} How to read the portfolio total
+:class: note
+Each row is simulated on its own predictive law and the draws are summed
+across rows, so the reported quantiles are of the **book** total and carry
+the dependence the shared coefficient draws induce — which is why the book
+99th percentile is not the sum of the rows' 99th percentiles. With prior
+weights, what the book pays is `Σ w y`: the rate times the exposure that
+bought it.
+```
 
 Under all four sits one primitive, and you can call it directly for any
 quantity:
@@ -396,14 +420,16 @@ comparison.overall     # mean difference, its standard error, the paired t and n
 comparison.by_segment  # the same per segment
 ```
 
-!!! note "How to read a score comparison"
-    The comparison is paired row by row, so its standard error is that of the
-    mean *difference* and not of two independent means — this is the difference
-    between a comparison that resolves and one that never leaves the noise. A
-    negative mean difference favours the model the method was called on. The
-    per-segment table says whether the win is broad or comes from one corner of
-    the book; a candidate that wins overall and loses on the largest segment is
-    a candidate to look at again.
+```{admonition} How to read a score comparison
+:class: note
+The comparison is paired row by row, so its standard error is that of the
+mean *difference* and not of two independent means — this is the difference
+between a comparison that resolves and one that never leaves the noise. A
+negative mean difference favours the model the method was called on. The
+per-segment table says whether the win is broad or comes from one corner of
+the book; a candidate that wins overall and loses on the largest segment is
+a candidate to look at again.
+```
 
 The continuous ranked probability score is available in closed form for the
 Gaussian, gamma and log-normal families (the catalogue of Jordan, Krüger and
@@ -463,14 +489,16 @@ call, including for a divergent heavy tail. NaN thresholds and nonfinite
 retained responses still refuse; finite responses below predictive support
 remain valid scoring inputs.
 
-!!! note "How to read the Murphy diagram"
-    Ask for it with `murphy_quantile=`. Every consistent scoring rule for a
-    quantile is a mixture of elementary scores, one per threshold (Ehm,
-    Gneiting, Jordan and Krüger 2016), so plotting the two candidates'
-    elementary scores against the threshold shows *where* one wins. A curve
-    below the other everywhere means the win holds for every user of that
-    functional, whatever their loss; curves that cross mean the ranking depends
-    on the threshold you care about, which is a finding and not a failure.
+```{admonition} How to read the Murphy diagram
+:class: note
+Ask for it with `murphy_quantile=`. Every consistent scoring rule for a
+quantile is a mixture of elementary scores, one per threshold (Ehm,
+Gneiting, Jordan and Krüger 2016), so plotting the two candidates'
+elementary scores against the threshold shows *where* one wins. A curve
+below the other everywhere means the win holds for every user of that
+functional, whatever their loss; curves that cross mean the ranking depends
+on the threshold you care about, which is a finding and not a failure.
+```
 
 ## Weights: rates are ratios of sums
 

@@ -79,7 +79,7 @@ CubicRegressionSpline(n_knots=8, constraint=Constraint.fit.decreasing)  # QP
 PSpline(n_knots=10, constraint=Constraint.fit.increasing)        # SCOP
 ```
 
-See [Monotone Splines](monotone.md) for the full decision guide.
+See [Monotone Splines](constrain-a-smooth.md) for the full decision guide.
 
 ## Polynomial
 
@@ -406,7 +406,7 @@ RandomEffect(levels=df["Region"].unique())  # bind the level universe
 
 It is the SuperGLM analogue of mgcv's `s(group, bs="re")`. Unlike
 `Categorical`, it retains every level rather than choosing a reference level,
-and it requires `fit_reml()`. See [Credibility terms](credibility.md) for
+and it requires `fit_reml()`. See [Credibility terms](../explanation/credibility-as-smoothing.md) for
 reporting, prediction, and a real insurance example.
 
 `levels=` takes the same three source shapes as `Categorical`, and the dtype
@@ -612,4 +612,4 @@ model = SuperGLM(
 )
 ```
 
-See [Interactions](interactions.md) for the full interaction map.
+See [Interactions](specify-interactions.md) for the full interaction map.

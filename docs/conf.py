@@ -46,24 +46,6 @@ exclude_patterns = [
     ".DS_Store",
 ]
 
-# TEMPORARY (spike, Tasks 2-5): the legacy MkDocs pages still live under
-# docs/ until Task 10 moves and converts them. Excluding them keeps the
-# strict build to the new tree. Delete this block in Task 10.
-exclude_patterns += [
-    "audit/**",
-    "development/**",
-    "getting-started/**",
-    "governance/**",
-    "guide/**",
-    "models/**",
-    "notebooks/**",
-    "research/**",
-    "distributional-family-development.md",
-    "editor_frontend.md",
-    "ROADMAP.md",
-    "tabmat-integration-notes.md",
-]
-
 # MyST Markdown
 myst_enable_extensions = [
     "amsmath",

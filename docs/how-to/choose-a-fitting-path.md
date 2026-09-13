@@ -90,7 +90,7 @@ model.fit_reml(df, y, offset=np.log(df["Exposure"]))
 
 The structured path supports one dominant credibility block plus narrow dense
 features, global splines, and secondary random effects. See
-[Credibility terms](credibility.md) for model semantics and the French motor
+[Credibility terms](../explanation/credibility-as-smoothing.md) for model semantics and the French motor
 example.
 
 For `basis="sz"`, configure the matching global spline explicitly:
@@ -279,7 +279,7 @@ result.n_iter_path
 
 Next:
 
-- [Recommended workflows](workflows.md)
-- [Feature types](features.md)
-- [Monotone splines](monotone.md)
-- [REML and solvers](optimization.md)
+- [Recommended workflows](recommended-workflows.md)
+- [Feature types](specify-features.md)
+- [Monotone splines](constrain-a-smooth.md)
+- [REML and solvers](../explanation/solvers-and-internals.md)

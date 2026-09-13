@@ -13,7 +13,7 @@ Do not use `GaussianLS` for raw claim counts. Use `NegativeBinomialLS` when both
 the count mean and overdispersion vary; use a Poisson or scalar
 negative-binomial `SuperGLM` when a second predictor is not needed.
 
-Start with [Your first distributional model](../getting-started/distributional.md)
+Start with [Your first distributional model](../tutorials/distributional-model.md)
 for a runnable example with sample data. This page explains the families and
 modelling options. Method signatures are in the
 [SuperLSS API reference](../api/distributional.md).
@@ -105,7 +105,7 @@ the same predictor.
 
 Custom families need no helper methods. Bind each canonical parameter explicitly
 with `bind_predictor(family, "parameter_name", *terms, intercept=True, link=None)`;
-the [family development guide](../distributional-family-development.md) includes
+the [family development guide](../development/internals/distributional-family-development.md) includes
 a complete custom-family example.
 
 Custom families and links must keep executable settings in independently copyable
@@ -143,7 +143,7 @@ standard deviation. Gamma's `scale` is CV, and its GLM dispersion is CV squared.
 The two-piece families' `skew` controls piece widths and is not the standardized
 third moment. See the family sections below for links, bounds and weight laws.
 
-The [family API reference](../api/families.md#distributional-families) documents
+The [family API reference](../api/distributional.md#declarations-and-families) documents
 the constructor options and each helper. Mean and location are distinct
 parameters where a family offers both forms; choosing a form changes what the
 first additive predictor describes.
@@ -753,7 +753,7 @@ or a bound on coefficient error. The objective-scaled stopping bar depends on
 the objective convention: adding a constant changes that bar without changing
 the gradient or optimum.
 
-The [C3 stress evidence](../research/2026-09-c3-stress-evidence.md) reproduces
+The [C3 stress evidence](https://github.com/StrudelDoodleS/superglm/blob/master/notes/research/2026-09-c3-stress-evidence.md) reproduces
 the original correlated Tweedie and GPD failures, records the strict Newton
 settings that pass these checks, and reports across-start sensitivity and the
 limits of independent references.
@@ -944,7 +944,7 @@ so simulation cannot produce a narrower simultaneous band.
 
 Every builder returns a payload with a JSON-clean `to_json()`, and
 `model.plot_data(kind, ...)` returns that dictionary directly.
-[Checking a distributional fit](distributional-inference.md) walks the whole
+[Checking a distributional fit](check-a-distributional-fit.md) walks the whole
 suite in the order a review asks its questions, with a "how to read it" box per
 figure and the papers each method comes from.
 
@@ -1303,7 +1303,7 @@ and the artifact schema is unchanged.
 - `NegativeBinomialLS` has no zero-inflation component or exact Poisson active
   face. The previously rejected large real-book NB2 example now reaches
   configured stationarity after a finite-kernel range fix and EFS recovery
-  improvements; this does not establish a global smoothing optimum. See the [practical convergence evidence](../research/2026-09-pragmatic-convergence.md)
+  improvements; this does not establish a global smoothing optimum. See the [practical convergence evidence](https://github.com/StrudelDoodleS/superglm/blob/master/notes/research/2026-09-pragmatic-convergence.md)
   for the corrected diagnosis and held-out prediction/uncertainty comparisons.
 - `GeneralizedGammaLSS`, `GeneralizedParetoLSS`, `TwoPieceLogNormalLSS` and
   `TwoPieceNormalLSS` are certified through the generic

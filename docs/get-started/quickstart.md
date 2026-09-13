@@ -2,7 +2,7 @@
 
 This page covers scalar-response `SuperGLM` models. To model several parameters
 of a response distribution, follow
-[Your first distributional model](distributional.md) with `SuperLSS`.
+[Your first distributional model](../tutorials/distributional-model.md) with `SuperLSS`.
 
 ## Recommended Start: Explicit Features + REML
 
@@ -133,6 +133,6 @@ model.fit(df, claim_rate, sample_weight=exposure)
 
 Next steps:
 
-- [Recommended workflows](../guide/workflows.md)
-- [Choosing a fitting path](../guide/fitting.md)
-- [Validation and model comparison](../guide/validation.md)
+- [Recommended workflows](../how-to/recommended-workflows.md)
+- [Choosing a fitting path](../how-to/choose-a-fitting-path.md)
+- [Validation and model comparison](../how-to/compare-models-on-holdout.md)

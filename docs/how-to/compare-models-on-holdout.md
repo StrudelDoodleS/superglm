@@ -22,7 +22,7 @@ The fitting examples on this page assume a Poisson rate response
 (`y = claim_count / exposure`) fitted with `weight_semantics="frequency"`, for
 which exposure is a replication weight. The contract is declared per model and
 the default is `"prior"`, an EDM precision. See
-[Families & Dispersion](families.md#weight-semantics).
+[Families & Dispersion](../explanation/families-and-weights.md#weight-semantics).
 
 ```python
 from sklearn.model_selection import KFold
@@ -84,7 +84,7 @@ The Gini ratio measures ranking power relative to perfect foresight. It is the
 standard quick view of segmentation quality.
 
 Do not score models on gini and balance alone: a fit with
-[separated interaction cells](interactions.md#separated-cells-exposure-without-response)
+[separated interaction cells](specify-interactions.md#separated-cells-exposure-without-response)
 can move out-of-sample deviance by orders of magnitude while both stay
 healthy. Keep out-of-sample deviance in every comparison.
 
@@ -143,5 +143,5 @@ rendering paths such as hexbin density summaries.
 - use both probabilistic metrics and business ranking metrics
 - treat double-lift as the business communication chart
 
-See the [Plotting & Diagnostics Demo](../notebooks/plotting_diagnostics_demo.ipynb)
+See the [Plotting & Diagnostics Demo](../examples/plotting_diagnostics_demo.ipynb)
 for a worked example on French MTPL2.

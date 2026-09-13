@@ -3,7 +3,7 @@
 This page records a head-to-head evaluation of PSST interaction screening
 against the closest existing tool, and a comparison of the mains model the
 screen is anchored to against a boosted alternative. It exists so the claims
-in [Interaction Screening](screening.md) can be checked rather than taken on
+in [Interaction Screening](../how-to/screen-interactions.md) can be checked rather than taken on
 trust, and so the places where the comparison goes against us are on the
 record next to the places it does not.
 
@@ -15,7 +15,7 @@ The PSST-versus-FAST rankings below used the earlier PSST denominator,
 factors for its reference variance. These historical correlations have not
 been recomputed with that correction. The unpenalized categorical examples
 later on this page retain the same normalization.
-The [reference-variance follow-up](../research/2026-09-psst-reference-variance.md)
+The [reference-variance follow-up](https://github.com/StrudelDoodleS/superglm/blob/master/notes/research/2026-09-psst-reference-variance.md)
 records the derivation, regenerated guide and null battery, a small paired
 ranking experiment, and the correction's measured cost.
 
@@ -139,7 +139,7 @@ FAST reports an average Newton gain, while the benchmarked PSST subtracts the pr
 rescales its local score. That complexity adjustment can promote a smaller,
 lower-dimensional effect. It is a plausible explanation for the recorded
 ordering, not proof of its cause or of calibrated signal-to-noise ratios.
-The [reference-law limitation](screening.md#reference-distribution-and-current-limitation)
+The [reference-law limitation](../how-to/screen-interactions.md#reference-distribution-and-current-limitation)
 explains why reference standardization alone does not establish fitted-model calibration.
 
 FAST's `Purify` flag removes main-effect-shaped components from the tensor.
@@ -250,7 +250,7 @@ would be misleading in our favour.
 Two practical notes fell out of the same measurements:
 
 - **Tempered-quantile knots are worth using on Bonus-Malus**, as
-  [Feature Types](features.md) already recommends: they improve holdout
+  [Feature Types](../how-to/specify-features.md) already recommends: they improve holdout
   deviance and cut dips from 41 to 8. Plain `quantile_rows` is **bit-identical
   to uniform** on this feature and buys nothing — with 57% of mass at the
   scale minimum, every quantile up to the 57th *is* that value, so the interior

@@ -88,7 +88,7 @@ SuperGLM refit would use, with a complexity ladder for penalized terms. That
 requires more matrix work. The intended benefit is a ranking suited to those
 refit shapes; superiority for other models or datasets does not follow.
 
-In the [recorded comparison](screening-evaluation.md#cost), screening ten pairs
+In the [recorded comparison](../explanation/what-screening-does.md#cost), screening ten pairs
 on 200,000 rows took 2.77–4.89 seconds for PSST and 0.106–0.113 seconds for
 FAST. These are historical measurements, not timings of every subsequent
 implementation. Both screens avoid the complete candidate-model refits.
@@ -131,7 +131,7 @@ achieved, which is lower when cells are empty or their columns collinear (an
 
 A `spline_cat` row can also be confirmed as a `FactorSmooth` when pooling
 across levels is wanted rather than reference-coded deviations — same parents,
-penalized level curves; see [Interactions](interactions.md).
+penalized level curves; see [Interactions](specify-interactions.md).
 
 **What gets swept.** `candidates=None` pairs every eligible fitted feature:
 splines, `OrderedCategorical`, `Categorical` and `Numeric`.
@@ -231,7 +231,7 @@ adjustment and total gain can disagree, but do not establish which pair is
 the better use of a refit budget. That requires held-out gains and refit
 costs. A holdout study of this ranking, against confirmatory refits on a
 200,000-row split, is in
-[Screening Evaluation](screening-evaluation.md).
+[Screening Evaluation](../explanation/what-screening-does.md).
 
 `statistic` is not comparable down that column: the `cat_cat` row's 39.9 is a
 208-dimensional block and the `numeric_cat` row's 1.1 a 10-dimensional one. The
@@ -312,7 +312,7 @@ These are **measured maxima over a null battery, not calibrated quantiles**.
 families x 40 seeds, n=8000 rows each) with no interactions in the truth,
 and screens 3520 pairs. The battery was rerun after correcting the reference
 variance; all fits completed, with no non-finite scores or warnings.
-The [paired measurement](../research/2026-09-psst-reference-variance.md)
+The [paired measurement](https://github.com/StrudelDoodleS/superglm/blob/master/notes/research/2026-09-psst-reference-variance.md)
 records both normalizations.
 
 | kind | rows | mean `z` | p90 `z` | max `z` | probe df |
@@ -641,7 +641,7 @@ factor-based assembly. Quantized screens are identified by `approx`.
 This combination explains the design; establishing its originality requires
 a more complete literature comparison.
 
-The [FAST comparison](screening-evaluation.md) used the earlier normalization,
+The [FAST comparison](../explanation/what-screening-does.md) used the earlier normalization,
 refits every candidate, and measures held-out gain. In its two specifications,
 that PSST ranking agrees more
 closely with held-out refit gain; FAST is faster and agrees more closely with

@@ -3,7 +3,7 @@
 The examples on this page assume the Poisson rate workflow with
 `weight_semantics="frequency"`, where `exposure` is a replication weight. The
 contract is declared per model and the default is `"prior"`; see
-[Families & Dispersion](families.md#weight-semantics) before carrying this
+[Families & Dispersion](../explanation/families-and-weights.md#weight-semantics) before carrying this
 spelling into another fit.
 
 ## Summary table
@@ -102,7 +102,7 @@ region_age.table[["level", "effective_df", "credibility", "sufficient_support"]]
 region_age.curves[["level", "DrivAge", "effect", "posterior_se", "lower", "upper"]]
 ```
 
-See [Credibility terms](credibility.md) for the definitions and interpretation.
+See [Credibility terms](../explanation/credibility-as-smoothing.md) for the definitions and interpretation.
 
 ## Plotting
 

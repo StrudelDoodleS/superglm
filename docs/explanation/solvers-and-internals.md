@@ -16,56 +16,6 @@ It is:
 
 `REML outside PIRLS outside a block solver`
 
-## Contents
-
-Use this like a chaptered reference: skim sections `1` to `3` for the big picture, then
-jump to the solver layer you care about.
-
-- [1. The story in one ladder](#1-the-story-in-one-ladder)
-    - [1.1 OLS](#11-ols)
-    - [1.2 WLS](#12-wls)
-    - [1.3 IRLS](#13-irls)
-    - [1.4 P-IRLS](#14-p-irls)
-    - [1.5 P-IRLS plus sparse penalties](#15-p-irls-plus-sparse-penalties)
-    - [1.6 REML and fREML](#16-reml-and-freml)
-- [2. Solver map](#2-solver-map)
-- [3. Why outer and inner solvers are not actually crazy](#3-why-outer-and-inner-solvers-are-not-actually-crazy)
-- [4. Why IRLS exists](#4-why-irls-exists)
-- [5. What PIRLS means here](#5-what-pirls-means-here)
-- [6. Why an inner solver is needed](#6-why-an-inner-solver-is-needed)
-    - [6.1 Smooth case: selection_penalty = 0](#61-smooth-case-selection_penalty-0)
-    - [6.2 Nonsmooth case: selection_penalty > 0](#62-nonsmooth-case-selection_penalty-0)
-- [7. What "proximal Newton BCD" means](#7-what-proximal-newton-bcd-means)
-    - [7.1 Proximal](#71-proximal)
-    - [7.2 Newton](#72-newton)
-    - [7.3 BCD](#73-bcd)
-- [8. Why this choice is reasonable](#8-why-this-choice-is-reasonable)
-    - [8.1 Why not plain coordinate descent?](#81-why-not-plain-coordinate-descent)
-    - [8.2 Why not proximal gradient or FISTA?](#82-why-not-proximal-gradient-or-fista)
-    - [8.3 Why not L-BFGS or L-BFGS-B?](#83-why-not-l-bfgs-or-l-bfgs-b)
-    - [8.4 Why not ADMM?](#84-why-not-admm)
-    - [8.5 Why not a full proximal Newton solve over all coefficients at once?](#85-why-not-a-full-proximal-newton-solve-over-all-coefficients-at-once)
-- [9. Performance and discretization](#9-performance-and-discretization)
-    - [9.1 Where the time really goes](#91-where-the-time-really-goes)
-    - [9.2 Discretization: what it does and what it does not do](#92-discretization-what-it-does-and-what-it-does-not-do)
-- [10. Where REML comes in](#10-where-reml-comes-in)
-- [11. Why REML has to be outside PIRLS](#11-why-reml-has-to-be-outside-pirls)
-- [12. What the REML objective is doing](#12-what-the-reml-objective-is-doing)
-    - [12.1 REML gradient and Hessian](#121-reml-gradient-and-hessian)
-- [13. The three REML paths in this repo](#13-the-three-reml-paths-in-this-repo)
-    - [13.1 Direct REML (Newton)](#131-direct-reml-newton)
-    - [13.2 Discrete cached-W REML (fREML)](#132-discrete-cached-w-reml-freml)
-    - [13.3 EFS REML (Fellner-Schall for sparse models)](#133-efs-reml-fellner-schall-for-sparse-models)
-- [14. Compared to other software](#14-compared-to-other-software)
-- [15. Why "REML on top of proximal Newton BCD" is a coherent design](#15-why-reml-on-top-of-proximal-newton-bcd-is-a-coherent-design)
-- [16. Reading order in the code](#16-reading-order-in-the-code)
-- [17. Appendix: demystifying the implementation-heavy parts](#17-appendix-demystifying-the-implementation-heavy-parts)
-    - [17.1 Cached W: what is actually being cached?](#171-cached-w-what-is-actually-being-cached)
-    - [17.2 Why the "dead group" logic exists](#172-why-the-dead-group-logic-exists)
-    - [17.3 QR: why is there QR code in `covariance.py` if the fitter uses Cholesky/eigendecomposition?](#173-qr-why-is-there-qr-code-in-covariancepy-if-the-fitter-uses-choleskyeigendecomposition)
-    - [17.4 Kernels: what are they really doing?](#174-kernels-what-are-they-really-doing)
-    - [17.5 A good way to read this code without getting lost](#175-a-good-way-to-read-this-code-without-getting-lost)
-
 ## 1. The story in one ladder
 
 One good way to make the stack feel intuitive is to view it as a historical build-up rather than a pile of acronyms.
@@ -110,7 +60,7 @@ a one-year row. It does not multiply the conditional mean automatically. For
 a raw count response, put `log(exposure)` in the offset so that
 \(\text{E}[\text{count}_i]=e_i\lambda_i\). Whether `sample_weight` is the inverse-variance row above or a replication
 count is declared per model by `weight_semantics`, and defaults to the former;
-see [Families & Dispersion](families.md#weight-semantics).
+see [Families & Dispersion](families-and-weights.md#weight-semantics).
 
 ### 1.3 IRLS
 
@@ -248,23 +198,29 @@ repeat:
 until λ stabilizes
 ```
 
-!!! note "Conceptually"
-    `REML` is "fit coefficients, score the current smoothness, update the smoothness, repeat."
-    `fREML` is the same outer idea, but engineered to reduce repeated full data passes
-    by reusing weighted summaries when the IRLS geometry has not changed much.
+```{admonition} Conceptually
+:class: note
+`REML` is "fit coefficients, score the current smoothness, update the smoothness, repeat."
+`fREML` is the same outer idea, but engineered to reduce repeated full data passes
+by reusing weighted summaries when the IRLS geometry has not changed much.
+```
 
-!!! tip "Recommended workflow for spline-based GAM models"
-    Use `fit_reml()` with `select=True` on your spline terms. REML estimates a separate smoothing parameter per term, and `select=True` adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — mgcv-style automatic term selection without needing `selection_penalty > 0`.
+```{admonition} Recommended workflow for spline-based GAM models
+:class: tip
+Use `fit_reml()` with `select=True` on your spline terms. REML estimates a separate smoothing parameter per term, and `select=True` adds a double-penalty decomposition (linear + wiggly subgroups) that lets REML shrink irrelevant terms all the way to zero — mgcv-style automatic term selection without needing `selection_penalty > 0`.
+```
 
-!!! note "Current multi-penalty guard rails"
-    The exact and discrete REML paths support shared-block multi-penalty terms
-    such as tensor margins and `Spline(m=(...))`. The sparse-additive
-    `selection_penalty > 0` path also accepts shared-block multi-penalty
-    terms. For tuples compatible with the selected spline class,
-    `select=True + m=(...)` produces a null-space component plus one component
-    per derivative order, with separate REML lambdas; per-class order limits
-    still apply. Tensor interactions with multi-order spline parents remain
-    unsupported.
+```{admonition} Current multi-penalty guard rails
+:class: note
+The exact and discrete REML paths support shared-block multi-penalty terms
+such as tensor margins and `Spline(m=(...))`. The sparse-additive
+`selection_penalty > 0` path also accepts shared-block multi-penalty
+terms. For tuples compatible with the selected spline class,
+`select=True + m=(...)` produces a null-space component plus one component
+per derivative order, with separate REML lambdas; per-class order limits
+still apply. Tensor interactions with multi-order spline parents remain
+unsupported.
+```
 
 So the rough historical ladder is:
 
@@ -287,8 +243,10 @@ that matter for this repo:
 | Inner coefficient solver | For fixed `W` and `z`, what coefficients solve the penalized WLS problem? | `beta`, intercept | penalties may be nonsmooth | direct solve or proximal Newton BCD |
 | REML / fREML | How smooth should each smooth term be? | per-term `lambda_j` | the inner fit does not choose smoothness for you | `src/superglm/reml/` |
 
-!!! tip "If you remember one thing"
-    `IRLS` fits coefficients for fixed penalties. `REML` fits the penalties themselves.
+```{admonition} If you remember one thing
+:class: tip
+`IRLS` fits coefficients for fixed penalties. `REML` fits the penalties themselves.
+```
 
 ## 3. Why outer and inner solvers are not actually crazy
 
@@ -889,8 +847,10 @@ At the same time:
 
 So the right way to think about it is:
 
-!!! note "A practical rule"
-    `REML` and `fREML` are standard, high-quality choices for spline smoothness estimation. They are not the universal default for every penalized regression library.
+```{admonition} A practical rule
+:class: note
+`REML` and `fREML` are standard, high-quality choices for spline smoothness estimation. They are not the universal default for every penalized regression library.
+```
 
 That is why comparing directly to something like `glum` is only partly fair:
 
@@ -936,12 +896,14 @@ If you want to understand the implementation from top to bottom, read in this or
 7. `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`
 8. `src/superglm/reml/efs.py::optimize_efs_reml`
 
-!!! tip "Three questions to keep in your head"
-    `IRLS`: what weighted least-squares problem is the GLM pretending to be right now?
+```{admonition} Three questions to keep in your head
+:class: tip
+`IRLS`: what weighted least-squares problem is the GLM pretending to be right now?
 
-    `Inner solver`: for that weighted least-squares problem, how do I solve the coefficient optimization with the penalties I actually have?
+`Inner solver`: for that weighted least-squares problem, how do I solve the coefficient optimization with the penalties I actually have?
 
-    `REML`: after I know how to fit coefficients for fixed penalties, how do I choose the smoothness penalties themselves?
+`REML`: after I know how to fit coefficients for fixed penalties, how do I choose the smoothness penalties themselves?
+```
 
 ## 17. Appendix: demystifying the implementation-heavy parts
 

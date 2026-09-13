@@ -351,14 +351,15 @@ reference.
 ci = result.ci(alpha=0.05)  # (lower, upper) via profile LRT
 ```
 
-!!! note
-    `result.ci()` is explicit and potentially expensive: each new boundary probe
-    can require a full model refit. It is available only for MLE dispersion
-    profiles. It updates the detached returned result, not the model's
-    independently owned published profile state. Pass `ci_alpha=0.05` to
-    `estimate_p()` when the interval should be computed transactionally and
-    cached for `model.summary(alpha=0.05)`. Omitting `ci_alpha` retains the lazy,
-    no-extra-CI-work path.
+```{note}
+`result.ci()` is explicit and potentially expensive: each new boundary probe
+can require a full model refit. It is available only for MLE dispersion
+profiles. It updates the detached returned result, not the model's
+independently owned published profile state. Pass `ci_alpha=0.05` to
+`estimate_p()` when the interval should be computed transactionally and
+cached for `model.summary(alpha=0.05)`. Omitting `ci_alpha` retains the lazy,
+no-extra-CI-work path.
+```
 
 ### Search trace and profile plots
 

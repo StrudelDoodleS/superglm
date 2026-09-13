@@ -204,7 +204,7 @@ times that jump, which a pointwise third derivative drops. For such a family
 the differenced route with its certificate is the correct method and the hook
 must not be implemented. The derivative orders each stage of the fit needs,
 and which family supplies which, are tabulated in
-[Derivative orders, and which families supply them](models/distributional.md#derivative-orders-and-which-families-supply-them).
+[Derivative orders, and which families supply them](../../how-to/fit-a-distributional-model.md#derivative-orders-and-which-families-supply-them).
 
 ## Primitive kernel rule
 

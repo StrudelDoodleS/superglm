@@ -200,11 +200,11 @@ results and offsets are `mean`, `dispersion` and `power`. The empty `p()` call
 estimates one power value for all rows. This code only constructs the model;
 fit it to a response for which the Tweedie law is appropriate.
 
-% See [family predictor names](../how-to/fit-a-distributional-model.md#family-predictor-names)
-% for all nine families, including what their scale and shape parameters mean.
-% For fitting options and return values, use the
-% [SuperLSS API reference](../api/distributional.md). The
-% [distributional model guide](../how-to/fit-a-distributional-model.md) covers weights,
-% offsets, interactions and discrete fitting; the
-% [checking guide](../how-to/check-a-distributional-fit.md) covers calibration and
-% predictive diagnostics.
+See [family predictor names](../how-to/fit-a-distributional-model.md#family-predictor-names)
+for all nine families, including what their scale and shape parameters mean.
+For fitting options and return values, use the
+[SuperLSS API reference](../api/distributional.md). The
+[distributional model guide](../how-to/fit-a-distributional-model.md) covers weights,
+offsets, interactions and discrete fitting; the
+[checking guide](../how-to/check-a-distributional-fit.md) covers calibration and
+predictive diagnostics.

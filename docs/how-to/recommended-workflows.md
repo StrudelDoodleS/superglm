@@ -151,8 +151,8 @@ coefficients, and REML-selected smoothing parameters.
 
 ## Where To Go Next
 
-- [Choosing a fitting path](fitting.md)
-- [Feature types](features.md)
-- [Monotone splines](monotone.md)
-- [Validation and model comparison](validation.md)
-- [Deployment](deployment.md)
+- [Choosing a fitting path](choose-a-fitting-path.md)
+- [Feature types](specify-features.md)
+- [Monotone splines](constrain-a-smooth.md)
+- [Validation and model comparison](compare-models-on-holdout.md)
+- [Deployment](deploy-a-fitted-model.md)

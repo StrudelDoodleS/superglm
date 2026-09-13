@@ -40,7 +40,7 @@ mapped level scores — the same axis its own main effect uses — so
 prediction path: fit-time discretization is skipped for them, because the
 margin already lives on at most one score point per level and there is nothing
 for binning to compress. Such pairs also screen — as `ti` and `spline_cat`
-rows on the mapped scores; see [Interaction Screening](screening.md).
+rows on the mapped scores; see [Interaction Screening](screen-interactions.md).
 
 ## Choosing a factor-varying curve
 
@@ -134,7 +134,7 @@ would be a second thing to keep in step.
 A level pinned on the parent gets no block in the interaction either — no
 all-zero columns for a level with no data — and predicts through the parent's
 base, so the interaction contributes nothing for those rows. See
-[Feature types](features.md#the-level-universe) for the sources and the pin
+[Feature types](specify-features.md#the-level-universe) for the sources and the pin
 semantics.
 
 `FactorSmooth` is the one exception to "every source works everywhere": it is
@@ -204,17 +204,19 @@ Remedies: collapse the affected levels into neighbours (`collapse_levels` /
 A cell with few rows but at least one positive response is *not* separated
 and is never flagged — thin is not separated.
 
-!!! warning "Rank and aggregate metrics cannot detect this failure"
+```{admonition} Rank and aggregate metrics cannot detect this failure
+:class: warning
 
-    On a measured 5-fold comparison, a separated crossed interaction moved
-    out-of-sample deviance by a factor of ~27,000 while normalised gini moved
-    by 0.004 and balance actually *improved*. The collapse concentrates in a
-    handful of rows, which rank metrics shrug off and aggregate balance
-    averages away — only the likelihood notices, because only the likelihood
-    is unbounded. A model-selection procedure scoring on gini and balance
-    alone will ship a separated model without a single number looking wrong.
-    Always include out-of-sample deviance (or another proper scoring rule)
-    when interactions are on the table.
+On a measured 5-fold comparison, a separated crossed interaction moved
+out-of-sample deviance by a factor of ~27,000 while normalised gini moved
+by 0.004 and balance actually *improved*. The collapse concentrates in a
+handful of rows, which rank metrics shrug off and aggregate balance
+averages away — only the likelihood notices, because only the likelihood
+is unbounded. A model-selection procedure scoring on gini and balance
+alone will ship a separated model without a single number looking wrong.
+Always include out-of-sample deviance (or another proper scoring rule)
+when interactions are on the table.
+```
 
 Separation the design scan cannot see — for example a numeric 0/1 indicator
 column whose active rows have no positive response — is caught at the end of
@@ -239,5 +241,5 @@ hierarchical decomposition in this release, because each constraint is global
 rather than sum-to-zero within its parent. FS is usually the clearer first
 choice for sparse nested levels.
 
-See [Credibility terms](credibility.md) for reporting, prediction intervals,
+See [Credibility terms](../explanation/credibility-as-smoothing.md) for reporting, prediction intervals,
 and structured-solver behavior.
