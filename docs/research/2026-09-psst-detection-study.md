@@ -7,9 +7,9 @@ comparison establishes a general increase in predictive accuracy.
 
 All results use SuperGLM source revision
 `22662a09c612f5fa9b5eb364e07ec8f8ac0a0d21`. This experiment changes no production
-code. The [normalization protocol](../../benchmarks/psst_detection_protocol.md)
+code. The [normalization protocol](https://github.com/StrudelDoodleS/superglm/blob/f6a27ff3bb36c76267158191b590ef82236e56f8/benchmarks/psst_detection_protocol.md)
 was written before the final run. The
-[FAST supplement](../../benchmarks/psst_fast_protocol.md) was written after
+[FAST supplement](https://github.com/StrudelDoodleS/superglm/blob/f6a27ff3bb36c76267158191b590ef82236e56f8/benchmarks/psst_fast_protocol.md) was written after
 the normalization study and before observing FAST results.
 
 ## What the experiment asks
@@ -240,8 +240,8 @@ estimands and Monte Carlo uncertainty described by
 
 ## Reproducing and reviewing the result
 
-The [normalization receipt](../../benchmarks/psst_detection_receipt.json) and
-[FAST receipt](../../benchmarks/psst_fast_receipt.json) contain manifests,
+The [normalization receipt](https://github.com/StrudelDoodleS/superglm/blob/f6a27ff3bb36c76267158191b590ef82236e56f8/benchmarks/psst_detection_receipt.json) and
+[FAST receipt](https://github.com/StrudelDoodleS/superglm/blob/f6a27ff3bb36c76267158191b590ef82236e56f8/benchmarks/psst_fast_receipt.json) contain manifests,
 source hashes, raw-record hashes, all cell summaries and uncertainty
 calculations. Raw records remain in the ignored local directory
 `.benchmark-artifacts/psst-detection-study/`, under `final/` and `fast-final/`.
