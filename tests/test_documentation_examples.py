@@ -75,7 +75,7 @@ def _published_pages() -> list[Path]:
         p for section in sections for p in sorted(section.glob("*.md")) if p.name != "index.md"
     ]
     candidates.append(_ROOT / "docs" / "tutorials" / "edit-a-model-in-the-browser.md")
-    return [p for p in candidates if str(p.relative_to(_ROOT)) not in _EXEMPT_PAGES]
+    return [p for p in candidates if p.relative_to(_ROOT).as_posix() not in _EXEMPT_PAGES]
 
 
 def _python_blocks(path: Path) -> list[str]:
