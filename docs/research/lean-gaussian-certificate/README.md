@@ -5,6 +5,13 @@ Verified on 2026-09-13. These proof sources accompany the
 The exact statements checked by Lean are narrower than the complete proposed
 numerical certificate.
 
+The subsequent [interaction operator proof](../2026-09-13-interaction-operator-proof.md)
+checks four additional exact identities/counterexamples in
+[InteractionOperator.lean](InteractionOperator.lean). It establishes that row
+accumulation preserves cross-interaction contributions, including unequal group
+widths. It does not establish a runtime bound or a floating-point certificate.
+All three proof libraries are included in `lake build`.
+
 ## Reading a proof
 
 This example is in [ProofTour.lean](ProofTour.lean):

@@ -141,11 +141,29 @@ peak RSS is 2.4% higher; large-case RSS ranges overlap the baseline. Two
 observations per version on a shared host do not establish a general speedup
 or improved asymptotic scaling. The initial baseline remains archived.
 
-The next implementation gate is the small C16/C21 hierarchy prototype: nested
+The [many-interaction probe](research/2026-09-13-many-interaction-probe.md)
+adds a 1–28 interaction ladder and an equal-total-coefficient comparison.
+At 28 small interactions, repeated cross-group Gram assembly dominates the
+profile; at one wide housing interaction, support construction dominates.
+Equal coefficient counts also give different fit costs as smoothing dimension
+and representation change. These observations do not establish a scaling law
+or a mathematical limit.
+
+The immediate performance gate is exact reuse of unchanged Gaussian tensor
+cross-products across coefficient-solver calls, with retained-memory accounting
+and unchanged centering/error evidence. Wide-term work separately investigates
+rank-only support construction and certified structured tensor rank. See the
+[cost analysis](research/2026-09-13-many-interaction-scaling-analysis.md) and
+[support analysis](research/2026-09-13-structured-tensor-support-analysis.md).
+These are implementation candidates, not completed optimizations.
+
+The small C16/C21 hierarchy prototype remains a representation gate: nested
 transfer, product centering, penalty pullbacks, nullspaces and adjoints before
-adaptive fitting. Its finite-precision certificates and the C15/C18
-large-coefficient backend remain research. General C9 search follows validated,
-affordable candidate fits.
+adaptive fitting. C15/C18 must also address many coupled terms, including
+preconditioning, smoothing traces and requested uncertainty. The
+[Lean-checked operator identity](research/2026-09-13-interaction-operator-proof.md)
+preserves every cross-group contribution, but does not prove a solver's runtime
+or floating-point error. General C9 search follows validated, affordable fits.
 
 **Selected on 2026-09-12: algorithm proof planning.** The
 [design](https://github.com/StrudelDoodleS/superglm/blob/master/docs/superpowers/specs/2026-09-12-algorithm-proofs-design.md) and

@@ -1,6 +1,6 @@
 name = "superglm_adaptive_proofs"
 version = "0.1.0"
-defaultTargets = ["Certificate", "ProofTour"]
+defaultTargets = ["Certificate", "ProofTour", "InteractionOperator"]
 
 [[require]]
 name = "mathlib"
@@ -12,3 +12,6 @@ name = "Certificate"
 
 [[lean_lib]]
 name = "ProofTour"
+
+[[lean_lib]]
+name = "InteractionOperator"

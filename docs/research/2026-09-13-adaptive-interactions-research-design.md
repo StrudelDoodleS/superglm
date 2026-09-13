@@ -20,6 +20,14 @@ The [tool setup](research-tools-setup.md) records the installed Lean and SymPy t
 Keep future derivations, counterexamples and formal proof scope under
 `docs/research` with their assumptions, source revisions and references.
 
+The subsequent [many-interaction probe](2026-09-13-many-interaction-probe.md)
+adds term-count and equal-P controls. It exposes repeated pairwise Gram assembly
+as a different bottleneck from the wide housing tensor's support construction.
+The [many-term cost analysis](2026-09-13-many-interaction-scaling-analysis.md)
+and [structured support analysis](2026-09-13-structured-tensor-support-analysis.md)
+extend the implementation gates accordingly. This widens the performance
+investigation without replacing the adaptive representation objective below.
+
 ## Objective and scope
 
 Improve predictive accuracy per unit of complete-fit time and peak process RSS

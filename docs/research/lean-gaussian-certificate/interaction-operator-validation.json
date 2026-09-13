@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-13",
+  "validation_time_utc": "2026-09-13 20:23:10 UTC",
+  "source_audit_commit": "d7f231e35b196b1421d604596204549d0d28ea49",
+  "project_directory": "docs/research/lean-gaussian-certificate",
+  "source_file": "InteractionOperator.lean",
+  "lean_version": "Lean (version 4.33.1, x86_64-unknown-linux-gnu, commit 819816b2e0a3bf405af45ae5c7af2491d8f5bee6, Release)",
+  "lake_version": "Lake version 5.0.0-src+819816b (Lean version 4.33.1)",
+  "mathlib_commit": "0df444a360eaa60ab8c11dca51a86af692955474",
+  "formal_scope": "Exact finite-real matrix algebra for the full penalized Hessian action, all cross-group contributions under row accumulation with potentially different coefficient widths, arbitrary coupled penalty blocks, and a concrete counterexample to deleting cross-group data terms.",
+  "theorems": [
+    {
+      "name": "SuperGLM.coupled_hessian_action",
+      "scope": "(X^T W X + S)v = X^T(W(Xv)) + Sv for compatible finite real matrices."
+    },
+    {
+      "name": "SuperGLM.group_row_accumulation",
+      "scope": "For each output group g, X_g^T W sum_h(X_h v_h) = sum_h((X_g^T W X_h)v_h), allowing a different finite coefficient index type for each group."
+    },
+    {
+      "name": "SuperGLM.group_penalized_row_accumulation",
+      "scope": "The group row identity with arbitrary compatible penalty blocks S_gh, retaining their complete finite sum."
+    },
+    {
+      "name": "SuperGLM.dropping_cross_terms_changes_action",
+      "scope": "For X=[1,1], v=[1,1], and identity penalty, the full Gram-plus-penalty action differs from the action obtained after deleting the cross terms."
+    }
+  ],
+  "assumptions": [
+    "All matrix and vector entries are exact real numbers.",
+    "Observation, coefficient and group indices are finite.",
+    "All matrix dimensions are compatible.",
+    "The algebraic action and group-sum identities do not require symmetry, positive definiteness or diagonal weights."
+  ],
+  "not_formalized": [
+    "Computational complexity or array allocations.",
+    "Peak memory or a performance improvement.",
+    "Floating-point arithmetic or numerical error enclosures.",
+    "Conditioning, positive definiteness or convergence.",
+    "Smoothing-parameter optimization or statistical uncertainty.",
+    "A production SuperGLM matrix-free implementation."
+  ],
+  "proof_placeholders_found": false,
+  "new_axiom_declarations_found": false,
+  "reported_axioms": [
+    "propext",
+    "Classical.choice",
+    "Quot.sound"
+  ],
+  "metadata_hash_scope": "The metadata hashes below record the exact first successful compiler invocation, before the parent added InteractionOperator as a default Lake library target. They are historical validation metadata, not a claim that subsequent package-target configuration is byte-identical. The InteractionOperator.lean hash identifies the checked theorem source.",
+  "source_sha256": {
+    "InteractionOperator.lean": "70714fbb2e2e3594df71535f71d80c748665191d02446d401deb30b346b8c4e4",
+    "lean-toolchain": "3aac669c7a910ec2389f4e4f921b605adf6ebf2d1e0c9b9cd0be4d33f3f5db71",
+    "lakefile.toml": "f47111517c74581d74122bc9ea94775e91d7008d674d731429487c95e0799d71",
+    "lake-manifest.json": "bab2f39ee243741cbcdde55de9a67c5470181dfb96142b691ba214ea760835b6"
+  },
+  "checks": [
+    {
+      "name": "interaction_operator_theorems",
+      "working_directory": "docs/research/lean-gaussian-certificate",
+      "command": [
+        "/home/max/.elan/bin/lake",
+        "env",
+        "lean",
+        "InteractionOperator.lean"
+      ],
+      "expected_exit_code": 0,
+      "exit_code": 0,
+      "output": "'SuperGLM.coupled_hessian_action' depends on axioms: [propext, Classical.choice, Quot.sound]\n'SuperGLM.group_row_accumulation' depends on axioms: [propext, Classical.choice, Quot.sound]\n'SuperGLM.group_penalized_row_accumulation' depends on axioms: [propext, Classical.choice, Quot.sound]\n'SuperGLM.dropping_cross_terms_changes_action' depends on axioms: [propext, Classical.choice, Quot.sound]\n"
+    },
+    {
+      "name": "source_placeholder_and_axiom_scan",
+      "working_directory": "docs/research/lean-gaussian-certificate",
+      "command": [
+        "rg",
+        "-n",
+        "\\b(sorry|admit)\\b|^axiom\\b|^constant\\b",
+        "InteractionOperator.lean"
+      ],
+      "expected_exit_code": 1,
+      "exit_code": 1,
+      "output": "",
+      "interpretation": "No matching proof placeholders or new top-level axiom/constant declarations."
+    }
+  ],
+  "benchmark_isolation": "The source was prepared while serial benchmarks ran. Compiler invocation waited for the parent to confirm that every timing and profiling worker had finished and been reaped.",
+  "integrated_build": {
+    "date": "2026-09-13",
+    "working_directory": "docs/research/lean-gaussian-certificate",
+    "command": ["/home/max/.elan/bin/lake", "build"],
+    "exit_code": 0,
+    "terminal_summary": "Build completed successfully (8711 jobs).",
+    "new_target_output": "Built InteractionOperator (6.0s); all four axiom audits report [propext, Classical.choice, Quot.sound].",
+    "lakefile_sha256": "8054e1f224be7d877e7ba0c3a402d57b30b86284c217d24c87f4b8e9ef58b62a",
+    "source_sha256": "70714fbb2e2e3594df71535f71d80c748665191d02446d401deb30b346b8c4e4",
+    "scope": "Parent verification after adding InteractionOperator to the default Lake targets, alongside Certificate and ProofTour."
+  }
+}
