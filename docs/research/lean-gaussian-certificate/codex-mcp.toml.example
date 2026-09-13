@@ -1,4 +1,4 @@
-# Optional project configuration. This example is not loaded by Codex here.
+# Template matching the installed project-local configurations on this machine.
 # Merge this table into the intended trusted project's .codex/config.toml;
 # preserve any existing configuration. Reconnect to load the tool server.
 [mcp_servers.lean_research]

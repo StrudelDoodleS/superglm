@@ -1,10 +1,11 @@
 # Research tools without additional skill packs
 
 Date: 2026-09-13. This records the user's request for useful agent tools while
-avoiding additional workflow bundles and custom skills. It does not change
-the current agent instructions or register another MCP server.
+avoiding additional workflow bundles and custom skills. Following user approval,
+the Lean MCP configuration and isolated SymPy environment are installed locally.
+See the [setup receipt](research-tools-setup.md) for commands and verification.
 
-## Selected tool candidate
+## Selected tool
 
 Use upstream [lean-lsp-mcp v0.30.0](https://github.com/oOo0oOo/lean-lsp-mcp/releases/tag/v0.30.0)
 with `leanclient==0.13.2`, restricted to five local tools:
@@ -32,7 +33,10 @@ AI-provider keys or remote theorem-search services. This is not network
 isolation; package/dependency downloads remain possible.
 
 Use a project configuration for proof work. Its absolute paths are for this
-machine and checkout. The example has not been installed as a live Codex config.
+machine and checkout. Matching live `.codex/config.toml` files are installed in
+the root checkout and research worktree, with both pointing at this proof project.
+Codex CLI resolves the server as enabled from both directories. The current
+session's tool catalog has no Lean tools; reconnect to load the server.
 Only the server and Lean client versions are pinned by that launch command;
 it does not lock all transitive Python packages.
 
@@ -71,7 +75,8 @@ This smoke test establishes these calls work with this project; it does not
 validate every server feature, certify its resource usage, or measure model
 reasoning quality. The temporary process was stopped after the test. `uvx`
 cached its Python dependencies; production dependencies, skill installations
-and agent configuration were unchanged.
+and agent configuration were unchanged during that historic smoke test.
+The later approved installation is recorded separately in the setup receipt.
 
 ## Assessment of the other recommendations
 
@@ -100,7 +105,11 @@ would need a concrete capability gap, such as a required citation-graph query.
 [SymPy](https://docs.sympy.org/latest/tutorials/intro-tutorial/intro.html) is a useful
 ordinary Python package for symbolic expansions, derivatives and exact small
 examples. Use it in an isolated research environment when an experiment needs
-it; no MCP wrapper or skill is necessary. Numerical exploration and symbolic
+it; no MCP wrapper or skill is necessary. The persistent environment at
+`/home/max/.local/share/superglm-research/.venv` now contains pinned SymPy 1.14.0
+and mpmath 1.3.0. The [exact algebra check](check_sympy_quadratic_gap.py) verifies
+scalar and symmetric 2-by-2 quadratic-gap identities, including the residual
+form when the matrix is invertible. Numerical exploration and symbolic
 checks supply evidence, while a Lean proof checks a precisely stated theorem
 under its explicit assumptions. Neither validates an unstated claim about the
 floating-point SuperGLM implementation.

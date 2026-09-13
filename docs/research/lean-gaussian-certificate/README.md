@@ -115,12 +115,16 @@ after installing [Lean through the official instructions](https://lean-lang.org/
 The [validation receipt](validation.json) records the commands, source hashes,
 exit statuses and compiler output from this checkout.
 
-## Optional live proof feedback
+## Installed live proof feedback
 
 The [tool assessment](../2026-09-13-agent-research-tools.md) records a tested
 five-tool Lean MCP setup with its startup instructions cleared. It can inspect
 the current goal, report diagnostics, look up types/declarations and try tactics.
-The [configuration example](codex-mcp.toml.example) is ready for review but is not
-a live agent configuration. The [MCP receipt](mcp-validation.json) records the
+The [configuration example](codex-mcp.toml.example) now matches project-local
+configurations installed in the root checkout and research worktree. Both point
+at this proof project. Codex CLI resolves the enabled server from both locations;
+reconnect the agent session to load its tools. The
+[setup receipt](../research-tools-setup.md) records installation checks and the
+separate SymPy environment. The historic [MCP receipt](mcp-validation.json) records the
 successful local calls and a rejected tactic trial. Completed proof validation
 remains in the separate compiler receipt above.
