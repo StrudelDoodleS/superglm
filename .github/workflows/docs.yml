@@ -5,12 +5,12 @@ on:
     branches: [master]
     paths:
       - "docs/**"
-      - "mkdocs.yml"
       - "src/**"
       - "README.md"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/docs.yml"
+  workflow_dispatch:
 
 concurrency:
   group: docs-deploy
@@ -20,10 +20,8 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -33,13 +31,42 @@ jobs:
       - run: uv python install 3.12
 
       - name: Install docs dependencies
-        run: uv sync --group docs --extra plotting
+        run: uv sync --python 3.12 --group docs --extra plotting
 
-      # Notebooks are pre-executed with outputs committed.
-      # No nbconvert --execute step needed in CI.
+      - name: Cache OpenML downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/scikit_learn_data
+          key: openml-mtpl2-v1
 
-      - name: Build and deploy
-        run: uv run mkdocs gh-deploy --force
+      - name: Cache executed notebooks
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: docs/_build/.jupyter_cache
+          key: docs-notebooks-${{ hashFiles('docs/tutorials/**', 'docs/how-to/**', 'uv.lock') }}
+          restore-keys: |
+            docs-notebooks-
 
-      # NOTE: After the first deploy, enable GitHub Pages in repo settings:
-      # Settings > Pages > Source: Deploy from a branch > Branch: gh-pages
+      - name: Build with execution
+        env:
+          SUPERGLM_DOCS_EXECUTE: cache
+        run: uv run sphinx-build -b html -n -W --keep-going docs docs/_build/html
+
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
+        with:
+          path: docs/_build/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
