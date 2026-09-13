@@ -1,4 +1,5 @@
 api/diagnostics/
+api/distributional/
 api/families/
 api/features/
 api/inference/
@@ -9,12 +10,14 @@ api/plotting/
 api/validation/
 development/cost-and-timing/
 development/data-and-solver-boundaries/
+development/migrations/family-bound-predictors/
 development/migrations/group-pricing-rank/
 development/migrations/weight-semantics-prior/
 development/python-support/
 development/releases/
 distributional-family-development/
 editor_frontend/
+getting-started/distributional/
 getting-started/installation/
 getting-started/quickstart/
 governance/model_risk_pack/

@@ -184,6 +184,9 @@ html_css_files = [
     "custom.css",
 ]
 html_sidebars = {"index": []}
+# The sources are on GitHub; this drops 27 MB from the published site.
+html_copy_source = False
+html_show_sourcelink = False
 html_context = {
     "github_user": "StrudelDoodleS",
     "github_repo": "superglm",

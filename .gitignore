@@ -63,9 +63,6 @@ tests/fixtures/mgcv_nb2_mtpl2_fitted.csv
 tests/fixtures/mtpl2_freq_50k.csv
 tests/fixtures/mtpl2_sev_merged.csv
 
-# MkDocs build output
-site/
-
 ROADMAP.md
 !notes/ROADMAP.md
 TESTING_AUDIT_PLAN.md
@@ -75,7 +72,6 @@ REML_IMPLEMENTATION_PLAN.md
 # scratch/ is a playground for local dev only — not for public release.
 # Benchmarks, experiments, R comparisons, and throwaway scripts live here.
 scratch/
-docs/notebooks/spline_diagnostics/
 .superglm-debug/
 
 # Superpowers skill artifacts
@@ -97,7 +93,7 @@ node_modules/
 playwright-report/
 test-results/
 
-# Build caches (mkdocs-jupyter writes here during `mkdocs build`)
+# Tool caches (pre-commit, uv)
 .cache/
 
 # Sphinx build output and generated API pages

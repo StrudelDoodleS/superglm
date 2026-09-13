@@ -223,7 +223,7 @@ natural parameters. It retains its pressure evidence and reports
 stationarity contract for the profiled objective in log smoothing parameters.
 Passing that contract does not prove a global minimum, unique solution or
 correct interval coverage. The public guide describes the limitations of its
-[derivative certificates](../docs/models/distributional.md#how-smoothing-parameters-are-chosen).
+[derivative certificates](../docs/how-to/fit-a-distributional-model.md#how-smoothing-parameters-are-chosen).
 
 The mathematical reason that an objective plateau is insufficient follows from
 Taylor's theorem. Near a stationary point,

@@ -53,8 +53,8 @@ class _PythonBlock:
         return f"{self.path.relative_to(_ROOT)}#python-{self.index}-line-{self.line}"
 
 
-# The narrative guide, page by page. These are the former ``docs/guide/*.md``
-# set after the Diátaxis move; listing them keeps the covered pages identical
+# The narrative guide, page by page. These are the former ``guide/`` tree's
+# pages after the Diátaxis move; listing them keeps the covered pages identical
 # to what the directory glob used to select, since ``docs/how-to`` and
 # ``docs/explanation`` also received pages from elsewhere in the old tree.
 _PUBLISHED_GUIDE_PAGES = (
