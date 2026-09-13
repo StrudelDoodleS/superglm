@@ -27,7 +27,9 @@ def redirect_map() -> dict[str, str]:
 
 
 def legacy_urls() -> list[str]:
-    return [line.strip() for line in LEGACY.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        line.strip() for line in LEGACY.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
 
 
 def test_every_legacy_url_has_a_redirect() -> None:

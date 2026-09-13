@@ -11,7 +11,7 @@ with the [tutorial](../tutorials/distributional-model.md). The members of
 .. autosummary::
    :toctree: generated
    :nosignatures:
-   :template: autosummary/class-no-members.rst
+   :template: autosummary/class-no-members-distributional.rst
 
    superglm.SuperLSS
 ```

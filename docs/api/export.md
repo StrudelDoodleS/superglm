@@ -1,7 +1,6 @@
 # Export
 
-Rating-table export for a fitted model, and the error raised when a base
-level cannot be represented in the requested block shape.
+Rating-table export for a fitted model.
 
 ```{eval-rst}
 .. autosummary::
@@ -9,5 +8,9 @@ level cannot be represented in the requested block shape.
    :nosignatures:
 
    superglm.export_rating_tables
-   superglm.RatingTableBaseNotRepresentableError
 ```
+
+When a base level cannot be represented in the requested block shape, export
+raises {py:exc}`superglm.RatingTableBaseNotRepresentableError`, documented with
+the rest of the package's errors on
+[Warnings and exceptions](warnings-and-exceptions.md).

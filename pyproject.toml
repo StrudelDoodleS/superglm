@@ -105,7 +105,7 @@ only-include = [
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
-extend-exclude = ["docs/notebooks"]
+extend-exclude = ["docs/examples"]
 
 [tool.ruff.lint]
 select = [

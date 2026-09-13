@@ -66,6 +66,12 @@ nb_execution_raise_on_error = True
 nb_execution_excludepatterns = ["examples/*.ipynb"]
 nb_merge_streams = True
 
+# docs/examples/mtpl2_frequency_walkthrough.ipynb carries two stored figures in
+# ``application/vnd.plotly.v1+json``, a MIME type MyST-NB has no renderer for.
+# The pages are excluded from execution, so the stored outputs are what they are;
+# suppress the per-output notice rather than rewriting the committed notebook.
+suppress_warnings = ["mystnb.unknown_mime_type"]
+
 # API reference
 autosummary_generate = True
 autodoc_member_order = "bysource"

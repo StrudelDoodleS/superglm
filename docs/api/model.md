@@ -11,7 +11,7 @@ page.
 .. autosummary::
    :toctree: generated
    :nosignatures:
-   :template: autosummary/class-no-members.rst
+   :template: autosummary/class-no-members-model.rst
 
    superglm.SuperGLM
 ```

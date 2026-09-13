@@ -15,7 +15,11 @@ PRIVATE_ACCESS = re.compile(r"[\w\)\]]\._(?!_)[A-Za-z]\w*")
 
 
 def executed_pages() -> list[Path]:
-    return [p for p in sorted(DOCS.rglob("*.md")) if "superpowers" not in p.parts and "_build" not in p.parts]
+    return [
+        p
+        for p in sorted(DOCS.rglob("*.md"))
+        if "superpowers" not in p.parts and "_build" not in p.parts
+    ]
 
 
 def test_no_private_attribute_access_in_executed_pages() -> None:

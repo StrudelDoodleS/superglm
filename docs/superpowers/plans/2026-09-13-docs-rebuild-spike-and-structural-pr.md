@@ -2937,7 +2937,7 @@ git commit -m "Pre-commit: numpydoc validation and tutorial notebook pairing"
 
 - [ ] **Step 1: Clean build with execution**
 
-Run: `rm -rf docs/_build && SUPERGLM_DOCS_EXECUTE=force uv run sphinx-build -b html -n -W --keep-going docs docs/_build/html`
+Run: `rm -rf docs/_build && SUPERGLM_DOCS_EXECUTE=force uv run sphinx-build -b html -n -W --keep-going -d docs/_build/doctrees docs docs/_build/html`
 Expected: `build succeeded`, zero warnings, in under five minutes.
 
 - [ ] **Step 2: All docs tests**
@@ -2965,7 +2965,11 @@ Screenshot the landing page, `tutorials/distributional-model.html`, `api/generat
 git push -u origin worktree-docs-rebuild-sphinx
 ```
 
-Open the PR with `gh pr create` against `master`. Title: `Rebuild the documentation on Sphinx: structure, API reference, execution, deploy`. Body sections: what changed (the spec's summary), the spike measurements (T5 execution time, numpydoc warning count settled, theme chosen), the one manual step (Pages source → GitHub Actions), and the follow-up PRs from spec §12. End the body with the attribution lines from the session's system reminder. Both review bots run on the PR; read their summary comments as well as their review threads, and resolve threads only after fixing.
+Open the PR with `gh pr create` against `master`. Title: `Rebuild the documentation on Sphinx: structure, API reference, execution, deploy`. Body sections: what changed (the spec's summary), the spike measurements (T5 execution time, numpydoc warning count settled, theme chosen), the one manual step (Pages source → GitHub Actions), the published-site size measured by `du -sh docs/_build/html`, and the follow-up PRs from spec §12.
+
+The body must also carry this paragraph verbatim, so the two deferred spec success criteria are on the record rather than discovered by the reviewer:
+
+> **Success criteria not yet met.** Spec §15 criterion 5 (the discrete-REML fit block appears on exactly one page) and criterion 6 (no user page exceeds 3,000 words except explanation essays) are not met by this PR, by design. The identical `SuperGLM(family="poisson", selection_penalty=0.0, discrete=True, n_bins=256, ...)` block still appears on both `get-started/quickstart.md` and `how-to/choose-a-fitting-path.md`, a second block is shared by those two plus `how-to/recommended-workflows.md`, and seven pages carry a `discrete=True` + `fit_reml` block. Seven pages exceed 3,000 words: `how-to/fit-a-distributional-model.md` 8,536, `explanation/what-screening-does.md` 7,503, `how-to/screen-interactions.md` 5,910, `explanation/solvers-and-internals.md` 6,276, `how-to/check-a-distributional-fit.md` 4,745, `how-to/specify-features.md` 4,107, `how-to/read-a-summary-and-plot-effects.md` 3,417 — the two explanation essays are exempt, the five how-tos are not. This PR moves and converts existing pages without rewriting them; both criteria close in the how-to split and explanation carving PRs listed in spec §12. End the body with the attribution lines from the session's system reminder. Both review bots run on the PR; read their summary comments as well as their review threads, and resolve threads only after fixing.
 
 ---
 

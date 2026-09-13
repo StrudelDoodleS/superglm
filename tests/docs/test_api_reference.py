@@ -11,12 +11,11 @@ import re
 from pathlib import Path
 
 import pytest
+
 import superglm
 
 DOCS_API = Path(__file__).resolve().parents[2] / "docs" / "api"
-AUTOSUMMARY_BLOCK = re.compile(
-    r"```\{eval-rst\}\s*\n\s*\.\.\s+autosummary::(.*?)```", re.S
-)
+AUTOSUMMARY_BLOCK = re.compile(r"```\{eval-rst\}\s*\n\s*\.\.\s+autosummary::(.*?)```", re.S)
 
 
 def documented_names() -> set[str]:

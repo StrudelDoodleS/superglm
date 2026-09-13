@@ -145,7 +145,7 @@ jobs:
       - name: Docs build check (strict, no execution)
         env:
           SUPERGLM_DOCS_EXECUTE: "off"
-        run: uv run sphinx-build -b html -n -W --keep-going docs docs/_build/html
+        run: uv run sphinx-build -b html -n -W --keep-going -d docs/_build/doctrees docs docs/_build/html
 
   docs-notebooks:
     runs-on: ubuntu-latest
