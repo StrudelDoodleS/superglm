@@ -52,12 +52,8 @@ with standard deviation 0.45. The basis is a P-spline with 40 functions,
 deliberately generous, so that an unpenalised fit has room to misbehave.
 
 ```{code-cell} ipython3
-import base64
-import io
-
 import numpy as np
 import pandas as pd
-from IPython.display import HTML
 from sklearn.model_selection import KFold
 
 from superglm import Spline, SuperGLM, cross_validate
@@ -139,9 +135,26 @@ axes[0].set_ylabel("y")
 axes[0].legend(loc="upper right")
 fig_pair.tight_layout()
 
-# The landing page pastes this figure from here with MyST-NB's cross-document
+fig_three, axes = plt.subplots(1, 3, figsize=(12, 3.8), sharey=True)
+for ax, (title, model) in zip(axes, fits):
+    draw(ax, title, model)
+axes[0].set_ylabel("y")
+axes[0].legend(loc="upper right")
+fig_three.tight_layout()
+glue("lambda-triptych", fig_three, display=False)
+```
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+# The landing page pastes fig_pair from here with MyST-NB's cross-document
 # glue, which carries HTML across documents but not image files, so the figure
 # travels as an inline data URI.
+import base64
+import io
+
+from IPython.display import HTML
+
 buffer = io.BytesIO()
 fig_pair.savefig(buffer, format="png")
 encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -155,20 +168,13 @@ glue(
     display=False,
 )
 plt.close(fig_pair)
-
-fig_three, axes = plt.subplots(1, 3, figsize=(12, 3.8), sharey=True)
-for ax, (title, model) in zip(axes, fits):
-    draw(ax, title, model)
-axes[0].set_ylabel("y")
-axes[0].legend(loc="upper right")
-fig_three.tight_layout()
-glue("lambda-triptych", fig_three, display=False)
 ```
 
 ```{glue:figure} lambda-triptych
 :name: fig-lambda-triptych
+:alt: Three fits of the same 400 points: no penalty, the REML penalty, and lambda ten thousand.
 
-The same 400 points three times. With no penalty the spline chases every point. REML picks a penalty that follows the truth. A penalty far too large flattens the curve to a line.
+The same 400 points three times. With no penalty the spline chases every point. REML picks a penalty that follows the truth. A penalty far too large leaves the curve a slope and one gentle bend, and it misses the peaks.
 ```
 
 With no penalty the fit spends all 39 of its free degrees of freedom on the
@@ -224,6 +230,7 @@ glue("edf-and-holdout", fig_sweep, display=False)
 
 ```{glue:figure} edf-and-holdout
 :name: fig-edf-and-holdout
+:alt: Effective degrees of freedom and held-out deviance against lambda on a log axis, with a red line at the lambda REML chose.
 
 What the penalty buys. Left: how many effective parameters the spline keeps. Right: held-out deviance. The red line is the lambda REML chose without ever seeing a holdout.
 ```
@@ -237,8 +244,11 @@ bottom.
 
 ## How REML gets there
 
-REML is a maximisation, not a search. `reml_diagnostics` keeps the path the
-optimiser took, one lambda and one objective value per outer step.
+REML is an optimisation the solver drives directly, not a grid search.
+superglm minimises the negative REML criterion, so lower is better and the
+right-hand curve below falls. `reml_diagnostics` keeps the path the optimiser
+took: one lambda per outer step plus the starting value, and one criterion
+value per step.
 
 ```{code-cell} ipython3
 :tags: [remove-output]
@@ -251,26 +261,32 @@ fig_path, axes = plt.subplots(1, 2, figsize=(9, 3.2))
 axes[0].plot(range(len(path)), path, color="#15171C", marker="o", markersize=4)
 axes[0].plot(len(path) - 1, path[-1], color="#D6402B", marker="o", markersize=7)
 axes[0].set_yscale("log")
-axes[0].set_title(f"lambda per step ({diag['n_reml_iter']} steps)")
-axes[0].set_xlabel("step")
+axes[0].set_title(f"lambda after each step ({diag['n_reml_iter']} steps)")
+axes[0].set_xlabel("step (0 = starting value)")
+axes[0].set_ylabel("lambda")
 axes[1].plot(range(1, len(objective) + 1), objective, color="#15171C", marker="o", markersize=4)
 axes[1].plot(len(objective), objective[-1], color="#D6402B", marker="o", markersize=7)
-axes[1].set_title("REML objective per step")
+axes[1].set_title("REML criterion per step (minimised)")
 axes[1].set_xlabel("step")
+axes[1].set_ylabel("REML criterion (lower is better)")
 fig_path.tight_layout()
 glue("reml-path", fig_path, display=False)
 ```
 
 ```{glue:figure} reml-path
 :name: fig-reml-path
+:alt: Two panels: lambda after each outer step on a log axis, and the REML criterion per step, both ending in a red marker.
 
-REML is a maximisation, not a search: a handful of steps from the starting value to the optimum on this example, and the objective settles after the first two.
+REML is an optimisation the solver drives directly, not a grid search: a handful of steps from the starting value to the optimum on this example. Left, lambda after each step, where step 0 is the starting value, so the left panel carries one point more than the right. Right, the criterion superglm minimises, which is why the curve falls.
 ```
 
-The first step moves lambda by orders of magnitude and does almost all of the
-work on the objective; the remaining steps are refinement. A grid over twelve
-values, as in the previous figure, costs twelve fits and five folds each; the
-optimiser costs a handful of fits and no folds.
+The path is not a steady climb. The optimiser probes downwards once, then
+climbs three orders of magnitude in two steps, overshoots, and settles back to
+a lambda near the bottom of the held-out curve in the previous figure. The
+criterion is within a fraction of a point of its final value after four steps;
+everything past that is refinement. A grid over twelve values, as in the
+previous figure, costs twelve fits and five folds each; the optimiser costs a
+handful of fits and no folds.
 
 ## Removing a term that carries no signal
 
@@ -301,12 +317,18 @@ for sel in (False, True):
 ```{code-cell} ipython3
 :tags: [remove-output]
 
-fig_select, axes = plt.subplots(2, 2, figsize=(9, 6), sharex="col", sharey="col")
+fig_select, axes = plt.subplots(2, 2, figsize=(9, 6), sharex="col", sharey=True)
 for row, sel in enumerate((False, True)):
     for col, name in enumerate(("x", "z")):
         ax = axes[row, col]
         term = selected[sel].term_inference(name)
-        ax.fill_between(term.x, term.ci_lower, term.ci_upper, color="#F4B942", alpha=0.35, linewidth=0)
+        # ci_lower and ci_upper are on the relativity scale; the curve is on the
+        # linear-predictor scale, which for this Gaussian identity fit is the
+        # effect on y. Take logs so the band and the curve share an axis.
+        ax.fill_between(
+            term.x, np.log(term.ci_lower), np.log(term.ci_upper),
+            color="#F4B942", alpha=0.35, linewidth=0,
+        )
         ax.plot(term.x, term.log_relativity, color="#15171C")
         ax.axhline(0.0, color="#6B7280", linewidth=0.8)
         ax.set_title(f"select={sel}, term {name}\nEDF {term.edf:.2f}")
@@ -320,15 +342,16 @@ glue("select-shrinkage", fig_select, display=False)
 
 ```{glue:figure} select-shrinkage
 :name: fig-select-shrinkage
+:alt: A two-by-two grid of fitted effects with confidence bands: the x term and the z term, fitted with select off and on.
 
-A term with no signal. Without the double penalty the `z` term keeps a slope and one degree of freedom, because the ordinary penalty cannot charge for a straight line; with `select=True` REML shrinks it to flat and its EDF to zero. The `x` term is untouched either way.
+A term with no signal. All four panels share one y axis, so the `z` term's effect can be compared with the `x` term's. Without the double penalty the `z` term keeps a slope and one degree of freedom, because the ordinary penalty cannot charge for a straight line; with `select=True` REML shrinks it to flat and its EDF to zero. The `x` term is untouched either way.
 ```
 
 ## Main takeaways
 
 - No penalty means the spline reproduces the noise; the effective degrees of freedom climb towards the basis size.
 - REML picks the penalty from the data alone, and on this example it lands where held-out deviance is lowest.
-- The optimiser reaches that value in a handful of steps; it is a maximisation, not a grid search.
+- The optimiser reaches that value in a handful of steps; it is an optimisation the solver drives directly, not a grid search, and the criterion it drives down is the negative REML criterion, so lower is better.
 - `select=True` lets REML remove a term that carries no signal instead of leaving it a straight line.
 
 ## Next steps
