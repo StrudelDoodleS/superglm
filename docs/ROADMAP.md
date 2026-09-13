@@ -168,6 +168,17 @@ converged and three reached the unchanged REML iteration limit; a dependent
 credit interaction arm was not fitted. Bike's selected interactions worsened
 chronological test loss. These fixed-count, fixed-resolution controls do not
 establish useful discovery or adaptive basis selection.
+The [mixed-pair follow-up](research/2026-09-14-targeted-interaction-comparison.md)
+finds useful structure the first screen missed: two bike interactions reduce
+test Poisson deviance from 60.58 to 32.39 at 4.57 times the matching additive
+model's fit time. The six-variant bike search costs 14.04 additive fit times
+in model fitting alone. Ames rejects the tested mixed pair on validation.
+The [GBM structural controls](research/2026-09-14-gbm-interaction-comparison.md)
+show pairwise gains over their own additive class on all four datasets,
+with a small credit gain. These are exploratory results on previously
+inspected splits, not fresh confirmation or automatic-discovery results.
+The [external evidence review](research/2026-09-14-interaction-dataset-evidence.md)
+records prior examples, candidate hypotheses and differences in evaluation.
 
 The first existing-tensor performance step is implemented and measured in
 `306f12e0`: exact admission carries selected penalty support from optimizer to

@@ -79,6 +79,19 @@ Bike's interaction arm improved validation loss and worsened chronological
 test loss. It is a fixed-count, fixed-resolution control, with no superiority
 or adaptive-selection claim.
 
+The [2026-09-14 mixed-pair follow-up](2026-09-14-targeted-interaction-comparison.md)
+finds a 46.5% bike test-deviance reduction from two prior-informed mixed
+interactions, at 4.57 times the matching additive fit time. The entire
+six-variant bike menu costs 14.04 such fit times before worker overhead.
+Matching k=4 and k=6 additive controls separate interaction value from
+main-effect resolution; both resolutions choose the two-pair model.
+Ames rejects the tested area/building-type pair on validation. All ten
+fits converge with numerical tolerances unchanged. The
+[GBM controls](2026-09-14-gbm-interaction-comparison.md) find pairwise gains
+over their own additive class on all four pilot datasets. These test blocks
+are now exploratory diagnostics; fresh confirmation and automatic candidate
+generation remain outstanding.
+
 Integration verification for these research additions passed 35 focused
 dataset/trial tests and Ruff checks on seven Python files. Independent checks
 matched 34 core source files, 21 Kaggle source/receipt hashes, all seven real
