@@ -58,7 +58,21 @@ def data_fingerprint(frame):
     return digest.hexdigest()
 
 
-def prepare_data(frame, *, expected_fingerprint):
+def feature_fingerprint(splits):
+    """Hash ordered, transformed model inputs for all three splits."""
+    import numpy as np
+
+    digest = hashlib.sha256()
+    for name in ("train", "valid", "test"):
+        features = splits[name][0]
+        values = np.asarray(features, dtype="<f8", order="C")
+        metadata = [name, list(features.columns), list(values.shape)]
+        digest.update(json.dumps(metadata, separators=(",", ":")).encode())
+        digest.update(values.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def prepare_data(frame, *, expected_fingerprint, expected_features=None):
     """Validate identity before applying the frozen transforms and split."""
     import numpy as np
 
@@ -74,6 +88,10 @@ def prepare_data(frame, *, expected_fingerprint):
         ("train", "valid", "test"), np.split(order, [12384, 16512]), strict=True
     ):
         splits[name] = (features.iloc[indices].reset_index(drop=True), response[indices])
+    if expected_features is not None and feature_fingerprint(splits) != expected_features:
+        raise ValueError(
+            "California housing transformed feature fingerprint differs from the reference"
+        )
     return splits, hashlib.sha256(order.astype("<i8").tobytes()).hexdigest()
 
 
@@ -165,7 +183,12 @@ def worker(args):
         frame = fetch_california_housing(as_frame=True).frame
     else:
         frame = pd.read_parquet(args.data)
-    splits, split_hash = prepare_data(frame, expected_fingerprint=reference["data_fingerprint"])
+    measured_data_hash = data_fingerprint(frame)
+    splits, split_hash = prepare_data(
+        frame,
+        expected_fingerprint=reference["data_fingerprint"],
+        expected_features=reference["transformed_features_sha256"],
+    )
     if split_hash != reference["split_sha256"]:
         raise ValueError("Split fingerprint differs from the frozen reference")
     model = build_model(args.case)
@@ -229,7 +252,8 @@ def worker(args):
         "mse": losses,
         "reference_comparison": comparison,
         "warnings": [str(item.message) for item in caught],
-        "data_fingerprint": reference["data_fingerprint"],
+        "data_fingerprint": measured_data_hash,
+        "transformed_features_sha256": feature_fingerprint(splits),
         "split_sha256": split_hash,
         "imported_package_directory": str(package_directory),
         "package_source_sha256": package_source_hash,

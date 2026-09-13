@@ -62,12 +62,68 @@
     },
     "tasks": 3900
   },
+  "fast_reference_manifest": {
+    "arguments": {
+      "phase": "study",
+      "cases": [
+        "gaussian_bilinear",
+        "gaussian_wave",
+        "gaussian_spline_cat",
+        "gaussian_cat_cat",
+        "poisson_wave",
+        "gaussian_correlated_wave"
+      ],
+      "strengths": [
+        0.02,
+        0.04,
+        0.06,
+        0.08,
+        0.12
+      ],
+      "replicates": 100,
+      "calibration": 200,
+      "audit": 100,
+      "refit_replicates": 20,
+      "workers": 6,
+      "output": ".benchmark-artifacts/psst-detection-study/fast-final"
+    },
+    "package_source_sha256": "8136f3169e756d270ba405705508dd836632547c69ba066cc0d16c41c3fe029e",
+    "script_sha256": "63fa1a03e0d4108ed00a98f21d566413584c9f1ecdfe3aba197de59a849b7a78",
+    "protocol_sha256": "c87f51f2e5cdbd0ad0280b1b49ea57efa4c1927efa808e8369d838992eff8c80",
+    "base_revision": "22662a09c612f5fa9b5eb364e07ec8f8ac0a0d21",
+    "python": "3.13.14",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0",
+    "threads": {
+      "OPENBLAS_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "NUMBA_NUM_THREADS": "1"
+    },
+    "tasks": 3900
+  },
+  "fast_metadata": {
+    "interpret_core": "0.7.8",
+    "wrapper_sha256": "be6eca8b7f05bf2ce0767ebe5bdfce726bcffc778a299669cea9fef94b39fbfb",
+    "protocol_sha256": "51a2eb3d5d914988ecab14ca7d76790a005019887df39988cac810f1b6d3a72e",
+    "methods": {
+      "old": "FAST default",
+      "corrected": "FAST Purify"
+    },
+    "reference": "https://interpret.ml/docs/python/api/measure_interactions.html",
+    "native_purify_flag": 1,
+    "baseline": "Same SuperGLM additive fit and link-scale predictions as PSST"
+  },
+  "reference_metadata_hashes": {
+    "psst_manifest": "4a0eb3e9cb0bc5f91e6eef8df5ef8ea553148e5731bcc12c7a2c2dec2486dea4",
+    "fast_manifest": "c305fec8bb344560e10916d297e6dab5f155b5becbeda7ccde07b9b8845bd589",
+    "fast_metadata": "4afc53b1843460a0aa38ba74645132b3a557dacc4124c195129f9e761426ebb3"
+  },
   "raw_hashes": {
     "boosters": "e48d3282a16b10fc4824d30801529b31fd5b01aacb237ba067441847b9d1617c",
     "psst": "38d672c13390f6f58010d5c5e07639eeb1b6da56cd09fa6df6f9ebabdce87910",
     "fast": "6d715e7be4d506f0bbb7d924203347ee4341d09e650878e68fdf428eaa17548d"
   },
-  "analysis_sha256": "24de3928adc328636fa2eb02a050b70057a9752307c487da654b6298f871eb74",
+  "analysis_sha256": "a8486b81ec24955b194de66b0b4989d2763c7cf7f78001b38a55ad2af419c4c2",
   "difference_direction": "Positive means higher error than PSST-selected SuperGLM",
   "families": {
     "gaussian": {
