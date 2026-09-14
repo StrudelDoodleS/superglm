@@ -127,10 +127,13 @@ def fit_summary(record):
         "worker_seconds",
         "worker_end_peak_process_rss_mib",
         "warnings",
+        "warnings_complete",
         "error",
         "traceback",
         "started_utc",
         "finished_utc",
+        "parent_finished_utc",
+        "incomplete_receipt",
     )
     result = {key: record[key] for key in keys if key in record}
     telemetry = record.get("telemetry", {})
@@ -168,6 +171,8 @@ def summarize(root, data_root=data.DEFAULT_ROOT):
     evaluation_starts, choice_times = [], []
     fit_statuses, evaluation_statuses = collections.Counter(), collections.Counter()
     missing_total_fields = []
+    incomplete_identity_workers = []
+    unverified_threadpool_workers = []
     declared_arm_count = 0
     for name, case in suite["datasets"].items():
         case_root = root / name
@@ -205,23 +210,50 @@ def summarize(root, data_root=data.DEFAULT_ROOT):
             folder = case_root / arm
             raw = read_json(folder / "result.json")
             assert raw == {k: v for k, v in record.items() if k not in ("process", "evaluation")}
-            assert raw["source"] == protocol["source"]
-            assert raw["protocol_sha256"] == protocol_hash
-            assert raw["data_identity_sha256"] == proposal["data_identity_sha256"]
-            assert raw["data"] == proposal["data"]
+            failed_fit = not is_proposal and raw["status"] in ("error", "timeout")
+            identity = {
+                "source": protocol["source"],
+                "protocol_sha256": protocol_hash,
+                "data_identity_sha256": proposal["data_identity_sha256"],
+                "data": proposal["data"],
+            }
+            if not is_proposal:
+                identity["proposal_result_sha256"] = proposal_hash
+            missing_identity = identity.keys() - raw.keys()
+            if missing_identity:
+                assert failed_fit, "Only failed fits may lack worker identity evidence"
+                incomplete_identity_workers.append(f"{name}/{arm}")
+            for key, value in identity.items():
+                if key in raw:
+                    assert raw[key] == value, f"Worker identity differs at {name}/{arm}: {key}"
             assert raw.get("finished_utc", raw.get("parent_finished_utc")) <= choice["selected_utc"]
-            assert all(pool["num_threads"] == 1 for pool in raw["runtime"]["threadpools"])
+            threadpools = raw.get("runtime", {}).get("threadpools")
+            if threadpools is None:
+                assert failed_fit, "Only failed fits may lack threadpool evidence"
+                unverified_threadpool_workers.append(f"{name}/{arm}")
+            else:
+                assert all(pool["num_threads"] == 1 for pool in threadpools)
             process_path = folder / f"{stage}_process.json"
             assert read_json(process_path) == record["process"]
             index(process_path)
             index(folder / f"{stage}.log")
             digest = index(folder / "result.json")
+            if "incomplete_receipt" in raw:
+                assert failed_fit
+                incomplete = raw["incomplete_receipt"]
+                filename = incomplete["path"]
+                assert Path(filename).name == filename
+                assert filename == f"{stage}_incomplete_{incomplete['sha256']}.bin"
+                incomplete_path = folder / filename
+                assert index(incomplete_path) == incomplete["sha256"]
+                assert incomplete_path.stat().st_size == incomplete["bytes"]
             case_search.append(record["process"]["process_seconds"])
             if is_proposal:
                 continue
             fit_statuses[raw["status"]] += 1
-            assert raw["proposal_result_sha256"] == proposal_hash
             summaries[arm] = fit_summary(record)
+            if missing_identity:
+                summaries[arm]["identity_evidence"] = "incomplete"
             if raw["status"] == "converged":
                 assert choice["fit_result_sha256"][arm] == digest
                 assert raw["convergence"]["combined_converged"]
@@ -229,8 +261,22 @@ def summarize(root, data_root=data.DEFAULT_ROOT):
                 assert raw["q"] == raw["nominal"]["q"]
                 assert index(folder / "model.pkl") == raw["model_pickle_sha256"]
             else:
-                assert "validation" not in raw and "evaluation" not in record
-                assert not (folder / "model.pkl").exists()
+                assert "evaluation" not in record
+                model_path = folder / "model.pkl"
+                if failed_fit:
+                    if "validation" in raw:
+                        summaries[arm]["selection_eligible"] = False
+                    if model_path.exists():
+                        model_hash = index(model_path)
+                        if "model_pickle_sha256" in raw:
+                            assert model_hash == raw["model_pickle_sha256"]
+                        summaries[arm]["unevaluated_model_artifact"] = {
+                            "sha256": model_hash,
+                            "bytes": model_path.stat().st_size,
+                            "trusted_for_evaluation": False,
+                        }
+                else:
+                    assert "validation" not in raw and not model_path.exists()
             if "evaluation" not in record:
                 assert arm not in choice["evaluation_arms"]
                 continue
@@ -352,10 +398,20 @@ def summarize(root, data_root=data.DEFAULT_ROOT):
         "audit": {
             "source_identity_matches": True,
             "all_choices_precede_all_test_evaluations": True,
-            "all_data_and_split_identities_match_repreparation": True,
+            "all_data_and_split_identities_match_repreparation": not incomplete_identity_workers,
             "all_declared_arms_accounted_for": declared_arm_count,
             "test_scores_exactly_replayed_from_saved_arrays": sum(evaluation_statuses.values()),
-            "all_worker_threadpools_one_thread": True,
+            "all_worker_threadpools_one_thread": not unverified_threadpool_workers,
+            **(
+                {"failed_workers_with_incomplete_identity": incomplete_identity_workers}
+                if incomplete_identity_workers
+                else {}
+            ),
+            **(
+                {"workers_with_unverified_threadpools": unverified_threadpool_workers}
+                if unverified_threadpool_workers
+                else {}
+            ),
             "total_derivation": "Sum every proposal, fit and evaluation process receipt; compare existing raw counters with a positive-sum rounding bound.",
             "cases_without_optional_raw_total_field": missing_total_fields,
             "scope": "Audit the completed frozen batch. This script expects successful proposals and all selected evaluations, while preserving failed fits.",

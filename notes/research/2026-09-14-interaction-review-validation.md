@@ -14,6 +14,14 @@ future reruns and verification. The frozen experiment results remain unchanged.
   If termination interrupts a JSON write, its original bytes are preserved in
   a file named by stage and SHA-256, and the normalized record references that
   file. Empty and truncated receipts no longer abort the parent suite.
+- The audit retains interrupted attempts and their full process costs even when
+  a worker leaves no usable identity or runtime evidence. Missing evidence makes
+  the corresponding aggregate verification flag false and lists the affected
+  workers; every identity field that is present must still match. Parent
+  completion times, incomplete warning status and interrupted-write receipts
+  survive into the summary. Preserved bytes are hashed and checked. A model
+  artifact left by a failed fit is indexed as untrusted and cannot be selected
+  or evaluated.
 - Audits and plots compare all data, source-code, registry, preprocessing and
   split evidence while excluding only the two local location fields
   `source_path` and `source_registry`. Archived metadata and its original digest
@@ -43,6 +51,13 @@ future reruns and verification. The frozen experiment results remain unchanged.
 Focused tests cover failed-search costs, normalized fit/evaluation receipts,
 optimized-Python refusal, location-only changes with content/split mutations,
 missing planned arms, unavailable baselines, a one-pair plot and nonfinite JSON.
+An additional 23 cases run preparation, the parent suite and its audit with
+synthetic child receipts, without fitting models. They cover absent, empty,
+truncated and intermediate receipts, missing evidence, incorrect identities,
+tampered preserved bytes and ineligible leftover model artifacts. The audit
+before this correction raises `KeyError('source')` for the absent, empty and
+truncated cases; the corrected audit records their costs with incomplete
+verification evidence.
 The original plotter fails the one-pair test. All eight initial optimized-Python
 and parent-receipt tests fail before their corrections; the six relevant
 many-interaction regressions also fail before their corrections.
@@ -71,7 +86,7 @@ environment from the frozen source tree and point the current audit script at
 that tree, rather than substituting the corrected runner for the measured one:
 
 ```bash
-git fetch origin research/adaptive-interactions
+git fetch origin 639f499eaec04967de0b7c31090276671144b99f
 git worktree add --detach .worktrees/interaction-frozen 639f499e
 uv sync --project .worktrees/interaction-frozen --python 3.13 --extra dev
 uv run --project .worktrees/interaction-frozen python docs/research/check_broad_interaction_measurements.py \
@@ -83,8 +98,10 @@ uv run --project .worktrees/interaction-frozen python docs/research/check_broad_
 
 The original commit is retained on the pushed `research/adaptive-interactions`
 branch: its head `18f21fa24ea7` is one commit after `639f499e`. The explicit fetch
-also makes the source available to a checkout that has fetched only its current
-PR branch or a shallow history.
+requests that exact commit so it also works when the archival branch has
+already been fetched with depth one. This was checked in a fresh shallow
+repository: fetching the branch again left its parent unavailable, while
+fetching the full commit ID retrieved it successfully.
 
 The raw archive and pinned source tables are required. The plotter takes the
 same roots and an output directory through `--output`; keep replay output

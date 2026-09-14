@@ -64,7 +64,7 @@ def test_source_root_selects_the_package_used_for_replay(script, tmp_path):
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    assert Path(result.stdout.strip()).resolve() == package / "__init__.py"
+    assert Path(result.stdout.strip()).resolve() == (package / "__init__.py").resolve()
 
 
 @pytest.mark.parametrize(
