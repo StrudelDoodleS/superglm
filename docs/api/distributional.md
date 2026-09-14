@@ -22,7 +22,7 @@ page.
 :gutter: 2
 
 :::{grid-item-card} 1 · Declare
-:link: distributional/declarations-and-families
+:link: distributional/families
 :link-type: doc
 A family, then one predictor per parameter.
 :::
@@ -53,7 +53,8 @@ All the groups, in the order you meet them:
 ```{toctree}
 :maxdepth: 1
 
-distributional/declarations-and-families
+distributional/families
+distributional/declarations
 distributional/fit
 distributional/inference
 distributional/predict

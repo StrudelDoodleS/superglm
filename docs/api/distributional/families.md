@@ -1,19 +1,9 @@
-# Declarations and families
+# Families
 
-Inside a predictor, {py:func}`~superglm.s` declares a smooth of one numeric
-column, {py:func}`~superglm.cat` a categorical effect with a reference level,
-{py:func}`~superglm.re` a random effect with a coefficient for every level,
-{py:func}`~superglm.term` attaches any other feature specification to a
-column, and {py:func}`~superglm.ti` and {py:func}`~superglm.interaction`
-declare interactions between terms already in that predictor. Those helpers
-return {py:class}`~superglm.BoundTerm` and
-{py:class}`~superglm.BoundInteraction`; the family helper wraps them in a
-{py:class}`~superglm.BoundPredictor`, which
-{py:func}`~superglm.bind_predictor` also creates by parameter name for custom
-families, and {py:class}`~superglm.Predictor` is the immutable configuration
-underneath.
-
-The families, each named for the parameters it models:
+Each family is named for the parameters it models, and each parameter has a
+helper method on the family (`location`, `scale`, `mu`, `phi`, and so on) that
+takes the declarations on the [Declarations](declarations.md) page and returns
+the predictor for that parameter.
 
 - {py:class}`~superglm.GaussianLS`: location and scale of a Gaussian response.
 - {py:class}`~superglm.GammaLS`: mean and coefficient of variation of a
@@ -38,17 +28,6 @@ The families, each named for the parameters it models:
    :toctree: ../generated
    :nosignatures:
 
-   superglm.Predictor
-   superglm.BoundPredictor
-   superglm.bind_predictor
-   superglm.BoundTerm
-   superglm.BoundInteraction
-   superglm.term
-   superglm.s
-   superglm.cat
-   superglm.re
-   superglm.ti
-   superglm.interaction
    superglm.GaussianLS
    superglm.GammaLS
    superglm.LogNormalLS
