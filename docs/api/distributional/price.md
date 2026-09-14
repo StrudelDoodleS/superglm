@@ -140,11 +140,10 @@ fig.colorbar(mesh, ax=ax, label="density")
 fig.tight_layout()
 ```
 
-As age rises the mass sinks
-towards small claims and packs more tightly there, while the top line stops
-falling and lifts again: the law is not sliding down, it is growing more
-right-skewed. That is a shape change, and it is what the quantile curves above
-can only imply.
+As age rises the mass sinks towards small claims and packs more tightly
+there, while the q0.99 line stops falling and lifts again: the law is not
+sliding down, it is growing more right-skewed. That is a shape change, and it
+is what the quantile curves above can only imply.
 
 `parameter_spread` bins the book by predicted mean and asks how far the tail
 probability moves inside a bin, reporting its 5th and 95th percentiles per bin
@@ -164,14 +163,14 @@ pd.Series(
         "5th percentile of P(Y > 5000)": widest["p_lo"],
         "95th percentile of P(Y > 5000)": widest["p_hi"],
     }
-).round(4)
+).round(5)
 ```
 
-In the typical bin the chance of a claim above
-5,000 varies by a factor of 2.8 between the 5th and the 95th percentile row;
-in the widest bin it varies by a factor of 34, from 0.0007 to 0.0252 at those
-two percentiles, while a mean-only model prices every row in that bin between 1,605 and 1,680.
-Those rows are priced as one risk and are not one risk.
+In the typical bin the chance of a claim above 5,000 varies by a factor of
+2.8 between the 5th and the 95th percentile row; in the widest bin it varies
+by a factor of 34, from 0.00075 to 0.0252 at those two percentiles, while a
+mean-only model prices every row in that bin between 1,605 and 1,680. Those
+rows are priced as one risk and are not one risk.
 
 `portfolio` simulates every row on its own predictive law and sums the draws,
 so the quantiles are of the book total.

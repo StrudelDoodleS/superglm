@@ -115,10 +115,9 @@ after each step and the REML objective it reached. The first entry of
 `lambda_history` is the starting value before any step, so the table below
 pairs the steps taken with the objective they produced; not every optimiser
 path records an objective, so the cell reads the history as optional rather
-than assuming it. The objective falls by
-about 2.4 at the first step and by a tenth at the second; the last two steps
-move it by less than a thousandth, which is why the loop stops on its objective
-tolerance.
+than assuming it. The objective falls by about 2.4 at the first step and by a
+tenth at the second; the last two steps move it by less than a thousandth,
+which is why the loop stops on its objective tolerance.
 
 ```{code-cell} ipython3
 diag = model.reml_diagnostics()

@@ -2,6 +2,10 @@
 
 Executed pages must use the public API only. The audit of the old site
 found four private-attribute reads in notebooks; this keeps them out.
+
+The reference group pages that carry an executed example repeat one setup
+cell per class so that every page runs on its own; the prose numbers on all
+of them depend on that one simulation, so the copies must stay identical.
 """
 
 from __future__ import annotations
@@ -33,24 +37,26 @@ def test_no_private_attribute_access_in_executed_pages() -> None:
     assert offenders == [], "private attribute access in executed pages:\n" + "\n".join(offenders)
 
 
-SETUP_FAMILIES = {
-    "SuperGLM": [
-        DOCS / "api" / "model" / f"{s}.md"
-        for s in ("inference", "fit", "predict", "deploy", "plot")
-    ],
-    "SuperLSS": [
-        DOCS / "api" / "distributional" / f"{s}.md"
-        for s in ("inference", "price", "predict", "check-the-fit")
-    ],
-}
+EXAMPLE_DIRS = {"SuperGLM": DOCS / "api" / "model", "SuperLSS": DOCS / "api" / "distributional"}
+
+
+def example_pages(directory: Path) -> list[Path]:
+    """Every group page in ``directory`` that carries an executed example."""
+    return [
+        p
+        for p in sorted(directory.glob("*.md"))
+        if "\n## Example\n" in p.read_text(encoding="utf-8")
+    ]
 
 
 def first_visible_cell(path: Path) -> str:
     cells = CODE_CELL.findall(path.read_text(encoding="utf-8"))
-    return next(cell for cell in cells if ":tags: [remove-cell]" not in cell)
+    visible = [cell for cell in cells if ":tags: [remove-cell]" not in cell]
+    assert visible, f"{path.relative_to(DOCS)} has an Example section but no visible code cell"
+    return visible[0]
 
 
-@pytest.mark.parametrize("family", sorted(SETUP_FAMILIES))
+@pytest.mark.parametrize("family", sorted(EXAMPLE_DIRS))
 def test_example_setup_cells_are_identical(family: str) -> None:
     """Each class's example pages share one simulation; the prose numbers depend on it.
 
@@ -58,7 +64,8 @@ def test_example_setup_cells_are_identical(family: str) -> None:
     copy would silently invalidate the numbers cited on the others, so the copies
     must stay byte-identical.
     """
-    pages = SETUP_FAMILIES[family]
+    pages = example_pages(EXAMPLE_DIRS[family])
+    assert len(pages) >= 2, f"{family}: fewer than two example pages found"
     reference = first_visible_cell(pages[0])
     differing = sorted(p.name for p in pages[1:] if first_visible_cell(p) != reference)
     assert differing == [], f"{family} setup cells differ from {pages[0].name}: {differing}"
