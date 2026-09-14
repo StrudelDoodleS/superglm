@@ -1,0 +1,291 @@
+{
+  "plot_script_sha256": "a7f62e7a090dc84c3cde542ce7f04cc6dd1ee8f091eed04b1cec243eb3bcc145",
+  "measurement_sha256": "45e1934e516b4b2db3aadc0b9072d5b81bc656912c95d6a25aa631fbb942f7fc",
+  "scope": "Saved Gaussian identity-link tensor terms; no fits or selection; raw outcome units; no exponential relativity conversion or extra centering.",
+  "view": "Training marginal 1st-99th percentiles, integer building grades, log display axes as declared in the script; observed-pair convex-hull mask is visual only.",
+  "cases": [
+    {
+      "dataset": "uci_airfoil",
+      "chosen_arm": "k4_s2",
+      "model_sha256": "3d5399e64cc85c1baadb66ef21f29176ac427b77ae8a8b681ee5aebcddcd22d4",
+      "test_prediction_replay": "exact",
+      "response_display_divisor": 1,
+      "surfaces": [
+        {
+          "name": "frequency:suction-side-displacement-thickness",
+          "grid_shape": [
+            121,
+            121
+          ],
+          "raw_axis_bounds": [
+            [
+              200.0,
+              16000.0
+            ],
+            [
+              0.000400682,
+              0.0437259
+            ]
+          ],
+          "training_rows": 900,
+          "visible_grid_cells": 12519,
+          "colour_limit_display_units": 23.534873498248952,
+          "visible_effect_range_original_units": [
+            -10.388779939032975,
+            23.534873498248952
+          ]
+        },
+        {
+          "name": "frequency:attack-angle",
+          "grid_shape": [
+            121,
+            121
+          ],
+          "raw_axis_bounds": [
+            [
+              200.0,
+              16000.0
+            ],
+            [
+              0.0,
+              22.2
+            ]
+          ],
+          "training_rows": 900,
+          "visible_grid_cells": 13446,
+          "colour_limit_display_units": 18.291899398974454,
+          "visible_effect_range_original_units": [
+            -18.291899398974454,
+            9.898686255076917
+          ]
+        }
+      ],
+      "artifacts": {
+        "airfoil.png": "9fa1b4da4a77fb592c36a60dd245e1a5065db4de356449f3d21bc6338024a394",
+        "airfoil.svg": "1f2c7c58ee44f5f8553e3087e94623db353c9b225d08d7a88874cec2ebd6fc7d",
+        "airfoil-surfaces.npz": "d13b186425a5bc3d80e33d2495ae75aec9017083ac4526edf720fe1e32116dab"
+      }
+    },
+    {
+      "dataset": "uci_concrete",
+      "chosen_arm": "k6_s4",
+      "model_sha256": "7bde75fc3345a5f457a447c283392d6feda1d9e4aaa90a59fe172fe7430b95d4",
+      "test_prediction_replay": "exact",
+      "response_display_divisor": 1,
+      "surfaces": [
+        {
+          "name": "Cement:Age",
+          "grid_shape": [
+            121,
+            121
+          ],
+          "raw_axis_bounds": [
+            [
+              108.3,
+              540.0
+            ],
+            [
+              3.0,
+              365.0
+            ]
+          ],
+          "training_rows": 643,
+          "visible_grid_cells": 14260,
+          "colour_limit_display_units": 7.219172767615526,
+          "visible_effect_range_original_units": [
+            -7.219172767615526,
+            4.307393420859573
+          ]
+        },
+        {
+          "name": "Water:Age",
+          "grid_shape": [
+            121,
+            121
+          ],
+          "raw_axis_bounds": [
+            [
+              126.6,
+              228.0
+            ],
+            [
+              3.0,
+              365.0
+            ]
+          ],
+          "training_rows": 643,
+          "visible_grid_cells": 13481,
+          "colour_limit_display_units": 6.631807790588544,
+          "visible_effect_range_original_units": [
+            -6.631807790588544,
+            5.846460562220502
+          ]
+        },
+        {
+          "name": "Cement:Blast Furnace Slag",
+          "grid_shape": [
+            121,
+            121
+          ],
+          "raw_axis_bounds": [
+            [
+              108.3,
+              540.0
+            ],
+            [
+              0.0,
+              288.0
+            ]
+          ],
+          "training_rows": 643,
+          "visible_grid_cells": 10135,
+          "colour_limit_display_units": 18.382173887042466,
+          "visible_effect_range_original_units": [
+            -18.382173887042466,
+            5.798577290218698
+          ]
+        },
+        {
+          "name": "Cement:Water",
+          "grid_shape": [
+            121,
+            121
+          ],
+          "raw_axis_bounds": [
+            [
+              108.3,
+              540.0
+            ],
+            [
+              126.6,
+              228.0
+            ]
+          ],
+          "training_rows": 643,
+          "visible_grid_cells": 12755,
+          "colour_limit_display_units": 4.224185139547526,
+          "visible_effect_range_original_units": [
+            -4.224185139547526,
+            4.028759933232088
+          ]
+        }
+      ],
+      "artifacts": {
+        "concrete.png": "14a4b9420268c7b38c661f04f5dfff999976908d9cdf0cf69e19f53fad215d13",
+        "concrete.svg": "fc5c6ad3754a2650f30697dc145da08ebd23878f14d8c258076b8169d7479085",
+        "concrete-surfaces.npz": "ee698702095ae53df9ea71fbf1815f6919ab10543557643d34e763d068eb4eb0"
+      }
+    },
+    {
+      "dataset": "kaggle_king_county_sales",
+      "chosen_arm": "k6_s4",
+      "model_sha256": "d6cd02366c6c10f65f1cdc70ba0938d83dd5a67ed1799cfb448a98508145b641",
+      "test_prediction_replay": "exact",
+      "response_display_divisor": 1000,
+      "surfaces": [
+        {
+          "name": "sqft_living:grade",
+          "grid_shape": [
+            7,
+            121
+          ],
+          "raw_axis_bounds": [
+            [
+              720.0,
+              5010.0
+            ],
+            [
+              5.0,
+              11.0
+            ]
+          ],
+          "training_rows": 13738,
+          "visible_grid_cells": 717,
+          "colour_limit_display_units": 391.31862568743907,
+          "visible_effect_range_original_units": [
+            -321148.207596499,
+            391318.62568743905
+          ]
+        },
+        {
+          "name": "sqft_living:lat",
+          "grid_shape": [
+            121,
+            121
+          ],
+          "raw_axis_bounds": [
+            [
+              720.0,
+              5010.0
+            ],
+            [
+              47.2568,
+              47.7719
+            ]
+          ],
+          "training_rows": 13738,
+          "visible_grid_cells": 14636,
+          "colour_limit_display_units": 235.10564176553365,
+          "visible_effect_range_original_units": [
+            -230933.9722371796,
+            235105.64176553366
+          ]
+        },
+        {
+          "name": "grade:lat",
+          "grid_shape": [
+            121,
+            7
+          ],
+          "raw_axis_bounds": [
+            [
+              5.0,
+              11.0
+            ],
+            [
+              47.2568,
+              47.7719
+            ]
+          ],
+          "training_rows": 13738,
+          "visible_grid_cells": 845,
+          "colour_limit_display_units": 377.3499780542974,
+          "visible_effect_range_original_units": [
+            -377349.97805429745,
+            190542.4965008736
+          ]
+        },
+        {
+          "name": "grade:long",
+          "grid_shape": [
+            121,
+            7
+          ],
+          "raw_axis_bounds": [
+            [
+              5.0,
+              11.0
+            ],
+            [
+              -122.409,
+              -121.778
+            ]
+          ],
+          "training_rows": 13738,
+          "visible_grid_cells": 847,
+          "colour_limit_display_units": 492.20097520504413,
+          "visible_effect_range_original_units": [
+            -492200.97520504415,
+            305088.71297747124
+          ]
+        }
+      ],
+      "artifacts": {
+        "king-county.png": "ef77a485b374e4e252a8738ede3d2df43d9cc8569f7c55ebff697a18bde92f3e",
+        "king-county.svg": "5336fba4b68fd7506ac4ce1bf8e3d8be2cb7e34ae231ad86ca8262feeae93331",
+        "king-county-surfaces.npz": "018b213cef1919c5882cc64a28a8d6477e7284b04e0b7372ec31c9261b1c7f4c"
+      }
+    }
+  ],
+  "pdf_sha256": "2736cb8fc41dd1e37d4bd3f4e65becd85fda81ea2fad5df0dcfc6d99ad752ab1"
+}

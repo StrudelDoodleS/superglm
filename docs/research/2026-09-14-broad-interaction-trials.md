@@ -19,6 +19,8 @@ admitted pairs, timing, memory, dispatch and 552 raw-artifact fingerprints.
 The [named reference bank](2026-09-14-known-interaction-candidates.md) supplies
 the complementary published candidates, including exact Kaggle feature
 constructions and their evidence limitations.
+The [fitted interaction plots](2026-09-14-broad-interaction-plots.md) show
+the selected Airfoil, Concrete and King County terms with training support.
 
 ## Observed test results
 
