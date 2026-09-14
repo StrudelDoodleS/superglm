@@ -1563,4 +1563,5 @@ def optimize_discrete_reml_cached_w(
         curvature_source="fisher",
         termination_reason=termination_reason,
         tweedie_scale_data=tweedie_scale_data,
+        reml_penalties=penalties,
     )

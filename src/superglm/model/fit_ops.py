@@ -2017,7 +2017,9 @@ def _fit_reml_in_workspace(
             best=best,
             use_direct=use_direct,
             reml_groups=reml_groups,
-            reml_penalties=reml_penalties,
+            reml_penalties=(
+                best.reml_penalties if best.reml_penalties is not None else reml_penalties
+            ),
             y=y,
             sample_weight=sample_weight,
             offset=offset,
