@@ -71,6 +71,13 @@ nb_merge_streams = True
 # The pages are excluded from execution, so the stored outputs are what they are;
 # suppress the per-output notice rather than rewriting the committed notebook.
 suppress_warnings = ["mystnb.unknown_mime_type"]
+# Glue data exists only once a page has executed. The pull-request build runs
+# with execution off (module docstring), so every ``glue:figure`` paste on an
+# executed page finds nothing there by design; executed builds still fail on a
+# missing key, and tests/docs/test_conventions.py pins each paste to a glue
+# call on its own page.
+if nb_execution_mode == "off":
+    suppress_warnings.append("mystnb.glue")
 
 # API reference
 autosummary_generate = True
