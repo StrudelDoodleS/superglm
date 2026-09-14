@@ -6,14 +6,15 @@ which selects no smoothing, all three are `None`.
 {py:attr}`~superglm.SuperLSS.smoothing_convergence_reason_` names why it
 stopped (`fixed_only` when every penalty was fixed by policy).
 {py:attr}`~superglm.SuperLSS.smoothing_certified_` is `True` only for a
-strict interior stop with every check passed: the fit converged at a
-stationary point rather than a `practical_plateau`, the coefficient solve
-converged on the curvature it was asked for with no fallback, no term sat at
-the finite cap, and no term ended on an exact face. Any one of those voids
-it, whatever the family, so read the other attributes before treating
-`False` as a defect: a term selected away or shrunk to its null space is
-listed in {py:attr}`~superglm.SuperLSS.exact_face_components_`, a term still
-pushing against the cap in
+strict interior stop with every check passed: the fit converged for any
+reason other than `practical_plateau`, the coefficient solve converged on
+the curvature it was asked for with no fallback, no term was left pushing
+against the finite cap (and, after a `stationary` stop, none rested on it),
+and no term ended on an exact face. Any one of those voids it, whatever the
+family, so read the other attributes before treating `False` as a defect: a
+term selected away or shrunk to its null space is listed in
+{py:attr}`~superglm.SuperLSS.exact_face_components_`, a term still pushing
+against the cap in
 {py:attr}`~superglm.SuperLSS.smoothing_unresolved_upper_bound_`, and a
 plateau stop, which the default `practical_reml=True` allows, in the
 convergence reason. {py:attr}`~superglm.SuperLSS.exact_face_components_` is

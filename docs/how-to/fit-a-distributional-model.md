@@ -1321,11 +1321,11 @@ order you are likely to meet them.
   Fisher approximation to fall back on: if a fit ends where the exact
   curvature does not describe a proper maximum, it refuses rather than guess.
 - **`smoothing_certified_` is strict, and `False` is not a defect on its
-  own.** It is `True` only for a stop at an interior stationary point with
-  every check passed: no `practical_plateau` stop (the default
-  `practical_reml=True` allows one), no curvature fallback, no term at the
-  finite cap, no term on an exact face. A term selected away or shrunk to its
-  null space voids it whatever the family. Read
+  own.** It is `True` only for a converged interior stop with every check
+  passed: no `practical_plateau` stop (the default `practical_reml=True`
+  allows one), no curvature fallback, no term left pushing against the
+  finite cap, no term on an exact face. A term selected away or shrunk to
+  its null space voids it whatever the family. Read
   `smoothing_convergence_reason_`, `exact_face_components_` and
   `smoothing_unresolved_upper_bound_` before reading anything into `False`.
 - **Automatic smoothing finds a stationary point, not a proven global
