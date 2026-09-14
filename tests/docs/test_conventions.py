@@ -55,6 +55,42 @@ CODE_DIRECTIVES = (
 BRACKET_MATH = re.compile(r"(?<!\\)\\[\(\[]")
 
 
+def blank_code_spans(line: str) -> str:
+    """Drop inline code spans: a backtick run closes only on a run of the same length.
+
+    An opening run with no matching closer is literal text, as in CommonMark.
+    """
+    out: list[str] = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] != "`":
+            out.append(line[i])
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == "`":
+            j += 1
+        run = j - i
+        k, close = j, -1
+        while k < n:
+            if line[k] != "`":
+                k += 1
+                continue
+            m = k
+            while m < n and line[m] == "`":
+                m += 1
+            if m - k == run:
+                close = k
+                break
+            k = m
+        if close < 0:
+            out.append(line[i:j])
+            i = j
+        else:
+            i = close + run
+    return "".join(out)
+
+
 def prose_lines(text: str) -> list[tuple[int, str]]:
     """Lines outside code fences, with inline code spans blanked out.
 
@@ -87,7 +123,7 @@ def prose_lines(text: str) -> list[tuple[int, str]]:
             continue
         if any(is_code for _, is_code in stack):
             continue
-        kept.append((number, re.sub(r"`+[^`]*`+", "", line)))
+        kept.append((number, blank_code_spans(line)))
     return kept
 
 
