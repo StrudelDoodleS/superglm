@@ -90,8 +90,11 @@ $$
 
 where $\mathbf X$ holds the basis functions evaluated at the data and
 $\mathbf W$ the working weights of the fit. With $\lambda = 0$ the trace is
-the full basis size; as $\lambda \to \infty$ it falls to the size of the null
-space, one line's worth. The EDF in every figure title below is this number.
+the rank of the identifiable design, one less than `k` here: the smooth is
+centred, so its constant direction belongs to the intercept and is constrained
+away, leaving 39 free degrees of freedom for a basis of 40. As
+$\lambda \to \infty$ it falls to the size of the null space, one line's worth.
+The EDF in every figure title below is this number.
 
 REML chooses $\boldsymbol\lambda$ by maximising the criterion Wood (2011)
 writes, for a fitted $\hat{\boldsymbol\beta}$ at the given
