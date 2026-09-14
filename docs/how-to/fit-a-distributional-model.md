@@ -196,12 +196,12 @@ shortfall is available for both the unit law and the prior-weighted row law.
 ## Negative-binomial mean–theta model
 
 `NegativeBinomialLS` is the NB2 family with canonical parameter/result order
-`mean`, then `theta`. Both use log links. For conditional mean \(\mu\) and size
-\(\theta\),
+`mean`, then `theta`. Both use log links. For conditional mean $\mu$ and size
+$\theta$,
 
-\[
+$$
 E(Y)=\mu, \qquad \operatorname{Var}(Y)=\mu+\frac{\mu^2}{\theta}.
-\]
+$$
 
 Larger `theta` means less overdispersion. `predict_parameters()` returns columns
 `mean` and `theta`, while `predict()` returns the conditional mean in the
@@ -234,12 +234,12 @@ rate_model = nb2_model().fit(
 `claim_count` must be a non-negative integer count; the prior route verifies
 that `exposure * (claim_count / exposure)` returns to that count lattice.
 
-If \(\lambda\) is mean rate, \(\kappa\) is size per unit exposure, and \(e\)
+If $\lambda$ is mean rate, $\kappa$ is size per unit exposure, and $e$
 is exposure, this prior-weight construction is
 
-\[
+$$
 \text{ClaimCount}\mid x,e \sim \operatorname{NB2}(e\lambda,e\kappa).
-\]
+$$
 
 The exactly equivalent raw-count fit uses unit likelihood weights and adds
 `log(exposure)` to both predictors:
@@ -266,7 +266,7 @@ persistent_frailty = nb2_model().fit(
 )
 ```
 
-This specifies \(\operatorname{NB2}(e\lambda,\theta)\): heterogeneity persists
+This specifies $\operatorname{NB2}(e\lambda,\theta)$: heterogeneity persists
 as exposure grows instead of the NB2 size accumulating with exposure. Choose
 between these laws as a modeling assumption; the API does not infer one from a
 column name.
@@ -610,27 +610,27 @@ expected shortfall.
 
 ## Gaussian parameterization and scale floor
 
-For response \(y_i\),
+For response $y_i$,
 
-\[
+$$
 y_i \mid x_i \sim N(\mu_i, \sigma_i^2), \qquad
 \mu_i = \eta_{\mu i}, \qquad
 \sigma_i = b + \exp(\eta_{\sigma i}).
-\]
+$$
 
 `GaussianLS(scale_floor=b)` serializes `b` as family configuration. The floor is
 part of the model, not a post-fit clip. Consequently,
 
-\[
+$$
 \frac{\partial \sigma}{\partial \eta_\sigma}
 = \frac{\partial^2 \sigma}{\partial \eta_\sigma^2}
 = \exp(\eta_\sigma)
 = \sigma-b.
-\]
+$$
 
-A scale coefficient therefore acts on \(\log(\sigma-b)\). For example, a
+A scale coefficient therefore acts on $\log(\sigma-b)$. For example, a
 coefficient of `-0.07` means a one-unit increase multiplies the excess scale
-\(\sigma-b\) by \(\exp(-0.07)\), about `0.932`. It does not directly subtract
+$\sigma-b$ by $\exp(-0.07)$, about `0.932`. It does not directly subtract
 `0.07` from standard deviation.
 
 ## Weights and offsets
@@ -1297,34 +1297,41 @@ and the artifact schema is unchanged.
 
 ## Current limits
 
-- `TweedieLSS` and `NegativeBinomialLS` support dense and chunked observed
-  curvature, including discrete designs. Neither provides Fisher fallback;
-  an unresolved indefinite terminal observed curvature is refused.
-- `NegativeBinomialLS` has no zero-inflation component or exact Poisson active
-  face. The previously rejected large real-book NB2 example now reaches
-  configured stationarity after a finite-kernel range fix and EFS recovery
-  improvements; this does not establish a global smoothing optimum. See the [practical convergence evidence](https://github.com/StrudelDoodleS/superglm/blob/master/notes/research/2026-09-pragmatic-convergence.md)
-  for the corrected diagnosis and held-out prediction/uncertainty comparisons.
-- `GeneralizedGammaLSS`, `GeneralizedParetoLSS`, `TwoPieceLogNormalLSS` and
-  `TwoPieceNormalLSS` are certified through the generic
-  finite-difference endpoint authority, so a certified face is converged but
-  not `matched_certified`.
-- Shape constraints (`Constraint.fit.*` and `Constraint.postfit.*` on a
-  feature) are not applied on the distributional path: the smooth is fitted
-  unconstrained and `ShapeConstraintIgnoredWarning` is emitted at compile time.
-  Constrained smooths on this path are a planned feature with their own design.
-- `LogNormalLS` is certified through the generic
-  finite-difference endpoint authority, so a certified face is converged but
-  not `matched_certified`.
-- Cross-predictor penalties are not supported.
-- A scalar offset is intentionally rejected.
-- `predict()` returns Gaussian location; transformations such as a lognormal
-  original-scale mean are the caller's explicit modeling decision. `LogNormalLS`
-  is the supported way to model that directly: it fits the same likelihood on
-  `y` and returns the original-scale mean from `predict()`.
-- Dedicated higher-dimensional interaction-surface confidence-band helpers and
-  broader count LSS families are future work; the joint covariance needed for
-  downstream inference is retained.
+What a distributional model does not do yet, and what it refuses, in the
+order you are likely to meet them.
+
+- **Shape constraints are ignored.** A monotone or other shape constraint on
+  a feature (`Constraint.fit.*`, `Constraint.postfit.*`) is not applied on
+  this path: the smooth is fitted unconstrained and
+  `ShapeConstraintIgnoredWarning` says so when the model is compiled.
+  Constrained smooths here are planned, with their own design.
+- **Each predictor is penalised on its own.** A penalty cannot tie a term in
+  the mean predictor to a term in the scale predictor.
+- **Offsets are per row.** An offset is an array with one value per row,
+  given per predictor. A single constant is refused.
+- **`predict()` returns the mean on the scale you fitted.** `LogNormalLS`
+  fits `y` itself and returns the mean of `y`. A Gaussian model fitted to a
+  response you logged by hand returns the mean of the logged response;
+  turning that into a mean of `y` is your modelling decision, and
+  `LogNormalLS` is the supported way to make it.
+- **Negative binomial has no zero-inflated variant**, and its size parameter
+  cannot run to infinity to become an exact Poisson.
+- **Tweedie and negative binomial fit on exact curvature only.** Dense,
+  chunked and discrete designs all work, but these two families have no
+  Fisher approximation to fall back on: if a fit ends where the exact
+  curvature does not describe a proper maximum, it refuses rather than guess.
+- **`smoothing_certified_` reads `False` for some families even on a good
+  fit.** The flag is `True` only when every part of the convergence check was
+  analytic. Generalized gamma, generalized Pareto, the two two-piece families
+  and log-normal confirm a boundary (a term shrunk away, or left unpenalised)
+  by numerical differencing instead, so their fits converge without the
+  certificate; read `smoothing_convergence_reason_` for how the fit stopped.
+- **Automatic smoothing finds a stationary point, not a proven global
+  optimum.** Fits can depend on the start; vary `initial_lambda` when
+  comparing solutions.
+- **Not built yet:** confidence bands for interaction surfaces, and more
+  count families. The joint covariance those will need is already kept on
+  the fit.
 
 The scale predictor is not a second price. For an ordinary expected-loss tariff,
 the selected technical severity remains the conditional mean. Scale becomes

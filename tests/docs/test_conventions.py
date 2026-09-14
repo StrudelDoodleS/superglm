@@ -11,6 +11,9 @@ Pages that paste glued figures must glue every key they paste. The
 pull-request docs build runs without execution, where glue data is empty by
 design, so ``docs/conf.py`` silences ``mystnb.glue`` there; this keeps a
 mistyped key from surviving until the executed deploy build.
+
+Maths is written with dollar delimiters. MyST parses nothing else, and a
+bracket-delimited formula is published as plain text without a warning.
 """
 
 from __future__ import annotations
@@ -37,6 +40,58 @@ SKIP_EXECUTION = re.compile(r"^:tags:.*skip-execution", re.M)
 
 def executed_pages() -> list[Path]:
     return docs_pages(DOCS)
+
+
+FENCE = re.compile(r"^(\s*)(`{3,}|~{3,})(.*)$")
+CODE_DIRECTIVES = (
+    "{code-cell}",
+    "{code-block}",
+    "{code}",
+    "{literalinclude}",
+    "{eval-rst}",
+    "{raw}",
+)
+BRACKET_MATH = re.compile(r"\\[\(\[]")
+
+
+def prose_lines(text: str) -> list[tuple[int, str]]:
+    """Lines outside code fences, with inline code spans blanked out.
+
+    Fenced admonitions and other prose directives count as prose; fenced code
+    (a bare language, or a code directive) does not. Fences nest by marker.
+    """
+    kept: list[tuple[int, str]] = []
+    stack: list[tuple[str, bool]] = []
+    for number, line in enumerate(text.split("\n"), start=1):
+        fence = FENCE.match(line)
+        if fence:
+            marker, info = fence.group(2), fence.group(3).strip()
+            if stack and stack[-1][0] == marker and not info:
+                stack.pop()
+            else:
+                is_code = info.startswith(CODE_DIRECTIVES) if info.startswith("{") else True
+                stack.append((marker, is_code))
+            continue
+        if any(is_code for _, is_code in stack):
+            continue
+        kept.append((number, re.sub(r"`+[^`]*`+", "", line)))
+    return kept
+
+
+def test_maths_uses_dollar_delimiters() -> None:
+    r"""Maths is written as ``$...$`` or ``$$...$$``, never ``\(...\)`` or ``\[...\]``.
+
+    MyST parses only dollar maths. The bracket forms came from the old site's
+    arithmatex setup; Markdown eats their backslashes and the formula is
+    published as plain text, with no build warning.
+    """
+    offenders = [
+        f"{path.relative_to(DOCS)}:{number}"
+        for path in executed_pages()
+        for number, line in prose_lines(path.read_text(encoding="utf-8"))
+        if BRACKET_MATH.search(line)
+    ]
+    assert offenders == [], "bracket maths delimiters in prose:\n" + "\n".join(offenders)
 
 
 def test_no_private_attribute_access_in_executed_pages() -> None:

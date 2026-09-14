@@ -33,7 +33,7 @@ This is the easy world: quadratic objective, one global solve, no iteration.
 
 ### 1.2 WLS
 
-Then you realize observations should not contribute equally. WLS introduces a diagonal weight matrix \(\mathbf{W} = \text{diag}(w_1, \ldots, w_n)\) that controls how much each observation influences the fit.
+Then you realize observations should not contribute equally. WLS introduces a diagonal weight matrix $\mathbf{W} = \text{diag}(w_1, \ldots, w_n)$ that controls how much each observation influences the fit.
 
 ```
 # ── WLS: same as OLS but with observation weights ─────────────
@@ -41,24 +41,24 @@ Then you realize observations should not contribute equally. WLS introduces a di
 β = solve(XᵀWX, XᵀWy)          # weighted normal equations
 ```
 
-Still linear algebra, still one solve. The only change is that \(\mathbf{X}^\top\mathbf{X}\) becomes \(\mathbf{X}^\top\mathbf{W}\mathbf{X}\) and \(\mathbf{X}^\top\mathbf{y}\) becomes \(\mathbf{X}^\top\mathbf{W}\mathbf{y}\).
+Still linear algebra, still one solve. The only change is that $\mathbf{X}^\top\mathbf{X}$ becomes $\mathbf{X}^\top\mathbf{W}\mathbf{X}$ and $\mathbf{X}^\top\mathbf{y}$ becomes $\mathbf{X}^\top\mathbf{W}\mathbf{y}$.
 
 **Where do the weights come from?** Weighted-model notation is overloaded.
 Three common sources have different interpretations:
 
 | Source | Weight | Meaning |
 |--------|--------|---------|
-| Inverse-variance | \(w_i = 1 / \text{Var}(y_i)\) | More precise observations contribute more — this is the classical GLS motivation |
-| Case / frequency | \(a_i = e_i\), for a Poisson *rate* row | Observation \(i\) contributes \(e_i\) likelihood units; for fixed feature geometry, integer \(a_i\) is likelihood-level row replication, and \(\text{E}[y_i]=\lambda_i\) remains a rate |
-| IRLS working weights | \(W_i = a_i \cdot (\mathrm{d}\mu/\mathrm{d}\eta)^2 / V(\mu_i)\) | Local curvature of the GLM log-likelihood — this is the weight that makes the WLS subproblem equivalent to one Fisher-scoring step |
+| Inverse-variance | $w_i = 1 / \text{Var}(y_i)$ | More precise observations contribute more — this is the classical GLS motivation |
+| Case / frequency | $a_i = e_i$, for a Poisson *rate* row | Observation $i$ contributes $e_i$ likelihood units; for fixed feature geometry, integer $a_i$ is likelihood-level row replication, and $\text{E}[y_i]=\lambda_i$ remains a rate |
+| IRLS working weights | $W_i = a_i \cdot (\mathrm{d}\mu/\mathrm{d}\eta)^2 / V(\mu_i)$ | Local curvature of the GLM log-likelihood — this is the weight that makes the WLS subproblem equivalent to one Fisher-scoring step |
 
 In the IRLS ladder below, the third type is what appears. The weights are not fixed — they are recomputed at each iteration from the current fit. That is the whole point of "iteratively **reweighted**" least squares.
 
-For the Poisson rate encoding, exposure \(a_i=e_i\) multiplies the IRLS
+For the Poisson rate encoding, exposure $a_i=e_i$ multiplies the IRLS
 curvature, so a three-year rate row contributes three times the information of
 a one-year row. It does not multiply the conditional mean automatically. For
 a raw count response, put `log(exposure)` in the offset so that
-\(\text{E}[\text{count}_i]=e_i\lambda_i\). Whether `sample_weight` is the inverse-variance row above or a replication
+$\text{E}[\text{count}_i]=e_i\lambda_i$. Whether `sample_weight` is the inverse-variance row above or a replication
 count is declared per model by `weight_semantics`, and defaults to the former;
 see [Families & Dispersion](families-and-weights.md#weight-semantics).
 
@@ -262,7 +262,7 @@ So the nesting is not arbitrary complexity. It is the optimization structure imp
 
 ## 4. Why IRLS exists
 
-A GLM maximises a log-likelihood that is nonlinear in \(\boldsymbol{\beta}\). IRLS replaces it with a sequence of WLS problems by taking a local Fisher-scoring approximation at each iteration.
+A GLM maximises a log-likelihood that is nonlinear in $\boldsymbol{\beta}$. IRLS replaces it with a sequence of WLS problems by taking a local Fisher-scoring approximation at each iteration.
 
 The working weights encode the local curvature of the GLM likelihood:
 
@@ -276,7 +276,7 @@ $$
 z_i = \eta_i + \frac{y_i - \mu_i}{\mathrm{d}\mu_i / \mathrm{d}\eta_i}
 $$
 
-The P-IRLS update (with smoothing penalty \(\mathbf{S}\)) solves the augmented system for the intercept \(\alpha\) and coefficients \(\boldsymbol{\beta}\) simultaneously:
+The P-IRLS update (with smoothing penalty $\mathbf{S}$) solves the augmented system for the intercept $\alpha$ and coefficients $\boldsymbol{\beta}$ simultaneously:
 
 $$
 \begin{pmatrix} \sum W_i & \mathbf{1}^\top \mathbf{W} \mathbf{X} \\ \mathbf{X}^\top \mathbf{W} \mathbf{1} & \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S} \end{pmatrix} \begin{pmatrix} \alpha \\ \boldsymbol{\beta} \end{pmatrix} = \begin{pmatrix} \sum W_i z_i \\ \mathbf{X}^\top \mathbf{W} \mathbf{z} \end{pmatrix}
@@ -284,13 +284,13 @@ $$
 
 That is the whole IRLS idea. Each outer iteration does four things:
 
-1. compute \(\mathbf{W}\) and \(\mathbf{z}\) from the current fit
+1. compute $\mathbf{W}$ and $\mathbf{z}$ from the current fit
 2. solve one penalized weighted least-squares problem
-3. update \(\eta\) and \(\mu\)
+3. update $\eta$ and $\mu$
 4. stop when the deviance stabilizes
 
 So the only reason IRLS feels complicated at first is that the weights are
-endogenous. Once \(\mathbf{W}\) and \(\mathbf{z}\) are fixed, the subproblem is
+endogenous. Once $\mathbf{W}$ and $\mathbf{z}$ are fixed, the subproblem is
 just weighted least squares again.
 
 ## 5. What PIRLS means here
@@ -328,7 +328,7 @@ else:
 
 ## 6. Why an inner solver is needed
 
-For fixed \(\mathbf{W}\) and \(\mathbf{z}\), the penalized subproblem is:
+For fixed $\mathbf{W}$ and $\mathbf{z}$, the penalized subproblem is:
 
 $$
 \min_{\boldsymbol{\beta}} \; \frac{1}{2} \|\mathbf{W}^{1/2}(\mathbf{z} - \alpha\mathbf{1} - \mathbf{X}\boldsymbol{\beta})\|^2 + \frac{1}{2}\boldsymbol{\beta}^\top \mathbf{S} \boldsymbol{\beta} + P(\boldsymbol{\beta})
@@ -338,7 +338,7 @@ Now split by penalty type.
 
 ### 6.1 Smooth case: selection_penalty = 0
 
-If there is no group lasso penalty, \(P(\boldsymbol{\beta}) = 0\) and the whole objective is quadratic. The solution is a single linear system:
+If there is no group lasso penalty, $P(\boldsymbol{\beta}) = 0$ and the whole objective is quadratic. The solution is a single linear system:
 
 $$
 \boldsymbol{\beta} = (\mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S})^{-1} \mathbf{X}^\top \mathbf{W} \mathbf{z}
@@ -374,13 +374,13 @@ The repo uses this in `src/superglm/solvers/irls_direct.py`. Typical iteration c
 
 ### 6.2 Nonsmooth case: selection_penalty > 0
 
-If \(\lambda_1 > 0\), the penalty includes a group lasso term:
+If $\lambda_1 > 0$, the penalty includes a group lasso term:
 
 $$
 P(\boldsymbol{\beta}) = \lambda_1 \sum_g w_g \|\boldsymbol{\beta}_g\|_2
 $$
 
-This is not differentiable at \(\boldsymbol{\beta}_g = \mathbf{0}\) — it has a kink where entire coefficient groups hit the origin.
+This is not differentiable at $\boldsymbol{\beta}_g = \mathbf{0}$ — it has a kink where entire coefficient groups hit the origin.
 
 That means a plain Newton or Cholesky solve is no longer enough. You need a method that can handle:
 
@@ -396,26 +396,26 @@ This name sounds more complicated than the actual algorithm.
 
 For one PIRLS outer step, the code loops over coefficient groups and does:
 
-1. hold \(\mathbf{W}\) and \(\mathbf{z}\) fixed
+1. hold $\mathbf{W}$ and $\mathbf{z}$ fixed
 2. update the intercept in closed form
-3. for each group \(g\), compute the local gradient and block Hessian
+3. for each group $g$, compute the local gradient and block Hessian
 4. take a Newton step for that block
 5. apply the proximal operator of the group penalty
 6. update the residual cheaply
 
-The gradient and Hessian for group \(g\) are:
+The gradient and Hessian for group $g$ are:
 
 $$
 \nabla_g = -\mathbf{X}_g^\top \mathbf{W} \mathbf{r}, \qquad \mathbf{H}_g = \mathbf{X}_g^\top \mathbf{W} \mathbf{X}_g
 $$
 
-where \(\mathbf{r} = \mathbf{z} - \alpha\mathbf{1} - \mathbf{X}\boldsymbol{\beta}\) is the working residual. The Newton direction is \(\mathbf{d}_g = \mathbf{H}_g^{-1} \nabla_g\), and the proximal operator enforces group sparsity:
+where $\mathbf{r} = \mathbf{z} - \alpha\mathbf{1} - \mathbf{X}\boldsymbol{\beta}$ is the working residual. The Newton direction is $\mathbf{d}_g = \mathbf{H}_g^{-1} \nabla_g$, and the proximal operator enforces group sparsity:
 
 $$
 \boldsymbol{\beta}_g^{\text{new}} = \text{prox}_{\lambda_1 w_g / L_g}\!\left(\boldsymbol{\beta}_g - \mathbf{d}_g\right) = \left(1 - \frac{\lambda_1 w_g / L_g}{\|\boldsymbol{\beta}_g - \mathbf{d}_g\|_2}\right)_+ (\boldsymbol{\beta}_g - \mathbf{d}_g)
 $$
 
-where \(L_g\) is the maximum eigenvalue of \(\mathbf{H}_g\) (local Lipschitz constant).
+where $L_g$ is the maximum eigenvalue of $\mathbf{H}_g$ (local Lipschitz constant).
 
 ```
 # ── Proximal Newton BCD: one PIRLS outer step ─────────────────
@@ -452,7 +452,7 @@ The penalty is handled by its proximal operator rather than by pretending it is 
 
 ### 7.2 Newton
 
-The update uses local curvature, not just a gradient. The block Hessian \(\mathbf{H}_g\) makes this much more aggressive than a first-order proximal-gradient method.
+The update uses local curvature, not just a gradient. The block Hessian $\mathbf{H}_g$ makes this much more aggressive than a first-order proximal-gradient method.
 
 ### 7.3 BCD
 
@@ -574,33 +574,33 @@ design block.
 
 #### 9.2.3 Why this matters in practice
 
-For discretized spline groups, the expensive matrix-building work can move from repeated \(O(n)\) passes on the full basis to something much closer to:
+For discretized spline groups, the expensive matrix-building work can move from repeated $O(n)$ passes on the full basis to something much closer to:
 
-- one \(O(n)\) aggregation by bin (weighted bincounts)
-- then \(O(n_{\text{bins}} \cdot K^2)\) dense work in basis space
+- one $O(n)$ aggregation by bin (weighted bincounts)
+- then $O(n_{\text{bins}} \cdot K^2)$ dense work in basis space
 
-where \(n_{\text{bins}} \ll n\) (typically 256 bins vs 678k observations) and \(K\) is the local basis size for that group (typically 9-13).
+where $n_{\text{bins}} \ll n$ (typically 256 bins vs 678k observations) and $K$ is the local basis size for that group (typically 9-13).
 
 So discretization helps most with:
 
-- weighted Gram construction (\(\mathbf{X}_g^\top \mathbf{W} \mathbf{X}_g\))
+- weighted Gram construction ($\mathbf{X}_g^\top \mathbf{W} \mathbf{X}_g$)
 - repeated PIRLS updates
 - repeated REML objective evaluations
-- cached-\(\mathbf{W}\) continuation in the fast REML path
+- cached-$\mathbf{W}$ continuation in the fast REML path
 
 #### 9.2.4 Why the p x p solve is often still fine
 
-In many models here, \(p\) is not enormous. It is often tens or low hundreds, not millions.
+In many models here, $p$ is not enormous. It is often tens or low hundreds, not millions.
 
-That means a Cholesky or eigendecomposition of a \(p \times p\) matrix is not free, but it is often not the part that kills you.
+That means a Cholesky or eigendecomposition of a $p \times p$ matrix is not free, but it is often not the part that kills you.
 
 The real win is usually:
 
 - reduce repeated data passes
 - reduce repeated basis aggregation
-- cache weighted summaries when \(\mathbf{W}\) is unchanged
+- cache weighted summaries when $\mathbf{W}$ is unchanged
 
-That is the whole point of the discrete cached-\(\mathbf{W}\) REML path.
+That is the whole point of the discrete cached-$\mathbf{W}$ REML path.
 
 ## 10. Where REML comes in
 
@@ -612,11 +612,11 @@ That is the next big question:
 
 The inner solve does not answer that. It only answers:
 
-> for this value of \(\lambda\), what is the best coefficient vector?
+> for this value of $\lambda$, what is the best coefficient vector?
 
 REML answers the higher-level question:
 
-> which \(\lambda\) values make the smooths appropriately flexible without overfitting?
+> which $\lambda$ values make the smooths appropriately flexible without overfitting?
 
 That is why REML must be an outer loop.
 
@@ -626,15 +626,15 @@ The REML objective depends on the fitted coefficients and the local weighted geo
 
 For one candidate set of smoothing parameters, you need:
 
-1. the fitted \(\hat{\boldsymbol{\beta}}(\boldsymbol{\lambda})\)
-2. the current IRLS weights \(\mathbf{W}\)
-3. the penalized Hessian \(\mathbf{H} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}(\boldsymbol{\lambda})\)
+1. the fitted $\hat{\boldsymbol{\beta}}(\boldsymbol{\lambda})$
+2. the current IRLS weights $\mathbf{W}$
+3. the penalized Hessian $\mathbf{H} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}(\boldsymbol{\lambda})$
 
 You only get those after solving the inner GLM problem.
 
 So the nesting is inevitable:
 
-- inner fit gives you \(\hat{\boldsymbol{\beta}}\), \(\mathbf{W}\), and \(\mathbf{H}\)
+- inner fit gives you $\hat{\boldsymbol{\beta}}$, $\mathbf{W}$, and $\mathbf{H}$
 - outer REML uses those to score the smoothing parameters
 - then proposes new smoothing parameters
 - then reruns the inner fit
@@ -648,16 +648,16 @@ In this repo, `reml_laml_objective()` in `src/superglm/reml/objective.py` evalua
 This section stays intentionally short. A full REML derivation turns into a paper-sized detour;
 the main thing this guide needs is the role each term plays in the outer optimization.
 
-For a known-scale family (\(\phi = 1\), e.g. Poisson):
+For a known-scale family ($\phi = 1$, e.g. Poisson):
 
 $$
 \mathcal{V}(\boldsymbol{\rho}) = -\ell(\hat{\boldsymbol{\beta}}) + \tfrac{1}{2}\hat{\boldsymbol{\beta}}^\top \mathbf{S} \hat{\boldsymbol{\beta}} + \tfrac{1}{2}\log|\mathbf{H}| - \tfrac{1}{2}\log|\mathbf{S}|_+
 $$
 
-where \(\boldsymbol{\rho} = \log\boldsymbol{\lambda}\). For estimated-scale families (Gamma, Tweedie), a \(\phi\)-profiled version replaces the NLL with a scale-free deviance term.
+where $\boldsymbol{\rho} = \log\boldsymbol{\lambda}$. For estimated-scale families (Gamma, Tweedie), a $\phi$-profiled version replaces the NLL with a scale-free deviance term.
 
-Here \(|\mathbf{S}|_+\) means the pseudo-determinant of \(\mathbf{S}\): the product of its strictly positive eigenvalues only.
-The `+` matters because spline penalties usually have a null space, so \(\mathbf{S}\) is often rank-deficient. For example,
+Here $|\mathbf{S}|_+$ means the pseudo-determinant of $\mathbf{S}$: the product of its strictly positive eigenvalues only.
+The `+` matters because spline penalties usually have a null space, so $\mathbf{S}$ is often rank-deficient. For example,
 constant or linear directions may be left unpenalized, which gives exact zero eigenvalues that should be excluded from the
 log-determinant term. In the code, this is the same idea as `log_det_omega_plus` and `cached_logdet_s_plus(...)` in
 `src/superglm/reml/penalty_algebra.py`.
@@ -666,28 +666,28 @@ The four terms:
 
 | Term | Meaning |
 |------|---------|
-| \(-\ell(\hat{\boldsymbol{\beta}})\) | Fit the data (negative log-likelihood) |
-| \(\hat{\boldsymbol{\beta}}^\top \mathbf{S} \hat{\boldsymbol{\beta}}\) | Penalize wiggliness |
-| \(\log|\mathbf{H}|\) | Account for posterior concentration (Laplace correction) |
-| \(-\log|\mathbf{S}|_+\) | Adjust for penalty scale using only penalized directions |
+| $-\ell(\hat{\boldsymbol{\beta}})$ | Fit the data (negative log-likelihood) |
+| $\hat{\boldsymbol{\beta}}^\top \mathbf{S} \hat{\boldsymbol{\beta}}$ | Penalize wiggliness |
+| $\log\vert\mathbf{H}\vert$ | Account for posterior concentration (Laplace correction) |
+| $-\log\vert\mathbf{S}\vert_+$ | Adjust for penalty scale using only penalized directions |
 
-REML is not "just another regularizer". It is an empirical-Bayes criterion for picking the smoothness parameters — it integrates out \(\boldsymbol{\beta}\) via a Laplace approximation and optimizes the resulting marginal likelihood.
+REML is not "just another regularizer". It is an empirical-Bayes criterion for picking the smoothness parameters — it integrates out $\boldsymbol{\beta}$ via a Laplace approximation and optimizes the resulting marginal likelihood.
 
 ### 12.1 REML gradient and Hessian
 
-The partial gradient with respect to \(\rho_j = \log\lambda_j\) at fixed \(\mathbf{W}\) is:
+The partial gradient with respect to $\rho_j = \log\lambda_j$ at fixed $\mathbf{W}$ is:
 
 $$
 \frac{\partial \mathcal{V}}{\partial \rho_j} = \frac{1}{2}\left(\lambda_j \left(\frac{1}{\phi}\hat{\boldsymbol{\beta}}_g^\top \boldsymbol{\Omega}_g \hat{\boldsymbol{\beta}}_g + \text{tr}(\mathbf{H}^{-1}_{[g,g]} \boldsymbol{\Omega}_g)\right) - r_g\right)
 $$
 
-where \(\boldsymbol{\Omega}_g\) is the penalty basis for group \(g\) and \(r_g\) is the penalty rank. Setting the gradient to zero gives the Fellner-Schall fixed-point update:
+where $\boldsymbol{\Omega}_g$ is the penalty basis for group $g$ and $r_g$ is the penalty rank. Setting the gradient to zero gives the Fellner-Schall fixed-point update:
 
 $$
 \lambda_j^{\text{new}} = \frac{r_g}{\frac{1}{\phi}\hat{\boldsymbol{\beta}}_g^\top \boldsymbol{\Omega}_g \hat{\boldsymbol{\beta}}_g + \text{tr}(\mathbf{H}^{-1}_{[g,g]} \boldsymbol{\Omega}_g)}
 $$
 
-The numerator is the penalty rank (degrees of freedom available). The denominator balances the current coefficient energy (\(\hat{\boldsymbol{\beta}}\) term) against the posterior uncertainty (trace term). When the signal is strong, the \(\hat{\boldsymbol{\beta}}\) term dominates and \(\lambda\) stays small. When the signal is weak, the trace dominates and \(\lambda\) grows large.
+The numerator is the penalty rank (degrees of freedom available). The denominator balances the current coefficient energy ($\hat{\boldsymbol{\beta}}$ term) against the posterior uncertainty (trace term). When the signal is strong, the $\hat{\boldsymbol{\beta}}$ term dominates and $\lambda$ stays small. When the signal is weak, the trace dominates and $\lambda$ grows large.
 
 For the Newton path, the Hessian is:
 
@@ -695,13 +695,13 @@ $$
 \frac{\partial^2 \mathcal{V}}{\partial \rho_i \partial \rho_j} = -\frac{1}{2}\text{tr}(\mathbf{H}^{-1}\mathbf{S}_i \mathbf{H}^{-1}\mathbf{S}_j) + [\text{diagonal correction}]
 $$
 
-with an optional first-order \(W(\boldsymbol{\rho})\) correction that accounts for \(\mathrm{d}\mathbf{W}/\mathrm{d}\boldsymbol{\rho}\) via the implicit function theorem.
+with an optional first-order $W(\boldsymbol{\rho})$ correction that accounts for $\mathrm{d}\mathbf{W}/\mathrm{d}\boldsymbol{\rho}$ via the implicit function theorem.
 
 ## 13. The three REML paths in this repo
 
 ### 13.1 Direct REML (Newton)
 
-When `selection_penalty = 0`, the inner problem is smooth. The repo uses direct IRLS plus a damped Newton outer loop on \(\boldsymbol{\rho} = \log\boldsymbol{\lambda}\), with Armijo line search.
+When `selection_penalty = 0`, the inner problem is smooth. The repo uses direct IRLS plus a damped Newton outer loop on $\boldsymbol{\rho} = \log\boldsymbol{\lambda}$, with Armijo line search.
 
 That is `optimize_direct_reml()`.
 
@@ -742,15 +742,15 @@ for iter in 1, 2, ..., max_reml_iter:
     if |projected ∇| < tol: break
 ```
 
-This is the cleanest path mathematically. The \(W(\boldsymbol{\rho})\) correction (enabled after warmup) accounts for the fact that changing \(\boldsymbol{\lambda}\) changes \(\hat{\boldsymbol{\beta}}\), which changes \(\boldsymbol{\mu}\), which changes \(\mathbf{W}\).
+This is the cleanest path mathematically. The $W(\boldsymbol{\rho})$ correction (enabled after warmup) accounts for the fact that changing $\boldsymbol{\lambda}$ changes $\hat{\boldsymbol{\beta}}$, which changes $\boldsymbol{\mu}$, which changes $\mathbf{W}$.
 
 In this repo: `src/superglm/reml/direct.py::optimize_direct_reml`.
 
 ### 13.2 Discrete cached-W REML (fREML)
 
-When `discrete=True`, the expensive part is repeatedly rebuilding \(\mathbf{X}^\top \mathbf{W} \mathbf{X}\) from \(n\) observations.
+When `discrete=True`, the expensive part is repeatedly rebuilding $\mathbf{X}^\top \mathbf{W} \mathbf{X}$ from $n$ observations.
 
-So the repo caches the weighted summaries after each IRLS convergence and does multiple analytical \(\boldsymbol{\lambda}\) updates before refreshing \(\mathbf{W}\):
+So the repo caches the weighted summaries after each IRLS convergence and does multiple analytical $\boldsymbol{\lambda}$ updates before refreshing $\mathbf{W}$:
 
 ```
 # ── Cached-W fREML: minimize data passes ──────────────────────
@@ -786,8 +786,8 @@ for w_iter in 1, 2, ...:
 
 The mental model is:
 
-- if \(\mathbf{W}\) changes, the local geometry changed and you need fresh weighted summaries (expensive)
-- if only \(\mathbf{S}(\boldsymbol{\lambda})\) changes, you can reuse the same weighted geometry and do cheap \(p \times p\) algebra (free)
+- if $\mathbf{W}$ changes, the local geometry changed and you need fresh weighted summaries (expensive)
+- if only $\mathbf{S}(\boldsymbol{\lambda})$ changes, you can reuse the same weighted geometry and do cheap $p \times p$ algebra (free)
 
 In this repo: `src/superglm/reml/discrete.py::optimize_discrete_reml_cached_w`.
 
@@ -797,7 +797,7 @@ When `selection_penalty > 0`, the inner fit uses BCD and the active set can chan
 
 That is `optimize_efs_reml()`.
 
-This Anderson step is internal to the EFS log-\(\lambda\) update. It is not a
+This Anderson step is internal to the EFS log-$\lambda$ update. It is not a
 separate user-tunable acceleration setting on the PIRLS solver.
 
 ```
@@ -911,38 +911,38 @@ This section is about the parts that often feel "agent-generated" or hard to par
 
 ### 17.1 Cached W: what is actually being cached?
 
-The cached-\(\mathbf{W}\) idea in the fast REML path is simpler than it looks.
+The cached-$\mathbf{W}$ idea in the fast REML path is simpler than it looks.
 
-For one fixed set of IRLS weights \(\mathbf{W}\), the coefficient problem only depends on the data through a few weighted summaries:
+For one fixed set of IRLS weights $\mathbf{W}$, the coefficient problem only depends on the data through a few weighted summaries:
 
 | Cached quantity | Size | Cost to build |
 |---|---|---|
-| \(\mathbf{X}^\top \mathbf{W} \mathbf{X}\) | \(p \times p\) | \(O(n \cdot p^2)\) or \(O(n_{\text{bins}} \cdot K^2)\) |
-| \(\mathbf{X}^\top \mathbf{W} \mathbf{z}\) | \(p\) | \(O(n \cdot p)\) |
-| \(\mathbf{X}^\top \mathbf{W} \mathbf{1}\) | \(p\) | \(O(n \cdot p)\) |
-| \(\sum W_i\) | scalar | \(O(n)\) |
-| \(\sum W_i z_i\) | scalar | \(O(n)\) |
+| $\mathbf{X}^\top \mathbf{W} \mathbf{X}$ | $p \times p$ | $O(n \cdot p^2)$ or $O(n_{\text{bins}} \cdot K^2)$ |
+| $\mathbf{X}^\top \mathbf{W} \mathbf{z}$ | $p$ | $O(n \cdot p)$ |
+| $\mathbf{X}^\top \mathbf{W} \mathbf{1}$ | $p$ | $O(n \cdot p)$ |
+| $\sum W_i$ | scalar | $O(n)$ |
+| $\sum W_i z_i$ | scalar | $O(n)$ |
 
 Those are exactly the quantities saved out of `fit_irls_direct()` for reuse.
 
-Once you have them, changing the smoothing penalty only changes the penalty matrix \(\mathbf{S}(\boldsymbol{\lambda})\). It does **not** force you to revisit all \(n\) observations immediately.
+Once you have them, changing the smoothing penalty only changes the penalty matrix $\mathbf{S}(\boldsymbol{\lambda})$. It does **not** force you to revisit all $n$ observations immediately.
 
-So with fixed \(\mathbf{W}\), the augmented system is just:
+So with fixed $\mathbf{W}$, the augmented system is just:
 
 $$
 \begin{pmatrix} \sum W_i & \mathbf{X}^\top \mathbf{W} \mathbf{1} \\ \mathbf{X}^\top \mathbf{W} \mathbf{1} & \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}(\boldsymbol{\lambda}) \end{pmatrix} \begin{pmatrix} \alpha \\ \boldsymbol{\beta} \end{pmatrix} = \begin{pmatrix} \sum W_i z_i \\ \mathbf{X}^\top \mathbf{W} \mathbf{z} \end{pmatrix}
 $$
 
-That means you can try new lambdas by doing one \(O(p^3)\) Cholesky solve on cached summaries, instead of rebuilding all weighted summaries from scratch at \(O(n)\) cost.
+That means you can try new lambdas by doing one $O(p^3)$ Cholesky solve on cached summaries, instead of rebuilding all weighted summaries from scratch at $O(n)$ cost.
 
 #### 17.1.1 When is that cache valid?
 
-Only while \(\mathbf{W}\) is effectively unchanged.
+Only while $\mathbf{W}$ is effectively unchanged.
 
 That is why the fast REML path alternates between:
 
-- expensive IRLS refreshes, which update \(\mathbf{W}\) (\(O(n)\) per iteration)
-- cheap analytical continuation steps, which keep \(\mathbf{W}\) fixed and only change \(\mathbf{S}(\boldsymbol{\lambda})\) (\(O(p^3)\) per step)
+- expensive IRLS refreshes, which update $\mathbf{W}$ ($O(n)$ per iteration)
+- cheap analytical continuation steps, which keep $\mathbf{W}$ fixed and only change $\mathbf{S}(\boldsymbol{\lambda})$ ($O(p^3)$ per step)
 
 The cache is not magic. It is just:
 
@@ -973,7 +973,7 @@ $$
 \mathbf{A} = \begin{pmatrix} \mathbf{W}^{1/2} \mathbf{X}_a \\ \mathbf{S}^{1/2} \end{pmatrix}
 $$
 
-so that \(\mathbf{A}^\top \mathbf{A} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}\). Then a reduced QR decomposition gives \(\mathbf{A} = \mathbf{Q}\mathbf{R}\), which implies:
+so that $\mathbf{A}^\top \mathbf{A} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}$. Then a reduced QR decomposition gives $\mathbf{A} = \mathbf{Q}\mathbf{R}$, which implies:
 
 $$
 \mathbf{R}^\top \mathbf{R} = \mathbf{A}^\top \mathbf{A} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S}
@@ -981,7 +981,7 @@ $$
 
 So QR is being used as a numerically stable way to factor the penalized normal equations when computing:
 
-- coefficient covariance: \(\hat{\phi} \cdot (\mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S})^{-1}\)
+- coefficient covariance: $\hat{\phi} \cdot (\mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{S})^{-1}$
 - leverage and effective degrees of freedom
 - inference summaries (SEs, Wood smooth tests)
 
