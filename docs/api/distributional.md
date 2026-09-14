@@ -24,32 +24,33 @@ each with its own page.
 :gutter: 2
 
 :::{grid-item-card} 1 · Declare
-:link: "#declare-and-fit"
-:link-type: url
+:link: lss-declarations
+:link-type: ref
 A family, then one predictor per parameter.
 :::
 :::{grid-item-card} 2 · Fit
-:link: "#declare-and-fit"
-:link-type: url
+:link: lss-declare-and-fit
+:link-type: ref
 `fit_reml` estimates smoothing jointly; `fit` holds it fixed.
 :::
 :::{grid-item-card} 3 · Predict
-:link: "#predict"
-:link-type: url
+:link: lss-predict
+:link-type: ref
 Means, every parameter, quantiles, simulated draws.
 :::
 :::{grid-item-card} 4 · Check
-:link: "#check-the-fit"
-:link-type: url
+:link: lss-check-the-fit
+:link-type: ref
 Residuals, binned moments, calibration, scores.
 :::
 :::{grid-item-card} 5 · Price
-:link: "#price-and-portfolio-views"
-:link-type: url
+:link: lss-price
+:link-type: ref
 Risk curves, density fans, the book total.
 :::
 ::::
 
+(lss-declare-and-fit)=
 ## Declare and fit
 
 Construct the model with a family and one declaration per family parameter,
@@ -58,8 +59,9 @@ fits the coefficients and estimates the smoothing parameters jointly, by
 generalised Fellner-Schall updates with optional Newton refinement, and is the
 normal path; {py:meth}`~superglm.SuperLSS.fit` holds the smoothing parameters
 fixed at the `lambdas` you pass. {py:meth}`~superglm.SuperLSS.diagnose`
-explains how the fit ran and how smoothing stopped: phase timings, iteration
-and refit counts, and the terminal state of every smoothing component.
+returns a {py:class}`~superglm.FitDiagnosticReport` that explains how the fit
+ran and how smoothing stopped: phase timings, iteration and refit counts, and
+the terminal state of every smoothing component.
 {py:attr}`~superglm.SuperLSS.predictors` and {py:attr}`~superglm.SuperLSS.family`
 echo the declaration as independent copies. The
 [how-to on fitting a distributional model](../how-to/fit-a-distributional-model.md)
@@ -77,10 +79,20 @@ covers the declaration syntax.
    ~superglm.SuperLSS.family
 ```
 
+```{eval-rst}
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   superglm.FitDiagnosticReport
+```
+
+(lss-predict)=
 ## Predict
 
 {py:meth}`~superglm.SuperLSS.predict` returns the conditional mean per row on
-the response scale the model was fitted to.
+the response scale the model was fitted to, for a built-in family; a custom
+family defines its own default prediction quantity.
 {py:meth}`~superglm.SuperLSS.predict_parameters` returns every fitted
 parameter on its natural scale, one column per name in
 {py:attr}`~superglm.SuperLSS.parameter_names_`, and
@@ -145,9 +157,10 @@ and {py:attr}`~superglm.SuperLSS.parameter_names_` the fit resolved.
    ~superglm.SuperLSS.smoothing_parameters_
 ```
 
+(lss-check-the-fit)=
 ## Check the fit
 
-Every check is built on {py:meth}`~superglm.SuperLSS.residuals`: the
+The residual checks start from {py:meth}`~superglm.SuperLSS.residuals`: the
 probability-integral transform of each row under its fitted law, or its
 normal inverse, which a correct family makes uniform or standard normal;
 {py:meth}`~superglm.SuperLSS.residual_set` is the full payload the residual
@@ -180,6 +193,7 @@ reads each of these in turn.
    ~superglm.SuperLSS.compare
 ```
 
+(lss-price)=
 ## Price and portfolio views
 
 {py:meth}`~superglm.SuperLSS.risk_curves` sweeps one covariate and returns
@@ -187,7 +201,8 @@ predicted response quantiles with posterior bands drawn from one shared draw
 set, so the curves are coherent with one another;
 {py:meth}`~superglm.SuperLSS.density_fan` is the same sweep but returns the
 whole conditional density at each point, the picture that shows a shape
-change. {py:meth}`~superglm.SuperLSS.parameter_spread` shows how far the
+change; it supports continuous families only, and families with atoms
+refuse. {py:meth}`~superglm.SuperLSS.parameter_spread` shows how far the
 fitted parameters spread across rows and, among identically priced rows, how
 far the tail probability does. {py:meth}`~superglm.SuperLSS.portfolio`
 simulates the total over a book of rows, optionally by segment, carrying the
@@ -231,11 +246,12 @@ After {py:meth}`~superglm.SuperLSS.fit_reml`,
 {py:attr}`~superglm.SuperLSS.smoothing_certified_` says whether the fit met
 strict matched certification and
 {py:attr}`~superglm.SuperLSS.smoothing_convergence_reason_` how automatic
-smoothing stopped; both are `None` for a fixed fit.
+smoothing stopped, and
 {py:attr}`~superglm.SuperLSS.smoothing_unresolved_upper_bound_` lists the
-smoothing components with unresolved pressure at the finite cap, and
-{py:attr}`~superglm.SuperLSS.exact_face_components_` those accepted at the
-exact infinity face. {py:attr}`~superglm.SuperLSS.coefficient_curvature`
+smoothing components with unresolved pressure at the finite cap; all three
+are `None` for a fixed fit.
+{py:attr}`~superglm.SuperLSS.exact_face_components_` always returns a tuple,
+the components accepted at the exact infinity face. {py:attr}`~superglm.SuperLSS.coefficient_curvature`
 reports which curvature the coefficient solve was asked to use, observed or
 Fisher, and {py:meth}`~superglm.SuperLSS.training_telemetry` returns the
 immutable audit metadata for the accepted fit.
@@ -294,6 +310,7 @@ what a `sample_weight` entry means, how precisely a row was measured
    ~superglm.SuperLSS.weight_semantics
 ```
 
+(lss-declarations)=
 ## Declarations and families
 
 Inside a predictor, {py:func}`~superglm.s` declares a smooth of one numeric

@@ -23,37 +23,40 @@ the group, each with its own page.
 :gutter: 2
 
 :::{grid-item-card} 1 · Build
-:link: "#configuration-and-fitted-attributes"
-:link-type: url
+:link: generated/superglm.SuperGLM
+:link-type: doc
 A family, a feature spec, a penalty policy.
 :::
 :::{grid-item-card} 2 · Fit
-:link: "#fit"
-:link-type: url
+:link: model-fit
+:link-type: ref
 `fit_reml` for REML; `fit` for a fixed penalty.
 :::
 :::{grid-item-card} 3 · Read the fit
-:link: "#read-the-fit"
-:link-type: url
+:link: model-read-the-fit
+:link-type: ref
 Summary, per-term curves, diagnostics.
 :::
 :::{grid-item-card} 4 · Predict
-:link: "#predict"
-:link-type: url
+:link: model-predict
+:link-type: ref
 Means, relativities, reconstructed effects.
 :::
 :::{grid-item-card} 5 · Deploy
-:link: "#export-for-deployment"
-:link-type: url
+:link: model-export
+:link-type: ref
 Rating tables and the payload behind them.
 :::
 ::::
 
+(model-fit)=
 ## Fit
 
 {py:meth}`~superglm.SuperGLM.fit_reml` is the normal path: it estimates a
 smoothing parameter for every penalised term by optimising a Laplace
-approximate REML objective, and it does not accept a selection penalty.
+approximate REML objective, except terms whose
+{py:class}`~superglm.LambdaPolicy` pins the value, and it does not accept a
+selection penalty.
 {py:meth}`~superglm.SuperGLM.fit` holds the smoothing parameters fixed at the
 configured `spline_penalty` and is the path for sparse and group selection;
 {py:meth}`~superglm.SuperGLM.fit_path` walks a regularisation path from
@@ -84,13 +87,15 @@ which to use when.
    ~superglm.SuperGLM.clone_unfitted
 ```
 
+(model-predict)=
 ## Predict
 
 {py:meth}`~superglm.SuperGLM.predict` returns the mean on the response scale
 for new rows, with an optional offset and a choice of conditional or
 population random effects. {py:meth}`~superglm.SuperGLM.relativities` returns
 plot-ready relativity tables for every feature, the multiplicative form a
-rating engine wants; {py:meth}`~superglm.SuperGLM.reconstruct_feature` returns
+rating engine wants from a log-link model (under other links they are
+exponentiated link-scale contributions, not factors of the mean); {py:meth}`~superglm.SuperGLM.reconstruct_feature` returns
 one feature's fitted curve or effect on its original scale.
 
 ```{eval-rst}
@@ -103,6 +108,7 @@ one feature's fitted curve or effect on its original scale.
    ~superglm.SuperGLM.reconstruct_feature
 ```
 
+(model-read-the-fit)=
 ## Read the fit
 
 Start with {py:meth}`~superglm.SuperGLM.summary`, the statsmodels-style
@@ -145,7 +151,7 @@ and fitted.
 
 {py:meth}`~superglm.SuperGLM.plot` is the single entry point for drawing
 terms: all main effects, one, a subset, or an interaction, with pointwise or
-simultaneous bands. {py:meth}`~superglm.SuperGLM.plot_data` returns the plain
+simultaneous bands on the main effects. {py:meth}`~superglm.SuperGLM.plot_data` returns the plain
 DataFrames, arrays and metadata behind those figures so you can rebuild them
 in matplotlib, plotly, Excel or a reporting system.
 {py:meth}`~superglm.SuperGLM.plot_diagnostics` is the four-panel residual
@@ -168,10 +174,11 @@ programmatic and audit access. {py:meth}`~superglm.SuperGLM.spline_redundancy`
 reports knot spacing, basis correlation and effective rank, and
 {py:meth}`~superglm.SuperGLM.discretization_impact` measures what binning the
 smooth terms into rating-table bins and grids does to the predictions.
-{py:meth}`~superglm.SuperGLM.iteration_diagnostics` (available after
-`fit(record_diagnostics=True)`), {py:meth}`~superglm.SuperGLM.reml_diagnostics`
-and {py:meth}`~superglm.SuperGLM.training_telemetry` are the solver's own
-records: plain JSON-serialisable objects with no tracking dependency, ready
+{py:meth}`~superglm.SuperGLM.iteration_diagnostics` is the per-iteration IRLS
+table, a DataFrame available after `fit(record_diagnostics=True)`;
+{py:meth}`~superglm.SuperGLM.reml_diagnostics` and
+{py:meth}`~superglm.SuperGLM.training_telemetry` are the solver's own records
+as plain JSON-serialisable dictionaries with no tracking dependency, ready
 for MLflow, files, logs or a governance system.
 
 ```{eval-rst}
@@ -227,6 +234,7 @@ reading the `z` and `kind` columns.
    ~superglm.SuperGLM.screen_interactions
 ```
 
+(model-export)=
 ## Export for deployment
 
 {py:meth}`~superglm.SuperGLM.export_rating_tables` writes the deployment
@@ -248,10 +256,13 @@ shows the export end to end.
 ## Configuration and fitted attributes
 
 {py:attr}`~superglm.SuperGLM.family`, {py:attr}`~superglm.SuperGLM.link`,
-{py:attr}`~superglm.SuperGLM.features`, {py:attr}`~superglm.SuperGLM.penalty`,
-{py:attr}`~superglm.SuperGLM.lambda2` and
-{py:attr}`~superglm.SuperGLM.selection_penalty` echo the configuration you
-passed. The trailing-underscore attributes follow the scikit-learn convention
+{py:attr}`~superglm.SuperGLM.penalty` and
+{py:attr}`~superglm.SuperGLM.selection_penalty` hold the configuration and
+can be assigned to change it before the next fit;
+{py:attr}`~superglm.SuperGLM.lambda2` is the fixed smoothing penalty the
+constructor takes as `spline_penalty`, assignable the same way; and
+{py:attr}`~superglm.SuperGLM.features` is read-only. The trailing-underscore
+attributes follow the scikit-learn convention
 and are resolved by the latest successful fit:
 {py:attr}`~superglm.SuperGLM.selection_penalty_`,
 {py:attr}`~superglm.SuperGLM.distribution_` and
@@ -279,11 +290,12 @@ and are resolved by the latest successful fit:
 {py:meth}`~superglm.SuperGLM.fit_path` returns, and
 {py:class}`~superglm.REMLResult` the record of the smoothing-parameter
 estimation behind {py:meth}`~superglm.SuperGLM.fit_reml`.
-{py:class}`~superglm.LambdaPolicy` controls one penalty component's smoothing
-parameter, estimated by REML or held fixed; {py:func}`~superglm.warmup`
-compiles the optional fitting kernels before the first fit.
-{py:class}`~superglm.ModelSummary`, {py:class}`~superglm.ModelMetrics`,
-{py:class}`~superglm.FitDiagnosticReport` and
+Two entries here are inputs rather than results:
+{py:class}`~superglm.LambdaPolicy`, passed to a term as `lambda_policy=`,
+controls one penalty component's smoothing parameter, estimated by REML or
+held fixed, and {py:func}`~superglm.warmup` compiles the optional fitting
+kernels before the first fit.
+{py:class}`~superglm.ModelSummary`, {py:class}`~superglm.ModelMetrics` and
 {py:class}`~superglm.DiscretizationResult` are what the reading and diagnosing
 methods return, and {py:func}`~superglm.discretization_impact` is the
 function form of the method of the same name.
@@ -299,7 +311,6 @@ function form of the method of the same name.
    superglm.warmup
    superglm.ModelSummary
    superglm.ModelMetrics
-   superglm.FitDiagnosticReport
    superglm.DiscretizationResult
    superglm.discretization_impact
 ```

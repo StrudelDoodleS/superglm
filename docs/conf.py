@@ -219,6 +219,13 @@ if html_theme == "pydata_sphinx_theme":
         "navbar_align": "left",
         "header_links_before_dropdown": 8,
         "show_toc_level": 2,
+        # Depth 1 keeps the autosummary-generated member pages out of the
+        # reference sidebar: they are children of api/model's and
+        # api/distributional's own toctrees, so any deeper setting lists all
+        # 233 of them, and html_sidebars cannot prune entries from a sidebar.
+        # The cost is site-wide: second-level pages under Development >
+        # Internals and under Examples leave the sidebar too; both remain
+        # listed on their own index pages.
         "navigation_depth": 1,
         "use_edit_page_button": False,
         "footer_start": ["copyright"],
