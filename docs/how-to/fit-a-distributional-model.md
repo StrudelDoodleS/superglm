@@ -1328,9 +1328,11 @@ order you are likely to meet them.
   its null space voids it whatever the family. Read
   `smoothing_convergence_reason_`, `exact_face_components_` and
   `smoothing_unresolved_upper_bound_` before reading anything into `False`.
-- **Automatic smoothing finds a stationary point, not a proven global
-  optimum.** Fits can depend on the start; vary `initial_lambda` when
-  comparing solutions.
+- **Automatic smoothing aims at a stationary point, not a proven global
+  optimum**, and under the default `practical_reml=True` it may stop
+  earlier, on a practical plateau, with the smoothing residual still above
+  the stationarity tolerance. Fits can depend on the start; vary
+  `initial_lambda` when comparing solutions.
 - **Not built yet:** confidence bands for interaction surfaces, and more
   count families. The joint covariance those will need is already kept on
   the fit.

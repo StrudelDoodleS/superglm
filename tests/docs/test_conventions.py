@@ -60,8 +60,10 @@ def prose_lines(text: str) -> list[tuple[int, str]]:
 
     Fenced admonitions and other prose directives count as prose; fenced code
     (a bare language, or a code directive) does not. Backtick, tilde and colon
-    fences nest; a fence closes on a bare marker of the same character at
-    least as long as the one that opened it, as CommonMark allows.
+    fences nest inside prose directives; a fence closes on a bare marker of
+    the same character at least as long as the one that opened it, as
+    CommonMark allows, and inside a code fence every other fence-looking line
+    is content.
     """
     kept: list[tuple[int, str]] = []
     stack: list[tuple[str, bool]] = []
@@ -77,6 +79,8 @@ def prose_lines(text: str) -> list[tuple[int, str]]:
             )
             if closes:
                 stack.pop()
+            elif stack and stack[-1][1]:
+                pass  # inside a code fence: a foreign marker is code content
             else:
                 is_code = info.startswith(CODE_DIRECTIVES) if info.startswith("{") else True
                 stack.append((marker, is_code))
