@@ -24,8 +24,12 @@ DOCS = Path(__file__).resolve().parents[2] / "docs"
 CODE_CELL = re.compile(r"```\{code-cell\}[^\n]*\n(.*?)```", re.S)
 PRIVATE_ACCESS = re.compile(r"[\w\)\]]\._(?!_)[A-Za-z]\w*")
 GLUE_CALL = re.compile(r"\bglue\(\s*[\"']([^\"']+)[\"']")
-# ```{glue:figure} key ... directives and {glue:text}`key` roles (any glue variant).
-GLUE_PASTE = re.compile(r"^```\{glue(?::\w+)?\}\s+(\S+)|\{glue(?::\w+)?\}`([^`:]+)", re.M)
+# A {glue:figure} / {glue:any} directive on a backtick or colon fence of any
+# width, or a {glue:text}`key` role (with or without a :format suffix).
+GLUE_PASTE = re.compile(
+    r"^(?:`{3,}|:{3,})\{glue(?::\w+)?\}\s+(\S+)|\{glue(?::\w+)?\}`([^`:]+)", re.M
+)
+SKIP_EXECUTION = re.compile(r"^:tags:.*skip-execution", re.M)
 
 
 def executed_pages() -> list[Path]:
@@ -46,18 +50,21 @@ def test_no_private_attribute_access_in_executed_pages() -> None:
 
 
 def test_glue_pastes_are_glued_on_the_same_page() -> None:
-    """Every ``glue:`` paste names a key that a code cell on the same page glues.
+    """Every ``glue:`` paste names a key that an executed cell on the same page glues.
 
     The pull-request build cannot check this itself: it runs with execution off,
     so every glue lookup is empty there and ``docs/conf.py`` suppresses the
     warning in that mode. Without this test a mistyped key would first fail in
-    the executed deploy build, after the merge.
+    the executed deploy build, after the merge. Only code cells that run count
+    as gluing: a call quoted in prose or sitting in a ``skip-execution`` cell
+    never populates the glue store.
     """
     missing: list[str] = []
     pasted = 0
     for path in executed_pages():
         text = path.read_text(encoding="utf-8")
-        glued = set(GLUE_CALL.findall(text))
+        executed_cells = [c for c in CODE_CELL.findall(text) if not SKIP_EXECUTION.search(c)]
+        glued = {key for cell in executed_cells for key in GLUE_CALL.findall(cell)}
         for match in GLUE_PASTE.finditer(text):
             pasted += 1
             key = match.group(1) or match.group(2)
@@ -65,6 +72,34 @@ def test_glue_pastes_are_glued_on_the_same_page() -> None:
                 missing.append(f"{path.relative_to(DOCS)}: {key}")
     assert pasted, "no glue pastes found; GLUE_PASTE no longer matches the pages"
     assert missing == [], "glue pastes without a glue call on their page:\n" + "\n".join(missing)
+
+
+def is_myst_notebook(text: str) -> bool:
+    """The rule ``tests/docs/test_notebooks.py`` uses to pick pages to execute."""
+    head = text[:600]
+    return head.startswith("---") and "format_name: myst" in head
+
+
+def test_pages_with_code_cells_are_myst_notebooks() -> None:
+    """Sphinx and the notebook test must agree on which pages execute.
+
+    The Sphinx build executes any page that holds a ``{code-cell}``; the
+    notebook test executes the pages whose front matter names the MyST format.
+    A page with cells but no front matter would run on the deploy build and
+    never in the tests, so the two rules must select the same files.
+    """
+    mismatched: list[str] = []
+    for path in executed_pages():
+        text = path.read_text(encoding="utf-8")
+        has_cells = "```{code-cell}" in text
+        if has_cells != is_myst_notebook(text):
+            mismatched.append(
+                f"{path.relative_to(DOCS)}: code cells={has_cells}, "
+                f"notebook front matter={not has_cells}"
+            )
+    assert mismatched == [], "pages Sphinx and the notebook test disagree on:\n" + "\n".join(
+        mismatched
+    )
 
 
 EXAMPLE_DIRS = {"SuperGLM": DOCS / "api" / "model", "SuperLSS": DOCS / "api" / "distributional"}

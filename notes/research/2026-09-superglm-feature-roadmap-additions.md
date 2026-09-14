@@ -54,7 +54,7 @@ The first several are more consequential than adding another generic optimizer.
 
 Generalize SuperGLM from "assemble a penalized Hessian, then factorize it" to an **operator backend** that can solve Newton/Fisher systems and smoothing trace problems without materializing the full $p\times p$ matrix.
 
-This is not completely new territory inside the repository: the existing [SCOP performance prototype blueprint](../guide/scop-performance-prototype.md#phase-3-controlled-approximation) already lists inexact Newton solves, matrix-free `H @ v`, block preconditioners, and exact fallback as staged targets. C15 is the proposal to turn that idea into a general scalar/LSS backend and add the smoothing-criterion machinery needed for production REML/EFS.
+This is not completely new territory inside the repository: the existing [SCOP performance prototype blueprint](../audit/scop-performance-prototype.md#phase-3-controlled-approximation) already lists inexact Newton solves, matrix-free `H @ v`, block preconditioners, and exact fallback as staged targets. C15 is the proposal to turn that idea into a general scalar/LSS backend and add the smoothing-criterion machinery needed for production REML/EFS.
 
 ### Core algebra
 

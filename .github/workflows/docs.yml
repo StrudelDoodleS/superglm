@@ -45,9 +45,11 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: docs/_build/.jupyter_cache
-          # The key carries the library source: a cached render is only valid
-          # for the build that produced it, so any source change re-executes.
-          key: docs-notebooks-${{ hashFiles('docs/tutorials/**', 'docs/how-to/**', 'docs/explanation/**', 'src/**', 'uv.lock') }}
+          # The key carries every input that shapes an executed output: the
+          # pages, the library source and lockfile, and the plot style the
+          # pages load at run time. A cached render is only valid for the
+          # build that produced it, so a change to any of them re-executes.
+          key: docs-notebooks-${{ hashFiles('docs/tutorials/**', 'docs/explanation/**', 'docs/api/**', 'docs/_static/superglm.mplstyle', 'src/**', 'uv.lock') }}
 
       - name: Build with execution
         env:

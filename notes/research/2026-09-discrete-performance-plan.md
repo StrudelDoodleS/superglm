@@ -7,7 +7,7 @@ model fit completes in 152.498 s at 11.055 GB peak process RSS with convergence;
 see the [model receipt](https://github.com/StrudelDoodleS/superglm/blob/fix/lss-convergence-repair/benchmarks/c1_current_10m_receipt.json).
 The 12.5-second target remains unmet. Historical plans and measurements below
 are retained, but do not override the current
-[closeout specification](../superpowers/specs/2026-09-11-c1-closeout.md).
+[closeout specification](../../docs/superpowers/specs/2026-09-11-c1-closeout.md).
 
 ## Closing checkpoint: 15 seconds confirmed; 12.5 seconds open
 

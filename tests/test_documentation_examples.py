@@ -53,10 +53,13 @@ class _PythonBlock:
         return f"{self.path.relative_to(_ROOT)}#python-{self.index}-line-{self.line}"
 
 
-# Every how-to and explanation page is covered by default, plus the editor
-# tutorial. A page whose Python blocks cannot run as published is listed in
-# ``_EXEMPT_PAGES`` with the reason, so each gap is one visible line here rather
-# than a silent omission when a new page lands.
+# Every plain-Markdown how-to and explanation page is covered by default, plus
+# the editor tutorial. A MyST notebook page in those directories keeps its code
+# in ``{code-cell}`` fences, which this harness does not see; those pages are
+# executed by ``tests/docs/test_notebooks.py`` instead. A page whose Python
+# blocks cannot run as published is listed in ``_EXEMPT_PAGES`` with the reason,
+# so each gap is one visible line here rather than a silent omission when a new
+# page lands.
 _EXEMPT_PAGES: dict[str, str] = {
     "docs/how-to/fit-a-distributional-model.md": (
         "documents SuperLSS; this harness doubles SuperGLM fitting only, so blocks "

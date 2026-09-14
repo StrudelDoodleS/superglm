@@ -631,3 +631,5 @@ The critic runs: clean strict executed build; `uv run pytest tests/docs -q`; pag
 ## Post-fold note (2026-09-14)
 
 The stacked PR #393 never ran the dev-ci `docs` job (stacked PRs get seven checks), so the first strict build of this page without execution was the one on #392 after the fold, and it went red: the four `glue:figure` pastes find no glue data when nothing executes. Fix at 096bc558 on the branch of #392: `docs/conf.py` suppresses `mystnb.glue` only when `SUPERGLM_DOCS_EXECUTE=off`, and `tests/docs/test_conventions.py` pins every glue paste to a glue call on the same page. Run the off-mode CI command locally before pushing any change to this page.
+
+Do not cross-reference the four `:name:` labels on the glued figures: the off-mode build never creates the figure nodes, so the labels are never registered there, and a `{ref}` or `{numref}` to one would red the PR build with a warning that the `mystnb.glue` suppression does not cover.

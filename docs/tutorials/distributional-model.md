@@ -26,17 +26,17 @@ kernelspec:
 :tags: [remove-cell]
 
 import logging
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-warnings.filterwarnings("ignore")
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 for candidate in (Path("../_static/superglm.mplstyle"), Path("docs/_static/superglm.mplstyle")):
     if candidate.exists():
         plt.style.use(str(candidate))
         break
+else:
+    raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
 ```
 
 `SuperLSS` fits several parameters of a response distribution together. A

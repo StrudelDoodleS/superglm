@@ -49,6 +49,9 @@ research/2026-09-c3-stress-evidence/index.md          development/index.md
 research/2026-09-discrete-performance-plan/index.md   development/index.md
 research/2026-09-discrete-performance-report/index.md development/index.md
 research/2026-09-pragmatic-convergence/index.md       development/index.md
+research/2026-09-psst-booster-comparison/index.md     development/index.md
+research/2026-09-psst-detection-study/index.md        development/index.md
+research/2026-09-psst-reference-variance/index.md     development/index.md
 research/2026-09-superglm-feature-roadmap-additions/index.md development/index.md
 research/2026-09-superglm-feature-roadmap-dossier/index.md development/index.md
 ROADMAP/index.md                                      development/index.md

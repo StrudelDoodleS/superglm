@@ -16,17 +16,17 @@ kernelspec:
 :tags: [remove-cell]
 
 import logging
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-warnings.filterwarnings("ignore")
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 for candidate in (Path("../_static/superglm.mplstyle"), Path("docs/_static/superglm.mplstyle")):
     if candidate.exists():
         plt.style.use(str(candidate))
         break
+else:
+    raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
 ```
 
 A spline can follow the data as closely as you let it. The smoothing penalty
@@ -186,7 +186,7 @@ from superglm import Spline, SuperGLM, cross_validate
 
 try:
     from myst_nb import glue
-except ImportError:  # running outside the docs build, e.g. Colab
+except ImportError:  # running outside the docs build, where nothing is glued
 
     def glue(name, obj, display=True):
         return obj
