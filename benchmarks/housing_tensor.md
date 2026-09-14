@@ -104,7 +104,8 @@ outside this checkout, so its source hash describes the code being executed.
 
 Each successful invocation saves:
 
-- `result.json`: complete-fit seconds, process peak RSS, package versions,
+- `result.json`: complete-fit seconds, process peak RSS at fit end and after
+  prediction export, retained model buffer payloads, package versions,
   thread-pool configuration, source/script hashes, actual matrix classes,
   solver dispatch, consumed reference-file hashes and full training telemetry.
 - `predictions.npz`: training, validation and test responses and predictions.
@@ -112,18 +113,67 @@ Each successful invocation saves:
   absolute difference, RMS difference, exact equality and MSE difference.
 - `worker.log` and `run.json`: the owned process's output and completion state.
 
-The fit clock excludes imports, data loading, prediction, telemetry export
-and profile-file writing. Peak RSS covers the worker process through
-prediction export, including its runtime and data. It is not the model's
-retained memory. A successful run requires convergence, finite predictions,
-the expected basis width, and matching raw-data, split and transformed-input
-identity. The input fingerprints require identical floating-point values;
+The fit clock excludes imports, data loading, retained-storage inspection,
+prediction, telemetry export and profile-file writing. A successful run
+requires convergence, finite predictions, the expected basis width, and
+matching raw-data, split and transformed-input identity. The input
+fingerprints require identical floating-point values;
 math-library differences that change transformation rounding are reported as
 an input mismatch. This keeps solver comparisons on the same inputs. Prediction
 differences are measured, not silently accepted as numerically equivalent.
 For a solver change, justify comparison tolerances from its numerical
 contracts and certify stable observables. Exact equality is a useful replay
 check in an unchanged local environment, not a portable BLAS requirement.
+
+### Memory fields
+
+`fit_end_peak_process_rss_mib` samples `ru_maxrss` immediately after the fit
+clock stops, before profiler output, memory inspection, telemetry, prediction
+or export. It is the process high-water through the fit, including imports,
+runtime and data. It does not isolate bytes allocated by fitting. On profiled
+runs it also includes the profiler's state accumulated during the fit.
+
+The existing `peak_process_rss_mib` field remains a second sample after
+prediction export. It includes all intervening work, including the new
+retained-storage inspection. Neither RSS field measures retained model bytes.
+Both use MiB, with the platform's `ru_maxrss` units converted before reporting.
+
+`retained_model_storage` inspects the model after fitting and before telemetry
+or prediction can add state. Its `scope` is
+`numpy_and_byte_buffer_owner_payloads_v1`. The visitor follows ordinary
+containers, instance dictionaries, slots across the class hierarchy, plain
+object-array entries, NumPy bases and memoryview exporters. This covers
+SuperGLM and its ordinary and slotted dataclasses. It handles cycles and counts
+each owner by identity, so a small view retains the charge for its full owner.
+Separate copies count separately even when their values match.
+
+| Field in `retained_model_storage` | Meaning |
+| --- | --- |
+| `numpy_owned_bytes`, `numpy_owner_count` | Total `nbytes` and count of distinct owning NumPy arrays reached by the visitor. |
+| `bytes_payload_bytes`, `bytes_owner_count` | Total lengths and count of distinct `bytes` owners, including stored byte snapshots. |
+| `bytearray_payload_bytes`, `bytearray_owner_count` | Total lengths and count of distinct `bytearray` owners. |
+| `total_payload_bytes` | Sum of the three byte totals above. |
+| `unmeasured_buffer_count`, `unmeasured_buffer_types` | Count and qualified type names of distinct external buffer bases/exporters whose allocation the visitor cannot resolve. |
+
+An array backed by `bytes` or `bytearray` contributes to that owner's category,
+with no second charge for the array view. A snapshot also retained directly
+counts once. Snapshot counts use the actual objects, without serializing the
+model or allocating replacement snapshots.
+
+This is a scoped payload inventory. It excludes Python object headers,
+allocator slack, bytearray spare capacity, native workspaces and released
+temporaries. It does not traverse functions, classes, modules or their globals,
+weak references, properties, object fields in structured NumPy scalars, or
+state hidden in extension objects. External buffers such as memory maps and
+`array.array` are reported as unmeasured when reached through an array base or
+memoryview; their view lengths are not used as allocation estimates. A zero
+`unmeasured_buffer_count` therefore does not certify complete Python heap or
+native-memory coverage. Use both RSS samples alongside these payload counts.
+
+Historical receipts lack the new fields. Copy the same runner into baseline
+and candidate checkouts for comparisons; its existing script hash covers the
+memory visitor. The new fields do not change the frozen model, data identities,
+prediction comparison or fit clock.
 
 ## Historical observations
 
