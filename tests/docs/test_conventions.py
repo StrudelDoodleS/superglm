@@ -11,6 +11,9 @@ Pages that paste glued figures must glue every key they paste. The
 pull-request docs build runs without execution, where glue data is empty by
 design, so ``docs/conf.py`` silences ``mystnb.glue`` there; this keeps a
 mistyped key from surviving until the executed deploy build.
+
+Maths is written with dollar delimiters. MyST parses nothing else, and a
+bracket-delimited formula is published as plain text without a warning.
 """
 
 from __future__ import annotations
@@ -35,13 +38,114 @@ GLUE_PASTE = re.compile(
 SKIP_EXECUTION = re.compile(r"^:tags:.*skip-execution", re.M)
 
 
-def executed_pages() -> list[Path]:
+def all_pages() -> list[Path]:
     return docs_pages(DOCS)
+
+
+FENCE = re.compile(r"^(\s*)(`{3,}|~{3,}|:{3,})(.*)$")
+CODE_DIRECTIVES = (
+    "{code-cell}",
+    "{code-block}",
+    "{code}",
+    "{literalinclude}",
+    "{eval-rst}",
+    "{raw}",
+)
+# A bracket delimiter, but not the ``\\[2pt]`` row spacing inside a display.
+BRACKET_MATH = re.compile(r"(?<!\\)\\[\(\[]")
+
+
+def blank_code_spans(line: str) -> str:
+    """Drop inline code spans: a backtick run closes only on a run of the same length.
+
+    An opening run with no matching closer is literal text, as in CommonMark.
+    """
+    out: list[str] = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] != "`":
+            out.append(line[i])
+            i += 1
+            continue
+        j = i
+        while j < n and line[j] == "`":
+            j += 1
+        run = j - i
+        k, close = j, -1
+        while k < n:
+            if line[k] != "`":
+                k += 1
+                continue
+            m = k
+            while m < n and line[m] == "`":
+                m += 1
+            if m - k == run:
+                close = k
+                break
+            k = m
+        if close < 0:
+            out.append(line[i:j])
+            i = j
+        else:
+            i = close + run
+    return "".join(out)
+
+
+def prose_lines(text: str) -> list[tuple[int, str]]:
+    """Lines outside code fences, with inline code spans blanked out.
+
+    Fenced admonitions and other prose directives count as prose; fenced code
+    (a bare language, or a code directive) does not. Backtick, tilde and colon
+    fences nest inside prose directives; a fence closes on a bare marker of
+    the same character at least as long as the one that opened it, as
+    CommonMark allows, and inside a code fence every other fence-looking line
+    is content.
+    """
+    kept: list[tuple[int, str]] = []
+    stack: list[tuple[str, bool]] = []
+    for number, line in enumerate(text.split("\n"), start=1):
+        fence = FENCE.match(line)
+        if fence:
+            marker, info = fence.group(2), fence.group(3).strip()
+            closes = (
+                bool(stack)
+                and not info
+                and stack[-1][0][0] == marker[0]
+                and len(marker) >= len(stack[-1][0])
+            )
+            if closes:
+                stack.pop()
+            elif stack and stack[-1][1]:
+                pass  # inside a code fence: a foreign marker is code content
+            else:
+                is_code = info.startswith(CODE_DIRECTIVES) if info.startswith("{") else True
+                stack.append((marker, is_code))
+            continue
+        if any(is_code for _, is_code in stack):
+            continue
+        kept.append((number, blank_code_spans(line)))
+    return kept
+
+
+def test_maths_uses_dollar_delimiters() -> None:
+    r"""Maths is written as ``$...$`` or ``$$...$$``, never ``\(...\)`` or ``\[...\]``.
+
+    MyST parses only dollar maths. The bracket forms came from the old site's
+    arithmatex setup; Markdown eats their backslashes and the formula is
+    published as plain text, with no build warning.
+    """
+    offenders = [
+        f"{path.relative_to(DOCS)}:{number}"
+        for path in all_pages()
+        for number, line in prose_lines(path.read_text(encoding="utf-8"))
+        if BRACKET_MATH.search(line)
+    ]
+    assert offenders == [], "bracket maths delimiters in prose:\n" + "\n".join(offenders)
 
 
 def test_no_private_attribute_access_in_executed_pages() -> None:
     offenders: list[str] = []
-    for path in executed_pages():
+    for path in all_pages():
         for cell in CODE_CELL.findall(path.read_text(encoding="utf-8")):
             for match in PRIVATE_ACCESS.finditer(cell):
                 offenders.append(f"{path.relative_to(DOCS)}: {match.group(0)}")
@@ -60,7 +164,7 @@ def test_glue_pastes_are_glued_on_the_same_page() -> None:
     """
     missing: list[str] = []
     pasted = 0
-    for path in executed_pages():
+    for path in all_pages():
         text = path.read_text(encoding="utf-8")
         executed_cells = [c for c in CODE_CELL.findall(text) if not SKIP_EXECUTION.search(c)]
         glued = {key for cell in executed_cells for key in GLUE_CALL.findall(cell)}
@@ -83,7 +187,7 @@ def test_pages_with_code_cells_are_myst_notebooks() -> None:
     same files.
     """
     mismatched: list[str] = []
-    for path in executed_pages():
+    for path in all_pages():
         text = path.read_text(encoding="utf-8")
         has_cells = "```{code-cell}" in text
         if has_cells != is_myst_notebook(text):

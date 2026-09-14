@@ -35,8 +35,8 @@ contract as fitting:
 - under `weight_semantics="frequency"`, the row's response distribution is
   unchanged by its weight; the weight represents repeated likelihood
   contribution rather than smaller row variance
-- under `"prior"`, row \(i\) has observation-specific dispersion
-  \(\phi / w_i\), which is used by both its CDF residual and simulation
+- under `"prior"`, row $i$ has observation-specific dispersion
+  $\phi / w_i$, which is used by both its CDF residual and simulation
 
 For exact discrete Poisson quantile residuals, diagnose raw claim counts with
 `log(exposure)` as an offset. A fractional rate response with exposure as a

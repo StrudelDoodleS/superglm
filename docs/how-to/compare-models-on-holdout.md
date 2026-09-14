@@ -127,8 +127,8 @@ The four-panel diagnostic figure includes:
 
 Diagnostic weighting follows the declared contract too: a replication weight
 repeats a row's contribution without changing its response distribution, while
-a prior weight gives row \(i\) observation-specific dispersion
-\(\phi / w_i\). For exact discrete Poisson quantile residuals, diagnose raw
+a prior weight gives row $i$ observation-specific dispersion
+$\phi / w_i$. For exact discrete Poisson quantile residuals, diagnose raw
 claim counts with `log(exposure)` as an offset; a rate plus replication weight
 cannot reconstruct the corresponding count CDF.
 

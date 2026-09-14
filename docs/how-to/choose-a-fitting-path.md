@@ -118,7 +118,7 @@ model.fit_reml(df, y, offset=np.log(exposure))
 Tabmat handles the ordinary dense, sparse, and categorical partition and the
 dense-small side of this solve. The dominant factor smooth stays in compact
 `codes + shared basis` form and uses compiled raw sufficient-statistic
-kernels. This avoids expanding \(Kk\) columns into a generic sparse block and
+kernels. This avoids expanding $Kk$ columns into a generic sparse block and
 then paying for its full weighted sandwich products.
 
 ### Measured SZ performance
@@ -130,9 +130,9 @@ model geometries, not a universal performance promise.
 
 | Mode | Rows | Groups | `k` | Coefficients | REML iterations | Median clean wall | Peak Python allocation | Sampled process RSS | Numerical check |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Exact | 6,000 | 50 | 6 | 304 | 7, converged | 2.47 s (3 runs) | 3.50 MiB | 383 MiB | \(2.3\times10^{-13}\) |
+| Exact | 6,000 | 50 | 6 | 304 | 7, converged | 2.47 s (3 runs) | 3.50 MiB | 383 MiB | $2.3\times10^{-13}$ |
 | Discrete | 20,000 | 300 | 10 | 3,003 | 12, converged | 2.97 s (3 runs) | 24.23 MiB | 498 MiB | stable prediction checksum |
-| Discrete | 1,000,000 | 300 | 10 | 3,003 | 5, converged | 4.47 s (5 runs) | 250.19 MiB | 789 MiB | \(3.7\times10^{-8}\) from the pre-optimization checksum |
+| Discrete | 1,000,000 | 300 | 10 | 3,003 | 5, converged | 4.47 s (5 runs) | 250.19 MiB | 789 MiB | $3.7\times10^{-8}$ from the pre-optimization checksum |
 
 Allocation stacks were collected in separate three-REML-iteration passes; the
 iteration count changes runtime, not the compact matrix dimensions that set
@@ -140,7 +140,7 @@ their peak. The million-row allocation run had a 59.10 MiB sampled RSS delta;
 its RSS peak includes the interpreter, input data, and retained model state.
 Exact parity is the maximum absolute prediction difference from a
 same-iteration dense Gram fit. The discrete cases were structured-only to
-avoid the dense \(3{,}003^2\) allocation.
+avoid the dense $3{,}003^2$ allocation.
 
 The million-row case previously took a 7.67 s median at the same five REML
 iterations. Compact `(group, spline-bin)` aggregation and batched dense/global

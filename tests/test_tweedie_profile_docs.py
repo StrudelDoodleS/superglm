@@ -198,7 +198,7 @@ def test_validation_and_diagnostic_guides_follow_the_declared_weight_contract() 
         assert "positive-weight row" in document or "count of positive-weight rows" in document
         assert "case/frequency" not in document
     assert "row's response distribution is unchanged by its weight" in results
-    assert r"\(\phi / w_i\)" in results
+    assert r"$\phi / w_i$" in results
     assert "diagnose raw claim counts with `log(exposure)` as an offset" in results
     assert "Poisson rate response" in validation
     assert "exposure is a replication weight" in validation

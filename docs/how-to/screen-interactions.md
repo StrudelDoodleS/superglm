@@ -566,23 +566,23 @@ discretize at all, so OC pairs stay exact on both sides.
 
 ## Provenance
 
-The basic calculation has a direct mathematical interpretation. Let \(U\)
-be the candidate's profiled working score, \(V\) its Fisher working curvature
-and \(S\succeq0\) its penalty. Fix the penalty weight \(\lambda\ge0\).
-For each candidate coefficient vector \(b\), profile unpenalized adjustments
+The basic calculation has a direct mathematical interpretation. Let $U$
+be the candidate's profiled working score, $V$ its Fisher working curvature
+and $S\succeq0$ its penalty. Fix the penalty weight $\lambda\ge0$.
+For each candidate coefficient vector $b$, profile unpenalized adjustments
 to the intercept and the pair's main-effect columns.
 Relative to the nuisance-only profiled optimum, the remaining working gain is
 
-\[
+$$
 q_\lambda(b)=U^\top b-\tfrac12 b^\top(V+\lambda S)b.
-\]
+$$
 
-When \(V+\lambda S\) is positive definite on the retained candidate space,
+When $V+\lambda S$ is positive definite on the retained candidate space,
 completing the square gives
 
-\[
+$$
 \max_b q_\lambda(b)=\tfrac12U^\top(V+\lambda S)^{-1}U=\tfrac12T_\lambda.
-\]
+$$
 
 Thus the raw score is twice the candidate's extra quadratic gain beyond what
 those main-effect adjustments can achieve alone. It is not necessarily twice
@@ -603,24 +603,24 @@ penalty choice, pair-only projection and maximum over complexity budgets.
 
 ### Reference distribution and current limitation
 
-If the geometry is fixed and \(U\sim N(0,\phi V)\) with known dispersion,
+If the geometry is fixed and $U\sim N(0,\phi V)$ with known dispersion,
 the quadratic has a weighted chi-square reference law:
 
-\[
+$$
 T_\lambda/\phi\overset d=\sum_j a_j Z_j^2,\qquad
 E(T_\lambda/\phi)=\sum_j a_j=\mathrm{edf}_0,\qquad
 \operatorname{Var}(T_\lambda/\phi)=2\sum_j a_j^2.
-\]
+$$
 
-Here the \(Z_j\) are independent standard normals and the \(a_j\) are the
+Here the $Z_j$ are independent standard normals and the $a_j$ are the
 candidate's shrinkage eigenvalues. Both execution paths use
 
-\[
+$$
 z_\lambda=\frac{T_\lambda/\phi-\mathrm{edf}_0}{\sqrt{2\sum_j a_j^2}}.
-\]
+$$
 
-For an identified unpenalized block, every retained \(a_j=1\), so this reduces
-to the usual \(\sqrt{2\mathrm{edf}_0}\) denominator. With shrinkage, that
+For an identified unpenalized block, every retained $a_j=1$, so this reduces
+to the usual $\sqrt{2\mathrm{edf}_0}$ denominator. With shrinkage, that
 old denominator was too large. The dense path obtains the sum of squares from
 its existing decomposition. The structured path computes the same quantity
 from diagonal and cross-level blocks, without assembling the full smoother.

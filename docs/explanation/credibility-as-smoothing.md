@@ -51,15 +51,15 @@ variance-component lambdas and therefore accepts only `None` or `0.0` for
 selection. Omitted, `None`, and zero are equivalent here. Sparse term
 selection belongs to `fit()` or `fit_path()`, not the REML fit.
 
-The estimated variance component is \(\tau^2 = \phi / \lambda\). At level
-\(j\), SuperGLM reports scalar credibility
+The estimated variance component is $\tau^2 = \phi / \lambda$. At level
+$j$, SuperGLM reports scalar credibility
 
-\[
+$$
 Z_j = \frac{I_j}{I_j + \lambda},
-\]
+$$
 
-where \(I_j\) is the fitted working information. Thick levels have \(Z_j\)
-near one and retain more of their own estimate; thin levels have \(Z_j\) near
+where $I_j$ is the fitted working information. Thick levels have $Z_j$
+near one and retain more of their own estimate; thin levels have $Z_j$ near
 zero and are pulled more strongly toward the population.
 
 ```python
@@ -117,15 +117,15 @@ term has shared `wiggle` and null-space smoothing parameters, but each level
 gets its own coefficient block. The null-space penalties make the deviations
 fully penalized, matching the role of mgcv's `bs="fs"` basis.
 
-For level \(j\), the scalar summary generalizes ordinary credibility to the
+For level $j$, the scalar summary generalizes ordinary credibility to the
 whole coefficient block:
 
-\[
+$$
 Z_j =
 \frac{\operatorname{tr}\left(I - (I_j + P)^{-1}P\right)}{k}.
-\]
+$$
 
-It is the mean fraction of the level's \(k\) coefficient directions retained
+It is the mean fraction of the level's $k$ coefficient directions retained
 after shrinkage. It is a useful compact ranking, not a claim that all parts of
 the curve receive identical shrinkage.
 
@@ -222,9 +222,9 @@ Missing group values always fail.
 
 These terms use compact group matrices alongside tabmat-backed narrow design
 blocks. The structured solver factors the small dense part once. RE and FS use
-independent scalar or \(k \times k\) local blocks; SZ uses raw all-level blocks
+independent scalar or $k \times k$ local blocks; SZ uses raw all-level blocks
 plus a small equality-constrained border. It does not form the full
-\((Kk)^2\) FS or \(((K-1)k)^2\) SZ Hessian.
+$(Kk)^2$ FS or $((K-1)k)^2$ SZ Hessian.
 
 ```python
 model = SuperGLM(
