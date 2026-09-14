@@ -1,6 +1,6 @@
 # Roadmap
 
-Last strategic review: **2026-09-13**. Current research baseline:
+Last strategic review: **2026-09-14**. Current research baseline:
 `v0.33.0` at `7c4e70ff`, including the LSS API refinement in PR #386
 and Newton completion repair in PR #387.
 The starting baseline was `8962c452` (published v0.31.0); individual implementation
@@ -179,6 +179,24 @@ with a small credit gain. These are exploratory results on previously
 inspected splits, not fresh confirmation or automatic-discovery results.
 The [external evidence review](research/2026-09-14-interaction-dataset-evidence.md)
 records prior examples, candidate hypotheses and differences in evaluation.
+The [named candidate bank](research/2026-09-14-known-interaction-candidates.md)
+adds eight explicit constructions across six datasets, including original
+Porto Seguro, Home Credit and IEEE competition code. Only one reviewed
+reference isolates a pair group's contribution; competition data for those
+three examples remain unavailable locally.
+
+The [fixed broad procedure](research/2026-09-14-broad-interaction-trials.md)
+uses training-only GBM proposals and validation-selected SuperGLM refits
+on twelve new real sources and a separate CASP decoy control. Ten real
+sources select interaction groups with lower test loss; two retain additive
+models. At most four pairs are fitted per arm. Selected real-data fits cost
+0.94–1.65 additive fit times, but complete search/evaluation workers cost
+764.94 seconds across the thirteen tables. All 26 test scores replay from
+saved arrays, with choices recorded before evaluation. Of 100 fits, 94
+converge, four reach the REML limit and two Concrete arms fail a data-Gram
+check; incomplete searches and all costs remain visible. This supplies
+local candidate groups for C9/C16/C21 research, not an optimal basis rule,
+a many-interaction scaling law, or an end-to-end speed guarantee.
 
 The first existing-tensor performance step is implemented and measured in
 `306f12e0`: exact admission carries selected penalty support from optimizer to

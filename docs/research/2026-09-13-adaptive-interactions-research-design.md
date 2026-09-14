@@ -89,10 +89,37 @@ Ames rejects the tested area/building-type pair on validation. All ten
 fits converge with numerical tolerances unchanged. The
 [GBM controls](2026-09-14-gbm-interaction-comparison.md) find pairwise gains
 over their own additive class on all four pilot datasets. These test blocks
-are now exploratory diagnostics; fresh confirmation and automatic candidate
-generation remain outstanding.
+are now exploratory diagnostics and require fresh confirmation after method
+changes.
 
-Integration verification for these research additions passed 35 focused
+The [fixed broad procedure](2026-09-14-broad-interaction-trials.md) adds
+training-only pairwise-GBM proposals and bounded SuperGLM refits on twelve
+new real sources plus a separate CASP decoy control. Ten real sources select
+pair groups with lower test loss than both additive controls; two retain
+additive models. Selected real-data fits cost 0.94–1.65 additive fit times,
+but searching and evaluating all thirteen tables consumes 764.94 worker
+seconds. This is at most four pairs per model, not the many-term scaling
+target. The procedure is a heuristic with a demonstrated pure-XOR blind
+spot, a limited k=4/6 main-effect menu and no optimal-resolution guarantee.
+
+The [named candidate bank](2026-09-14-known-interaction-candidates.md) stores
+eight source-backed constructions across six datasets, with exact formulas,
+column mappings and evidence grades. Successful competition-pipeline use
+does not isolate a feature's contribution. The broad run independently
+recovers Concrete's water/cement variable pair, but its selected four-pair
+tensor result does not isolate that pair or test the published ratio.
+Competition code supplies further candidates while raw access remains
+unavailable for Porto Seguro, Home Credit and IEEE.
+
+The broad batch preserves 94 converged fits, four REML-limit terminations
+and two Concrete numerical refusals. All 26 selected test evaluations
+replay exactly from saved arrays, with choices preceding every test worker.
+The new integration checks pass 95 focused tests. The
+[failure memo](2026-09-14-broad-interaction-numerical-failures.md) identifies
+the unpenalized data-Gram refusal path without claiming its construction
+error is explained. Source bytes and numerical tolerances remain unchanged.
+
+Earlier corpus integration verification passed 35 focused
 dataset/trial tests and Ruff checks on seven Python files. Independent checks
 matched 34 core source files, 21 Kaggle source/receipt hashes, all seven real
 fit records and four test-prediction archives. The synthetic receipt rebuilds

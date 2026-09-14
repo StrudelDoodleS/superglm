@@ -1,0 +1,502 @@
+{
+  "format_version": 1,
+  "created_on": "2026-09-14",
+  "inspected_repository_head": "6340fdd8",
+  "purpose": "Named interaction candidates from primary sources, with explicit evidence and data-access limits.",
+  "executable": false,
+  "ground_truth_interactions": false,
+  "new_fits_run": false,
+  "evidence_grades": {
+    "A": "A named pair or mixed pair group has an isolated held-out addition/removal comparison. This grades the experiment, not universal validity or statistical significance.",
+    "B": "The named feature is present in a successful joint pipeline; its isolated contribution is not established.",
+    "C": "A fitted surface or domain result motivates a hypothesis, including transfer to a different dataset."
+  },
+  "sources": {
+    "bike_example": {
+      "url": "https://scikit-learn.org/stable/auto_examples/applications/plot_cyclical_feature_engineering.html#modeling-pairwise-interactions-with-splines-and-polynomial-features",
+      "author": "scikit-learn developers",
+      "locator": "hour_workday_interaction and evaluate(cyclic_spline_interactions_pipeline)",
+      "revision": "Stable documentation read on 2026-09-14"
+    },
+    "ames_comparison": {
+      "url": "https://www.tmwr.org/compare#creating-multiple-models-with-workflow-sets",
+      "author": "Max Kuhn and Julia Silge",
+      "locator": "basic_rec, interaction_rec, and collect_metrics(lm_models)",
+      "revision": "Book page read on 2026-09-14"
+    },
+    "ames_split": {
+      "url": "https://www.tmwr.org/splitting",
+      "author": "Max Kuhn and Julia Silge",
+      "locator": "Chapter summary, seed 502 and price-stratified initial_split"
+    },
+    "ames_folds": {
+      "url": "https://www.tmwr.org/resampling",
+      "author": "Max Kuhn and Julia Silge",
+      "locator": "ames_folds, seed 1001 and vfold_cv(v=10)"
+    },
+    "porto_pair_generation": {
+      "url": "https://github.com/xiaozhouwang/kaggle-porto-seguro/blob/master/code/nn_model290.py#L36-L38",
+      "author": "Xiaozhou Wang and the Porto Seguro second-place team",
+      "locator": "Six-feature combinations passed to interaction_features; output sigmoid and binary_crossentropy at lines 178-181",
+      "revision": "master read on 2026-09-14; not an immutable commit citation"
+    },
+    "porto_pair_formula": {
+      "url": "https://github.com/xiaozhouwang/kaggle-porto-seguro/blob/master/code/util.py#L92-L98",
+      "author": "Xiaozhou Wang and the Porto Seguro second-place team",
+      "locator": "interaction_features",
+      "revision": "master read on 2026-09-14; not an immutable commit citation"
+    },
+    "porto_aggregation": {
+      "url": "https://github.com/xiaozhouwang/kaggle-porto-seguro/blob/master/code/util.py#L47-L89",
+      "author": "Xiaozhou Wang and the Porto Seguro second-place team",
+      "locator": "proj_num_on_cat; callers at nn_model290.py lines 120-126"
+    },
+    "porto_result": {
+      "url": "https://github.com/xiaozhouwang/kaggle-porto-seguro#simple-solution-recommended",
+      "author": "Xiaozhou Wang and the Porto Seguro second-place team",
+      "locator": "Simple and exact solution reproduction instructions"
+    },
+    "home_features": {
+      "url": "https://github.com/pklauke/Kaggle-HomeCreditDefaultRisk/blob/master/feature_engineering.py#L221-L255",
+      "author": "pklauke",
+      "locator": "ANNUITY LENGTH, ANNUITY_INCOME_PERC; get_features_to_keep at lines 452-598",
+      "revision": "master read on 2026-09-14; not an immutable commit citation"
+    },
+    "home_models": {
+      "url": "https://github.com/pklauke/Kaggle-HomeCreditDefaultRisk/blob/master/models.py#L214-L283",
+      "author": "pklauke",
+      "locator": "run_model stratified folds and LightGBM binary objective"
+    },
+    "home_result": {
+      "url": "https://github.com/pklauke/Kaggle-HomeCreditDefaultRisk",
+      "author": "pklauke",
+      "locator": "README reports rank 248/7198 and blended model structure"
+    },
+    "home_corroboration": {
+      "url": "https://github.com/NoxMoon/home-credit-default-risk#features-from-business-intuition",
+      "author": "NoxMoon",
+      "locator": "Credit amount / annuity is named; README reports rank 17/7198 for a different full solution"
+    },
+    "ieee_winner": {
+      "url": "https://developer.nvidia.com/blog/leveraging-machine-learning-to-detect-fraud-tips-to-developing-a-winning-kaggle-solution/",
+      "author": "Carol McDonald and first-place team member Chris Deotte",
+      "locator": "New features from aggregation encoding; feature selection; final model training",
+      "reading_scope": "Author-written article body; the added AI-generated summary was not used as evidence"
+    },
+    "concrete_paper": {
+      "url": "https://ascelibrary.org/doi/10.1061/%28ASCE%290899-1561%281998%2910%3A4%28263%29",
+      "author": "I-Cheng Yeh",
+      "title": "Modeling Concrete Strength with Augment-Neuron Networks",
+      "reading_scope": "Publisher-indexed abstract; full text not accessed"
+    },
+    "concrete_dataset": {
+      "url": "https://archive.ics.uci.edu/dataset/165/concrete+compressive+strength",
+      "author": "UCI repository and I-Cheng Yeh",
+      "locator": "Variables table and 1030-row dataset description"
+    }
+  },
+  "datasets": [
+    {
+      "id": "uci_bike_sharing",
+      "registry": "benchmarks/interaction_datasets.json",
+      "registry_id": "uci_bike_sharing",
+      "access": "local_bytes_verified_against_registry",
+      "local_path": ".benchmark-artifacts/interaction-datasets/uci_bike_sharing/source.csv",
+      "sha256": "e03de4ee4ef4dc376ac6e04bf829673c6269e8eba5c60fa121640fa2f829504f",
+      "raw_target": "cnt",
+      "target_column_map": {
+        "count": "cnt"
+      },
+      "source_to_local_columns": {
+        "hour": "hr",
+        "workingday": "workingday"
+      },
+      "usable_data_now": true
+    },
+    {
+      "id": "ames_housing",
+      "registry": "benchmarks/interaction_datasets.json",
+      "registry_id": "ames_housing",
+      "access": "local_bytes_verified_against_registry",
+      "local_path": ".benchmark-artifacts/interaction-datasets/ames_housing/source.tsv",
+      "sha256": "6cfe6cb525ba437de428653a1040e2aed7d696640bf75203786a6d7a0e67cfcc",
+      "raw_target": "SalePrice",
+      "target_column_map": {
+        "Sale_Price": "SalePrice"
+      },
+      "source_to_local_columns": {
+        "Gr_Liv_Area": "Gr Liv Area",
+        "Bldg_Type": "Bldg Type"
+      },
+      "usable_data_now": true,
+      "source_dataset_difference": "The book also uses added coordinates; the local predictor contract has no latitude/longitude."
+    },
+    {
+      "id": "porto_seguro_safe_driver",
+      "registry": null,
+      "registry_id": null,
+      "access": "not_registered_or_acquired",
+      "raw_target": "target",
+      "usable_data_now": false,
+      "access_note": "Only public competitor code/writeups were read. No new competition-access probe or acquisition was attempted."
+    },
+    {
+      "id": "home_credit_default_risk",
+      "registry": "benchmarks/interaction_kaggle_datasets.json",
+      "registry_id": "kaggle_home_credit_default_risk",
+      "access": "catalogued_authentication_required",
+      "access_evidence": "Existing registry probe on 2026-09-13 returned HTTP 401; source and feature schema remain unavailable locally.",
+      "raw_target": "TARGET",
+      "raw_table": "application_train.csv",
+      "usable_data_now": false
+    },
+    {
+      "id": "ieee_cis_fraud",
+      "registry": "benchmarks/interaction_kaggle_datasets.json",
+      "registry_id": "kaggle_ieee_cis_fraud",
+      "access": "catalogued_authentication_required",
+      "access_evidence": "Existing registry probe on 2026-09-13 returned HTTP 401; source and feature schema remain unavailable locally.",
+      "raw_target": "isFraud",
+      "raw_table": "train_transaction.csv",
+      "usable_data_now": false
+    },
+    {
+      "id": "uci_concrete",
+      "registry": "benchmarks/interaction_datasets.json",
+      "registry_id": "uci_concrete",
+      "access": "local_bytes_verified_against_registry",
+      "local_path": ".benchmark-artifacts/interaction-datasets/uci_concrete/source.csv",
+      "sha256": "8d4b15b6fc68cd932d745cbd663d5ceae66dd54422e99c1e4865f2936ab7e2af",
+      "raw_target": "Concrete compressive strength",
+      "usable_data_now": true
+    }
+  ],
+  "candidates": [
+    {
+      "id": "bike_hour_workingday",
+      "dataset_id": "uci_bike_sharing",
+      "raw_columns": [
+        "hr",
+        "workingday"
+      ],
+      "kind": "mixed_pair_basis",
+      "formula": "B_j(hr; cubic periodic spline, period=24, eight spline columns) * I(workingday=1), j=1..8",
+      "exact_source_difference": "The source adds all degree-two distinct-column products of eight hour splines plus the workday indicator, including hour-spline-by-hour-spline products.",
+      "source_model": {
+        "target": "count/977",
+        "loss": "squared_error",
+        "link": "identity",
+        "estimator": "RidgeCV"
+      },
+      "proposed_model": {
+        "target": "cnt",
+        "family": "Poisson",
+        "link": "log"
+      },
+      "evidence_grade": "B",
+      "pair_isolated": false,
+      "evaluation": {
+        "metric": "MAE",
+        "baseline": 0.097,
+        "augmented": 0.078,
+        "split": "Five time-series folds; gap=48 rows, max_train_size=10000, test_size=1000",
+        "attribution": "Complete added polynomial block, not isolated hour/workday products"
+      },
+      "source_refs": [
+        "bike_example"
+      ],
+      "test_recipe": "Add only the hour/workday block to a frozen additive model; refit main effects. Keep the same hour basis in both arms. The proposed Poisson link changes the meaning of additivity from the source identity link."
+    },
+    {
+      "id": "ames_logarea_building_type",
+      "dataset_id": "ames_housing",
+      "raw_columns": [
+        "Gr Liv Area",
+        "Bldg Type"
+      ],
+      "kind": "mixed_pair_slope",
+      "formula": "log10(Gr Liv Area) * I(Bldg Type=level), for every non-reference building-type level",
+      "source_model": {
+        "target": "log10(Sale_Price)",
+        "loss": "squared_error",
+        "link": "identity",
+        "estimator": "linear_reg"
+      },
+      "proposed_model": {
+        "target": "log10(SalePrice)",
+        "family": "Gaussian",
+        "link": "identity"
+      },
+      "evidence_grade": "A",
+      "pair_isolated": true,
+      "evaluation": {
+        "metric": "RMSE_log10_price",
+        "baseline": 0.0803,
+        "augmented": 0.0799,
+        "split": "Ten random folds, seed 1001, within price-stratified 80% random training split, seed 502",
+        "attribution": "Incremental building-type-by-log-area group; small mean difference, not a significance claim"
+      },
+      "source_refs": [
+        "ames_comparison",
+        "ames_split",
+        "ames_folds"
+      ],
+      "test_recipe": "Preserve the log-area and type main effects; jointly add the mixed group. Use the local temporal/PID split and report this as a transfer from the book's random-fold result."
+    },
+    {
+      "id": "porto_car13_ind03",
+      "dataset_id": "porto_seguro_safe_driver",
+      "raw_columns": [
+        "ps_car_13",
+        "ps_ind_03"
+      ],
+      "kind": "rowwise_pair_features",
+      "source_feature_names": [
+        "inter_0*",
+        "inter_0/"
+      ],
+      "formulas": [
+        "ps_car_13 * ps_ind_03",
+        "ps_car_13 / ps_ind_03"
+      ],
+      "source_model": {
+        "target": "target",
+        "loss": "binary_crossentropy",
+        "link": "logit",
+        "estimator": "sigmoid-output neural network"
+      },
+      "proposed_model": {
+        "target": "target",
+        "family": "Binomial",
+        "link": "logit"
+      },
+      "evidence_grade": "B",
+      "pair_isolated": false,
+      "evaluation": {
+        "metric": "normalized_Gini",
+        "split": "Five shuffled stratified folds, seed 218, then competition leaderboard",
+        "result_scope": "README reports approximately 0.2938 private Gini for the simplified NN+GBM ensemble. No score isolates this pair."
+      },
+      "source_refs": [
+        "porto_pair_generation",
+        "porto_pair_formula",
+        "porto_result"
+      ],
+      "source_missing_policy": "The code applies raw arithmetic, then replaces nonfinite numeric results with zero; -1 sentinel values participate in arithmetic.",
+      "test_recipe": "After authorized acquisition, compare the two exact engineered columns and a centered pair tensor as separate candidates. Decide missing/zero-denominator semantics before fitting."
+    },
+    {
+      "id": "porto_car13_reg03",
+      "dataset_id": "porto_seguro_safe_driver",
+      "raw_columns": [
+        "ps_car_13",
+        "ps_reg_03"
+      ],
+      "kind": "rowwise_pair_features",
+      "source_feature_names": [
+        "inter_1*",
+        "inter_1/"
+      ],
+      "formulas": [
+        "ps_car_13 * ps_reg_03",
+        "ps_car_13 / ps_reg_03"
+      ],
+      "source_model": {
+        "target": "target",
+        "loss": "binary_crossentropy",
+        "link": "logit",
+        "estimator": "sigmoid-output neural network"
+      },
+      "proposed_model": {
+        "target": "target",
+        "family": "Binomial",
+        "link": "logit"
+      },
+      "evidence_grade": "B",
+      "pair_isolated": false,
+      "evaluation": {
+        "metric": "normalized_Gini",
+        "split": "Same source protocol as porto_car13_ind03",
+        "result_scope": "Same joint pipeline; no independent gain reported for this pair."
+      },
+      "source_refs": [
+        "porto_pair_generation",
+        "porto_pair_formula",
+        "porto_result"
+      ],
+      "test_recipe": "Evaluate separately and jointly with porto_car13_ind03. Correlated candidates can be redundant."
+    },
+    {
+      "id": "home_credit_annuity",
+      "dataset_id": "home_credit_default_risk",
+      "raw_columns": [
+        "AMT_CREDIT",
+        "AMT_ANNUITY"
+      ],
+      "kind": "rowwise_ratio",
+      "source_feature_names": [
+        "ANNUITY LENGTH",
+        "NEW_CREDIT_TO_ANNUITY_RATIO"
+      ],
+      "formula": "AMT_CREDIT / AMT_ANNUITY",
+      "source_model": {
+        "target": "TARGET",
+        "loss": "binary",
+        "link": "logit",
+        "estimator": "LightGBM component of blended pipeline"
+      },
+      "proposed_model": {
+        "target": "TARGET",
+        "family": "Binomial",
+        "link": "logit"
+      },
+      "evidence_grade": "B",
+      "pair_isolated": false,
+      "evaluation": {
+        "metric": "ROC_AUC",
+        "split": "Source runner uses shuffled stratified folds, default ten folds and repeated seeds; final competition ranking",
+        "result_scope": "Author reports rank 248/7198 for the blend. NoxMoon independently names the same ratio in a different rank-17 solution. Neither isolates its contribution."
+      },
+      "source_refs": [
+        "home_features",
+        "home_models",
+        "home_result",
+        "home_corroboration"
+      ],
+      "test_recipe": "After authorized acquisition, use application rows grouped by SK_ID_CURR. Add this ratio to a frozen raw-feature additive model, then separately test a two-margin tensor. Declare zero and missing annuity handling."
+    },
+    {
+      "id": "home_annuity_income",
+      "dataset_id": "home_credit_default_risk",
+      "raw_columns": [
+        "AMT_ANNUITY",
+        "AMT_INCOME_TOTAL"
+      ],
+      "kind": "rowwise_ratio",
+      "source_feature_names": [
+        "ANNUITY_INCOME_PERC"
+      ],
+      "formula": "AMT_ANNUITY / AMT_INCOME_TOTAL",
+      "exact_source_difference": "A second source column NEW_ANNUITY_TO_INCOME_RATIO uses AMT_ANNUITY / (1 + AMT_INCOME_TOTAL); it is a distinct formula.",
+      "source_model": {
+        "target": "TARGET",
+        "loss": "binary",
+        "link": "logit",
+        "estimator": "LightGBM component of blended pipeline"
+      },
+      "proposed_model": {
+        "target": "TARGET",
+        "family": "Binomial",
+        "link": "logit"
+      },
+      "evidence_grade": "B",
+      "pair_isolated": false,
+      "evaluation": {
+        "metric": "ROC_AUC",
+        "split": "Same competitor runner as home_credit_annuity",
+        "result_scope": "Named feature in the rank-248 blended pipeline; no pair ablation."
+      },
+      "source_refs": [
+        "home_features",
+        "home_models",
+        "home_result"
+      ],
+      "test_recipe": "Compare this exact ratio, the source's plus-one denominator variant, and a pair tensor using training/validation only. Retain income and annuity main effects."
+    },
+    {
+      "id": "ieee_amount_uid_mean",
+      "dataset_id": "ieee_cis_fraud",
+      "raw_columns": [
+        "card1",
+        "addr1",
+        "TransactionDT",
+        "D1",
+        "TransactionAmt"
+      ],
+      "kind": "group_statistic",
+      "source_feature_names": [
+        "UID",
+        "TransactionAmt_UID_mean"
+      ],
+      "formula": "UID is the joint key (card1, addr1, floor(TransactionDT / 86400 - D1)); feature_i = mean(TransactionAmt_j over rows j sharing UID_i)",
+      "formula_scope": "The tuple states the grouping semantics; source code serializes a combined card1_addr1 value and inferred start day as strings.",
+      "rowwise_raw_pair": false,
+      "source_model": {
+        "target": "isFraud",
+        "loss": "classification with AUC evaluation",
+        "link": "probability output; the final blend/postprocessing has no single GLM link",
+        "estimator": "XGBoost component; final XGBoost/CatBoost/LightGBM blend"
+      },
+      "proposed_model": {
+        "target": "isFraud",
+        "family": "Binomial",
+        "link": "logit"
+      },
+      "evidence_grade": "B",
+      "pair_isolated": false,
+      "evaluation": {
+        "metric": "ROC_AUC",
+        "reported": 0.9472,
+        "result_scope": "Article reports local AUC after adding the whole UID aggregate bundle, not this mean alone.",
+        "split": "The preceding evaluation uses the first 75% versus last 25%; the UID paragraph does not separately specify row boundaries."
+      },
+      "source_refs": [
+        "ieee_winner"
+      ],
+      "test_recipe": "Treat as a separate relational/history experiment. Freeze which rows may contribute to aggregates, enforce prediction-time availability, and group repeated identities. A pair tensor cannot reproduce a cross-row UID mean."
+    },
+    {
+      "id": "concrete_water_cement",
+      "dataset_id": "uci_concrete",
+      "raw_columns": [
+        "Water",
+        "Cement"
+      ],
+      "kind": "rowwise_ratio",
+      "formula": "Water / Cement",
+      "source_model": {
+        "target": "compressive strength",
+        "loss": null,
+        "link": null,
+        "estimator": "augment-neuron network",
+        "limitation": "Accessible abstract does not expose the exact loss or output transformation."
+      },
+      "proposed_model": {
+        "target": "Concrete compressive strength",
+        "family": "Gaussian",
+        "link": "identity"
+      },
+      "evidence_grade": "C",
+      "pair_isolated": false,
+      "evaluation": {
+        "metric": null,
+        "result_scope": "Yeh's source includes water/cement ratio among seven network inputs and uses 100 random training plus 100 test examples. No isolated ratio result is given in the accessible abstract.",
+        "dataset_transfer": "That 200-example study differs from the local 1030-row UCI dataset."
+      },
+      "source_refs": [
+        "concrete_paper",
+        "concrete_dataset"
+      ],
+      "test_recipe": "Keep all ingredient and age main effects, then add a ratio term or separately a Water/Cement tensor. Group identical mixtures across ages per registry; declare Cement>0 handling. Treat this as a transferred physical hypothesis."
+    }
+  ],
+  "exclusions": [
+    {
+      "dataset": "Allstate Claims Severity",
+      "reason": "No sufficiently verified original named-pair construction found in this bounded search; local competition data remain authentication-gated."
+    },
+    {
+      "dataset": "UCI credit default and WDBC",
+      "reason": "The prior memo's suggested pairs remain hypotheses. This bank adds no unsupported evidence grade or competitor provenance to them."
+    }
+  ],
+  "shared_trial_rules": [
+    "Keep evidence grade separate from local readiness, estimated effect size, and transfer to a different model.",
+    "Engineered ratios are multivariable features. An additive model supplied with them is no longer additive in the original raw features.",
+    "An isolated gain over a weak additive representation can reflect missing univariate flexibility. Freeze comparable main effects before pair tests.",
+    "Use the source-exact feature and a pairwise spline representation as separate arms; they express different function classes.",
+    "All listed recipes still need implementation and evaluation. This manifest launches no jobs and changes no dataset registry.",
+    "Record complete discovery/refit costs, failures, numerical outputs, and actual backend dispatch for any later SuperGLM comparison.",
+    "No raw competition downloads, installations, or access bypasses were performed during this review."
+  ]
+}
