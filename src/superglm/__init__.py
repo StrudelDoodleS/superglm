@@ -134,20 +134,18 @@ from superglm.profiling.tweedie import (
     TweedieProfileCIDensityProvenance as TweedieProfileCIDensityProvenance,
 )
 from superglm.profiling.tweedie import (
-    TweedieProfileCIDetails as TweedieProfileCIDetails,
+    TweedieProfileCIDetails,
+    TweedieProfileResult,
+    estimate_phi,
+    estimate_tweedie_p,
+    generate_tweedie_cpg,
+    tweedie_logpdf,
 )
 from superglm.profiling.tweedie import (
     TweedieProfileCIEndpoint as TweedieProfileCIEndpoint,
 )
 from superglm.profiling.tweedie import (
     TweedieProfileCIEvaluation as TweedieProfileCIEvaluation,
-)
-from superglm.profiling.tweedie import (
-    TweedieProfileResult,
-    estimate_phi,
-    estimate_tweedie_p,
-    generate_tweedie_cpg,
-    tweedie_logpdf,
 )
 from superglm.reml import REMLResult
 from superglm.sklearn import SuperGLMClassifier, SuperGLMRegressor
@@ -164,12 +162,8 @@ from superglm.stats.model_tests import (
 )
 from superglm.stats.wood_pvalue import wood_test_smooth
 from superglm.terms import (
-    BoundInteraction as BoundInteraction,
-)
-from superglm.terms import (
-    BoundTerm as BoundTerm,
-)
-from superglm.terms import (
+    BoundInteraction,
+    BoundTerm,
     cat,
     interaction,
     re,
@@ -219,6 +213,8 @@ __all__ = [
     "SuperLSS",
     "BoundPredictor",
     "bind_predictor",
+    "BoundInteraction",
+    "BoundTerm",
     "term",
     "s",
     "cat",
@@ -294,6 +290,7 @@ __all__ = [
     "estimate_nb_theta",
     "estimate_tweedie_p",
     "TweedieProfileResult",
+    "TweedieProfileCIDetails",
     "tweedie_logpdf",
     "estimate_phi",
     "generate_tweedie_cpg",

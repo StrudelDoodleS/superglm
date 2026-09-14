@@ -5,9 +5,10 @@ presents as the package's own names and what ``from superglm import *`` hands
 a user. A change to it is an API decision, so edit ``PUBLIC_API`` in the same
 pull request, where a reviewer sees the name as a diff line rather than inside
 a large commit. The rule applied when the list was trimmed: a name is exported
-when the documented user path writes it or receives it from a public method;
-objects the library builds on the user's behalf stay importable from the root
-and from their home modules but are not exports, and the second list pins that.
+when the documented user path writes it, or when a public function or method
+returns or accepts it. Objects the library builds on the user's behalf stay
+importable from the root and from a public module, and the mapping below pins
+both promises to the paths the release notes name.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ PUBLIC_API = [
     "Adaptive",
     "BSplineSmooth",
     "Binomial",
+    "BoundInteraction",
     "BoundPredictor",
+    "BoundTerm",
     "Categorical",
     "CauchitLink",
     "CloglogLink",
@@ -93,6 +96,7 @@ PUBLIC_API = [
     "TermInference",
     "Tweedie",
     "TweedieLSS",
+    "TweedieProfileCIDetails",
     "TweedieProfileResult",
     "TwoPieceLogNormalLSS",
     "TwoPieceNormalLSS",
@@ -131,27 +135,24 @@ PUBLIC_API = [
     "zero_inflation_index",
 ]
 
-IMPORTABLE_NOT_EXPORTED = [
-    "BoundInteraction",
-    "BoundTerm",
-    "CategoricalInteraction",
-    "ConstraintSpec",
-    "LinearConstraintSet",
-    "MonotoneRepairResult",
-    "MonotoneRepairer",
-    "NumericCategorical",
-    "NumericInteraction",
-    "PolynomialCategorical",
-    "PolynomialInteraction",
-    "SmoothCurve",
-    "SplineCategorical",
-    "SplineMetadata",
-    "TensorInteraction",
-    "TweedieProfileCIDensityProvenance",
-    "TweedieProfileCIDetails",
-    "TweedieProfileCIEndpoint",
-    "TweedieProfileCIEvaluation",
-]
+IMPORTABLE_NOT_EXPORTED = {
+    "CategoricalInteraction": "superglm.features",
+    "ConstraintSpec": "superglm.features",
+    "LinearConstraintSet": "superglm.types",
+    "MonotoneRepairResult": "superglm.constraints",
+    "MonotoneRepairer": "superglm.constraints",
+    "NumericCategorical": "superglm.features",
+    "NumericInteraction": "superglm.features",
+    "PolynomialCategorical": "superglm.features",
+    "PolynomialInteraction": "superglm.features",
+    "SmoothCurve": "superglm.inference",
+    "SplineCategorical": "superglm.features",
+    "SplineMetadata": "superglm.inference",
+    "TensorInteraction": "superglm.features.interaction",
+    "TweedieProfileCIDensityProvenance": "superglm.profiling",
+    "TweedieProfileCIEndpoint": "superglm.profiling",
+    "TweedieProfileCIEvaluation": "superglm.profiling",
+}
 
 
 def test_root_exports_match_the_reviewed_list() -> None:
@@ -162,15 +163,16 @@ def test_root_exports_match_the_reviewed_list() -> None:
 
 def test_reviewed_lists_are_sorted_and_disjoint() -> None:
     assert PUBLIC_API == sorted(set(PUBLIC_API))
-    assert IMPORTABLE_NOT_EXPORTED == sorted(set(IMPORTABLE_NOT_EXPORTED))
+    assert list(IMPORTABLE_NOT_EXPORTED) == sorted(IMPORTABLE_NOT_EXPORTED)
     assert set(PUBLIC_API).isdisjoint(IMPORTABLE_NOT_EXPORTED)
 
 
-def test_trimmed_names_stay_importable_from_the_root() -> None:
+def test_trimmed_names_stay_importable_from_the_root_and_a_public_module() -> None:
     missing = [name for name in IMPORTABLE_NOT_EXPORTED if not hasattr(superglm, name)]
     assert missing == [], f"trimmed names no longer reachable from superglm: {missing}"
     assert set(IMPORTABLE_NOT_EXPORTED).isdisjoint(superglm.__all__)
-    for name in IMPORTABLE_NOT_EXPORTED:
-        obj = getattr(superglm, name)
-        home = importlib.import_module(obj.__module__)
-        assert getattr(home, obj.__name__) is obj, f"{name} is not the object from {obj.__module__}"
+    for name, path in IMPORTABLE_NOT_EXPORTED.items():
+        module = importlib.import_module(path)
+        assert getattr(module, name, None) is getattr(superglm, name), (
+            f"{name} is not importable from {path} as the same object"
+        )
