@@ -1,5 +1,5 @@
 {
-  "plot_script_sha256": "a7f62e7a090dc84c3cde542ce7f04cc6dd1ee8f091eed04b1cec243eb3bcc145",
+  "plot_script_sha256": "2698a7fa17e2412eec526268f98a224906b209d02edbed511e70f67891b53aa9",
   "measurement_sha256": "45e1934e516b4b2db3aadc0b9072d5b81bc656912c95d6a25aa631fbb942f7fc",
   "scope": "Saved Gaussian identity-link tensor terms; no fits or selection; raw outcome units; no exponential relativity conversion or extra centering.",
   "view": "Training marginal 1st-99th percentiles, integer building grades, log display axes as declared in the script; observed-pair convex-hull mask is visual only.",
@@ -62,7 +62,7 @@
       ],
       "artifacts": {
         "airfoil.png": "9fa1b4da4a77fb592c36a60dd245e1a5065db4de356449f3d21bc6338024a394",
-        "airfoil.svg": "1f2c7c58ee44f5f8553e3087e94623db353c9b225d08d7a88874cec2ebd6fc7d",
+        "airfoil.svg": "95e4e0ce886c5e183489e7b12b1df88ec870a8f645468a27e811efe6ac82b3c1",
         "airfoil-surfaces.npz": "d13b186425a5bc3d80e33d2495ae75aec9017083ac4526edf720fe1e32116dab"
       }
     },
@@ -172,7 +172,7 @@
       ],
       "artifacts": {
         "concrete.png": "14a4b9420268c7b38c661f04f5dfff999976908d9cdf0cf69e19f53fad215d13",
-        "concrete.svg": "fc5c6ad3754a2650f30697dc145da08ebd23878f14d8c258076b8169d7479085",
+        "concrete.svg": "a6001296f134d4c4b99669c216bead9370ac83f22eacb36824f687e351380d56",
         "concrete-surfaces.npz": "ee698702095ae53df9ea71fbf1815f6919ab10543557643d34e763d068eb4eb0"
       }
     },
@@ -282,10 +282,10 @@
       ],
       "artifacts": {
         "king-county.png": "ef77a485b374e4e252a8738ede3d2df43d9cc8569f7c55ebff697a18bde92f3e",
-        "king-county.svg": "5336fba4b68fd7506ac4ce1bf8e3d8be2cb7e34ae231ad86ca8262feeae93331",
+        "king-county.svg": "46602b13ae20ed4c4495653fc37839be012ea9bd3fb81de56d785b1504b0450c",
         "king-county-surfaces.npz": "018b213cef1919c5882cc64a28a8d6477e7284b04e0b7372ec31c9261b1c7f4c"
       }
     }
   ],
-  "pdf_sha256": "2736cb8fc41dd1e37d4bd3f4e65becd85fda81ea2fad5df0dcfc6d99ad752ab1"
+  "pdf_sha256": "51f50787cfc4f887f3a42148a85e4ae1514384da4fd8caf30e2e18e132d6c077"
 }

@@ -275,6 +275,7 @@ def plot_case(dataset, case, fit, surfaces, pdf):
     svg = OUTPUT / f"{slug}.svg"
     fig.savefig(png, dpi=180, facecolor="white")
     fig.savefig(svg, facecolor="white")
+    svg.write_text("\n".join(line.rstrip() for line in svg.read_text().splitlines()) + "\n")
     pdf.savefig(fig, facecolor="white")
     plt.close(fig)
     npz = OUTPUT / f"{slug}-surfaces.npz"
