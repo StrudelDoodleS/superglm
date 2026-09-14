@@ -6,7 +6,7 @@ a user. A change to it is an API decision, so edit ``PUBLIC_API`` in the same
 pull request, where a reviewer sees the name as a diff line rather than inside
 a large commit. The rule applied when the list was trimmed: a name is exported
 when the documented user path writes it, or when a public function or method
-returns or accepts it. Objects the library builds on the user's behalf stay
+returns it. Objects the library builds on the user's behalf stay
 importable from the root and from a public module, and the mapping below pins
 both promises to the paths the release notes name.
 """

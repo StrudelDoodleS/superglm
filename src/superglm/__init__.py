@@ -203,9 +203,9 @@ def warmup() -> None:
 # The root export list is the reviewed public surface and is pinned by
 # tests/test_public_api_snapshot.py: adding or removing a name here edits that
 # list in the same pull request. Objects the library builds on the user's
-# behalf (bound terms, auto-detected interaction types, constraint machinery,
-# term-inference parts, Tweedie profile records) are importable from their
-# modules and from this namespace but are not exports.
+# behalf (auto-detected interaction types, constraint machinery, term-inference
+# parts, Tweedie profile records) are importable from their modules and from
+# this namespace but are not exports.
 __all__ = [
     "families",
     "warmup",
