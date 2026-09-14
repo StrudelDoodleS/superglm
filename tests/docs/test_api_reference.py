@@ -20,7 +20,7 @@ AUTOSUMMARY_BLOCK = re.compile(r"```\{eval-rst\}\s*\n\s*\.\.\s+autosummary::(.*?
 
 def documented_names() -> set[str]:
     names: set[str] = set()
-    for page in DOCS_API.glob("*.md"):
+    for page in DOCS_API.rglob("*.md"):
         for block in AUTOSUMMARY_BLOCK.findall(page.read_text(encoding="utf-8")):
             for raw in block.splitlines():
                 line = raw.strip().lstrip("~")
@@ -35,25 +35,26 @@ def test_every_public_name_has_a_reference_entry() -> None:
 
 
 MEMBER_PAGES = {
-    "SuperGLM": DOCS_API / "model.md",
-    "SuperLSS": DOCS_API / "distributional.md",
+    "SuperGLM": DOCS_API / "model",
+    "SuperLSS": DOCS_API / "distributional",
 }
 
 
-def listed_members(page: Path, cls_name: str) -> list[str]:
+def listed_members(pages: Path, cls_name: str) -> list[str]:
     prefix = f"superglm.{cls_name}."
     members: list[str] = []
-    for block in AUTOSUMMARY_BLOCK.findall(page.read_text(encoding="utf-8")):
-        for raw in block.splitlines():
-            line = raw.strip().lstrip("~")
-            if line.startswith(prefix):
-                members.append(line.removeprefix(prefix))
+    for page in sorted(pages.glob("*.md")):
+        for block in AUTOSUMMARY_BLOCK.findall(page.read_text(encoding="utf-8")):
+            for raw in block.splitlines():
+                line = raw.strip().lstrip("~")
+                if line.startswith(prefix):
+                    members.append(line.removeprefix(prefix))
     return members
 
 
 @pytest.mark.parametrize("cls_name", sorted(MEMBER_PAGES))
 def test_every_public_member_is_grouped_exactly_once(cls_name: str) -> None:
-    """The two big classes list every public member once, under a task heading."""
+    """The two big classes list every public member once, on one task page."""
     cls = getattr(superglm, cls_name)
     public = {name for name in dir(cls) if not name.startswith("_")}
     listed = listed_members(MEMBER_PAGES[cls_name], cls_name)

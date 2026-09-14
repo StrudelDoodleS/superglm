@@ -1,4 +1,4 @@
-{{ fullname | escape | underline }}
+{{ name | escape | underline }}
 
 .. currentmodule:: {{ module }}
 
@@ -7,5 +7,5 @@
 .. seealso::
 
    The methods and attributes of this class are grouped by task on the
-   :doc:`Distributional models </api/distributional>` reference page. Each has
-   its own page.
+   :doc:`SuperLSS </api/distributional>` reference pages; each has its own
+   page.

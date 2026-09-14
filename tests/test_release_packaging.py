@@ -113,7 +113,7 @@ def test_installation_docs_are_pypi_first() -> None:
 def test_dataframe_boundary_documentation_is_discoverable() -> None:
     installation = (ROOT / "docs/get-started/installation.md").read_text(encoding="utf-8")
     quickstart = (ROOT / "docs/get-started/quickstart.md").read_text(encoding="utf-8")
-    model_api = (ROOT / "docs/api/model.md").read_text(encoding="utf-8")
+    model_api = (ROOT / "docs/api/model/inference.md").read_text(encoding="utf-8")
     internals_toctree = (ROOT / "docs/development/internals/index.md").read_text(encoding="utf-8")
     developer_path = ROOT / "docs/development/internals/data-and-solver-boundaries.md"
 

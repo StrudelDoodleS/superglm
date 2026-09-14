@@ -143,7 +143,7 @@ standard deviation. Gamma's `scale` is CV, and its GLM dispersion is CV squared.
 The two-piece families' `skew` controls piece widths and is not the standardized
 third moment. See the family sections below for links, bounds and weight laws.
 
-The [family API reference](../api/distributional.md#declarations-and-families) documents
+The [family API reference](../api/distributional/declarations-and-families.md) documents
 the constructor options and each helper. Mean and location are distinct
 parameters where a family offers both forms; choosing a form changes what the
 first additive predictor describes.
