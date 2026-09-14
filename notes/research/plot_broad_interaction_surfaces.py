@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import pickle
 import sys
 from pathlib import Path
+
+if not __debug__:
+    raise RuntimeError("Research plot audit requires enabled assertions; remove -O/PYTHONOPTIMIZE")
 
 import matplotlib
 
@@ -19,12 +23,15 @@ from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from scipy.spatial import Delaunay
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "benchmarks"))
+SOURCE_PARSER = argparse.ArgumentParser(add_help=False)
+SOURCE_PARSER.add_argument("--source-root", type=Path, default=REPO)
+SOURCE_REPO = SOURCE_PARSER.parse_known_args()[0].source_root.resolve()
+sys.path.insert(0, str(SOURCE_REPO / "benchmarks"))
 import benchmark_broad_interactions as broad  # noqa: E402
 import benchmark_real_interactions as base  # noqa: E402
 import broad_interaction_data as data  # noqa: E402
 
-RUN = REPO / ".benchmark-artifacts/broad-interactions/frozen-20260914"
+RUN = SOURCE_REPO / ".benchmark-artifacts/broad-interactions/frozen-20260914"
 OUTPUT = Path(__file__).with_name("figures") / "2026-09-14-broad-interactions"
 CASES = {
     "uci_airfoil": ("airfoil", "Airfoil", "Sound pressure contribution (dB)", 1),
@@ -54,6 +61,15 @@ LOG_AXES = {"frequency", "suction-side-displacement-thickness", "Age", "sqft_liv
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def data_identity(metadata):
+    """Exclude only local locations; retain all content, code and split evidence."""
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key not in ("source_path", "source_registry")
+    }
 
 
 def display_values(name, values):
@@ -89,15 +105,15 @@ def configure_axis(ax, axis, name):
     ax.tick_params(axis=axis, which="minor", labelsize=0)
 
 
-def case_surfaces(dataset, measurement):
+def case_surfaces(dataset, measurement, data_root=data.DEFAULT_ROOT):
     case = measurement["datasets"][dataset]
     chosen = case["choice"]["chosen_arm"]
     fit = case["fits"][chosen]
     folder = RUN / dataset / chosen
     model_path = folder / "model.pkl"
     assert sha(model_path) == fit["model_pickle_sha256"]
-    prepared = data.load_prepared(dataset)
-    assert prepared["metadata"] == case["data"]
+    prepared = data.load_prepared(dataset, data_root=data_root)
+    assert data_identity(prepared["metadata"]) == data_identity(case["data"])
     assert prepared["metadata"]["family"] == "gaussian"
     with model_path.open("rb") as stream:
         model = pickle.load(stream)
@@ -189,7 +205,9 @@ def plot_case(dataset, case, fit, surfaces, pdf):
         "surfaces": [],
     }
     array_payload = {}
-    for i, (ax, surface) in enumerate(zip(axes.flat, surfaces, strict=True)):
+    for ax in axes.flat[len(surfaces) :]:
+        ax.set_axis_off()
+    for i, (ax, surface) in enumerate(zip(axes.flat[: len(surfaces)], surfaces, strict=True)):
         left, right = surface["parents"]
         x, y = [
             display_values(name, values)
@@ -285,6 +303,13 @@ def plot_case(dataset, case, fit, surfaces, pdf):
 
 
 def main():
+    global RUN, OUTPUT
+    parser = argparse.ArgumentParser(description=__doc__, parents=[SOURCE_PARSER])
+    parser.add_argument("--run-root", type=Path, default=RUN)
+    parser.add_argument("--data-root", type=Path, default=data.DEFAULT_ROOT)
+    parser.add_argument("--output", type=Path, default=OUTPUT)
+    args = parser.parse_args()
+    RUN, OUTPUT = args.run_root.resolve(), args.output.resolve()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     measurement_path = Path(__file__).with_name("2026-09-14-broad-interaction-measurements.json")
     measurement = json.loads(measurement_path.read_text())
@@ -299,7 +324,9 @@ def main():
     }
     with PdfPages(OUTPUT / "interaction-surfaces.pdf") as pdf:
         for dataset in CASES:
-            case, fit, surfaces = case_surfaces(dataset, measurement)
+            case, fit, surfaces = case_surfaces(
+                dataset, measurement, data_root=args.data_root.resolve()
+            )
             receipt["cases"].append(plot_case(dataset, case, fit, surfaces, pdf))
     receipt["pdf_sha256"] = sha(OUTPUT / "interaction-surfaces.pdf")
     (OUTPUT / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")

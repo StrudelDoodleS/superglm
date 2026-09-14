@@ -27,6 +27,11 @@ ROOT = Path(__file__).resolve().parents[1]
 FEATURES = tuple(f"x{i}" for i in range(8))
 SEED = 202609132
 
+if not __debug__:
+    raise RuntimeError(
+        "This benchmark requires enabled assertions; run without -O or PYTHONOPTIMIZE."
+    )
+
 
 def interaction_pairs():
     """Seven rounds of four disjoint pairs, covering the complete graph."""
@@ -163,8 +168,11 @@ def worker(args):
         "backend_groups": [type(group).__name__ for group in model._dm.group_matrices],
         "telemetry": telemetry,
     }
-    (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(json.dumps({k: result[k] for k in ("status", "fit_seconds", "mse")}), flush=True)
+    (args.output / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    print(
+        json.dumps({k: result[k] for k in ("status", "fit_seconds", "mse")}, allow_nan=False),
+        flush=True,
+    )
 
 
 def main():
@@ -217,8 +225,8 @@ def main():
         command, log_path=args.output / "worker.log", timeout=args.timeout, env=env
     )
     receipt.update(command=command, timeout_seconds=args.timeout, profiled=args.profile)
-    (args.output / "run.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    print(json.dumps(receipt), flush=True)
+    (args.output / "run.json").write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
+    print(json.dumps(receipt, allow_nan=False), flush=True)
     return 0 if receipt["status"] == "success" else 1
 
 

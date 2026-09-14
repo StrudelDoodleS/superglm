@@ -170,6 +170,29 @@ def test_suite_retains_all_attempt_costs_without_test_evaluation(tmp_path, monke
         assert suite["datasets"]["uci_concrete"]["status"] == "budget_exhausted"
 
 
+@pytest.mark.parametrize("stage", ["fit", "evaluate"])
+@pytest.mark.parametrize("process_status", ["timeout", "error"])
+def test_launch_persists_parent_normalized_incomplete_receipts(
+    tmp_path, monkeypatch, stage, process_status
+):
+    args = SimpleNamespace(output=tmp_path, data_root=tmp_path)
+    filename = "evaluation.json" if stage == "evaluate" else "result.json"
+    result_path = tmp_path / "uci_airfoil" / "k4_s0" / filename
+
+    def isolated(*args, **kwargs):
+        broad.base.write_json(result_path, {"status": "fitting", "partial_evidence": "retained"})
+        return {"status": process_status, "process_seconds": 2.0}
+
+    monkeypatch.setattr(broad, "run_isolated", isolated)
+    record = broad.launch(args, "uci_airfoil", "k4_s0", stage, 2.0)
+    raw = json.loads(result_path.read_text())
+    assert raw == {key: value for key, value in record.items() if key != "process"}
+    assert raw["status"] == process_status
+    assert raw["warnings_complete"] is False
+    assert raw["partial_evidence"] == "retained"
+    assert raw["parent_finished_utc"]
+
+
 def test_zero_smoothing_model_uses_coefficient_convergence_without_fictitious_reml():
     state = {"features": {"x": {"kind": "numeric"}, "z": {"kind": "numeric"}}}
     x = np.tile(np.arange(4, dtype=float), 20)

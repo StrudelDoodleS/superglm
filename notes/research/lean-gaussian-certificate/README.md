@@ -119,8 +119,15 @@ To use short commands in a shell session, add its `bin` directory to that
 session's `PATH`. On another machine use the corresponding `lake` executable
 after installing [Lean through the official instructions](https://lean-lang.org/install/manual/).
 
-The [validation receipt](validation.json) records the commands, source hashes,
-exit statuses and compiler output from this checkout.
+The [historical validation receipt](validation.json) records the Gaussian and
+beginner checks, including the deliberately rejected proof, at their original
+source hashes. Its `lakefile.toml` hash predates the addition of
+`InteractionOperator` to the default Lake targets.
+
+The [interaction operator receipt](interaction-operator-validation.json) records
+the subsequent `integrated_build`, including the updated `lakefile.toml` hash
+used when `lake build` checked all three libraries. Both receipts preserve their
+original compiler outputs and exit statuses.
 
 ## Installed live proof feedback
 
@@ -134,4 +141,4 @@ reconnect the agent session to load its tools. The
 [setup receipt](../research-tools-setup.md) records installation checks and the
 separate SymPy environment. The historic [MCP receipt](mcp-validation.json) records the
 successful local calls and a rejected tactic trial. Completed proof validation
-remains in the separate compiler receipt above.
+remains in the separate compiler receipts above.

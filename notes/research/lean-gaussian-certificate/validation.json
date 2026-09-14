@@ -13,6 +13,7 @@
     "Classical.choice",
     "Quot.sound"
   ],
+  "metadata_hash_scope": "Historical validation of Certificate.lean and ProofTour.lean, plus the deliberately rejected ProofTourInvalid.lean.txt check, before InteractionOperator was added as a default Lake library target. The lakefile.toml hash below records that earlier configuration. The later integrated build and its updated lakefile.toml hash are recorded in interaction-operator-validation.json under integrated_build. This receipt preserves the original checks and does not record that later build.",
   "source_sha256": {
     "Certificate.lean": "887356aa33dce90017c1fc7f125d9186332f8e939ccf792fd8a717c9ccfa4718",
     "ProofTour.lean": "cfaaf5e9a6a80f0ea1893ef12b8f0917875e8940aceb33590736b47910cdecda",

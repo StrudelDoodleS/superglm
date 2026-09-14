@@ -57,6 +57,11 @@ evaluation, so the recorded experiment totals are unchanged. Its original
 runner and source hash remain preserved in commit `639f499e`; the updated
 runner has a new source identity and cannot stand in for the frozen run.
 
+The [PR review follow-up](2026-09-14-interaction-review-validation.md) records
+the remaining audit, timeout, plotting and receipt corrections, their regression
+checks, and a replay from a different source checkout. The archived scores,
+costs, hashes and surface arrays are unchanged.
+
 One archival JSON file had a second final newline removed during PR packaging:
 `2026-09-13-tensor-support-handoff-initial-measurements.json`. Its parsed values
 are unchanged. The original bytes remain in commit `639f499e`, with SHA-256
