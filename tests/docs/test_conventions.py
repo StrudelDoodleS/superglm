@@ -96,20 +96,23 @@ def test_pages_with_code_cells_are_myst_notebooks() -> None:
     )
 
 
-def test_notebook_files_outside_examples_are_jupytext_pairs() -> None:
-    """An ``.ipynb`` under docs is a stored example or the pair of a Markdown page.
+def test_notebook_files_outside_examples_are_tutorial_pairs() -> None:
+    """An ``.ipynb`` under docs is a stored example or the pair of a tutorial page.
 
     Both selection rules read ``*.md`` only, so a bare notebook anywhere else
-    would execute on the deploy build and be invisible to every test.
+    would execute on the deploy build and be invisible to every test. Only
+    ``docs/tutorials/`` is equipped for pairs: the jupytext sync and nbstripout
+    hooks and the Sphinx exclusion of ``tutorials/*.ipynb`` are all scoped there.
     """
+    tutorials = DOCS / "tutorials"
     stray = [
         str(p.relative_to(DOCS))
         for p in sorted(DOCS.rglob("*.ipynb"))
         if not SKIP_DIRS & set(p.relative_to(DOCS).parts)
         and "examples" not in p.relative_to(DOCS).parts
-        and not p.with_suffix(".md").exists()
+        and not (p.parent == tutorials and p.with_suffix(".md").exists())
     ]
-    assert stray == [], f"notebooks with no Markdown pair: {stray}"
+    assert stray == [], f"notebooks that are neither examples nor tutorial pairs: {stray}"
 
 
 EXAMPLE_DIRS = {"SuperGLM": DOCS / "api" / "model", "SuperLSS": DOCS / "api" / "distributional"}
@@ -144,3 +147,24 @@ def test_example_setup_cells_are_identical(family: str) -> None:
     reference = first_visible_cell(pages[0])
     differing = sorted(p.name for p in pages[1:] if first_visible_cell(p) != reference)
     assert differing == [], f"{family} setup cells differ from {pages[0].name}: {differing}"
+
+
+def first_hidden_cell(path: Path) -> str:
+    cells = CODE_CELL.findall(path.read_text(encoding="utf-8"))
+    hidden = [cell for cell in cells if ":tags: [remove-cell]" in cell]
+    assert hidden, f"{path.relative_to(DOCS)} has an Example section but no hidden style cell"
+    return hidden[0]
+
+
+@pytest.mark.parametrize("family", sorted(EXAMPLE_DIRS))
+def test_example_style_cells_are_identical(family: str) -> None:
+    """The hidden style cell is repeated per page as well, and it has drifted once already.
+
+    The tutorial and the REML page are not held to this copy: they sit one
+    directory shallower, and the tutorial's cell differs by design so that its
+    paired notebook still runs in Colab.
+    """
+    pages = example_pages(EXAMPLE_DIRS[family])
+    reference = first_hidden_cell(pages[0])
+    differing = sorted(p.name for p in pages[1:] if first_hidden_cell(p) != reference)
+    assert differing == [], f"{family} style cells differ from {pages[0].name}: {differing}"
