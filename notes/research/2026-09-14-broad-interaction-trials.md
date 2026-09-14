@@ -196,7 +196,7 @@ source hash from the one that produced this archive:
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  uv run --project .worktrees/interaction-frozen python docs/research/check_broad_interaction_measurements.py \
+  uv run --project .worktrees/interaction-frozen python notes/research/check_broad_interaction_measurements.py \
   --source-root .worktrees/interaction-frozen \
   --run-root /path/to/frozen-20260914 \
   --data-root /path/to/interaction-datasets \
@@ -210,7 +210,7 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   uv run python benchmarks/benchmark_broad_interactions.py \
   --output .benchmark-artifacts/broad-interactions/new-run
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  uv run python docs/research/check_broad_interaction_measurements.py \
+  uv run python notes/research/check_broad_interaction_measurements.py \
   --source-root . \
   --run-root .benchmark-artifacts/broad-interactions/new-run \
   --data-root .benchmark-artifacts/interaction-datasets \

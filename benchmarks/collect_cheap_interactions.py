@@ -122,7 +122,7 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        default=ROOT / "docs/research/2026-09-13-cheap-interaction-measurements.json",
+        default=ROOT / "notes/research/2026-09-13-cheap-interaction-measurements.json",
     )
     args = parser.parse_args()
     receipt = collect(args.input)

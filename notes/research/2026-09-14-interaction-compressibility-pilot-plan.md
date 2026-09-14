@@ -22,8 +22,10 @@ pytest, Ruff, Matplotlib and the frozen broad-trial adapters/artifacts.
 
 ## Global constraints
 
-- Work in `.worktrees/adaptive-interactions`; preserve unrelated user changes.
-- Keep prototypes in `benchmarks`, findings in `docs/research`, and raw runs
+- Create isolated feature work under `.worktrees/` from the integrated research
+  branch. Preserve `.worktrees/adaptive-interactions` as the original source
+  and artifact archive, along with unrelated user changes.
+- Keep prototypes in `benchmarks`, findings in `notes/research`, and raw runs
   under `.benchmark-artifacts/interaction-compressibility/`.
 - Do not edit frozen broad-trial scripts, source files, models or receipts.
   This batch makes no production, dependency, release or API changes.
@@ -47,19 +49,19 @@ pytest, Ruff, Matplotlib and the frozen broad-trial adapters/artifacts.
 | `benchmarks/benchmark_interaction_compressibility.py` | Source/model admission, serial workers, complete-predictor comparisons and receipt export |
 | `benchmarks/test_interaction_compressibility.py` | Admission, accounting, no-fit scope and candidate completeness checks |
 | `benchmarks/interaction_compressibility_cases.json` | Frozen three-case identities and candidate policy |
-| `docs/research/2026-09-14-interaction-compressibility.md` | Results, plots, limitations and next-branch recommendation |
-| `docs/research/2026-09-14-interaction-compressibility-measurements.json` | Durable derived measurements and raw artifact hashes |
+| `notes/research/2026-09-14-interaction-compressibility.md` | Results, plots, limitations and next-branch recommendation |
+| `notes/research/2026-09-14-interaction-compressibility-measurements.json` | Durable derived measurements and raw artifact hashes |
 
 The report/measurement files are created only when the experiment runs. Raw
 arrays and standard scientific figures go under the experiment's artifact
-directory and a corresponding `docs/research/figures/` directory. A later
+directory and a corresponding `notes/research/figures/` directory. A later
 execution date may be recorded inside these planned files without rewriting
 the frozen source references.
 
 ## Task 1. Freeze the three saved models and admit their coordinate maps
 
 **Existing sources to read:**
-`case_surfaces` in `docs/research/plot_broad_interaction_surfaces.py`,
+`case_surfaces` in `notes/research/plot_broad_interaction_surfaces.py`,
 `src/superglm/features/interaction.py:1799`,
 `benchmarks/benchmark_broad_interactions.py:183`,
 `benchmarks/broad_interaction_data.py`, and the broad measurement JSON.
@@ -72,7 +74,7 @@ These are input references; do not refactor them for this pilot.
   "schema_version": 1,
   "scope": "post_fit_compression_development_only",
   "run_root": ".benchmark-artifacts/broad-interactions/frozen-20260914",
-  "measurement_path": "docs/research/2026-09-14-broad-interaction-measurements.json",
+  "measurement_path": "notes/research/2026-09-14-broad-interaction-measurements.json",
   "measurement_sha256": "45e1934e516b4b2db3aadc0b9072d5b81bc656912c95d6a25aa631fbb942f7fc",
   "cases": {
     "uci_airfoil": "k4_s2",

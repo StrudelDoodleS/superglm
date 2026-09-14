@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-RESEARCH = Path(__file__).resolve().parents[1] / "docs" / "research"
+RESEARCH = Path(__file__).resolve().parents[1] / "notes" / "research"
 
 
 def load_tool(filename):

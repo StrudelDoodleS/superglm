@@ -22,7 +22,7 @@ IDENTITIES = ("source", "protocol_sha256", "data", "data_identity_sha256", "prop
 def audit_run(tmp_path, monkeypatch):
     path = (
         Path(__file__).resolve().parents[1]
-        / "docs/research/check_broad_interaction_measurements.py"
+        / "notes/research/check_broad_interaction_measurements.py"
     )
     spec = importlib.util.spec_from_file_location("partial_receipt_audit", path)
     audit = importlib.util.module_from_spec(spec)
