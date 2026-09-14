@@ -2,7 +2,9 @@
 
 Response families define the variance function and the weight semantics;
 links map the linear predictor to the mean. The negative-binomial and Tweedie
-profilers estimate the extra parameters those families carry.
+profilers estimate the extra parameters those families carry. The records
+inside a Tweedie profile's confidence interval are on the
+[Internals](internals.md) page.
 
 ```{eval-rst}
 .. autosummary::
@@ -32,6 +34,7 @@ profilers estimate the extra parameters those families carry.
    superglm.estimate_tweedie_p
    superglm.estimate_phi
    superglm.TweedieProfileResult
+   superglm.TweedieProfileCIDetails
    superglm.tweedie_logpdf
    superglm.generate_tweedie_cpg
 ```

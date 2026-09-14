@@ -1,7 +1,8 @@
 # Inference results
 
-The objects returned by `term_inference`, `random_effects`, `factor_smooth`
-and the spline diagnostics. They are plain data containers; the model
+The objects returned by `term_inference` (a `TermInference` for a main
+effect, an `InteractionInference` for an interaction), `random_effects`,
+`factor_smooth` and the spline diagnostics. They are plain data containers; the model
 methods that produce them are documented on the
 [SuperGLM pages](model.md), and the parts they are built from on the
 [Internals](internals.md) page.
@@ -12,6 +13,7 @@ methods that produce them are documented on the
    :nosignatures:
 
    superglm.TermInference
+   superglm.InteractionInference
    superglm.RandomEffectResult
    superglm.FactorSmoothResult
    superglm.SplineRedundancyReport
