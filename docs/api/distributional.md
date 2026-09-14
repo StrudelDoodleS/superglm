@@ -24,7 +24,7 @@ page.
 :::{grid-item-card} 1 · Declare
 :link: distributional/families
 :link-type: doc
-A family, then one predictor per parameter.
+The family and the parameters it models.
 :::
 :::{grid-item-card} 2 · Fit
 :link: distributional/fit

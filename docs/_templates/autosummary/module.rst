@@ -1,3 +1,6 @@
+{#- Sphinx's builtin autosummary/module.rst, copied verbatim except for the title
+    line, which uses name instead of fullname so the sidebar entry is short.
+    On a Sphinx upgrade, diff against sphinx/ext/autosummary/templates/autosummary/module.rst. -#}
 {{ name | escape | underline }}
 
 .. automodule:: {{ fullname }}

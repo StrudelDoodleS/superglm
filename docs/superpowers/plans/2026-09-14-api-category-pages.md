@@ -21,12 +21,12 @@
 
 ### Task 1: Split the two class pages
 
-- [ ] Run `split_reference.py` (scratchpad): writes `api/model/{build,fit,inference,predict,plot,diagnose,constrain-shapes,screen-interactions,deploy,results-and-records}.md` and `api/distributional/{declarations-and-families,fit,inference,predict,check-the-fit,price,plot,certification,save-and-load,configuration}.md`, and rewrites the two overviews. The Build page holds the SuperGLM class entry plus the configuration group; the SuperLSS Fit page holds the class entry, the fit members and `FitDiagnosticReport` in one block. "Read the fit" is renamed Inference on both pages and on card 3.
-- [ ] Group order follows the cards: SuperGLM = Build, Fit, Inference, Predict, Plot, Diagnose, Constrain shapes, Screen interactions, Deploy, Results and records; SuperLSS = Declarations and families, Fit, Inference, Predict, Check the fit, Price and portfolio views, Plot, Smoothing certification and telemetry, Save and load, Configuration.
+- [ ] Run `split_reference.py` (scratchpad): writes `api/model/{build,fit,inference,predict,plot,diagnose,constrain-shapes,screen-interactions,deploy,results-and-records}.md` and `api/distributional/{families,declarations,fit,inference,predict,check-the-fit,price,plot,certification,save-and-load,configuration}.md`, and rewrites the two overviews. The Build page holds the SuperGLM class entry plus the configuration group; the SuperLSS Fit page holds the class entry, the fit members and `FitDiagnosticReport` in one block. "Read the fit" is renamed Inference on both pages and on card 3.
+- [ ] Group order follows the cards: SuperGLM = Build, Fit, Inference, Predict, Plot, Diagnose, Constrain shapes, Screen interactions, Deploy, Results and records; SuperLSS = Families, Declarations, Fit, Inference, Predict, Check the fit, Price and portfolio views, Plot, Smoothing certification and telemetry, Save and load, Configuration (Max, after the first build: families in their own dropdown).
 
 ### Task 2: Short titles on generated pages
 
-- [ ] `_templates/autosummary/base.rst` (new) and the three class templates use `{{ name | escape | underline }}`; the two `class-no-members` templates' seealso text names the SuperGLM / SuperLSS overview pages.
+- [ ] `_templates/autosummary/base.rst` (new), `class.rst` and `module.rst` (new, Sphinx's builtin with the title line changed) use `{{ name | escape | underline }}`. The two `class-no-members` templates keep `fullname`, so the class stub never shares a label with the overview entry one level above it; their seealso text names the SuperGLM / SuperLSS overview pages.
 
 ### Task 3: Sidebar depth and tests
 
