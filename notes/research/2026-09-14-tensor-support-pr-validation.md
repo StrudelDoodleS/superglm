@@ -1,9 +1,11 @@
 # Tensor support handoff review guide
 
 This checkpoint extracts the completed performance change from the larger
-interaction research branch. The four production files and the new regression
-module match the previously reviewed implementation at `639f499e` byte for
-byte. The research archive retains the original implementation history.
+interaction research branch. The four production files match the previously
+reviewed implementation at `639f499e` byte for byte. The regression module
+contains the archived tests plus the nonidentity-coordinate handoff test added
+during PR review at `01d2349d`. The research archive retains the original
+implementation history; its mutation evidence describes the archived tests.
 
 ## Problem and resulting behavior
 
