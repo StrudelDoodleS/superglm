@@ -16,7 +16,6 @@ kernelspec:
 :tags: [remove-cell]
 
 import logging
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -136,6 +135,9 @@ means stay within 0.09 of zero and the standard deviations between 0.94 and
 the lower panel would tilt — small residual spread at young ages, large at old
 — which is exactly the failure the second panel exists to catch.
 
+`actual_expected` leaves residual space and reports money: realised against
+predicted totals per level, as a ratio of weighted sums.
+
 ```{code-cell} ipython3
 ae = model.actual_expected(book, amount, "region")
 pd.DataFrame(
@@ -150,18 +152,20 @@ pd.DataFrame(
 ).round(3)
 ```
 
-`actual_expected` leaves residual space and reports money: realised against
-predicted totals per level, as a ratio of weighted sums. All four regions land
+All four regions land
 within 1.3% of parity and every ratio is inside one standard error of one, so
 there is no region the fit is systematically underpricing.
+
+`scores` gives proper scores per row; the mean log score is the average
+negative log-likelihood on these rows and the CRPS is in the units of the
+claim itself. Both are only meaningful against another candidate.
 
 ```{code-cell} ipython3
 model.scores(book, amount).mean().round(3)
 ```
 
-`scores` gives proper scores per row; the mean log score is the average
-negative log-likelihood on these rows and the CRPS is in the units of the
-claim itself. Both are only meaningful against another candidate.
+`compare` refits the same location predictor with one standard deviation for
+every row, then pairs the two fits row by row.
 
 ```{code-cell} ipython3
 flat_scale = SuperLSS(
@@ -173,8 +177,7 @@ flat_scale = SuperLSS(
 pd.Series(model.compare(flat_scale, book, amount, which="log").overall).round(4)
 ```
 
-The comparison refits the same location predictor with one standard deviation
-for every row, then pairs the two fits row by row. The mean log-score
+The mean log-score
 difference is -0.029 in favour of the varying-scale model, with a t statistic
 of -6.7 on 3,000 rows: the age effect on the spread is not a rounding artefact,
 and the check above is what it looks like when it is modelled.

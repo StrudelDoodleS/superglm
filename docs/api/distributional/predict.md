@@ -16,7 +16,6 @@ kernelspec:
 :tags: [remove-cell]
 
 import logging
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -115,6 +114,10 @@ repeats it; the scale link is `log(scale - 0.01)`, which is why 0.533 appears
 as -0.648. Both columns move from row to row, which is the point of the
 distributional fit: rows differ in spread as well as in level.
 
+`predict`, `predict_quantile` and `predict_cdf` on the first five rows: the
+conditional mean, the 90th percentile of the claim, and the observed claim
+read back through its own fitted law.
+
 ```{code-cell} ipython3
 first = book.head(5)
 pd.DataFrame(
@@ -137,6 +140,11 @@ the observed claim back through its own fitted law — the five values are sprea
 across the unit interval, as they should be for rows that are neither
 systematically over- nor under-predicted.
 
+`posterior_predictive` simulates responses for those same rows, drawing
+coefficients from the fit's posterior and then a response from each drawn
+law, so the interval carries both parameter uncertainty and the claim's own
+randomness.
+
 ```{code-cell} ipython3
 draws = model.posterior_predictive(first, n_draws=500)
 pd.DataFrame(
@@ -145,8 +153,5 @@ pd.DataFrame(
 ).round(0)
 ```
 
-`posterior_predictive` simulates responses for those same rows, drawing
-coefficients from the fit's posterior and then a response from each drawn law,
-so the interval carries both parameter uncertainty and the claim's own
-randomness. Each row's 5% to 95% span covers a factor of roughly four to ten
+Each row's 5% to 95% span covers a factor of roughly four to ten
 — the spread of a single claim dwarfs the uncertainty in where its law sits.

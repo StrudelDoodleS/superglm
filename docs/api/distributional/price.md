@@ -16,7 +16,6 @@ kernelspec:
 :tags: [remove-cell]
 
 import logging
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -121,6 +120,9 @@ widening at the same time, so the older policy is cheaper on average and
 relatively more exposed in the tail. A mean-only model prices the first move
 and misses the second.
 
+`density_fan` is the same sweep as the whole conditional density rather than
+three of its quantiles, with those quantiles drawn over it.
+
 ```{code-cell} ipython3
 fan = model.density_fan(reference, "age")
 
@@ -135,12 +137,14 @@ fig.colorbar(mesh, ax=ax, label="density")
 fig.tight_layout()
 ```
 
-The same sweep as the whole conditional density rather than three of its
-quantiles, with those quantiles drawn over it. As age rises the mass sinks
+As age rises the mass sinks
 towards small claims and packs more tightly there, while the top line stops
 falling and lifts again: the law is not sliding down, it is growing more
 right-skewed. That is a shape change, and it is what the quantile curves above
 can only imply.
+
+`parameter_spread` bins the book by predicted mean and asks how far the tail
+probability moves inside a bin.
 
 ```{code-cell} ipython3
 spread = model.parameter_spread(book, threshold=5000.0)
@@ -159,12 +163,14 @@ pd.Series(
 ).round(4)
 ```
 
-`parameter_spread` bins the book by predicted mean and asks how far the tail
-probability moves inside a bin. In the typical bin the chance of a claim above
+In the typical bin the chance of a claim above
 5,000 varies by a factor of 2.8 between the mildest and the most exposed row;
 in the widest bin it varies by a factor of 34, between 0.0007 and 0.0252,
 while a mean-only model prices every row in that bin between 1,605 and 1,680.
 Those rows are priced as one risk and are not one risk.
+
+`portfolio` simulates every row on its own predictive law and sums the draws,
+so the quantiles are of the book total.
 
 ```{code-cell} ipython3
 total = model.portfolio(book, quantiles=(0.05, 0.5, 0.95))
@@ -180,8 +186,7 @@ pd.Series(
 ).round(0)
 ```
 
-`portfolio` simulates every row on its own predictive law and sums the draws,
-so the quantiles are of the book total. The expected total is 5.82 million
+The expected total is 5.82 million
 against an observed 5.83 million, and the 5% to 95% interval spans 4.6% of the
 mean: the aggregate is far tighter than any single policy because the row
 draws average out, while the coefficient draws they share keep it from being

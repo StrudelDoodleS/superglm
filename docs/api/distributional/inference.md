@@ -16,7 +16,6 @@ kernelspec:
 :tags: [remove-cell]
 
 import logging
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -118,6 +117,10 @@ spread moves with age far more gently than the location does. Every term's
 Wood statistic is large enough that its p-value rounds to zero at three
 decimal places.
 
+`term_inference` returns one term of one parameter swept over its training
+range: the centred effect on the link scale, identity here, so log-amount
+units, with pointwise bounds and the simultaneous ones.
+
 ```{code-cell} ipython3
 age_effect = model.term_inference("location", "age")
 band = pd.DataFrame(
@@ -134,11 +137,11 @@ print(f"edf {age_effect.edf:.2f}, critical value {age_effect.critical_value:.2f}
 band.head().round(3)
 ```
 
-`term_inference` returns the term swept over its training range: the centred
-effect on the link scale — identity here, so log-amount units — with pointwise
-bounds and the simultaneous ones. The simultaneous bounds use a critical value
+The simultaneous bounds use a critical value
 of 2.97 rather than the pointwise 1.96, which is why they sit further out at
 every age.
+
+The same frame, drawn with both bands.
 
 ```{code-cell} ipython3
 import matplotlib.pyplot as plt
@@ -167,6 +170,9 @@ age different from the average?"; the simultaneous band, about 1.5 times as
 wide here, answers the question a pricing review actually asks — "could this
 whole curve have been flat?" — and a flat line does not fit inside it.
 
+`term_test` asks the same question of the scale predictor, as a test rather
+than a picture.
+
 ```{code-cell} ipython3
 test = model.term_test("scale", "age")
 pd.Series(
@@ -179,7 +185,6 @@ pd.Series(
 )
 ```
 
-The same question for the scale predictor, as a test rather than a picture.
 The statistic is 177 on 2.6 ranks and the p-value is far below any usual
 threshold, so the width of the claim distribution genuinely varies with age:
 a location-only model would misstate the tail at both ends of the age range.

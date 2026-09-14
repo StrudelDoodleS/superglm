@@ -16,7 +16,6 @@ kernelspec:
 :tags: [remove-cell]
 
 import logging
-import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -82,7 +81,6 @@ offset = np.log(exposure)
 
 model = SuperGLM(
     family="poisson",
-    selection_penalty=0.0,
     features={
         "age": Spline(kind="cr", k=10),
         "region": Categorical(),
@@ -138,7 +136,6 @@ payload.discretization_impact[
         "exported",
         "deviance_change_pct",
         "max_abs_prediction_change_pct",
-        "mean_abs_prediction_change_pct",
     ]
 ].round(3)
 ```
