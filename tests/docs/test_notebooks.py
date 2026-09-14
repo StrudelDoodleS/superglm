@@ -21,19 +21,13 @@ import pytest
 jupytext = pytest.importorskip("jupytext")
 nbclient = pytest.importorskip("nbclient")
 
+from tests.docs.page_rules import docs_pages, is_myst_notebook  # noqa: E402
+
 DOCS = Path(__file__).resolve().parents[2] / "docs"
-SKIP_DIRS = {"superpowers", "_build"}
 
 
 def myst_notebooks() -> list[Path]:
-    found: list[Path] = []
-    for path in sorted(DOCS.rglob("*.md")):
-        if SKIP_DIRS & set(path.relative_to(DOCS).parts):
-            continue
-        head = path.read_text(encoding="utf-8")[:600]
-        if head.startswith("---") and "format_name: myst" in head:
-            found.append(path)
-    return found
+    return [p for p in docs_pages(DOCS) if is_myst_notebook(p.read_text(encoding="utf-8"))]
 
 
 @pytest.mark.docs

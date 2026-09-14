@@ -31,12 +31,15 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
-for candidate in (Path("../_static/superglm.mplstyle"), Path("docs/_static/superglm.mplstyle")):
+candidates = (Path("../_static/superglm.mplstyle"), Path("docs/_static/superglm.mplstyle"))
+for candidate in candidates:
     if candidate.exists():
         plt.style.use(str(candidate))
         break
 else:
-    raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
+    # No docs tree at all means Colab or a bare download: keep matplotlib's defaults.
+    if any(candidate.parent.is_dir() for candidate in candidates):
+        raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
 ```
 
 `SuperLSS` fits several parameters of a response distribution together. A

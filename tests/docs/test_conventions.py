@@ -20,24 +20,23 @@ from pathlib import Path
 
 import pytest
 
+from tests.docs.page_rules import SKIP_DIRS, docs_pages, is_myst_notebook
+
 DOCS = Path(__file__).resolve().parents[2] / "docs"
 CODE_CELL = re.compile(r"```\{code-cell\}[^\n]*\n(.*?)```", re.S)
 PRIVATE_ACCESS = re.compile(r"[\w\)\]]\._(?!_)[A-Za-z]\w*")
 GLUE_CALL = re.compile(r"\bglue\(\s*[\"']([^\"']+)[\"']")
 # A {glue:figure} / {glue:any} directive on a backtick or colon fence of any
-# width, or a {glue:text}`key` role (with or without a :format suffix).
+# width, indented or not, or a {glue:text}`key` role (with or without a
+# :format suffix).
 GLUE_PASTE = re.compile(
-    r"^(?:`{3,}|:{3,})\{glue(?::\w+)?\}\s+(\S+)|\{glue(?::\w+)?\}`([^`:]+)", re.M
+    r"^[ \t]*(?:`{3,}|:{3,})\{glue(?::\w+)?\}\s+(\S+)|\{glue(?::\w+)?\}`([^`:]+)", re.M
 )
 SKIP_EXECUTION = re.compile(r"^:tags:.*skip-execution", re.M)
 
 
 def executed_pages() -> list[Path]:
-    return [
-        p
-        for p in sorted(DOCS.rglob("*.md"))
-        if "superpowers" not in p.parts and "_build" not in p.parts
-    ]
+    return docs_pages(DOCS)
 
 
 def test_no_private_attribute_access_in_executed_pages() -> None:
@@ -74,19 +73,14 @@ def test_glue_pastes_are_glued_on_the_same_page() -> None:
     assert missing == [], "glue pastes without a glue call on their page:\n" + "\n".join(missing)
 
 
-def is_myst_notebook(text: str) -> bool:
-    """The rule ``tests/docs/test_notebooks.py`` uses to pick pages to execute."""
-    head = text[:600]
-    return head.startswith("---") and "format_name: myst" in head
-
-
 def test_pages_with_code_cells_are_myst_notebooks() -> None:
     """Sphinx and the notebook test must agree on which pages execute.
 
     The Sphinx build executes any page that holds a ``{code-cell}``; the
-    notebook test executes the pages whose front matter names the MyST format.
-    A page with cells but no front matter would run on the deploy build and
-    never in the tests, so the two rules must select the same files.
+    notebook test executes the pages ``page_rules.is_myst_notebook`` accepts,
+    the same rule it imports. A page with cells but no front matter would run
+    on the deploy build and never in the tests, so the two must select the
+    same files.
     """
     mismatched: list[str] = []
     for path in executed_pages():
@@ -100,6 +94,22 @@ def test_pages_with_code_cells_are_myst_notebooks() -> None:
     assert mismatched == [], "pages Sphinx and the notebook test disagree on:\n" + "\n".join(
         mismatched
     )
+
+
+def test_notebook_files_outside_examples_are_jupytext_pairs() -> None:
+    """An ``.ipynb`` under docs is a stored example or the pair of a Markdown page.
+
+    Both selection rules read ``*.md`` only, so a bare notebook anywhere else
+    would execute on the deploy build and be invisible to every test.
+    """
+    stray = [
+        str(p.relative_to(DOCS))
+        for p in sorted(DOCS.rglob("*.ipynb"))
+        if not SKIP_DIRS & set(p.relative_to(DOCS).parts)
+        and "examples" not in p.relative_to(DOCS).parts
+        and not p.with_suffix(".md").exists()
+    ]
+    assert stray == [], f"notebooks with no Markdown pair: {stray}"
 
 
 EXAMPLE_DIRS = {"SuperGLM": DOCS / "api" / "model", "SuperLSS": DOCS / "api" / "distributional"}
