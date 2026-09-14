@@ -35,8 +35,7 @@ from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
 from superglm.distributional.api import SuperLSS
-from superglm.distributional.binding import BoundPredictor as BoundPredictor
-from superglm.distributional.binding import bind_predictor
+from superglm.distributional.binding import BoundPredictor, bind_predictor
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
@@ -95,16 +94,14 @@ from superglm.inference.metrics import ModelMetrics
 from superglm.inference.random_effects import RandomEffectResult
 from superglm.inference.summary import ModelSummary
 from superglm.inference.term import (
-    InteractionInference as InteractionInference,
+    InteractionInference,
+    TermInference,
 )
 from superglm.inference.term import (
     SmoothCurve as SmoothCurve,
 )
 from superglm.inference.term import (
     SplineMetadata as SplineMetadata,
-)
-from superglm.inference.term import (
-    TermInference,
 )
 from superglm.links import (
     CauchitLink,
@@ -220,6 +217,7 @@ __all__ = [
     "warmup",
     "SuperGLM",
     "SuperLSS",
+    "BoundPredictor",
     "bind_predictor",
     "term",
     "s",
@@ -304,6 +302,7 @@ __all__ = [
     "wood_test_smooth",
     "n_knots_from_k",
     "TermInference",
+    "InteractionInference",
     "SeparationError",
     "SeparationWarning",
     "SplineRedundancyReport",
