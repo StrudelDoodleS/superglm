@@ -107,6 +107,7 @@ model = SuperGLM(
         "veh_power": Numeric(),
     },
 ).fit_reml(X, claims, offset=offset)
+model.reml_diagnostics()["converged"]
 ```
 
 `reml_diagnostics` is the record of that outer loop: the smoothing parameter
@@ -137,8 +138,8 @@ pd.DataFrame(
 configuration put them, which is what the selection paths need. The model above
 never set `spline_penalty`, so `clone_unfitted` plus `fit` refits the identical
 specification at the default penalty. That penalty is far below the value REML
-chose, so the age curve keeps almost all nine of its spline parameters instead
-of the 4.6 REML spent.
+chose, so the age curve keeps all nine of its spline parameters (9.000 to three
+decimals) instead of the 4.6 REML spent.
 
 ```{code-cell} ipython3
 fixed = model.clone_unfitted().fit(X, claims, offset=offset)

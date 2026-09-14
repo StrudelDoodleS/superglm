@@ -91,14 +91,14 @@ model = SuperGLM(
         "veh_power": Numeric(),
     },
 ).fit_reml(X, claims, offset=offset)
+model.reml_diagnostics()["converged"]
 ```
 
 Three hand-written policies are enough to price. The model was fitted with
 exposure in the offset, so `predict` with no offset returns the expected claim
 count at one unit of exposure — a rate. Pass the offset for the exposure you
 are actually rating and the mean scales with it: at half a year every number
-below halves exactly, because the offset enters the log link with a coefficient
-of one.
+below halves, because the offset enters the log link with a coefficient of one.
 
 ```{code-cell} ipython3
 new_policies = pd.DataFrame(

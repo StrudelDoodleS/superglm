@@ -112,7 +112,14 @@ checked = model.check(book, amount, "age", n_bins=10)
 
 fig, axes = plt.subplots(2, 1, figsize=(6.4, 4.6), sharex=True)
 for ax, value, lower, upper, target, label in (
-    (axes[0], checked.mean, checked.mean_lower, checked.mean_upper, 0.0, "residual mean"),
+    (
+        axes[0],
+        checked.mean,
+        checked.mean_lower,
+        checked.mean_upper,
+        0.0,
+        "residual mean",
+    ),
     (axes[1], checked.sd, checked.sd_lower, checked.sd_upper, 1.0, "residual sd"),
 ):
     ax.fill_between(checked.centers, lower, upper, alpha=0.3)

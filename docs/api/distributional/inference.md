@@ -151,7 +151,9 @@ ax.fill_between(
     alpha=0.25,
     label="simultaneous",
 )
-ax.fill_between(band["age"], band["lower"], band["upper"], alpha=0.45, label="pointwise")
+ax.fill_between(
+    band["age"], band["lower"], band["upper"], alpha=0.45, label="pointwise"
+)
 ax.plot(band["age"], band["effect"], color="black", linewidth=1.5, label="effect")
 ax.set_xlabel("age")
 ax.set_ylabel("location effect (log amount)")
@@ -166,7 +168,15 @@ wide here, answers the question a pricing review actually asks — "could this
 whole curve have been flat?" — and a flat line does not fit inside it.
 
 ```{code-cell} ipython3
-model.term_test("scale", "age")
+test = model.term_test("scale", "age")
+pd.Series(
+    {
+        "statistic": f"{test.statistic:.2f}",
+        "rank": f"{test.rank:.2f}",
+        "edf": f"{test.edf:.2f}",
+        "p_value": f"{test.p_value:.1e}",
+    }
+)
 ```
 
 The same question for the scale predictor, as a test rather than a picture.

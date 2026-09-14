@@ -110,6 +110,7 @@ model = SuperGLM(
         "veh_power": Numeric(),
     },
 ).fit_reml(X, claims, offset=offset)
+model.reml_diagnostics()["converged"]
 ```
 
 `summary` is the whole fit in one table: the header block carries the family,
@@ -146,21 +147,16 @@ curve.head().round(3)
 `simultaneous_bands` returns the same curve with both band types side by side.
 Pointwise bands hold at each age separately; simultaneous bands hold jointly
 across the whole curve, which is what you need before claiming the curve is
-non-flat. They are wider for it — about half again as wide here.
-
-```{code-cell} ipython3
-bands = model.simultaneous_bands("age")
-bands.head().round(3)
-```
-
-Drawn together, the difference is the outer shaded band. Even the simultaneous
-band stays clear of the flat line at 1.0 below age 35 and again between the
-early forties and the low seventies, so the shape survives the joint statement,
-not only the pointwise one.
+non-flat. They are wider for it — about half again as wide here. Drawn
+together, the difference is the outer shaded band: even the simultaneous band
+stays clear of the flat line at 1.0 below age 35 and again between the early
+forties and the low seventies, so the shape survives the joint statement, not
+only the pointwise one.
 
 ```{code-cell} ipython3
 import matplotlib.pyplot as plt
 
+bands = model.simultaneous_bands("age")
 fig, ax = plt.subplots(figsize=(7, 4))
 ax.fill_between(
     bands["x"],

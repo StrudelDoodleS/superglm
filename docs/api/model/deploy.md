@@ -89,6 +89,7 @@ model = SuperGLM(
         "veh_power": Numeric(),
     },
 ).fit_reml(X, claims, offset=offset)
+model.reml_diagnostics()["converged"]
 ```
 
 `rating_table_payload` is the objects behind the workbook. Each main effect
@@ -113,8 +114,8 @@ pd.DataFrame(
 ```
 
 A block's `table` is an ordinary DataFrame, keyed by the rating value with the
-relativity and the exposure weight behind it. This is the table a rater keys
-on.
+relativity and the fitting weight behind it — one per row here, because no
+`sample_weight` was passed. This is the table a rater keys on.
 
 ```{code-cell} ipython3
 region_block = next(

@@ -105,7 +105,9 @@ curves = model.risk_curves(reference, "age")
 fig, ax = plt.subplots(figsize=(6.4, 3.6))
 for i, level in enumerate(curves.quantiles):
     line, = ax.plot(curves.x, curves.values[i], label=f"q{level:g}")
-    ax.fill_between(curves.x, curves.lower[i], curves.upper[i], alpha=0.25, color=line.get_color())
+    ax.fill_between(
+        curves.x, curves.lower[i], curves.upper[i], alpha=0.25, color=line.get_color()
+    )
 ax.set_xlabel("age")
 ax.set_ylabel("claim amount")
 ax.legend(loc="upper right", frameon=False)
@@ -149,7 +151,8 @@ pd.Series(
         "bins": float(len(priced)),
         "median ratio across bins": priced["ratio"].median(),
         "widest ratio": widest["ratio"],
-        "predicted mean in that bin": widest["mean"],
+        "lowest mean in that bin": widest["mean_lo"],
+        "highest mean in that bin": widest["mean_hi"],
         "lowest P(Y > 5000)": widest["p_lo"],
         "highest P(Y > 5000)": widest["p_hi"],
     }
@@ -159,14 +162,15 @@ pd.Series(
 `parameter_spread` bins the book by predicted mean and asks how far the tail
 probability moves inside a bin. In the typical bin the chance of a claim above
 5,000 varies by a factor of 2.8 between the mildest and the most exposed row;
-in the widest bin it varies by a factor of 34, between 0.0007 and 0.0252, and
-every row in that bin carries the same 1,660 predicted mean. Those rows are
-identically priced by a mean-only model and are not the same risk.
+in the widest bin it varies by a factor of 34, between 0.0007 and 0.0252,
+while a mean-only model prices every row in that bin between 1,605 and 1,680.
+Those rows are priced as one risk and are not one risk.
 
 ```{code-cell} ipython3
 total = model.portfolio(book, quantiles=(0.05, 0.5, 0.95))
 pd.Series(
     {
+        "observed": amount.sum(),
         "mean": total.total_mean,
         "sd": total.total_sd,
         "5%": total.total_quantiles[0.05],

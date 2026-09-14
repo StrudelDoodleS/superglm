@@ -91,12 +91,13 @@ model = SuperGLM(
         "veh_power": Numeric(),
     },
 ).fit_reml(X, claims, offset=offset)
+model.reml_diagnostics()["converged"]
 ```
 
 One named term draws one figure: the fitted age curve with its pointwise band
 and, because `X` was passed, the density of the fitting rows underneath, so a
-thin stretch of data cannot masquerade as a confident part of the curve. Drop the term name to
-draw every main effect, pass a list for a subset, and pass
+thin stretch of data cannot masquerade as a confident part of the curve. Drop
+the term name to draw every main effect, pass a list for a subset, and pass
 `ci="simultaneous"` for bands that hold jointly across the curve.
 
 ```{code-cell} ipython3

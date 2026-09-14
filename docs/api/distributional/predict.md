@@ -132,8 +132,8 @@ pd.DataFrame(
 `predict` is the conditional mean of the claim amount, not of its logarithm,
 so it sits above the median of a right-skewed law. `predict_quantile` answers
 the price question instead: the 90th percentile of what this policy would
-claim, between 1.6 and 1.9 times the mean on these rows. `predict_cdf` reads the
-observed claim back through its own fitted law — the five values are spread
+claim, between 1.55 and 1.9 times the mean on these rows. `predict_cdf` reads
+the observed claim back through its own fitted law — the five values are spread
 across the unit interval, as they should be for rows that are neither
 systematically over- nor under-predicted.
 
@@ -148,5 +148,5 @@ pd.DataFrame(
 `posterior_predictive` simulates responses for those same rows, drawing
 coefficients from the fit's posterior and then a response from each drawn law,
 so the interval carries both parameter uncertainty and the claim's own
-randomness. Each row's 5% to 95% span covers a factor of four to ten — the
-spread of a single claim dwarfs the uncertainty in where its law sits.
+randomness. Each row's 5% to 95% span covers a factor of roughly four to ten
+— the spread of a single claim dwarfs the uncertainty in where its law sits.
