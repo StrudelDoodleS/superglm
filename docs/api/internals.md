@@ -33,10 +33,10 @@ produces which type.
 The [declaration helpers](distributional/declarations.md) return a
 {py:class}`~superglm.BoundTerm` or {py:class}`~superglm.BoundInteraction`, a
 feature specification attached to a named column; a family's helper method
-wraps them in a {py:class}`~superglm.BoundPredictor`, which is what `SuperLSS`
-takes and so stays on the Declarations page, and
-{py:class}`~superglm.Predictor` is the immutable configuration the estimator
-reads underneath.
+wraps them in a {py:class}`~superglm.BoundPredictor`, listed with the
+[declarations](distributional/declarations.md), and
+{py:class}`~superglm.Predictor` is the immutable configuration
+{py:class}`~superglm.SuperLSS` reads underneath.
 
 ```{eval-rst}
 .. autosummary::
@@ -74,9 +74,9 @@ a {py:class}`~superglm.MonotoneRepairResult`.
 ## Parts of a term inference
 
 {py:class}`~superglm.TermInference`, which
-{py:meth}`~superglm.SuperGLM.term_inference` returns for a main effect, carries
-these two: the continuous fitted curve for plotting, and the knot and basis
-metadata of a spline term. For an interaction the method returns an
+{py:meth}`~superglm.SuperGLM.term_inference` returns for a main effect, can
+carry these two, depending on the term: the continuous fitted curve for
+plotting, and the knot and basis metadata of a spline term. For an interaction the method returns an
 {py:class}`~superglm.InteractionInference` instead, listed with the other
 [inference results](inference.md).
 
