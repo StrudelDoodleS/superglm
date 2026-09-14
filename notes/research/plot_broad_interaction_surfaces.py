@@ -313,7 +313,9 @@ def main():
     OUTPUT.mkdir(parents=True, exist_ok=True)
     measurement_path = Path(__file__).with_name("2026-09-14-broad-interaction-measurements.json")
     measurement = json.loads(measurement_path.read_text())
-    assert broad.source_identity() == measurement["protocol"]["source"]
+    assert broad.source_identity() == measurement["protocol"]["source"], (
+        "Source differs from the frozen protocol; use --source-root and its recorded environment"
+    )
     plt.rcParams.update({"font.family": "DejaVu Sans", "svg.fonttype": "none"})
     receipt = {
         "plot_script_sha256": sha(Path(__file__)),

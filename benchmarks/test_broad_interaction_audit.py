@@ -112,6 +112,39 @@ def test_audit_rederives_all_100_arms_and_rejects_an_omission():
     assert sum(counts) == 100
 
 
+@pytest.mark.parametrize("changed_field", ["pairs", "parent_resolutions"])
+def test_audit_rederives_admission_before_trusting_the_menu(tmp_path, monkeypatch, changed_field):
+    audit = load_tool("check_broad_interaction_measurements.py")
+    state = {"features": {"x": {"kind": "spline"}, "z": {"kind": "spline"}}}
+    pairs = [["x", "z"]]
+    admission = audit.broad.admit_pairs(state, pairs)
+    admission[changed_field] = [] if changed_field == "pairs" else [4]
+    metadata = {"fixture": True}
+    protocol = {"source": "fixture", "prefix_counts": list(audit.broad.COUNTS)}
+    proposal = {
+        "status": "proposed",
+        "data": metadata,
+        "data_identity_sha256": audit.base.digest_json(metadata),
+        "proposal": {"pairs": pairs},
+        "admission": admission,
+    }
+    suite = {"protocol": protocol, "datasets": {"fixture": {"proposal": proposal, "arms": {}}}}
+    audit.base.write_json(tmp_path / "protocol.json", protocol)
+    audit.base.write_json(tmp_path / "suite.json", suite)
+    monkeypatch.setattr(audit.broad, "source_identity", lambda: "fixture")
+    monkeypatch.setattr(
+        audit.data, "load_prepared", lambda *args, **kwargs: {"metadata": metadata, "state": state}
+    )
+    with pytest.raises(ValueError, match="admission"):
+        audit.summarize(tmp_path)
+
+
+def test_audit_explains_the_scope_boundary_without_an_additive_comparator():
+    audit = load_tool("check_broad_interaction_measurements.py")
+    with pytest.raises(ValueError, match="scope.*converged additive"):
+        audit.compare_selected_models({"chosen_arm": None, "additive_arm": None}, {})
+
+
 @pytest.mark.parametrize("matching", [None, "k6_s0"])
 def test_missing_matching_control_remains_an_unavailable_comparison(matching):
     audit = load_tool("check_broad_interaction_measurements.py")

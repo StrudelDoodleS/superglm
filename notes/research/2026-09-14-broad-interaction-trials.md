@@ -182,25 +182,45 @@ fields inside the evaluation loop, so other runs with no evaluable models
 can omit that field. All cases in this batch have evaluations and raw totals;
 the derived totals agree. The measured runner is preserved byte-for-byte.
 
-The six related benchmark test modules pass **95 tests**. Ruff check and
-format checks cover the new Python files and the audit script. No production
+At this experiment checkpoint, six related benchmark test modules passed
+**95 tests**. Ruff check and format checks covered the new Python files and
+the audit script. The [PR follow-up](2026-09-14-interaction-review-validation.md)
+records subsequent test selections and corrections. No production
 source, dependency or version changes, or full production-suite rerun, are
 claimed for this batch.
 
-Reproduce with the measured environment and local source corpus:
+To replay the archived measurements, first prepare the frozen source checkout
+and environment as described in the [replay instructions](2026-09-14-interaction-review-validation.md#replaying-a-historical-source-tree).
+Use the current audit with explicit roots; the corrected runner has a different
+source hash from the one that produced this archive:
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  .venv/bin/python benchmarks/benchmark_broad_interactions.py \
-  --output .benchmark-artifacts/broad-interactions/new-run
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  .venv/bin/python docs/research/check_broad_interaction_measurements.py \
-  --output .benchmark-artifacts/broad-interactions/replayed-measurements.json
+  uv run --project .worktrees/interaction-frozen python docs/research/check_broad_interaction_measurements.py \
+  --source-root .worktrees/interaction-frozen \
+  --run-root /path/to/frozen-20260914 \
+  --data-root /path/to/interaction-datasets \
+  --output /tmp/replayed-measurements.json
 ```
 
-The audit defaults to the archived `frozen-20260914` run and reproduces the
-measurement JSON values. A new run has new timestamps, process receipts and
-potential timing variation. These inspected test blocks now belong to
+To perform a new run with the current runner and audit that same run:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  uv run python benchmarks/benchmark_broad_interactions.py \
+  --output .benchmark-artifacts/broad-interactions/new-run
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  uv run python docs/research/check_broad_interaction_measurements.py \
+  --source-root . \
+  --run-root .benchmark-artifacts/broad-interactions/new-run \
+  --data-root .benchmark-artifacts/interaction-datasets \
+  --output /tmp/new-run-measurements.json
+```
+
+The audit requires successful proposals, a selected model and converged
+additive comparator for each case, and completed selected evaluations. A
+new run has new timestamps, process receipts and potential timing variation.
+These inspected test blocks now belong to
 development evidence; later method changes require new confirmation data.
 
 ## Protocol before model fitting
