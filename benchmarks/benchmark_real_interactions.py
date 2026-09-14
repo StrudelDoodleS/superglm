@@ -635,6 +635,8 @@ def launch(args, dataset, arm, stage, timeout):
         "OMP_NUM_THREADS",
         "NUMBA_NUM_THREADS",
         "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
     ):
         env[variable] = "1"
     receipt = run_isolated(command, log_path=output / f"{stage}.log", timeout=timeout, env=env)

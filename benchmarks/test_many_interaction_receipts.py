@@ -85,6 +85,9 @@ def worker_args(tmp_path):
 
 @pytest.mark.parametrize("platform,maximum_rss", [("linux", 102400), ("darwin", 104857600)])
 def test_worker_reports_peak_rss_in_mib(worker_args, monkeypatch, platform, maximum_rss):
+    import threadpoolctl
+
+    monkeypatch.setattr(threadpoolctl, "threadpool_info", lambda: [{"num_threads": 1}])
     monkeypatch.setattr(benchmark, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(
         benchmark,

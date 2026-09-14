@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import benchmark_broad_interactions as broad
 import benchmark_gbm_interactions as gbm
 import benchmark_real_interactions as real
 import benchmark_targeted_interactions as targeted
@@ -80,3 +81,26 @@ def test_launch_preserves_complete_worker_evidence(launcher, monkeypatch, stage)
     assert {key: record[key] for key in original} == original
     assert record["process"]["process_seconds"] == 1.5
     assert "incomplete_receipt" not in record and "parent_finished_utc" not in record
+
+
+@pytest.mark.parametrize(
+    "launcher",
+    [real, targeted, broad, gbm],
+    indirect=True,
+    ids=["real", "targeted", "broad", "gbm"],
+)
+@pytest.mark.parametrize("variable", ["VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS"])
+def test_launch_overrides_inherited_backend_thread_counts(launcher, monkeypatch, variable):
+    runner, args = launcher
+    monkeypatch.setenv(variable, "8")
+    observed = {}
+
+    def completed(command, *, env, **kwargs):
+        observed.update(env)
+        output = Path(command[command.index("--output") + 1])
+        real.write_json(output / "result.json", {"status": "converged"})
+        return {"status": "success", "process_seconds": 1.5, "returncode": 0}
+
+    monkeypatch.setattr(runner, "run_isolated", completed)
+    runner.launch(args, "fixture", "arm", "fit", 3)
+    assert observed[variable] == "1"
