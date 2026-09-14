@@ -10,13 +10,20 @@ import argparse
 import collections
 import json
 import math
+import os
 import sys
 from pathlib import Path
+
+if not __debug__:
+    raise RuntimeError("Research audit requires enabled assertions; remove -O/PYTHONOPTIMIZE")
 
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "benchmarks"))
+SOURCE_PARSER = argparse.ArgumentParser(add_help=False)
+SOURCE_PARSER.add_argument("--source-root", type=Path, default=REPO)
+SOURCE_REPO = SOURCE_PARSER.parse_known_args()[0].source_root.resolve()
+sys.path.insert(0, str(SOURCE_REPO / "benchmarks"))
 
 import benchmark_broad_interactions as broad  # noqa: E402
 import benchmark_gbm_interactions as gbm  # noqa: E402
@@ -26,6 +33,61 @@ import broad_interaction_data as data  # noqa: E402
 
 def read_json(path):
     return json.loads(path.read_text())
+
+
+def data_identity(metadata):
+    """Exclude only local locations; retain all content, code and split evidence."""
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key not in ("source_path", "source_registry")
+    }
+
+
+def check_menu(protocol, admission, arms):
+    counts = {0, *(min(count, len(admission["pairs"])) for count in protocol["prefix_counts"])}
+    expected = {f"k{k}_s{count}" for k in admission["parent_resolutions"] for count in counts}
+    if set(arms) != expected:
+        raise ValueError(
+            f"Recorded arm menu differs: missing={expected - set(arms)}, extra={set(arms) - expected}"
+        )
+    return len(expected)
+
+
+def compare_selected_models(choice, summaries):
+    winner, additive = (summaries[choice[key]] for key in ("chosen_arm", "additive_arm"))
+    matching = (
+        summaries[choice["matching_additive_arm"]]
+        if choice["matching_comparison_status"] == "available"
+        else None
+    )
+    winner_loss = winner["evaluation"]["test"]["primary_loss"]
+    gains = {
+        label: 100 * (1 - winner_loss / baseline["evaluation"]["test"]["primary_loss"])
+        if baseline is not None
+        else None
+        for label, baseline in (
+            ("vs_best_additive_percent", additive),
+            ("vs_matching_k_percent", matching),
+        )
+    }
+    outcome = (
+        "additive_retained"
+        if not winner["pairs"]
+        else "matching_additive_unavailable"
+        if matching is None
+        else "selected_interactions_lower_test_loss"
+        if min(gains.values()) > 0
+        else "selected_interactions_not_lower_than_both_controls"
+    )
+    return {
+        "outcome": outcome,
+        "test_comparison": gains,
+        "selected_fit_ratio_vs_best_additive": winner["fit_seconds"] / additive["fit_seconds"],
+        "selected_fit_ratio_vs_matching_k": winner["fit_seconds"] / matching["fit_seconds"]
+        if matching is not None
+        else None,
+    }
 
 
 def check_sum(values, recorded):
@@ -80,7 +142,7 @@ def fit_summary(record):
     return result
 
 
-def summarize(root):
+def summarize(root, data_root=data.DEFAULT_ROOT):
     protocol = read_json(root / "protocol.json")
     suite = read_json(root / "suite.json")
     assert suite["protocol"] == protocol
@@ -100,13 +162,15 @@ def summarize(root):
     evaluation_starts, choice_times = [], []
     fit_statuses, evaluation_statuses = collections.Counter(), collections.Counter()
     missing_total_fields = []
+    declared_arm_count = 0
     for name, case in suite["datasets"].items():
         case_root = root / name
-        prepared = data.load_prepared(name)
+        prepared = data.load_prepared(name, data_root=data_root)
         proposal = case["proposal"]
         assert proposal["status"] == "proposed"
-        assert proposal["data"] == prepared["metadata"]
-        assert proposal["data_identity_sha256"] == base.digest_json(prepared["metadata"])
+        assert data_identity(proposal["data"]) == data_identity(prepared["metadata"])
+        assert proposal["data_identity_sha256"] == base.digest_json(proposal["data"])
+        declared_arm_count += check_menu(protocol, proposal["admission"], case["arms"])
         proposal_hash = index(case_root / "proposals" / "result.json")
         choice = read_json(case_root / "choice.json")
         assert choice == case["choice"]
@@ -133,8 +197,8 @@ def summarize(root):
             assert raw["source"] == protocol["source"]
             assert raw["protocol_sha256"] == protocol_hash
             assert raw["data_identity_sha256"] == proposal["data_identity_sha256"]
-            assert raw["data"] == prepared["metadata"]
-            assert raw["finished_utc"] <= choice["selected_utc"]
+            assert raw["data"] == proposal["data"]
+            assert raw.get("finished_utc", raw.get("parent_finished_utc")) <= choice["selected_utc"]
             assert all(pool["num_threads"] == 1 for pool in raw["runtime"]["threadpools"])
             process_path = folder / f"{stage}_process.json"
             assert read_json(process_path) == record["process"]
@@ -165,7 +229,7 @@ def summarize(root):
             assert raw_evaluation == {k: v for k, v in evaluation.items() if k != "process"}
             assert evaluation["source"] == protocol["source"]
             assert evaluation["protocol_sha256"] == protocol_hash
-            assert evaluation["data"] == prepared["metadata"]
+            assert evaluation["data"] == proposal["data"]
             assert evaluation["choice_sha256"] == choice_hash
             assert evaluation["data_identity_sha256"] == proposal["data_identity_sha256"]
             assert evaluation["started_utc"] >= suite["all_choices_persisted_utc"]
@@ -217,37 +281,17 @@ def summarize(root):
         search_costs.extend(case_search)
         evaluation_costs.extend(case_evaluation)
         all_process_costs.extend(case_search + case_evaluation)
-        winner, additive, matching = (
-            summaries[choice[key]]
-            for key in ("chosen_arm", "additive_arm", "matching_additive_arm")
-        )
-        winner_loss = winner["evaluation"]["test"]["primary_loss"]
-        gains = {
-            label: 100 * (1 - winner_loss / baseline["evaluation"]["test"]["primary_loss"])
-            for label, baseline in (
-                ("vs_best_additive_percent", additive),
-                ("vs_matching_k_percent", matching),
-            )
-        }
-        outcome = (
-            "additive_retained"
-            if not winner["pairs"]
-            else "selected_interactions_lower_test_loss"
-            if min(gains.values()) > 0
-            else "selected_interactions_not_lower_than_both_controls"
-        )
+        comparison = compare_selected_models(choice, summaries)
+        additive = summaries[choice["additive_arm"]]
         inner_proposal = proposal["proposal"]
         chosen_pair_keys = {frozenset(pair) for pair in proposal["admission"]["pairs"]}
         cases[name] = {
             "status": case["status"],
-            "outcome": outcome,
-            "data": prepared["metadata"],
+            **comparison,
+            "data": proposal["data"],
             "rows": proposal["rows"],
             "raw_predictor_count": proposal["raw_predictor_count"],
             "choice": choice,
-            "test_comparison": gains,
-            "selected_fit_ratio_vs_best_additive": winner["fit_seconds"] / additive["fit_seconds"],
-            "selected_fit_ratio_vs_matching_k": winner["fit_seconds"] / matching["fit_seconds"],
             "search_worker_process_seconds": math.fsum(case_search),
             "evaluation_worker_process_seconds": math.fsum(case_evaluation),
             "all_worker_process_seconds": math.fsum(case_search + case_evaluation),
@@ -291,13 +335,14 @@ def summarize(root):
     assert max(choice_times) <= min(evaluation_starts)
     return {
         "schema_version": 1,
-        "raw_root": str(root.relative_to(REPO)),
+        "raw_root": os.path.relpath(root, REPO),
         "protocol": protocol,
         "runtime": next(iter(suite["datasets"].values()))["proposal"]["runtime"],
         "audit": {
             "source_identity_matches": True,
             "all_choices_precede_all_test_evaluations": True,
             "all_data_and_split_identities_match_repreparation": True,
+            "all_declared_arms_accounted_for": declared_arm_count,
             "test_scores_exactly_replayed_from_saved_arrays": sum(evaluation_statuses.values()),
             "all_worker_threadpools_one_thread": True,
             "total_derivation": "Sum every proposal, fit and evaluation process receipt; compare existing raw counters with a positive-sum rounding bound.",
@@ -333,15 +378,16 @@ def summarize(root):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, parents=[SOURCE_PARSER])
     parser.add_argument(
         "--run-root",
         type=Path,
-        default=REPO / ".benchmark-artifacts/broad-interactions/frozen-20260914",
+        default=SOURCE_REPO / ".benchmark-artifacts/broad-interactions/frozen-20260914",
     )
+    parser.add_argument("--data-root", type=Path, default=data.DEFAULT_ROOT)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    result = summarize(args.run_root.resolve())
+    result = summarize(args.run_root.resolve(), data_root=args.data_root.resolve())
     args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     print(
         json.dumps(

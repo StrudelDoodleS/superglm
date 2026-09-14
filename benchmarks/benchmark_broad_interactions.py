@@ -441,6 +441,9 @@ def launch(args, dataset, arm, stage, timeout):
         "representation_refused",
     ):
         record["status"] = "error"
+    if "finished_utc" not in record:
+        record.update(warnings_complete=False, parent_finished_utc=datetime.now(UTC).isoformat())
+    base.write_json(path, record)
     record["process"] = receipt
     print(
         json.dumps(
