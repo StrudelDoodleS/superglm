@@ -42,6 +42,27 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
 
 
+def load_worker_receipt(path, stage):
+    """Preserve interrupted writes before the parent records the failed attempt."""
+    if not path.exists():
+        return {"status": "error", "error": "Worker produced no receipt"}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        incomplete = path.with_name(f"{stage}_incomplete_{digest}.bin")
+        path.rename(incomplete)
+        return {
+            "status": "error",
+            "error": f"Worker produced an incomplete JSON receipt: {error}",
+            "incomplete_receipt": {
+                "path": incomplete.name,
+                "sha256": digest,
+                "bytes": incomplete.stat().st_size,
+            },
+        }
+
+
 def category_labels(series):
     # Prefix real labels so user strings cannot collide with missing/pool tokens.
     return series.astype(object).map(lambda value: "missing:" if pd.isna(value) else f"v:{value}")
@@ -620,7 +641,7 @@ def launch(args, dataset, arm, stage, timeout):
     receipt.update(command=command, timeout_seconds=timeout)
     write_json(output / f"{stage}_process.json", receipt)
     result_path = output / ("result.json" if stage == "fit" else "evaluation.json")
-    record = json.loads(result_path.read_text()) if result_path.exists() else {}
+    record = load_worker_receipt(result_path, stage)
     if receipt["status"] == "timeout":
         record["status"] = "timeout"
         record["warnings_complete"] = False
@@ -628,6 +649,9 @@ def launch(args, dataset, arm, stage, timeout):
         record["status"] = "error"
     elif not record:
         record = {"status": "error", "error": "Worker exited without a result receipt"}
+    if "finished_utc" not in record:
+        record.update(warnings_complete=False, parent_finished_utc=datetime.now(UTC).isoformat())
+    write_json(result_path, record)
     record["process"] = receipt
     print(
         json.dumps(

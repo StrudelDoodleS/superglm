@@ -114,11 +114,12 @@ The archive was rebased on performance head `bdac5b0e9450`, based on master
 `38eb29f1186c` after PRs #392, #397, #402 and #401 merged. Research files now
 live in `notes/research` and the roadmap in `notes/ROADMAP.md`. The follow-up
 updates current command paths, audit-test imports, the collector's default
-output, generated-file attributes, the corpus's related-research link and
-the plans' output locations. Exact-commit links, installed MCP paths and
+output, generated-file attributes and the plans' output locations.
+The hash-pinned corpus registry retains its original related-research string.
+Exact-commit links, installed MCP paths and
 historical receipt paths still describe the preserved original archive.
 
-Validation after the move:
+Validation at rebase checkpoint `aa37192f`, before the subsequent review fixes:
 
 - The existing audit entry-point regression failed on the old path before
   the import-path correction. All 186 tests in the eleven benchmark/audit
@@ -150,3 +151,47 @@ scope refusal, and an unstarted `budget_exhausted` fit arm has no raw receipt
 for the auditor to read. Neither run shape occurs in the frozen archive.
 Future support needs explicit scope diagnostics and separate accounting for
 declared-but-unstarted arms, with synthetic receipt regressions.
+
+## Fresh review of the integrated archive
+
+Codex and Claude reviewed `aa37192f` against performance base `2ae09a78`.
+The resulting corrections preserve the measured values and make the tools'
+future behavior explicit:
+
+- The real, targeted and GBM launchers recover empty, truncated and invalid-UTF-8
+  receipts after fit/evaluation failures. A shared reader preserves the original
+  bytes under their SHA-256 before normalization. Parent completion times are
+  labelled separately from worker times, warning evidence stays incomplete,
+  and both normalized records and process-cost receipts are persisted.
+- Plot and timing-collector replays default to ignored artifact paths and
+  refuse their tracked frozen output locations. Regression fixtures execute
+  the real entry points against protected sentinel archives. Replay cannot
+  silently replace the committed figures or measurement receipt.
+- Timing medians require both the parent and worker receipts of both
+  repetitions to state `profiled: false`. A profiled or missing flag is an
+  explicit refusal. The archived successful repetitions are all unprofiled.
+- The core corpus registry is restored to its original bytes and digest
+  `8ad0bbac4dbdf0580d15a6bafa50d7147c48ddeb654e75642f60ab944c8bcbb3`.
+  A regression compares it with the committed corpus receipt. Current
+  documentation links live in the corpus note, outside this pinned input.
+- A dataset skipped before its proposal is explicitly outside this auditor's
+  completed-proposal scope. The auditor refuses it before loading that dataset,
+  with its name in the diagnostic. This does not claim support for summarizing
+  unstarted datasets; the runner's own zero-cost record remains available.
+- The plot note identifies the original producing script separately from the
+  corrected replay tool. Both SymPy scripts refuse optimized Python before
+  optional imports; their original receipts and exact algebra are preserved.
+
+The pre-fix boundary run had 52 failures, and both collector-output boundary
+cases also failed before their correction. In the isolated SymPy environment,
+both original scripts also exited zero under `-O`; the current scripts refuse
+that mode. The launcher regressions use synthetic child receipts and no fits.
+All 247 tests across thirteen benchmark/audit modules pass in 11.15 seconds;
+Ruff and format checks pass for every changed Python file. Fresh saved-result
+verification reproduces the complete broad measurement object, all 26 scores,
+552 artifact hashes and 100 planned arms. Plot replay matches all 40 surface
+arrays and all three saved models' predictions exactly. Timing collection
+matches its complete archived object except the two explicitly current tool
+hash fields, `collector_sha256` and `current_runner_sha256`. These replays fit
+and select no models. All historical JSON, Lean sources and figure bytes are
+preserved; the corpus registry again matches its pinned digest.

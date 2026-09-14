@@ -16,6 +16,12 @@ exact URLs, publisher metadata snapshots, source versions, byte limits, predicto
 roles and proposed split policies. Dataset readiness is a property of a receipt,
 not a promise made by the registry.
 
+The registry is a frozen input: its whole-file SHA-256 is recorded in this
+receipt and the broad-trial data identities. Its `related_research` value
+therefore keeps the original `docs/research` path after the documentation move.
+Use the current Kaggle-corpus link below; changing that metadata inside the
+registry would change the pinned input bytes.
+
 The separate [Kaggle corpus](2026-09-13-interaction-kaggle-corpus.md) and
 [registry](../../benchmarks/interaction_kaggle_datasets.json) add five verified real
 sources and record unavailable competitions, including Allstate, separately.

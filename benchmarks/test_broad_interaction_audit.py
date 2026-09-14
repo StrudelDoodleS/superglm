@@ -20,7 +20,13 @@ def load_tool(filename):
 
 
 @pytest.mark.parametrize(
-    "script", ["check_broad_interaction_measurements.py", "plot_broad_interaction_surfaces.py"]
+    "script",
+    [
+        "check_broad_interaction_measurements.py",
+        "plot_broad_interaction_surfaces.py",
+        "check_sympy_quadratic_gap.py",
+        "check_sympy_interaction_factors.py",
+    ],
 )
 @pytest.mark.parametrize("optimization", ["flag", "environment"])
 def test_audit_entry_points_reject_disabled_assertions(script, optimization):
@@ -202,3 +208,80 @@ def test_one_pair_plot_writes_artifacts_and_hides_the_unused_axis(tmp_path, monk
     assert (tmp_path / "airfoil.png").is_file()
     assert (tmp_path / "airfoil.svg").is_file()
     assert not closed[-1].axes[1].axison
+
+
+@pytest.fixture
+def isolated_plot_replay(tmp_path, monkeypatch):
+    # Execute the real CLI from a relocated copy, with synthetic inputs and
+    # one harmless PDF page. The frozen receipt must survive an ordinary replay.
+    research = tmp_path / "checkout" / "notes" / "research"
+    research.mkdir(parents=True)
+    script = research / "plot_broad_interaction_surfaces.py"
+    script.write_bytes((RESEARCH / script.name).read_bytes())
+    spec = importlib.util.spec_from_file_location("isolated_plot_replay", script)
+    plot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plot)
+    archive = research / "figures" / "2026-09-14-broad-interactions"
+    archive.mkdir(parents=True)
+    (archive / "receipt.json").write_text("original frozen evidence\n")
+    (research / "2026-09-14-broad-interaction-measurements.json").write_text(
+        json.dumps({"protocol": {"source": "fixture"}})
+    )
+    monkeypatch.setattr(plot.broad, "source_identity", lambda: "fixture")
+    monkeypatch.setattr(plot, "CASES", {"fixture": None})
+    monkeypatch.setattr(plot, "case_surfaces", lambda *args, **kwargs: ({}, {}, []))
+
+    def one_page(dataset, case, fitted, surfaces, pdf):
+        figure = plot.plt.figure(figsize=(1, 1))
+        pdf.savefig(figure)
+        plot.plt.close(figure)
+        return {"fixture": True}
+
+    monkeypatch.setattr(plot, "plot_case", one_page)
+    monkeypatch.setattr(sys, "argv", [str(script)])
+    return plot, archive
+
+
+def test_default_plot_replay_preserves_the_frozen_archive(isolated_plot_replay):
+    plot, archive = isolated_plot_replay
+    plot.main()
+    assert (archive / "receipt.json").read_text() == "original frozen evidence\n"
+    assert [item.name for item in archive.iterdir()] == ["receipt.json"]
+    assert (
+        plot.REPO / ".benchmark-artifacts/broad-interaction-surfaces-replay/receipt.json"
+    ).is_file()
+
+
+def test_plot_replay_refuses_the_frozen_archive_as_output(isolated_plot_replay, monkeypatch):
+    plot, archive = isolated_plot_replay
+    monkeypatch.setattr(sys, "argv", [plot.__file__, "--output", str(archive)])
+    with pytest.raises(SystemExit) as error:
+        plot.main()
+    assert error.value.code == 2
+    assert (archive / "receipt.json").read_text() == "original frozen evidence\n"
+
+
+def test_audit_refuses_a_dataset_skipped_before_proposal_without_loading_data(
+    tmp_path, monkeypatch
+):
+    audit = load_tool("check_broad_interaction_measurements.py")
+    protocol = {"source": "fixture"}
+    case = {
+        "status": "budget_exhausted",
+        "arms": {},
+        "search_worker_process_seconds": 0.0,
+        "evaluation_worker_process_seconds": 0.0,
+        "all_worker_process_seconds": 0.0,
+    }
+    audit.base.write_json(tmp_path / "protocol.json", protocol)
+    audit.base.write_json(
+        tmp_path / "suite.json", {"protocol": protocol, "datasets": {"late": case}}
+    )
+    monkeypatch.setattr(audit.broad, "source_identity", lambda: "fixture")
+
+    def unexpected_load(*args, **kwargs):
+        raise AssertionError("Skipped datasets must be refused before data loading")
+
+    monkeypatch.setattr(audit.data, "load_prepared", unexpected_load)
+    with pytest.raises(ValueError, match="scope.*skipped before proposal.*late"):
+        audit.summarize(tmp_path)

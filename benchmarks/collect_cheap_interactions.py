@@ -54,6 +54,12 @@ def collect(base):
     for key, pair in sorted(groups.items()):
         if len(pair) != 2:
             raise ValueError(f"Expected two repetitions for {key}, found {len(pair)}")
+        if any(
+            item[receipt].get("profiled") is not False
+            for item in pair
+            for receipt in ("run", "result")
+        ):
+            raise ValueError(f"Timing summaries require explicitly unprofiled repetitions: {key}")
         left, right = [item["result"] for item in pair]
         if without_times(left["telemetry"]) != without_times(right["telemetry"]):
             raise ValueError(f"Numerical telemetry changed between repetitions: {key}")
@@ -122,10 +128,14 @@ def main():
     parser.add_argument(
         "--output",
         type=Path,
-        default=ROOT / "notes/research/2026-09-13-cheap-interaction-measurements.json",
+        default=ROOT / ".benchmark-artifacts/cheap-interaction-measurements-replay.json",
     )
     args = parser.parse_args()
+    archive = ROOT / "notes/research/2026-09-13-cheap-interaction-measurements.json"
+    if args.output.resolve() == archive.resolve():
+        parser.error("Replay output must be separate from the frozen measurement archive")
     receipt = collect(args.input)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
     print(json.dumps(receipt["summaries"], indent=2))
     print(json.dumps(receipt["validation"]))

@@ -33,6 +33,7 @@ from benchmark_real_interactions import (
     SEED,
     digest_json,
     family_for,
+    load_worker_receipt,
     prepare_dataset,
     response_values,
     score_predictions,
@@ -407,15 +408,14 @@ def launch(args, dataset, arm, stage, timeout):
         env[name] = "1"
     receipt = run_isolated(command, log_path=output / f"{stage}.log", timeout=timeout, env=env)
     receipt.update(command=command, timeout_seconds=timeout)
+    write_json(output / f"{stage}_process.json", receipt)
     path = output / ("result.json" if stage == "fit" else "evaluation.json")
-    result = (
-        json.loads(path.read_text())
-        if path.exists()
-        else {"status": "error", "error": "Worker produced no receipt"}
-    )
+    result = load_worker_receipt(path, stage)
     if receipt["status"] != "success":
         result["status"] = receipt["status"]
         result["warnings_complete"] = receipt["status"] != "timeout"
+    if "finished_utc" not in result:
+        result.update(warnings_complete=False, parent_finished_utc=datetime.now(UTC).isoformat())
     result["process"] = receipt
     write_json(path, result)
     print(

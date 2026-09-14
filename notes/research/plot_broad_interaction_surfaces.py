@@ -32,7 +32,7 @@ import benchmark_real_interactions as base  # noqa: E402
 import broad_interaction_data as data  # noqa: E402
 
 RUN = SOURCE_REPO / ".benchmark-artifacts/broad-interactions/frozen-20260914"
-OUTPUT = Path(__file__).with_name("figures") / "2026-09-14-broad-interactions"
+OUTPUT = REPO / ".benchmark-artifacts/broad-interaction-surfaces-replay"
 CASES = {
     "uci_airfoil": ("airfoil", "Airfoil", "Sound pressure contribution (dB)", 1),
     "uci_concrete": ("concrete", "Concrete", "Strength contribution (MPa)", 1),
@@ -310,6 +310,9 @@ def main():
     parser.add_argument("--output", type=Path, default=OUTPUT)
     args = parser.parse_args()
     RUN, OUTPUT = args.run_root.resolve(), args.output.resolve()
+    archive = Path(__file__).with_name("figures") / "2026-09-14-broad-interactions"
+    if OUTPUT.is_relative_to(archive.resolve()):
+        parser.error("Replay output must be outside the frozen figure archive")
     OUTPUT.mkdir(parents=True, exist_ok=True)
     measurement_path = Path(__file__).with_name("2026-09-14-broad-interaction-measurements.json")
     measurement = json.loads(measurement_path.read_text())

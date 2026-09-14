@@ -63,3 +63,9 @@ floating-point computation or establish positive definiteness.
 
 Use the environment's Python executable directly for later experiments; shell
 activation is optional. No SymPy MCP wrapper is needed.
+
+The current symbolic check scripts refuse `-O` and `PYTHONOPTIMIZE` before
+importing optional dependencies, so a disabled assertion cannot report a
+successful check. The symbolic identities are unchanged. The original
+validation receipts retain the script hashes and outputs from before this
+guard was added; they describe the preserved `639f499e` source checkpoint.
