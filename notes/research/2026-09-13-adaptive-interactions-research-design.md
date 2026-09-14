@@ -18,7 +18,7 @@ The [performance follow-through](2026-09-13-tensor-support-handoff-performance.m
 records the first implemented change, numerical checks and memory tradeoffs.
 The [tool setup](research-tools-setup.md) records the installed Lean and SymPy tools.
 Keep future derivations, counterexamples and formal proof scope under
-`docs/research` with their assumptions, source revisions and references.
+`notes/research` with their assumptions, source revisions and references.
 
 The [2026-09-14 research plan](2026-09-14-cheap-interaction-research-plan.md)
 refines the next sequence using the real-data evidence: measure compression
@@ -486,7 +486,7 @@ replace the mathematical claim it is supposed to satisfy.
 ## Research records and formal proofs
 
 All mathematical findings, including counterexamples and rejected approaches,
-belong under `docs/research`. Record definitions, assumptions, the derivation,
+belong under `notes/research`. Record definitions, assumptions, the derivation,
 source/code revisions, primary references, verification commands and remaining
 obligations. Distinguish published results, project derivations, implemented
 numerical contracts and formalized statements. A derivation recorded here does
@@ -495,7 +495,7 @@ not by itself establish research novelty.
 Lean 4.33.1 and Lake are installed user-locally in `/home/max/.elan/bin`, with
 Mathlib pinned to `0df444a360eaa60ab8c11dca51a86af692955474`. Use Lean when a bounded
 formal proof can check an important mathematical step. Keep successful sources,
-dependency pins and exact theorem scope under `docs/research`; retain generated
+dependency pins and exact theorem scope under `notes/research`; retain generated
 caches in ignored directories. Name the precise checked statements and their
 assumptions. Verifying an exact quadratic identity does not certify the Schur
 bound, stochastic smoothing, floating-point implementation or statistical

@@ -5,7 +5,7 @@
     "benchmarks/interaction_kaggle_datasets.json"
   ],
   "related_research": [
-    "docs/research/2026-09-13-interaction-kaggle-corpus.md"
+    "notes/research/2026-09-13-interaction-kaggle-corpus.md"
   ],
   "default_download_budget_bytes": 314572800,
   "datasets": [

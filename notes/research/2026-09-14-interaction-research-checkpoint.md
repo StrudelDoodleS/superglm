@@ -67,7 +67,15 @@ One archival JSON file had a second final newline removed during PR packaging:
 are unchanged. The original bytes remain in commit `639f499e`, with SHA-256
 `3e5373d10d50df9fec3db276fd5f4f78fd982718ed906e51556b5ba24ccf7dfd`.
 
-The documentation rebuild in PR #392 relocates the roadmap and previous
-research files to `notes/`. Preserve this archive and its links when those
-branches are integrated. The current checkpoint follows the user's requested
-`docs/research` location; no relocation is performed here.
+The documentation rebuild in PR #392 moved the roadmap and research files to
+`notes/`. This archive now follows that layout: the roadmap is `notes/ROADMAP.md`
+and the research, scripts, proof project and figures are in `notes/research/`.
+Current commands, test imports, generated-file attributes and the corpus's
+related-research link use those paths. Existing measurement JSON, proof
+receipts and figure bytes retain their original values and hashes, including
+historical `docs/research` paths. Exact-commit links and the installed Lean MCP
+configuration still refer to the preserved original archival worktree.
+
+Future pilot work uses a new isolated worktree. The original
+`research/adaptive-interactions` branch and its ignored data/model artifacts
+remain available for replay of the measured source.

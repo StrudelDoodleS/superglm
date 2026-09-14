@@ -57,7 +57,7 @@ then replay to a separate output directory:
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  uv run --project .worktrees/interaction-frozen python docs/research/plot_broad_interaction_surfaces.py \
+  uv run --project .worktrees/interaction-frozen python notes/research/plot_broad_interaction_surfaces.py \
   --source-root .worktrees/interaction-frozen \
   --run-root /path/to/frozen-20260914 \
   --data-root /path/to/interaction-datasets \

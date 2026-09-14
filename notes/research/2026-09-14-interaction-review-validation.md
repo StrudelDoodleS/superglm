@@ -89,7 +89,7 @@ that tree, rather than substituting the corrected runner for the measured one:
 git fetch origin 639f499eaec04967de0b7c31090276671144b99f
 git worktree add --detach .worktrees/interaction-frozen 639f499e
 uv sync --project .worktrees/interaction-frozen --python 3.13 --extra dev
-uv run --project .worktrees/interaction-frozen python docs/research/check_broad_interaction_measurements.py \
+uv run --project .worktrees/interaction-frozen python notes/research/check_broad_interaction_measurements.py \
   --source-root .worktrees/interaction-frozen \
   --run-root /path/to/frozen-20260914 \
   --data-root /path/to/interaction-datasets \
@@ -107,3 +107,46 @@ The raw archive and pinned source tables are required. The plotter takes the
 same roots and an output directory through `--output`; keep replay output
 separate from the archived figures. These options relocate inputs without
 waiving any content, source-version or numerical replay checks.
+
+## Integration after the documentation rebuild
+
+The archive was rebased on performance head `bdac5b0e9450`, based on master
+`38eb29f1186c` after PRs #392, #397, #402 and #401 merged. Research files now
+live in `notes/research` and the roadmap in `notes/ROADMAP.md`. The follow-up
+updates current command paths, audit-test imports, the collector's default
+output, generated-file attributes, the corpus's related-research link and
+the plans' output locations. Exact-commit links, installed MCP paths and
+historical receipt paths still describe the preserved original archive.
+
+Validation after the move:
+
+- The existing audit entry-point regression failed on the old path before
+  the import-path correction. All 186 tests in the eleven benchmark/audit
+  modules then passed in 9.58 seconds on Python 3.13.14. Ruff and format
+  checks pass for the three Python files changed by the relocation.
+- All measurement JSON, proof sources/receipts and figure artifacts match
+  reviewed checkpoint `c83a7d899ed9` byte for byte. The audit and plot scripts
+  themselves are also unchanged; their paths have moved.
+- Running the relocated auditor with the original environment and source
+  `639f499e` reproduces the complete archived measurement object after
+  normalizing its displayed location and accounting for the added 100-arm
+  menu check. All 26 scores and 552 artifact hashes remain verified.
+- The relocated plotter reproduces all 40 arrays for ten surfaces exactly.
+  All three saved models reproduce their stored test predictions exactly.
+  Replay outputs are separate temporary files; no models were fitted or selected.
+- `lake build` succeeds in the relocated proof project for Certificate,
+  InteractionOperator and ProofTour using the pinned dependency cache. All
+  ten identities/examples report only the existing standard axioms
+  `propext`, `Classical.choice` and `Quot.sound`. Both SymPy check scripts
+  also return exact zero remainders from their new paths. The earlier proof
+  scope and compiler receipts are unchanged.
+- All 274 relative Markdown link targets checked in the added research notes
+  and roadmap exist. The research diff from the performance base contains
+  no production source/tests, dependency or version changes.
+
+The two previously recorded incomplete-run audit limitations remain future
+work: missing selected-evaluation metadata may fail before the documented
+scope refusal, and an unstarted `budget_exhausted` fit arm has no raw receipt
+for the auditor to read. Neither run shape occurs in the frozen archive.
+Future support needs explicit scope diagnostics and separate accounting for
+declared-but-unstarted arms, with synthetic receipt regressions.

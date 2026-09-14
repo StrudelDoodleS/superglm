@@ -17,7 +17,7 @@ identify a reason to build them.
 
 **Tech stack:** Existing SuperGLM, NumPy/SciPy, Python 3.12+, the development
 environment on Python 3.13, Matplotlib, and the pinned Lean/Mathlib project in
-`docs/research/lean-gaussian-certificate`.
+`notes/research/lean-gaussian-certificate`.
 
 **Spec:** The approved
 [adaptive-interaction design](2026-09-13-adaptive-interactions-research-design.md),
@@ -28,9 +28,11 @@ Audit head: `7a317569`. No new fit, proof, or speedup accompanies this plan.
 
 ## Global constraints
 
-- Work in `.worktrees/adaptive-interactions`; preserve unrelated user changes.
+- Create isolated feature work under `.worktrees/` from the integrated research
+  branch. Preserve `.worktrees/adaptive-interactions` as the original source
+  and artifact archive, along with unrelated user changes.
 - Keep mathematical findings, failed conjectures, proof sources and receipts
-  under `docs/research`. Keep prototypes and timing outside production paths.
+  under `notes/research`. Keep prototypes and timing outside production paths.
 - Use `gpt-6-astra` at `max` for mathematical agents and no more than three
   concurrent subagents. Give each a bounded deliverable and report its status.
 - Retain every observation within each declared fit. Training subsets belong
@@ -41,7 +43,7 @@ Audit head: `7a317569`. No new fit, proof, or speedup accompanies this plan.
 - Compare complete fits, numerical outputs, actual backend dispatch, peak RSS
   and retained payload. Charge every search attempt and certification pass.
 - Run timed fits serially in fresh single-thread workers with owned deadlines.
-  Apply the repository [timing policy](../development/cost-and-timing.md).
+  Apply the repository [timing policy](../../docs/development/cost-and-timing.md).
 - Preserve source/data/model hashes and old raw artifacts. Previously examined
   test sets are development evidence, including when repartitioned.
 - No public API or SuperLSS naming decision is part of this research plan.

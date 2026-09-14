@@ -42,12 +42,14 @@ the configured server.
 ## SymPy
 
 The environment is independent of the project's `.venv`, `pyproject.toml` and
-`uv.lock`. Create it once and install the research pins from the worktree root:
+`uv.lock`. Create it once and install the research pins from the worktree root.
+These commands use the current `notes/research` location; the original
+installation used `docs/research` in the preserved archival worktree:
 
 ```sh
 uv venv --python 3.13 /home/max/.local/share/superglm-research/.venv
-uv pip install --python /home/max/.local/share/superglm-research/.venv/bin/python -r docs/research/sympy-requirements.txt
-/home/max/.local/share/superglm-research/.venv/bin/python docs/research/check_sympy_quadratic_gap.py
+uv pip install --python /home/max/.local/share/superglm-research/.venv/bin/python -r notes/research/sympy-requirements.txt
+/home/max/.local/share/superglm-research/.venv/bin/python notes/research/check_sympy_quadratic_gap.py
 uv pip check --python /home/max/.local/share/superglm-research/.venv/bin/python
 ```
 
