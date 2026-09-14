@@ -3,6 +3,10 @@
 This is the authoritative check on executable documentation. The Sphinx
 build caches renders by file content, so a library change that breaks a
 tutorial without touching its text would otherwise go unnoticed.
+
+Figures are not checked here: the kernel runs under the Agg backend, so a
+cell whose only output is a figure is checked for not raising. The strict
+Sphinx build is what asserts that every cell renders an output.
 """
 
 from __future__ import annotations

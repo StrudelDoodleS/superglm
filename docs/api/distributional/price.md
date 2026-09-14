@@ -28,6 +28,8 @@ for candidate in (
     if candidate.exists():
         plt.style.use(str(candidate))
         break
+else:
+    raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
 ```
 
 {py:meth}`~superglm.SuperLSS.risk_curves` sweeps one covariate and returns
@@ -129,8 +131,9 @@ fan = model.density_fan(reference, "age")
 fig, ax = plt.subplots(figsize=(6.4, 3.6))
 mesh = ax.pcolormesh(fan.x, fan.y_grid, fan.density.T, cmap="Blues", shading="auto")
 for i, level in enumerate(fan.quantile_levels):
-    ax.plot(fan.x, fan.quantiles[i], linewidth=1.0, color="black", alpha=0.7)
-ax.set_ylim(0, 8000)
+    ax.plot(fan.x, fan.quantiles[i], linewidth=1.2, label=f"q{level:g}")
+ax.set_ylim(0, 1.15 * float(np.max(fan.quantiles)))
+ax.legend(loc="upper right", frameon=False)
 ax.set_xlabel("age")
 ax.set_ylabel("claim amount")
 fig.colorbar(mesh, ax=ax, label="density")
@@ -144,7 +147,8 @@ right-skewed. That is a shape change, and it is what the quantile curves above
 can only imply.
 
 `parameter_spread` bins the book by predicted mean and asks how far the tail
-probability moves inside a bin.
+probability moves inside a bin, reporting its 5th and 95th percentiles per bin
+and their ratio.
 
 ```{code-cell} ipython3
 spread = model.parameter_spread(book, threshold=5000.0)
@@ -157,16 +161,16 @@ pd.Series(
         "widest ratio": widest["ratio"],
         "lowest mean in that bin": widest["mean_lo"],
         "highest mean in that bin": widest["mean_hi"],
-        "lowest P(Y > 5000)": widest["p_lo"],
-        "highest P(Y > 5000)": widest["p_hi"],
+        "5th percentile of P(Y > 5000)": widest["p_lo"],
+        "95th percentile of P(Y > 5000)": widest["p_hi"],
     }
 ).round(4)
 ```
 
 In the typical bin the chance of a claim above
-5,000 varies by a factor of 2.8 between the mildest and the most exposed row;
-in the widest bin it varies by a factor of 34, between 0.0007 and 0.0252,
-while a mean-only model prices every row in that bin between 1,605 and 1,680.
+5,000 varies by a factor of 2.8 between the 5th and the 95th percentile row;
+in the widest bin it varies by a factor of 34, from 0.0007 to 0.0252 at those
+two percentiles, while a mean-only model prices every row in that bin between 1,605 and 1,680.
 Those rows are priced as one risk and are not one risk.
 
 `portfolio` simulates every row on its own predictive law and sums the draws,

@@ -28,6 +28,8 @@ for candidate in (
     if candidate.exists():
         plt.style.use(str(candidate))
         break
+else:
+    raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
 ```
 
 {py:meth}`~superglm.SuperGLM.predict` returns the mean on the response scale

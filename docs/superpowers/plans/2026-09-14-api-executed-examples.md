@@ -50,6 +50,8 @@ for candidate in (
     if candidate.exists():
         plt.style.use(str(candidate))
         break
+else:
+    raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
 ```
 ````
 

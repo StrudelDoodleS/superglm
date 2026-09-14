@@ -28,6 +28,8 @@ for candidate in (
     if candidate.exists():
         plt.style.use(str(candidate))
         break
+else:
+    raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
 ```
 
 {py:meth}`~superglm.SuperGLM.fit_reml` is the normal path: it estimates a
@@ -111,13 +113,17 @@ model.reml_diagnostics()["converged"]
 `reml_diagnostics` is the record of that outer loop: the smoothing parameter
 after each step and the REML objective it reached. The first entry of
 `lambda_history` is the starting value before any step, so the table below
-pairs the steps taken with the objective they produced. The objective falls by
+pairs the steps taken with the objective they produced; not every optimiser
+path records an objective, so the cell reads the history as optional rather
+than assuming it. The objective falls by
 about 2.4 at the first step and by a tenth at the second; the last two steps
 move it by less than a thousandth, which is why the loop stops on its objective
 tolerance.
 
 ```{code-cell} ipython3
 diag = model.reml_diagnostics()
+objective = diag.get("objective_history") or []
+steps = diag["lambda_history"][1 : len(objective) + 1]
 print(
     f"converged={diag['converged']} in {diag['n_reml_iter']} iterations "
     f"({diag['termination_reason']}), starting lambda "
@@ -125,10 +131,10 @@ print(
 )
 pd.DataFrame(
     {
-        "lambda_age": [step["age"] for step in diag["lambda_history"][1:]],
-        "reml_objective": diag["objective_history"],
+        "lambda_age": [step["age"] for step in steps],
+        "reml_objective": objective[: len(steps)],
     },
-    index=pd.RangeIndex(1, len(diag["objective_history"]) + 1, name="iteration"),
+    index=pd.RangeIndex(1, len(steps) + 1, name="iteration"),
 ).round(4)
 ```
 

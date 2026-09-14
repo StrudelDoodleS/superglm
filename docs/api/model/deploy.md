@@ -28,6 +28,8 @@ for candidate in (
     if candidate.exists():
         plt.style.use(str(candidate))
         break
+else:
+    raise FileNotFoundError("superglm.mplstyle: run this page from its own directory")
 ```
 
 {py:meth}`~superglm.SuperGLM.export_rating_tables` writes the deployment
@@ -150,8 +152,9 @@ directory.
 import tempfile
 from pathlib import Path
 
-workbook = Path(tempfile.mkdtemp()) / "rating_tables.xlsx"
-model.export_rating_tables(workbook, X, claims, offset=offset)
-with pd.ExcelFile(workbook) as book:
-    print(workbook.name, "->", book.sheet_names)
+with tempfile.TemporaryDirectory() as folder:
+    workbook = Path(folder) / "rating_tables.xlsx"
+    model.export_rating_tables(workbook, X, claims, offset=offset)
+    with pd.ExcelFile(workbook) as book:
+        print(workbook.name, "->", book.sheet_names)
 ```
