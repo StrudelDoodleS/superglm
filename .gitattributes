@@ -1,0 +1,4 @@
+# Machine-generated numerical receipts and figures remain tracked and auditable.
+docs/research/*measurements.json linguist-generated=true
+docs/research/*receipt.json linguist-generated=true
+docs/research/figures/** linguist-generated=true
