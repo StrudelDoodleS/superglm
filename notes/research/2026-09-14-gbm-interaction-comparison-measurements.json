@@ -1,0 +1,2544 @@
+{
+  "schema_version": 1,
+  "interpretation": "Exploratory diagnostic on previously inspected test splits; no fresh confirmation or cross-dataset superiority claim",
+  "runner_command": "OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMBA_NUM_THREADS=1 .venv/bin/python benchmarks/benchmark_gbm_interactions.py --output .benchmark-artifacts/gbm-interactions/diagnostic-20260914",
+  "worker_command_template": "{python} {repo}/benchmarks/benchmark_gbm_interactions.py --worker --dataset {dataset} --arm {arm} --stage {fit_or_evaluate} --output {run}/{dataset}/{arm} --case-root {run}/{dataset} --manifest {repo}/benchmarks/interaction_datasets.json --data-root {repo}/.benchmark-artifacts/interaction-datasets",
+  "worker_python": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/bin/python",
+  "suite_exit_code": 0,
+  "raw_suite_relative_path": ".benchmark-artifacts/gbm-interactions/diagnostic-20260914/suite.json",
+  "raw_suite_sha256": "62cdbd67a57322b4f80b32d3728f2c6a234ed2e0d85896a140a6da8e7d272284",
+  "protocol_sha256": "686a26f3d05608e79ae24bc49c0df436e4e0e172970147d055e3af43ed638c84",
+  "git_heads": [
+    "052c1e67ee38fb0a0d20d3384c6b301febc2d8f2"
+  ],
+  "protocol": {
+    "source": {
+      "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+      "benchmark_files_sha256": {
+        "benchmark_gbm_interactions.py": "8df4dcc9e9600be64052f1d010748eedd309826b87ff59eb69ff962ad1c62dc0",
+        "benchmark_real_interactions.py": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+        "benchmark_housing_tensor.py": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+        "interaction_datasets.py": "c28aa62c9a154405fd901c3c1898dd0c899742f17a202da6b2c46aa82cabf3d0"
+      },
+      "sklearn_gradient_boosting_py_sha256": "82619e3ae89af1625dea1d4245d0d4a9e2eb85e0d034790fbd89a1bb51d7e996",
+      "sklearn_version": "1.9.0"
+    },
+    "datasets": [
+      "uci_breast_cancer",
+      "uci_credit_default",
+      "ames_housing",
+      "uci_bike_sharing"
+    ],
+    "structures": {
+      "additive": "no_interactions",
+      "pairwise": "pairwise",
+      "unrestricted": null
+    },
+    "capacity_menu": {
+      "leaves15": {
+        "max_leaf_nodes": 15
+      },
+      "leaves31": {
+        "max_leaf_nodes": 31
+      }
+    },
+    "common_parameters": {
+      "max_iter": 200,
+      "learning_rate": 0.1,
+      "min_samples_leaf": 20,
+      "max_bins": 255,
+      "l2_regularization": 0,
+      "max_features": 1,
+      "early_stopping": false,
+      "categorical_features": "from_dtype",
+      "random_state": 20260913
+    },
+    "registered_utc": "2026-09-13T22:24:53.866668+00:00",
+    "interpretation": "Exploratory same-split diagnostic; test outcomes were inspected in the earlier SuperGLM pilot",
+    "selection": "Minimum validation primary loss within each class, then across classes; exact class ties prefer additive, then pairwise; capacity ties prefer fewer leaves",
+    "evaluation": "Persist all dataset choices before any test evaluation; evaluate only each class's selected capacity without refitting",
+    "memory_scope": "Fit-end RSS includes imports, raw data, preprocessing and fit; retained payload excludes Python object overhead and unknown extension allocations; pickle contains estimator only, adapter state is separate",
+    "fit_worker_budget_seconds": 600,
+    "per_fit_worker_timeout_seconds": 120,
+    "per_evaluation_worker_timeout_seconds": 30
+  },
+  "runtime": {
+    "python": "3.13.14",
+    "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+    "packages": {
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "pandas": "3.0.5",
+      "scikit-learn": "1.9.0",
+      "threadpoolctl": "3.6.0"
+    },
+    "threadpools": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scikit_learn.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      }
+    ]
+  },
+  "all_choices_persisted_utc": "2026-09-13T22:25:48.035274+00:00",
+  "finished_utc": "2026-09-13T22:26:08.213388+00:00",
+  "fit_worker_process_seconds_spent": 54.12433394812979,
+  "all_model_fit_seconds": 8.45232085720636,
+  "suite_end_to_end_seconds": 75.02906810096465,
+  "outcomes": {
+    "datasets": 4,
+    "fit_workers": 24,
+    "fixed_budget_fits_completed": 24,
+    "test_workers": 12,
+    "test_evaluations_completed": 12,
+    "errors": 0,
+    "timeouts": 0,
+    "budget_exhausted": 0,
+    "warning_count": 0,
+    "reruns": 0
+  },
+  "prior_pilot_relative_path": "docs/research/2026-09-13-real-interaction-trials-measurements.json",
+  "prior_pilot_sha256": "90c4fa7ef2220cb0fab5e30ec6b7cb6c88e9ad124b633bd82cecc161a6eeb628",
+  "artifact_audit": {
+    "all_fit_receipt_hashes_match_frozen_choices": true,
+    "all_model_pickle_hashes_match": true,
+    "all_test_prediction_hashes_match": true,
+    "all_test_workers_started_after_all_choices_persisted": true,
+    "all_fit_sources_equal_frozen_protocol": true,
+    "all_fit_protocol_hashes_match": true,
+    "all_observed_threadpools_single_threaded": true,
+    "runtime_package_versions_identical_across_fits": true,
+    "post_run_source_audit": "Runner, adapter, loader, storage helper, SuperGLM package and sklearn gradient_boosting.py hashes still matched frozen protocol; performed before this report was written"
+  },
+  "verification": {
+    "command": ".venv/bin/python -m pytest benchmarks/test_gbm_interactions.py benchmarks/test_real_interactions.py -q",
+    "passed": 32,
+    "new_gbm_tests": 15,
+    "initial_empty_runner_failures": 13,
+    "preload_row_admission_regression": "Failed before the row-budget guard was added; passed afterward",
+    "selection_mutation_check": {
+      "change": "Remove the fitted-status guard from validation selection in memory without editing the measured source file",
+      "test": "test_selection_uses_validation_only_and_can_choose_zero_interactions",
+      "mutated_test_exit_code": 1,
+      "observed_failure": "Selected timed-out additive_leaves15 instead of fitted pairwise_leaves31"
+    },
+    "ruff_check": "passed for both new Python files",
+    "ruff_format_check": "passed for both new Python files"
+  },
+  "timing_limit": "Single observation per capacity and class, serial fresh processes on a shared host. The coordinating agent did light implementation and test work during the run. Not a repeated performance gate.",
+  "receipt_scope": "Repeated source/runtime/data identities and complete model parameters are deduplicated. They remain present in every raw fit receipt; model_parameters_sha256 binds each full parameter dictionary. Every arm, including unsuccessful statuses if present, is retained.",
+  "datasets": {
+    "uci_breast_cancer": {
+      "family": "binomial",
+      "rows": {
+        "train": 341,
+        "valid": 114,
+        "test": 114
+      },
+      "full_table_rows": 569,
+      "subsampling": "none; every source row belongs to one split",
+      "raw_predictor_count": 30,
+      "split": {
+        "strategy": "stratified_group",
+        "columns": [
+          "ID"
+        ],
+        "policy": "Stratify 60/20/20 by Diagnosis while keeping each ID in one partition. This is a historical diagnostic control, not an external clinical validation.",
+        "seed": 20260913
+      },
+      "data_sha256": "3487b754ff02c93cdc8a18afafe223961d9cfbfdb932e57483e52581042767d7",
+      "manifest_entry_sha256": "1f68076b2ce5865c7d3d82cf1d7164da11fc02a8b1268e6b601b0a21ee0d6cce",
+      "split_sha256": "dbd749162fbf45490374af5a2d32eab39155df758ef6e05b8520104227a4af04",
+      "preprocessing_sha256": "bfd3929bf48be1846bcb41c6190e55dc4aaed5b9a2cfe5ce5cba73794f2edc29",
+      "every_fit_matches_prior_pilot_identity": {
+        "data_sha256": true,
+        "manifest_entry_sha256": true,
+        "split_sha256": true,
+        "preprocessing_sha256": true
+      },
+      "preprocessing_summary": {
+        "feature_kind_counts": {
+          "spline": 30
+        },
+        "categorical_level_counts": {},
+        "dropped": {},
+        "full_state_location": "Each local fit result.json; raw-input replay requires this state plus the estimator pickle"
+      },
+      "matched_menu_completed": true,
+      "choice": {
+        "selected_by_structure": {
+          "additive": "additive_leaves15",
+          "pairwise": "pairwise_leaves15",
+          "unrestricted": "unrestricted_leaves31"
+        },
+        "chosen_arm": "pairwise_leaves15",
+        "chosen_before_test_evaluation": true,
+        "selected_utc": "2026-09-13T22:25:04.150766+00:00",
+        "validation_scores": {
+          "additive_leaves15": {
+            "primary_loss": 0.15515447025370543,
+            "log_loss": 0.15515447025370543,
+            "average_precision": 0.9838267946170682,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9874338624338626,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "pairwise_leaves15": {
+            "primary_loss": 0.11529657883689581,
+            "log_loss": 0.11529657883689581,
+            "average_precision": 0.9940572365131266,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.996362433862434,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "unrestricted_leaves15": {
+            "primary_loss": 0.11912255078968453,
+            "log_loss": 0.11912255078968453,
+            "average_precision": 0.9948442372358268,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9970238095238095,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "additive_leaves31": {
+            "primary_loss": 0.15515447025370543,
+            "log_loss": 0.15515447025370543,
+            "average_precision": 0.9838267946170682,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9874338624338626,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "pairwise_leaves31": {
+            "primary_loss": 0.11529657883689581,
+            "log_loss": 0.11529657883689581,
+            "average_precision": 0.9940572365131266,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.996362433862434,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "unrestricted_leaves31": {
+            "primary_loss": 0.11912249555986729,
+            "log_loss": 0.11912249555986729,
+            "average_precision": 0.9948442372358268,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9970238095238095,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          }
+        },
+        "fit_result_sha256": {
+          "additive_leaves15": "bb0bc9dde653836ad38e6e78416b78b27529c2507ea5e44b3602835946cad1b3",
+          "pairwise_leaves15": "c5e06728606d50ea5b2e31d96e525737e224ca3736db63cc149d0bd34939a42f",
+          "unrestricted_leaves15": "8be15becdb6d7804c287b3e1a2ee9b2a39e59e37a5e8c3f8ee38a409ab2f0863",
+          "additive_leaves31": "e4e45302abeba4c0b42355ae80004fc4817be9abf61673b8fd77a3c6e4157e04",
+          "pairwise_leaves31": "8095a15d259b644869689996343730d053dacc975399f09d65f0dd14222b634d",
+          "unrestricted_leaves31": "a7e9295f69c9614d0b32f1baf963afcd45b7f75a85d194eb88261af211c7eece"
+        }
+      },
+      "costs": {
+        "all_tuning_and_selection_wall_seconds": 10.284623749030288,
+        "all_fit_worker_process_seconds": 10.275871220044792,
+        "all_model_fit_seconds": 0.7490408959565684,
+        "class_tuning_process_seconds": {
+          "additive": 3.391092479985673,
+          "pairwise": 3.54263283504406,
+          "unrestricted": 3.342145905015059
+        },
+        "all_evaluation_worker_process_seconds": 4.508645560941659,
+        "all_tuning_selection_and_evaluation_seconds": 14.793269309971947
+      },
+      "arms": {
+        "additive_leaves15": {
+          "structure": "additive",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:24:54.228659+00:00",
+          "loading_seconds": 0.02398016699589789,
+          "preprocessing_seconds": 0.03440169198438525,
+          "model_setup_seconds": 0.00003566598752513528,
+          "fit_seconds": 0.12065525498474017,
+          "fit_end_peak_process_rss_mib": 207.87109375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 347734,
+            "numpy_owner_count": 637,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 347734,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 5166,
+            "leaf_count": 2683,
+            "max_distinct_features_per_branch": 1,
+            "requested_interaction_cst": "no_interactions",
+            "native_categorical_count": 0,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.15515447025370543,
+            "log_loss": 0.15515447025370543,
+            "average_precision": 0.9838267946170682,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9874338624338626,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "validation_prediction_seconds": 0.009839856997132301,
+          "model_pickle_sha256": "ca72a1adc243dfc1bf6271967131d7bc11973a41bb97e3a6ba6246e0a06633b6",
+          "model_pickle_bytes": 374216,
+          "serialization_seconds": 0.004801574978046119,
+          "warnings": [],
+          "worker_seconds": 0.9680083089624532,
+          "worker_end_peak_process_rss_mib": 208.37109375,
+          "finished_utc": "2026-09-13T22:24:55.196688+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538227,
+            "returncode": 0,
+            "process_seconds": 1.7212354670045897,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:25:48.375742+00:00",
+            "test": {
+              "primary_loss": 0.1020859010412093,
+              "log_loss": 0.1020859010412093,
+              "average_precision": 0.9900412473718845,
+              "prevalence": 0.37719298245614036,
+              "roc_auc": 0.9918113331149687,
+              "rows": 114,
+              "class_counts": {
+                "0": 71,
+                "1": 43
+              }
+            },
+            "test_prediction_seconds": 0.029941843007691205,
+            "choice_sha256": "83635df9b43254b5a85a6fa49a153a63ed7eed5b8cc4854939cabee0b0581700",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "2911c2c7df8114fd16eafa7746962a0ddccf031a78385aa5f3cf2d76a90ed619",
+            "warnings": [],
+            "worker_seconds": 0.8371479099732824,
+            "worker_end_peak_process_rss_mib": 206.91796875,
+            "finished_utc": "2026-09-13T22:25:49.212903+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539462,
+              "returncode": 0,
+              "process_seconds": 1.6203059899853542,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "b154ac53784ff890dcd50cc62ee10f04ec8f283129acfc81dcdae0f2b2bce427"
+        },
+        "pairwise_leaves15": {
+          "structure": "pairwise",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:24:55.929141+00:00",
+          "loading_seconds": 0.012331295991316438,
+          "preprocessing_seconds": 0.03214243601541966,
+          "model_setup_seconds": 0.00004421797348186374,
+          "fit_seconds": 0.10673147399211302,
+          "fit_end_peak_process_rss_mib": 207.75390625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 335750,
+            "numpy_owner_count": 637,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 335750,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 4952,
+            "leaf_count": 2576,
+            "max_distinct_features_per_branch": 2,
+            "requested_interaction_cst": "pairwise",
+            "native_categorical_count": 0,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.11529657883689581,
+            "log_loss": 0.11529657883689581,
+            "average_precision": 0.9940572365131266,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.996362433862434,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "validation_prediction_seconds": 0.007871695037465543,
+          "model_pickle_sha256": "aa69a06639a38b80e6839db0f2cee5c98f1d64dc70141f237ec4b237250de021",
+          "model_pickle_bytes": 362225,
+          "serialization_seconds": 0.0030690309940837324,
+          "warnings": [],
+          "worker_seconds": 0.9227247840026394,
+          "worker_end_peak_process_rss_mib": 208.12890625,
+          "finished_utc": "2026-09-13T22:24:56.851890+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538315,
+            "returncode": 0,
+            "process_seconds": 1.6211540560470894,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:25:49.952771+00:00",
+            "test": {
+              "primary_loss": 0.054404269146343213,
+              "log_loss": 0.054404269146343213,
+              "average_precision": 0.9989306258911451,
+              "prevalence": 0.37719298245614036,
+              "roc_auc": 0.9993449066491975,
+              "rows": 114,
+              "class_counts": {
+                "0": 71,
+                "1": 43
+              }
+            },
+            "test_prediction_seconds": 0.02397802594350651,
+            "choice_sha256": "83635df9b43254b5a85a6fa49a153a63ed7eed5b8cc4854939cabee0b0581700",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "130a4d3ee14dee2eddabc4f70ffcaf1fcf258f7ee72608fb08bbdfe8c1307d24",
+            "warnings": [],
+            "worker_seconds": 0.7488459890009835,
+            "worker_end_peak_process_rss_mib": 206.98828125,
+            "finished_utc": "2026-09-13T22:25:50.701633+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539474,
+              "returncode": 0,
+              "process_seconds": 1.4189773089601658,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "717072ed61150a61564b139d8a6f79af85c5d23cd36a91de5dc17a2f20758805"
+        },
+        "unrestricted_leaves15": {
+          "structure": "unrestricted",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:24:57.517511+00:00",
+          "loading_seconds": 0.013645548024214804,
+          "preprocessing_seconds": 0.03502752003259957,
+          "model_setup_seconds": 0.00004845496732741594,
+          "fit_seconds": 0.12765195401152596,
+          "fit_end_peak_process_rss_mib": 207.64453125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 301590,
+            "numpy_owner_count": 637,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 301590,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 4342,
+            "leaf_count": 2271,
+            "max_distinct_features_per_branch": 9,
+            "requested_interaction_cst": null,
+            "native_categorical_count": 0,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.11912255078968453,
+            "log_loss": 0.11912255078968453,
+            "average_precision": 0.9948442372358268,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9970238095238095,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "validation_prediction_seconds": 0.007559318968560547,
+          "model_pickle_sha256": "b382a2822bb4d4e9d845499912f713c0c0e1fcbdb49bee9036fa2fe2ea2b1b94",
+          "model_pickle_bytes": 328046,
+          "serialization_seconds": 0.003225964028388262,
+          "warnings": [],
+          "worker_seconds": 0.8474637100007385,
+          "worker_end_peak_process_rss_mib": 208.1640625,
+          "finished_utc": "2026-09-13T22:24:58.364991+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538329,
+            "returncode": 0,
+            "process_seconds": 1.570685348007828,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "ee6f2bd8cf3c5302a30ae0d6821c9087e501fe2e3742b16263592167642a17b4"
+        },
+        "additive_leaves31": {
+          "structure": "additive",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:24:59.152280+00:00",
+          "loading_seconds": 0.012317073997110128,
+          "preprocessing_seconds": 0.03671993099851534,
+          "model_setup_seconds": 0.00005209102528169751,
+          "fit_seconds": 0.11721088801277801,
+          "fit_end_peak_process_rss_mib": 207.5,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 347734,
+            "numpy_owner_count": 637,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 347734,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 5166,
+            "leaf_count": 2683,
+            "max_distinct_features_per_branch": 1,
+            "requested_interaction_cst": "no_interactions",
+            "native_categorical_count": 0,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.15515447025370543,
+            "log_loss": 0.15515447025370543,
+            "average_precision": 0.9838267946170682,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9874338624338626,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "validation_prediction_seconds": 0.008299744979012758,
+          "model_pickle_sha256": "898850a6efd0a4eb2c614c1abd0c3775544b1b70609520bdf408d5585f786920",
+          "model_pickle_bytes": 374216,
+          "serialization_seconds": 0.0036409219610504806,
+          "warnings": [],
+          "worker_seconds": 0.856218735978473,
+          "worker_end_peak_process_rss_mib": 208.03515625,
+          "finished_utc": "2026-09-13T22:25:00.008517+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538346,
+            "returncode": 0,
+            "process_seconds": 1.6698570129810832,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "fe5c7de113a677a5b8609fff773ae947c0035459cc4f048e6240684506c99854"
+        },
+        "pairwise_leaves31": {
+          "structure": "pairwise",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:00.846735+00:00",
+          "loading_seconds": 0.015502988011576235,
+          "preprocessing_seconds": 0.04294412594754249,
+          "model_setup_seconds": 0.00006094604032114148,
+          "fit_seconds": 0.14019606198417023,
+          "fit_end_peak_process_rss_mib": 207.484375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 335750,
+            "numpy_owner_count": 637,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 335750,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 4952,
+            "leaf_count": 2576,
+            "max_distinct_features_per_branch": 2,
+            "requested_interaction_cst": "pairwise",
+            "native_categorical_count": 0,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.11529657883689581,
+            "log_loss": 0.11529657883689581,
+            "average_precision": 0.9940572365131266,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.996362433862434,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "validation_prediction_seconds": 0.009158965025562793,
+          "model_pickle_sha256": "c92c81871fdcd96e7611552fd230314b636d3599d0af8e718725e317ea68803c",
+          "model_pickle_bytes": 362225,
+          "serialization_seconds": 0.004039535007905215,
+          "warnings": [],
+          "worker_seconds": 1.0750750809675083,
+          "worker_end_peak_process_rss_mib": 208.03515625,
+          "finished_utc": "2026-09-13T22:25:01.921833+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538361,
+            "returncode": 0,
+            "process_seconds": 1.9214787789969705,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "fe2e86e52dbe50ad0a189c5cbdc52b1ef828da9590c66f5ff7d20975dcdfcead"
+        },
+        "unrestricted_leaves31": {
+          "structure": "unrestricted",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:02.741937+00:00",
+          "loading_seconds": 0.019249483942985535,
+          "preprocessing_seconds": 0.04554096999345347,
+          "model_setup_seconds": 0.000055356009397655725,
+          "fit_seconds": 0.13659526297124103,
+          "fit_end_peak_process_rss_mib": 207.67578125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 301814,
+            "numpy_owner_count": 637,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 301814,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 4346,
+            "leaf_count": 2273,
+            "max_distinct_features_per_branch": 9,
+            "requested_interaction_cst": null,
+            "native_categorical_count": 0,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.11912249555986729,
+            "log_loss": 0.11912249555986729,
+            "average_precision": 0.9948442372358268,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9970238095238095,
+            "rows": 114,
+            "class_counts": {
+              "0": 72,
+              "1": 42
+            }
+          },
+          "validation_prediction_seconds": 0.0077117569744586945,
+          "model_pickle_sha256": "18e8e2987c2d69c9b02a00ceb70af943a1f2dcb325090f9e2b35cbe98f194931",
+          "model_pickle_bytes": 328270,
+          "serialization_seconds": 0.003685272007714957,
+          "warnings": [],
+          "worker_seconds": 0.9716930050053634,
+          "worker_end_peak_process_rss_mib": 208.0546875,
+          "finished_utc": "2026-09-13T22:25:03.713650+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538466,
+            "returncode": 0,
+            "process_seconds": 1.7714605570072308,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:25:51.446001+00:00",
+            "test": {
+              "primary_loss": 0.03539105752082127,
+              "log_loss": 0.03539105752082127,
+              "average_precision": 0.9994714587737844,
+              "prevalence": 0.37719298245614036,
+              "roc_auc": 0.9996724533245988,
+              "rows": 114,
+              "class_counts": {
+                "0": 71,
+                "1": 43
+              }
+            },
+            "test_prediction_seconds": 0.023989453038666397,
+            "choice_sha256": "83635df9b43254b5a85a6fa49a153a63ed7eed5b8cc4854939cabee0b0581700",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "285ba4baf468c7f7de5215aeb4efb98491913b24ac477f0830a5cac482ebd0d4",
+            "warnings": [],
+            "worker_seconds": 0.7030021969694644,
+            "worker_end_peak_process_rss_mib": 207.09375,
+            "finished_utc": "2026-09-13T22:25:52.149016+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539486,
+              "returncode": 0,
+              "process_seconds": 1.4693622619961388,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "6e5e9946c94d3ece11b4cdd2b7cb724d36981646570fe8cb8b6043d17cc9c296"
+        }
+      },
+      "pairwise_relative_loss_reduction": {
+        "validation": 0.2568916728704935,
+        "test": 0.4670736253345926
+      }
+    },
+    "uci_credit_default": {
+      "family": "binomial",
+      "rows": {
+        "train": 18000,
+        "valid": 6000,
+        "test": 6000
+      },
+      "full_table_rows": 30000,
+      "subsampling": "none; every source row belongs to one split",
+      "raw_predictor_count": 23,
+      "split": {
+        "strategy": "stratified_group",
+        "columns": [
+          "ID"
+        ],
+        "policy": "Stratify 60/20/20 by Y, grouping each client ID. X6-X11 are earlier repayment statuses; Y is default in the following month. There is one historical cohort, not separate future calendar cohorts.",
+        "seed": 20260913
+      },
+      "data_sha256": "45bcf4df62ff2e237a74eb155cabfb4bbbc171219a0637daef44fdad07503dd0",
+      "manifest_entry_sha256": "c4a1555b49420eb3c45007c9f129a8a6861759b4dcc5431e459f2af81a684d97",
+      "split_sha256": "b75482888266e1e0365ce12878e5af0b11c989545770526d0863118d0b0e8061",
+      "preprocessing_sha256": "4ec4e9c022a9c27720fe5124708f6785f8e7fc1e757f05354a619f2e1d043a8a",
+      "every_fit_matches_prior_pilot_identity": {
+        "data_sha256": true,
+        "manifest_entry_sha256": true,
+        "split_sha256": true,
+        "preprocessing_sha256": true
+      },
+      "preprocessing_summary": {
+        "feature_kind_counts": {
+          "spline": 14,
+          "categorical": 9
+        },
+        "categorical_level_counts": {
+          "X2": 2,
+          "X3": 4,
+          "X4": 4,
+          "X6": 7,
+          "X7": 6,
+          "X8": 5,
+          "X9": 5,
+          "X10": 5,
+          "X11": 5
+        },
+        "dropped": {},
+        "full_state_location": "Each local fit result.json; raw-input replay requires this state plus the estimator pickle"
+      },
+      "matched_menu_completed": true,
+      "choice": {
+        "selected_by_structure": {
+          "additive": "additive_leaves15",
+          "pairwise": "pairwise_leaves15",
+          "unrestricted": "unrestricted_leaves15"
+        },
+        "chosen_arm": "pairwise_leaves15",
+        "chosen_before_test_evaluation": true,
+        "selected_utc": "2026-09-13T22:25:20.160859+00:00",
+        "validation_scores": {
+          "additive_leaves15": {
+            "primary_loss": 0.4417696412380066,
+            "log_loss": 0.4417696412380066,
+            "average_precision": 0.5226575179940409,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.765462853110374,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "pairwise_leaves15": {
+            "primary_loss": 0.4347217703285458,
+            "log_loss": 0.4347217703285458,
+            "average_precision": 0.540137180759387,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7758875039489146,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "unrestricted_leaves15": {
+            "primary_loss": 0.43620459186634913,
+            "log_loss": 0.43620459186634913,
+            "average_precision": 0.5415591865849565,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7729587356764661,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "additive_leaves31": {
+            "primary_loss": 0.4436004210506805,
+            "log_loss": 0.4436004210506805,
+            "average_precision": 0.5206349307291844,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7614578997724748,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "pairwise_leaves31": {
+            "primary_loss": 0.4396681447356111,
+            "log_loss": 0.4396681447356111,
+            "average_precision": 0.5329896903571207,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7681672246616754,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "unrestricted_leaves31": {
+            "primary_loss": 0.4452046767452553,
+            "log_loss": 0.4452046767452553,
+            "average_precision": 0.5350908188286728,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7645383353939988,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          }
+        },
+        "fit_result_sha256": {
+          "additive_leaves15": "bfedcf847121f41178aeedd466ff2e675f4620a88a594f9ac85e4b49154c12d9",
+          "pairwise_leaves15": "5e688a61bdaf6de6e65d1fe81519236af32ef1d1808943ef18c34db6d499020d",
+          "unrestricted_leaves15": "a1ec7010f42a1d739d7217c3d81860f49668fb1611c112b8e0470c53480f61e2",
+          "additive_leaves31": "282b9beceb973acc023f53ca63af2f413c9c8c99d302e8b53d707b4c59d9f079",
+          "pairwise_leaves31": "5159754abe604ba85b19ca443b6e502a1e4e8b98375380d1ac6e2dab315e20b8",
+          "unrestricted_leaves31": "2660ed4239d1da2f301a9eb45705b2e285f8e36ff8304e0dc0da7a9afb1ef1f6"
+        }
+      },
+      "costs": {
+        "all_tuning_and_selection_wall_seconds": 16.0087842529756,
+        "all_fit_worker_process_seconds": 16.000782096059993,
+        "all_model_fit_seconds": 3.0644259960390627,
+        "class_tuning_process_seconds": {
+          "additive": 5.0994139310205355,
+          "pairwise": 5.3033597220201045,
+          "unrestricted": 5.598008443019353
+        },
+        "all_evaluation_worker_process_seconds": 5.460889749985654,
+        "all_tuning_selection_and_evaluation_seconds": 21.469674002961256
+      },
+      "arms": {
+        "additive_leaves15": {
+          "structure": "additive",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:04.494354+00:00",
+          "loading_seconds": 0.06158743397099897,
+          "preprocessing_seconds": 0.3625401720055379,
+          "model_setup_seconds": 0.000046201981604099274,
+          "fit_seconds": 0.39270289801061153,
+          "fit_end_peak_process_rss_mib": 241.0234375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 267200,
+            "numpy_owner_count": 644,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 267200,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 3960,
+            "leaf_count": 2080,
+            "max_distinct_features_per_branch": 1,
+            "requested_interaction_cst": "no_interactions",
+            "native_categorical_count": 9,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.4417696412380066,
+            "log_loss": 0.4417696412380066,
+            "average_precision": 0.5226575179940409,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.765462853110374,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "validation_prediction_seconds": 0.06833759002620354,
+          "model_pickle_sha256": "a62971d3d9d3335cc5d02631c5a12aa8593de66f359b1153fd98b936cba0ed50",
+          "model_pickle_bytes": 296443,
+          "serialization_seconds": 0.00348369701532647,
+          "warnings": [],
+          "worker_seconds": 1.6309703569859266,
+          "worker_end_peak_process_rss_mib": 241.0234375,
+          "finished_utc": "2026-09-13T22:25:06.125344+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538588,
+            "returncode": 0,
+            "process_seconds": 2.4260851080180146,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:25:52.877645+00:00",
+            "test": {
+              "primary_loss": 0.4303295082980471,
+              "log_loss": 0.4303295082980471,
+              "average_precision": 0.5533383431286782,
+              "prevalence": 0.22116666666666668,
+              "roc_auc": 0.7783101499724805,
+              "rows": 6000,
+              "class_counts": {
+                "0": 4673,
+                "1": 1327
+              }
+            },
+            "test_prediction_seconds": 0.1560718470136635,
+            "choice_sha256": "d364c70f1008e9b98c099bd90c55332ecd8940efbe80c84b89de483b1837a30c",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "e5beb6dfd41fa526bcd9bd5c911946feee083f94517e64e7215c2d2fd6c04633",
+            "warnings": [],
+            "worker_seconds": 1.238673533021938,
+            "worker_end_peak_process_rss_mib": 223.2421875,
+            "finished_utc": "2026-09-13T22:25:54.116339+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539498,
+              "returncode": 0,
+              "process_seconds": 1.9710059390054084,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "b154ac53784ff890dcd50cc62ee10f04ec8f283129acfc81dcdae0f2b2bce427"
+        },
+        "pairwise_leaves15": {
+          "structure": "pairwise",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:06.934384+00:00",
+          "loading_seconds": 0.06551172904437408,
+          "preprocessing_seconds": 0.39919896697392687,
+          "model_setup_seconds": 0.00004823599010705948,
+          "fit_seconds": 0.47977789299329743,
+          "fit_end_peak_process_rss_mib": 240.5859375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 380880,
+            "numpy_owner_count": 644,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 380880,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 5766,
+            "leaf_count": 2983,
+            "max_distinct_features_per_branch": 2,
+            "requested_interaction_cst": "pairwise",
+            "native_categorical_count": 9,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.4347217703285458,
+            "log_loss": 0.4347217703285458,
+            "average_precision": 0.540137180759387,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7758875039489146,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "validation_prediction_seconds": 0.07676103600533679,
+          "model_pickle_sha256": "b5148d4970b28ec707baf5a1b76b2aa023b6e26a729293adafb17b09f4ace190",
+          "model_pickle_bytes": 410134,
+          "serialization_seconds": 0.004078675992786884,
+          "warnings": [],
+          "worker_seconds": 1.7858354799682274,
+          "worker_end_peak_process_rss_mib": 240.5859375,
+          "finished_utc": "2026-09-13T22:25:08.720238+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538715,
+            "returncode": 0,
+            "process_seconds": 2.5797619560034946,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:25:54.876684+00:00",
+            "test": {
+              "primary_loss": 0.4266156573538764,
+              "log_loss": 0.4266156573538764,
+              "average_precision": 0.5573409800432649,
+              "prevalence": 0.22116666666666668,
+              "roc_auc": 0.7852874124485916,
+              "rows": 6000,
+              "class_counts": {
+                "0": 4673,
+                "1": 1327
+              }
+            },
+            "test_prediction_seconds": 0.116479251999408,
+            "choice_sha256": "d364c70f1008e9b98c099bd90c55332ecd8940efbe80c84b89de483b1837a30c",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "793bd5ac7860c1bda9a53fbed95ca849c4e0213dbee84d4ee311f05e4f116217",
+            "warnings": [],
+            "worker_seconds": 1.0617525959969498,
+            "worker_end_peak_process_rss_mib": 223.375,
+            "finished_utc": "2026-09-13T22:25:55.938439+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539513,
+              "returncode": 0,
+              "process_seconds": 1.770491446950473,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "717072ed61150a61564b139d8a6f79af85c5d23cd36a91de5dc17a2f20758805"
+        },
+        "unrestricted_leaves15": {
+          "structure": "unrestricted",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:09.512615+00:00",
+          "loading_seconds": 0.0655598440207541,
+          "preprocessing_seconds": 0.38699655298842117,
+          "model_setup_seconds": 0.00006387900793924928,
+          "fit_seconds": 0.5279095270088874,
+          "fit_end_peak_process_rss_mib": 240.9921875,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 379584,
+            "numpy_owner_count": 644,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 379584,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 5800,
+            "leaf_count": 3000,
+            "max_distinct_features_per_branch": 10,
+            "requested_interaction_cst": null,
+            "native_categorical_count": 9,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.43620459186634913,
+            "log_loss": 0.43620459186634913,
+            "average_precision": 0.5415591865849565,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7729587356764661,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "validation_prediction_seconds": 0.06447678402764723,
+          "model_pickle_sha256": "e6d27a45326d7e977ef11643362baf0366f57500d846004e96df84ec77d93e8c",
+          "model_pickle_bytes": 408828,
+          "serialization_seconds": 0.004088811983820051,
+          "warnings": [],
+          "worker_seconds": 1.9411054739612155,
+          "worker_end_peak_process_rss_mib": 240.9921875,
+          "finished_utc": "2026-09-13T22:25:11.453738+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538954,
+            "returncode": 0,
+            "process_seconds": 2.7738780030049384,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:25:56.618904+00:00",
+            "test": {
+              "primary_loss": 0.42664658025154373,
+              "log_loss": 0.42664658025154373,
+              "average_precision": 0.5631876309205993,
+              "prevalence": 0.22116666666666668,
+              "roc_auc": 0.7855763141560546,
+              "rows": 6000,
+              "class_counts": {
+                "0": 4673,
+                "1": 1327
+              }
+            },
+            "test_prediction_seconds": 0.1085440359893255,
+            "choice_sha256": "d364c70f1008e9b98c099bd90c55332ecd8940efbe80c84b89de483b1837a30c",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "740d497006096566b9b2abe8e4ed5d9f0cf689b6f66f4953728e776727f920cb",
+            "warnings": [],
+            "worker_seconds": 1.0181583660305478,
+            "worker_end_peak_process_rss_mib": 223.3828125,
+            "finished_utc": "2026-09-13T22:25:57.637080+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539525,
+              "returncode": 0,
+              "process_seconds": 1.7193923640297726,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "ee6f2bd8cf3c5302a30ae0d6821c9087e501fe2e3742b16263592167642a17b4"
+        },
+        "additive_leaves31": {
+          "structure": "additive",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:12.321248+00:00",
+          "loading_seconds": 0.06705327401868999,
+          "preprocessing_seconds": 0.37374208599794656,
+          "model_setup_seconds": 0.00005790096474811435,
+          "fit_seconds": 0.43962318304693326,
+          "fit_end_peak_process_rss_mib": 240.9296875,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 453984,
+            "numpy_owner_count": 644,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 453984,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 7284,
+            "leaf_count": 3742,
+            "max_distinct_features_per_branch": 1,
+            "requested_interaction_cst": "no_interactions",
+            "native_categorical_count": 9,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.4436004210506805,
+            "log_loss": 0.4436004210506805,
+            "average_precision": 0.5206349307291844,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7614578997724748,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "validation_prediction_seconds": 0.07855307398131117,
+          "model_pickle_sha256": "ea7d265752dfb9f2dd9fb208746faac40e78acb82546c70a4fe54368d86a1461",
+          "model_pickle_bytes": 483254,
+          "serialization_seconds": 0.0041440079803578556,
+          "warnings": [],
+          "worker_seconds": 1.8200283430051059,
+          "worker_end_peak_process_rss_mib": 240.9296875,
+          "finished_utc": "2026-09-13T22:25:14.141301+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538977,
+            "returncode": 0,
+            "process_seconds": 2.673328823002521,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "fe5c7de113a677a5b8609fff773ae947c0035459cc4f048e6240684506c99854"
+        },
+        "pairwise_leaves31": {
+          "structure": "pairwise",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:14.991762+00:00",
+          "loading_seconds": 0.053741057054139674,
+          "preprocessing_seconds": 0.3623716610018164,
+          "model_setup_seconds": 0.00006759498501196504,
+          "fit_seconds": 0.5320556689985096,
+          "fit_end_peak_process_rss_mib": 239.53515625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 732064,
+            "numpy_owner_count": 644,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 732064,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 11676,
+            "leaf_count": 5938,
+            "max_distinct_features_per_branch": 2,
+            "requested_interaction_cst": "pairwise",
+            "native_categorical_count": 9,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.4396681447356111,
+            "log_loss": 0.4396681447356111,
+            "average_precision": 0.5329896903571207,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7681672246616754,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "validation_prediction_seconds": 0.08579204196576029,
+          "model_pickle_sha256": "1ea6451e23fa5acf5dcf72400c5d726fe6487358c250f6090ad462798b91d789",
+          "model_pickle_bytes": 761363,
+          "serialization_seconds": 0.004455493995919824,
+          "warnings": [],
+          "worker_seconds": 1.8816313259885646,
+          "worker_end_peak_process_rss_mib": 239.53515625,
+          "finished_utc": "2026-09-13T22:25:16.873412+00:00",
+          "process": {
+            "status": "success",
+            "pid": 538997,
+            "returncode": 0,
+            "process_seconds": 2.72359776601661,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "fe2e86e52dbe50ad0a189c5cbdc52b1ef828da9590c66f5ff7d20975dcdfcead"
+        },
+        "unrestricted_leaves31": {
+          "structure": "unrestricted",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:17.748380+00:00",
+          "loading_seconds": 0.05116418702527881,
+          "preprocessing_seconds": 0.3501400710083544,
+          "model_setup_seconds": 0.00005363300442695618,
+          "fit_seconds": 0.6923568259808235,
+          "fit_end_peak_process_rss_mib": 240.80078125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 763072,
+            "numpy_owner_count": 644,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 763072,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 12200,
+            "leaf_count": 6200,
+            "max_distinct_features_per_branch": 14,
+            "requested_interaction_cst": null,
+            "native_categorical_count": 9,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 0.4452046767452553,
+            "log_loss": 0.4452046767452553,
+            "average_precision": 0.5350908188286728,
+            "prevalence": 0.22116666666666668,
+            "roc_auc": 0.7645383353939988,
+            "rows": 6000,
+            "class_counts": {
+              "0": 4673,
+              "1": 1327
+            }
+          },
+          "validation_prediction_seconds": 0.06802202598191798,
+          "model_pickle_sha256": "6e84d6ece03c96d2095e653dd8fde92ee7dc8f37d0d4a0902a062dbcdfe68773",
+          "model_pickle_bytes": 792361,
+          "serialization_seconds": 0.004095452022738755,
+          "warnings": [],
+          "worker_seconds": 1.9414049420156516,
+          "worker_end_peak_process_rss_mib": 240.80078125,
+          "finished_utc": "2026-09-13T22:25:19.689808+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539020,
+            "returncode": 0,
+            "process_seconds": 2.8241304400144145,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "6e5e9946c94d3ece11b4cdd2b7cb724d36981646570fe8cb8b6043d17cc9c296"
+        }
+      },
+      "pairwise_relative_loss_reduction": {
+        "validation": 0.015953723958282873,
+        "test": 0.008630249314900529
+      }
+    },
+    "ames_housing": {
+      "family": "gaussian",
+      "rows": {
+        "train": 1941,
+        "valid": 648,
+        "test": 341
+      },
+      "full_table_rows": 2930,
+      "subsampling": "none; every source row belongs to one split",
+      "raw_predictor_count": 74,
+      "split": {
+        "strategy": "time_group",
+        "columns": [
+          "Yr Sold",
+          "PID"
+        ],
+        "policy": "Train on 2006-2008, validate on 2009, test on 2010, grouping PID. All 2930 PIDs are distinct in this artifact. Transaction-condition/date fields and separate miscellaneous monetary valuation are excluded from the physical-property baseline.",
+        "seed": 20260913,
+        "train_years": [
+          2006,
+          2007,
+          2008
+        ],
+        "validation_years": [
+          2009
+        ],
+        "test_years": [
+          2010
+        ]
+      },
+      "data_sha256": "6cfe6cb525ba437de428653a1040e2aed7d696640bf75203786a6d7a0e67cfcc",
+      "manifest_entry_sha256": "842d1f1098c4d2f4cdd7716e7a8b059ccbd4a73c12d0a2b1d0ac259a5dcfb2e6",
+      "split_sha256": "016fba5a482286057d357a709c3b66ccf596d7be03d4b7acec848a16770b0b6a",
+      "preprocessing_sha256": "d524893916b6d6045d9a4b1a0b2ddcd52c58d7ff0c48e367fbe3940ed276dc68",
+      "every_fit_matches_prior_pilot_identity": {
+        "data_sha256": true,
+        "manifest_entry_sha256": true,
+        "split_sha256": true,
+        "preprocessing_sha256": true
+      },
+      "preprocessing_summary": {
+        "feature_kind_counts": {
+          "categorical": 42,
+          "spline": 23,
+          "numeric": 9
+        },
+        "categorical_level_counts": {
+          "MS SubClass": 12,
+          "MS Zoning": 4,
+          "Street": 2,
+          "Alley": 3,
+          "Lot Shape": 4,
+          "Land Contour": 4,
+          "Utilities": 2,
+          "Lot Config": 5,
+          "Land Slope": 3,
+          "Neighborhood": 24,
+          "Condition 1": 7,
+          "Condition 2": 2,
+          "Bldg Type": 5,
+          "House Style": 6,
+          "Roof Style": 3,
+          "Roof Matl": 2,
+          "Exterior 1st": 11,
+          "Exterior 2nd": 11,
+          "Mas Vnr Type": 5,
+          "Exter Qual": 4,
+          "Exter Cond": 4,
+          "Foundation": 5,
+          "Bsmt Qual": 6,
+          "Bsmt Cond": 5,
+          "Bsmt Exposure": 6,
+          "BsmtFin Type 1": 8,
+          "BsmtFin Type 2": 8,
+          "Heating": 2,
+          "Heating QC": 5,
+          "Central Air": 2,
+          "Electrical": 4,
+          "Kitchen Qual": 4,
+          "Functional": 5,
+          "Fireplace Qu": 6,
+          "Garage Type": 7,
+          "Garage Finish": 5,
+          "Garage Qual": 5,
+          "Garage Cond": 4,
+          "Paved Drive": 3,
+          "Pool QC": 2,
+          "Fence": 5,
+          "Misc Feature": 3
+        },
+        "dropped": {},
+        "full_state_location": "Each local fit result.json; raw-input replay requires this state plus the estimator pickle"
+      },
+      "matched_menu_completed": true,
+      "choice": {
+        "selected_by_structure": {
+          "additive": "additive_leaves15",
+          "pairwise": "pairwise_leaves15",
+          "unrestricted": "unrestricted_leaves31"
+        },
+        "chosen_arm": "pairwise_leaves15",
+        "chosen_before_test_evaluation": true,
+        "selected_utc": "2026-09-13T22:25:34.622006+00:00",
+        "validation_scores": {
+          "additive_leaves15": {
+            "primary_loss": 587063810.4841186,
+            "mse": 587063810.4841186,
+            "mean_deviance": 587063810.4841186,
+            "rows": 648,
+            "rmse": 24229.399713656105
+          },
+          "pairwise_leaves15": {
+            "primary_loss": 490640243.8552472,
+            "mse": 490640243.8552472,
+            "mean_deviance": 490640243.8552472,
+            "rows": 648,
+            "rmse": 22150.400534871762
+          },
+          "unrestricted_leaves15": {
+            "primary_loss": 535193633.7539491,
+            "mse": 535193633.7539491,
+            "mean_deviance": 535193633.7539491,
+            "rows": 648,
+            "rmse": 23134.252392371556
+          },
+          "additive_leaves31": {
+            "primary_loss": 605375529.513517,
+            "mse": 605375529.513517,
+            "mean_deviance": 605375529.513517,
+            "rows": 648,
+            "rmse": 24604.38029119037
+          },
+          "pairwise_leaves31": {
+            "primary_loss": 498746492.91365445,
+            "mse": 498746492.91365445,
+            "mean_deviance": 498746492.91365445,
+            "rows": 648,
+            "rmse": 22332.63291494432
+          },
+          "unrestricted_leaves31": {
+            "primary_loss": 528655950.6591712,
+            "mse": 528655950.6591712,
+            "mean_deviance": 528655950.6591712,
+            "rows": 648,
+            "rmse": 22992.519450011805
+          }
+        },
+        "fit_result_sha256": {
+          "additive_leaves15": "066f7af04814b8cbbdbe28e2cd977ae4241f4898dfb3a9568bb5aeab6084b6fd",
+          "pairwise_leaves15": "3051f81da990cdd71b8e9b6d7132f59aa473133b1330c90ee1491159ae257d5b",
+          "unrestricted_leaves15": "d658276dae0deec9a948da2c2f84e32e10d4add81740c9f0f4206e37aefca623",
+          "additive_leaves31": "dfb7a88b466305ee2b34839e4a056af8a55167311543c69000d0ec60de2e0e38",
+          "pairwise_leaves31": "bd9818fe75cedcdca33e5ef85a91c7b1d510738c3ab2494ff95e66d16c658936",
+          "unrestricted_leaves31": "a1f7a8eac4a30739e37559f4a937a7705643cffeccb106d8b609bc68212ca44c"
+        }
+      },
+      "costs": {
+        "all_tuning_and_selection_wall_seconds": 14.459251407010015,
+        "all_fit_worker_process_seconds": 14.448928227066062,
+        "all_model_fit_seconds": 2.48623241414316,
+        "class_tuning_process_seconds": {
+          "additive": 4.64606018102495,
+          "pairwise": 4.752975427021738,
+          "unrestricted": 5.049892619019374
+        },
+        "all_evaluation_worker_process_seconds": 5.11506948096212,
+        "all_tuning_selection_and_evaluation_seconds": 19.574320887972135
+      },
+      "arms": {
+        "additive_leaves15": {
+          "structure": "additive",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:20.515699+00:00",
+          "loading_seconds": 0.032464460004121065,
+          "preprocessing_seconds": 0.22295825002947822,
+          "model_setup_seconds": 0.000046622008085250854,
+          "fit_seconds": 0.2170709500205703,
+          "fit_end_peak_process_rss_mib": 224.1875,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 266656,
+            "numpy_owner_count": 727,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 266656,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 3684,
+            "leaf_count": 1942,
+            "max_distinct_features_per_branch": 1,
+            "requested_interaction_cst": "no_interactions",
+            "native_categorical_count": 42,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 587063810.4841186,
+            "mse": 587063810.4841186,
+            "mean_deviance": 587063810.4841186,
+            "rows": 648,
+            "rmse": 24229.399713656105
+          },
+          "validation_prediction_seconds": 0.021009831980336457,
+          "model_pickle_sha256": "983cd65b963845f6042507dbbbb01a14cbdc7a962adc6d15fd51b7d29829d083",
+          "model_pickle_bytes": 299883,
+          "serialization_seconds": 0.0030785350245423615,
+          "warnings": [],
+          "worker_seconds": 1.267929819994606,
+          "worker_end_peak_process_rss_mib": 224.1875,
+          "finished_utc": "2026-09-13T22:25:21.783646+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539040,
+            "returncode": 0,
+            "process_seconds": 2.0719436579965986,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:25:58.389443+00:00",
+            "test": {
+              "primary_loss": 602408799.9483458,
+              "mse": 602408799.9483458,
+              "mean_deviance": 602408799.9483458,
+              "rows": 341,
+              "rmse": 24544.017599984436
+            },
+            "test_prediction_seconds": 0.0877687800093554,
+            "choice_sha256": "38392faa85289b884b5bd4dded26c1c44d2c765afb5940f85507268e43f70061",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "415ae0aa68ae6abe59cf2cfe81071414ef1d5fd547c812e641e0f6189afbe4a8",
+            "warnings": [],
+            "worker_seconds": 0.9329799879924394,
+            "worker_end_peak_process_rss_mib": 212.76171875,
+            "finished_utc": "2026-09-13T22:25:59.322437+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539542,
+              "returncode": 0,
+              "process_seconds": 1.7207689950009808,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "025f9086db7ee79be85d6bbe332e6128e7fe5c9ab2a829c1b3662d1c7b239e51"
+        },
+        "pairwise_leaves15": {
+          "structure": "pairwise",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:22.625398+00:00",
+          "loading_seconds": 0.04310775100020692,
+          "preprocessing_seconds": 0.277209063002374,
+          "model_setup_seconds": 0.0000614059972576797,
+          "fit_seconds": 0.35262967803282663,
+          "fit_end_peak_process_rss_mib": 224.2109375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 383504,
+            "numpy_owner_count": 727,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 383504,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 5446,
+            "leaf_count": 2823,
+            "max_distinct_features_per_branch": 2,
+            "requested_interaction_cst": "pairwise",
+            "native_categorical_count": 42,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 490640243.8552472,
+            "mse": 490640243.8552472,
+            "mean_deviance": 490640243.8552472,
+            "rows": 648,
+            "rmse": 22150.400534871762
+          },
+          "validation_prediction_seconds": 0.02591109200147912,
+          "model_pickle_sha256": "c7a7af44cde7588b8ec3846f56e9bae3f78ff6b32fc1cc3ef82eede6f9b0a76c",
+          "model_pickle_bytes": 416742,
+          "serialization_seconds": 0.009268334950320423,
+          "warnings": [],
+          "worker_seconds": 1.5698800280224532,
+          "worker_end_peak_process_rss_mib": 224.2109375,
+          "finished_utc": "2026-09-13T22:25:24.195294+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539092,
+            "returncode": 0,
+            "process_seconds": 2.4268413389800116,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:26:00.092453+00:00",
+            "test": {
+              "primary_loss": 457101879.79562926,
+              "mse": 457101879.79562926,
+              "mean_deviance": 457101879.79562926,
+              "rows": 341,
+              "rmse": 21379.941061556492
+            },
+            "test_prediction_seconds": 0.09949860698543489,
+            "choice_sha256": "38392faa85289b884b5bd4dded26c1c44d2c765afb5940f85507268e43f70061",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "ccd25f58fe0495612eb6bb954ef708f5d0256bed56e27774f1fbe85e8ce0505f",
+            "warnings": [],
+            "worker_seconds": 0.9034385720151477,
+            "worker_end_peak_process_rss_mib": 213.02734375,
+            "finished_utc": "2026-09-13T22:26:00.995907+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539577,
+              "returncode": 0,
+              "process_seconds": 1.671789818967227,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "cac7720912e3bb4f573d803cc1aa3b0b976eae74d9784e01e0cadfab56adcd59"
+        },
+        "unrestricted_leaves15": {
+          "structure": "unrestricted",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:25.038638+00:00",
+          "loading_seconds": 0.03637431201059371,
+          "preprocessing_seconds": 0.284874286968261,
+          "model_setup_seconds": 0.000048946007154881954,
+          "fit_seconds": 0.5026314290007576,
+          "fit_end_peak_process_rss_mib": 224.5625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 401024,
+            "numpy_owner_count": 727,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 401024,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 5800,
+            "leaf_count": 3000,
+            "max_distinct_features_per_branch": 12,
+            "requested_interaction_cst": null,
+            "native_categorical_count": 42,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 535193633.7539491,
+            "mse": 535193633.7539491,
+            "mean_deviance": 535193633.7539491,
+            "rows": 648,
+            "rmse": 23134.252392371556
+          },
+          "validation_prediction_seconds": 0.03462666500126943,
+          "model_pickle_sha256": "fb94456f909b01a39e18bd677a004535335973189aaf31bc1f2a1155cfc28bd7",
+          "model_pickle_bytes": 434252,
+          "serialization_seconds": 0.004443034995347261,
+          "warnings": [],
+          "worker_seconds": 1.6335014009964652,
+          "worker_end_peak_process_rss_mib": 224.5625,
+          "finished_utc": "2026-09-13T22:25:26.672164+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539132,
+            "returncode": 0,
+            "process_seconds": 2.4763253059936687,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "6f4750a8f905a391ceec354d89b17385b7f45d405224ae8de0f2e0637cea4794"
+        },
+        "additive_leaves31": {
+          "structure": "additive",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:27.534442+00:00",
+          "loading_seconds": 0.04881984699750319,
+          "preprocessing_seconds": 0.3220273460028693,
+          "model_setup_seconds": 0.000048975052777677774,
+          "fit_seconds": 0.31744990102015436,
+          "fit_end_peak_process_rss_mib": 223.6015625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 410784,
+            "numpy_owner_count": 727,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 410784,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 6116,
+            "leaf_count": 3158,
+            "max_distinct_features_per_branch": 1,
+            "requested_interaction_cst": "no_interactions",
+            "native_categorical_count": 42,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 605375529.513517,
+            "mse": 605375529.513517,
+            "mean_deviance": 605375529.513517,
+            "rows": 648,
+            "rmse": 24604.38029119037
+          },
+          "validation_prediction_seconds": 0.031068490992765874,
+          "model_pickle_sha256": "06ee0d766feb641421876dd06f405e7349d29ff7b33710d0615dc3999b43c1f1",
+          "model_pickle_bytes": 444029,
+          "serialization_seconds": 0.004905685957055539,
+          "warnings": [],
+          "worker_seconds": 1.6423473909962922,
+          "worker_end_peak_process_rss_mib": 223.6015625,
+          "finished_utc": "2026-09-13T22:25:29.176823+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539155,
+            "returncode": 0,
+            "process_seconds": 2.5741165230283514,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "fb1a88527d47323dafd4d8e39ac777bdedc28b3ea7089cad41ac3cb714079866"
+        },
+        "pairwise_leaves31": {
+          "structure": "pairwise",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:30.162353+00:00",
+          "loading_seconds": 0.029901609988883138,
+          "preprocessing_seconds": 0.2353737679659389,
+          "model_setup_seconds": 0.00005743000656366348,
+          "fit_seconds": 0.4152160140220076,
+          "fit_end_peak_process_rss_mib": 224.41015625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 666400,
+            "numpy_owner_count": 727,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 666400,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 10156,
+            "leaf_count": 5178,
+            "max_distinct_features_per_branch": 2,
+            "requested_interaction_cst": "pairwise",
+            "native_categorical_count": 42,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 498746492.91365445,
+            "mse": 498746492.91365445,
+            "mean_deviance": 498746492.91365445,
+            "rows": 648,
+            "rmse": 22332.63291494432
+          },
+          "validation_prediction_seconds": 0.027845352014992386,
+          "model_pickle_sha256": "b95fb70283846a80f84ec36001ece467e46f39c012c8744546afe74a90c5a481",
+          "model_pickle_bytes": 699674,
+          "serialization_seconds": 0.008739200013224036,
+          "warnings": [],
+          "worker_seconds": 1.4861267560045235,
+          "worker_end_peak_process_rss_mib": 224.41015625,
+          "finished_utc": "2026-09-13T22:25:31.648494+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539202,
+            "returncode": 0,
+            "process_seconds": 2.3261340880417265,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "d7a0bf781a29607357b06028cd6d466f174acab6490e3c9cfd354ec5238d38a1"
+        },
+        "unrestricted_leaves31": {
+          "structure": "unrestricted",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:32.395325+00:00",
+          "loading_seconds": 0.041214025986846536,
+          "preprocessing_seconds": 0.2562309220083989,
+          "model_setup_seconds": 0.00005501596024259925,
+          "fit_seconds": 0.6812344420468435,
+          "fit_end_peak_process_rss_mib": 226.36328125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 808256,
+            "numpy_owner_count": 727,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 808256,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 12200,
+            "leaf_count": 6200,
+            "max_distinct_features_per_branch": 19,
+            "requested_interaction_cst": null,
+            "native_categorical_count": 42,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 528655950.6591712,
+            "mse": 528655950.6591712,
+            "mean_deviance": 528655950.6591712,
+            "rows": 648,
+            "rmse": 22992.519450011805
+          },
+          "validation_prediction_seconds": 0.03575217199977487,
+          "model_pickle_sha256": "c7d01478ade106796a7a8f5bd3f4b4fb6ca15bcd6b8e5a5de2e4af0e45ec3dde",
+          "model_pickle_bytes": 841538,
+          "serialization_seconds": 0.004716000985354185,
+          "warnings": [],
+          "worker_seconds": 1.8345595190185122,
+          "worker_end_peak_process_rss_mib": 226.36328125,
+          "finished_utc": "2026-09-13T22:25:34.229919+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539222,
+            "returncode": 0,
+            "process_seconds": 2.5735673130257055,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:26:01.763416+00:00",
+            "test": {
+              "primary_loss": 520880226.43991446,
+              "mse": 520880226.43991446,
+              "mean_deviance": 520880226.43991446,
+              "rows": 341,
+              "rmse": 22822.800582748703
+            },
+            "test_prediction_seconds": 0.11946816800627857,
+            "choice_sha256": "38392faa85289b884b5bd4dded26c1c44d2c765afb5940f85507268e43f70061",
+            "validation_chosen_arm": "pairwise_leaves15",
+            "test_predictions_sha256": "7bcdfc3851ad1c89c3b13ce3547716a2f680486b70ec7bb43b89e66896e19027",
+            "warnings": [],
+            "worker_seconds": 0.9611892600078136,
+            "worker_end_peak_process_rss_mib": 213.26171875,
+            "finished_utc": "2026-09-13T22:26:02.724624+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539620,
+              "returncode": 0,
+              "process_seconds": 1.7225106669939123,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "b89af3dacd6de133b21e12adb63e9874a10ee5dcdba96c32653b9f02792701bb"
+        }
+      },
+      "pairwise_relative_loss_reduction": {
+        "validation": 0.1642471651409687,
+        "test": 0.24120982323826612
+      }
+    },
+    "uci_bike_sharing": {
+      "family": "poisson",
+      "rows": {
+        "train": 10389,
+        "valid": 3502,
+        "test": 3488
+      },
+      "full_table_rows": 17379,
+      "subsampling": "none; every source row belongs to one split",
+      "raw_predictor_count": 12,
+      "split": {
+        "strategy": "time",
+        "columns": [
+          "dteday"
+        ],
+        "policy": "Chronological 60/20/20 whole-day groups; preserve all hours of a date together. casual+registered exactly reconstruct cnt. Supplied same-hour weather is a contemporaneous predictor, not a forecast available in advance.",
+        "seed": 20260913
+      },
+      "data_sha256": "e03de4ee4ef4dc376ac6e04bf829673c6269e8eba5c60fa121640fa2f829504f",
+      "manifest_entry_sha256": "9aeeea61eec8d70ab4b75d7370823917dcdf79a2ab896a17a8dd770952dd355d",
+      "split_sha256": "642d41f20d01521e7aa598a16364c971eee7749f15413db1fd9a6e8d278ba02d",
+      "preprocessing_sha256": "231bd4d44ad2c5eb8f671d02c6715f14b4f154b998b0b1368fe93caa78714265",
+      "every_fit_matches_prior_pilot_identity": {
+        "data_sha256": true,
+        "manifest_entry_sha256": true,
+        "split_sha256": true,
+        "preprocessing_sha256": true
+      },
+      "preprocessing_summary": {
+        "feature_kind_counts": {
+          "categorical": 8,
+          "spline": 4
+        },
+        "categorical_level_counts": {
+          "season": 4,
+          "yr": 2,
+          "mnth": 12,
+          "hr": 24,
+          "holiday": 2,
+          "weekday": 7,
+          "workingday": 2,
+          "weathersit": 4
+        },
+        "dropped": {},
+        "full_state_location": "Each local fit result.json; raw-input replay requires this state plus the estimator pickle"
+      },
+      "matched_menu_completed": true,
+      "choice": {
+        "selected_by_structure": {
+          "additive": "additive_leaves31",
+          "pairwise": "pairwise_leaves15",
+          "unrestricted": "unrestricted_leaves31"
+        },
+        "chosen_arm": "unrestricted_leaves31",
+        "chosen_before_test_evaluation": true,
+        "selected_utc": "2026-09-13T22:25:48.031751+00:00",
+        "validation_scores": {
+          "additive_leaves15": {
+            "primary_loss": 43.82236504010883,
+            "mse": 14275.394737774588,
+            "mean_deviance": 43.82236504010883,
+            "rows": 3502
+          },
+          "pairwise_leaves15": {
+            "primary_loss": 25.31585056938907,
+            "mse": 8060.461406180989,
+            "mean_deviance": 25.31585056938907,
+            "rows": 3502
+          },
+          "unrestricted_leaves15": {
+            "primary_loss": 24.137824014791406,
+            "mse": 7621.74715527741,
+            "mean_deviance": 24.137824014791406,
+            "rows": 3502
+          },
+          "additive_leaves31": {
+            "primary_loss": 43.76462853094192,
+            "mse": 14273.528166376598,
+            "mean_deviance": 43.76462853094192,
+            "rows": 3502
+          },
+          "pairwise_leaves31": {
+            "primary_loss": 27.285490823245176,
+            "mse": 8880.485463985058,
+            "mean_deviance": 27.285490823245176,
+            "rows": 3502
+          },
+          "unrestricted_leaves31": {
+            "primary_loss": 23.90551980581213,
+            "mse": 7773.840730108565,
+            "mean_deviance": 23.90551980581213,
+            "rows": 3502
+          }
+        },
+        "fit_result_sha256": {
+          "additive_leaves15": "26b51fd9dc23dde17d4d1ed12fbcda7e57a75d4fb6c2f55382192cc94ad30bc7",
+          "pairwise_leaves15": "a04025d3746982a659b6d7e56fcbaeef2cfd5109266d2bb5d4e4092e6dab8f9c",
+          "unrestricted_leaves15": "61e52afee31df055c8a0cfe0b21e1eb6524c408e3f57045d44acacef2157f6c5",
+          "additive_leaves31": "a84e3b4911c3c12ae48fea1bca955f252c17f4fcdbeeb8010013a5888b28bf17",
+          "pairwise_leaves31": "aae58dabe44a79b3efb9a9498afc60a6b3b4977090c2bad90e9f39c91bd56055",
+          "unrestricted_leaves31": "04d5e81b87fd725d695b6337a0c68e1e4d7097f869c828b2202e54cc013e3a1e"
+        }
+      },
+      "costs": {
+        "all_tuning_and_selection_wall_seconds": 13.405800904030912,
+        "all_fit_worker_process_seconds": 13.398752404958941,
+        "all_model_fit_seconds": 2.1526215510675684,
+        "class_tuning_process_seconds": {
+          "additive": 4.454754293023143,
+          "pairwise": 4.496390115935355,
+          "unrestricted": 4.447607996000443
+        },
+        "all_evaluation_worker_process_seconds": 5.067766616004519,
+        "all_tuning_selection_and_evaluation_seconds": 18.47356752003543
+      },
+      "arms": {
+        "additive_leaves15": {
+          "structure": "additive",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:35.006153+00:00",
+          "loading_seconds": 0.05015197698958218,
+          "preprocessing_seconds": 0.21093568700598553,
+          "model_setup_seconds": 0.00007144099799916148,
+          "fit_seconds": 0.25733287300681695,
+          "fit_end_peak_process_rss_mib": 228.62109375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 240192,
+            "numpy_owner_count": 631,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 240192,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 3114,
+            "leaf_count": 1657,
+            "max_distinct_features_per_branch": 1,
+            "requested_interaction_cst": "no_interactions",
+            "native_categorical_count": 8,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 43.82236504010883,
+            "mse": 14275.394737774588,
+            "mean_deviance": 43.82236504010883,
+            "rows": 3502
+          },
+          "validation_prediction_seconds": 0.050856446963734925,
+          "model_pickle_sha256": "e5e7c95c311197d2771f7855702c4f38f763b6b19e69e84b89ca85ef01b0a45b",
+          "model_pickle_bytes": 269002,
+          "serialization_seconds": 0.005095332977361977,
+          "warnings": [],
+          "worker_seconds": 1.6156642910209484,
+          "worker_end_peak_process_rss_mib": 230.77734375,
+          "finished_utc": "2026-09-13T22:25:36.621841+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539245,
+            "returncode": 0,
+            "process_seconds": 2.4807790140039288,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "4bb437edd9177824b19a280d3672385869277b02621fbbef211ee8b49f21f22e"
+        },
+        "pairwise_leaves15": {
+          "structure": "pairwise",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:37.502867+00:00",
+          "loading_seconds": 0.04269711097003892,
+          "preprocessing_seconds": 0.18338972295168787,
+          "model_setup_seconds": 0.00006031501106917858,
+          "fit_seconds": 0.33678454102482647,
+          "fit_end_peak_process_rss_mib": 228.828125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 417312,
+            "numpy_owner_count": 631,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 417312,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 5670,
+            "leaf_count": 2935,
+            "max_distinct_features_per_branch": 2,
+            "requested_interaction_cst": "pairwise",
+            "native_categorical_count": 8,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 25.31585056938907,
+            "mse": 8060.461406180989,
+            "mean_deviance": 25.31585056938907,
+            "rows": 3502
+          },
+          "validation_prediction_seconds": 0.056511762959416956,
+          "model_pickle_sha256": "a012fdb8f54c9935d1e786334ae61f1c211bfd45b62a5f872a0f9067b313a482",
+          "model_pickle_bytes": 446133,
+          "serialization_seconds": 0.006212756969034672,
+          "warnings": [],
+          "worker_seconds": 1.5428545150207356,
+          "worker_end_peak_process_rss_mib": 230.91015625,
+          "finished_utc": "2026-09-13T22:25:39.045747+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539267,
+            "returncode": 0,
+            "process_seconds": 2.424729716964066,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:26:05.033135+00:00",
+            "test": {
+              "primary_loss": 31.480005983695897,
+              "mse": 9938.110471090187,
+              "mean_deviance": 31.480005983695897,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.08313382498454303,
+            "choice_sha256": "163f27caf7ad18fca015fd5565d277e186b20115656a483f5ada101a780670ef",
+            "validation_chosen_arm": "unrestricted_leaves31",
+            "test_predictions_sha256": "abdaa797ccd22f1bbe043bef529769411920e28e9d3cee8ed77dd39d86cf0f50",
+            "warnings": [],
+            "worker_seconds": 0.8795837439829484,
+            "worker_end_peak_process_rss_mib": 220.609375,
+            "finished_utc": "2026-09-13T22:26:05.912739+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539876,
+              "returncode": 0,
+              "process_seconds": 1.6705835220054723,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "e64c415ad1f15ac9bb476151e62b38cf4167882a59d20277fca863464f8a66f9"
+        },
+        "unrestricted_leaves15": {
+          "structure": "unrestricted",
+          "config": "leaves15",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:39.891009+00:00",
+          "loading_seconds": 0.035940114001277834,
+          "preprocessing_seconds": 0.14376299502328038,
+          "model_setup_seconds": 0.000050098984502255917,
+          "fit_seconds": 0.38764706801157445,
+          "fit_end_peak_process_rss_mib": 228.17578125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 458640,
+            "numpy_owner_count": 631,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 458640,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 5800,
+            "leaf_count": 3000,
+            "max_distinct_features_per_branch": 8,
+            "requested_interaction_cst": null,
+            "native_categorical_count": 8,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 24.137824014791406,
+            "mse": 7621.74715527741,
+            "mean_deviance": 24.137824014791406,
+            "rows": 3502
+          },
+          "validation_prediction_seconds": 0.038359131023753434,
+          "model_pickle_sha256": "22951359c5746a27cad659e68cfb8d83c11fd890a9d9d5ea839881d4abf32d39",
+          "model_pickle_bytes": 487460,
+          "serialization_seconds": 0.0037204570253379643,
+          "warnings": [],
+          "worker_seconds": 1.4368059069965966,
+          "worker_end_peak_process_rss_mib": 230.27734375,
+          "finished_utc": "2026-09-13T22:25:41.327831+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539303,
+            "returncode": 0,
+            "process_seconds": 2.125171224004589,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "53477f8ce6852f3dafe6d9d837c4723e5de473c9cd55a425314af7c421b4b829"
+        },
+        "additive_leaves31": {
+          "structure": "additive",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:42.008922+00:00",
+          "loading_seconds": 0.028124667005613446,
+          "preprocessing_seconds": 0.13560950802639127,
+          "model_setup_seconds": 0.00004966696724295616,
+          "fit_seconds": 0.23480779601959512,
+          "fit_end_peak_process_rss_mib": 228.4921875,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 366560,
+            "numpy_owner_count": 631,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 366560,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 4926,
+            "leaf_count": 2563,
+            "max_distinct_features_per_branch": 1,
+            "requested_interaction_cst": "no_interactions",
+            "native_categorical_count": 8,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 43.76462853094192,
+            "mse": 14273.528166376598,
+            "mean_deviance": 43.76462853094192,
+            "rows": 3502
+          },
+          "validation_prediction_seconds": 0.036826027964707464,
+          "model_pickle_sha256": "ae435dca5e253dbc77a5060ce0a9fc298d3372461c5bf9de1cc261cbeffd169f",
+          "model_pickle_bytes": 395379,
+          "serialization_seconds": 0.004368958994746208,
+          "warnings": [],
+          "worker_seconds": 1.17911039799219,
+          "worker_end_peak_process_rss_mib": 230.71875,
+          "finished_utc": "2026-09-13T22:25:43.188050+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539336,
+            "returncode": 0,
+            "process_seconds": 1.9739752790192142,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:26:03.453878+00:00",
+            "test": {
+              "primary_loss": 44.106832590634525,
+              "mse": 13014.663964180143,
+              "mean_deviance": 44.106832590634525,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.07666160399094224,
+            "choice_sha256": "163f27caf7ad18fca015fd5565d277e186b20115656a483f5ada101a780670ef",
+            "validation_chosen_arm": "unrestricted_leaves31",
+            "test_predictions_sha256": "8d8ec560805ca9be4718d25df14d7897e47dc2899c132dbd7bedd997619bb7d4",
+            "warnings": [],
+            "worker_seconds": 0.8282817879808135,
+            "worker_end_peak_process_rss_mib": 220.83203125,
+            "finished_utc": "2026-09-13T22:26:04.282175+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539778,
+              "returncode": 0,
+              "process_seconds": 1.5760554400039837,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "a2b7d90e7cc6cfea7930c92d431895ffe5d540d0f1cf04bb16c40e1f18364fcf"
+        },
+        "pairwise_leaves31": {
+          "structure": "pairwise",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:43.950509+00:00",
+          "loading_seconds": 0.03863899799762294,
+          "preprocessing_seconds": 0.13785608496982604,
+          "model_setup_seconds": 0.00005352299194782972,
+          "fit_seconds": 0.4141031200415455,
+          "fit_end_peak_process_rss_mib": 228.9453125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 815632,
+            "numpy_owner_count": 631,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 815632,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 11400,
+            "leaf_count": 5800,
+            "max_distinct_features_per_branch": 2,
+            "requested_interaction_cst": "pairwise",
+            "native_categorical_count": 8,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 27.285490823245176,
+            "mse": 8880.485463985058,
+            "mean_deviance": 27.285490823245176,
+            "rows": 3502
+          },
+          "validation_prediction_seconds": 0.05075096199288964,
+          "model_pickle_sha256": "2e70e0b31002c1c7ab555255c5a65a0f766223ff61e5587825f131ab00333ac8",
+          "model_pickle_bytes": 844507,
+          "serialization_seconds": 0.005123346985783428,
+          "warnings": [],
+          "worker_seconds": 1.373241109016817,
+          "worker_end_peak_process_rss_mib": 231.03125,
+          "finished_utc": "2026-09-13T22:25:45.323770+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539387,
+            "returncode": 0,
+            "process_seconds": 2.0716603989712894,
+            "timeout_seconds": 120
+          },
+          "model_parameters_sha256": "a9248a062d008909444580fef7b533bb928470d116c30e8395be9046c4af23e5"
+        },
+        "unrestricted_leaves31": {
+          "structure": "unrestricted",
+          "config": "leaves31",
+          "status": "fitted",
+          "started_utc": "2026-09-13T22:25:46.029883+00:00",
+          "loading_seconds": 0.027537630987353623,
+          "preprocessing_seconds": 0.11977504496462643,
+          "model_setup_seconds": 0.00003970199031755328,
+          "fit_seconds": 0.5219461529632099,
+          "fit_end_peak_process_rss_mib": 228.89453125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 932560,
+            "numpy_owner_count": 631,
+            "bytes_payload_bytes": 0,
+            "bytes_owner_count": 0,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 932560,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "tree_diagnostics": {
+            "estimator_class": "sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor",
+            "n_iter": 200,
+            "trees_per_iteration": 1,
+            "tree_count": 200,
+            "node_count": 12200,
+            "leaf_count": 6200,
+            "max_distinct_features_per_branch": 10,
+            "requested_interaction_cst": null,
+            "native_categorical_count": 8,
+            "scope": "Observed fitted HistGradientBoosting trees; path support does not prove statistical interaction strength"
+          },
+          "validation": {
+            "primary_loss": 23.90551980581213,
+            "mse": 7773.840730108565,
+            "mean_deviance": 23.90551980581213,
+            "rows": 3502
+          },
+          "validation_prediction_seconds": 0.044505655008833855,
+          "model_pickle_sha256": "61d9a9f469241e3ffcb89b3c0f8abcb006fef44b762fe0b42f9463a878b07759",
+          "model_pickle_bytes": 961443,
+          "serialization_seconds": 0.004763804958201945,
+          "warnings": [],
+          "worker_seconds": 1.5726991450064816,
+          "worker_end_peak_process_rss_mib": 231.1640625,
+          "finished_utc": "2026-09-13T22:25:47.602605+00:00",
+          "process": {
+            "status": "success",
+            "pid": 539424,
+            "returncode": 0,
+            "process_seconds": 2.3224367719958536,
+            "timeout_seconds": 120
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "started_utc": "2026-09-13T22:26:06.743175+00:00",
+            "test": {
+              "primary_loss": 30.49203061991157,
+              "mse": 9589.14969609382,
+              "mean_deviance": 30.49203061991157,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.09828094899421558,
+            "choice_sha256": "163f27caf7ad18fca015fd5565d277e186b20115656a483f5ada101a780670ef",
+            "validation_chosen_arm": "unrestricted_leaves31",
+            "test_predictions_sha256": "d62044a491676c05c664ac567d4c1f9e95c88e51504a519a585311347ddea2c4",
+            "warnings": [],
+            "worker_seconds": 0.9614292090409435,
+            "worker_end_peak_process_rss_mib": 220.88671875,
+            "finished_utc": "2026-09-13T22:26:07.704630+00:00",
+            "process": {
+              "status": "success",
+              "pid": 539895,
+              "returncode": 0,
+              "process_seconds": 1.8211276539950632,
+              "timeout_seconds": 30
+            }
+          },
+          "model_parameters_sha256": "40ab804f4fabcc7dcdd7a37e1a180b1eb7ff96660ac3a3a26711383640db199e"
+        }
+      },
+      "pairwise_relative_loss_reduction": {
+        "validation": 0.4215454027790828,
+        "test": 0.2862782445552384
+      }
+    }
+  }
+}

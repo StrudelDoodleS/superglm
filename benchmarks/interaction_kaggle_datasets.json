@@ -1,0 +1,1168 @@
+{
+  "schema_version": 1,
+  "title": "Kaggle and official public alternatives for interaction research",
+  "recorded_date": "2026-09-13",
+  "default_root": ".benchmark-artifacts/interaction-datasets",
+  "adapter_boundary": "Verified raw tables only. Features and split policies are an explicit adapter specification, not implemented preprocessing or completed model fits.",
+  "summary": {
+    "verified_real_tables": 5,
+    "verified_raw_rows": 11954804,
+    "downloaded_file_bytes": 210657215,
+    "catalogued_access_blocked_competitions": 5,
+    "download_budget_bytes": 1000000000,
+    "synthetic_candidates_excluded": 2
+  },
+  "validation_runtime": {
+    "python": "3.13.14",
+    "pandas": "3.0.5",
+    "pyarrow": "25.0.1"
+  },
+  "tooling": {
+    "package": "kaggle",
+    "version": "2.2.4",
+    "official_repository": "https://github.com/Kaggle/kaggle-cli",
+    "pypi_version_url": "https://pypi.org/project/kaggle/2.2.4/",
+    "tool_root": ".benchmark-artifacts/kaggle-cli",
+    "executable": ".benchmark-artifacts/kaggle-cli/bin/kaggle",
+    "isolated_config_dir": ".benchmark-artifacts/kaggle-cli/config",
+    "global_path_changed": false,
+    "project_dependencies_changed": false,
+    "account_login_attempted": false,
+    "rules_accepted": false,
+    "installation_record": {
+      "path": ".benchmark-artifacts/kaggle-cli/installation.json",
+      "sha256": "80c5b5bce072e706c73bf32bdfcea4d41fca93dc76cc3ea63edfa0be20b80861"
+    },
+    "published_distributions": [
+      {
+        "filename": "kaggle-2.2.4-py3-none-any.whl",
+        "bytes": 126165,
+        "sha256": "47d3b258363f4693ade67d875b1c108bfaa87a469f4b6fe85903e7c9757aa09c",
+        "upload_time_iso_8601": "2026-07-23T21:20:56.631698Z"
+      },
+      {
+        "filename": "kaggle-2.2.4.tar.gz",
+        "bytes": 317079,
+        "sha256": "28a58f6c1b9f46ce2afdfb439e0c4e91219e818b377ea4254f4e479456d8cb78",
+        "upload_time_iso_8601": "2026-07-23T21:20:57.915789Z"
+      }
+    ],
+    "installed_distributions": [
+      {
+        "name": "PyYAML",
+        "version": "6.0.3"
+      },
+      {
+        "name": "attrs",
+        "version": "26.1.0"
+      },
+      {
+        "name": "bleach",
+        "version": "6.4.0"
+      },
+      {
+        "name": "certifi",
+        "version": "2026.7.22"
+      },
+      {
+        "name": "charset-normalizer",
+        "version": "3.5.1"
+      },
+      {
+        "name": "fastjsonschema",
+        "version": "2.22.2"
+      },
+      {
+        "name": "idna",
+        "version": "3.19"
+      },
+      {
+        "name": "jsonschema",
+        "version": "4.26.0"
+      },
+      {
+        "name": "jsonschema-specifications",
+        "version": "2025.9.1"
+      },
+      {
+        "name": "jupyter_core",
+        "version": "5.9.1"
+      },
+      {
+        "name": "jupytext",
+        "version": "1.19.5"
+      },
+      {
+        "name": "kaggle",
+        "version": "2.2.4"
+      },
+      {
+        "name": "kagglesdk",
+        "version": "0.1.37"
+      },
+      {
+        "name": "markdown-it-py",
+        "version": "4.2.0"
+      },
+      {
+        "name": "mdit-py-plugins",
+        "version": "0.6.1"
+      },
+      {
+        "name": "mdurl",
+        "version": "0.1.2"
+      },
+      {
+        "name": "nbformat",
+        "version": "5.11.1"
+      },
+      {
+        "name": "packaging",
+        "version": "26.3"
+      },
+      {
+        "name": "platformdirs",
+        "version": "4.11.8"
+      },
+      {
+        "name": "protobuf",
+        "version": "7.36.1"
+      },
+      {
+        "name": "python-dateutil",
+        "version": "2.9.0.post0"
+      },
+      {
+        "name": "python-dotenv",
+        "version": "1.2.3"
+      },
+      {
+        "name": "python-slugify",
+        "version": "9.0.0"
+      },
+      {
+        "name": "referencing",
+        "version": "0.37.0"
+      },
+      {
+        "name": "requests",
+        "version": "2.34.2"
+      },
+      {
+        "name": "rpds-py",
+        "version": "2026.6.3"
+      },
+      {
+        "name": "six",
+        "version": "1.17.0"
+      },
+      {
+        "name": "text-unidecode",
+        "version": "1.3"
+      },
+      {
+        "name": "tqdm",
+        "version": "4.70.1"
+      },
+      {
+        "name": "traitlets",
+        "version": "5.16.1"
+      },
+      {
+        "name": "urllib3",
+        "version": "2.7.0"
+      },
+      {
+        "name": "webencodings",
+        "version": "0.6.1"
+      }
+    ],
+    "smoke_checks": [
+      {
+        "command": "kaggle --version",
+        "returncode": 0,
+        "observation": "Kaggle CLI 2.2.4"
+      },
+      {
+        "command": "kaggle datasets files mlg-ulb/creditcardfraud --csv",
+        "returncode": 0,
+        "observation": "Public file listing returned creditcard.csv, 150828752 bytes."
+      },
+      {
+        "command": "kaggle competitions files allstate-claims-severity --csv",
+        "returncode": 1,
+        "observation": "Authentication required; no login or rule acceptance was performed."
+      }
+    ]
+  },
+  "access_evidence": {
+    "record_path": ".benchmark-artifacts/interaction-datasets/kaggle-access-probes.json",
+    "sha256": "7c61fff4211bdde2d4b9fca84e0560e2316536d0d88120359dd93c535e2597a9",
+    "checked_at_utc": "2026-09-13T21:13:34.268262+00:00",
+    "credential_status": {
+      "environment_token_present": false,
+      "environment_username_present": false,
+      "environment_key_present": false,
+      "default_kaggle_json_exists": false,
+      "default_access_token_exists": false,
+      "credential_contents_read": false
+    }
+  },
+  "datasets": [
+    {
+      "id": "kaggle_ulb_creditcard_fraud",
+      "title": "ULB/Worldline credit-card fraud (September 2013)",
+      "availability": "fetchable",
+      "local_status": "raw_table_verified",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "ulb_creditcard_fraud_2013",
+      "task": "binary_classification",
+      "domain": "fraud",
+      "primary_target": "Class",
+      "features": [
+        "V1",
+        "V2",
+        "V3",
+        "V4",
+        "V5",
+        "V6",
+        "V7",
+        "V8",
+        "V9",
+        "V10",
+        "V11",
+        "V12",
+        "V13",
+        "V14",
+        "V15",
+        "V16",
+        "V17",
+        "V18",
+        "V19",
+        "V20",
+        "V21",
+        "V22",
+        "V23",
+        "V24",
+        "V25",
+        "V26",
+        "V27",
+        "V28",
+        "Amount"
+      ],
+      "categorical_columns": [],
+      "exclude_columns": {
+        "Time": "Elapsed time reserved for chronological partitioning; it is not a selected predictor."
+      },
+      "split": {
+        "strategy": "chronological",
+        "columns": [
+          "Time"
+        ],
+        "policy": "Choose contiguous time cutoffs before modelling; equal Time values must stay together. Report fraud counts in every partition. Cardholder identifiers are unavailable, so account-disjoint validation cannot be certified."
+      },
+      "source": {
+        "url": "https://www.kaggle.com/api/v1/datasets/download/mlg-ulb/creditcardfraud?datasetVersionNumber=3",
+        "filename": "creditcardfraud-v3.zip",
+        "sha256": "a0360ce715992212e9ac72d8ccdca97f4be87dc1fdf2bed011358f7ab409a28a",
+        "bytes": 69155672,
+        "max_bytes": 69155672,
+        "format": "zip_csv",
+        "member": "creditcard.csv",
+        "max_expanded_bytes": 150828752
+      },
+      "schema": {
+        "rows": 284807,
+        "columns": [
+          "Time",
+          "V1",
+          "V2",
+          "V3",
+          "V4",
+          "V5",
+          "V6",
+          "V7",
+          "V8",
+          "V9",
+          "V10",
+          "V11",
+          "V12",
+          "V13",
+          "V14",
+          "V15",
+          "V16",
+          "V17",
+          "V18",
+          "V19",
+          "V20",
+          "V21",
+          "V22",
+          "V23",
+          "V24",
+          "V25",
+          "V26",
+          "V27",
+          "V28",
+          "Amount",
+          "Class"
+        ],
+        "missing_counts": {}
+      },
+      "target_rule": {
+        "classes": [
+          0,
+          1
+        ]
+      },
+      "provenance": {
+        "source_page": "https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud",
+        "delivery": "kaggle_public_dataset_api",
+        "version": 3,
+        "acquired_at_utc": "2026-09-13T21:06:41.448221+00:00",
+        "publisher": "Machine Learning Group - ULB",
+        "publisher_updated_at": "2018-03-23T01:17:27.913Z",
+        "publisher_declared_license": "Database: Open Database, Contents: Database Contents",
+        "notes": [
+          "The publishing account is Machine Learning Group - ULB; its card identifies real transactions supplied through the Worldline/ULB research collaboration.",
+          "V1-V28 are publisher-provided PCA coordinates. The original inputs and PCA fitting partition are unavailable; this limitation applies to every compared method."
+        ],
+        "kaggle_ref": "mlg-ulb/creditcardfraud",
+        "kaggle_dataset_id": 310,
+        "metadata_url": "https://www.kaggle.com/api/v1/datasets/view/mlg-ulb/creditcardfraud",
+        "metadata_sha256": "915bfb593cd91eaa6268c4c4817dcb6cc7f74ef95cfe40479d22ca2f2ec88c51"
+      },
+      "observed": {
+        "target": {
+          "column": "Class",
+          "observed": 284807,
+          "missing": 0,
+          "minimum": 0,
+          "maximum": 1,
+          "zero_count": 284315,
+          "negative_count": 0,
+          "class_counts": {
+            "0": 284315,
+            "1": 492
+          }
+        },
+        "split_field_ranges": {
+          "Time": {
+            "minimum": 0,
+            "maximum": 172792
+          }
+        }
+      },
+      "local_records": [
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_ulb_creditcard_fraud/acquisition.json",
+          "sha256": "7a85542d9a6f970bb96c61c29097623558ae00f95332f1464a463c5e589a986a"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_ulb_creditcard_fraud/validation.json",
+          "sha256": "1c3c822c68f019031bbc99c7d32b2dd0a3d4f3d3b2d3ce3c47145e4b53734913"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_ulb_creditcard_fraud/publisher-metadata.json",
+          "sha256": "915bfb593cd91eaa6268c4c4817dcb6cc7f74ef95cfe40479d22ca2f2ec88c51"
+        }
+      ],
+      "modelling_notes": [
+        "Keep original prevalence in validation and test; report log loss, ROC AUC and average precision with class counts.",
+        "All resampling, imputation, scaling and learned feature selection belong inside training partitions."
+      ]
+    },
+    {
+      "id": "kaggle_nyc_property_sales",
+      "title": "NYC Department of Finance rolling property sales (2016-2017 publication)",
+      "availability": "fetchable",
+      "local_status": "raw_table_verified",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "nyc_property_sales_2016_2017",
+      "task": "regression",
+      "domain": "housing",
+      "primary_target": "SALE PRICE",
+      "features": [
+        "BOROUGH",
+        "NEIGHBORHOOD",
+        "BUILDING CLASS CATEGORY",
+        "ZIP CODE",
+        "RESIDENTIAL UNITS",
+        "COMMERCIAL UNITS",
+        "TOTAL UNITS",
+        "LAND SQUARE FEET",
+        "GROSS SQUARE FEET",
+        "YEAR BUILT",
+        "TAX CLASS AT TIME OF SALE",
+        "BUILDING CLASS AT TIME OF SALE"
+      ],
+      "categorical_columns": [
+        "BOROUGH",
+        "NEIGHBORHOOD",
+        "BUILDING CLASS CATEGORY",
+        "ZIP CODE",
+        "TAX CLASS AT TIME OF SALE",
+        "BUILDING CLASS AT TIME OF SALE"
+      ],
+      "exclude_columns": {
+        "Unnamed: 0": "Exported row index.",
+        "BLOCK": "Together with BOROUGH and LOT, reserved for property grouping.",
+        "LOT": "Together with BOROUGH and BLOCK, reserved for property grouping.",
+        "EASE-MENT": "Entire column is a missing placeholder.",
+        "TAX CLASS AT PRESENT": "Present-day report field may postdate the sale.",
+        "BUILDING CLASS AT PRESENT": "Present-day report field may postdate the sale.",
+        "ADDRESS": "Street address excluded; use declared geography fields.",
+        "APARTMENT NUMBER": "Unit identifier excluded.",
+        "SALE DATE": "Reserved for chronological partitioning."
+      },
+      "split": {
+        "strategy": "chronological_grouped",
+        "columns": [
+          "SALE DATE",
+          "BOROUGH",
+          "BLOCK",
+          "LOT"
+        ],
+        "policy": "Declare sale-date cutoffs and keep borough/block/lot property keys disjoint, for example by purging earlier records of held-out properties. Report purged and eligible row counts. A separate geography holdout may test transfer."
+      },
+      "source": {
+        "url": "https://www.kaggle.com/api/v1/datasets/download/new-york-city/nyc-property-sales?datasetVersionNumber=1",
+        "filename": "nyc-property-sales-v1.zip",
+        "sha256": "c0e007b46ca7eca5e1b7fc20d88b081837bcf6b387cc36ff8b2f92b62351f045",
+        "bytes": 1898090,
+        "max_bytes": 1898090,
+        "format": "zip_csv",
+        "member": "nyc-rolling-sales.csv",
+        "max_expanded_bytes": 13625843,
+        "read_csv": {
+          "na_values": [
+            "?",
+            " -  ",
+            " "
+          ]
+        }
+      },
+      "schema": {
+        "rows": 84548,
+        "columns": [
+          "Unnamed: 0",
+          "BOROUGH",
+          "NEIGHBORHOOD",
+          "BUILDING CLASS CATEGORY",
+          "TAX CLASS AT PRESENT",
+          "BLOCK",
+          "LOT",
+          "EASE-MENT",
+          "BUILDING CLASS AT PRESENT",
+          "ADDRESS",
+          "APARTMENT NUMBER",
+          "ZIP CODE",
+          "RESIDENTIAL UNITS",
+          "COMMERCIAL UNITS",
+          "TOTAL UNITS",
+          "LAND SQUARE FEET",
+          "GROSS SQUARE FEET",
+          "YEAR BUILT",
+          "TAX CLASS AT TIME OF SALE",
+          "BUILDING CLASS AT TIME OF SALE",
+          "SALE PRICE",
+          "SALE DATE"
+        ],
+        "missing_counts": {
+          "TAX CLASS AT PRESENT": 738,
+          "EASE-MENT": 84548,
+          "BUILDING CLASS AT PRESENT": 738,
+          "APARTMENT NUMBER": 65496,
+          "LAND SQUARE FEET": 26252,
+          "GROSS SQUARE FEET": 27612,
+          "SALE PRICE": 14561
+        }
+      },
+      "target_rule": {
+        "minimum": 0,
+        "allow_missing": true
+      },
+      "provenance": {
+        "source_page": "https://www.kaggle.com/datasets/new-york-city/nyc-property-sales",
+        "delivery": "kaggle_public_dataset_api",
+        "version": 1,
+        "acquired_at_utc": "2026-09-13T21:06:40.500906+00:00",
+        "publisher": "City of New York",
+        "publisher_updated_at": "2017-09-22T19:43:30.99Z",
+        "publisher_declared_license": "CC0: Public Domain",
+        "notes": [
+          "Kaggle's City of New York publishing account describes a concatenation with light cleaning of NYC Department of Finance rolling sales.",
+          "The declared placeholders ' -  ' and ' ' are parsed as missing without rewriting the source archive.",
+          "The source report includes transfers with zero or nominal prices; it is not already a filtered sample of market sales."
+        ],
+        "kaggle_ref": "new-york-city/nyc-property-sales",
+        "kaggle_dataset_id": 2648,
+        "metadata_url": "https://www.kaggle.com/api/v1/datasets/view/new-york-city/nyc-property-sales",
+        "metadata_sha256": "3dfdb4a10da9d5854ba60996cd4614e2026c5487bd2331994495093e41c85395",
+        "original_source_url": "https://www.nyc.gov/site/finance/taxes/property-rolling-sales-data.page"
+      },
+      "observed": {
+        "target": {
+          "column": "SALE PRICE",
+          "observed": 69987,
+          "missing": 14561,
+          "minimum": 0,
+          "maximum": 2210000000,
+          "zero_count": 10228,
+          "negative_count": 0
+        },
+        "split_field_ranges": {
+          "SALE DATE": {
+            "minimum": "2016-09-01 00:00:00",
+            "maximum": "2017-08-31 00:00:00"
+          }
+        },
+        "identifier_summary": {
+          "columns": [
+            "BOROUGH",
+            "BLOCK",
+            "LOT"
+          ],
+          "distinct": 67239,
+          "rows_beyond_first_for_same_key": 17309
+        }
+      },
+      "local_records": [
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_nyc_property_sales/acquisition.json",
+          "sha256": "f0c822fcd91dfe3b1e2ee9800033820270bf5dd189657c5e76a6c16d0a800f97"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_nyc_property_sales/validation.json",
+          "sha256": "cae03767fa573417e8b6434b5aa302000cebb1ce5f057039058191d1e04386ac"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_nyc_property_sales/publisher-metadata.json",
+          "sha256": "3dfdb4a10da9d5854ba60996cd4614e2026c5487bd2331994495093e41c85395"
+        }
+      ],
+      "modelling_notes": [
+        "Predeclare target-observation and market-sale eligibility rules before fitting; retain raw zero and missing target counts in every receipt.",
+        "Treat covariates as a retrospective administrative report unless availability at the sale date is separately established."
+      ]
+    },
+    {
+      "id": "kaggle_king_county_sales",
+      "title": "King County house sales (May 2014-May 2015)",
+      "availability": "fetchable",
+      "local_status": "raw_table_verified",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "king_county_house_sales_2014_2015",
+      "task": "regression",
+      "domain": "housing",
+      "primary_target": "price",
+      "features": [
+        "bedrooms",
+        "bathrooms",
+        "sqft_living",
+        "sqft_lot",
+        "floors",
+        "waterfront",
+        "view",
+        "condition",
+        "grade",
+        "sqft_above",
+        "sqft_basement",
+        "yr_built",
+        "yr_renovated",
+        "zipcode",
+        "lat",
+        "long",
+        "sqft_living15",
+        "sqft_lot15"
+      ],
+      "categorical_columns": [
+        "waterfront",
+        "zipcode"
+      ],
+      "exclude_columns": {
+        "id": "Property identifier reserved for grouping.",
+        "date": "Sale date reserved for chronological partitioning."
+      },
+      "split": {
+        "strategy": "chronological_grouped",
+        "columns": [
+          "date",
+          "id"
+        ],
+        "policy": "Declare sale-date cutoffs and keep property IDs disjoint by purging overlaps or assigning an entire property's rows to one partition. Record the policy and all removed rows."
+      },
+      "source": {
+        "url": "https://www.kaggle.com/api/v1/datasets/download/harlfoxem/housesalesprediction?datasetVersionNumber=1",
+        "filename": "king-county-sales-v1.zip",
+        "sha256": "1fdffaeec5e7656f6c09e29d9daa7e2157479c5f8e3a761758b4bfa43c773202",
+        "bytes": 798275,
+        "max_bytes": 798275,
+        "format": "zip_csv",
+        "member": "kc_house_data.csv",
+        "max_expanded_bytes": 2515206
+      },
+      "schema": {
+        "rows": 21613,
+        "columns": [
+          "id",
+          "date",
+          "price",
+          "bedrooms",
+          "bathrooms",
+          "sqft_living",
+          "sqft_lot",
+          "floors",
+          "waterfront",
+          "view",
+          "condition",
+          "grade",
+          "sqft_above",
+          "sqft_basement",
+          "yr_built",
+          "yr_renovated",
+          "zipcode",
+          "lat",
+          "long",
+          "sqft_living15",
+          "sqft_lot15"
+        ],
+        "missing_counts": {}
+      },
+      "target_rule": {
+        "minimum": 0
+      },
+      "provenance": {
+        "source_page": "https://www.kaggle.com/datasets/harlfoxem/housesalesprediction",
+        "delivery": "kaggle_public_dataset_api",
+        "version": 1,
+        "acquired_at_utc": "2026-09-13T21:06:42.579675+00:00",
+        "publisher": "harlfoxem",
+        "publisher_updated_at": "2016-08-25T15:52:49.797Z",
+        "publisher_declared_license": "CC0: Public Domain",
+        "notes": [
+          "Public community dataset from the harlfoxem publishing account, described as real King County sales.",
+          "Its short publisher card does not establish the complete assessor-to-CSV provenance chain. It is a qualified community-source control, not a government-verified extract."
+        ],
+        "kaggle_ref": "harlfoxem/housesalesprediction",
+        "kaggle_dataset_id": 128,
+        "metadata_url": "https://www.kaggle.com/api/v1/datasets/view/harlfoxem/housesalesprediction",
+        "metadata_sha256": "37360f75a0521d2eb9882e515b25508afb5065bbb983657323288f88780cb1c7"
+      },
+      "observed": {
+        "target": {
+          "column": "price",
+          "observed": 21613,
+          "missing": 0,
+          "minimum": 75000,
+          "maximum": 7700000,
+          "zero_count": 0,
+          "negative_count": 0
+        },
+        "split_field_ranges": {
+          "date": {
+            "minimum": "20140502T000000",
+            "maximum": "20150527T000000"
+          }
+        },
+        "identifier_summary": {
+          "columns": [
+            "id"
+          ],
+          "distinct": 21436,
+          "rows_beyond_first_for_same_key": 177
+        }
+      },
+      "local_records": [
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_king_county_sales/acquisition.json",
+          "sha256": "a6dbfc7f3acfdd8a084648b88c09f17396d6209d1aaf812f3d6853be415f9967"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_king_county_sales/validation.json",
+          "sha256": "a15f35ea7dde6b1056e1ce6b98c7a89af3a54a70dc81a7311be9bc4d80bc379f"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_king_county_sales/publisher-metadata.json",
+          "sha256": "37360f75a0521d2eb9882e515b25508afb5065bbb983657323288f88780cb1c7"
+        }
+      ],
+      "modelling_notes": [
+        "Raw data has 177 rows beyond the first occurrence of a property ID; a random row split can place the same property on both sides.",
+        "Preserve raw prices; any log transformation must be reported and evaluated consistently across additive and interaction models."
+      ]
+    },
+    {
+      "id": "kaggle_berkeley_city_temperature",
+      "title": "Berkeley Earth monthly city temperatures",
+      "availability": "fetchable",
+      "local_status": "raw_table_verified",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "berkeley_earth_temperature_release_2017",
+      "task": "regression",
+      "domain": "climate",
+      "primary_target": "AverageTemperature",
+      "features": [
+        "dt",
+        "City",
+        "Country",
+        "Latitude",
+        "Longitude"
+      ],
+      "categorical_columns": [
+        "City",
+        "Country"
+      ],
+      "exclude_columns": {
+        "AverageTemperatureUncertainty": "Uncertainty supplied with the temperature estimate; excluded from predicting that estimate."
+      },
+      "split": {
+        "strategy": "chronological_grouped",
+        "columns": [
+          "dt",
+          "City",
+          "Country",
+          "Latitude",
+          "Longitude"
+        ],
+        "policy": "Primary validation uses contiguous year cutoffs shared by every location. Define locations using city, country and coordinates, not city name alone. A location-disjoint secondary split answers a different transfer question."
+      },
+      "source": {
+        "url": "https://www.kaggle.com/api/v1/datasets/download/berkeleyearth/climate-change-earth-surface-temperature-data?datasetVersionNumber=2",
+        "filename": "berkeley-earth-v2.zip",
+        "sha256": "d43eb24148c7ea1451ede2e6c742b5177eff2a4255ae2edbb42a3d9c86a6a656",
+        "bytes": 88843537,
+        "max_bytes": 88843537,
+        "format": "zip_csv",
+        "member": "GlobalLandTemperaturesByCity.csv",
+        "max_expanded_bytes": 532830464
+      },
+      "schema": {
+        "rows": 8599212,
+        "columns": [
+          "dt",
+          "AverageTemperature",
+          "AverageTemperatureUncertainty",
+          "City",
+          "Country",
+          "Latitude",
+          "Longitude"
+        ],
+        "missing_counts": {
+          "AverageTemperature": 364130,
+          "AverageTemperatureUncertainty": 364130
+        }
+      },
+      "target_rule": {
+        "allow_missing": true
+      },
+      "provenance": {
+        "source_page": "https://www.kaggle.com/datasets/berkeleyearth/climate-change-earth-surface-temperature-data",
+        "delivery": "kaggle_public_dataset_api",
+        "version": 2,
+        "acquired_at_utc": "2026-09-13T21:06:44.755422+00:00",
+        "publisher": "Berkeley Earth",
+        "publisher_updated_at": "2017-05-01T17:29:10.78Z",
+        "publisher_declared_license": "CC BY-NC-SA 4.0",
+        "notes": [
+          "Published by Berkeley Earth on Kaggle, repackaged from its temperature data.",
+          "The table contains compiled monthly temperature estimates, not 8.6 million independent raw thermometer readings.",
+          "The archive contains five overlapping aggregation views; only GlobalLandTemperaturesByCity.csv is a registered table and the archive counts as one real source."
+        ],
+        "kaggle_ref": "berkeleyearth/climate-change-earth-surface-temperature-data",
+        "kaggle_dataset_id": 29,
+        "metadata_url": "https://www.kaggle.com/api/v1/datasets/view/berkeleyearth/climate-change-earth-surface-temperature-data",
+        "metadata_sha256": "4cbdb055b2c3c141e6f59ad1988576c62b60126a7b56386d4effd0bbcf1ed732",
+        "original_source_url": "https://berkeleyearth.org/data/"
+      },
+      "observed": {
+        "target": {
+          "column": "AverageTemperature",
+          "observed": 8235082,
+          "missing": 364130,
+          "minimum": -42.70399999999999,
+          "maximum": 39.651,
+          "zero_count": 75,
+          "negative_count": 611080
+        },
+        "split_field_ranges": {
+          "dt": {
+            "minimum": "1743-11-01",
+            "maximum": "2013-09-01"
+          }
+        },
+        "category_counts": {
+          "City": 3448,
+          "Country": 159
+        }
+      },
+      "local_records": [
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_berkeley_city_temperature/acquisition.json",
+          "sha256": "27a13dc79d24cf0a01897c2e6563f0f653f1b252d1610a8ac922a6c88354864b"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_berkeley_city_temperature/validation.json",
+          "sha256": "71e71fb6b913cc687a61311143526520a04b65f75f9e6abf8223f92c23639acf"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_berkeley_city_temperature/publisher-metadata.json",
+          "sha256": "4cbdb055b2c3c141e6f59ad1988576c62b60126a7b56386d4effd0bbcf1ed732"
+        }
+      ],
+      "modelling_notes": [
+        "Drop missing targets under a recorded eligibility rule; do not impute held-out outcomes.",
+        "Parse the date into declared calendar variables and coordinates into signed numeric degrees before fitting. Fit any learned encoding on training only.",
+        "This is a large-n temporal/geographic control with few raw fields, not a high-dimensional credit substitute."
+      ]
+    },
+    {
+      "id": "kaggle_alternative_nyc_tlc_2024_01",
+      "title": "NYC TLC yellow taxi trips, January 2024 (official public alternative)",
+      "availability": "fetchable",
+      "local_status": "raw_table_verified",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "nyc_tlc_yellow_trips_2024_01",
+      "task": "regression",
+      "domain": "transport",
+      "primary_target": "fare_amount",
+      "features": [
+        "VendorID",
+        "tpep_pickup_datetime",
+        "tpep_dropoff_datetime",
+        "passenger_count",
+        "trip_distance",
+        "RatecodeID",
+        "PULocationID",
+        "DOLocationID"
+      ],
+      "categorical_columns": [
+        "VendorID",
+        "RatecodeID",
+        "PULocationID",
+        "DOLocationID"
+      ],
+      "exclude_columns": {
+        "store_and_fwd_flag": "Transmission status excluded from fare prediction.",
+        "payment_type": "Observed payment information excluded.",
+        "extra": "Charge component excluded to avoid reconstructing the outcome from billing fields.",
+        "mta_tax": "Charge component excluded.",
+        "tip_amount": "Payment outcome excluded.",
+        "tolls_amount": "Charge component excluded.",
+        "improvement_surcharge": "Charge component excluded.",
+        "total_amount": "Total payment contains fare_amount.",
+        "congestion_surcharge": "Charge component excluded.",
+        "Airport_fee": "Charge component excluded."
+      },
+      "split": {
+        "strategy": "chronological",
+        "columns": [
+          "tpep_pickup_datetime",
+          "tpep_dropoff_datetime"
+        ],
+        "policy": "Predeclare the valid pickup month, timestamp consistency and fare eligibility rules, then hold out contiguous later days. Report every removed row. No vehicle or driver identifier is supplied for group-disjoint validation."
+      },
+      "source": {
+        "url": "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet",
+        "filename": "yellow_tripdata_2024-01.parquet",
+        "sha256": "c4d59da7bbc8abaeeeb1727947ee93d9891a71acb42854bd80db1571b2030510",
+        "bytes": 49961641,
+        "max_bytes": 49961641,
+        "format": "parquet"
+      },
+      "schema": {
+        "rows": 2964624,
+        "columns": [
+          "VendorID",
+          "tpep_pickup_datetime",
+          "tpep_dropoff_datetime",
+          "passenger_count",
+          "trip_distance",
+          "RatecodeID",
+          "store_and_fwd_flag",
+          "PULocationID",
+          "DOLocationID",
+          "payment_type",
+          "fare_amount",
+          "extra",
+          "mta_tax",
+          "tip_amount",
+          "tolls_amount",
+          "improvement_surcharge",
+          "total_amount",
+          "congestion_surcharge",
+          "Airport_fee"
+        ],
+        "missing_counts": {
+          "passenger_count": 140162,
+          "RatecodeID": 140162,
+          "store_and_fwd_flag": 140162,
+          "congestion_surcharge": 140162,
+          "Airport_fee": 140162
+        }
+      },
+      "target_rule": {},
+      "provenance": {
+        "source_page": "https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page",
+        "delivery": "official_original_source",
+        "version": "2024-01",
+        "acquired_at_utc": "2026-09-13T21:06:43.266643+00:00",
+        "publisher": "New York City Taxi and Limousine Commission",
+        "publisher_updated_at": "Thu, 21 Mar 2024 15:35:44 GMT",
+        "publisher_declared_license": "See NYC TLC portal terms and disclaimer",
+        "notes": [
+          "Downloaded from the CloudFront URL linked by the official NYC TLC portal; this is not a Kaggle-hosted file.",
+          "The kaggle_ prefix is a registry namespace and does not claim Kaggle as publisher.",
+          "The pinned monthly filename is not an immutable version guarantee; bytes, SHA256 and Last-Modified bind this observation.",
+          "No separate open-data license is inferred beyond the publisher's terms and disclaimer."
+        ]
+      },
+      "observed": {
+        "target": {
+          "column": "fare_amount",
+          "observed": 2964624,
+          "missing": 0,
+          "minimum": -899,
+          "maximum": 5000,
+          "zero_count": 893,
+          "negative_count": 37448
+        },
+        "split_field_ranges": {
+          "tpep_pickup_datetime": {
+            "minimum": "2002-12-31 22:59:39",
+            "maximum": "2024-02-01 00:01:15"
+          },
+          "tpep_dropoff_datetime": {
+            "minimum": "2002-12-31 23:05:41",
+            "maximum": "2024-02-02 13:56:52"
+          }
+        }
+      },
+      "local_records": [
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_alternative_nyc_tlc_2024_01/acquisition.json",
+          "sha256": "e113de7d080de6d5d41c912bbe03514b93b76f9b27d87a06220494849b3c4639"
+        },
+        {
+          "path": ".benchmark-artifacts/interaction-datasets/kaggle_alternative_nyc_tlc_2024_01/validation.json",
+          "sha256": "89371faae7cc989c381cc888d7f4baf8e3da7ed4dc18cfc7a1041f4e81da6ddb"
+        }
+      ],
+      "modelling_notes": [
+        "The proposed outcome is retrospective fare_amount conditional on observed trip distance and times; it is not an advance booking-price forecast.",
+        "The raw table contains negative and zero fares and timestamps outside January 2024; benchmark inclusion rules are not yet implemented.",
+        "Date parsing, trip-duration construction and categorical handling must be explicit in the trial adapter."
+      ]
+    },
+    {
+      "id": "kaggle_allstate_claims_severity",
+      "title": "Allstate Claims Severity",
+      "availability": "catalogued",
+      "local_status": "access_blocked",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "allstate_claims_severity",
+      "task": "regression",
+      "domain": "insurance",
+      "primary_target": "loss",
+      "features": [],
+      "categorical_columns": [],
+      "exclude_columns": {},
+      "split": {
+        "strategy": "pending_authorized_schema",
+        "columns": [],
+        "policy": "Predeclare a fresh validation/test policy after obtaining and validating the original labelled files."
+      },
+      "source": null,
+      "schema": null,
+      "provenance": {
+        "source_page": "https://www.kaggle.com/competitions/allstate-claims-severity/data",
+        "kaggle_competition_slug": "allstate-claims-severity"
+      },
+      "access": {
+        "checked_at_utc": "2026-09-13T21:13:34.268262+00:00",
+        "anonymous_list_url": "https://www.kaggle.com/api/v1/competitions/data/list/allstate-claims-severity",
+        "http_status": 401,
+        "authenticated": false,
+        "rules_accepted": false
+      },
+      "reason": "Anonymous official file listing returned HTTP 401 and local Kaggle credentials were absent. Installing the client does not confer access; account-specific authorization and rule status have not been established.",
+      "notes": [
+        "Insurance claim loss with categorical cat* and continuous cont* fields; training schema remains unverified.",
+        "No competition files, row counts, source version or byte hashes are claimed as locally verified."
+      ]
+    },
+    {
+      "id": "kaggle_house_prices",
+      "title": "House Prices: Advanced Regression Techniques",
+      "availability": "catalogued",
+      "local_status": "access_blocked",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "ames_housing",
+      "task": "regression",
+      "domain": "housing",
+      "primary_target": "SalePrice",
+      "features": [],
+      "categorical_columns": [],
+      "exclude_columns": {},
+      "split": {
+        "strategy": "pending_authorized_schema",
+        "columns": [],
+        "policy": "Predeclare a fresh validation/test policy after obtaining and validating the original labelled files."
+      },
+      "source": null,
+      "schema": null,
+      "provenance": {
+        "source_page": "https://www.kaggle.com/competitions/house-prices-advanced-regression-techniques/data",
+        "kaggle_competition_slug": "house-prices-advanced-regression-techniques"
+      },
+      "access": {
+        "checked_at_utc": "2026-09-13T21:13:34.268262+00:00",
+        "anonymous_list_url": "https://www.kaggle.com/api/v1/competitions/data/list/house-prices-advanced-regression-techniques",
+        "http_status": 401,
+        "authenticated": false,
+        "rules_accepted": false
+      },
+      "reason": "Anonymous official file listing returned HTTP 401 and local Kaggle credentials were absent. Installing the client does not confer access; account-specific authorization and rule status have not been established.",
+      "notes": [
+        "Competition version overlaps the original Ames corpus registered separately; do not count them as independent sources.",
+        "No competition files, row counts, source version or byte hashes are claimed as locally verified."
+      ]
+    },
+    {
+      "id": "kaggle_home_credit_default_risk",
+      "title": "Home Credit Default Risk",
+      "availability": "catalogued",
+      "local_status": "access_blocked",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "home_credit_default_risk",
+      "task": "binary_classification",
+      "domain": "credit",
+      "primary_target": "TARGET",
+      "features": [],
+      "categorical_columns": [],
+      "exclude_columns": {},
+      "split": {
+        "strategy": "pending_authorized_schema",
+        "columns": [],
+        "policy": "Predeclare a fresh validation/test policy after obtaining and validating the original labelled files."
+      },
+      "source": null,
+      "schema": null,
+      "provenance": {
+        "source_page": "https://www.kaggle.com/competitions/home-credit-default-risk/data",
+        "kaggle_competition_slug": "home-credit-default-risk"
+      },
+      "access": {
+        "checked_at_utc": "2026-09-13T21:13:34.268262+00:00",
+        "anonymous_list_url": "https://www.kaggle.com/api/v1/competitions/data/list/home-credit-default-risk",
+        "http_status": 401,
+        "authenticated": false,
+        "rules_accepted": false
+      },
+      "reason": "Anonymous official file listing returned HTTP 401 and local Kaggle credentials were absent. Installing the client does not confer access; account-specific authorization and rule status have not been established.",
+      "notes": [
+        "Application and history tables require a declared join/aggregation adapter; rows and files are not locally verified.",
+        "No competition files, row counts, source version or byte hashes are claimed as locally verified."
+      ]
+    },
+    {
+      "id": "kaggle_give_me_some_credit",
+      "title": "Give Me Some Credit (original competition)",
+      "availability": "catalogued",
+      "local_status": "access_blocked",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "give_me_some_credit_original",
+      "task": "binary_classification",
+      "domain": "credit",
+      "primary_target": null,
+      "features": [],
+      "categorical_columns": [],
+      "exclude_columns": {},
+      "split": {
+        "strategy": "pending_authorized_schema",
+        "columns": [],
+        "policy": "Predeclare a fresh validation/test policy after obtaining and validating the original labelled files."
+      },
+      "source": null,
+      "schema": null,
+      "provenance": {
+        "source_page": "https://www.kaggle.com/competitions/GiveMeSomeCredit/data",
+        "kaggle_competition_slug": "GiveMeSomeCredit"
+      },
+      "access": {
+        "checked_at_utc": "2026-09-13T21:13:34.268262+00:00",
+        "anonymous_list_url": "https://www.kaggle.com/api/v1/competitions/data/list/GiveMeSomeCredit",
+        "http_status": 401,
+        "authenticated": false,
+        "rules_accepted": false
+      },
+      "reason": "Anonymous official file listing returned HTTP 401 and local Kaggle credentials were absent. Installing the client does not confer access; account-specific authorization and rule status have not been established.",
+      "notes": [
+        "The original CamelCase slug is preserved. The similarly named give-me-some-credit community competition is a different publication. Verify exact target and schema after authorized acquisition.",
+        "No competition files, row counts, source version or byte hashes are claimed as locally verified."
+      ]
+    },
+    {
+      "id": "kaggle_ieee_cis_fraud",
+      "title": "IEEE-CIS Fraud Detection",
+      "availability": "catalogued",
+      "local_status": "access_blocked",
+      "adapter_ready": false,
+      "counts_as_real_source": true,
+      "independent_unit": "ieee_cis_fraud",
+      "task": "binary_classification",
+      "domain": "fraud",
+      "primary_target": "isFraud",
+      "features": [],
+      "categorical_columns": [],
+      "exclude_columns": {},
+      "split": {
+        "strategy": "pending_authorized_schema",
+        "columns": [],
+        "policy": "Predeclare a fresh validation/test policy after obtaining and validating the original labelled files."
+      },
+      "source": null,
+      "schema": null,
+      "provenance": {
+        "source_page": "https://www.kaggle.com/competitions/ieee-fraud-detection/data",
+        "kaggle_competition_slug": "ieee-fraud-detection"
+      },
+      "access": {
+        "checked_at_utc": "2026-09-13T21:13:34.268262+00:00",
+        "anonymous_list_url": "https://www.kaggle.com/api/v1/competitions/data/list/ieee-fraud-detection",
+        "http_status": 401,
+        "authenticated": false,
+        "rules_accepted": false
+      },
+      "reason": "Anonymous official file listing returned HTTP 401 and local Kaggle credentials were absent. Installing the client does not confer access; account-specific authorization and rule status have not been established.",
+      "notes": [
+        "Transaction and optional identity tables join on TransactionID; chronological validation and identity availability need an adapter.",
+        "No competition files, row counts, source version or byte hashes are claimed as locally verified."
+      ]
+    }
+  ],
+  "excluded_synthetic_candidates": [
+    {
+      "id": "kaggle_paysim_synthetic",
+      "title": "PaySim mobile-money simulation",
+      "source_page": "https://www.kaggle.com/datasets/ealaxi/paysim1",
+      "counts_as_real_source": false,
+      "reason": "Synthetic transactions generated by the PaySim simulator. Excluded from the requested real-data batch."
+    },
+    {
+      "id": "kaggle_banksim_synthetic",
+      "title": "BankSim payments simulation",
+      "source_page": "https://www.kaggle.com/datasets/ealaxi/banksim1",
+      "counts_as_real_source": false,
+      "reason": "Synthetic payments generated by the BankSim simulator. Excluded from the requested real-data batch."
+    }
+  ]
+}

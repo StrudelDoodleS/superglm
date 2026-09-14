@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-09-13 21:07:22 UTC",
+  "source_revision": "03766e8d5ce5b67a2ce1091ab5ae92cabf9076c3",
+  "source_revision_role": "Workspace HEAD; the new script bytes are bound by source_sha256.",
+  "source_file": "docs/research/check_sympy_interaction_factors.py",
+  "source_sha256": "98e3c5c1302a5b1d314ba0c571752591e7ad5e954c4c2d08bb4f6329b5984545",
+  "cwd": "/home/max/projects/superglm/.worktrees/adaptive-interactions",
+  "commands": [
+    {
+      "argv": [
+        "/home/max/.local/share/superglm-research/.venv/bin/python",
+        "docs/research/check_sympy_interaction_factors.py"
+      ],
+      "exit_code": 0,
+      "stdout_json": {
+        "python": "3.13.14",
+        "sympy": "1.14.0",
+        "source_sha256": "98e3c5c1302a5b1d314ba0c571752591e7ad5e954c4c2d08bb4f6329b5984545",
+        "signed_four_feature_rank_two_sum_remainder": "0",
+        "two_by_two_edge_penalty_remainder": "0",
+        "signed_four_feature_rank_two_penalty_sum_remainder": "0",
+        "scope": "Finite-dimensional symbolic checks, not a general formal proof or floating-point certification. Symmetry is assumed for marginal matrices; positivity is unnecessary for these algebraic equalities."
+      },
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "--no-sync",
+        "ruff",
+        "check",
+        "docs/research/check_sympy_interaction_factors.py"
+      ],
+      "exit_code": 0,
+      "stdout": "All checks passed!\n"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "--no-sync",
+        "ruff",
+        "format",
+        "--check",
+        "docs/research/check_sympy_interaction_factors.py"
+      ],
+      "exit_code": 0,
+      "stdout": "1 file already formatted\n"
+    },
+    {
+      "argv": ["uv", "run", "--no-sync", "ruff", "--version"],
+      "exit_code": 0,
+      "stdout": "ruff 0.16.3\n"
+    }
+  ]
+}

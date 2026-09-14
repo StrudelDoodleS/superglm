@@ -1,0 +1,3471 @@
+{
+  "schema_version": 1,
+  "started_utc": "2026-09-13T21:27:26.756742+00:00",
+  "fit_worker_budget_seconds": 600.0,
+  "per_fit_worker_timeout_seconds": 75.0,
+  "protocol": "Full rows; training-only preprocessing/screening/REML; validation selects one of two arms; test evaluation follows persisted choice",
+  "fit_worker_process_seconds_spent": 43.206240101892035,
+  "finished_utc": "2026-09-13T21:28:20.944939+00:00",
+  "raw_suite_relative_path": ".benchmark-artifacts/real-interactions/pilot-20260913/suite.json",
+  "raw_suite_sha256": "b97d3fcbb08734af47b08ab67ab30fb82a0c458315e28ccd69fa16e0ece2e1e4",
+  "pilot_command": "OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run python benchmarks/benchmark_real_interactions.py --output .benchmark-artifacts/real-interactions/pilot-20260913 --fit-timeout 75 --total-fit-budget 600",
+  "suite_exit_code": 1,
+  "suite_exit_reason": "Three REML failures; credit interactions refused because the additive screen fit failed.",
+  "wall_seconds": 54.188197,
+  "outcomes": {
+    "datasets": 4,
+    "actual_fits": 7,
+    "converged_fits": 4,
+    "reml_iteration_limit_failures": 3,
+    "dependency_refused_arms": 1,
+    "timed_out_workers": 0,
+    "completed_test_evaluations": 4,
+    "reruns": 0
+  },
+  "discovery_limits": {
+    "proposal_cap": 8,
+    "candidate_set_sizes_compared": "Additive versus one capped candidate set, not adaptive count selection",
+    "categorical_level_cap": 32,
+    "bike_eligible_spline_features": ["temp", "atemp", "hum", "windspeed"],
+    "bike_scored_pairs": 6,
+    "missed_candidate_types": "Mixed hour/weather and other categorical interactions; no cyclic interaction representation; weak-margin and nonlinear pure interactions can also be missed",
+    "timing_limit": "Candidate generation, marginal shortlisting and product scoring share one clock; training prediction and full additive screening fit are charged separately"
+  },
+  "claims": {
+    "cross_dataset_superiority": false,
+    "adaptive_interaction_count_selection": false,
+    "out_of_sample_error_certificate": false,
+    "full_source_rows_used": true
+  },
+  "verification": {
+    "focused_tests_command": "OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run pytest benchmarks/test_real_interactions.py -q",
+    "focused_tests_passed": 17,
+    "initial_missing_implementation_failures": 12,
+    "mutation": {
+      "change": "Admit nonconverged arms into validation selection",
+      "test": "test_validation_choice_refuses_nonconverged_better_scoring_fit",
+      "mutated_test_exit_code": 1,
+      "observed_failure": "Selected interactions instead of additive"
+    },
+    "row_budget_demonstration": "Pre-parse admission test failed before the row guard, then passed.",
+    "ruff_check": "passed",
+    "ruff_format_check": "passed"
+  },
+  "after_run_loader_audit": {
+    "sha256": "c28aa62c9a154405fd901c3c1898dd0c899742f17a202da6b2c46aa82cabf3d0",
+    "mtime_utc": "2026-09-13T21:23:45.018789+00:00",
+    "scope": "Post-run observation, not a loader hash captured by each worker. Dataset agent confirms no loader edits during fits. Post-corpus-scan changes were formatting and a categorical-declaration guard, with unchanged parsing. Per-arm byte/schema-entry/split/preprocessor hashes are direct run evidence."
+  },
+  "datasets": {
+    "uci_breast_cancer": {
+      "choice": {
+        "chosen_arm": "additive",
+        "chosen_before_test_evaluation": true,
+        "validation_scores": {
+          "additive": {
+            "primary_loss": 0.9307282592153429,
+            "log_loss": 0.9307282592153429,
+            "average_precision": 0.8885606874328679,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9429563492063492,
+            "rows": 114
+          },
+          "interactions": null
+        },
+        "fit_result_sha256": {
+          "additive": "2c05517a537d7fd1e1b4bb8e88c06bec34447728ad691bca97c2a60b3b1229c0"
+        }
+      },
+      "costs": {
+        "case_end_to_end_seconds": 13.299336197960656,
+        "joint_refit_over_additive_fit": 2.1734222624890784,
+        "charged_screen_and_fit_over_additive_fit": 3.1767656103574544,
+        "interaction_training_pipeline_process_seconds": 10.615292637958191
+      },
+      "arms": {
+        "additive": {
+          "dataset": "uci_breast_cancer",
+          "arm": "additive",
+          "stage": "fit",
+          "status": "converged",
+          "started_utc": "2026-09-13T21:27:27.074155+00:00",
+          "finished_utc": "2026-09-13T21:27:30.229809+00:00",
+          "rows": {
+            "train": 341,
+            "valid": 114,
+            "test": 114
+          },
+          "full_table_rows": 569,
+          "subsampling": "none; every source row belongs to one split",
+          "raw_predictor_count": 30,
+          "family": "binomial",
+          "split": {
+            "strategy": "stratified_group",
+            "columns": [
+              "ID"
+            ],
+            "policy": "Stratify 60/20/20 by Diagnosis while keeping each ID in one partition. This is a historical diagnostic control, not an external clinical validation.",
+            "seed": 20260913
+          },
+          "split_sha256": "dbd749162fbf45490374af5a2d32eab39155df758ef6e05b8520104227a4af04",
+          "preprocessing_sha256": "bfd3929bf48be1846bcb41c6190e55dc4aaed5b9a2cfe5ce5cba73794f2edc29",
+          "data_sha256": "3487b754ff02c93cdc8a18afafe223961d9cfbfdb932e57483e52581042767d7",
+          "manifest_entry_sha256": "1f68076b2ce5865c7d3d82cf1d7164da11fc02a8b1268e6b601b0a21ee0d6cce",
+          "pairs": [],
+          "resource_estimate": {
+            "coefficient_count_without_intercept": 150,
+            "nominal_smoothing_components": 30,
+            "one_dense_design_mib": 0.39284515380859375,
+            "one_dense_square_mib": 0.17395782470703125,
+            "scope": "Representation estimate only, not an RSS upper bound or dispatch claim"
+          },
+          "fit_end_peak_process_rss_mib": 402.1875,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 373880,
+            "numpy_owner_count": 996,
+            "bytes_payload_bytes": 907730,
+            "bytes_owner_count": 30,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 1281610,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "coefficient_count_without_intercept": 150,
+          "fitted_smoothing_parameter_count": 30,
+          "resolved_direct_backend": "gram",
+          "backend_groups": [
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix"
+          ],
+          "validation": {
+            "primary_loss": 0.9307282592153429,
+            "log_loss": 0.9307282592153429,
+            "average_precision": 0.8885606874328679,
+            "prevalence": 0.3684210526315789,
+            "roc_auc": 0.9429563492063492,
+            "rows": 114
+          },
+          "screening": {
+            "policy": "training marginal correlation shortlist, centered residual product correlation",
+            "shortlisted_features": [
+              "perimeter3",
+              "concave_points3",
+              "radius3",
+              "concave_points1",
+              "area3",
+              "perimeter1",
+              "radius1",
+              "area1",
+              "concavity1",
+              "concavity3",
+              "compactness3",
+              "compactness1"
+            ],
+            "candidate_pair_count": 66,
+            "scores": [
+              {
+                "pair": [
+                  "compactness1",
+                  "compactness3"
+                ],
+                "score": 0.14906790489589603
+              },
+              {
+                "pair": [
+                  "compactness3",
+                  "concavity3"
+                ],
+                "score": 0.13010732202602526
+              },
+              {
+                "pair": [
+                  "compactness1",
+                  "concavity3"
+                ],
+                "score": 0.10467664653978728
+              },
+              {
+                "pair": [
+                  "compactness3",
+                  "concavity1"
+                ],
+                "score": 0.08515810124331488
+              },
+              {
+                "pair": [
+                  "compactness3",
+                  "concave_points3"
+                ],
+                "score": 0.0723034503669581
+              },
+              {
+                "pair": [
+                  "concavity1",
+                  "concavity3"
+                ],
+                "score": 0.046368397010304305
+              },
+              {
+                "pair": [
+                  "concave_points3",
+                  "concavity3"
+                ],
+                "score": 0.04633189858658056
+              },
+              {
+                "pair": [
+                  "compactness1",
+                  "concavity1"
+                ],
+                "score": 0.04564798042688396
+              },
+              {
+                "pair": [
+                  "compactness1",
+                  "concave_points3"
+                ],
+                "score": 0.042342059822789525
+              },
+              {
+                "pair": [
+                  "compactness3",
+                  "concave_points1"
+                ],
+                "score": 0.038631377656996535
+              },
+              {
+                "pair": [
+                  "concave_points1",
+                  "concavity3"
+                ],
+                "score": 0.030848595041369112
+              },
+              {
+                "pair": [
+                  "concave_points3",
+                  "concavity1"
+                ],
+                "score": 0.0224523999187098
+              },
+              {
+                "pair": [
+                  "area3",
+                  "compactness3"
+                ],
+                "score": 0.014629206222701665
+              },
+              {
+                "pair": [
+                  "compactness1",
+                  "concave_points1"
+                ],
+                "score": 0.014183880925978875
+              },
+              {
+                "pair": [
+                  "concavity1",
+                  "perimeter1"
+                ],
+                "score": 0.01375994745388758
+              },
+              {
+                "pair": [
+                  "compactness1",
+                  "perimeter1"
+                ],
+                "score": 0.013700461195705041
+              },
+              {
+                "pair": [
+                  "concavity1",
+                  "radius1"
+                ],
+                "score": 0.012988897613026318
+              },
+              {
+                "pair": [
+                  "concave_points1",
+                  "concavity1"
+                ],
+                "score": 0.012508438866440829
+              },
+              {
+                "pair": [
+                  "area1",
+                  "compactness3"
+                ],
+                "score": 0.012229675542674364
+              },
+              {
+                "pair": [
+                  "compactness1",
+                  "radius1"
+                ],
+                "score": 0.01159558131766374
+              },
+              {
+                "pair": [
+                  "area3",
+                  "concavity3"
+                ],
+                "score": 0.011368801796338323
+              },
+              {
+                "pair": [
+                  "compactness1",
+                  "perimeter3"
+                ],
+                "score": 0.00896809768125139
+              },
+              {
+                "pair": [
+                  "perimeter3",
+                  "radius3"
+                ],
+                "score": 0.008881831623484404
+              },
+              {
+                "pair": [
+                  "concavity3",
+                  "radius3"
+                ],
+                "score": 0.008460427354936422
+              },
+              {
+                "pair": [
+                  "area1",
+                  "concavity1"
+                ],
+                "score": 0.008358350068643168
+              },
+              {
+                "pair": [
+                  "area3",
+                  "radius3"
+                ],
+                "score": 0.00830234603943967
+              },
+              {
+                "pair": [
+                  "compactness3",
+                  "radius3"
+                ],
+                "score": 0.007600355094357278
+              },
+              {
+                "pair": [
+                  "radius1",
+                  "radius3"
+                ],
+                "score": 0.007450628230896447
+              },
+              {
+                "pair": [
+                  "area3",
+                  "perimeter3"
+                ],
+                "score": 0.007420520426314566
+              },
+              {
+                "pair": [
+                  "area1",
+                  "concavity3"
+                ],
+                "score": 0.007215485158847013
+              },
+              {
+                "pair": [
+                  "concavity1",
+                  "perimeter3"
+                ],
+                "score": 0.006905171547759848
+              },
+              {
+                "pair": [
+                  "area3",
+                  "concave_points3"
+                ],
+                "score": 0.006704592550671814
+              },
+              {
+                "pair": [
+                  "area3",
+                  "radius1"
+                ],
+                "score": 0.006675420589076482
+              },
+              {
+                "pair": [
+                  "perimeter1",
+                  "radius3"
+                ],
+                "score": 0.0065014648482071245
+              },
+              {
+                "pair": [
+                  "area1",
+                  "radius3"
+                ],
+                "score": 0.006406391708841937
+              },
+              {
+                "pair": [
+                  "concavity3",
+                  "perimeter3"
+                ],
+                "score": 0.006157069478672303
+              },
+              {
+                "pair": [
+                  "area3",
+                  "perimeter1"
+                ],
+                "score": 0.00606557017427973
+              },
+              {
+                "pair": [
+                  "perimeter3",
+                  "radius1"
+                ],
+                "score": 0.006059653094009661
+              },
+              {
+                "pair": [
+                  "concave_points1",
+                  "perimeter1"
+                ],
+                "score": 0.005845331980758336
+              },
+              {
+                "pair": [
+                  "concave_points1",
+                  "radius1"
+                ],
+                "score": 0.005701901398712724
+              },
+              {
+                "pair": [
+                  "compactness1",
+                  "radius3"
+                ],
+                "score": 0.005641946875204179
+              },
+              {
+                "pair": [
+                  "compactness3",
+                  "perimeter1"
+                ],
+                "score": 0.005534940746401357
+              },
+              {
+                "pair": [
+                  "concavity1",
+                  "radius3"
+                ],
+                "score": 0.005498843268980829
+              },
+              {
+                "pair": [
+                  "area1",
+                  "area3"
+                ],
+                "score": 0.0054743389724182835
+              },
+              {
+                "pair": [
+                  "area1",
+                  "perimeter3"
+                ],
+                "score": 0.0053220890543170295
+              },
+              {
+                "pair": [
+                  "area1",
+                  "concave_points3"
+                ],
+                "score": 0.00511674803810377
+              },
+              {
+                "pair": [
+                  "perimeter1",
+                  "perimeter3"
+                ],
+                "score": 0.005084787967110161
+              },
+              {
+                "pair": [
+                  "concave_points3",
+                  "radius3"
+                ],
+                "score": 0.00486098213376419
+              },
+              {
+                "pair": [
+                  "concave_points1",
+                  "concave_points3"
+                ],
+                "score": 0.0046141930279574766
+              },
+              {
+                "pair": [
+                  "concave_points1",
+                  "perimeter3"
+                ],
+                "score": 0.0036774974196882265
+              },
+              {
+                "pair": [
+                  "area1",
+                  "compactness1"
+                ],
+                "score": 0.003153603701825204
+              },
+              {
+                "pair": [
+                  "area1",
+                  "concave_points1"
+                ],
+                "score": 0.0028787395449865172
+              },
+              {
+                "pair": [
+                  "concave_points3",
+                  "perimeter3"
+                ],
+                "score": 0.0026517961087111556
+              },
+              {
+                "pair": [
+                  "concavity3",
+                  "perimeter1"
+                ],
+                "score": 0.0026460648423770757
+              },
+              {
+                "pair": [
+                  "concave_points3",
+                  "radius1"
+                ],
+                "score": 0.0022581613163885532
+              },
+              {
+                "pair": [
+                  "concave_points1",
+                  "radius3"
+                ],
+                "score": 0.002150405136363847
+              },
+              {
+                "pair": [
+                  "compactness3",
+                  "perimeter3"
+                ],
+                "score": 0.0021486879554780845
+              },
+              {
+                "pair": [
+                  "area3",
+                  "concavity1"
+                ],
+                "score": 0.002050692136705897
+              },
+              {
+                "pair": [
+                  "area3",
+                  "compactness1"
+                ],
+                "score": 0.0014701103776694185
+              },
+              {
+                "pair": [
+                  "concavity3",
+                  "radius1"
+                ],
+                "score": 0.0014279012845398774
+              },
+              {
+                "pair": [
+                  "area1",
+                  "radius1"
+                ],
+                "score": 0.0013278625330458683
+              },
+              {
+                "pair": [
+                  "compactness3",
+                  "radius1"
+                ],
+                "score": 0.0009885938096425649
+              },
+              {
+                "pair": [
+                  "area1",
+                  "perimeter1"
+                ],
+                "score": 0.0008180776766790081
+              },
+              {
+                "pair": [
+                  "concave_points3",
+                  "perimeter1"
+                ],
+                "score": 0.0005314845250194434
+              },
+              {
+                "pair": [
+                  "perimeter1",
+                  "radius1"
+                ],
+                "score": 0.0004233558840518567
+              },
+              {
+                "pair": [
+                  "area3",
+                  "concave_points1"
+                ],
+                "score": 0.0003641702743512962
+              }
+            ],
+            "pairs": [
+              [
+                "compactness1",
+                "compactness3"
+              ],
+              [
+                "compactness3",
+                "concavity3"
+              ],
+              [
+                "compactness1",
+                "concavity3"
+              ],
+              [
+                "compactness3",
+                "concavity1"
+              ],
+              [
+                "compactness3",
+                "concave_points3"
+              ],
+              [
+                "concavity1",
+                "concavity3"
+              ],
+              [
+                "concave_points3",
+                "concavity3"
+              ],
+              [
+                "compactness1",
+                "concavity1"
+              ]
+            ]
+          },
+          "warnings": [],
+          "model_pickle_sha256": "6cb1851faf149731d15adc9b728dceb767f11f81cd8e30cd801349c9269e0cc7",
+          "model_pickle_bytes": 1988368,
+          "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+          "benchmark_script_sha256": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+          "measurement_helper_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+          "git_head": "03766e8d5ce5b67a2ce1091ab5ae92cabf9076c3",
+          "runtime": {
+            "python": "3.13.14",
+            "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+            "packages": {
+              "superglm": "0.33.0",
+              "numpy": "2.5.2",
+              "scipy": "1.18.0",
+              "pandas": "3.0.5",
+              "numba": "0.67.0",
+              "scikit-learn": "1.9.0",
+              "threadpoolctl": "3.6.0"
+            },
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+                "version": "0.3.34.0.0",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+                "version": "0.3.31.dev",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "num_threads": 1,
+                "prefix": "libgomp",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+                "version": null
+              }
+            ]
+          },
+          "timings_seconds": {
+            "loading_seconds": 0.012797650997526944,
+            "preprocessing_seconds": 0.06061636202502996,
+            "model_setup_seconds": 0.0014169630012474954,
+            "fit_seconds": 1.6732431689742953,
+            "validation_prediction_seconds": 0.007825189037248492,
+            "screening_prediction_seconds": 0.0039812359609641135,
+            "screening_seconds": 0.001612998021300882,
+            "serialization_seconds": 0.006814339954871684,
+            "worker_seconds": 3.155651843000669
+          },
+          "process": {
+            "status": "success",
+            "pid": 486103,
+            "returncode": 0,
+            "process_seconds": 4.2791431219666265,
+            "timeout_seconds": 75.0
+          },
+          "convergence": {
+            "fit": {
+              "method": "fit_reml",
+              "fit_meta": {
+                "method": "fit_reml",
+                "discrete": true,
+                "direct_backend": "gram",
+                "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+              },
+              "deviance": 0.0002968465346575531,
+              "effective_df": 31.00075747290916,
+              "phi": 1.0,
+              "n_iter": 1,
+              "converged": true,
+              "intercept": 57.32388960318186
+            },
+            "reml": {
+              "enabled": true,
+              "converged": true,
+              "n_reml_iter": 10,
+              "termination_reason": "score_objective_tolerance",
+              "objective": -201.0189416557526,
+              "lambdas": {
+                "radius1": 0.0020837875909510066,
+                "texture1": 0.042623114473398296,
+                "perimeter1": 0.002060041897709995,
+                "area1": 0.0020824210892239755,
+                "smoothness1": 0.0007540777315193977,
+                "compactness1": 0.04556629009026382,
+                "concavity1": 0.016604155026463795,
+                "concave_points1": 0.005769332096130116,
+                "symmetry1": 0.005631473356704893,
+                "fractal_dimension1": 0.006111157400145311,
+                "radius2": 0.0007477232652652764,
+                "texture2": 0.00556892865642165,
+                "perimeter2": 0.0007430765830075423,
+                "area2": 0.0007463291587363501,
+                "smoothness2": 0.015560687378141869,
+                "compactness2": 0.12460039681986135,
+                "concavity2": 0.015460585922990034,
+                "concave_points2": 0.016038869918985243,
+                "symmetry2": 0.01647280088882713,
+                "fractal_dimension2": 0.006101287182652946,
+                "radius3": 0.002122219572837805,
+                "texture3": 0.015738538917764337,
+                "perimeter3": 0.00209677849405501,
+                "area3": 0.002125576277126035,
+                "smoothness3": 0.005799361424983836,
+                "compactness3": 0.045990339920348455,
+                "concavity3": 0.016393578488707098,
+                "concave_points3": 0.00583335867722142,
+                "symmetry3": 0.045893927359076755,
+                "fractal_dimension3": 0.016311283325620894
+              }
+            },
+            "rank_policy": {
+              "version": 4,
+              "coordinate_space": "solver"
+            },
+            "full_telemetry_sha256": "4a7ace2edd7b6b0c494b8ea15978cb469c344fb9c2637717147c6f38605172f5"
+          },
+          "final_test": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 0.46044001403659757,
+              "log_loss": 0.46044001403659757,
+              "average_precision": 0.9628011348002239,
+              "prevalence": 0.37719298245614036,
+              "roc_auc": 0.9808385194890271,
+              "rows": 114
+            },
+            "test_prediction_seconds": 0.015931162983179092,
+            "worker_seconds": 1.5888202319620177,
+            "validation_chosen_arm": "additive",
+            "warnings": [],
+            "process_seconds": 2.674127987003885,
+            "prediction_archive_sha256": "0d61eb27bfcb233c21a15510fee1a31df5c559344c0b429e7c8991a1018f7771"
+          },
+          "preprocessing_summary": {
+            "feature_kinds": {
+              "radius1": "spline",
+              "texture1": "spline",
+              "perimeter1": "spline",
+              "area1": "spline",
+              "smoothness1": "spline",
+              "compactness1": "spline",
+              "concavity1": "spline",
+              "concave_points1": "spline",
+              "symmetry1": "spline",
+              "fractal_dimension1": "spline",
+              "radius2": "spline",
+              "texture2": "spline",
+              "perimeter2": "spline",
+              "area2": "spline",
+              "smoothness2": "spline",
+              "compactness2": "spline",
+              "concavity2": "spline",
+              "concave_points2": "spline",
+              "symmetry2": "spline",
+              "fractal_dimension2": "spline",
+              "radius3": "spline",
+              "texture3": "spline",
+              "perimeter3": "spline",
+              "area3": "spline",
+              "smoothness3": "spline",
+              "compactness3": "spline",
+              "concavity3": "spline",
+              "concave_points3": "spline",
+              "symmetry3": "spline",
+              "fractal_dimension3": "spline"
+            },
+            "dropped": {},
+            "categorical_observed_levels": {}
+          },
+          "discovery_counts": {
+            "all_raw_feature_pairs": 435,
+            "eligible_spline_features": 30,
+            "eligible_spline_pairs": 435,
+            "shortlisted_features": 12,
+            "scored_pairs": 66,
+            "proposed_pairs": 8,
+            "joint_candidate_fit_count": 0,
+            "note": "Proposal cap, not an estimate of true useful interaction count."
+          }
+        },
+        "interactions": {
+          "dataset": "uci_breast_cancer",
+          "arm": "interactions",
+          "stage": "fit",
+          "status": "not_converged",
+          "started_utc": "2026-09-13T21:27:31.312253+00:00",
+          "finished_utc": "2026-09-13T21:27:36.391929+00:00",
+          "rows": {
+            "train": 341,
+            "valid": 114,
+            "test": 114
+          },
+          "full_table_rows": 569,
+          "subsampling": "none; every source row belongs to one split",
+          "raw_predictor_count": 30,
+          "family": "binomial",
+          "split": {
+            "strategy": "stratified_group",
+            "columns": [
+              "ID"
+            ],
+            "policy": "Stratify 60/20/20 by Diagnosis while keeping each ID in one partition. This is a historical diagnostic control, not an external clinical validation.",
+            "seed": 20260913
+          },
+          "split_sha256": "dbd749162fbf45490374af5a2d32eab39155df758ef6e05b8520104227a4af04",
+          "preprocessing_sha256": "bfd3929bf48be1846bcb41c6190e55dc4aaed5b9a2cfe5ce5cba73794f2edc29",
+          "data_sha256": "3487b754ff02c93cdc8a18afafe223961d9cfbfdb932e57483e52581042767d7",
+          "manifest_entry_sha256": "1f68076b2ce5865c7d3d82cf1d7164da11fc02a8b1268e6b601b0a21ee0d6cce",
+          "pairs": [
+            [
+              "compactness1",
+              "compactness3"
+            ],
+            [
+              "compactness3",
+              "concavity3"
+            ],
+            [
+              "compactness1",
+              "concavity3"
+            ],
+            [
+              "compactness3",
+              "concavity1"
+            ],
+            [
+              "compactness3",
+              "concave_points3"
+            ],
+            [
+              "concavity1",
+              "concavity3"
+            ],
+            [
+              "concave_points3",
+              "concavity3"
+            ],
+            [
+              "compactness1",
+              "concavity1"
+            ]
+          ],
+          "resource_estimate": {
+            "coefficient_count_without_intercept": 222,
+            "nominal_smoothing_components": 46,
+            "one_dense_design_mib": 0.5801620483398438,
+            "one_dense_square_mib": 0.37940216064453125,
+            "scope": "Representation estimate only, not an RSS upper bound or dispatch claim"
+          },
+          "fit_end_peak_process_rss_mib": 419.796875,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 772976,
+            "numpy_owner_count": 1468,
+            "bytes_payload_bytes": 1982762,
+            "bytes_owner_count": 30,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 2755738,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "coefficient_count_without_intercept": 222,
+          "fitted_smoothing_parameter_count": 46,
+          "resolved_direct_backend": "gram",
+          "backend_groups": [
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix"
+          ],
+          "warnings": [],
+          "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+          "benchmark_script_sha256": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+          "measurement_helper_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+          "git_head": "03766e8d5ce5b67a2ce1091ab5ae92cabf9076c3",
+          "runtime": {
+            "python": "3.13.14",
+            "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+            "packages": {
+              "superglm": "0.33.0",
+              "numpy": "2.5.2",
+              "scipy": "1.18.0",
+              "pandas": "3.0.5",
+              "numba": "0.67.0",
+              "scikit-learn": "1.9.0",
+              "threadpoolctl": "3.6.0"
+            },
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+                "version": "0.3.34.0.0",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+                "version": "0.3.31.dev",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "num_threads": 1,
+                "prefix": "libgomp",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+                "version": null
+              }
+            ]
+          },
+          "timings_seconds": {
+            "loading_seconds": 0.010933870042208582,
+            "preprocessing_seconds": 0.05617813201388344,
+            "model_setup_seconds": 0.0021806650329381227,
+            "fit_seconds": 3.636663954006508,
+            "worker_seconds": 5.079671801009681
+          },
+          "process": {
+            "status": "error",
+            "pid": 486155,
+            "returncode": 1,
+            "process_seconds": 6.336149515991565,
+            "timeout_seconds": 75.0
+          },
+          "convergence": {
+            "fit": {
+              "method": "fit_reml",
+              "fit_meta": {
+                "method": "fit_reml",
+                "discrete": true,
+                "direct_backend": "gram",
+                "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+              },
+              "deviance": 0.00011978287192105088,
+              "effective_df": 39.000958550207145,
+              "phi": 1.0,
+              "n_iter": 1,
+              "converged": true,
+              "intercept": -16.74366089420849
+            },
+            "reml": {
+              "enabled": true,
+              "converged": false,
+              "n_reml_iter": 20,
+              "termination_reason": "max_reml_iter",
+              "objective": -308.4712313449336,
+              "lambdas": {
+                "radius1": 0.00027183401030151294,
+                "texture1": 0.005479177096810134,
+                "perimeter1": 0.0002718330676977204,
+                "area1": 0.0002718331262575552,
+                "smoothness1": 0.0007392008651122012,
+                "compactness1": 0.00027183970542933535,
+                "concavity1": 0.00027183238436484595,
+                "concave_points1": 0.0002718336393200162,
+                "symmetry1": 0.0020116176700738578,
+                "fractal_dimension1": 0.002010863168171586,
+                "radius2": 0.0002718369675230332,
+                "texture2": 0.005475519585920244,
+                "perimeter2": 0.0002718375051287796,
+                "area2": 0.0007391011406387891,
+                "smoothness2": 0.002011023667770385,
+                "compactness2": 0.000739726423078999,
+                "concavity2": 0.0007397998501742965,
+                "concave_points2": 0.0007393041398879118,
+                "symmetry2": 0.002012714605192743,
+                "fractal_dimension2": 0.0007395372157155185,
+                "radius3": 0.0002718321215921238,
+                "texture3": 0.005481197471842663,
+                "perimeter3": 0.0001000011256047601,
+                "area3": 0.00027183297042581247,
+                "smoothness3": 0.002011837836385663,
+                "compactness3": 0.0007398851673594188,
+                "concavity3": 0.0002718356580839753,
+                "concave_points3": 0.0002718355290886733,
+                "symmetry3": 0.0020107597846256197,
+                "fractal_dimension3": 0.0020119535850988027,
+                "compactness1:compactness3:margin_compactness1": 1.5001308132516684,
+                "compactness1:compactness3:margin_compactness3": 1.499869441668207,
+                "compactness3:concavity3:margin_compactness3": 1.509699461482406,
+                "compactness3:concavity3:margin_concavity3": 1.4904245928936322,
+                "compactness1:concavity3:margin_compactness1": 1.5098315050529199,
+                "compactness1:concavity3:margin_concavity3": 1.490295814123118,
+                "compactness3:concavity1:margin_compactness3": 1.4929691061761654,
+                "compactness3:concavity1:margin_concavity1": 1.507097653483616,
+                "compactness3:concave_points3:margin_compactness3": 1.5926069880986418,
+                "compactness3:concave_points3:margin_concave_points3": 1.4175710770788543,
+                "concavity1:concavity3:margin_concavity1": 1.5168625836455887,
+                "concavity1:concavity3:margin_concavity3": 1.4835083308925259,
+                "concave_points3:concavity3:margin_concave_points3": 1.42497575251932,
+                "concave_points3:concavity3:margin_concavity3": 1.5833632540826124,
+                "compactness1:concavity1:margin_compactness1": 1.4930983942433593,
+                "compactness1:concavity1:margin_concavity1": 1.50696581505012
+              }
+            },
+            "rank_policy": {
+              "version": 4,
+              "coordinate_space": "solver"
+            },
+            "full_telemetry_sha256": "165a5c0694366f5e34b283ea32c352a1cfe70a31e266ef32ab0b3c5be00fb5fd"
+          },
+          "preprocessing_summary": {
+            "feature_kinds": {
+              "radius1": "spline",
+              "texture1": "spline",
+              "perimeter1": "spline",
+              "area1": "spline",
+              "smoothness1": "spline",
+              "compactness1": "spline",
+              "concavity1": "spline",
+              "concave_points1": "spline",
+              "symmetry1": "spline",
+              "fractal_dimension1": "spline",
+              "radius2": "spline",
+              "texture2": "spline",
+              "perimeter2": "spline",
+              "area2": "spline",
+              "smoothness2": "spline",
+              "compactness2": "spline",
+              "concavity2": "spline",
+              "concave_points2": "spline",
+              "symmetry2": "spline",
+              "fractal_dimension2": "spline",
+              "radius3": "spline",
+              "texture3": "spline",
+              "perimeter3": "spline",
+              "area3": "spline",
+              "smoothness3": "spline",
+              "compactness3": "spline",
+              "concavity3": "spline",
+              "concave_points3": "spline",
+              "symmetry3": "spline",
+              "fractal_dimension3": "spline"
+            },
+            "dropped": {},
+            "categorical_observed_levels": {}
+          },
+          "discovery_counts": {
+            "all_raw_feature_pairs": 435,
+            "eligible_spline_features": 30,
+            "eligible_spline_pairs": 435,
+            "shortlisted_features": null,
+            "scored_pairs": null,
+            "proposed_pairs": 8,
+            "joint_candidate_fit_count": 1,
+            "note": "Proposal cap, not an estimate of true useful interaction count."
+          }
+        }
+      }
+    },
+    "uci_credit_default": {
+      "choice": {
+        "chosen_arm": null,
+        "chosen_before_test_evaluation": true,
+        "validation_scores": {
+          "additive": null,
+          "interactions": null
+        },
+        "fit_result_sha256": {}
+      },
+      "costs": {
+        "case_end_to_end_seconds": 5.839894286997151
+      },
+      "arms": {
+        "additive": {
+          "dataset": "uci_credit_default",
+          "arm": "additive",
+          "stage": "fit",
+          "status": "not_converged",
+          "started_utc": "2026-09-13T21:27:40.413154+00:00",
+          "finished_utc": "2026-09-13T21:27:45.012804+00:00",
+          "rows": {
+            "train": 18000,
+            "valid": 6000,
+            "test": 6000
+          },
+          "full_table_rows": 30000,
+          "subsampling": "none; every source row belongs to one split",
+          "raw_predictor_count": 23,
+          "family": "binomial",
+          "split": {
+            "strategy": "stratified_group",
+            "columns": [
+              "ID"
+            ],
+            "policy": "Stratify 60/20/20 by Y, grouping each client ID. X6-X11 are earlier repayment statuses; Y is default in the following month. There is one historical cohort, not separate future calendar cohorts.",
+            "seed": 20260913
+          },
+          "split_sha256": "b75482888266e1e0365ce12878e5af0b11c989545770526d0863118d0b0e8061",
+          "preprocessing_sha256": "4ec4e9c022a9c27720fe5124708f6785f8e7fc1e757f05354a619f2e1d043a8a",
+          "data_sha256": "45bcf4df62ff2e237a74eb155cabfb4bbbc171219a0637daef44fdad07503dd0",
+          "manifest_entry_sha256": "c4a1555b49420eb3c45007c9f129a8a6861759b4dcc5431e459f2af81a684d97",
+          "pairs": [],
+          "resource_estimate": {
+            "coefficient_count_without_intercept": 104,
+            "nominal_smoothing_components": 14,
+            "one_dense_design_mib": 14.4195556640625,
+            "one_dense_square_mib": 0.08411407470703125,
+            "scope": "Representation estimate only, not an RSS upper bound or dispatch claim"
+          },
+          "fit_end_peak_process_rss_mib": 438.15234375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 4161472,
+            "numpy_owner_count": 486,
+            "bytes_payload_bytes": 270792,
+            "bytes_owner_count": 25,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 4432264,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "coefficient_count_without_intercept": 104,
+          "fitted_smoothing_parameter_count": 14,
+          "resolved_direct_backend": "gram",
+          "backend_groups": [
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix"
+          ],
+          "warnings": [],
+          "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+          "benchmark_script_sha256": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+          "measurement_helper_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+          "git_head": "03766e8d5ce5b67a2ce1091ab5ae92cabf9076c3",
+          "runtime": {
+            "python": "3.13.14",
+            "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+            "packages": {
+              "superglm": "0.33.0",
+              "numpy": "2.5.2",
+              "scipy": "1.18.0",
+              "pandas": "3.0.5",
+              "numba": "0.67.0",
+              "scikit-learn": "1.9.0",
+              "threadpoolctl": "3.6.0"
+            },
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+                "version": "0.3.34.0.0",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+                "version": "0.3.31.dev",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "num_threads": 1,
+                "prefix": "libgomp",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+                "version": null
+              }
+            ]
+          },
+          "timings_seconds": {
+            "loading_seconds": 0.05370953801320866,
+            "preprocessing_seconds": 0.26315695396624506,
+            "model_setup_seconds": 0.0016232139896601439,
+            "fit_seconds": 2.794434717972763,
+            "worker_seconds": 4.599648401024751
+          },
+          "process": {
+            "status": "error",
+            "pid": 486224,
+            "returncode": 1,
+            "process_seconds": 5.838506900996435,
+            "timeout_seconds": 75.0
+          },
+          "convergence": {
+            "fit": {
+              "method": "fit_reml",
+              "fit_meta": {
+                "method": "fit_reml",
+                "discrete": true,
+                "direct_backend": "gram",
+                "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+              },
+              "deviance": 15477.918224365874,
+              "effective_df": 59.412413449297986,
+              "phi": 1.0,
+              "n_iter": 1,
+              "converged": true,
+              "intercept": -2.141511445530923
+            },
+            "reml": {
+              "enabled": true,
+              "converged": false,
+              "n_reml_iter": 20,
+              "termination_reason": "max_reml_iter",
+              "objective": 7879.92185645742,
+              "lambdas": {
+                "X1": 35.95823065008642,
+                "X5": 60245.61748167751,
+                "X12": 9.267623286610254,
+                "X13": 363.481781915939,
+                "X14": 72604.17347044041,
+                "X15": 14110.959076094305,
+                "X16": 16.02400795800808,
+                "X17": 10.48038988362588,
+                "X18": 551.5754518808432,
+                "X19": 110336.60371173116,
+                "X20": 1077.3436246840981,
+                "X21": 407900.75658306084,
+                "X22": 132.68709672827427,
+                "X23": 169875.5376041313
+              }
+            },
+            "rank_policy": {
+              "version": 4,
+              "coordinate_space": "solver"
+            },
+            "full_telemetry_sha256": "b680e4857f2812a16d2b1c5fee54ba829050333b1ad33d8beba80aecec55130e"
+          },
+          "preprocessing_summary": {
+            "feature_kinds": {
+              "X1": "spline",
+              "X2": "categorical",
+              "X3": "categorical",
+              "X4": "categorical",
+              "X5": "spline",
+              "X6": "categorical",
+              "X7": "categorical",
+              "X8": "categorical",
+              "X9": "categorical",
+              "X10": "categorical",
+              "X11": "categorical",
+              "X12": "spline",
+              "X13": "spline",
+              "X14": "spline",
+              "X15": "spline",
+              "X16": "spline",
+              "X17": "spline",
+              "X18": "spline",
+              "X19": "spline",
+              "X20": "spline",
+              "X21": "spline",
+              "X22": "spline",
+              "X23": "spline"
+            },
+            "dropped": {},
+            "categorical_observed_levels": {
+              "X2": 2,
+              "X3": 4,
+              "X4": 4,
+              "X6": 7,
+              "X7": 6,
+              "X8": 5,
+              "X9": 5,
+              "X10": 5,
+              "X11": 5
+            }
+          },
+          "discovery_counts": {
+            "all_raw_feature_pairs": 253,
+            "eligible_spline_features": 14,
+            "eligible_spline_pairs": 91,
+            "shortlisted_features": 0,
+            "scored_pairs": 0,
+            "proposed_pairs": 0,
+            "joint_candidate_fit_count": 0,
+            "note": "Proposal cap, not an estimate of true useful interaction count."
+          }
+        },
+        "interactions": {
+          "status": "dependency_failed",
+          "reason": "Additive screening fit did not converge",
+          "timings_seconds": {}
+        }
+      }
+    },
+    "ames_housing": {
+      "choice": {
+        "chosen_arm": "additive",
+        "chosen_before_test_evaluation": true,
+        "validation_scores": {
+          "additive": {
+            "primary_loss": 488646458.75075585,
+            "mse": 488646458.75075585,
+            "mean_deviance": 488646458.75075585,
+            "rows": 648
+          },
+          "interactions": null
+        },
+        "fit_result_sha256": {
+          "additive": "a2e45775a5bcf568a2f08e2dd7b5fa48c599bcca23058cc84a5898695ccadd08"
+        }
+      },
+      "costs": {
+        "case_end_to_end_seconds": 20.21790865797084,
+        "joint_refit_over_additive_fit": 1.8832372254450624,
+        "charged_screen_and_fit_over_additive_fit": 2.8945726948705817,
+        "interaction_training_pipeline_process_seconds": 17.490202188957483
+      },
+      "arms": {
+        "additive": {
+          "dataset": "ames_housing",
+          "arm": "additive",
+          "stage": "fit",
+          "status": "converged",
+          "started_utc": "2026-09-13T21:27:46.201603+00:00",
+          "finished_utc": "2026-09-13T21:27:51.908812+00:00",
+          "rows": {
+            "train": 1941,
+            "valid": 648,
+            "test": 341
+          },
+          "full_table_rows": 2930,
+          "subsampling": "none; every source row belongs to one split",
+          "raw_predictor_count": 74,
+          "family": "gaussian",
+          "split": {
+            "strategy": "time_group",
+            "columns": [
+              "Yr Sold",
+              "PID"
+            ],
+            "policy": "Train on 2006-2008, validate on 2009, test on 2010, grouping PID. All 2930 PIDs are distinct in this artifact. Transaction-condition/date fields and separate miscellaneous monetary valuation are excluded from the physical-property baseline.",
+            "seed": 20260913,
+            "train_years": [
+              2006,
+              2007,
+              2008
+            ],
+            "validation_years": [
+              2009
+            ],
+            "test_years": [
+              2010
+            ]
+          },
+          "split_sha256": "016fba5a482286057d357a709c3b66ccf596d7be03d4b7acec848a16770b0b6a",
+          "preprocessing_sha256": "d524893916b6d6045d9a4b1a0b2ddcd52c58d7ff0c48e367fbe3940ed276dc68",
+          "data_sha256": "6cfe6cb525ba437de428653a1040e2aed7d696640bf75203786a6d7a0e67cfcc",
+          "manifest_entry_sha256": "842d1f1098c4d2f4cdd7716e7a8b059ccbd4a73c12d0a2b1d0ac259a5dcfb2e6",
+          "pairs": [],
+          "resource_estimate": {
+            "coefficient_count_without_intercept": 305,
+            "nominal_smoothing_components": 23,
+            "one_dense_design_mib": 4.5314483642578125,
+            "one_dense_square_mib": 0.714385986328125,
+            "scope": "Representation estimate only, not an RSS upper bound or dispatch claim"
+          },
+          "fit_end_peak_process_rss_mib": 461.15625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1422152,
+            "numpy_owner_count": 867,
+            "bytes_payload_bytes": 7988763,
+            "bytes_owner_count": 41,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 9410915,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "coefficient_count_without_intercept": 305,
+          "fitted_smoothing_parameter_count": 23,
+          "resolved_direct_backend": "gram",
+          "backend_groups": [
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DenseGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DenseGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DenseGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "validation": {
+            "primary_loss": 488646458.75075585,
+            "mse": 488646458.75075585,
+            "mean_deviance": 488646458.75075585,
+            "rows": 648
+          },
+          "screening": {
+            "policy": "training marginal correlation shortlist, centered residual product correlation",
+            "shortlisted_features": [
+              "Overall Qual",
+              "Gr Liv Area",
+              "Garage Area",
+              "Total Bsmt SF",
+              "1st Flr SF",
+              "Year Built",
+              "Year Remod/Add",
+              "Mas Vnr Area",
+              "TotRms AbvGrd",
+              "Garage Yr Blt",
+              "BsmtFin SF 1",
+              "Lot Frontage"
+            ],
+            "candidate_pair_count": 66,
+            "scores": [
+              {
+                "pair": [
+                  "Gr Liv Area",
+                  "Year Remod/Add"
+                ],
+                "score": 0.14806813900150012
+              },
+              {
+                "pair": [
+                  "Lot Frontage",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.14335357446269356
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Lot Frontage"
+                ],
+                "score": 0.13828967907844952
+              },
+              {
+                "pair": [
+                  "Gr Liv Area",
+                  "Lot Frontage"
+                ],
+                "score": 0.13772000881238747
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Year Remod/Add"
+                ],
+                "score": 0.13056677022527854
+              },
+              {
+                "pair": [
+                  "Gr Liv Area",
+                  "Year Built"
+                ],
+                "score": 0.13040125160931418
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.12673360893606717
+              },
+              {
+                "pair": [
+                  "Lot Frontage",
+                  "Overall Qual"
+                ],
+                "score": 0.1264403257043358
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Lot Frontage"
+                ],
+                "score": 0.12390794435329383
+              },
+              {
+                "pair": [
+                  "Total Bsmt SF",
+                  "Year Built"
+                ],
+                "score": 0.12254811414591714
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Gr Liv Area"
+                ],
+                "score": 0.12151026343151743
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Garage Area"
+                ],
+                "score": 0.12118950670970145
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Year Built"
+                ],
+                "score": 0.11997164916505591
+              },
+              {
+                "pair": [
+                  "Total Bsmt SF",
+                  "Year Remod/Add"
+                ],
+                "score": 0.1184027570311486
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.11398979303375267
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "Lot Frontage"
+                ],
+                "score": 0.11303342854058021
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "Year Built"
+                ],
+                "score": 0.11114066310502221
+              },
+              {
+                "pair": [
+                  "Overall Qual",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.1090746405911713
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Overall Qual"
+                ],
+                "score": 0.10822421712003948
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Garage Yr Blt"
+                ],
+                "score": 0.10545696103888112
+              },
+              {
+                "pair": [
+                  "Garage Yr Blt",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.10534969069224
+              },
+              {
+                "pair": [
+                  "Lot Frontage",
+                  "Mas Vnr Area"
+                ],
+                "score": 0.10372842280290942
+              },
+              {
+                "pair": [
+                  "Gr Liv Area",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.1035156967921305
+              },
+              {
+                "pair": [
+                  "Lot Frontage",
+                  "Year Built"
+                ],
+                "score": 0.09989994863600736
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Year Built"
+                ],
+                "score": 0.09938498996566014
+              },
+              {
+                "pair": [
+                  "Garage Yr Blt",
+                  "Lot Frontage"
+                ],
+                "score": 0.09871905986708464
+              },
+              {
+                "pair": [
+                  "Gr Liv Area",
+                  "Overall Qual"
+                ],
+                "score": 0.09855065204811346
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "BsmtFin SF 1"
+                ],
+                "score": 0.09732747149893423
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Overall Qual"
+                ],
+                "score": 0.09720077692007206
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Garage Area"
+                ],
+                "score": 0.09571764936777623
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Year Remod/Add"
+                ],
+                "score": 0.09043498880760623
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Garage Yr Blt"
+                ],
+                "score": 0.0901931599711503
+              },
+              {
+                "pair": [
+                  "TotRms AbvGrd",
+                  "Year Remod/Add"
+                ],
+                "score": 0.0890628989599535
+              },
+              {
+                "pair": [
+                  "Lot Frontage",
+                  "Year Remod/Add"
+                ],
+                "score": 0.08781703799126685
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.08623015176237639
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "Gr Liv Area"
+                ],
+                "score": 0.08347091016834009
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "Year Remod/Add"
+                ],
+                "score": 0.08219819849615352
+              },
+              {
+                "pair": [
+                  "Garage Yr Blt",
+                  "Gr Liv Area"
+                ],
+                "score": 0.08095496812068276
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Gr Liv Area"
+                ],
+                "score": 0.07932717391468307
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "Overall Qual"
+                ],
+                "score": 0.07354138853510667
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "TotRms AbvGrd"
+                ],
+                "score": 0.07255323180101311
+              },
+              {
+                "pair": [
+                  "Lot Frontage",
+                  "TotRms AbvGrd"
+                ],
+                "score": 0.07138903013112559
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "Garage Yr Blt"
+                ],
+                "score": 0.07107814620646895
+              },
+              {
+                "pair": [
+                  "Overall Qual",
+                  "TotRms AbvGrd"
+                ],
+                "score": 0.06778354884010333
+              },
+              {
+                "pair": [
+                  "TotRms AbvGrd",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.06712393862190705
+              },
+              {
+                "pair": [
+                  "Mas Vnr Area",
+                  "Year Remod/Add"
+                ],
+                "score": 0.06444951821345822
+              },
+              {
+                "pair": [
+                  "TotRms AbvGrd",
+                  "Year Built"
+                ],
+                "score": 0.06297536284853127
+              },
+              {
+                "pair": [
+                  "BsmtFin SF 1",
+                  "Mas Vnr Area"
+                ],
+                "score": 0.05820763501671083
+              },
+              {
+                "pair": [
+                  "Mas Vnr Area",
+                  "Total Bsmt SF"
+                ],
+                "score": 0.052481475201649065
+              },
+              {
+                "pair": [
+                  "Mas Vnr Area",
+                  "Year Built"
+                ],
+                "score": 0.04599825470541443
+              },
+              {
+                "pair": [
+                  "Garage Yr Blt",
+                  "Mas Vnr Area"
+                ],
+                "score": 0.04486772839758537
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "TotRms AbvGrd"
+                ],
+                "score": 0.04295349951318346
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "TotRms AbvGrd"
+                ],
+                "score": 0.0389397665123926
+              },
+              {
+                "pair": [
+                  "Garage Yr Blt",
+                  "TotRms AbvGrd"
+                ],
+                "score": 0.038597470236401525
+              },
+              {
+                "pair": [
+                  "Gr Liv Area",
+                  "TotRms AbvGrd"
+                ],
+                "score": 0.03702741611134346
+              },
+              {
+                "pair": [
+                  "Overall Qual",
+                  "Year Remod/Add"
+                ],
+                "score": 0.03390389555504882
+              },
+              {
+                "pair": [
+                  "Garage Area",
+                  "Mas Vnr Area"
+                ],
+                "score": 0.03335902845548207
+              },
+              {
+                "pair": [
+                  "Garage Yr Blt",
+                  "Year Built"
+                ],
+                "score": 0.03189308575318768
+              },
+              {
+                "pair": [
+                  "1st Flr SF",
+                  "Mas Vnr Area"
+                ],
+                "score": 0.02759177893207687
+              },
+              {
+                "pair": [
+                  "Overall Qual",
+                  "Year Built"
+                ],
+                "score": 0.025234535184254045
+              },
+              {
+                "pair": [
+                  "Gr Liv Area",
+                  "Mas Vnr Area"
+                ],
+                "score": 0.022743792550918743
+              },
+              {
+                "pair": [
+                  "Mas Vnr Area",
+                  "TotRms AbvGrd"
+                ],
+                "score": 0.014180485371298401
+              },
+              {
+                "pair": [
+                  "Garage Yr Blt",
+                  "Overall Qual"
+                ],
+                "score": 0.009203442873880382
+              },
+              {
+                "pair": [
+                  "Mas Vnr Area",
+                  "Overall Qual"
+                ],
+                "score": 0.00677518392504458
+              },
+              {
+                "pair": [
+                  "Garage Yr Blt",
+                  "Year Remod/Add"
+                ],
+                "score": 0.001981226675793683
+              },
+              {
+                "pair": [
+                  "Year Built",
+                  "Year Remod/Add"
+                ],
+                "score": 0.0016843981010692258
+              }
+            ],
+            "pairs": [
+              [
+                "Gr Liv Area",
+                "Year Remod/Add"
+              ],
+              [
+                "Lot Frontage",
+                "Total Bsmt SF"
+              ],
+              [
+                "BsmtFin SF 1",
+                "Lot Frontage"
+              ],
+              [
+                "Gr Liv Area",
+                "Lot Frontage"
+              ],
+              [
+                "1st Flr SF",
+                "Year Remod/Add"
+              ],
+              [
+                "Gr Liv Area",
+                "Year Built"
+              ],
+              [
+                "Garage Area",
+                "Total Bsmt SF"
+              ],
+              [
+                "Lot Frontage",
+                "Overall Qual"
+              ]
+            ]
+          },
+          "warnings": [],
+          "model_pickle_sha256": "cca71617c197a83550b60ac9f91e65b27673e9699a1236a97783e6a9a857ce34",
+          "model_pickle_bytes": 13371528,
+          "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+          "benchmark_script_sha256": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+          "measurement_helper_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+          "git_head": "03766e8d5ce5b67a2ce1091ab5ae92cabf9076c3",
+          "runtime": {
+            "python": "3.13.14",
+            "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+            "packages": {
+              "superglm": "0.33.0",
+              "numpy": "2.5.2",
+              "scipy": "1.18.0",
+              "pandas": "3.0.5",
+              "numba": "0.67.0",
+              "scikit-learn": "1.9.0",
+              "threadpoolctl": "3.6.0"
+            },
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+                "version": "0.3.34.0.0",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+                "version": "0.3.31.dev",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "num_threads": 1,
+                "prefix": "libgomp",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+                "version": null
+              }
+            ]
+          },
+          "timings_seconds": {
+            "loading_seconds": 0.035535882983822376,
+            "preprocessing_seconds": 0.21984269499080256,
+            "model_setup_seconds": 0.002749431994743645,
+            "fit_seconds": 3.8257657769718207,
+            "validation_prediction_seconds": 0.02703456999734044,
+            "screening_prediction_seconds": 0.04102694703033194,
+            "screening_seconds": 0.002339903963729739,
+            "serialization_seconds": 0.025937236030586064,
+            "worker_seconds": 5.707201548968442
+          },
+          "process": {
+            "status": "success",
+            "pid": 486268,
+            "returncode": 0,
+            "process_seconds": 7.090024608944077,
+            "timeout_seconds": 75.0
+          },
+          "convergence": {
+            "fit": {
+              "method": "fit_reml",
+              "fit_meta": {
+                "method": "fit_reml",
+                "discrete": true,
+                "direct_backend": "gram",
+                "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+              },
+              "deviance": 581730068249.5498,
+              "effective_df": 244.88657255376754,
+              "phi": 342975458.6627061,
+              "n_iter": 1,
+              "converged": true,
+              "intercept": 177490.04273248743
+            },
+            "reml": {
+              "enabled": true,
+              "converged": true,
+              "n_reml_iter": 12,
+              "termination_reason": "score_objective_tolerance",
+              "objective": 20006.905882323892,
+              "lambdas": {
+                "Lot Frontage": 906.9048018138826,
+                "Lot Area": 116.68402330413285,
+                "Overall Qual": 1.552159110866705,
+                "Year Built": 0.9399361939234133,
+                "Year Remod/Add": 6280.548720328344,
+                "Mas Vnr Area": 570.2657241677381,
+                "BsmtFin SF 1": 0.007232880318774446,
+                "BsmtFin SF 2": 23.58844267670648,
+                "Bsmt Unf SF": 4.319603723802086,
+                "Total Bsmt SF": 1.3298632543408833,
+                "1st Flr SF": 0.3774572868961464,
+                "2nd Flr SF": 0.043455795780883,
+                "Low Qual Fin SF": 281.7580688272404,
+                "Gr Liv Area": 0.0008632535644686032,
+                "TotRms AbvGrd": 29146.27422422601,
+                "Garage Yr Blt": 24335.065790351524,
+                "Garage Area": 3.3924739540368174,
+                "Wood Deck SF": 0.054692005282086203,
+                "Open Porch SF": 11291.39415569348,
+                "Enclosed Porch": 92.03166108796698,
+                "3Ssn Porch": 225703.014984392,
+                "Screen Porch": 2916.2052668393776,
+                "Pool Area": 3.851558014360123
+              }
+            },
+            "rank_policy": {
+              "version": 4,
+              "coordinate_space": "solver"
+            },
+            "full_telemetry_sha256": "2805b62c2da3708425f9e1545c6b56f1a26fe7daf23b2571d6e57f90f8295144"
+          },
+          "final_test": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 426676939.22894573,
+              "mse": 426676939.22894573,
+              "mean_deviance": 426676939.22894573,
+              "rows": 341
+            },
+            "test_prediction_seconds": 0.0682531269849278,
+            "worker_seconds": 1.648973170958925,
+            "validation_chosen_arm": "additive",
+            "warnings": [],
+            "process_seconds": 2.7234241230180487,
+            "prediction_archive_sha256": "0e57b80849ac81da2e4e2db4676b66b0c5c52bd699f6eac6e3b3054d6360f86b"
+          },
+          "preprocessing_summary": {
+            "feature_kinds": {
+              "MS SubClass": "categorical",
+              "MS Zoning": "categorical",
+              "Lot Frontage": "spline",
+              "Lot Area": "spline",
+              "Street": "categorical",
+              "Alley": "categorical",
+              "Lot Shape": "categorical",
+              "Land Contour": "categorical",
+              "Utilities": "categorical",
+              "Lot Config": "categorical",
+              "Land Slope": "categorical",
+              "Neighborhood": "categorical",
+              "Condition 1": "categorical",
+              "Condition 2": "categorical",
+              "Bldg Type": "categorical",
+              "House Style": "categorical",
+              "Overall Qual": "spline",
+              "Overall Cond": "numeric",
+              "Year Built": "spline",
+              "Year Remod/Add": "spline",
+              "Roof Style": "categorical",
+              "Roof Matl": "categorical",
+              "Exterior 1st": "categorical",
+              "Exterior 2nd": "categorical",
+              "Mas Vnr Type": "categorical",
+              "Mas Vnr Area": "spline",
+              "Exter Qual": "categorical",
+              "Exter Cond": "categorical",
+              "Foundation": "categorical",
+              "Bsmt Qual": "categorical",
+              "Bsmt Cond": "categorical",
+              "Bsmt Exposure": "categorical",
+              "BsmtFin Type 1": "categorical",
+              "BsmtFin SF 1": "spline",
+              "BsmtFin Type 2": "categorical",
+              "BsmtFin SF 2": "spline",
+              "Bsmt Unf SF": "spline",
+              "Total Bsmt SF": "spline",
+              "Heating": "categorical",
+              "Heating QC": "categorical",
+              "Central Air": "categorical",
+              "Electrical": "categorical",
+              "1st Flr SF": "spline",
+              "2nd Flr SF": "spline",
+              "Low Qual Fin SF": "spline",
+              "Gr Liv Area": "spline",
+              "Bsmt Full Bath": "numeric",
+              "Bsmt Half Bath": "numeric",
+              "Full Bath": "numeric",
+              "Half Bath": "numeric",
+              "Bedroom AbvGr": "numeric",
+              "Kitchen AbvGr": "numeric",
+              "Kitchen Qual": "categorical",
+              "TotRms AbvGrd": "spline",
+              "Functional": "categorical",
+              "Fireplaces": "numeric",
+              "Fireplace Qu": "categorical",
+              "Garage Type": "categorical",
+              "Garage Yr Blt": "spline",
+              "Garage Finish": "categorical",
+              "Garage Cars": "numeric",
+              "Garage Area": "spline",
+              "Garage Qual": "categorical",
+              "Garage Cond": "categorical",
+              "Paved Drive": "categorical",
+              "Wood Deck SF": "spline",
+              "Open Porch SF": "spline",
+              "Enclosed Porch": "spline",
+              "3Ssn Porch": "spline",
+              "Screen Porch": "spline",
+              "Pool Area": "spline",
+              "Pool QC": "categorical",
+              "Fence": "categorical",
+              "Misc Feature": "categorical"
+            },
+            "dropped": {},
+            "categorical_observed_levels": {
+              "MS SubClass": 12,
+              "MS Zoning": 4,
+              "Street": 2,
+              "Alley": 3,
+              "Lot Shape": 4,
+              "Land Contour": 4,
+              "Utilities": 2,
+              "Lot Config": 5,
+              "Land Slope": 3,
+              "Neighborhood": 24,
+              "Condition 1": 7,
+              "Condition 2": 2,
+              "Bldg Type": 5,
+              "House Style": 6,
+              "Roof Style": 3,
+              "Roof Matl": 2,
+              "Exterior 1st": 11,
+              "Exterior 2nd": 11,
+              "Mas Vnr Type": 5,
+              "Exter Qual": 4,
+              "Exter Cond": 4,
+              "Foundation": 5,
+              "Bsmt Qual": 6,
+              "Bsmt Cond": 5,
+              "Bsmt Exposure": 6,
+              "BsmtFin Type 1": 8,
+              "BsmtFin Type 2": 8,
+              "Heating": 2,
+              "Heating QC": 5,
+              "Central Air": 2,
+              "Electrical": 4,
+              "Kitchen Qual": 4,
+              "Functional": 5,
+              "Fireplace Qu": 6,
+              "Garage Type": 7,
+              "Garage Finish": 5,
+              "Garage Qual": 5,
+              "Garage Cond": 4,
+              "Paved Drive": 3,
+              "Pool QC": 2,
+              "Fence": 5,
+              "Misc Feature": 3
+            }
+          },
+          "discovery_counts": {
+            "all_raw_feature_pairs": 2701,
+            "eligible_spline_features": 23,
+            "eligible_spline_pairs": 253,
+            "shortlisted_features": 12,
+            "scored_pairs": 66,
+            "proposed_pairs": 8,
+            "joint_candidate_fit_count": 0,
+            "note": "Proposal cap, not an estimate of true useful interaction count."
+          }
+        },
+        "interactions": {
+          "dataset": "ames_housing",
+          "arm": "interactions",
+          "stage": "fit",
+          "status": "not_converged",
+          "started_utc": "2026-09-13T21:27:53.339579+00:00",
+          "finished_utc": "2026-09-13T21:28:02.532975+00:00",
+          "rows": {
+            "train": 1941,
+            "valid": 648,
+            "test": 341
+          },
+          "full_table_rows": 2930,
+          "subsampling": "none; every source row belongs to one split",
+          "raw_predictor_count": 74,
+          "family": "gaussian",
+          "split": {
+            "strategy": "time_group",
+            "columns": [
+              "Yr Sold",
+              "PID"
+            ],
+            "policy": "Train on 2006-2008, validate on 2009, test on 2010, grouping PID. All 2930 PIDs are distinct in this artifact. Transaction-condition/date fields and separate miscellaneous monetary valuation are excluded from the physical-property baseline.",
+            "seed": 20260913,
+            "train_years": [
+              2006,
+              2007,
+              2008
+            ],
+            "validation_years": [
+              2009
+            ],
+            "test_years": [
+              2010
+            ]
+          },
+          "split_sha256": "016fba5a482286057d357a709c3b66ccf596d7be03d4b7acec848a16770b0b6a",
+          "preprocessing_sha256": "d524893916b6d6045d9a4b1a0b2ddcd52c58d7ff0c48e367fbe3940ed276dc68",
+          "data_sha256": "6cfe6cb525ba437de428653a1040e2aed7d696640bf75203786a6d7a0e67cfcc",
+          "manifest_entry_sha256": "842d1f1098c4d2f4cdd7716e7a8b059ccbd4a73c12d0a2b1d0ac259a5dcfb2e6",
+          "pairs": [
+            [
+              "Gr Liv Area",
+              "Year Remod/Add"
+            ],
+            [
+              "Lot Frontage",
+              "Total Bsmt SF"
+            ],
+            [
+              "BsmtFin SF 1",
+              "Lot Frontage"
+            ],
+            [
+              "Gr Liv Area",
+              "Lot Frontage"
+            ],
+            [
+              "1st Flr SF",
+              "Year Remod/Add"
+            ],
+            [
+              "Gr Liv Area",
+              "Year Built"
+            ],
+            [
+              "Garage Area",
+              "Total Bsmt SF"
+            ],
+            [
+              "Lot Frontage",
+              "Overall Qual"
+            ]
+          ],
+          "resource_estimate": {
+            "coefficient_count_without_intercept": 377,
+            "nominal_smoothing_components": 39,
+            "one_dense_design_mib": 5.5976715087890625,
+            "one_dense_square_mib": 1.090118408203125,
+            "scope": "Representation estimate only, not an RSS upper bound or dispatch claim"
+          },
+          "fit_end_peak_process_rss_mib": 482.49609375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 2263968,
+            "numpy_owner_count": 1339,
+            "bytes_payload_bytes": 12262899,
+            "bytes_owner_count": 41,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 14526867,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "coefficient_count_without_intercept": 377,
+          "fitted_smoothing_parameter_count": 39,
+          "resolved_direct_backend": "gram",
+          "backend_groups": [
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DenseGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "DenseGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DenseGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DenseGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix"
+          ],
+          "warnings": [],
+          "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+          "benchmark_script_sha256": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+          "measurement_helper_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+          "git_head": "03766e8d5ce5b67a2ce1091ab5ae92cabf9076c3",
+          "runtime": {
+            "python": "3.13.14",
+            "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+            "packages": {
+              "superglm": "0.33.0",
+              "numpy": "2.5.2",
+              "scipy": "1.18.0",
+              "pandas": "3.0.5",
+              "numba": "0.67.0",
+              "scikit-learn": "1.9.0",
+              "threadpoolctl": "3.6.0"
+            },
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+                "version": "0.3.34.0.0",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+                "version": "0.3.31.dev",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "num_threads": 1,
+                "prefix": "libgomp",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+                "version": null
+              }
+            ]
+          },
+          "timings_seconds": {
+            "loading_seconds": 0.036477984045632184,
+            "preprocessing_seconds": 0.24155987397534773,
+            "model_setup_seconds": 0.0033148950315080583,
+            "fit_seconds": 7.204824527027085,
+            "worker_seconds": 9.193392131011933
+          },
+          "process": {
+            "status": "error",
+            "pid": 486338,
+            "returncode": 1,
+            "process_seconds": 10.400177580013406,
+            "timeout_seconds": 75.0
+          },
+          "convergence": {
+            "fit": {
+              "method": "fit_reml",
+              "fit_meta": {
+                "method": "fit_reml",
+                "discrete": true,
+                "direct_backend": "gram",
+                "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+              },
+              "deviance": 498715670626.3531,
+              "effective_df": 264.1690674198426,
+              "phi": 297411618.74444884,
+              "n_iter": 1,
+              "converged": true,
+              "intercept": 177312.21614074352
+            },
+            "reml": {
+              "enabled": true,
+              "converged": false,
+              "n_reml_iter": 20,
+              "termination_reason": "max_reml_iter",
+              "objective": 19795.30186640287,
+              "lambdas": {
+                "Lot Frontage": 73.67073701053714,
+                "Lot Area": 87.6063789693299,
+                "Overall Qual": 3.251426628190116,
+                "Year Built": 0.814993710809779,
+                "Year Remod/Add": 102.45835937167027,
+                "Mas Vnr Area": 105.0282205426371,
+                "BsmtFin SF 1": 0.0029681616436564784,
+                "BsmtFin SF 2": 32.98877726277993,
+                "Bsmt Unf SF": 8.832558617040474,
+                "Total Bsmt SF": 2.1810002788173275,
+                "1st Flr SF": 0.09632173239694174,
+                "2nd Flr SF": 0.08700521368780824,
+                "Low Qual Fin SF": 35.58755102053425,
+                "Gr Liv Area": 0.0004762452207963376,
+                "TotRms AbvGrd": 15000.137282266856,
+                "Garage Yr Blt": 14758.87257866603,
+                "Garage Area": 33.06341574856326,
+                "Wood Deck SF": 74031.61079171413,
+                "Open Porch SF": 161358.7471763865,
+                "Enclosed Porch": 3.3581979361116376,
+                "3Ssn Porch": 86792.57900726439,
+                "Screen Porch": 62752.850007019246,
+                "Pool Area": 3.6312084649805345,
+                "Gr Liv Area:Year Remod/Add:margin_Gr Liv Area": 26.941489050672814,
+                "Gr Liv Area:Year Remod/Add:margin_Year Remod/Add": 499.73580150511845,
+                "Lot Frontage:Total Bsmt SF:margin_Lot Frontage": 1026881.2489397387,
+                "Lot Frontage:Total Bsmt SF:margin_Total Bsmt SF": 0.42767780209169476,
+                "BsmtFin SF 1:Lot Frontage:margin_BsmtFin SF 1": 16.673348404178764,
+                "BsmtFin SF 1:Lot Frontage:margin_Lot Frontage": 47735.463340992465,
+                "Gr Liv Area:Lot Frontage:margin_Gr Liv Area": 0.6332588325608495,
+                "Gr Liv Area:Lot Frontage:margin_Lot Frontage": 107811.09826850834,
+                "1st Flr SF:Year Remod/Add:margin_1st Flr SF": 26.56504467464174,
+                "1st Flr SF:Year Remod/Add:margin_Year Remod/Add": 116.04881555365299,
+                "Gr Liv Area:Year Built:margin_Gr Liv Area": 6.939707024474433,
+                "Gr Liv Area:Year Built:margin_Year Built": 7.23373190903753,
+                "Garage Area:Total Bsmt SF:margin_Garage Area": 65.66355992752548,
+                "Garage Area:Total Bsmt SF:margin_Total Bsmt SF": 31.737772118376505,
+                "Lot Frontage:Overall Qual:margin_Lot Frontage": 22277.07383763875,
+                "Lot Frontage:Overall Qual:margin_Overall Qual": 647.0442700016343
+              }
+            },
+            "rank_policy": {
+              "version": 4,
+              "coordinate_space": "solver"
+            },
+            "full_telemetry_sha256": "66f60a0a16bc0434ba5c96a4f160d0cac8a9f1dfcebb6376765114eb8dd2feb3"
+          },
+          "preprocessing_summary": {
+            "feature_kinds": {
+              "MS SubClass": "categorical",
+              "MS Zoning": "categorical",
+              "Lot Frontage": "spline",
+              "Lot Area": "spline",
+              "Street": "categorical",
+              "Alley": "categorical",
+              "Lot Shape": "categorical",
+              "Land Contour": "categorical",
+              "Utilities": "categorical",
+              "Lot Config": "categorical",
+              "Land Slope": "categorical",
+              "Neighborhood": "categorical",
+              "Condition 1": "categorical",
+              "Condition 2": "categorical",
+              "Bldg Type": "categorical",
+              "House Style": "categorical",
+              "Overall Qual": "spline",
+              "Overall Cond": "numeric",
+              "Year Built": "spline",
+              "Year Remod/Add": "spline",
+              "Roof Style": "categorical",
+              "Roof Matl": "categorical",
+              "Exterior 1st": "categorical",
+              "Exterior 2nd": "categorical",
+              "Mas Vnr Type": "categorical",
+              "Mas Vnr Area": "spline",
+              "Exter Qual": "categorical",
+              "Exter Cond": "categorical",
+              "Foundation": "categorical",
+              "Bsmt Qual": "categorical",
+              "Bsmt Cond": "categorical",
+              "Bsmt Exposure": "categorical",
+              "BsmtFin Type 1": "categorical",
+              "BsmtFin SF 1": "spline",
+              "BsmtFin Type 2": "categorical",
+              "BsmtFin SF 2": "spline",
+              "Bsmt Unf SF": "spline",
+              "Total Bsmt SF": "spline",
+              "Heating": "categorical",
+              "Heating QC": "categorical",
+              "Central Air": "categorical",
+              "Electrical": "categorical",
+              "1st Flr SF": "spline",
+              "2nd Flr SF": "spline",
+              "Low Qual Fin SF": "spline",
+              "Gr Liv Area": "spline",
+              "Bsmt Full Bath": "numeric",
+              "Bsmt Half Bath": "numeric",
+              "Full Bath": "numeric",
+              "Half Bath": "numeric",
+              "Bedroom AbvGr": "numeric",
+              "Kitchen AbvGr": "numeric",
+              "Kitchen Qual": "categorical",
+              "TotRms AbvGrd": "spline",
+              "Functional": "categorical",
+              "Fireplaces": "numeric",
+              "Fireplace Qu": "categorical",
+              "Garage Type": "categorical",
+              "Garage Yr Blt": "spline",
+              "Garage Finish": "categorical",
+              "Garage Cars": "numeric",
+              "Garage Area": "spline",
+              "Garage Qual": "categorical",
+              "Garage Cond": "categorical",
+              "Paved Drive": "categorical",
+              "Wood Deck SF": "spline",
+              "Open Porch SF": "spline",
+              "Enclosed Porch": "spline",
+              "3Ssn Porch": "spline",
+              "Screen Porch": "spline",
+              "Pool Area": "spline",
+              "Pool QC": "categorical",
+              "Fence": "categorical",
+              "Misc Feature": "categorical"
+            },
+            "dropped": {},
+            "categorical_observed_levels": {
+              "MS SubClass": 12,
+              "MS Zoning": 4,
+              "Street": 2,
+              "Alley": 3,
+              "Lot Shape": 4,
+              "Land Contour": 4,
+              "Utilities": 2,
+              "Lot Config": 5,
+              "Land Slope": 3,
+              "Neighborhood": 24,
+              "Condition 1": 7,
+              "Condition 2": 2,
+              "Bldg Type": 5,
+              "House Style": 6,
+              "Roof Style": 3,
+              "Roof Matl": 2,
+              "Exterior 1st": 11,
+              "Exterior 2nd": 11,
+              "Mas Vnr Type": 5,
+              "Exter Qual": 4,
+              "Exter Cond": 4,
+              "Foundation": 5,
+              "Bsmt Qual": 6,
+              "Bsmt Cond": 5,
+              "Bsmt Exposure": 6,
+              "BsmtFin Type 1": 8,
+              "BsmtFin Type 2": 8,
+              "Heating": 2,
+              "Heating QC": 5,
+              "Central Air": 2,
+              "Electrical": 4,
+              "Kitchen Qual": 4,
+              "Functional": 5,
+              "Fireplace Qu": 6,
+              "Garage Type": 7,
+              "Garage Finish": 5,
+              "Garage Qual": 5,
+              "Garage Cond": 4,
+              "Paved Drive": 3,
+              "Pool QC": 2,
+              "Fence": 5,
+              "Misc Feature": 3
+            }
+          },
+          "discovery_counts": {
+            "all_raw_feature_pairs": 2701,
+            "eligible_spline_features": 23,
+            "eligible_spline_pairs": 253,
+            "shortlisted_features": null,
+            "scored_pairs": null,
+            "proposed_pairs": 8,
+            "joint_candidate_fit_count": 1,
+            "note": "Proposal cap, not an estimate of true useful interaction count."
+          }
+        }
+      }
+    },
+    "uci_bike_sharing": {
+      "choice": {
+        "chosen_arm": "interactions",
+        "chosen_before_test_evaluation": true,
+        "validation_scores": {
+          "additive": {
+            "primary_loss": 63.751532804206356,
+            "mse": 25171.72542298224,
+            "mean_deviance": 63.751532804206356,
+            "rows": 3502
+          },
+          "interactions": {
+            "primary_loss": 62.15324582278629,
+            "mse": 24442.350872613293,
+            "mean_deviance": 62.15324582278629,
+            "rows": 3502
+          }
+        },
+        "fit_result_sha256": {
+          "additive": "6b95ad86b3b108c2e345d73e39984d2469bfa92e7f549d5b13027ee929843761",
+          "interactions": "2ac352d5400819b78000fff497a2e472d19ff0f42179ee4c4e01aed3e9d7dc64"
+        }
+      },
+      "costs": {
+        "case_end_to_end_seconds": 14.815472531015985,
+        "joint_refit_over_additive_fit": 3.175056071785823,
+        "charged_screen_and_fit_over_additive_fit": 4.207183797507553,
+        "interaction_training_pipeline_process_seconds": 9.262238373979926
+      },
+      "arms": {
+        "additive": {
+          "dataset": "uci_bike_sharing",
+          "arm": "additive",
+          "stage": "fit",
+          "status": "converged",
+          "started_utc": "2026-09-13T21:28:06.442537+00:00",
+          "finished_utc": "2026-09-13T21:28:08.932602+00:00",
+          "rows": {
+            "train": 10389,
+            "valid": 3502,
+            "test": 3488
+          },
+          "full_table_rows": 17379,
+          "subsampling": "none; every source row belongs to one split",
+          "raw_predictor_count": 12,
+          "family": "poisson",
+          "split": {
+            "strategy": "time",
+            "columns": [
+              "dteday"
+            ],
+            "policy": "Chronological 60/20/20 whole-day groups; preserve all hours of a date together. casual+registered exactly reconstruct cnt. Supplied same-hour weather is a contemporaneous predictor, not a forecast available in advance.",
+            "seed": 20260913
+          },
+          "split_sha256": "642d41f20d01521e7aa598a16364c971eee7749f15413db1fd9a6e8d278ba02d",
+          "preprocessing_sha256": "231bd4d44ad2c5eb8f671d02c6715f14b4f154b998b0b1368fe93caa78714265",
+          "data_sha256": "e03de4ee4ef4dc376ac6e04bf829673c6269e8eba5c60fa121640fa2f829504f",
+          "manifest_entry_sha256": "9aeeea61eec8d70ab4b75d7370823917dcdf79a2ab896a17a8dd770952dd355d",
+          "pairs": [],
+          "resource_estimate": {
+            "coefficient_count_without_intercept": 69,
+            "nominal_smoothing_components": 4,
+            "one_dense_design_mib": 5.5483245849609375,
+            "one_dense_square_mib": 0.037384033203125,
+            "scope": "Representation estimate only, not an RSS upper bound or dispatch claim"
+          },
+          "fit_end_peak_process_rss_mib": 446.9765625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1446416,
+            "numpy_owner_count": 154,
+            "bytes_payload_bytes": 272943,
+            "bytes_owner_count": 35,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 1719359,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "coefficient_count_without_intercept": 69,
+          "fitted_smoothing_parameter_count": 4,
+          "resolved_direct_backend": "gram",
+          "backend_groups": [
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix"
+          ],
+          "validation": {
+            "primary_loss": 63.751532804206356,
+            "mse": 25171.72542298224,
+            "mean_deviance": 63.751532804206356,
+            "rows": 3502
+          },
+          "screening": {
+            "policy": "training marginal correlation shortlist, centered residual product correlation",
+            "shortlisted_features": [
+              "temp",
+              "atemp",
+              "hum",
+              "windspeed"
+            ],
+            "candidate_pair_count": 6,
+            "scores": [
+              {
+                "pair": [
+                  "hum",
+                  "windspeed"
+                ],
+                "score": 0.038812011028066785
+              },
+              {
+                "pair": [
+                  "hum",
+                  "temp"
+                ],
+                "score": 0.030946994005695977
+              },
+              {
+                "pair": [
+                  "atemp",
+                  "hum"
+                ],
+                "score": 0.027455747354630442
+              },
+              {
+                "pair": [
+                  "atemp",
+                  "windspeed"
+                ],
+                "score": 0.01674599355022149
+              },
+              {
+                "pair": [
+                  "temp",
+                  "windspeed"
+                ],
+                "score": 0.016520180287202663
+              },
+              {
+                "pair": [
+                  "atemp",
+                  "temp"
+                ],
+                "score": 0.004039424408654103
+              }
+            ],
+            "pairs": [
+              [
+                "hum",
+                "windspeed"
+              ],
+              [
+                "hum",
+                "temp"
+              ],
+              [
+                "atemp",
+                "hum"
+              ],
+              [
+                "atemp",
+                "windspeed"
+              ],
+              [
+                "temp",
+                "windspeed"
+              ],
+              [
+                "atemp",
+                "temp"
+              ]
+            ]
+          },
+          "warnings": [],
+          "model_pickle_sha256": "184bf8844d15dd3a228171e2eea13e2d4f286b0b1208298ad733d064667996c0",
+          "model_pickle_bytes": 3201046,
+          "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+          "benchmark_script_sha256": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+          "measurement_helper_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+          "git_head": "03766e8d5ce5b67a2ce1091ab5ae92cabf9076c3",
+          "runtime": {
+            "python": "3.13.14",
+            "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+            "packages": {
+              "superglm": "0.33.0",
+              "numpy": "2.5.2",
+              "scipy": "1.18.0",
+              "pandas": "3.0.5",
+              "numba": "0.67.0",
+              "scikit-learn": "1.9.0",
+              "threadpoolctl": "3.6.0"
+            },
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+                "version": "0.3.34.0.0",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+                "version": "0.3.31.dev",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "num_threads": 1,
+                "prefix": "libgomp",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+                "version": null
+              }
+            ]
+          },
+          "timings_seconds": {
+            "loading_seconds": 0.035432962991762906,
+            "preprocessing_seconds": 0.14518959895940498,
+            "model_setup_seconds": 0.0011241149622946978,
+            "fit_seconds": 0.7977828629664145,
+            "validation_prediction_seconds": 0.015634601993951946,
+            "screening_prediction_seconds": 0.02493052399950102,
+            "screening_seconds": 0.0007004250073805451,
+            "serialization_seconds": 0.0058858589618466794,
+            "worker_seconds": 2.4900625409791246
+          },
+          "process": {
+            "status": "success",
+            "pid": 486552,
+            "returncode": 0,
+            "process_seconds": 3.727862237021327,
+            "timeout_seconds": 75.0
+          },
+          "convergence": {
+            "fit": {
+              "method": "fit_reml",
+              "fit_meta": {
+                "method": "fit_reml",
+                "discrete": true,
+                "direct_backend": "gram",
+                "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+              },
+              "deviance": 257730.4593047835,
+              "effective_df": 68.64573617270769,
+              "phi": 1.0,
+              "n_iter": 1,
+              "converged": true,
+              "intercept": 4.823288074387737
+            },
+            "reml": {
+              "enabled": true,
+              "converged": true,
+              "n_reml_iter": 4,
+              "termination_reason": "score_objective_tolerance",
+              "objective": 129212.4178081844,
+              "lambdas": {
+                "temp": 12.063443718863127,
+                "atemp": 11.67039835437426,
+                "hum": 6.794380575627053,
+                "windspeed": 239.75332714434447
+              }
+            },
+            "rank_policy": {
+              "version": 4,
+              "coordinate_space": "solver"
+            },
+            "full_telemetry_sha256": "71c32fc6b5365287f2d5aa410b1a4020cf2f937c70a35508631ee18fc41c9ce6"
+          },
+          "final_test": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 60.582036887918925,
+              "mse": 20876.622311877338,
+              "mean_deviance": 60.582036887918925,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.032469466037582606,
+            "worker_seconds": 1.5856997150112875,
+            "validation_chosen_arm": "interactions",
+            "warnings": [],
+            "process_seconds": 2.7252889829687774,
+            "prediction_archive_sha256": "2acb6193c8e9678281c5e8ae5ef047b467427395b7035b92fc235da65dce3ab2"
+          },
+          "preprocessing_summary": {
+            "feature_kinds": {
+              "season": "categorical",
+              "yr": "categorical",
+              "mnth": "categorical",
+              "hr": "categorical",
+              "holiday": "categorical",
+              "weekday": "categorical",
+              "workingday": "categorical",
+              "weathersit": "categorical",
+              "temp": "spline",
+              "atemp": "spline",
+              "hum": "spline",
+              "windspeed": "spline"
+            },
+            "dropped": {},
+            "categorical_observed_levels": {
+              "season": 4,
+              "yr": 2,
+              "mnth": 12,
+              "hr": 24,
+              "holiday": 2,
+              "weekday": 7,
+              "workingday": 2,
+              "weathersit": 4
+            }
+          },
+          "discovery_counts": {
+            "all_raw_feature_pairs": 66,
+            "eligible_spline_features": 4,
+            "eligible_spline_pairs": 6,
+            "shortlisted_features": 4,
+            "scored_pairs": 6,
+            "proposed_pairs": 6,
+            "joint_candidate_fit_count": 0,
+            "note": "Proposal cap, not an estimate of true useful interaction count."
+          }
+        },
+        "interactions": {
+          "dataset": "uci_bike_sharing",
+          "arm": "interactions",
+          "stage": "fit",
+          "status": "converged",
+          "started_utc": "2026-09-13T21:28:10.171493+00:00",
+          "finished_utc": "2026-09-13T21:28:14.394449+00:00",
+          "rows": {
+            "train": 10389,
+            "valid": 3502,
+            "test": 3488
+          },
+          "full_table_rows": 17379,
+          "subsampling": "none; every source row belongs to one split",
+          "raw_predictor_count": 12,
+          "family": "poisson",
+          "split": {
+            "strategy": "time",
+            "columns": [
+              "dteday"
+            ],
+            "policy": "Chronological 60/20/20 whole-day groups; preserve all hours of a date together. casual+registered exactly reconstruct cnt. Supplied same-hour weather is a contemporaneous predictor, not a forecast available in advance.",
+            "seed": 20260913
+          },
+          "split_sha256": "642d41f20d01521e7aa598a16364c971eee7749f15413db1fd9a6e8d278ba02d",
+          "preprocessing_sha256": "231bd4d44ad2c5eb8f671d02c6715f14b4f154b998b0b1368fe93caa78714265",
+          "data_sha256": "e03de4ee4ef4dc376ac6e04bf829673c6269e8eba5c60fa121640fa2f829504f",
+          "manifest_entry_sha256": "9aeeea61eec8d70ab4b75d7370823917dcdf79a2ab896a17a8dd770952dd355d",
+          "pairs": [
+            [
+              "hum",
+              "windspeed"
+            ],
+            [
+              "hum",
+              "temp"
+            ],
+            [
+              "atemp",
+              "hum"
+            ],
+            [
+              "atemp",
+              "windspeed"
+            ],
+            [
+              "temp",
+              "windspeed"
+            ],
+            [
+              "atemp",
+              "temp"
+            ]
+          ],
+          "resource_estimate": {
+            "coefficient_count_without_intercept": 123,
+            "nominal_smoothing_components": 16,
+            "one_dense_design_mib": 9.828460693359375,
+            "one_dense_square_mib": 0.1173095703125,
+            "scope": "Representation estimate only, not an RSS upper bound or dispatch claim"
+          },
+          "fit_end_peak_process_rss_mib": 459.015625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 3420416,
+            "numpy_owner_count": 508,
+            "bytes_payload_bytes": 858465,
+            "bytes_owner_count": 35,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 4278881,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "coefficient_count_without_intercept": 123,
+          "fitted_smoothing_parameter_count": 16,
+          "resolved_direct_backend": "gram",
+          "backend_groups": [
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedSSPGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix",
+            "DiscretizedTensorGroupMatrix"
+          ],
+          "validation": {
+            "primary_loss": 62.15324582278629,
+            "mse": 24442.350872613293,
+            "mean_deviance": 62.15324582278629,
+            "rows": 3502
+          },
+          "warnings": [],
+          "model_pickle_sha256": "6a9794763262b8509989823cb0826cc65ef8d27b0a5b5e50ff632d53aa5218a6",
+          "model_pickle_bytes": 6065017,
+          "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+          "benchmark_script_sha256": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+          "measurement_helper_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+          "git_head": "03766e8d5ce5b67a2ce1091ab5ae92cabf9076c3",
+          "runtime": {
+            "python": "3.13.14",
+            "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+            "packages": {
+              "superglm": "0.33.0",
+              "numpy": "2.5.2",
+              "scipy": "1.18.0",
+              "pandas": "3.0.5",
+              "numba": "0.67.0",
+              "scikit-learn": "1.9.0",
+              "threadpoolctl": "3.6.0"
+            },
+            "threadpools": [
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+                "version": "0.3.34.0.0",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "blas",
+                "internal_api": "openblas",
+                "num_threads": 1,
+                "prefix": "libscipy_openblas",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+                "version": "0.3.31.dev",
+                "threading_layer": "pthreads",
+                "architecture": "SkylakeX"
+              },
+              {
+                "user_api": "openmp",
+                "internal_api": "openmp",
+                "num_threads": 1,
+                "prefix": "libgomp",
+                "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+                "version": null
+              }
+            ]
+          },
+          "timings_seconds": {
+            "loading_seconds": 0.024005801999010146,
+            "preprocessing_seconds": 0.1406446930486709,
+            "model_setup_seconds": 0.0019828060176223516,
+            "fit_seconds": 2.533005323028192,
+            "validation_prediction_seconds": 0.022371319006197155,
+            "serialization_seconds": 0.011289686022792011,
+            "worker_seconds": 4.222953342017718
+          },
+          "process": {
+            "status": "success",
+            "pid": 486613,
+            "returncode": 0,
+            "process_seconds": 5.534376136958599,
+            "timeout_seconds": 75.0
+          },
+          "convergence": {
+            "fit": {
+              "method": "fit_reml",
+              "fit_meta": {
+                "method": "fit_reml",
+                "discrete": true,
+                "direct_backend": "gram",
+                "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+              },
+              "deviance": 252181.04419958775,
+              "effective_df": 117.4401406965299,
+              "phi": 1.0,
+              "n_iter": 1,
+              "converged": true,
+              "intercept": 4.0686468904738256
+            },
+            "reml": {
+              "enabled": true,
+              "converged": true,
+              "n_reml_iter": 11,
+              "termination_reason": "score_objective_tolerance",
+              "objective": 126627.40676299471,
+              "lambdas": {
+                "temp": 0.1405596081233504,
+                "atemp": 0.18681509672754973,
+                "hum": 5.88892105069695,
+                "windspeed": 29.40734257542636,
+                "hum:windspeed:margin_hum": 0.31959439742075146,
+                "hum:windspeed:margin_windspeed": 1.8161238141844958,
+                "hum:temp:margin_hum": 0.2811674509299463,
+                "hum:temp:margin_temp": 3.181756375143736,
+                "atemp:hum:margin_atemp": 2.0016824515150553,
+                "atemp:hum:margin_hum": 0.20063435568366553,
+                "atemp:windspeed:margin_atemp": 0.8996264180816049,
+                "atemp:windspeed:margin_windspeed": 30.829291651953564,
+                "temp:windspeed:margin_temp": 0.3540625567257741,
+                "temp:windspeed:margin_windspeed": 14.889285122726413,
+                "atemp:temp:margin_atemp": 0.019316561526936164,
+                "atemp:temp:margin_temp": 0.05930860759218609
+              }
+            },
+            "rank_policy": {
+              "version": 4,
+              "coordinate_space": "solver"
+            },
+            "full_telemetry_sha256": "1b680aa90fa0a3d51e901e9aa668cd9834fdb64efa629abf327576211a1c1899"
+          },
+          "final_test": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 100.82706863815704,
+              "mse": 21639.097612193786,
+              "mean_deviance": 100.82706863815704,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.04546333401231095,
+            "worker_seconds": 1.7252286369912326,
+            "validation_chosen_arm": "interactions",
+            "warnings": [],
+            "process_seconds": 2.823149357980583,
+            "prediction_archive_sha256": "5137c1948d9abd4225e20ede46eb027b1b12ae65c6b2ba886e2d698d893804a6"
+          },
+          "preprocessing_summary": {
+            "feature_kinds": {
+              "season": "categorical",
+              "yr": "categorical",
+              "mnth": "categorical",
+              "hr": "categorical",
+              "holiday": "categorical",
+              "weekday": "categorical",
+              "workingday": "categorical",
+              "weathersit": "categorical",
+              "temp": "spline",
+              "atemp": "spline",
+              "hum": "spline",
+              "windspeed": "spline"
+            },
+            "dropped": {},
+            "categorical_observed_levels": {
+              "season": 4,
+              "yr": 2,
+              "mnth": 12,
+              "hr": 24,
+              "holiday": 2,
+              "weekday": 7,
+              "workingday": 2,
+              "weathersit": 4
+            }
+          },
+          "discovery_counts": {
+            "all_raw_feature_pairs": 66,
+            "eligible_spline_features": 4,
+            "eligible_spline_pairs": 6,
+            "shortlisted_features": null,
+            "scored_pairs": null,
+            "proposed_pairs": 6,
+            "joint_candidate_fit_count": 1,
+            "note": "Proposal cap, not an estimate of true useful interaction count."
+          }
+        }
+      }
+    }
+  }
+}

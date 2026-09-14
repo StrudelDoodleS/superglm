@@ -1,16 +1,17 @@
 # Roadmap
 
-Last strategic review: **2026-09-12**. Current implementation baseline:
-`origin/master` at `c0ed3a62`, including the LSS API refinement in PR #386
+Last strategic review: **2026-09-14**. Current research baseline:
+`v0.33.0` at `7c4e70ff`, including the LSS API refinement in PR #386
 and Newton completion repair in PR #387.
 The starting baseline was `8962c452` (published v0.31.0); individual implementation
 and benchmark revisions remain pinned in the evidence below.
 
-**Current direction:** the LSS API refinement and Newton completion repair are
-merged; next establish a scoped proof programme. The user identified 0.33 as a
-possible release target; this records intent, not a version decision or publication.
-The 12.5-second latency target remains unmet. Further performance work and
-100-million-row/out-of-core fitting remain separately scoped future work.
+**Current direction:** the user selected affordable locally adaptive interactions,
+with predictive accuracy, complete-fit time, peak RSS and system-specific error
+bounds as joint objectives. Start with the housing performance investigation and
+a fixed Gaussian representation/certification pilot. The proof programme remains
+part of these numerical claims. The separate 12.5-second C1 latency target remains
+unmet; 100-million-row/out-of-core fitting remains deferred.
 
 This is **directional project state, not an implementation specification**,
 delivery commitment, or authorization to start a capability. Scope implementation
@@ -121,6 +122,129 @@ does not replace separate discretization-error evidence. Final production
 validation passed 11,546 tests with 174 skips and mandatory real-data availability.
 
 ## Next
+
+**Selected on 2026-09-13: adaptive interactions and coefficient scaling research.**
+The [research design](research/2026-09-13-adaptive-interactions-research-design.md)
+promotes bounded C16/C21 work and the necessary C15/C18 analysis. Keep every
+observation; allocate interaction basis resolution where it is useful. Validate
+the first numerical reduction against a fixed rich Gaussian problem, then assess
+automatic smoothing and fresh held-out accuracy. A fixed-parameter mean-error
+bound does not certify covariance or the smoothing optimum.
+
+The user clarified the practical target: many useful interactions for a modest
+multiple of the matching additive fit's time. The 2×, 5× and 10× additive-cost
+budgets are exploratory guides, with held-out loss, peak RSS and retained
+payload recorded alongside them. The
+[additive-normalized baseline](research/2026-09-13-cheap-interaction-additive-baseline.md)
+and [representation analysis](research/2026-09-13-cheap-interaction-representations.md)
+now separate unchanged-model reuse from smaller ordinary tensors, nested
+product dictionaries, local refinement and shared-factor models.
+
+Cheap discovery is part of the selected scope. Find a small, adaptively chosen
+set of useful interactions among many possible pairs; charge candidate
+generation, score refinement, joint refits and validation to the cost. Preserve
+the possibility of strong interactions with weak main effects. The
+[discovery analysis](research/2026-09-13-cheap-interaction-discovery.md) scopes
+this bounded scalar use of the existing C9/PSST workflow alongside C16/C21.
+Fitting every possible tensor interaction is not the target.
+PSST's winning EDF rung does not select basis resolution or establish that an
+interaction is useful. The selected search must assess both pair inclusion and
+resolution through bounded joint refits and held-out predictive gain.
+
+Choosing a method requires broad real-data trials. The
+[public corpus](research/2026-09-13-interaction-dataset-corpus.md) and
+[Kaggle corpus](research/2026-09-13-interaction-kaggle-corpus.md) cover housing,
+credit/default, claims severity, fraud, small classification controls and
+larger tabular problems. Their receipts distinguish validated data from
+catalogued or access-blocked sources; fabricated schema fixtures do not count
+as real data. The
+[row and coefficient scaling design](research/2026-09-13-real-data-scaling-design.md)
+distinguishes raw rows, input predictors and compiled coefficients, including
+dense storage and penalty-nullity constraints for the selected model.
+No general cross-dataset interaction performance claim has been made.
+The [first real trials](research/2026-09-13-real-interaction-trials.md) contain
+seven fits across breast cancer, credit default, Ames and bike sharing. Four
+converged and three reached the unchanged REML iteration limit; a dependent
+credit interaction arm was not fitted. Bike's selected interactions worsened
+chronological test loss. These fixed-count, fixed-resolution controls do not
+establish useful discovery or adaptive basis selection.
+The [mixed-pair follow-up](research/2026-09-14-targeted-interaction-comparison.md)
+finds useful structure the first screen missed: two bike interactions reduce
+test Poisson deviance from 60.58 to 32.39 at 4.57 times the matching additive
+model's fit time. The six-variant bike search costs 14.04 additive fit times
+in model fitting alone. Ames rejects the tested mixed pair on validation.
+The [GBM structural controls](research/2026-09-14-gbm-interaction-comparison.md)
+show pairwise gains over their own additive class on all four datasets,
+with a small credit gain. These are exploratory results on previously
+inspected splits, not fresh confirmation or automatic-discovery results.
+The [external evidence review](research/2026-09-14-interaction-dataset-evidence.md)
+records prior examples, candidate hypotheses and differences in evaluation.
+The [named candidate bank](research/2026-09-14-known-interaction-candidates.md)
+adds eight explicit constructions across six datasets, including original
+Porto Seguro, Home Credit and IEEE competition code. Only one reviewed
+reference isolates a pair group's contribution; competition data for those
+three examples remain unavailable locally.
+
+The [fixed broad procedure](research/2026-09-14-broad-interaction-trials.md)
+uses training-only GBM proposals and validation-selected SuperGLM refits
+on twelve new real sources and a separate CASP decoy control. Ten real
+sources select interaction groups with lower test loss; two retain additive
+models. At most four pairs are fitted per arm. Selected real-data fits cost
+0.94–1.65 additive fit times, but complete search/evaluation workers cost
+764.94 seconds across the thirteen tables. All 26 test scores replay from
+saved arrays, with choices recorded before evaluation. Of 100 fits, 94
+converge, four reach the REML limit and two Concrete arms fail a data-Gram
+check; incomplete searches and all costs remain visible. This supplies
+local candidate groups for C9/C16/C21 research, not an optimal basis rule,
+a many-interaction scaling law, or an end-to-end speed guarantee.
+
+**2026-09-14 representation plan:** the
+[detailed research plan](research/2026-09-14-cheap-interaction-research-plan.md)
+now prioritizes measuring compressibility of known useful interaction groups,
+then fitting compact representations directly. Its
+[first pilot](research/2026-09-14-interaction-compressibility-pilot-plan.md)
+uses saved Gaussian models and performs no new fits. C21 is the main work;
+C16 local refinement is a branch selected by the observed approximation
+errors. C15/C18 follow only if coupled solves remain expensive after
+compression; bounded C9 discovery then includes representation selection and
+its full cost. The plan separates existing Lean identities from the new
+pullback, nested-optimum and numerical upper-bound contracts needed for a
+certified reduced fit. No compressibility result or new proof is yet claimed.
+
+The first existing-tensor performance step is implemented and measured in
+`306f12e0`: exact admission carries selected penalty support from optimizer to
+finalization, reducing the expensive tensor builds from two to one. The
+[complete-fit results](research/2026-09-13-tensor-support-handoff-performance.md)
+record median time reductions of 34.0% for `rows20` and 44.8% for `rows30`,
+with exact numerical replay and unchanged retained model payload. Small-case
+peak RSS is 2.4% higher; large-case RSS ranges overlap the baseline. Two
+observations per version on a shared host do not establish a general speedup
+or improved asymptotic scaling. The initial baseline remains archived.
+
+The [many-interaction probe](research/2026-09-13-many-interaction-probe.md)
+adds a 1–28 interaction ladder and an equal-total-coefficient comparison.
+At 28 small interactions, repeated cross-group Gram assembly dominates the
+profile; at one wide housing interaction, support construction dominates.
+Equal coefficient counts also give different fit costs as smoothing dimension
+and representation change. These observations do not establish a scaling law
+or a mathematical limit.
+
+The next unchanged-model performance gate is exact reuse of unchanged Gaussian
+tensor cross-products across coefficient-solver calls, with retained-memory accounting
+and unchanged centering/error evidence. Wide-term work separately investigates
+rank-only support construction and certified structured tensor rank. See the
+[cost analysis](research/2026-09-13-many-interaction-scaling-analysis.md) and
+[support analysis](research/2026-09-13-structured-tensor-support-analysis.md).
+These are implementation candidates, not completed optimizations.
+
+The small C16/C21 hierarchy prototype remains the local-refinement gate: nested
+transfer, product centering, penalty pullbacks, nullspaces and adjoints before
+adaptive fitting. C15/C18 must also address many coupled terms, including
+preconditioning, smoothing traces and requested uncertainty. The
+[Lean-checked operator identity](research/2026-09-13-interaction-operator-proof.md)
+preserves every cross-group contribution, but does not prove a solver's runtime
+or floating-point error. Bounded scalar discovery is active; general
+distributional C9 structure search still requires validated, affordable fits.
 
 **Selected on 2026-09-12: algorithm proof planning.** The
 [design](https://github.com/StrudelDoodleS/superglm/blob/master/docs/superpowers/specs/2026-09-12-algorithm-proofs-design.md) and
@@ -389,7 +513,8 @@ The reviewed row store and unfinished compiler are preserved locally on
 `deferred/c1-out-of-core` at `92f99dda`, outside PR #381's final code. No further
 analysis or implementation is active for this item.
 
-Beyond the selected proof work, the capability candidate priority order is:
+Beyond the selected adaptive-interaction research and proof work, the capability
+candidate priority order is:
 
 **1. Shape-constrained LSS (C5).** Close the explicit gap between scalar pricing
 constraints and distributional fits, starting with demanded monotone effects.
@@ -438,8 +563,9 @@ The reviewed additions organize computational research into three complementary
 directions: C1 reduces row-side basis-product work; C15/C18 target coefficient
 storage and iterative solves; C16/C21/C22 target representation efficiency, with
 C26 as a possible specialist solver. Composition is a research question, not an
-assumption that one backend should serve every size regime. These additions do
-not reorder the existing delivery queue or reopen the completed C3+C1 checkpoint.
+assumption that one backend should serve every size regime. The additions alone
+did not reorder the delivery queue. The explicit 2026-09-13 selection above now
+promotes bounded C15/C16/C18/C21 research and preserves the completed C3+C1 checkpoint.
 
 | Candidate | Idea | Reviewed readiness and promotion gate |
 | --- | --- | --- |

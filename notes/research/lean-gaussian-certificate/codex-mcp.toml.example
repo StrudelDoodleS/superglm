@@ -1,0 +1,19 @@
+# Template matching the installed project-local configurations on this machine.
+# Merge this table into the intended trusted project's .codex/config.toml;
+# preserve any existing configuration. Reconnect to load the tool server.
+[mcp_servers.lean_research]
+command = "/home/max/.local/bin/uvx"
+args = ["--from", "lean-lsp-mcp==0.30.0", "--with", "leanclient==0.13.2", "lean-lsp-mcp", "--transport", "stdio"]
+cwd = "/home/max/projects/superglm/.worktrees/adaptive-interactions/docs/research/lean-gaussian-certificate"
+enabled = true
+enabled_tools = ["lean_goal", "lean_diagnostic_messages", "lean_hover_info", "lean_local_search", "lean_multi_attempt"]
+startup_timeout_sec = 30
+tool_timeout_sec = 90
+
+[mcp_servers.lean_research.env]
+PATH = "/home/max/.elan/bin:/home/max/.local/bin:/usr/local/bin:/usr/bin:/bin"
+LEAN_PROJECT_PATH = "/home/max/projects/superglm/.worktrees/adaptive-interactions/docs/research/lean-gaussian-certificate"
+LEAN_MCP_INSTRUCTIONS = ""
+LEAN_REPL = "false"
+LEAN_LOOGLE_LOCAL = "false"
+LEAN_MCP_DISABLED_TOOLS = "lean_run_code,lean_verify,lean_minimal_hypotheses,lean_profile_proof,lean_build,lean_file_outline,lean_code_actions,lean_term_goal,lean_completions,lean_declaration_file,lean_references,lean_leansearch,lean_loogle,lean_leanfinder,lean_state_search,lean_hammer_premise,lean_get_widgets,lean_get_widget_source"

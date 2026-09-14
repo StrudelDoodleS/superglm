@@ -1,0 +1,6 @@
+import Mathlib
+
+-- Deliberately false: the cross term 2*a*b is missing.
+theorem square_sum_broken (a b : ℝ) :
+    (a + b) ^ 2 = a ^ 2 + b ^ 2 := by
+  ring
