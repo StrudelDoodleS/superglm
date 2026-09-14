@@ -24,13 +24,19 @@ sklearn-compatible API:
 """
 
 from superglm import families
-from superglm.constraints import MonotoneRepairer, MonotoneRepairResult
+from superglm.constraints import (
+    MonotoneRepairer as MonotoneRepairer,
+)
+from superglm.constraints import (
+    MonotoneRepairResult as MonotoneRepairResult,
+)
 from superglm.diagnostics.discretize import DiscretizationResult, discretization_impact
 from superglm.diagnostics.fit_report import FitDiagnosticReport
 from superglm.diagnostics.separation import SeparationError, SeparationWarning
 from superglm.diagnostics.spline_checks import SplineRedundancyReport
 from superglm.distributional.api import SuperLSS
-from superglm.distributional.binding import BoundPredictor, bind_predictor
+from superglm.distributional.binding import BoundPredictor as BoundPredictor
+from superglm.distributional.binding import bind_predictor
 from superglm.distributional.families.gamma import GammaLS
 from superglm.distributional.families.gaussian import GaussianLS
 from superglm.distributional.families.generalized_gamma import GeneralizedGammaLSS
@@ -46,17 +52,30 @@ from superglm.distributional.predictor import Predictor
 from superglm.distributions import Binomial, Gamma, Gaussian, NegativeBinomial, Poisson, Tweedie
 from superglm.export import RatingTableBaseNotRepresentableError, export_rating_tables
 from superglm.features.categorical import Categorical
-from superglm.features.constraint import Constraint, ConstraintSpec
+from superglm.features.constraint import Constraint
+from superglm.features.constraint import ConstraintSpec as ConstraintSpec
 from superglm.features.factor_smooth import FactorSmooth
 from superglm.features.grouping import LevelGrouping, collapse_levels
 from superglm.features.interaction import (
-    CategoricalInteraction,
-    NumericCategorical,
-    NumericInteraction,
-    PolynomialCategorical,
-    PolynomialInteraction,
-    SplineCategorical,
-    TensorInteraction,
+    CategoricalInteraction as CategoricalInteraction,
+)
+from superglm.features.interaction import (
+    NumericCategorical as NumericCategorical,
+)
+from superglm.features.interaction import (
+    NumericInteraction as NumericInteraction,
+)
+from superglm.features.interaction import (
+    PolynomialCategorical as PolynomialCategorical,
+)
+from superglm.features.interaction import (
+    PolynomialInteraction as PolynomialInteraction,
+)
+from superglm.features.interaction import (
+    SplineCategorical as SplineCategorical,
+)
+from superglm.features.interaction import (
+    TensorInteraction as TensorInteraction,
 )
 from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical
@@ -75,7 +94,18 @@ from superglm.inference.factor_smooths import FactorSmoothResult
 from superglm.inference.metrics import ModelMetrics
 from superglm.inference.random_effects import RandomEffectResult
 from superglm.inference.summary import ModelSummary
-from superglm.inference.term import InteractionInference, SmoothCurve, SplineMetadata, TermInference
+from superglm.inference.term import (
+    InteractionInference as InteractionInference,
+)
+from superglm.inference.term import (
+    SmoothCurve as SmoothCurve,
+)
+from superglm.inference.term import (
+    SplineMetadata as SplineMetadata,
+)
+from superglm.inference.term import (
+    TermInference,
+)
 from superglm.links import (
     CauchitLink,
     CloglogLink,
@@ -104,10 +134,18 @@ from superglm.penalties.sparse_group_lasso import SparseGroupLasso
 from superglm.plotting import plot_term_comparison
 from superglm.profiling.nb import NBProfileResult, NBThetaBoundWarning, estimate_nb_theta
 from superglm.profiling.tweedie import (
-    TweedieProfileCIDensityProvenance,
-    TweedieProfileCIDetails,
-    TweedieProfileCIEndpoint,
-    TweedieProfileCIEvaluation,
+    TweedieProfileCIDensityProvenance as TweedieProfileCIDensityProvenance,
+)
+from superglm.profiling.tweedie import (
+    TweedieProfileCIDetails as TweedieProfileCIDetails,
+)
+from superglm.profiling.tweedie import (
+    TweedieProfileCIEndpoint as TweedieProfileCIEndpoint,
+)
+from superglm.profiling.tweedie import (
+    TweedieProfileCIEvaluation as TweedieProfileCIEvaluation,
+)
+from superglm.profiling.tweedie import (
     TweedieProfileResult,
     estimate_phi,
     estimate_tweedie_p,
@@ -128,8 +166,22 @@ from superglm.stats.model_tests import (
     zero_inflation_index,
 )
 from superglm.stats.wood_pvalue import wood_test_smooth
-from superglm.terms import BoundInteraction, BoundTerm, cat, interaction, re, s, term, ti
-from superglm.types import LambdaPolicy, LinearConstraintSet
+from superglm.terms import (
+    BoundInteraction as BoundInteraction,
+)
+from superglm.terms import (
+    BoundTerm as BoundTerm,
+)
+from superglm.terms import (
+    cat,
+    interaction,
+    re,
+    s,
+    term,
+    ti,
+)
+from superglm.types import LambdaPolicy
+from superglm.types import LinearConstraintSet as LinearConstraintSet
 from superglm.validation import (
     DoubleLiftChartResult,
     LiftChartResult,
@@ -157,15 +209,18 @@ def warmup() -> None:
     _warmup_global_moments()
 
 
+# The root export list is the reviewed public surface and is pinned by
+# tests/test_public_api_snapshot.py: adding or removing a name here edits that
+# list in the same pull request. Objects the library builds on the user's
+# behalf (bound terms, auto-detected interaction types, constraint machinery,
+# term-inference parts, Tweedie profile records) are importable from their
+# modules and from this namespace but are not exports.
 __all__ = [
     "families",
     "warmup",
     "SuperGLM",
     "SuperLSS",
-    "BoundPredictor",
     "bind_predictor",
-    "BoundTerm",
-    "BoundInteraction",
     "term",
     "s",
     "cat",
@@ -219,7 +274,6 @@ __all__ = [
     "Categorical",
     "OrderedCategorical",
     "Constraint",
-    "ConstraintSpec",
     "FactorSmooth",
     "FactorSmoothResult",
     "RandomEffect",
@@ -228,13 +282,6 @@ __all__ = [
     "Numeric",
     "Piecewise",
     "Polynomial",
-    "SplineCategorical",
-    "PolynomialCategorical",
-    "NumericCategorical",
-    "CategoricalInteraction",
-    "NumericInteraction",
-    "PolynomialInteraction",
-    "TensorInteraction",
     "GroupElasticNet",
     "GroupLasso",
     "SparseGroupLasso",
@@ -246,13 +293,8 @@ __all__ = [
     "PriorWeightLatticeWarning",
     "REMLResult",
     "LambdaPolicy",
-    "LinearConstraintSet",
     "estimate_nb_theta",
     "estimate_tweedie_p",
-    "TweedieProfileCIDetails",
-    "TweedieProfileCIDensityProvenance",
-    "TweedieProfileCIEndpoint",
-    "TweedieProfileCIEvaluation",
     "TweedieProfileResult",
     "tweedie_logpdf",
     "estimate_phi",
@@ -262,11 +304,6 @@ __all__ = [
     "wood_test_smooth",
     "n_knots_from_k",
     "TermInference",
-    "SmoothCurve",
-    "InteractionInference",
-    "SplineMetadata",
-    "MonotoneRepairResult",
-    "MonotoneRepairer",
     "SeparationError",
     "SeparationWarning",
     "SplineRedundancyReport",
