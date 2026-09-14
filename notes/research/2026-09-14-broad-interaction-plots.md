@@ -51,11 +51,17 @@ The [receipt](figures/2026-09-14-broad-interactions/receipt.json) records input
 and output hashes, axis bounds, effect ranges and grid shapes. PNG and SVG
 figures, raw-axis/contribution NPZ grids and the combined PDF are retained
 in the same directory. NPZ contributions are in original outcome units,
-before the housing display divisor. Reproduce in the measured worktree:
+before the housing display divisor. Prepare the frozen source checkout and
+environment in the [replay instructions](2026-09-14-interaction-review-validation.md#replaying-a-historical-source-tree),
+then replay to a separate output directory:
 
 ```bash
 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  .venv/bin/python docs/research/plot_broad_interaction_surfaces.py
+  uv run --project .worktrees/interaction-frozen python docs/research/plot_broad_interaction_surfaces.py \
+  --source-root .worktrees/interaction-frozen \
+  --run-root /path/to/frozen-20260914 \
+  --data-root /path/to/interaction-datasets \
+  --output /tmp/replayed-interaction-surfaces
 ```
 
 The NPZ values reproduce exactly in this environment. Image/container bytes

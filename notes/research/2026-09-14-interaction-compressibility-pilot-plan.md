@@ -59,7 +59,7 @@ the frozen source references.
 ## Task 1. Freeze the three saved models and admit their coordinate maps
 
 **Existing sources to read:**
-`docs/research/plot_broad_interaction_surfaces.py:96`,
+`case_surfaces` in `docs/research/plot_broad_interaction_surfaces.py`,
 `src/superglm/features/interaction.py:1799`,
 `benchmarks/benchmark_broad_interactions.py:183`,
 `benchmarks/broad_interaction_data.py`, and the broad measurement JSON.

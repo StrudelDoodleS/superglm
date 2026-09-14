@@ -11,6 +11,9 @@ future reruns and verification. The frozen experiment results remain unchanged.
 - Parent-normalized timeout/error receipts are written back to disk. Partial
   worker evidence is retained; `parent_finished_utc` identifies a completion time
   recorded by the parent when the worker could not finish its own receipt.
+  If termination interrupts a JSON write, its original bytes are preserved in
+  a file named by stage and SHA-256, and the normalized record references that
+  file. Empty and truncated receipts no longer abort the parent suite.
 - Audits and plots compare all data, source-code, registry, preprocessing and
   split evidence while excluding only the two local location fields
   `source_path` and `source_registry`. Archived metadata and its original digest
@@ -18,11 +21,15 @@ future reruns and verification. The frozen experiment results remain unchanged.
 - `--source-root` selects both benchmark modules and the package source used
   for saved-model replay. Two fresh-process regressions demonstrate that a
   different installed checkout cannot silently supply the package instead.
-- The audit reconstructs the arm menu from the frozen protocol and admission
-  record, so dropping an arm from the suite cannot silently reduce attempt counts.
+- The audit reconstructs admission from the re-prepared state and proposed
+  pairs, then reconstructs the arm menu from that admission and the frozen
+  protocol. Dropping an arm or changing its recorded admission cannot silently
+  reduce attempt counts.
 - An unavailable matching additive baseline is recorded with null comparison
   and fit-ratio values and outcome `matching_additive_unavailable`. It cannot
-  support a claim of established interaction gain.
+  support a claim of established interaction gain. No selected model or no
+  converged additive comparator is an explicit refusal at the audit's scope
+  boundary.
 - The plotter handles odd pair counts and hides unused axes.
 - The audit, plotter and many-interaction benchmark refuse Python execution
   with assertions disabled. The many-interaction writer rejects nonfinite JSON
@@ -64,6 +71,7 @@ environment from the frozen source tree and point the current audit script at
 that tree, rather than substituting the corrected runner for the measured one:
 
 ```bash
+git fetch origin research/adaptive-interactions
 git worktree add --detach .worktrees/interaction-frozen 639f499e
 uv sync --project .worktrees/interaction-frozen --python 3.13 --extra dev
 uv run --project .worktrees/interaction-frozen python docs/research/check_broad_interaction_measurements.py \
@@ -72,6 +80,11 @@ uv run --project .worktrees/interaction-frozen python docs/research/check_broad_
   --data-root /path/to/interaction-datasets \
   --output /tmp/broad-replay.json
 ```
+
+The original commit is retained on the pushed `research/adaptive-interactions`
+branch: its head `18f21fa24ea7` is one commit after `639f499e`. The explicit fetch
+also makes the source available to a checkout that has fetched only its current
+PR branch or a shallow history.
 
 The raw archive and pinned source tables are required. The plotter takes the
 same roots and an output directory through `--output`; keep replay output

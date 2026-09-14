@@ -429,11 +429,25 @@ def launch(args, dataset, arm, stage, timeout):
     receipt.update(command=command, timeout_seconds=timeout)
     base.write_json(output / f"{stage}_process.json", receipt)
     path = output / ("evaluation.json" if stage == "evaluate" else "result.json")
-    record = (
-        json.loads(path.read_text())
-        if path.exists()
-        else {"status": "error", "error": "Worker produced no receipt"}
-    )
+    try:
+        record = (
+            json.loads(path.read_text())
+            if path.exists()
+            else {"status": "error", "error": "Worker produced no receipt"}
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        digest = gbm.file_hash(path)
+        incomplete = path.with_name(f"{stage}_incomplete_{digest}.bin")
+        path.rename(incomplete)
+        record = {
+            "status": "error",
+            "error": f"Worker produced an incomplete JSON receipt: {error}",
+            "incomplete_receipt": {
+                "path": incomplete.name,
+                "sha256": digest,
+                "bytes": incomplete.stat().st_size,
+            },
+        }
     if receipt["status"] == "timeout":
         record.update(status="timeout", warnings_complete=False)
     elif receipt["status"] != "success" and record["status"] not in (
@@ -501,7 +515,11 @@ def run_suite(args):
         case_root.mkdir()
         case_spent = 0.0
         if remaining_budget(args, spent, case_spent, "propose") <= 0:
-            suite["datasets"][dataset] = {"status": "budget_exhausted", "arms": {}}
+            suite["datasets"][dataset] = {
+                "status": "budget_exhausted",
+                "arms": {},
+                "search_worker_process_seconds": 0.0,
+            }
             continue
         proposal = launch(
             args,

@@ -55,6 +55,10 @@ def check_menu(protocol, admission, arms):
 
 
 def compare_selected_models(choice, summaries):
+    if choice["chosen_arm"] is None or choice["additive_arm"] is None:
+        raise ValueError(
+            "Audit scope requires a selected model and a converged additive comparator"
+        )
     winner, additive = (summaries[choice[key]] for key in ("chosen_arm", "additive_arm"))
     matching = (
         summaries[choice["matching_additive_arm"]]
@@ -146,7 +150,9 @@ def summarize(root, data_root=data.DEFAULT_ROOT):
     protocol = read_json(root / "protocol.json")
     suite = read_json(root / "suite.json")
     assert suite["protocol"] == protocol
-    assert broad.source_identity() == protocol["source"]
+    assert broad.source_identity() == protocol["source"], (
+        "Source differs from the frozen protocol; use --source-root and its recorded environment"
+    )
     protocol_hash = gbm.file_hash(root / "protocol.json")
     receipt_index = {}
 
@@ -170,6 +176,11 @@ def summarize(root, data_root=data.DEFAULT_ROOT):
         assert proposal["status"] == "proposed"
         assert data_identity(proposal["data"]) == data_identity(prepared["metadata"])
         assert proposal["data_identity_sha256"] == base.digest_json(proposal["data"])
+        if (
+            broad.admit_pairs(prepared["state"], proposal["proposal"]["pairs"])
+            != proposal["admission"]
+        ):
+            raise ValueError("Recorded admission differs from re-prepared state and proposed pairs")
         declared_arm_count += check_menu(protocol, proposal["admission"], case["arms"])
         proposal_hash = index(case_root / "proposals" / "result.json")
         choice = read_json(case_root / "choice.json")

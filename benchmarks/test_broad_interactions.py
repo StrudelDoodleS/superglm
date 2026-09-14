@@ -163,6 +163,7 @@ def test_suite_retains_all_attempt_costs_without_test_evaluation(tmp_path, monke
     for dataset, cost in attempts:
         expected_cost[dataset] += cost
     for dataset, case in suite["datasets"].items():
+        assert case["search_worker_process_seconds"] == expected_cost[dataset]
         assert case["evaluation_worker_process_seconds"] == 0.0
         assert case["all_worker_process_seconds"] == expected_cost[dataset]
     assert suite["all_worker_process_seconds"] == sum(expected_cost.values())
@@ -191,6 +192,31 @@ def test_launch_persists_parent_normalized_incomplete_receipts(
     assert raw["warnings_complete"] is False
     assert raw["partial_evidence"] == "retained"
     assert raw["parent_finished_utc"]
+
+
+@pytest.mark.parametrize("process_status", ["timeout", "error"])
+@pytest.mark.parametrize("partial", [b"", b'{"status": "fitting"'])
+def test_launch_preserves_malformed_receipt_bytes_and_records_failure(
+    tmp_path, monkeypatch, process_status, partial
+):
+    args = SimpleNamespace(output=tmp_path, data_root=tmp_path)
+    folder = tmp_path / "uci_airfoil" / "k4_s0"
+
+    def isolated(*args, **kwargs):
+        (folder / "result.json").write_bytes(partial)
+        return {"status": process_status, "process_seconds": 2.0}
+
+    monkeypatch.setattr(broad, "run_isolated", isolated)
+    record = broad.launch(args, "uci_airfoil", "k4_s0", "fit", 2.0)
+    assert record["status"] == process_status
+    assert record["warnings_complete"] is False
+    original = folder / record["incomplete_receipt"]["path"]
+    assert original.read_bytes() == partial
+    assert broad.gbm.file_hash(original) == record["incomplete_receipt"]["sha256"]
+    assert record["incomplete_receipt"]["bytes"] == len(partial)
+    assert json.loads((folder / "result.json").read_text()) == {
+        key: value for key, value in record.items() if key != "process"
+    }
 
 
 def test_zero_smoothing_model_uses_coefficient_convergence_without_fictitious_reml():
