@@ -128,13 +128,19 @@ logs are retained and excluded from fit statistics.
 rebuilds the receipt from `.benchmark-artifacts/cheap-interactions/`. It verifies
 common production/input hashes and exact repeated coefficients, predictions,
 non-timing telemetry and retained owner payload for all twelve paired cases.
+The current collector also requires matching recorded runtimes for the
+repetitions and additive comparisons, and matching resolved direct backends
+within each repetition pair. See the [pre-merge validation record](
+2026-09-14-interaction-review-validation.md#pre-merge-review-and-portable-timing-evidence)
+for the portability corrections and replay against the original receipts.
 Raw commands, source/runner hashes, losses, convergence, dispatch, memory and
 artifact hashes remain available in the receipt. Different runner hashes
 distinguish the original matched ladder and optional-k control. Exact local
 repeatability is not a portable floating-point tolerance.
 
-An independent reconstruction matches the complete receipt exactly and verifies
-all 100 raw artifact hashes. The current production fingerprint matches every
-measured fit. The benchmark runner and collector pass focused Ruff and format checks.
+At the measured checkpoint, an independent reconstruction matched the complete
+receipt exactly and verified all 100 raw artifact hashes. That checkpoint's
+production fingerprint matched every measured fit. The benchmark runner and
+collector passed focused Ruff and format checks.
 The production source and dependencies are unchanged. No full production test
 rerun is claimed for this research-only change.

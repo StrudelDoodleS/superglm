@@ -29,6 +29,35 @@ def without_times(value):
     return value
 
 
+def runtime_identity(result, case):
+    runtime = result.get("runtime")
+    if not isinstance(runtime, dict) or any(
+        not isinstance(runtime.get(field), str) or not runtime[field]
+        for field in ("python", "platform")
+    ):
+        raise ValueError(f"Incomplete runtime identity: {case}")
+    packages = runtime.get("packages")
+    if not isinstance(packages, dict) or any(
+        not isinstance(packages.get(name), str) or not packages[name]
+        for name in ("superglm", "numpy", "scipy", "pandas", "numba", "threadpoolctl")
+    ):
+        raise ValueError(f"Incomplete runtime package identity: {case}")
+    pools = runtime.get("threadpools")
+    if not isinstance(pools, list):
+        raise ValueError(f"Incomplete runtime thread-pool identity: {case}")
+    if any(
+        not isinstance(pool, dict)
+        or type(pool.get("num_threads")) is not int
+        or pool["num_threads"] != 1
+        for pool in pools
+    ):
+        raise ValueError(f"Every observed numerical thread pool must use one thread: {case}")
+    backend = result.get("resolved_direct_backend")
+    if not isinstance(backend, str) or not backend:
+        raise ValueError(f"Missing resolved direct backend identity: {case}")
+    return runtime
+
+
 def collect(base):
     records = []
     groups = {}
@@ -51,6 +80,7 @@ def collect(base):
     if not records:
         raise ValueError(f"No worker receipts in {base}")
     summaries = {}
+    experiment_runtime = None
     for key, pair in sorted(groups.items()):
         if len(pair) != 2:
             raise ValueError(f"Expected two repetitions for {key}, found {len(pair)}")
@@ -61,6 +91,15 @@ def collect(base):
         ):
             raise ValueError(f"Timing summaries require explicitly unprofiled repetitions: {key}")
         left, right = [item["result"] for item in pair]
+        left_runtime, right_runtime = [runtime_identity(item, key) for item in (left, right)]
+        if left_runtime != right_runtime:
+            raise ValueError(f"Runtime identity changed between repetitions: {key}")
+        if experiment_runtime is None:
+            experiment_runtime = left_runtime
+        elif left_runtime != experiment_runtime:
+            raise ValueError(f"Runtime identity changed across additive comparison cases: {key}")
+        if left["resolved_direct_backend"] != right["resolved_direct_backend"]:
+            raise ValueError(f"Resolved direct backend changed between repetitions: {key}")
         if without_times(left["telemetry"]) != without_times(right["telemetry"]):
             raise ValueError(f"Numerical telemetry changed between repetitions: {key}")
         if left["retained_model_storage"] != right["retained_model_storage"]:

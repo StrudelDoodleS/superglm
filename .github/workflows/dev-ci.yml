@@ -29,14 +29,18 @@ jobs:
           uv run --no-sync ruff check benchmarks/psst_*.py benchmarks/test_psst_*.py benchmarks/benchmark_housing_tensor.py benchmarks/test_housing_tensor.py
           uv run --no-sync ruff format --check benchmarks/psst_*.py benchmarks/test_psst_*.py benchmarks/benchmark_housing_tensor.py benchmarks/test_housing_tensor.py
 
-      - name: Test study contracts and native booster adapters
+      - name: Test study, interaction and native booster contracts
         env:
           OPENBLAS_NUM_THREADS: "1"
           OMP_NUM_THREADS: "1"
           NUMBA_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          VECLIB_MAXIMUM_THREADS: "1"
+          BLIS_NUM_THREADS: "1"
         run: >-
           uv run --no-sync pytest benchmarks/test_psst_*.py
-          benchmarks/test_housing_tensor.py -q
+          benchmarks/test_housing_tensor.py benchmarks/test_*interaction*.py
+          benchmarks/test_broad_partial_audit.py -q
 
   type-check:
     # The exact backlog is not yet cleared, but increases are blocking.

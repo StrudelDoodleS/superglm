@@ -1,10 +1,11 @@
-"""Check receipt refusal paths without starting a fit worker."""
+"""Check receipt refusals, portable resource units and single-threaded workers."""
 
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import benchmark_many_interactions as benchmark
 import pytest
@@ -67,3 +68,55 @@ def test_run_receipt_preserves_finite_metrics(run_receipt, capsys):
     assert receipt["status"] == "success"
     assert Path(receipt["command"][1]) == Path(benchmark.__file__).resolve()
     assert json.loads(capsys.readouterr().out) == receipt
+
+
+@pytest.fixture
+def worker_args(tmp_path):
+    return SimpleNamespace(
+        rows=128,
+        interactions=0,
+        k=4,
+        interaction_k=None,
+        mode="fixed",
+        profile=False,
+        output=tmp_path,
+    )
+
+
+@pytest.mark.parametrize("platform,maximum_rss", [("linux", 102400), ("darwin", 104857600)])
+def test_worker_reports_peak_rss_in_mib(worker_args, monkeypatch, platform, maximum_rss):
+    monkeypatch.setattr(benchmark, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(
+        benchmark,
+        "resource",
+        SimpleNamespace(
+            RUSAGE_SELF=0, getrusage=lambda who: SimpleNamespace(ru_maxrss=maximum_rss)
+        ),
+    )
+    benchmark.worker(worker_args)
+    result = json.loads((worker_args.output / "result.json").read_text())
+    assert result["fit_end_peak_process_rss_mib"] == 100.0
+
+
+@pytest.mark.parametrize("variable", ["VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS"])
+def test_launcher_overrides_inherited_backend_thread_counts(tmp_path, monkeypatch, variable):
+    monkeypatch.setenv(variable, "8")
+    monkeypatch.setattr(sys, "argv", [benchmark.__file__, "--output", str(tmp_path / "receipt")])
+    observed = {}
+
+    def isolated(*args, env, **kwargs):
+        observed.update(env)
+        return {"status": "success", "process_seconds": 0.125}
+
+    monkeypatch.setattr(benchmark, "run_isolated", isolated)
+    assert benchmark.main() == 0
+    assert observed[variable] == "1"
+
+
+def test_worker_refuses_an_observed_multithreaded_pool(worker_args, monkeypatch):
+    import threadpoolctl
+
+    monkeypatch.setattr(threadpoolctl, "threadpool_info", lambda: [{"num_threads": 8}])
+    with pytest.raises(ValueError, match="thread pool"):
+        benchmark.worker(worker_args)
+    assert not (worker_args.output / "result.json").exists()

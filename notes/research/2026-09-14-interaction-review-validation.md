@@ -195,3 +195,51 @@ matches its complete archived object except the two explicitly current tool
 hash fields, `collector_sha256` and `current_runner_sha256`. These replays fit
 and select no models. All historical JSON, Lean sources and figure bytes are
 preserved; the corpus registry again matches its pinned digest.
+
+## Pre-merge review and portable timing evidence
+
+After #399 merged, #400 was rebased onto master `8218f54e`. All nine research
+patches and the complete tree at `d770fb15` matched reviewed head `ed040680`.
+The automatic Codex review triggered by marking #400 ready found four more
+issues in the research tools and their CI coverage.
+
+- The many-interaction worker now converts macOS `ru_maxrss` bytes to MiB;
+  Linux retains the KiB conversion. A regression exercises the complete
+  receipt-producing worker with equivalent 100 MiB resource observations on
+  both platforms. The unfixed macOS path reported 102400 MiB.
+- The launcher overrides inherited Accelerate and BLIS thread limits, alongside
+  OpenBLAS, OpenMP, MKL and Numba. A completed worker refuses to write a result
+  if any observed numerical pool uses more than one thread. Tests cover
+  inherited eight-thread settings and an observed eight-thread pool.
+- The timing collector requires recorded Python, platform, package and
+  thread-pool identity. Both repetitions and their additive comparison cases
+  must have identical recorded runtimes, and every observed pool must use one
+  thread. Resolved direct backends must agree within each repetition pair;
+  different model sizes can still dispatch to different backends. Missing
+  identity evidence is an explicit refusal, including when both repetitions
+  omit the same field. This compares recorded evidence; it does not identify
+  hardware or thread pools absent from the original receipt.
+- The benchmark CI command now includes all twelve newly added research test
+  modules, including `test_broad_partial_audit.py`, alongside the existing
+  PSST and housing suites. These tests previously ran only in local validation.
+
+Before the corrections, the two focused modules had 17 failures and 20 passes.
+Afterward all 37 focused cases pass. The expanded CI command passes all 313
+tests locally in 12.49 seconds on Python 3.13.14 with the workflow's pinned
+XGBoost, CatBoost and LightGBM packages. The command is:
+
+```bash
+NUMBA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 BLIS_NUM_THREADS=1 \
+uv run --no-sync pytest benchmarks/test_psst_*.py \
+  benchmarks/test_housing_tensor.py benchmarks/test_*interaction*.py \
+  benchmarks/test_broad_partial_audit.py -q
+```
+
+The 24 completed archived fits all ran on Linux with identical recorded
+runtimes and one thread in every observed pool. Replaying their collector
+preserves the complete 26-worker archive object and all twelve timing/memory
+summaries, except the explicitly current `collector_sha256` and
+`current_runner_sha256` fields. Historical runner hashes, raw receipts and
+measured values remain untouched. The new worker's platform tests simulate
+resource observations on Linux; no native macOS run is claimed.
