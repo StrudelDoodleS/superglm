@@ -164,7 +164,8 @@ retains the identities and compressed exclusion positions in this tracked file.
 All position ranges there are zero-based and inclusive. Repeating preparation
 from the pinned bytes and registry reproduces the retained row and state hashes.
 
-The frozen adapter source SHA256 is
+These are the measured source and registry hashes from preparation, preserved
+in source checkpoint `639f499e`. The frozen adapter source SHA256 is
 `6bde2ec96fb97ecc888aa3dd4e7c1d9a22eafbe694864a17fa83984abe1eacba`.
 The reused source-loader SHA256 is
 `c28aa62c9a154405fd901c3c1898dd0c899742f17a202da6b2c46aa82cabf3d0`;
@@ -174,6 +175,11 @@ The core registry SHA256 is
 `8ad0bbac4dbdf0580d15a6bafa50d7147c48ddeb654e75642f60ab944c8bcbb3`;
 the Kaggle registry SHA256 is
 `59ecbd64ac86813866e027b1ec7769a0775232d6b2ddc28cd1dacb33e3eab2ac`.
+Later PR-review corrections changed receipt handling in
+`benchmarks/benchmark_real_interactions.py`, so its current module hash differs
+from the measured value above. The adapter and source-loader files are unchanged.
+Replay uses the [frozen source and environment](2026-09-14-interaction-review-validation.md#replaying-a-historical-source-tree),
+not the corrected launcher module in place of its measured version.
 Preparation used Python 3.13.14, NumPy 2.5.2, pandas 3.0.5 and scikit-learn 1.9.0.
 No environment or dependency files were changed.
 
