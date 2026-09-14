@@ -689,7 +689,7 @@ def estimate_nb_theta(
          → update theta by a bracketed root find on the closed-form profile
          score (Lawless 1987), started from a method-of-moments estimate on
          the first pass and warm-started thereafter.
-      3. Converge when |theta_new - theta_old| < xatol (~3-5 iterations).
+      3. Converge when ``|theta_new - theta_old|`` < xatol (~3-5 iterations).
 
     Parameters
     ----------

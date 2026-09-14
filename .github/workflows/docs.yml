@@ -5,41 +5,72 @@ on:
     branches: [master]
     paths:
       - "docs/**"
-      - "mkdocs.yml"
       - "src/**"
       - "README.md"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/docs.yml"
+  workflow_dispatch:
 
 concurrency:
   group: docs-deploy
-  cancel-in-progress: true
+  # Never cancel an in-flight production deploy; queued runs still serialise.
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
+  build:
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
 
-      - run: uv python install 3.12
+      - run: uv python install 3.14
 
       - name: Install docs dependencies
-        run: uv sync --group docs --extra plotting
+        run: uv sync --locked --python 3.14 --group docs --extra plotting
 
-      # Notebooks are pre-executed with outputs committed.
-      # No nbconvert --execute step needed in CI.
+      - name: Cache OpenML downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/scikit_learn_data
+          key: openml-mtpl2-v1
 
-      - name: Build and deploy
-        run: uv run mkdocs gh-deploy --force
+      - name: Cache executed notebooks
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: docs/_build/.jupyter_cache
+          # The key carries every input that shapes an executed output: the
+          # pages, the library source and lockfile, and the plot style the
+          # pages load at run time. A cached render is only valid for the
+          # build that produced it, so a change to any of them re-executes.
+          key: docs-notebooks-${{ hashFiles('docs/tutorials/**', 'docs/explanation/**', 'docs/api/**', 'docs/_static/superglm.mplstyle', 'src/**', 'uv.lock') }}
 
-      # NOTE: After the first deploy, enable GitHub Pages in repo settings:
-      # Settings > Pages > Source: Deploy from a branch > Branch: gh-pages
+      - name: Build with execution
+        env:
+          SUPERGLM_DOCS_EXECUTE: cache
+        run: uv run sphinx-build -b html -n -W --keep-going -d docs/_build/doctrees docs docs/_build/html
+
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
+        with:
+          path: docs/_build/html
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346

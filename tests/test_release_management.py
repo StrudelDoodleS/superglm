@@ -249,7 +249,7 @@ def test_pull_request_template_records_impact_as_advice() -> None:
 
 def test_release_documentation_explains_release_bearing_invocations() -> None:
     documentation = (ROOT / "docs/development/releases.md").read_text(encoding="utf-8")
-    mkdocs = (ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+    development_toctree = (ROOT / "docs/development/index.md").read_text(encoding="utf-8")
 
     assert ".codex/agents/release_manager.toml" in documentation
     assert "assess the unreleased changes" in documentation
@@ -259,4 +259,4 @@ def test_release_documentation_explains_release_bearing_invocations() -> None:
     assert "one deliberate act" in documentation
     assert "never minting phantom versions" in documentation
     assert "Trusted Publishing" in documentation
-    assert "development/releases.md" in mkdocs
+    assert "releases" in development_toctree

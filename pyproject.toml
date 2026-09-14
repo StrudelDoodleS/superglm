@@ -105,7 +105,7 @@ only-include = [
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
-extend-exclude = ["docs/notebooks"]
+extend-exclude = ["docs/examples"]
 
 [tool.ruff.lint]
 select = [
@@ -135,6 +135,7 @@ norecursedirs = ["scratch"]
 markers = [
     "browser: runs real-browser editor integration tests",
     "slow: marks tests that fit real models (deselect with '-m \"not slow\"')",
+    "docs: executes documentation notebooks (deselect with '-m \"not docs\"')",
 ]
 filterwarnings = [
     "ignore:Spline\\(kind='bs'\\):FutureWarning",
@@ -158,10 +159,29 @@ include = ["src/superglm"]
 
 [dependency-groups]
 docs = [
-    "mkdocs-material>=9.7.5",
-    "mkdocstrings[python]>=1.0.3",
-    "mkdocs-jupyter>=0.25.0",
-    "nbconvert>=7.0",
-    "nbformat>=5.0",
+    "sphinx>=9.1,<10",
+    "pydata-sphinx-theme>=0.21",
+    "myst-nb>=1.4",
+    "numpydoc>=1.10",
+    "sphinx-design>=0.7",
+    "sphinx-copybutton>=0.5",
+    "sphinxext-rediraffe>=0.3",
+    "jupytext>=1.19",
+    "nbstripout>=0.9",
     "ipykernel>=6.0",
+]
+
+# ── numpydoc docstring validation (pre-commit) ──────────────────
+[tool.numpydoc_validation]
+checks = ["GL08"]
+# The hook names objects `<module stem>.<qualname>`, so the patterns below
+# match on that shape rather than on a dotted import path.
+exclude = [
+    '^_',                       # private modules
+    '\._',                      # private members and dunders
+    '^[^.]+\.[^.]+\.',          # methods and nested functions: the hook reads
+                                # the file with ast, so it cannot see a
+                                # docstring inherited from a base class or a
+                                # Protocol, which is where the method
+                                # documentation of this package lives
 ]

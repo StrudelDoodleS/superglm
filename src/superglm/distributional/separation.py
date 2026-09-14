@@ -33,6 +33,8 @@ SEPARATION_POLICIES: tuple[str, ...] = ("warn", "error", "ignore")
 
 
 def validate_separation_policy(value: object) -> SeparationPolicy:
+    """Return ``value`` unchanged when it names a supported separation policy."""
+
     if value not in SEPARATION_POLICIES:
         raise ValueError(f"separation must be one of {SEPARATION_POLICIES}; got {value!r}")
     return cast(SeparationPolicy, value)

@@ -43,5 +43,5 @@ historical replay requires the historical controller from repository history.
 New runs use the updated external-process categories. The summary does not
 approve timing claims automatically. See the
 [independent receipt](../c3_pragmatic_performance_receipt.json) and
-[evidence report](../../docs/research/2026-09-pragmatic-convergence.md) for the
+[evidence report](../../notes/research/2026-09-pragmatic-convergence.md) for the
 qualified local assessment, numerical comparisons and measurement limitations.

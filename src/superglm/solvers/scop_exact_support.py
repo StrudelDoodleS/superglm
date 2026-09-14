@@ -1,3 +1,5 @@
+"""Exact de-duplicated support for a shape-constrained (SCOP) design."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +10,8 @@ from numpy.typing import NDArray
 
 @dataclass
 class ExactSCOPSupport:
+    """Unique SCOP design rows, and the map from each original row to them."""
+
     B_unique: NDArray
     row_to_support: NDArray
 
@@ -24,6 +28,8 @@ class ExactSCOPSupport:
 
 
 def build_exact_scop_support(B_scop: NDArray) -> ExactSCOPSupport | None:
+    """Return the de-duplicated SCOP support, or ``None`` when rows are unique."""
+
     B = np.asarray(B_scop, dtype=np.float64)
     B_unique, row_to_support = np.unique(B, axis=0, return_inverse=True)
     if B_unique.shape[0] == B.shape[0]:

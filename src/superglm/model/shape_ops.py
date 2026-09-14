@@ -796,6 +796,8 @@ def _refresh_repaired_scale_and_statistics(model) -> None:
 
 
 def apply_shape_postfit(model, X, sample_weight=None, offset=None, *, n_grid: int = 500):
+    """Repair the shapes of a fitted model's smooths after the fit."""
+
     if model._result is None:
         raise RuntimeError("Model must be fitted before calling apply_shape_postfit().")
     if not getattr(model, "_retain_fit_state", True):

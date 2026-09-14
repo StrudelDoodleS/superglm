@@ -1,0 +1,30 @@
+# superglm documentation figure style. Palette from spec §9.
+figure.facecolor: white
+figure.dpi: 130
+figure.figsize: 8.0, 4.0
+savefig.dpi: 160
+savefig.bbox: tight
+axes.facecolor: white
+axes.edgecolor: 6B7280
+axes.linewidth: 0.8
+axes.grid: True
+axes.grid.axis: y
+grid.color: E5E3DC
+grid.linewidth: 0.6
+axes.spines.top: False
+axes.spines.right: False
+axes.titlesize: 12
+axes.titleweight: bold
+axes.titlelocation: left
+axes.labelsize: 10
+axes.labelcolor: 3A3F4A
+axes.prop_cycle: cycler('color', ['15171C', 'D6402B', 'F4B942', '6B7280', '2E5AAC'])
+xtick.color: 6B7280
+ytick.color: 6B7280
+xtick.labelsize: 9
+ytick.labelsize: 9
+legend.frameon: False
+legend.fontsize: 9
+lines.linewidth: 2.0
+font.family: sans-serif
+font.sans-serif: Source Sans 3, DejaVu Sans, Arial, sans-serif

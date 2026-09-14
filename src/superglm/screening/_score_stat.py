@@ -281,7 +281,8 @@ absent information.
 
 **REPRODUCIBILITY, WHICH IS WHAT ACTUALLY REACHED A USER.**  On the guide's
 published twelve-row ``freMTPL2freq`` screen -- an 80,000-row sample under
-``weight_semantics="frequency"``, the specification ``docs/guide/screening.md``
+``weight_semantics="frequency"``, the specification
+``docs/how-to/screen-interactions.md``
 prints and ``tests/fixtures/screening_guide_fremtpl.json`` pins, ``phi``
 4.821136 -- one thread against eight with all six pools pinned together::
 

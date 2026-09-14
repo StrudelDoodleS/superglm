@@ -118,6 +118,8 @@ def _as_positive_vector(values: object, *, name: str) -> NDArray[np.float64]:
 
 @dataclass(frozen=True)
 class GammaKernelEvaluation:
+    """Row-wise Gamma likelihood, score and packed Hessian from one evaluation."""
+
     optimizing_log_likelihood: NDArray[np.float64]
     score: NDArray[np.float64] | None
     hessian_packed: NDArray[np.float64] | None
@@ -832,6 +834,8 @@ def evaluate_gamma_rows(
     *,
     derivative_order: int,
 ) -> GammaKernelEvaluation:
+    """Evaluate the Gamma log-likelihood and its derivatives row by row."""
+
     response_values = _as_positive_vector(response, name="response")
     mean_values = _as_positive_vector(mean, name="mean")
     scale_values = _as_positive_vector(scale, name="scale")
@@ -890,6 +894,8 @@ def gamma_expected_information(
     weights: NDArray,
     semantics: WeightSemantics,
 ) -> NDArray[np.float64]:
+    """Return the row-wise expected information of the Gamma kernel."""
+
     mean_values = _as_positive_vector(mean, name="mean")
     scale_values = _as_positive_vector(scale, name="scale")
     weight_semantics = validated_semantics(semantics)
@@ -1063,6 +1069,8 @@ def initialize_gamma(
     weights: NDArray,
     semantics: WeightSemantics,
 ) -> NDArray[np.float64]:
+    """Return starting mean and scale values for a Gamma fit."""
+
     response_values = _as_positive_vector(response, name="response")
     weight_semantics = validated_semantics(semantics)
     weight_values = positive_weights(_as_positive_vector(weights, name="weights"), weight_semantics)
@@ -1156,6 +1164,8 @@ def gamma_predictor_curvature_directional(
     weights: NDArray,
     semantics: WeightSemantics,
 ) -> NDArray[np.float64]:
+    """Return the directional curvature of the Gamma predictor."""
+
     response_values = _as_positive_vector(response, name="response")
     weight_semantics = validated_semantics(semantics)
     weight_values = positive_weights(_as_positive_vector(weights, name="weights"), weight_semantics)

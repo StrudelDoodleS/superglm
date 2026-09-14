@@ -12,7 +12,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _notebook_source() -> str:
-    notebook = json.loads((_ROOT / "docs/notebooks/tweedie_profile_estimation.ipynb").read_text())
+    notebook = json.loads((_ROOT / "docs/examples/tweedie_profile_estimation.ipynb").read_text())
     return "\n".join(
         "".join(cell.get("source", []))
         for cell in notebook["cells"]
@@ -21,12 +21,12 @@ def _notebook_source() -> str:
 
 
 def _notebook_all_source() -> str:
-    notebook = json.loads((_ROOT / "docs/notebooks/tweedie_profile_estimation.ipynb").read_text())
+    notebook = json.loads((_ROOT / "docs/examples/tweedie_profile_estimation.ipynb").read_text())
     return "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
 
 
 def test_tweedie_notebook_first_code_cell_executes_supported_public_imports():
-    path = _ROOT / "docs/notebooks/tweedie_profile_estimation.ipynb"
+    path = _ROOT / "docs/examples/tweedie_profile_estimation.ipynb"
     notebook = json.loads(path.read_text())
     first_code_cell = next(cell for cell in notebook["cells"] if cell.get("cell_type") == "code")
     source = "".join(first_code_cell.get("source", []))
@@ -45,7 +45,7 @@ def test_tweedie_notebook_first_code_cell_executes_supported_public_imports():
 
 
 def test_tweedie_family_guide_documents_current_profile_contract():
-    guide = (_ROOT / "docs/guide/families.md").read_text()
+    guide = (_ROOT / "docs/explanation/families-and-weights.md").read_text()
     tweedie = guide.split("## Tweedie: estimating the power parameter", maxsplit=1)[1]
 
     assert "per-exposure response" in tweedie
@@ -74,7 +74,7 @@ def test_binomial_family_guide_block_executes_a_real_fit() -> None:
 
     from superglm import Numeric
 
-    guide = (_ROOT / "docs/guide/families.md").read_text()
+    guide = (_ROOT / "docs/explanation/families-and-weights.md").read_text()
     section = guide.split("## Binomial (binary classification)", maxsplit=1)[1]
     block = section.split("```python", maxsplit=1)[1].split("```", maxsplit=1)[0]
     frame = pd.DataFrame({"age": np.linspace(18.0, 80.0, 80)})
@@ -85,7 +85,7 @@ def test_binomial_family_guide_block_executes_a_real_fit() -> None:
         "y": response,
     }
 
-    exec(compile(block, "docs/guide/families.md#binomial", "exec"), namespace)
+    exec(compile(block, "docs/explanation/families-and-weights.md#binomial", "exec"), namespace)
 
     probabilities = namespace["probabilities"]
     assert probabilities.shape == response.shape
@@ -112,13 +112,13 @@ def test_tweedie_notebook_removes_stale_pearson_default_claims():
 
 
 def test_selection_penalty_docs_make_calibration_explicit():
-    readme = (_ROOT / "README.md").read_text()
-    fitting = (_ROOT / "docs/guide/fitting.md").read_text()
+    # The README is a front door now and carries no fitting options; the
+    # calibration contract lives on the fitting how-to alone.
+    fitting = (_ROOT / "docs/how-to/choose-a-fitting-path.md").read_text()
 
-    for document in (readme, fitting):
-        assert 'SuperGLM(selection_penalty="auto")' in document
-        assert "`None` and `0.0` disable sparse selection" in document
-        assert "REML accepts only `None` or `0.0`" in document
+    assert 'SuperGLM(selection_penalty="auto")' in fitting
+    assert "`None` and `0.0` disable sparse selection" in fitting
+    assert "REML accepts only `None` or `0.0`" in fitting
 
 
 def test_tweedie_profile_api_docstrings_use_prior_weight_convention():
@@ -167,8 +167,8 @@ def test_plotting_docstrings_use_declared_contract_language() -> None:
 
 
 def test_screening_guides_declare_the_weight_contract_they_measured_under() -> None:
-    guide = (_ROOT / "docs/guide/screening.md").read_text()
-    evaluation = (_ROOT / "docs/guide/screening-evaluation.md").read_text()
+    guide = (_ROOT / "docs/how-to/screen-interactions.md").read_text()
+    evaluation = (_ROOT / "docs/explanation/what-screening-does.md").read_text()
     normalized_guide = " ".join(guide.split())
 
     assert "`sum(sample_weight) - edf`" in normalized_guide
@@ -185,9 +185,11 @@ def test_screening_guides_declare_the_weight_contract_they_measured_under() -> N
 
 
 def test_validation_and_diagnostic_guides_follow_the_declared_weight_contract() -> None:
-    workflows = " ".join((_ROOT / "docs/guide/workflows.md").read_text().split())
-    results = " ".join((_ROOT / "docs/guide/results.md").read_text().split())
-    validation = " ".join((_ROOT / "docs/guide/validation.md").read_text().split())
+    workflows = " ".join((_ROOT / "docs/how-to/recommended-workflows.md").read_text().split())
+    results = " ".join(
+        (_ROOT / "docs/how-to/read-a-summary-and-plot-effects.md").read_text().split()
+    )
+    validation = " ".join((_ROOT / "docs/how-to/compare-models-on-holdout.md").read_text().split())
 
     assert "`sum(sample_weight)`" in workflows
     assert "`sum(sample_weight) - edf`" in results
@@ -211,7 +213,7 @@ def test_validation_and_diagnostic_guides_follow_the_declared_weight_contract() 
 
 
 def test_monotone_guide_scopes_fit_curvature_to_cubic_or_lower_degree() -> None:
-    guide = (_ROOT / "docs/guide/monotone.md").read_text()
+    guide = (_ROOT / "docs/how-to/constrain-a-smooth.md").read_text()
     normalized = " ".join(guide.split())
 
     assert "convex/concave only when `degree <= 3`" in normalized
@@ -223,7 +225,7 @@ def test_monotone_guide_scopes_fit_curvature_to_cubic_or_lower_degree() -> None:
 
 
 def test_quickstart_scopes_frequency_weight_guidance_to_poisson():
-    quickstart = (_ROOT / "docs/getting-started/quickstart.md").read_text()
+    quickstart = (_ROOT / "docs/get-started/quickstart.md").read_text()
     weights = " ".join(quickstart.split("## Weights And Offsets", maxsplit=1)[1].split())
 
     assert "For the Poisson frequency examples on this page" in weights

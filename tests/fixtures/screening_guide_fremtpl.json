@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Measured sweep behind the worked example in docs/guide/screening.md.",
+    "Measured sweep behind the worked example in docs/how-to/screen-interactions.md.",
     "Regenerate with tests/test_screening_guide_numbers.py::",
     "test_screening_guide_fixture_matches_the_real_book, which recomputes every",
     "value here from data/freMTPL2freq.parquet and fails on any drift.",

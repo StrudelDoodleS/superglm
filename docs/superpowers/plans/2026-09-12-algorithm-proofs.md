@@ -41,7 +41,7 @@ true. Each task ends in a separately reviewable document or counterexample.
 Derivations may require sustained work; they are not timed implementation steps.
 Do not create empty proof files or an unimplemented certification API.
 
-| Task | Output under `docs/research/proofs/` | Dependency |
+| Task | Output under `notes/research/proofs/` | Dependency |
 | --- | --- | --- |
 | 1 | `index.md`: baseline, ledger, terminology and reference-to-code map | None |
 | 2 | `assembly.md`: P1 exact identities and P2 arithmetic obligations | Task 1 |
@@ -65,9 +65,9 @@ NUMBA_NUM_THREADS=2` so the existing two-worker tests can run.
 
 **Files**
 
-- Create: `docs/research/proofs/index.md`.
+- Create: `notes/research/proofs/index.md`.
 - Read: the design's source table, `docs/models/distributional.md`,
-  `docs/research/2026-09-c3-stress-evidence.md`,
+  `notes/research/2026-09-c3-stress-evidence.md`,
   `benchmarks/lss_newton_completion.md`, and the three primary papers linked
   by the design.
 
@@ -104,8 +104,8 @@ assumptions behind every proposed claim. No proof status is inferred from CI.
 
 **Files**
 
-- Create: `docs/research/proofs/assembly.md`.
-- Update: P1/P2 in `docs/research/proofs/index.md`.
+- Create: `notes/research/proofs/assembly.md`.
+- Update: P1/P2 in `notes/research/proofs/index.md`.
 - Read: `src/superglm/distributional/solver/assembly.py`, `chunks.py`,
   `_global_moments.py`, `_batched_moments.py`, `curvature.py`, and
   `src/superglm/distributional/smoothing/penalty_geometry.py`.
@@ -151,8 +151,8 @@ An incomplete P2 does not invalidate a correctly qualified P1.
 
 **Files**
 
-- Create: `docs/research/proofs/reuse.md`.
-- Update: P3 in `docs/research/proofs/index.md`.
+- Create: `notes/research/proofs/reuse.md`.
+- Update: P3 in `notes/research/proofs/index.md`.
 - Read: `src/superglm/distributional/solver/_reuse_digest.py`, `_likelihood_cache.py`, `solver.py`,
   `src/superglm/distributional/smoothing/derivatives.py` and `newton.py`.
 - Inspect tests: `tests/test_distributional_reuse_digest.py`,
@@ -191,8 +191,8 @@ promise positive curvature or eventual convergence for every fit.
 
 **Files**
 
-- Create: `docs/research/proofs/stopping.md`.
-- Update: P4 in `docs/research/proofs/index.md`.
+- Create: `notes/research/proofs/stopping.md`.
+- Update: P4 in `notes/research/proofs/index.md`.
 - Read: `src/superglm/distributional/smoothing/endpoint_direction.py`,
   `derivatives.py`, `penalty_geometry.py`, `newton.py`, and
   `src/superglm/reml/convergence.py`.
@@ -242,8 +242,8 @@ by a document-only result.
 
 **Files**
 
-- Create: `docs/research/proofs/controller.md`.
-- Update: P5 in `docs/research/proofs/index.md`.
+- Create: `notes/research/proofs/controller.md`.
+- Update: P5 in `notes/research/proofs/index.md`.
 - Read: `src/superglm/distributional/smoothing/newton.py`, `loop.py`,
   `objective.py` and `src/superglm/reml/convergence.py`.
 - Inspect tests: `tests/test_distributional_newton_endgame.py`,
@@ -288,8 +288,8 @@ changed algorithm. It makes no global-optimality claim.
 
 **Files**
 
-- Create: `docs/research/proofs/boundaries.md`.
-- Update: P6 in `docs/research/proofs/index.md`.
+- Create: `notes/research/proofs/boundaries.md`.
+- Update: P6 in `notes/research/proofs/index.md`.
 - Read: `src/superglm/distributional/smoothing/penalty_face.py`,
   `endpoint_laml.py`, `faces.py`, `authority.py`, `penalty_geometry.py` and
   `src/superglm/distributional/kernels/two_piece.py`.
@@ -327,7 +327,7 @@ exact infinite penalties or two-piece joins.
 
 **Files**
 
-- Update: `docs/research/proofs/index.md`, `docs/models/distributional.md`,
+- Update: `notes/research/proofs/index.md`, `docs/models/distributional.md`,
   `docs/ROADMAP.md` and `mkdocs.yml` if adding the proof index to navigation.
 - Review: P1–P6 and their referenced evidence; include the current P7 disposition
   from the companion PSST work without requiring that independent work to finish.

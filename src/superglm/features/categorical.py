@@ -185,9 +185,13 @@ class Categorical:
     ----------
     base : str
         How to choose the reference level.
-        'most_exposed' - level with highest total sample_weight (default, best for insurance)
-        'first'        - first level in the level universe (alphabetical when inferred,
-                         as declared when ``levels=`` or a categorical dtype bounds it)
+
+        - ``'most_exposed'`` - level with highest total sample_weight (default,
+          best for insurance)
+        - ``'first'`` - first level in the level universe (alphabetical when
+          inferred, as declared when ``levels=`` or a categorical dtype bounds
+          it)
+
         Or pass a specific level name as a string.
     grouping : LevelGrouping, optional
         Collapse original levels into groups before fitting.

@@ -2,7 +2,7 @@
 
 Coordinates: ``(psi, xi)`` = (scale, shape), response the excess ``y >= 0`` over
 a threshold chosen outside the family (the splice recipe lives in
-``docs/models/distributional.md``):
+``docs/how-to/fit-a-distributional-model.md``):
 
     log f = -log psi - (1 + 1/xi) log1p(xi y / psi)
 

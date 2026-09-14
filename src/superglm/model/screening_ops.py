@@ -1147,7 +1147,7 @@ def screen_interactions(
         different costs: this count is neither a bound on floating-point
         operations nor a wall-clock guarantee. The width-45, 34-level review
         measurement and its profiler breakdown are recorded in
-        ``docs/research/2026-09-psst-reference-variance.md``.
+        ``notes/research/2026-09-psst-reference-variance.md``.
 
         Exact support that cannot afford setup may be retried after spline
         binning. The kernel makes the final admission decision once it knows

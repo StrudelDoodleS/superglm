@@ -5,7 +5,8 @@ Run:  uv run python benchmarks/screening_null_floors.py [--seeds 40]
 Prints max |z| per screening kind over a battery of null datasets spanning
 families (Poisson, Bernoulli-like binomial, gamma, dispersed Gaussian),
 correlated parents, exposure spread, and rare-level factors.  The maxima go
-into docs/guide/screening.md verbatim; they are documentation of measured
+into docs/how-to/screen-interactions.md verbatim; they are documentation of
+measured
 noise floors, not calibrated quantiles.  Nothing here is a p-value: `z`
 ranks pairs, and the numbers below say how large a rank score pure noise
 produced, so a reader knows what to discount.

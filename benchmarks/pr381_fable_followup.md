@@ -132,8 +132,8 @@ that saving; the complete-fit timing spread supports no speedup claim.
 ## C1 completion remains separate work
 
 Fable confirmed that compact history is implemented. The existing
-[roadmap](../docs/ROADMAP.md) and
-[performance plan](../docs/research/2026-09-discrete-performance-plan.md)
+[roadmap](../notes/ROADMAP.md) and
+[performance plan](../notes/research/2026-09-discrete-performance-plan.md)
 still require the following, in dependency order:
 
 1. Replayable bounded-row input and prepared-likelihood storage, preserving one

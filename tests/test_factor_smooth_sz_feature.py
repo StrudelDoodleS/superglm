@@ -303,7 +303,7 @@ def test_public_docs_use_explicit_spline_features_and_cover_factor_smooth_choice
         violations.append(str(module_path))
 
     assert violations == []
-    interactions = Path("docs/guide/interactions.md").read_text()
+    interactions = Path("docs/how-to/specify-interactions.md").read_text()
     for required in (
         'basis="fs"',
         'basis="sz"',

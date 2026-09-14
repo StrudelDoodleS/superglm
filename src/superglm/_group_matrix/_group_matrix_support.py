@@ -45,7 +45,7 @@ DEFAULT_MIN_SPEEDUP = 1.5
 # Ratio of realised speedup to the flop-count ratio below.  The flop count alone
 # badly under-predicts, because the compressed side is a BLAS dense gram while
 # the current side is a numba scalar loop over rows.  Measured at n=200_000,
-# median of 5 after warm-up (see docs/audit/2026-07-28/):
+# median of 5 after warm-up (see notes/audit/2026-07-28/):
 #
 #   p_b  nnz_row  support ratio  flop ratio  measured  implied factor
 #     9        4          0.400       0.309     1.68x            5.4

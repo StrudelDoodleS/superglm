@@ -86,4 +86,4 @@ Existing supported model artifacts still load through `SuperLSS.from_bytes`.
 The constructor migration does not change their parameter ordering or schema.
 
 For a complete runnable example, follow
-[Your first distributional model](../../getting-started/distributional.md).
+[Your first distributional model](../../tutorials/distributional-model.md).

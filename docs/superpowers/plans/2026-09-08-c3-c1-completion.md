@@ -167,8 +167,8 @@ and report; documentation/roadmap owned by root.
   held-out location RMS differences from dense are 0.003817/0.000821/0.000216.
   These are approximation differences in changed designs, separate from the
   finite-support representation checks.
-- The [completion report](../../research/2026-09-c3-c1-completion-evidence.md),
-  [C3 diagnosis](../../research/2026-09-c3-stress-evidence.md) and tracked benchmark
+- The [completion report](../../../notes/research/2026-09-c3-c1-completion-evidence.md),
+  [C3 diagnosis](../../../notes/research/2026-09-c3-stress-evidence.md) and tracked benchmark
   receipts retain successful and unsuccessful outcomes. The roadmap retires the
   chosen C3/C1 scope, keeps C5 next, and records remaining NB2, memory and
   certification limits. Source document hashes match the original preserved

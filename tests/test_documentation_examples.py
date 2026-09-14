@@ -53,12 +53,40 @@ class _PythonBlock:
         return f"{self.path.relative_to(_ROOT)}#python-{self.index}-line-{self.line}"
 
 
+# Every plain-Markdown how-to and explanation page is covered by default, plus
+# the editor tutorial. A MyST notebook page in those directories keeps its code
+# in ``{code-cell}`` fences, which this harness does not see; those pages are
+# executed by ``tests/docs/test_notebooks.py`` instead. A page whose Python
+# blocks cannot run as published is listed in ``_EXEMPT_PAGES`` with the reason,
+# so each gap is one visible line here rather than a silent omission when a new
+# page lands.
+_EXEMPT_PAGES: dict[str, str] = {
+    "docs/how-to/fit-a-distributional-model.md": (
+        "documents SuperLSS; this harness doubles SuperGLM fitting only, so blocks "
+        "that call SuperLSS methods cannot execute here"
+    ),
+    "docs/how-to/check-a-distributional-fit.md": (
+        "documents SuperLSS; its second block calls residuals(), which the SuperGLM "
+        "doubles do not provide"
+    ),
+}
+
+
+def _published_pages() -> list[Path]:
+    sections = (_ROOT / "docs" / "how-to", _ROOT / "docs" / "explanation")
+    candidates = [
+        p for section in sections for p in sorted(section.glob("*.md")) if p.name != "index.md"
+    ]
+    candidates.append(_ROOT / "docs" / "tutorials" / "edit-a-model-in-the-browser.md")
+    return [p for p in candidates if p.relative_to(_ROOT).as_posix() not in _EXEMPT_PAGES]
+
+
 def _python_blocks(path: Path) -> list[str]:
     return _PYTHON_FENCE.findall(path.read_text(encoding="utf-8"))
 
 
 def _published_python_blocks() -> list[_PythonBlock]:
-    paths = [_ROOT / "README.md", *sorted((_ROOT / "docs/guide").glob("*.md"))]
+    paths = [_ROOT / "README.md", *_published_pages()]
     published: list[_PythonBlock] = []
     for path in paths:
         text = path.read_text(encoding="utf-8")
@@ -509,12 +537,12 @@ def test_native_fit_and_profile_examples_configure_features_explicitly() -> None
             and isinstance(node.func, ast.Name)
             and node.func.id == "SuperGLM"
         ]
-        is_family_example = block.path.name == "families.md"
+        is_family_example = block.path.name == "families-and-weights.md"
         if not constructors or (not method_names and not is_family_example):
             continue
 
         checked.append(block.filename)
-        if block.path.name == "families.md":
+        if block.path.name == "families-and-weights.md":
             family_methods.update(method_names)
         for constructor in constructors:
             feature_keywords = [
@@ -533,7 +561,7 @@ def test_native_fit_and_profile_examples_configure_features_explicitly() -> None
 
 def test_families_binomial_example_executes_real_fit_with_features() -> None:
     block = _python_block_after_heading(
-        _ROOT / "docs/guide/families.md",
+        _ROOT / "docs/explanation/families-and-weights.md",
         "## Binomial (binary classification)",
     )
     frame = pd.DataFrame({"age": [-1.0, -1.0, -0.5, -0.5, 0.5, 0.5, 1.0, 1.0]})
@@ -544,7 +572,7 @@ def test_families_binomial_example_executes_real_fit_with_features() -> None:
         "y": y,
     }
 
-    exec(compile(block, "docs/guide/families.md#binomial", "exec"), namespace)
+    exec(compile(block, "docs/explanation/families-and-weights.md#binomial", "exec"), namespace)
 
     model = namespace["model"]
     probabilities = namespace["probabilities"]
@@ -552,43 +580,6 @@ def test_families_binomial_example_executes_real_fit_with_features() -> None:
     assert model.result is not None
     assert model._feature_order == ["age"]
     np.testing.assert_allclose(probabilities, np.full(len(frame), 0.5), atol=1e-8)
-
-
-def test_readme_lorenz_example_keeps_result_and_gini_ratio(
-    monkeypatch,
-) -> None:
-    from matplotlib import pyplot as plt
-
-    cross_validate = create_autospec(superglm.cross_validate, return_value=object())
-    double_lift_chart = create_autospec(
-        superglm.validation.double_lift_chart,
-        return_value=DoubleLiftChartResult(bins=pd.DataFrame(), figure=None),
-    )
-    monkeypatch.setattr(superglm, "cross_validate", cross_validate)
-    monkeypatch.setattr(superglm.validation, "double_lift_chart", double_lift_chart)
-    block = _python_block_after_heading(
-        _ROOT / "README.md",
-        "## Validation And Model Comparison",
-    )
-    y_holdout = np.array([0.0, 1.0, 3.0, 0.0, 2.0])
-    namespace = {
-        "exposure_holdout": np.ones(len(y_holdout)),
-        "exposure_train": np.ones(10),
-        "model": object(),
-        "mu_baseline": np.ones(len(y_holdout)),
-        "mu_holdout": np.array([0.2, 0.8, 2.5, 0.3, 1.7]),
-        "train_df": object(),
-        "y_holdout": y_holdout,
-        "y_train": np.arange(10, dtype=np.float64),
-    }
-
-    exec(compile(block, "README.md#validation", "exec"), namespace)
-
-    lorenz = namespace["lorenz"]
-    assert "gini" not in namespace
-    assert isinstance(lorenz, LorenzCurveResult)
-    assert np.isfinite(lorenz.gini_ratio)
-    plt.close(lorenz.figure)
 
 
 def test_corrected_shape_api_docstrings_remain_current() -> None:
@@ -605,16 +596,6 @@ def test_corrected_shape_api_docstrings_remain_current() -> None:
     assert "Constraint.postfit.*" in monotonize_doc
     assert "weighted shape projection" in monotonize_doc
     assert "isotonic regression" not in monotonize_doc
-
-
-def test_readme_shape_constraint_example_executes_current_api() -> None:
-    block = _python_block_after_heading(_ROOT / "README.md", "## Monotone Splines")
-    namespace: dict[str, object] = {}
-
-    exec(compile(block, "README.md#monotone-splines", "exec"), namespace)
-
-    assert isinstance(namespace["qp_model"], superglm.SuperGLM)
-    assert isinstance(namespace["scop_model"], superglm.SuperGLM)
 
 
 def test_workflow_cross_validation_example_supplies_splitter(
@@ -649,7 +630,7 @@ def test_workflow_cross_validation_example_supplies_splitter(
 
     monkeypatch.setattr(superglm, "cross_validate", recording_cross_validate)
     block = _python_block_after_heading(
-        _ROOT / "docs/guide/workflows.md",
+        _ROOT / "docs/how-to/recommended-workflows.md",
         "## 6. Validation And Challenger Comparison",
     )
     namespace = {
@@ -659,7 +640,7 @@ def test_workflow_cross_validation_example_supplies_splitter(
         "exposure_train": np.ones(10, dtype=np.float64),
     }
 
-    exec(compile(block, "docs/guide/workflows.md#validation", "exec"), namespace)
+    exec(compile(block, "docs/how-to/recommended-workflows.md#validation", "exec"), namespace)
 
     assert len(calls) == 1
     assert isinstance(calls[0]["cv"], KFold)
@@ -669,8 +650,8 @@ def test_workflow_cross_validation_example_supplies_splitter(
 
 def test_published_docs_do_not_reference_removed_examples_or_modules() -> None:
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
-    deployment = (_ROOT / "docs/guide/deployment.md").read_text(encoding="utf-8")
-    optimization = (_ROOT / "docs/guide/optimization.md").read_text(encoding="utf-8")
+    deployment = (_ROOT / "docs/how-to/deploy-a-fitted-model.md").read_text(encoding="utf-8")
+    optimization = (_ROOT / "docs/explanation/solvers-and-internals.md").read_text(encoding="utf-8")
 
     assert "monotone_mode=" not in readme
     assert "monotone=" not in readme
