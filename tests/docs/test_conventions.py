@@ -38,11 +38,11 @@ GLUE_PASTE = re.compile(
 SKIP_EXECUTION = re.compile(r"^:tags:.*skip-execution", re.M)
 
 
-def executed_pages() -> list[Path]:
+def all_pages() -> list[Path]:
     return docs_pages(DOCS)
 
 
-FENCE = re.compile(r"^(\s*)(`{3,}|~{3,})(.*)$")
+FENCE = re.compile(r"^(\s*)(`{3,}|~{3,}|:{3,})(.*)$")
 CODE_DIRECTIVES = (
     "{code-cell}",
     "{code-block}",
@@ -51,14 +51,17 @@ CODE_DIRECTIVES = (
     "{eval-rst}",
     "{raw}",
 )
-BRACKET_MATH = re.compile(r"\\[\(\[]")
+# A bracket delimiter, but not the ``\\[2pt]`` row spacing inside a display.
+BRACKET_MATH = re.compile(r"(?<!\\)\\[\(\[]")
 
 
 def prose_lines(text: str) -> list[tuple[int, str]]:
     """Lines outside code fences, with inline code spans blanked out.
 
     Fenced admonitions and other prose directives count as prose; fenced code
-    (a bare language, or a code directive) does not. Fences nest by marker.
+    (a bare language, or a code directive) does not. Backtick, tilde and colon
+    fences nest; a fence closes on a bare marker of the same character at
+    least as long as the one that opened it, as CommonMark allows.
     """
     kept: list[tuple[int, str]] = []
     stack: list[tuple[str, bool]] = []
@@ -66,7 +69,13 @@ def prose_lines(text: str) -> list[tuple[int, str]]:
         fence = FENCE.match(line)
         if fence:
             marker, info = fence.group(2), fence.group(3).strip()
-            if stack and stack[-1][0] == marker and not info:
+            closes = (
+                bool(stack)
+                and not info
+                and stack[-1][0][0] == marker[0]
+                and len(marker) >= len(stack[-1][0])
+            )
+            if closes:
                 stack.pop()
             else:
                 is_code = info.startswith(CODE_DIRECTIVES) if info.startswith("{") else True
@@ -87,7 +96,7 @@ def test_maths_uses_dollar_delimiters() -> None:
     """
     offenders = [
         f"{path.relative_to(DOCS)}:{number}"
-        for path in executed_pages()
+        for path in all_pages()
         for number, line in prose_lines(path.read_text(encoding="utf-8"))
         if BRACKET_MATH.search(line)
     ]
@@ -96,7 +105,7 @@ def test_maths_uses_dollar_delimiters() -> None:
 
 def test_no_private_attribute_access_in_executed_pages() -> None:
     offenders: list[str] = []
-    for path in executed_pages():
+    for path in all_pages():
         for cell in CODE_CELL.findall(path.read_text(encoding="utf-8")):
             for match in PRIVATE_ACCESS.finditer(cell):
                 offenders.append(f"{path.relative_to(DOCS)}: {match.group(0)}")
@@ -115,7 +124,7 @@ def test_glue_pastes_are_glued_on_the_same_page() -> None:
     """
     missing: list[str] = []
     pasted = 0
-    for path in executed_pages():
+    for path in all_pages():
         text = path.read_text(encoding="utf-8")
         executed_cells = [c for c in CODE_CELL.findall(text) if not SKIP_EXECUTION.search(c)]
         glued = {key for cell in executed_cells for key in GLUE_CALL.findall(cell)}
@@ -138,7 +147,7 @@ def test_pages_with_code_cells_are_myst_notebooks() -> None:
     same files.
     """
     mismatched: list[str] = []
-    for path in executed_pages():
+    for path in all_pages():
         text = path.read_text(encoding="utf-8")
         has_cells = "```{code-cell}" in text
         if has_cells != is_myst_notebook(text):

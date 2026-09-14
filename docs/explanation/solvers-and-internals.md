@@ -668,8 +668,8 @@ The four terms:
 |------|---------|
 | $-\ell(\hat{\boldsymbol{\beta}})$ | Fit the data (negative log-likelihood) |
 | $\hat{\boldsymbol{\beta}}^\top \mathbf{S} \hat{\boldsymbol{\beta}}$ | Penalize wiggliness |
-| $\log\vert\mathbf{H}\vert$ | Account for posterior concentration (Laplace correction) |
-| $-\log\vert\mathbf{S}\vert_+$ | Adjust for penalty scale using only penalized directions |
+| $\log\lvert\mathbf{H}\rvert$ | Account for posterior concentration (Laplace correction) |
+| $-\log\lvert\mathbf{S}\rvert_+$ | Adjust for penalty scale using only penalized directions |
 
 REML is not "just another regularizer". It is an empirical-Bayes criterion for picking the smoothness parameters — it integrates out $\boldsymbol{\beta}$ via a Laplace approximation and optimizes the resulting marginal likelihood.
 

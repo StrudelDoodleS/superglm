@@ -1320,12 +1320,14 @@ order you are likely to meet them.
   chunked and discrete designs all work, but these two families have no
   Fisher approximation to fall back on: if a fit ends where the exact
   curvature does not describe a proper maximum, it refuses rather than guess.
-- **`smoothing_certified_` reads `False` for some families even on a good
-  fit.** The flag is `True` only when every part of the convergence check was
-  analytic. Generalized gamma, generalized Pareto, the two two-piece families
-  and log-normal confirm a boundary (a term shrunk away, or left unpenalised)
-  by numerical differencing instead, so their fits converge without the
-  certificate; read `smoothing_convergence_reason_` for how the fit stopped.
+- **`smoothing_certified_` is strict, and `False` is not a defect on its
+  own.** It is `True` only for a stop at an interior stationary point with
+  every check passed: no `practical_plateau` stop (the default
+  `practical_reml=True` allows one), no curvature fallback, no term at the
+  finite cap, no term on an exact face. A term selected away or shrunk to its
+  null space voids it whatever the family. Read
+  `smoothing_convergence_reason_`, `exact_face_components_` and
+  `smoothing_unresolved_upper_bound_` before reading anything into `False`.
 - **Automatic smoothing finds a stationary point, not a proven global
   optimum.** Fits can depend on the start; vary `initial_lambda` when
   comparing solutions.
