@@ -1,0 +1,2498 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-13",
+  "phase": "initial",
+  "runtime": {
+    "python": "3.13.14",
+    "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+    "cpu_count": 16,
+    "packages": {
+      "superglm": "0.33.0",
+      "numpy": "2.5.2",
+      "scipy": "1.18.0",
+      "pandas": "3.0.5",
+      "scikit-learn": "1.9.0",
+      "threadpoolctl": "3.6.0"
+    },
+    "threadpools_before_fit": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      }
+    ],
+    "threadpools_after_fit": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      }
+    ]
+  },
+  "cases": {
+    "rows20": {
+      "summaries": {
+        "baseline": {
+          "fit_seconds": {
+            "minimum": 8.43125050200615,
+            "median": 8.728186024003662,
+            "maximum": 9.025121546001174
+          },
+          "fit_end_peak_process_rss_mib": {
+            "minimum": 543.56640625,
+            "median": 543.580078125,
+            "maximum": 543.59375
+          },
+          "retained_payload_bytes": {
+            "minimum": 40694067,
+            "median": 40694067,
+            "maximum": 40694067
+          }
+        },
+        "patched": {
+          "fit_seconds": {
+            "minimum": 5.834555827022996,
+            "median": 5.842330514511559,
+            "maximum": 5.8501052020001225
+          },
+          "fit_end_peak_process_rss_mib": {
+            "minimum": 561.3828125,
+            "median": 561.595703125,
+            "maximum": 561.80859375
+          },
+          "retained_payload_bytes": {
+            "minimum": 40694067,
+            "median": 40694067,
+            "maximum": 40694067
+          }
+        }
+      },
+      "median_speedup": 1.4939562221486833,
+      "median_time_reduction_fraction": 0.33063634317092006,
+      "median_fit_end_peak_rss_reduction_fraction": -0.03314254095209357,
+      "retained_payload_reduction_fraction": 0,
+      "all_prediction_arrays_exact": true,
+      "all_non_timing_telemetry_exact": true,
+      "numerical_telemetry": {
+        "package": {
+          "name": "superglm",
+          "version": "0.33.0"
+        },
+        "model": {
+          "family": "Gaussian",
+          "link": "IdentityLink",
+          "penalty": "GroupLasso",
+          "selection_penalty": 0,
+          "spline_penalty": 0.1,
+          "direct_solve": "auto",
+          "discrete": true,
+          "n_bins": 256,
+          "tol": 0.000001,
+          "max_iter": 100,
+          "convergence": "deviance",
+          "retain_fit_state": true
+        },
+        "rank_policy": {
+          "version": 4,
+          "coordinate_space": "solver"
+        },
+        "fit": {
+          "method": "fit_reml",
+          "fit_meta": {
+            "method": "fit_reml",
+            "discrete": true,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+          },
+          "deviance": 2909.497382773643,
+          "effective_df": 236.65586685760132,
+          "phi": 0.23951716117668606,
+          "n_iter": 1,
+          "converged": true,
+          "intercept": 0.32125381760897814
+        },
+        "fit_statistics": {
+          "log_likelihood": -8604.632598612865,
+          "null_log_likelihood": -36889.71565339555,
+          "null_deviance": 16459.022976630313,
+          "explained_deviance": 0.8232278193605567,
+          "pearson_chi2": 2909.497382773643,
+          "n_obs": 12384,
+          "likelihood_size": 12384,
+          "weighted": false
+        },
+        "features": {
+          "feature_order": [
+            "MedInc",
+            "HouseAge",
+            "AveRooms",
+            "AveBedrms",
+            "Population",
+            "AveOccup",
+            "Latitude",
+            "Longitude"
+          ],
+          "interaction_order": [
+            "Latitude:Longitude"
+          ],
+          "features": {
+            "MedInc": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "HouseAge": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "AveRooms": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "AveBedrms": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "Population": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "AveOccup": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "Latitude": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "Longitude": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            }
+          },
+          "interactions": {
+            "Latitude:Longitude": {
+              "class": "TensorInteraction",
+              "parents": [
+                "Latitude",
+                "Longitude"
+              ],
+              "config": {}
+            }
+          },
+          "constraints": {},
+          "groups": [
+            {
+              "name": "MedInc",
+              "feature_name": "MedInc",
+              "subgroup_type": null,
+              "start": 0,
+              "end": 19,
+              "size": 19
+            },
+            {
+              "name": "HouseAge",
+              "feature_name": "HouseAge",
+              "subgroup_type": null,
+              "start": 19,
+              "end": 38,
+              "size": 19
+            },
+            {
+              "name": "AveRooms",
+              "feature_name": "AveRooms",
+              "subgroup_type": null,
+              "start": 38,
+              "end": 57,
+              "size": 19
+            },
+            {
+              "name": "AveBedrms",
+              "feature_name": "AveBedrms",
+              "subgroup_type": null,
+              "start": 57,
+              "end": 76,
+              "size": 19
+            },
+            {
+              "name": "Population",
+              "feature_name": "Population",
+              "subgroup_type": null,
+              "start": 76,
+              "end": 95,
+              "size": 19
+            },
+            {
+              "name": "AveOccup",
+              "feature_name": "AveOccup",
+              "subgroup_type": null,
+              "start": 95,
+              "end": 114,
+              "size": 19
+            },
+            {
+              "name": "Latitude",
+              "feature_name": "Latitude",
+              "subgroup_type": null,
+              "start": 114,
+              "end": 133,
+              "size": 19
+            },
+            {
+              "name": "Longitude",
+              "feature_name": "Longitude",
+              "subgroup_type": null,
+              "start": 133,
+              "end": 152,
+              "size": 19
+            },
+            {
+              "name": "Latitude:Longitude",
+              "feature_name": "Latitude:Longitude",
+              "subgroup_type": null,
+              "start": 152,
+              "end": 513,
+              "size": 361
+            }
+          ]
+        },
+        "edf": {
+          "by_group": {
+            "MedInc": 8.446841730252721,
+            "HouseAge": 11.837227370241935,
+            "AveRooms": 7.0188371035853585,
+            "AveBedrms": 5.1874226370456205,
+            "Population": 6.853197602195331,
+            "AveOccup": 9.306337980933723,
+            "Latitude": 7.266682735448883,
+            "Longitude": 2.718323962391281,
+            "Latitude:Longitude": 177.0209957355065
+          },
+          "by_feature": {
+            "MedInc": 8.446841730252721,
+            "HouseAge": 11.837227370241935,
+            "AveRooms": 7.0188371035853585,
+            "AveBedrms": 5.1874226370456205,
+            "Population": 6.853197602195331,
+            "AveOccup": 9.306337980933723,
+            "Latitude": 7.266682735448883,
+            "Longitude": 2.718323962391281,
+            "Latitude:Longitude": 177.0209957355065
+          },
+          "total": 235.65586685760135
+        },
+        "reml": {
+          "enabled": true,
+          "lambdas": {
+            "MedInc": 16.48145125711514,
+            "HouseAge": 780.73326595459,
+            "AveRooms": 0.11062410096659546,
+            "AveBedrms": 0.012818683735741652,
+            "Population": 5.897428499424516,
+            "AveOccup": 0.015146050385936999,
+            "Latitude": 0.011769605375490452,
+            "Longitude": 0.04954324068403073,
+            "Latitude:Longitude:margin_Latitude": 57.41702991266852,
+            "Latitude:Longitude:margin_Longitude": 5.723736611640011
+          },
+          "lambda_history": [
+            {
+              "MedInc": 0.1,
+              "HouseAge": 0.1,
+              "AveRooms": 0.1,
+              "AveBedrms": 0.1,
+              "Population": 0.1,
+              "AveOccup": 0.1,
+              "Latitude": 0.1,
+              "Longitude": 0.1,
+              "Latitude:Longitude:margin_Latitude": 0.1,
+              "Latitude:Longitude:margin_Longitude": 0.1
+            },
+            {
+              "MedInc": 0.3795228383964868,
+              "HouseAge": 109.31984255423626,
+              "AveRooms": 0.0009510504273840312,
+              "AveBedrms": 0.00020338057697996326,
+              "Population": 0.030209323116039372,
+              "AveOccup": 0.0006956776699725281,
+              "Latitude": 0.00022163137983508902,
+              "Longitude": 0.0003904341838844133,
+              "Latitude:Longitude:margin_Latitude": 3.619896780819027,
+              "Latitude:Longitude:margin_Longitude": 2.8160321363587313
+            },
+            {
+              "MedInc": 12.661927269209123,
+              "HouseAge": 443.1711208475714,
+              "AveRooms": 0.010573125822713858,
+              "AveBedrms": 0.009006474266838472,
+              "Population": 1.3794798851154664,
+              "AveOccup": 0.0072244384085533,
+              "Latitude": 0.0024134865801203258,
+              "Longitude": 0.0023510956533768575,
+              "Latitude:Longitude:margin_Latitude": 537.2403168665992,
+              "Latitude:Longitude:margin_Longitude": 1.471613983221677
+            },
+            {
+              "MedInc": 16.94848903607018,
+              "HouseAge": 767.881056788261,
+              "AveRooms": 0.1629887900046858,
+              "AveBedrms": 0.013592835478937134,
+              "Population": 4.206215748579746,
+              "AveOccup": 0.016737814821261215,
+              "Latitude": 0.003748611523206176,
+              "Longitude": 0.10028632405674903,
+              "Latitude:Longitude:margin_Latitude": 63.73651075987482,
+              "Latitude:Longitude:margin_Longitude": 27.65234843090959
+            },
+            {
+              "MedInc": 16.42147084620311,
+              "HouseAge": 784.2307999377263,
+              "AveRooms": 0.11526287028547585,
+              "AveBedrms": 0.012782269660188703,
+              "Population": 5.792488479810514,
+              "AveOccup": 0.015115507372726069,
+              "Latitude": 0.006557220066125748,
+              "Longitude": 0.25175137042377427,
+              "Latitude:Longitude:margin_Latitude": 55.772693031176566,
+              "Latitude:Longitude:margin_Longitude": 6.582709131786144
+            },
+            {
+              "MedInc": 16.481774189047144,
+              "HouseAge": 780.477324945371,
+              "AveRooms": 0.1106431478418872,
+              "AveBedrms": 0.012819567820066272,
+              "Population": 5.91158960082537,
+              "AveOccup": 0.015143801542013863,
+              "Latitude": 0.009869105127152332,
+              "Longitude": 0.12998302235143921,
+              "Latitude:Longitude:margin_Latitude": 58.58750341283968,
+              "Latitude:Longitude:margin_Longitude": 5.61501508946414
+            },
+            {
+              "MedInc": 16.480531989848345,
+              "HouseAge": 780.6238925240924,
+              "AveRooms": 0.11068608331017737,
+              "AveBedrms": 0.012822070047494943,
+              "Population": 5.90706650562859,
+              "AveOccup": 0.01514993573825088,
+              "Latitude": 0.010292481928887721,
+              "Longitude": 0.03724075941407264,
+              "Latitude:Longitude:margin_Latitude": 58.04100910017163,
+              "Latitude:Longitude:margin_Longitude": 5.725832580248196
+            },
+            {
+              "MedInc": 16.481225035256237,
+              "HouseAge": 780.7336078001626,
+              "AveRooms": 0.11062681900234822,
+              "AveBedrms": 0.012819094251762248,
+              "Population": 5.897520918089683,
+              "AveOccup": 0.015146574035965681,
+              "Latitude": 0.011656203436737112,
+              "Longitude": 0.04730950414780648,
+              "Latitude:Longitude:margin_Latitude": 57.414854433352495,
+              "Latitude:Longitude:margin_Longitude": 5.7295176836339845
+            },
+            {
+              "MedInc": 16.481447813515885,
+              "HouseAge": 780.7334006883577,
+              "AveRooms": 0.11062417045263807,
+              "AveBedrms": 0.012818689063699429,
+              "Population": 5.897425080560976,
+              "AveOccup": 0.015146060730938904,
+              "Latitude": 0.011769494483410785,
+              "Longitude": 0.04947329499609163,
+              "Latitude:Longitude:margin_Latitude": 57.41646830446088,
+              "Latitude:Longitude:margin_Longitude": 5.723884019356166
+            },
+            {
+              "MedInc": 16.48145125711514,
+              "HouseAge": 780.73326595459,
+              "AveRooms": 0.11062410096659546,
+              "AveBedrms": 0.012818683735741652,
+              "Population": 5.897428499424516,
+              "AveOccup": 0.015146050385936999,
+              "Latitude": 0.011769605375490452,
+              "Longitude": 0.04954324068403073,
+              "Latitude:Longitude:margin_Latitude": 57.41702991266852,
+              "Latitude:Longitude:margin_Longitude": 5.723736611640011
+            },
+            {
+              "MedInc": 16.48145125711514,
+              "HouseAge": 780.73326595459,
+              "AveRooms": 0.11062410096659546,
+              "AveBedrms": 0.012818683735741652,
+              "Population": 5.897428499424516,
+              "AveOccup": 0.015146050385936999,
+              "Latitude": 0.011769605375490452,
+              "Longitude": 0.04954324068403073,
+              "Latitude:Longitude:margin_Latitude": 57.41702991266852,
+              "Latitude:Longitude:margin_Longitude": 5.723736611640011
+            }
+          ],
+          "n_reml_iter": 9,
+          "converged": true,
+          "termination_reason": "score_objective_tolerance",
+          "objective": 9325.158020517123,
+          "objective_history": null,
+          "inner_iter_history": null,
+          "profile": {
+            "interaction_mode": "full",
+            "interaction_candidate_active": false,
+            "n_interactions": 1,
+            "requested_max_reml_iter": 20,
+            "effective_max_reml_iter": 20,
+            "reml_tol_resolved": 1e-9,
+            "irls_calls": 11,
+            "irls_iters": 12,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+            "reml_freeze_decision": {
+              "names": [
+                "MedInc",
+                "HouseAge",
+                "AveRooms",
+                "AveBedrms",
+                "Population",
+                "AveOccup",
+                "Latitude",
+                "Longitude",
+                "Latitude:Longitude:margin_Latitude",
+                "Latitude:Longitude:margin_Longitude"
+              ],
+              "proj_grad": [
+                1.5336546432820342e-7,
+                0.0000011297197204385157,
+                8.892558334139267e-7,
+                9.073644147150617e-7,
+                0.0000015101853758636707,
+                6.551754871964022e-7,
+                0.00002989191737512442,
+                0.00012612012215029722,
+                0.00006807656981777654,
+                0.00030930291710262736
+              ],
+              "hess_diag": [
+                3.611574431495293,
+                2.702859390971579,
+                1.843938941262871,
+                2.0439053359654693,
+                0.7207999691348387,
+                2.608769498692969,
+                0.64963920113996,
+                0.09986460513681338,
+                23.355417685744445,
+                18.094345956137133
+              ],
+              "row_curvature": [
+                3.611574431495293,
+                2.702859390971579,
+                1.843938941262871,
+                2.0439053359654693,
+                0.7207999691348387,
+                2.608769498692969,
+                1.124893977480419,
+                0.525331803263699,
+                23.355417685744445,
+                18.094345956137133
+              ],
+              "penalty_rank": [
+                18,
+                18,
+                18,
+                18,
+                18,
+                18,
+                18,
+                18,
+                342,
+                342
+              ],
+              "normalized_curvature": [
+                0.20064302397196077,
+                0.15015885505397664,
+                0.10244105229238175,
+                0.1135502964425261,
+                0.04004444272971327,
+                0.14493163881627608,
+                0.03609106672999778,
+                0.0066955211761826165,
+                0.06829069498755685,
+                0.05290744431619045
+              ],
+              "curvature_bar": 0.002006430239719608,
+              "score_scale": 9326.15802060248,
+              "estimated": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true
+              ],
+              "frozen": [
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+              ]
+            },
+            "reml_bootstrap_summary": {
+              "boot_phi": 0.23188359198642972,
+              "boot_inv_phi": 4.312508666238541,
+              "boot_deviance": 2859.1009363579965,
+              "boot_penalty_quad": 10.226630882081901,
+              "boot_penalty_rank_total": 504,
+              "n_components": 10,
+              "lam_fp_min": 0.0002033805769799632,
+              "lam_fp_max": 109.31984255423629,
+              "n_components_at_lower_bound": 0
+            },
+            "reml_bootstrap_components": [
+              {
+                "name": "MedInc",
+                "group_name": "MedInc",
+                "rank": 18,
+                "quad": 6.063451004898601,
+                "trace_term": 21.279290807194567,
+                "denom": 47.427975813132576,
+                "lam_fp_raw": 0.3795228383964868,
+                "lam_fp_clipped": 0.3795228383964868,
+                "beta_norm": 0.4312576379020965,
+                "omega_frob": 19098.86957766332,
+                "block_dim": 19
+              },
+              {
+                "name": "HouseAge",
+                "group_name": "HouseAge",
+                "rank": 18,
+                "quad": 0.027191771333984337,
+                "trace_term": 0.04738971373697972,
+                "denom": 0.1646544632651639,
+                "lam_fp_raw": 109.31984255423629,
+                "lam_fp_clipped": 109.31984255423629,
+                "beta_norm": 0.06062763556071372,
+                "omega_frob": 242.02324828447863,
+                "block_dim": 19
+              },
+              {
+                "name": "AveRooms",
+                "group_name": "AveRooms",
+                "rank": 18,
+                "quad": 1491.2556093828932,
+                "trace_term": 12495.388469246336,
+                "denom": 18926.4412082869,
+                "lam_fp_raw": 0.0009510504273840315,
+                "lam_fp_clipped": 0.0009510504273840315,
+                "beta_norm": 0.4695705153210463,
+                "omega_frob": 36693.316108298626,
+                "block_dim": 19
+              },
+              {
+                "name": "AveBedrms",
+                "group_name": "AveBedrms",
+                "rank": 18,
+                "quad": 333.96689998109076,
+                "trace_term": 87063.79147438562,
+                "denom": 88504.0266247909,
+                "lam_fp_raw": 0.0002033805769799632,
+                "lam_fp_clipped": 0.0002033805769799632,
+                "beta_norm": 0.23659251039051016,
+                "omega_frob": 40296.04689259756,
+                "block_dim": 19
+              },
+              {
+                "name": "Population",
+                "group_name": "Population",
+                "rank": 18,
+                "quad": 44.714884771750775,
+                "trace_term": 403.0092179650117,
+                "denom": 595.8425460530447,
+                "lam_fp_raw": 0.03020932311603938,
+                "lam_fp_clipped": 0.03020932311603938,
+                "beta_norm": 0.08022005506910651,
+                "omega_frob": 28327.748000122665,
+                "block_dim": 19
+              },
+              {
+                "name": "AveOccup",
+                "group_name": "AveOccup",
+                "rank": 18,
+                "quad": 1524.1836350087194,
+                "trace_term": 19300.996565941605,
+                "denom": 25874.05170085567,
+                "lam_fp_raw": 0.0006956776699725281,
+                "lam_fp_clipped": 0.0006956776699725281,
+                "beta_norm": 0.44089893049698153,
+                "omega_frob": 37434.16126946274,
+                "block_dim": 19
+              },
+              {
+                "name": "Latitude",
+                "group_name": "Latitude",
+                "rank": 18,
+                "quad": 1984.0483263116273,
+                "trace_term": 72659.71057776929,
+                "denom": 81215.93617922426,
+                "lam_fp_raw": 0.00022163137983508902,
+                "lam_fp_clipped": 0.00022163137983508902,
+                "beta_norm": 6.36455090207,
+                "omega_frob": 24748.82368129602,
+                "block_dim": 19
+              },
+              {
+                "name": "Longitude",
+                "group_name": "Longitude",
+                "rank": 18,
+                "quad": 3686.391241862623,
+                "trace_term": 30204.926408297837,
+                "denom": 46102.52058597626,
+                "lam_fp_raw": 0.0003904341838844132,
+                "lam_fp_clipped": 0.0003904341838844132,
+                "beta_norm": 11.369860329338547,
+                "omega_frob": 22087.992389817904,
+                "block_dim": 19
+              },
+              {
+                "name": "Latitude:Longitude:margin_Latitude",
+                "group_name": "Latitude:Longitude",
+                "rank": 342,
+                "quad": 4.103590842960312,
+                "trace_term": 76.78106095036293,
+                "denom": 94.47783202332639,
+                "lam_fp_raw": 3.6198967808190274,
+                "lam_fp_clipped": 3.6198967808190274,
+                "beta_norm": 454.87694283046693,
+                "omega_frob": 4.622332506265009,
+                "block_dim": 361
+              },
+              {
+                "name": "Latitude:Longitude:margin_Longitude",
+                "group_name": "Latitude:Longitude",
+                "rank": 342,
+                "quad": 5.2159749151120955,
+                "trace_term": 98.953540646254,
+                "denom": 121.44747767055775,
+                "lam_fp_raw": 2.816032136358731,
+                "lam_fp_clipped": 2.816032136358731,
+                "beta_norm": 454.87694283046693,
+                "omega_frob": 4.707797064041456,
+                "block_dim": 361
+              }
+            ],
+            "reml_n_structured_cache_solves": 0,
+            "reml_n_block_structured_cache_solves": 0,
+            "reml_structured_cache_data_passes": 0,
+            "reml_block_structured_cache_data_passes": 0,
+            "reml_n_linesearch_fits": 10,
+            "reml_n_linesearch_surrogate_evals": 0,
+            "reml_n_linesearch_full_evals": 10,
+            "reml_n_outer_iter": 9,
+            "reml_n_analytical_iters": 8,
+            "n_reml_iter": 9,
+            "converged": true,
+            "fit_runtime_canonicalize_validate": true,
+            "fit_runtime_canonicalize_validate_reason": "auto_full"
+          }
+        }
+      },
+      "workload": {
+        "coefficient_count_without_intercept": 513,
+        "mse": {
+          "train": 0.23088656801038826,
+          "valid": 0.24777169778663752,
+          "test": 0.2544978955927369
+        },
+        "backend_groups": [
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedTensorGroupMatrix"
+        ],
+        "data_fingerprint": "97b51f1dcea2cfc6ca34858a9f3f867826091d4ffdbd2b06f86cc7b612b3ba79",
+        "transformed_features_sha256": "14bb8779e4e52acc7deed8b8870f2cdacd9a4b47927a55549fae67c3139f36f2",
+        "split_sha256": "b6636f12fd2167618d26247e636d8f195f59a2c52b60195ecde005da044bbd69",
+        "reference_json_sha256": "dae642454b9940ac4aecd9ce3108f93efeaccf34e66bd6fb5cea9f554b7cb44d",
+        "reference_predictions_sha256": "50bc6b86b64022e6a8e5fe9896ca0dada1d13cfc9083533f45d18a7d4a19e3f5",
+        "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62"
+      }
+    },
+    "rows30": {
+      "summaries": {
+        "baseline": {
+          "fit_seconds": {
+            "minimum": 109.48509363096673,
+            "median": 119.35490297299111,
+            "maximum": 129.2247123150155
+          },
+          "fit_end_peak_process_rss_mib": {
+            "minimum": 891.28515625,
+            "median": 903.95703125,
+            "maximum": 916.62890625
+          },
+          "retained_payload_bytes": {
+            "minimum": 170201663,
+            "median": 170201663,
+            "maximum": 170201663
+          }
+        },
+        "patched": {
+          "fit_seconds": {
+            "minimum": 66.05120485502994,
+            "median": 66.84969447401818,
+            "maximum": 67.64818409300642
+          },
+          "fit_end_peak_process_rss_mib": {
+            "minimum": 931.33203125,
+            "median": 937.060546875,
+            "maximum": 942.7890625
+          },
+          "retained_payload_bytes": {
+            "minimum": 170201663,
+            "median": 170201663,
+            "maximum": 170201663
+          }
+        }
+      },
+      "median_speedup": 1.7854218169894498,
+      "median_time_reduction_fraction": 0.4399082667835972,
+      "median_fit_end_peak_rss_reduction_fraction": -0.036620673860154884,
+      "retained_payload_reduction_fraction": 0,
+      "all_prediction_arrays_exact": true,
+      "all_non_timing_telemetry_exact": true,
+      "numerical_telemetry": {
+        "package": {
+          "name": "superglm",
+          "version": "0.33.0"
+        },
+        "model": {
+          "family": "Gaussian",
+          "link": "IdentityLink",
+          "penalty": "GroupLasso",
+          "selection_penalty": 0,
+          "spline_penalty": 0.1,
+          "direct_solve": "auto",
+          "discrete": true,
+          "n_bins": 256,
+          "tol": 0.000001,
+          "max_iter": 100,
+          "convergence": "deviance",
+          "retain_fit_state": true
+        },
+        "rank_policy": {
+          "version": 4,
+          "coordinate_space": "solver"
+        },
+        "fit": {
+          "method": "fit_reml",
+          "fit_meta": {
+            "method": "fit_reml",
+            "discrete": true,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+          },
+          "deviance": 2699.379962415671,
+          "effective_df": 360.6404010933385,
+          "phi": 0.22451123949450683,
+          "n_iter": 1,
+          "converged": true,
+          "intercept": 3.316921431660684
+        },
+        "fit_statistics": {
+          "log_likelihood": -8142.023605369387,
+          "null_log_likelihood": -38785.574113564115,
+          "null_deviance": 16459.022976630313,
+          "explained_deviance": 0.8359939125032851,
+          "pearson_chi2": 2699.379962415671,
+          "n_obs": 12384,
+          "likelihood_size": 12384,
+          "weighted": false
+        },
+        "features": {
+          "feature_order": [
+            "MedInc",
+            "HouseAge",
+            "AveRooms",
+            "AveBedrms",
+            "Population",
+            "AveOccup",
+            "Latitude",
+            "Longitude"
+          ],
+          "interaction_order": [
+            "Latitude:Longitude"
+          ],
+          "features": {
+            "MedInc": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "HouseAge": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "AveRooms": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "AveBedrms": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "Population": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "AveOccup": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 18,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "Latitude": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 28,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            },
+            "Longitude": {
+              "class": "CubicRegressionSpline",
+              "constraint": null,
+              "config": {
+                "select": false,
+                "n_knots": 28,
+                "degree": 3,
+                "constraint_kind": null,
+                "constraint_mode": "postfit"
+              }
+            }
+          },
+          "interactions": {
+            "Latitude:Longitude": {
+              "class": "TensorInteraction",
+              "parents": [
+                "Latitude",
+                "Longitude"
+              ],
+              "config": {}
+            }
+          },
+          "constraints": {},
+          "groups": [
+            {
+              "name": "MedInc",
+              "feature_name": "MedInc",
+              "subgroup_type": null,
+              "start": 0,
+              "end": 19,
+              "size": 19
+            },
+            {
+              "name": "HouseAge",
+              "feature_name": "HouseAge",
+              "subgroup_type": null,
+              "start": 19,
+              "end": 38,
+              "size": 19
+            },
+            {
+              "name": "AveRooms",
+              "feature_name": "AveRooms",
+              "subgroup_type": null,
+              "start": 38,
+              "end": 57,
+              "size": 19
+            },
+            {
+              "name": "AveBedrms",
+              "feature_name": "AveBedrms",
+              "subgroup_type": null,
+              "start": 57,
+              "end": 76,
+              "size": 19
+            },
+            {
+              "name": "Population",
+              "feature_name": "Population",
+              "subgroup_type": null,
+              "start": 76,
+              "end": 95,
+              "size": 19
+            },
+            {
+              "name": "AveOccup",
+              "feature_name": "AveOccup",
+              "subgroup_type": null,
+              "start": 95,
+              "end": 114,
+              "size": 19
+            },
+            {
+              "name": "Latitude",
+              "feature_name": "Latitude",
+              "subgroup_type": null,
+              "start": 114,
+              "end": 143,
+              "size": 29
+            },
+            {
+              "name": "Longitude",
+              "feature_name": "Longitude",
+              "subgroup_type": null,
+              "start": 143,
+              "end": 172,
+              "size": 29
+            },
+            {
+              "name": "Latitude:Longitude",
+              "feature_name": "Latitude:Longitude",
+              "subgroup_type": null,
+              "start": 172,
+              "end": 1013,
+              "size": 841
+            }
+          ]
+        },
+        "edf": {
+          "by_group": {
+            "MedInc": 8.62303206596191,
+            "HouseAge": 11.37094855944046,
+            "AveRooms": 6.827369132082703,
+            "AveBedrms": 5.356861781513332,
+            "Population": 7.414945596598766,
+            "AveOccup": 9.04605730015179,
+            "Latitude": 1.003537145243337,
+            "Longitude": 1.0046203439883576,
+            "Latitude:Longitude": 308.9930291683578
+          },
+          "by_feature": {
+            "MedInc": 8.62303206596191,
+            "HouseAge": 11.37094855944046,
+            "AveRooms": 6.827369132082703,
+            "AveBedrms": 5.356861781513332,
+            "Population": 7.414945596598766,
+            "AveOccup": 9.04605730015179,
+            "Latitude": 1.003537145243337,
+            "Longitude": 1.0046203439883576,
+            "Latitude:Longitude": 308.9930291683578
+          },
+          "total": 359.6404010933384
+        },
+        "reml": {
+          "enabled": true,
+          "lambdas": {
+            "MedInc": 14.63473653605989,
+            "HouseAge": 943.7777139560716,
+            "AveRooms": 0.1254494926088654,
+            "AveBedrms": 0.01046273028972635,
+            "Population": 3.976016413396018,
+            "AveOccup": 0.01770819180213519,
+            "Latitude": 126.52808285090823,
+            "Longitude": 76.40768869746361,
+            "Latitude:Longitude:margin_Latitude": 224.75846104543746,
+            "Latitude:Longitude:margin_Longitude": 41.6749083734457
+          },
+          "lambda_history": [
+            {
+              "MedInc": 0.1,
+              "HouseAge": 0.1,
+              "AveRooms": 0.1,
+              "AveBedrms": 0.1,
+              "Population": 0.1,
+              "AveOccup": 0.1,
+              "Latitude": 0.1,
+              "Longitude": 0.1,
+              "Latitude:Longitude:margin_Latitude": 0.1,
+              "Latitude:Longitude:margin_Longitude": 0.1
+            },
+            {
+              "MedInc": 0.33439534408982047,
+              "HouseAge": 117.44720236115049,
+              "AveRooms": 0.0008729337201090861,
+              "AveBedrms": 0.0002019582707080013,
+              "Population": 0.028430165457268602,
+              "AveOccup": 0.0007354515186677119,
+              "Latitude": 0.00013228653084903586,
+              "Longitude": 0.00020102421546785176,
+              "Latitude:Longitude:margin_Latitude": 4.117125469637623,
+              "Latitude:Longitude:margin_Longitude": 2.8589485577596703
+            },
+            {
+              "MedInc": 10.206796953034905,
+              "HouseAge": 534.622320628372,
+              "AveRooms": 0.011529531816305337,
+              "AveBedrms": 0.008883161660372847,
+              "Population": 1.0271331713358138,
+              "AveOccup": 0.011108729211389336,
+              "Latitude": 0.008103959299278133,
+              "Longitude": 0.029834638873700924,
+              "Latitude:Longitude:margin_Latitude": 197.35017551474735,
+              "Latitude:Longitude:margin_Longitude": 153.81612680877066
+            },
+            {
+              "MedInc": 15.24246504292742,
+              "HouseAge": 951.646102870347,
+              "AveRooms": 0.1619434709069755,
+              "AveBedrms": 0.01078180230179055,
+              "Population": 3.010469258002713,
+              "AveOccup": 0.01837708553417853,
+              "Latitude": 0.009887767529489971,
+              "Longitude": 0.09473190258153505,
+              "Latitude:Longitude:margin_Latitude": 258.3696010115254,
+              "Latitude:Longitude:margin_Longitude": 36.891310226233294
+            },
+            {
+              "MedInc": 14.618361979824803,
+              "HouseAge": 943.3564730303045,
+              "AveRooms": 0.12850428145754333,
+              "AveBedrms": 0.01047491727432933,
+              "Population": 3.934528463836149,
+              "AveOccup": 0.017737404244285174,
+              "Latitude": 0.015073035090190645,
+              "Longitude": 0.2554028750791095,
+              "Latitude:Longitude:margin_Latitude": 239.51147348097587,
+              "Latitude:Longitude:margin_Longitude": 41.3059769899922
+            },
+            {
+              "MedInc": 14.617218771481715,
+              "HouseAge": 943.53351270775,
+              "AveRooms": 0.1253880902228107,
+              "AveBedrms": 0.010463482989755815,
+              "Population": 3.967594030400032,
+              "AveOccup": 0.0177112193936834,
+              "Latitude": 0.034629170526579656,
+              "Longitude": 0.8808163459643311,
+              "Latitude:Longitude:margin_Latitude": 230.19967297396397,
+              "Latitude:Longitude:margin_Longitude": 41.403935983851774
+            },
+            {
+              "MedInc": 14.622067295341015,
+              "HouseAge": 943.3650590219812,
+              "AveRooms": 0.12547702341293124,
+              "AveBedrms": 0.010453654502405357,
+              "Population": 3.9514409500061554,
+              "AveOccup": 0.017697505660665525,
+              "Latitude": 0.1225084749791655,
+              "Longitude": 1.8857186373677755,
+              "Latitude:Longitude:margin_Latitude": 224.32674682374494,
+              "Latitude:Longitude:margin_Longitude": 41.70630642798861
+            },
+            {
+              "MedInc": 14.644196848888779,
+              "HouseAge": 943.622893459296,
+              "AveRooms": 0.12568963762585778,
+              "AveBedrms": 0.010440992196639751,
+              "Population": 3.9427492874905274,
+              "AveOccup": 0.017685166302592023,
+              "Latitude": 18.181869788496915,
+              "Longitude": 27.60979912729044,
+              "Latitude:Longitude:margin_Latitude": 214.98765413213874,
+              "Latitude:Longitude:margin_Longitude": 42.05388859699065
+            },
+            {
+              "MedInc": 14.634871974988604,
+              "HouseAge": 943.7956198561025,
+              "AveRooms": 0.12545037518310254,
+              "AveBedrms": 0.010462691838826706,
+              "Population": 3.9760273041162892,
+              "AveOccup": 0.017708529476001912,
+              "Latitude": 46.51195885257066,
+              "Longitude": 76.40768869746361,
+              "Latitude:Longitude:margin_Latitude": 224.88221912662004,
+              "Latitude:Longitude:margin_Longitude": 41.66843442679228
+            },
+            {
+              "MedInc": 14.634771765755344,
+              "HouseAge": 943.779814376943,
+              "AveRooms": 0.1254493333219472,
+              "AveBedrms": 0.01046275844374627,
+              "Population": 3.976082436366084,
+              "AveOccup": 0.017708215200636344,
+              "Latitude": 126.52808285090823,
+              "Longitude": 76.40768869746361,
+              "Latitude:Longitude:margin_Latitude": 224.75434983318235,
+              "Latitude:Longitude:margin_Longitude": 41.67492904503258
+            },
+            {
+              "MedInc": 14.63473653605989,
+              "HouseAge": 943.7777139560716,
+              "AveRooms": 0.1254494926088654,
+              "AveBedrms": 0.01046273028972635,
+              "Population": 3.976016413396018,
+              "AveOccup": 0.01770819180213519,
+              "Latitude": 126.52808285090823,
+              "Longitude": 76.40768869746361,
+              "Latitude:Longitude:margin_Latitude": 224.75846104543746,
+              "Latitude:Longitude:margin_Longitude": 41.6749083734457
+            },
+            {
+              "MedInc": 14.63473653605989,
+              "HouseAge": 943.7777139560716,
+              "AveRooms": 0.1254494926088654,
+              "AveBedrms": 0.01046273028972635,
+              "Population": 3.976016413396018,
+              "AveOccup": 0.01770819180213519,
+              "Latitude": 126.52808285090823,
+              "Longitude": 76.40768869746361,
+              "Latitude:Longitude:margin_Latitude": 224.75846104543746,
+              "Latitude:Longitude:margin_Longitude": 41.6749083734457
+            }
+          ],
+          "n_reml_iter": 10,
+          "converged": true,
+          "termination_reason": "score_objective_tolerance",
+          "objective": 9092.128990580406,
+          "objective_history": null,
+          "inner_iter_history": null,
+          "profile": {
+            "interaction_mode": "full",
+            "interaction_candidate_active": false,
+            "n_interactions": 1,
+            "requested_max_reml_iter": 20,
+            "effective_max_reml_iter": 20,
+            "reml_tol_resolved": 1e-9,
+            "irls_calls": 12,
+            "irls_iters": 13,
+            "direct_backend": "gram",
+            "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term",
+            "reml_freeze_decision": {
+              "names": [
+                "MedInc",
+                "HouseAge",
+                "AveRooms",
+                "AveBedrms",
+                "Population",
+                "AveOccup",
+                "Latitude",
+                "Longitude",
+                "Latitude:Longitude:margin_Latitude",
+                "Latitude:Longitude:margin_Longitude"
+              ],
+              "proj_grad": [
+                5.121236767990922e-12,
+                9.180212146020494e-12,
+                5.6736837450444e-12,
+                2.8403945862010005e-12,
+                6.111910977324442e-11,
+                7.410960733977845e-12,
+                0.00042409502794527043,
+                0.0009031841765398951,
+                3.247464519517962e-9,
+                5.081517429061932e-10
+              ],
+              "hess_diag": [
+                3.4353286347438132,
+                2.4751760667602456,
+                1.910732396310202,
+                2.005105610307123,
+                0.8670715122178867,
+                2.8263334800009408,
+                0.00042413923944389383,
+                0.0009015585070485477,
+                40.03422077796841,
+                33.59261911252318
+              ],
+              "row_curvature": [
+                3.4353286347438132,
+                2.4751760667602456,
+                1.910732396310202,
+                2.005105610307123,
+                0.8670715122178867,
+                2.8263334800009408,
+                0.000739753377324311,
+                0.0009015585070485477,
+                40.03422077796841,
+                33.59261911252318
+              ],
+              "penalty_rank": [
+                18,
+                18,
+                18,
+                18,
+                18,
+                18,
+                28,
+                28,
+                812,
+                812
+              ],
+              "normalized_curvature": [
+                0.19085159081910077,
+                0.13750978148668033,
+                0.10615179979501124,
+                0.11139475612817352,
+                0.04817063956766038,
+                0.15701852666671895,
+                0.000015147829980139064,
+                0.000032198518108876696,
+                0.0493032275590744,
+                0.041370220581925105
+              ],
+              "curvature_bar": 0.0019085159081910078,
+              "score_scale": 9093.128990580406,
+              "estimated": [
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true
+              ],
+              "frozen": [
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                false,
+                false
+              ]
+            },
+            "reml_freeze_revalidated": true,
+            "reml_bootstrap_summary": {
+              "boot_phi": 0.2116653348706977,
+              "boot_inv_phi": 4.72443917475141,
+              "boot_deviance": 2608.629483474773,
+              "boot_penalty_quad": 10.517370215238483,
+              "boot_penalty_rank_total": 1004,
+              "n_components": 10,
+              "lam_fp_min": 0.00013228653084903586,
+              "lam_fp_max": 117.44720236115047,
+              "n_components_at_lower_bound": 0
+            },
+            "reml_bootstrap_components": [
+              {
+                "name": "MedInc",
+                "group_name": "MedInc",
+                "rank": 18,
+                "quad": 6.807932444046457,
+                "trace_term": 21.6648379221667,
+                "denom": 53.82850065988089,
+                "lam_fp_raw": 0.3343953440898205,
+                "lam_fp_clipped": 0.3343953440898205,
+                "beta_norm": 0.3908981272877878,
+                "omega_frob": 19098.86957766332,
+                "block_dim": 19
+              },
+              {
+                "name": "HouseAge",
+                "group_name": "HouseAge",
+                "rank": 18,
+                "quad": 0.0221184423264964,
+                "trace_term": 0.048763120204440055,
+                "denom": 0.15326035561621937,
+                "lam_fp_raw": 117.44720236115047,
+                "lam_fp_clipped": 117.44720236115047,
+                "beta_norm": 0.04924653741262471,
+                "omega_frob": 242.02324828447863,
+                "block_dim": 19
+              },
+              {
+                "name": "AveRooms",
+                "group_name": "AveRooms",
+                "rank": 18,
+                "quad": 1683.974762500433,
+                "trace_term": 12664.285884344157,
+                "denom": 20620.122221593905,
+                "lam_fp_raw": 0.0008729337201090861,
+                "lam_fp_clipped": 0.0008729337201090861,
+                "beta_norm": 0.5001007109072301,
+                "omega_frob": 36693.316108298626,
+                "block_dim": 19
+              },
+              {
+                "name": "AveBedrms",
+                "group_name": "AveBedrms",
+                "rank": 18,
+                "quad": 396.4985434214063,
+                "trace_term": 87254.08962041707,
+                "denom": 89127.32287168903,
+                "lam_fp_raw": 0.0002019582707080012,
+                "lam_fp_clipped": 0.0002019582707080012,
+                "beta_norm": 0.2534430776198093,
+                "omega_frob": 40296.04689259756,
+                "block_dim": 19
+              },
+              {
+                "name": "Population",
+                "group_name": "Population",
+                "rank": 18,
+                "quad": 47.33446171167913,
+                "trace_term": 409.5015434399515,
+                "denom": 633.130328666379,
+                "lam_fp_raw": 0.028430165457268595,
+                "lam_fp_clipped": 0.028430165457268595,
+                "beta_norm": 0.08003460314254512,
+                "omega_frob": 28327.748000122665,
+                "block_dim": 19
+              },
+              {
+                "name": "AveOccup",
+                "group_name": "AveOccup",
+                "rank": 18,
+                "quad": 1056.941949514706,
+                "trace_term": 19481.302849105392,
+                "denom": 24474.760800830794,
+                "lam_fp_raw": 0.0007354515186677122,
+                "lam_fp_clipped": 0.0007354515186677122,
+                "beta_norm": 0.3756393532018954,
+                "omega_frob": 37434.16126946274,
+                "block_dim": 19
+              },
+              {
+                "name": "Latitude",
+                "group_name": "Latitude",
+                "rank": 28,
+                "quad": 1631.0450952280019,
+                "trace_term": 203955.9870811448,
+                "denom": 211661.76042482612,
+                "lam_fp_raw": 0.00013228653084903586,
+                "lam_fp_clipped": 0.00013228653084903586,
+                "beta_norm": 6.173099213139739,
+                "omega_frob": 37536.36209456379,
+                "block_dim": 29
+              },
+              {
+                "name": "Longitude",
+                "group_name": "Longitude",
+                "rank": 28,
+                "quad": 3039.9148568668516,
+                "trace_term": 124924.80918890101,
+                "denom": 139286.70202659158,
+                "lam_fp_raw": 0.00020102421546785168,
+                "lam_fp_clipped": 0.00020102421546785168,
+                "beta_norm": 4.918337662961715,
+                "omega_frob": 35947.75368431247,
+                "block_dim": 29
+              },
+              {
+                "name": "Latitude:Longitude:margin_Latitude",
+                "group_name": "Latitude:Longitude",
+                "rank": 812,
+                "quad": 3.5331201427858048,
+                "trace_term": 180.53297160417466,
+                "denom": 197.2249828158552,
+                "lam_fp_raw": 4.117125469637623,
+                "lam_fp_clipped": 4.117125469637623,
+                "beta_norm": 486.763502197594,
+                "omega_frob": 5.767682547823997,
+                "block_dim": 841
+              },
+              {
+                "name": "Latitude:Longitude:margin_Longitude",
+                "group_name": "Latitude:Longitude",
+                "rank": 812,
+                "quad": 6.197996100439734,
+                "trace_term": 254.73844482065846,
+                "denom": 284.02050040253243,
+                "lam_fp_raw": 2.8589485577596703,
+                "lam_fp_clipped": 2.8589485577596703,
+                "beta_norm": 486.763502197594,
+                "omega_frob": 6.182159958469671,
+                "block_dim": 841
+              }
+            ],
+            "reml_n_structured_cache_solves": 0,
+            "reml_n_block_structured_cache_solves": 0,
+            "reml_structured_cache_data_passes": 0,
+            "reml_block_structured_cache_data_passes": 0,
+            "reml_n_linesearch_fits": 9,
+            "reml_n_linesearch_surrogate_evals": 0,
+            "reml_n_linesearch_full_evals": 9,
+            "reml_n_outer_iter": 10,
+            "reml_n_analytical_iters": 9,
+            "n_reml_iter": 10,
+            "converged": true,
+            "fit_runtime_canonicalize_validate": true,
+            "fit_runtime_canonicalize_validate_reason": "auto_full"
+          }
+        }
+      },
+      "workload": {
+        "coefficient_count_without_intercept": 1013,
+        "mse": {
+          "train": 0.21322959430325328,
+          "valid": 0.22850544346181947,
+          "test": 0.23744908041783022
+        },
+        "backend_groups": [
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedSSPGroupMatrix",
+          "DiscretizedTensorGroupMatrix"
+        ],
+        "data_fingerprint": "97b51f1dcea2cfc6ca34858a9f3f867826091d4ffdbd2b06f86cc7b612b3ba79",
+        "transformed_features_sha256": "14bb8779e4e52acc7deed8b8870f2cdacd9a4b47927a55549fae67c3139f36f2",
+        "split_sha256": "b6636f12fd2167618d26247e636d8f195f59a2c52b60195ecde005da044bbd69",
+        "reference_json_sha256": "dae642454b9940ac4aecd9ce3108f93efeaccf34e66bd6fb5cea9f554b7cb44d",
+        "reference_predictions_sha256": "50bc6b86b64022e6a8e5fe9896ca0dada1d13cfc9083533f45d18a7d4a19e3f5",
+        "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62"
+      }
+    }
+  },
+  "measured_runs": [
+    {
+      "case": "rows20",
+      "profiled": false,
+      "fit_seconds": 8.43125050200615,
+      "fit_end_peak_process_rss_mib": 543.59375,
+      "peak_process_rss_mib": 543.59375,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 32793376,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 7900691,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 40694067,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "0696a00a2e3f43d0a54f2e94a99bb76abb38b26177ff6fe941800ebf00dd9c47",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "daf6196a6d10b82149eeb146a80363f5c20d5c0b",
+      "warnings": [],
+      "label": "baseline-rows20-1",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.benchmark-artifacts/tensor-reuse/baseline-rows20-1",
+      "artifact_sha256": {
+        "measurement-environment.json": "20c847db0ed93fb61db2e171bf493544fc7d8a05085ddbb48b06391ae8baad86",
+        "predictions.npz": "6b7a90ad4a110c3f5f65618e9eac80548fa1ab3107696b5e48b4403fa89076aa",
+        "result.json": "009d6f946c2f09815c2aaa3d0daa366e074722ed45a658a74d31cd31175fa874",
+        "run.json": "0a00fe68bca437263e54401ce298b393f9fafe0f3ed99dbfadbd68b14a1ed1d5",
+        "worker.log": "bf182827acdf7d0ca7c7d5fa54d14136afa9f55844618b727cc8d2806802a6a3"
+      },
+      "measurement_environment": {
+        "started_at_utc": "2026-09-13T18:42:26.279560+00:00",
+        "load_average": [
+          0.80517578125,
+          1.11767578125,
+          0.88916015625
+        ],
+        "other_python_processes": [],
+        "finished_at_utc": "2026-09-13T18:42:37.833984+00:00",
+        "returncode": 0
+      },
+      "implementation": "baseline"
+    },
+    {
+      "case": "rows20",
+      "profiled": false,
+      "fit_seconds": 9.025121546001174,
+      "fit_end_peak_process_rss_mib": 543.56640625,
+      "peak_process_rss_mib": 543.56640625,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 32793376,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 7900691,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 40694067,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "0696a00a2e3f43d0a54f2e94a99bb76abb38b26177ff6fe941800ebf00dd9c47",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "daf6196a6d10b82149eeb146a80363f5c20d5c0b",
+      "warnings": [],
+      "label": "baseline-rows20-2",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.benchmark-artifacts/tensor-reuse/baseline-rows20-2",
+      "artifact_sha256": {
+        "measurement-environment.json": "2b94c9c2f420576a488d28d4b6116287a458ed2352c72b65a918d2d5841e6a57",
+        "predictions.npz": "6b7a90ad4a110c3f5f65618e9eac80548fa1ab3107696b5e48b4403fa89076aa",
+        "result.json": "d47858a1362dc91db5d4697b1ee3e703d8e805cf4544e357e30b205b29be16a6",
+        "run.json": "2cbc02ee7def2003a85fe592ec2cf5562bd73246e49f604290a6a5c7cecacbe0",
+        "worker.log": "27e654b664dde4ba59d0eba6be3ab4645930fb108719c3a0f5e89d03b0380d6e"
+      },
+      "measurement_environment": {
+        "before": {
+          "utc": "2026-09-13T19:23:02.790847+00:00",
+          "load_average": [
+            1.22802734375,
+            1.49365234375,
+            1.328125
+          ],
+          "other_compute_processes": []
+        },
+        "profiled": false,
+        "after": {
+          "utc": "2026-09-13T19:23:15.433870+00:00",
+          "load_average": [
+            1.1767578125,
+            1.46875,
+            1.322265625
+          ],
+          "other_compute_processes": []
+        },
+        "returncode": 0
+      },
+      "implementation": "baseline"
+    },
+    {
+      "case": "rows20",
+      "profiled": false,
+      "fit_seconds": 5.8501052020001225,
+      "fit_end_peak_process_rss_mib": 561.80859375,
+      "peak_process_rss_mib": 561.80859375,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 32793376,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 7900691,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 40694067,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "ff8dcc4a8cbffc9e47fe3619442f18585f31055143b3a07c1c000f9369289b41",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "90f519f39ec3f1a7b1b9a3a2ff13d1c96ababd21",
+      "warnings": [],
+      "label": "patched-rows20-1",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.benchmark-artifacts/tensor-reuse/patched-rows20-1",
+      "artifact_sha256": {
+        "measurement-environment.json": "5fe3b5a208d00723ec50846e734557b1f270d5fc785cf9168b85663097e36010",
+        "predictions.npz": "6b7a90ad4a110c3f5f65618e9eac80548fa1ab3107696b5e48b4403fa89076aa",
+        "result.json": "99f37a927ec9c57adf4b2cc1b3e292c8d3960a4499d4e974f5ac1da61033d14f",
+        "run.json": "88963ef5c63fa5b252665a6458b9bab8d1a1b74b657e025914ebbb18d544f3fc",
+        "worker.log": "ecaaebbaf3fc60614c5ba3062e8e4a0568205c69b671874a5ad7b513e10c6d5a"
+      },
+      "measurement_environment": {
+        "before": {
+          "utc": "2026-09-13T19:22:44.259569+00:00",
+          "load_average": [
+            1.2158203125,
+            1.51123046875,
+            1.330078125
+          ],
+          "other_compute_processes": []
+        },
+        "profiled": false,
+        "after": {
+          "utc": "2026-09-13T19:22:53.596868+00:00",
+          "load_average": [
+            1.18212890625,
+            1.49365234375,
+            1.326171875
+          ],
+          "other_compute_processes": []
+        },
+        "returncode": 0
+      },
+      "implementation": "patched"
+    },
+    {
+      "case": "rows20",
+      "profiled": false,
+      "fit_seconds": 5.834555827022996,
+      "fit_end_peak_process_rss_mib": 561.3828125,
+      "peak_process_rss_mib": 561.3828125,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 32793376,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 7900691,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 40694067,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "ff8dcc4a8cbffc9e47fe3619442f18585f31055143b3a07c1c000f9369289b41",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "90f519f39ec3f1a7b1b9a3a2ff13d1c96ababd21",
+      "warnings": [],
+      "label": "patched-rows20-2",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.benchmark-artifacts/tensor-reuse/patched-rows20-2",
+      "artifact_sha256": {
+        "measurement-environment.json": "d8314fccbe2c98c240b1450c6e6e73f7091a21938f90ba4dba234272cf3b1d35",
+        "predictions.npz": "6b7a90ad4a110c3f5f65618e9eac80548fa1ab3107696b5e48b4403fa89076aa",
+        "result.json": "9dcf4522139b6a4ab354ca86c538dcff898f08b13f835fd8b467d107dc67de96",
+        "run.json": "87055da8625109a21342c5b07e0b353272e17c893f63ad07ab22ffaa1ca839d2",
+        "worker.log": "d4df2d86aa5b9e0299f73746bcf38107376204bd7f76cdc41d526eb387ce3471"
+      },
+      "measurement_environment": {
+        "before": {
+          "utc": "2026-09-13T19:22:53.608160+00:00",
+          "load_average": [
+            1.18212890625,
+            1.49365234375,
+            1.326171875
+          ],
+          "other_compute_processes": []
+        },
+        "profiled": false,
+        "after": {
+          "utc": "2026-09-13T19:23:02.777802+00:00",
+          "load_average": [
+            1.22802734375,
+            1.49365234375,
+            1.328125
+          ],
+          "other_compute_processes": []
+        },
+        "returncode": 0
+      },
+      "implementation": "patched"
+    },
+    {
+      "case": "rows30",
+      "profiled": false,
+      "fit_seconds": 109.48509363096673,
+      "fit_end_peak_process_rss_mib": 891.28515625,
+      "peak_process_rss_mib": 891.28515625,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 140395136,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 29806527,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 170201663,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "0696a00a2e3f43d0a54f2e94a99bb76abb38b26177ff6fe941800ebf00dd9c47",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "daf6196a6d10b82149eeb146a80363f5c20d5c0b",
+      "warnings": [],
+      "label": "baseline-rows30-1",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.benchmark-artifacts/tensor-reuse/baseline-rows30-1",
+      "artifact_sha256": {
+        "measurement-environment.json": "15e33db29f6e2d1928f506e50a75de611147004be768cace62fe5e202e2a0ff9",
+        "predictions.npz": "aafcb1ce10e2829a07063e19b9cfac4e1327481eaaca4c2bc8a27cf723a7ec5d",
+        "result.json": "5c6661de94ce59b899a99107233ce7732a79fecb341be4131bc6e330ee0acb12",
+        "run.json": "313d3880838466d67bd05992261694621c5d51580b493afa49d45e2ed46328f4",
+        "worker.log": "047dcda59df49beced55cad1e963b0509310324b055fb4b26644b920fd83f0ef"
+      },
+      "measurement_environment": {
+        "started_at_utc": "2026-09-13T18:42:37.834839+00:00",
+        "load_average": [
+          1.0703125,
+          1.16162109375,
+          0.908203125
+        ],
+        "other_python_processes": [],
+        "finished_at_utc": "2026-09-13T18:44:30.697411+00:00",
+        "returncode": 0
+      },
+      "implementation": "baseline"
+    },
+    {
+      "case": "rows30",
+      "profiled": false,
+      "fit_seconds": 129.2247123150155,
+      "fit_end_peak_process_rss_mib": 916.62890625,
+      "peak_process_rss_mib": 916.75390625,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 140395136,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 29806527,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 170201663,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "0696a00a2e3f43d0a54f2e94a99bb76abb38b26177ff6fe941800ebf00dd9c47",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "daf6196a6d10b82149eeb146a80363f5c20d5c0b",
+      "warnings": [],
+      "label": "baseline-rows30-2",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.benchmark-artifacts/tensor-reuse/baseline-rows30-2",
+      "artifact_sha256": {
+        "measurement-environment.json": "4d314a559a03e290e2e110e85c472c4e9c4e58dd950877336e99276b812d71a5",
+        "predictions.npz": "aafcb1ce10e2829a07063e19b9cfac4e1327481eaaca4c2bc8a27cf723a7ec5d",
+        "result.json": "b967b1e0fd20e9d57aa0ab47d81cf521864ea5058cf94cde78704fa3dd1331cc",
+        "run.json": "014d060823dc89806d3e5db08f0ea18776a7dd662affc88d72510cbebde15f5f",
+        "worker.log": "1df8743e846f668add81c4a9de4a46be9f6ff5b9516622a350e6412d67f14046"
+      },
+      "measurement_environment": {
+        "before": {
+          "utc": "2026-09-13T19:25:36.689860+00:00",
+          "load_average": [
+            1.19140625,
+            1.34716796875,
+            1.291015625
+          ],
+          "other_compute_processes": []
+        },
+        "profiled": false,
+        "after": {
+          "utc": "2026-09-13T19:27:49.874180+00:00",
+          "load_average": [
+            1.3076171875,
+            1.36083984375,
+            1.30224609375
+          ],
+          "other_compute_processes": []
+        },
+        "returncode": 0
+      },
+      "implementation": "baseline"
+    },
+    {
+      "case": "rows30",
+      "profiled": false,
+      "fit_seconds": 67.64818409300642,
+      "fit_end_peak_process_rss_mib": 931.33203125,
+      "peak_process_rss_mib": 931.33203125,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 140395136,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 29806527,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 170201663,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "ff8dcc4a8cbffc9e47fe3619442f18585f31055143b3a07c1c000f9369289b41",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "90f519f39ec3f1a7b1b9a3a2ff13d1c96ababd21",
+      "warnings": [],
+      "label": "patched-rows30-1",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.benchmark-artifacts/tensor-reuse/patched-rows30-1",
+      "artifact_sha256": {
+        "measurement-environment.json": "9ac48eaf841d9af78390eb2dda9880f922e1d0ca3f0af101071a26ce07b17c6a",
+        "predictions.npz": "aafcb1ce10e2829a07063e19b9cfac4e1327481eaaca4c2bc8a27cf723a7ec5d",
+        "result.json": "c52fd8b952694fb24b9e1d9373bb3c029b76a7890d87cbced9e94cc1dd480d26",
+        "run.json": "320e0b7563c11c39e8b55039892fea762f84781d58249404acfe15ebb7259d06",
+        "worker.log": "b69a7f4620f1cb9c0d5dfb5069710de2d3e29b00f4e00751f213a8d4276d705e"
+      },
+      "measurement_environment": {
+        "before": {
+          "utc": "2026-09-13T19:23:15.446761+00:00",
+          "load_average": [
+            1.1767578125,
+            1.46875,
+            1.322265625
+          ],
+          "other_compute_processes": []
+        },
+        "profiled": false,
+        "after": {
+          "utc": "2026-09-13T19:24:26.984640+00:00",
+          "load_average": [
+            1.19140625,
+            1.4013671875,
+            1.306640625
+          ],
+          "other_compute_processes": []
+        },
+        "returncode": 0
+      },
+      "implementation": "patched"
+    },
+    {
+      "case": "rows30",
+      "profiled": false,
+      "fit_seconds": 66.05120485502994,
+      "fit_end_peak_process_rss_mib": 942.7890625,
+      "peak_process_rss_mib": 942.7890625,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 140395136,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 29806527,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 170201663,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "ff8dcc4a8cbffc9e47fe3619442f18585f31055143b3a07c1c000f9369289b41",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "90f519f39ec3f1a7b1b9a3a2ff13d1c96ababd21",
+      "warnings": [],
+      "label": "patched-rows30-2",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.benchmark-artifacts/tensor-reuse/patched-rows30-2",
+      "artifact_sha256": {
+        "measurement-environment.json": "7ba4b1fec12ce351dbb7daacf78a414d3d5f539032aea1fa38ab6c225f7c9b3c",
+        "predictions.npz": "aafcb1ce10e2829a07063e19b9cfac4e1327481eaaca4c2bc8a27cf723a7ec5d",
+        "result.json": "7b4d87be30a1e675feb50db238c61a841e147fba3ac1f024801015c596a0cb7b",
+        "run.json": "6a149e6ce66464a9e62a663f9130853259158901ec23519fddd919c898556a43",
+        "worker.log": "153ae1b2d9e1a555e7798d235564a2dfe689d37b31ece18cdadc1012c3335975"
+      },
+      "measurement_environment": {
+        "before": {
+          "utc": "2026-09-13T19:24:26.997759+00:00",
+          "load_average": [
+            1.19140625,
+            1.4013671875,
+            1.306640625
+          ],
+          "other_compute_processes": [
+            {
+              "pid": 395033,
+              "ppid": 393953,
+              "command_name": "ps",
+              "percent_cpu_lifetime_average": 100,
+              "elapsed_seconds": 0
+            }
+          ]
+        },
+        "profiled": false,
+        "after": {
+          "utc": "2026-09-13T19:25:36.677363+00:00",
+          "load_average": [
+            1.19140625,
+            1.34716796875,
+            1.291015625
+          ],
+          "other_compute_processes": []
+        },
+        "returncode": 0
+      },
+      "implementation": "patched"
+    }
+  ],
+  "excluded_warmups": [
+    {
+      "case": "rows20",
+      "profiled": false,
+      "fit_seconds": 9.988967491022777,
+      "fit_end_peak_process_rss_mib": 582.58203125,
+      "peak_process_rss_mib": 582.58203125,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 32793376,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 7900691,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 40694067,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "0696a00a2e3f43d0a54f2e94a99bb76abb38b26177ff6fe941800ebf00dd9c47",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "daf6196a6d10b82149eeb146a80363f5c20d5c0b",
+      "warnings": [],
+      "label": "warmup-baseline-rows20",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/tensor-reuse-baseline-20260913/.benchmark-artifacts/tensor-reuse/warmup-baseline-rows20",
+      "artifact_sha256": {
+        "predictions.npz": "6b7a90ad4a110c3f5f65618e9eac80548fa1ab3107696b5e48b4403fa89076aa",
+        "result.json": "e08aca6588b6ab32ab8cda766de86d507813f7acf47dd1bc61da3a6e7f31f769",
+        "run.json": "ee6f5b18ff64b2ea7285452757f8c030119b9b60c35676c004ff96d6b2621bac",
+        "worker.log": "04573d126528fc8f7c8d1be62e931e9ff96cdb2d7ab4137c5390c10a25a4c796"
+      },
+      "measurement_environment": null
+    },
+    {
+      "case": "rows20",
+      "profiled": false,
+      "fit_seconds": 5.991571786988061,
+      "fit_end_peak_process_rss_mib": 561.6015625,
+      "peak_process_rss_mib": 561.6015625,
+      "retained_model_storage": {
+        "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+        "numpy_owned_bytes": 32793376,
+        "numpy_owner_count": 330,
+        "bytes_payload_bytes": 7900691,
+        "bytes_owner_count": 28,
+        "bytearray_payload_bytes": 0,
+        "bytearray_owner_count": 0,
+        "total_payload_bytes": 40694067,
+        "unmeasured_buffer_count": 0,
+        "unmeasured_buffer_types": {}
+      },
+      "reference_comparison": {
+        "valid": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        },
+        "test": {
+          "max_abs_prediction_difference": 0,
+          "rms_prediction_difference": 0,
+          "exact_prediction_match": true,
+          "mse_difference": 0
+        }
+      },
+      "package_source_sha256": "ff8dcc4a8cbffc9e47fe3619442f18585f31055143b3a07c1c000f9369289b41",
+      "benchmark_script_sha256": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "git_head": "90f519f39ec3f1a7b1b9a3a2ff13d1c96ababd21",
+      "warnings": [],
+      "label": "warmup-patched-rows20",
+      "artifact_directory": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.benchmark-artifacts/tensor-reuse/warmup-patched-rows20",
+      "artifact_sha256": {
+        "measurement-environment.json": "770da319c20b3b69199403dbac22e216a1a743749736bacec388252433df2a83",
+        "predictions.npz": "6b7a90ad4a110c3f5f65618e9eac80548fa1ab3107696b5e48b4403fa89076aa",
+        "result.json": "421d68558d21803c39dd54d415d72be3bcd8e6bbe17e9a530ec32d84fa17987f",
+        "run.json": "ad1179b8cd2d4cab0c61b5cc3ce610de78105b6f46373b0579b422b522e38be7",
+        "worker.log": "3f39f943e0117da30bd54deb9d50b7c71c536c462d5d586ebb535aede3932383"
+      },
+      "measurement_environment": {
+        "before": {
+          "utc": "2026-09-13T19:22:34.710990+00:00",
+          "load_average": [
+            0.99365234375,
+            1.47802734375,
+            1.3173828125
+          ],
+          "other_compute_processes": []
+        },
+        "profiled": false,
+        "after": {
+          "utc": "2026-09-13T19:22:44.247291+00:00",
+          "load_average": [
+            1.2158203125,
+            1.51123046875,
+            1.330078125
+          ],
+          "other_compute_processes": []
+        },
+        "returncode": 0
+      }
+    }
+  ],
+  "profile_comparison": {
+    "original": {
+      "functions": [
+        {
+          "file": "superglm/reml/penalty_algebra.py",
+          "line": 2155,
+          "function": "compute_penalty_nullity",
+          "primitive_calls": 22,
+          "total_calls": 22,
+          "self_seconds": 0.000142249,
+          "cumulative_seconds": 51.73677076600001,
+          "callers": [
+            {
+              "file": "superglm/reml/discrete.py",
+              "line": 174,
+              "function": "optimize_discrete_reml_cached_w",
+              "stats": [
+                1,
+                1,
+                0.000013721000000000001,
+                0.000180852
+              ]
+            },
+            {
+              "file": "superglm/reml/objective.py",
+              "line": 56,
+              "function": "reml_laml_objective",
+              "stats": [
+                21,
+                21,
+                0.000128528,
+                51.73658991400001
+              ]
+            }
+          ]
+        },
+        {
+          "file": "superglm/reml/penalty_support.py",
+          "line": 102,
+          "function": "_component_root",
+          "primitive_calls": 100,
+          "total_calls": 100,
+          "self_seconds": 23.802170154000002,
+          "cumulative_seconds": 24.687443652000002,
+          "callers": [
+            {
+              "file": "superglm/reml/penalty_support.py",
+              "line": 139,
+              "function": "<genexpr>",
+              "stats": [
+                100,
+                100,
+                23.802170154000002,
+                24.687443652000002
+              ]
+            }
+          ]
+        },
+        {
+          "file": "superglm/reml/penalty_support.py",
+          "line": 136,
+          "function": "_penalty_support",
+          "primitive_calls": 98,
+          "total_calls": 98,
+          "self_seconds": 0.00215432,
+          "cumulative_seconds": 103.59241660800001,
+          "callers": [
+            {
+              "file": "superglm/reml/penalty_algebra.py",
+              "line": 650,
+              "function": "get_support",
+              "stats": [
+                98,
+                98,
+                0.00215432,
+                103.59241660800001
+              ]
+            }
+          ]
+        },
+        {
+          "file": "superglm/model/reml_finalize.py",
+          "line": 348,
+          "function": "finalize_reml_fit",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "self_seconds": 0.000297241,
+          "cumulative_seconds": 55.433370198000006,
+          "callers": [
+            {
+              "file": "superglm/model/fit_ops.py",
+              "line": 1724,
+              "function": "_fit_reml_in_workspace",
+              "stats": [
+                1,
+                1,
+                0.000297241,
+                55.433370198000006
+              ]
+            }
+          ]
+        },
+        {
+          "file": "superglm/reml/penalty_algebra.py",
+          "line": 1996,
+          "function": "build_penalty_context",
+          "primitive_calls": 13,
+          "total_calls": 13,
+          "self_seconds": 0.001278749,
+          "cumulative_seconds": 0.476078198,
+          "callers": [
+            {
+              "file": "superglm/model/fit_ops.py",
+              "line": 1724,
+              "function": "_fit_reml_in_workspace",
+              "stats": [
+                1,
+                1,
+                0.000539153,
+                0.16953284700000001
+              ]
+            },
+            {
+              "file": "superglm/reml/discrete.py",
+              "line": 174,
+              "function": "optimize_discrete_reml_cached_w",
+              "stats": [
+                11,
+                11,
+                0.000704492,
+                0.165824447
+              ]
+            },
+            {
+              "file": "superglm/model/reml_finalize.py",
+              "line": 348,
+              "function": "finalize_reml_fit",
+              "stats": [
+                1,
+                1,
+                0.000035104,
+                0.140720904
+              ]
+            }
+          ]
+        },
+        {
+          "file": "superglm/reml/penalty_algebra.py",
+          "line": 650,
+          "function": "get_support",
+          "primitive_calls": 631,
+          "total_calls": 631,
+          "self_seconds": 0.0011276790000000001,
+          "cumulative_seconds": 103.593544287,
+          "callers": [
+            {
+              "file": "superglm/reml/penalty_algebra.py",
+              "line": 657,
+              "function": "evaluate",
+              "stats": [
+                96,
+                96,
+                0.000078125,
+                0.000078125
+              ]
+            },
+            {
+              "file": "superglm/reml/penalty_algebra.py",
+              "line": 2072,
+              "function": "_group_penalty_rank",
+              "stats": [
+                207,
+                207,
+                0.000179122,
+                103.33488270900001
+              ]
+            },
+            {
+              "file": "superglm/reml/penalty_algebra.py",
+              "line": 2237,
+              "function": "_compute_penalty_logdet_evaluation",
+              "stats": [
+                328,
+                328,
+                0.0008704320000000001,
+                0.258583453
+              ]
+            }
+          ]
+        },
+        {
+          "file": "superglm/reml/penalty_algebra.py",
+          "line": 2089,
+          "function": "compute_total_penalty_rank",
+          "primitive_calls": 1,
+          "total_calls": 1,
+          "self_seconds": 0.000053561000000000004,
+          "cumulative_seconds": 51.601030687000005,
+          "callers": [
+            {
+              "file": "superglm/reml/discrete.py",
+              "line": 174,
+              "function": "optimize_discrete_reml_cached_w",
+              "stats": [
+                1,
+                1,
+                0.000053561000000000004,
+                51.601030687000005
+              ]
+            }
+          ]
+        }
+      ],
+      "support_builds": 98,
+      "component_root_builds": 100,
+      "tensor_builds_inferred_from_one_or_two_component_families": 2,
+      "singleton_builds_inferred": 96
+    }
+  },
+  "purpose": "Initial authenticated tensor handoff on 90f519f3; exact numerical replay with transient RSS overhead. Superseded by the cache-scoped producer amendment, with these observations retained.",
+  "protocol": {
+    "implementations": {
+      "baseline": "daf6196a6d10b82149eeb146a80363f5c20d5c0b",
+      "patched": "90f519f39ec3f1a7b1b9a3a2ff13d1c96ababd21"
+    },
+    "baseline_production_source_matches": "7c4e70ffac99c9a70adf90e5b21d9735109c4675",
+    "unprofiled_repetitions_per_implementation_per_case": 2,
+    "order_per_case": "B1, A1, A2, B2; independent rows20 warmups excluded",
+    "native_threads": 1,
+    "whole_worker_deadline_seconds": 180,
+    "fit_clock": "Complete fit_reml including construction, optimizer and finalization; excludes imports, loading and post-fit inspection/prediction/export.",
+    "fit_end_peak_rss": "Whole-process high-water sampled immediately after fit; includes runtime/data and fitting, excludes later inspection/export.",
+    "retained_storage": "NumPy and byte-buffer owner payloads, deduplicated through views; excludes Python headers, allocator slack and hidden extension state.",
+    "environment": "Shared 16-visible-CPU host. No simultaneous fit/test workers launched by this session. Point-in-time process/load snapshots only; no continuous host monitor.",
+    "uncertainty": "Two observations per implementation/case establish ranges only; no significance claim or general speedup guarantee. Exact replay is local evidence, not a portable tolerance.",
+    "historical_profile_receipt": "../../benchmarks/adaptive_interactions_baseline.json"
+  }
+}

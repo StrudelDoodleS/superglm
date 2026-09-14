@@ -1,0 +1,62 @@
+# Fitted interaction plots from the broad trial
+
+The figures show all ten interaction terms in the selected Airfoil,
+Concrete and King County models from the
+[frozen broad trial](2026-09-14-broad-interaction-trials.md).
+
+- [Airfoil, two terms](figures/2026-09-14-broad-interactions/airfoil.png)
+- [Concrete, four terms](figures/2026-09-14-broad-interactions/concrete.png)
+- [King County, four terms](figures/2026-09-14-broad-interactions/king-county.png)
+- [All figures as a three-page PDF](figures/2026-09-14-broad-interactions/interaction-surfaces.pdf)
+
+Red is a positive contribution and blue a negative contribution within the
+jointly fitted model. Main effects, other interactions and the intercept
+also contribute to its prediction. A plotted term is not the difference
+between this model and a separately fitted additive model. The reported test
+MSE reduction belongs to the selected group of terms, not to each panel.
+
+All three models use Gaussian identity links. The plotter evaluates the
+saved tensor's `score` in its fitted coefficient coordinates, without
+exponentiating or adding a new centering constraint. The contribution is
+in the outcome's units: scaled sound-pressure level in dB, concrete strength
+in MPa, and sale price in dollars. Housing colour bars show thousands of
+dollars. Airfoil displacement thickness is displayed in millimetres.
+
+The axes use original predictor units, reversing the frozen training
+preprocessor's centering and scaling. Frequency, thickness, curing age and
+living area use logarithmic display axes; the fitted models are unchanged.
+The plotting window spans training marginal first-to-99th percentiles.
+Building grades are evaluated at integer values. This display window does
+not remove observations from a fit or change any test result.
+
+Dots show training observations. Grey masks grid points outside the convex
+hull of the observed raw predictor pair. Inside that hull, some combinations
+still have few or no nearby observations. This mask is a display aid, not
+a density threshold, numerical certificate, confidence interval or causal
+identification condition. Panels have separately labelled colour scales.
+
+Airfoil illustrates a sign-changing fitted interaction: the frequency
+pattern reverses between thin and thick boundary layers. Concrete has more
+localized curvature, including regions with sparse support. These are
+descriptions of the fitted terms, without new significance or causal claims.
+
+The [plot script](plot_broad_interaction_surfaces.py) verifies the frozen
+production and benchmark source identities, data preparation, and saved
+model hashes. Before extracting terms, it exactly reproduces every saved
+test prediction for the three models, 5,173 predictions in total. No model
+is fitted, selected, or altered for these figures. Ruff check and format
+checks pass, and each rendered figure was visually inspected.
+
+The [receipt](figures/2026-09-14-broad-interactions/receipt.json) records input
+and output hashes, axis bounds, effect ranges and grid shapes. PNG and SVG
+figures, raw-axis/contribution NPZ grids and the combined PDF are retained
+in the same directory. NPZ contributions are in original outcome units,
+before the housing display divisor. Reproduce in the measured worktree:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  .venv/bin/python docs/research/plot_broad_interaction_surfaces.py
+```
+
+The NPZ values reproduce exactly in this environment. Image/container bytes
+may vary with rendering metadata; the receipt binds the delivered files.

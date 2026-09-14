@@ -1,0 +1,1512 @@
+{
+  "schema_version": 1,
+  "raw_suite_relative_path": ".benchmark-artifacts/targeted-interactions/diagnostic-20260914/suite.json",
+  "raw_suite_sha256": "7e835b96965833975f6013c78a800d353f1c3c1bd3958cca2e28c91278b17ae6",
+  "command": ".venv/bin/python benchmarks/benchmark_targeted_interactions.py --output .benchmark-artifacts/targeted-interactions/diagnostic-20260914",
+  "suite_exit_code": 0,
+  "protocol": {
+    "package_source_sha256": "7151ca3bdf15181144e935c937434a0924d1cce28940b3ef584f3a49a5bfcfb5",
+    "benchmark_script_sha256": "afc9dd08d0111b4effa418c6a74009806dd7bfdb2202bb149b9ca13a18b857d9",
+    "benchmark_files_sha256": {
+      "benchmark_targeted_interactions.py": "6244c5eb0185a6631bfdd702a60fcd2e21f4b9de9be6e7cf369038773c651be1",
+      "benchmark_real_interactions.py": "d1fd02b97005d0a71c094dec05488343f5a712c821ae7866d5227d4ec1a16b13",
+      "benchmark_housing_tensor.py": "818b424239709d422cf8fe50d8b0e9ba283311f6a88287ce412e122e1c946a62",
+      "interaction_datasets.py": "c28aa62c9a154405fd901c3c1898dd0c899742f17a202da6b2c46aa82cabf3d0"
+    },
+    "started_utc": "2026-09-13T22:28:10.032528+00:00",
+    "menus": {
+      "uci_bike_sharing": [
+        {
+          "arm": "k4_additive",
+          "parent_k": 4,
+          "pairs": []
+        },
+        {
+          "arm": "k4_clock",
+          "parent_k": 4,
+          "pairs": [
+            [
+              "hr",
+              "workingday"
+            ]
+          ]
+        },
+        {
+          "arm": "k4_clock_weather",
+          "parent_k": 4,
+          "pairs": [
+            [
+              "hr",
+              "workingday"
+            ],
+            [
+              "temp",
+              "hr"
+            ]
+          ]
+        },
+        {
+          "arm": "k6_additive",
+          "parent_k": 6,
+          "pairs": []
+        },
+        {
+          "arm": "k6_clock",
+          "parent_k": 6,
+          "pairs": [
+            [
+              "hr",
+              "workingday"
+            ]
+          ]
+        },
+        {
+          "arm": "k6_clock_weather",
+          "parent_k": 6,
+          "pairs": [
+            [
+              "hr",
+              "workingday"
+            ],
+            [
+              "temp",
+              "hr"
+            ]
+          ]
+        }
+      ],
+      "ames_housing": [
+        {
+          "arm": "k4_additive",
+          "parent_k": 4,
+          "pairs": []
+        },
+        {
+          "arm": "k4_area_type",
+          "parent_k": 4,
+          "pairs": [
+            [
+              "Gr Liv Area",
+              "Bldg Type"
+            ]
+          ]
+        },
+        {
+          "arm": "k6_additive",
+          "parent_k": 6,
+          "pairs": []
+        },
+        {
+          "arm": "k6_area_type",
+          "parent_k": 6,
+          "pairs": [
+            [
+              "Gr Liv Area",
+              "Bldg Type"
+            ]
+          ]
+        }
+      ]
+    },
+    "max_reml_iter": 100,
+    "numerical_tolerances": "unchanged production defaults for every arm",
+    "fit_worker_budget_seconds": 600,
+    "per_fit_worker_timeout_seconds": 120,
+    "evaluation": "validation winner at each k plus its additive control; all choices saved before test",
+    "test_status": "previously inspected test blocks; exploratory audit, not fresh confirmation",
+    "candidate_source": "prior-informed fixed menu; no automatic discovery claim"
+  },
+  "finished_utc": "2026-09-13T22:29:21.802896+00:00",
+  "suite_wall_seconds_from_utc_timestamps": 71.770368,
+  "fit_worker_process_seconds_spent": 54.189398621965665,
+  "datasets": {
+    "uci_bike_sharing": {
+      "rows": {
+        "train": 10389,
+        "valid": 3502,
+        "test": 3488
+      },
+      "family": "poisson",
+      "identities": {
+        "data_sha256": "e03de4ee4ef4dc376ac6e04bf829673c6269e8eba5c60fa121640fa2f829504f",
+        "manifest_entry_sha256": "9aeeea61eec8d70ab4b75d7370823917dcdf79a2ab896a17a8dd770952dd355d",
+        "split_sha256": "642d41f20d01521e7aa598a16364c971eee7749f15413db1fd9a6e8d278ba02d",
+        "preprocessing_sha256": "231bd4d44ad2c5eb8f671d02c6715f14b4f154b998b0b1368fe93caa78714265"
+      },
+      "choice": {
+        "chosen_arm": "k6_clock_weather",
+        "chosen_by_parent_k": {
+          "4": "k4_clock_weather",
+          "6": "k6_clock_weather"
+        },
+        "chosen_before_test_evaluation": true,
+        "evaluation_arms": [
+          "k4_additive",
+          "k4_clock_weather",
+          "k6_additive",
+          "k6_clock_weather"
+        ],
+        "validation_scores": {
+          "k4_additive": {
+            "primary_loss": 64.81627981490938,
+            "mse": 25778.776878515935,
+            "mean_deviance": 64.81627981490938,
+            "rows": 3502
+          },
+          "k4_clock": {
+            "primary_loss": 41.10414213566204,
+            "mse": 20931.450576358373,
+            "mean_deviance": 41.10414213566204,
+            "rows": 3502
+          },
+          "k4_clock_weather": {
+            "primary_loss": 37.40193717655249,
+            "mse": 18035.775178208656,
+            "mean_deviance": 37.40193717655249,
+            "rows": 3502
+          },
+          "k6_additive": {
+            "primary_loss": 63.751532804206356,
+            "mse": 25171.72542298224,
+            "mean_deviance": 63.751532804206356,
+            "rows": 3502
+          },
+          "k6_clock": {
+            "primary_loss": 39.89528709902333,
+            "mse": 20225.748257702882,
+            "mean_deviance": 39.89528709902333,
+            "rows": 3502
+          },
+          "k6_clock_weather": {
+            "primary_loss": 35.83134269487363,
+            "mse": 17091.31785522866,
+            "mean_deviance": 35.83134269487363,
+            "rows": 3502
+          }
+        },
+        "fit_result_sha256": {
+          "k4_additive": "67d03ac4b7dada4abe593b985c75810556e154eee35555a6ef1cda962b2450c8",
+          "k4_clock": "cda6a510b1ea8f7aecd08193c6ca648149d75329ff9218c1e8cf2f564fe8edd0",
+          "k4_clock_weather": "4434d78f23804d853b58d70f769ecb1d1532043476b348fbf6776ec91c0dc1c5",
+          "k6_additive": "640b120dd8ec05fa8c58c9f60253b43d634b022d5fe3aad1eea8940166d2ce78",
+          "k6_clock": "4ee643c505e6175ceebe6fd3a7462dc1a8fa49f1a26a1ae7486c81cfd6428012",
+          "k6_clock_weather": "b6bc03a47d8e46461a67a47ab2046b9bbb6f164b03b12d6e2f136e8d7455062d"
+        }
+      },
+      "runtime": {
+        "python": "3.13.14",
+        "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+        "packages": {
+          "superglm": "0.33.0",
+          "numpy": "2.5.2",
+          "scipy": "1.18.0",
+          "pandas": "3.0.5",
+          "numba": "0.67.0",
+          "scikit-learn": "1.9.0"
+        },
+        "threadpools": [
+          {
+            "user_api": "blas",
+            "internal_api": "openblas",
+            "num_threads": 1,
+            "prefix": "libscipy_openblas",
+            "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+            "version": "0.3.34.0.0",
+            "threading_layer": "pthreads",
+            "architecture": "SkylakeX"
+          },
+          {
+            "user_api": "blas",
+            "internal_api": "openblas",
+            "num_threads": 1,
+            "prefix": "libscipy_openblas",
+            "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+            "version": "0.3.31.dev",
+            "threading_layer": "pthreads",
+            "architecture": "SkylakeX"
+          },
+          {
+            "user_api": "openmp",
+            "internal_api": "openmp",
+            "num_threads": 1,
+            "prefix": "libgomp",
+            "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+            "version": null
+          }
+        ]
+      },
+      "arms": {
+        "k4_additive": {
+          "status": "converged",
+          "variant": {
+            "arm": "k4_additive",
+            "parent_k": 4,
+            "pairs": []
+          },
+          "P": 61,
+          "fitted_smoothing_parameter_count": 4,
+          "fit_seconds": 0.6993756020092405,
+          "loading_seconds": 0.027420310012530535,
+          "preprocessing_seconds": 0.14280960900941864,
+          "model_setup_seconds": 0.001178389007691294,
+          "validation_prediction_seconds": 0.01628951699240133,
+          "serialization_seconds": 0.005815997952595353,
+          "fit_end_peak_process_rss_mib": 444.4921875,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1433648,
+            "numpy_owner_count": 154,
+            "bytes_payload_bytes": 213975,
+            "bytes_owner_count": 35,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 1647623,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {},
+          "validation": {
+            "primary_loss": 64.81627981490938,
+            "mse": 25778.776878515935,
+            "mean_deviance": 64.81627981490938,
+            "rows": 3502
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "ab202eed2c27153c4c354fa640afa19682894c4c9511f3e1fd70e455adc062be",
+          "model_pickle_bytes": 3105409,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 8,
+            "DiscretizedSSPGroupMatrix": 4
+          },
+          "process_seconds": 3.778082564997021,
+          "reml": {
+            "n_reml_iter": 4,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "temp": 414.9219186820783,
+              "atemp": 8.78891423283786,
+              "hum": 81.73368496293807,
+              "windspeed": 288.72576454743984
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 259147.6899931984,
+            "effective_df": 60.73023593055994,
+            "phi": 1,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 4.8197755236566895
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 61.29560541636503,
+              "mse": 21277.57464082634,
+              "mean_deviance": 61.29560541636503,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.032065461040474474,
+            "validation_chosen_arm": "k6_clock_weather",
+            "process_seconds": 2.723497943021357
+          }
+        },
+        "k4_clock": {
+          "status": "converged",
+          "variant": {
+            "arm": "k4_clock",
+            "parent_k": 4,
+            "pairs": [
+              [
+                "hr",
+                "workingday"
+              ]
+            ]
+          },
+          "P": 84,
+          "fitted_smoothing_parameter_count": 4,
+          "fit_seconds": 0.8240322460187599,
+          "loading_seconds": 0.024646249949000776,
+          "preprocessing_seconds": 0.14904265897348523,
+          "model_setup_seconds": 0.0012193319853395224,
+          "validation_prediction_seconds": 0.016711604956071824,
+          "serialization_seconds": 0.005783638975117356,
+          "fit_end_peak_process_rss_mib": 452.8828125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1516944,
+            "numpy_owner_count": 156,
+            "bytes_payload_bytes": 402828,
+            "bytes_owner_count": 35,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 1919772,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {
+            "hr:workingday": "CategoricalInteraction"
+          },
+          "validation": {
+            "primary_loss": 41.10414213566204,
+            "mse": 20931.450576358373,
+            "mean_deviance": 41.10414213566204,
+            "rows": 3502
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "7b4225d29f67c689c622ac1b2855a82149663711b75acb02d9e880ac145e6b2e",
+          "model_pickle_bytes": 3459492,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 9,
+            "DiscretizedSSPGroupMatrix": 4
+          },
+          "process_seconds": 4.030318220960908,
+          "reml": {
+            "n_reml_iter": 3,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "temp": 36.2681783593349,
+              "atemp": 10.190681879403796,
+              "hum": 73.47826079883325,
+              "windspeed": 1571.7829203009624
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 96871.32526880315,
+            "effective_df": 83.83937855234393,
+            "phi": 1,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 5.00430532594272
+          }
+        },
+        "k4_clock_weather": {
+          "status": "converged",
+          "variant": {
+            "arm": "k4_clock_weather",
+            "parent_k": 4,
+            "pairs": [
+              [
+                "hr",
+                "workingday"
+              ],
+              [
+                "temp",
+                "hr"
+              ]
+            ]
+          },
+          "P": 153,
+          "fitted_smoothing_parameter_count": 27,
+          "fit_seconds": 3.6655130839790218,
+          "loading_seconds": 0.03594097000313923,
+          "preprocessing_seconds": 0.15222938201623037,
+          "model_setup_seconds": 0.0012079350417479873,
+          "validation_prediction_seconds": 0.020316152018494904,
+          "serialization_seconds": 0.010790161031764,
+          "fit_end_peak_process_rss_mib": 473.23046875,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1698904,
+            "numpy_owner_count": 714,
+            "bytes_payload_bytes": 1484091,
+            "bytes_owner_count": 81,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 3182995,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {
+            "hr:workingday": "CategoricalInteraction",
+            "temp:hr": "SplineCategorical"
+          },
+          "validation": {
+            "primary_loss": 37.40193717655249,
+            "mse": 18035.775178208656,
+            "mean_deviance": 37.40193717655249,
+            "rows": 3502
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "08e6f8c57cbd8c6de8f61cd4c605661642c67e27b323ed4e00f25ff26ab7bbd9",
+          "model_pickle_bytes": 4998447,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 9,
+            "DiscretizedSSPGroupMatrix": 4,
+            "DiscretizedSplineCategoricalGroupMatrix": 23
+          },
+          "process_seconds": 6.737705600971822,
+          "reml": {
+            "n_reml_iter": 11,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "temp": 60.79269460891922,
+              "atemp": 13.941681743602722,
+              "hum": 72.46244950919059,
+              "windspeed": 2094.3617268101493,
+              "temp:hr[v:0]": 28948.96069228895,
+              "temp:hr[v:1]": 34.88036406576845,
+              "temp:hr[v:10]": 1732586.5952786163,
+              "temp:hr[v:11]": 393.8068586210825,
+              "temp:hr[v:12]": 509.9109890605391,
+              "temp:hr[v:13]": 1141195.6510190568,
+              "temp:hr[v:14]": 515138.587013506,
+              "temp:hr[v:15]": 676518.1379910914,
+              "temp:hr[v:17]": 174.40643072406345,
+              "temp:hr[v:18]": 34.56644004217516,
+              "temp:hr[v:19]": 15.083816461716669,
+              "temp:hr[v:2]": 11.269355188304289,
+              "temp:hr[v:20]": 16.78253922247269,
+              "temp:hr[v:21]": 86.87261256390029,
+              "temp:hr[v:22]": 397.3782211779296,
+              "temp:hr[v:23]": 143.97037400745685,
+              "temp:hr[v:3]": 29524.71369355632,
+              "temp:hr[v:4]": 1644.156081401551,
+              "temp:hr[v:5]": 59.44990633950943,
+              "temp:hr[v:6]": 141652.6963139559,
+              "temp:hr[v:7]": 158.54808996527478,
+              "temp:hr[v:8]": 33.20103111397022,
+              "temp:hr[v:9]": 58.32315960479495
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 86427.42859883807,
+            "effective_df": 132.51257848875193,
+            "phi": 1,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 4.997106104337254
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 33.3504277251069,
+              "mse": 13228.23951269683,
+              "mean_deviance": 33.3504277251069,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.03698183497181162,
+            "validation_chosen_arm": "k6_clock_weather",
+            "process_seconds": 2.873998132010456
+          }
+        },
+        "k6_additive": {
+          "status": "converged",
+          "variant": {
+            "arm": "k6_additive",
+            "parent_k": 6,
+            "pairs": []
+          },
+          "P": 69,
+          "fitted_smoothing_parameter_count": 4,
+          "fit_seconds": 0.724009646975901,
+          "loading_seconds": 0.0244678920134902,
+          "preprocessing_seconds": 0.14231471699895337,
+          "model_setup_seconds": 0.000939627003390342,
+          "validation_prediction_seconds": 0.013782673981040716,
+          "serialization_seconds": 0.005836058990098536,
+          "fit_end_peak_process_rss_mib": 445.90234375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1446416,
+            "numpy_owner_count": 154,
+            "bytes_payload_bytes": 272943,
+            "bytes_owner_count": 35,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 1719359,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {},
+          "validation": {
+            "primary_loss": 63.751532804206356,
+            "mse": 25171.72542298224,
+            "mean_deviance": 63.751532804206356,
+            "rows": 3502
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "a6b850b144896ca1a36c863dbcd5430c53e6ce581942a198db0ecaf8bf90dfc9",
+          "model_pickle_bytes": 3201046,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 8,
+            "DiscretizedSSPGroupMatrix": 4
+          },
+          "process_seconds": 3.5778114310232922,
+          "reml": {
+            "n_reml_iter": 4,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "temp": 12.063443718863127,
+              "atemp": 11.67039835437426,
+              "hum": 6.794380575627053,
+              "windspeed": 239.75332714434447
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 257730.4593047835,
+            "effective_df": 68.64573617270769,
+            "phi": 1,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 4.823288074387737
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 60.582036887918925,
+              "mse": 20876.622311877338,
+              "mean_deviance": 60.582036887918925,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.038165103003848344,
+            "validation_chosen_arm": "k6_clock_weather",
+            "process_seconds": 3.2262134620104916
+          }
+        },
+        "k6_clock": {
+          "status": "converged",
+          "variant": {
+            "arm": "k6_clock",
+            "parent_k": 6,
+            "pairs": [
+              [
+                "hr",
+                "workingday"
+              ]
+            ]
+          },
+          "P": 92,
+          "fitted_smoothing_parameter_count": 4,
+          "fit_seconds": 0.9419203120050952,
+          "loading_seconds": 0.024612417037133127,
+          "preprocessing_seconds": 0.14803851197939366,
+          "model_setup_seconds": 0.0010600649984553456,
+          "validation_prediction_seconds": 0.016442566004116088,
+          "serialization_seconds": 0.006109617010224611,
+          "fit_end_peak_process_rss_mib": 453.05078125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1529712,
+            "numpy_owner_count": 156,
+            "bytes_payload_bytes": 482404,
+            "bytes_owner_count": 35,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 2012116,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {
+            "hr:workingday": "CategoricalInteraction"
+          },
+          "validation": {
+            "primary_loss": 39.89528709902333,
+            "mse": 20225.748257702882,
+            "mean_deviance": 39.89528709902333,
+            "rows": 3502
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "25090798873035598bea57edc9900b4b2744c6774ef82392019b1a9fdaa00363",
+          "model_pickle_bytes": 3584665,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 9,
+            "DiscretizedSSPGroupMatrix": 4
+          },
+          "process_seconds": 3.827371552004479,
+          "reml": {
+            "n_reml_iter": 4,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "temp": 31.258073163081693,
+              "atemp": 19.24572340938444,
+              "hum": 8.295413387200215,
+              "windspeed": 42.982278580409115
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 95831.78818753564,
+            "effective_df": 91.7354797579905,
+            "phi": 1,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 5.006141431043381
+          }
+        },
+        "k6_clock_weather": {
+          "status": "converged",
+          "variant": {
+            "arm": "k6_clock_weather",
+            "parent_k": 6,
+            "pairs": [
+              [
+                "hr",
+                "workingday"
+              ],
+              [
+                "temp",
+                "hr"
+              ]
+            ]
+          },
+          "P": 207,
+          "fitted_smoothing_parameter_count": 27,
+          "fit_seconds": 3.3078926009475254,
+          "loading_seconds": 0.025305139017291367,
+          "preprocessing_seconds": 0.17375192802865058,
+          "model_setup_seconds": 0.0010942480294033885,
+          "validation_prediction_seconds": 0.017677843978162855,
+          "serialization_seconds": 0.011350816988851875,
+          "fit_end_peak_process_rss_mib": 477.8515625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1751208,
+            "numpy_owner_count": 714,
+            "bytes_payload_bytes": 2577645,
+            "bytes_owner_count": 81,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 4328853,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {
+            "hr:workingday": "CategoricalInteraction",
+            "temp:hr": "SplineCategorical"
+          },
+          "validation": {
+            "primary_loss": 35.83134269487363,
+            "mse": 17091.31785522866,
+            "mean_deviance": 35.83134269487363,
+            "rows": 3502
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "3baa3e9a12b1e4c3d9c6b1302046d4097b3626d2aa486a4cf54358ff5a82e7dd",
+          "model_pickle_bytes": 6603170,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 9,
+            "DiscretizedSSPGroupMatrix": 4,
+            "DiscretizedSplineCategoricalGroupMatrix": 23
+          },
+          "process_seconds": 6.338834883004893,
+          "reml": {
+            "n_reml_iter": 8,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "temp": 18.412738532895,
+              "atemp": 36.38229936284086,
+              "hum": 6.77341627032118,
+              "windspeed": 57.349848822718435,
+              "temp:hr[v:0]": 15.143283176540926,
+              "temp:hr[v:1]": 18.05200906484298,
+              "temp:hr[v:10]": 15.941832361067423,
+              "temp:hr[v:11]": 107.7530783270302,
+              "temp:hr[v:12]": 348.2939758081306,
+              "temp:hr[v:13]": 609926.6811988102,
+              "temp:hr[v:14]": 116487.26371573498,
+              "temp:hr[v:15]": 22.054703201390595,
+              "temp:hr[v:17]": 308.6680424567825,
+              "temp:hr[v:18]": 76.27849108254877,
+              "temp:hr[v:19]": 22.377210789000518,
+              "temp:hr[v:2]": 5.99302865737981,
+              "temp:hr[v:20]": 10.592542407950493,
+              "temp:hr[v:21]": 44.84316329786341,
+              "temp:hr[v:22]": 83.21589699671667,
+              "temp:hr[v:23]": 32.77254566209647,
+              "temp:hr[v:3]": 22.90130520568818,
+              "temp:hr[v:4]": 15.501135648582782,
+              "temp:hr[v:5]": 58.98061212865245,
+              "temp:hr[v:6]": 27.063564802141,
+              "temp:hr[v:7]": 60.8914952207863,
+              "temp:hr[v:8]": 47.073173560581395,
+              "temp:hr[v:9]": 43.72882374799527
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 84985.01333553978,
+            "effective_df": 173.05212192062572,
+            "phi": 1,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 4.996446074364413
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 32.39321009226886,
+              "mse": 12603.839711368191,
+              "mean_deviance": 32.39321009226886,
+              "rows": 3488
+            },
+            "test_prediction_seconds": 0.04378453298704699,
+            "validation_chosen_arm": "k6_clock_weather",
+            "process_seconds": 2.824838577012997
+          }
+        }
+      },
+      "costs": {
+        "all_model_fit_seconds": 10.162743491935544,
+        "all_fit_worker_process_seconds": 28.290124252962414,
+        "all_evaluation_worker_process_seconds": 11.648548114055302
+      },
+      "matched_comparisons": {
+        "4": {
+          "chosen_arm": "k4_clock_weather",
+          "test_primary_loss_relative_reduction": 0.45590833961805,
+          "selected_fit_over_matching_additive_fit": 5.241122328900731,
+          "fit_end_peak_rss_ratio": 1.064654187538448,
+          "retained_payload_ratio": 1.931870943777794
+        },
+        "6": {
+          "chosen_arm": "k6_clock_weather",
+          "test_primary_loss_relative_reduction": 0.4653000830559956,
+          "selected_fit_over_matching_additive_fit": 4.56885155434625,
+          "fit_end_peak_rss_ratio": 1.071650708272376,
+          "retained_payload_ratio": 2.517713287335571
+        }
+      },
+      "k6_additive_prediction_exact_replay_of_pilot": true
+    },
+    "ames_housing": {
+      "rows": {
+        "train": 1941,
+        "valid": 648,
+        "test": 341
+      },
+      "family": "gaussian",
+      "identities": {
+        "data_sha256": "6cfe6cb525ba437de428653a1040e2aed7d696640bf75203786a6d7a0e67cfcc",
+        "manifest_entry_sha256": "842d1f1098c4d2f4cdd7716e7a8b059ccbd4a73c12d0a2b1d0ac259a5dcfb2e6",
+        "split_sha256": "016fba5a482286057d357a709c3b66ccf596d7be03d4b7acec848a16770b0b6a",
+        "preprocessing_sha256": "d524893916b6d6045d9a4b1a0b2ddcd52c58d7ff0c48e367fbe3940ed276dc68"
+      },
+      "choice": {
+        "chosen_arm": "k6_additive",
+        "chosen_by_parent_k": {
+          "4": "k4_additive",
+          "6": "k6_additive"
+        },
+        "chosen_before_test_evaluation": true,
+        "evaluation_arms": [
+          "k4_additive",
+          "k6_additive"
+        ],
+        "validation_scores": {
+          "k4_additive": {
+            "primary_loss": 527782521.3538272,
+            "mse": 527782521.3538272,
+            "mean_deviance": 527782521.3538272,
+            "rows": 648
+          },
+          "k4_area_type": {
+            "primary_loss": 529470754.88292456,
+            "mse": 529470754.88292456,
+            "mean_deviance": 529470754.88292456,
+            "rows": 648
+          },
+          "k6_additive": {
+            "primary_loss": 488646458.75075585,
+            "mse": 488646458.75075585,
+            "mean_deviance": 488646458.75075585,
+            "rows": 648
+          },
+          "k6_area_type": {
+            "primary_loss": 492615439.85891104,
+            "mse": 492615439.85891104,
+            "mean_deviance": 492615439.85891104,
+            "rows": 648
+          }
+        },
+        "fit_result_sha256": {
+          "k4_additive": "bc09a70c60935642f33f615590098c06200b246b066d661fcf88b477deaffdda",
+          "k4_area_type": "21ddb708a4745818c56a570a5b2e34854295cf84dd063dd718c6fe4281b9c513",
+          "k6_additive": "833345a66fed46fcf9ca55f952706683f2aa7f85584c7ecee0c4da0b8c691d5f",
+          "k6_area_type": "4b65d7bb81df3c8e38b76b80cec0b2cdaf8d43aace9fb68775a3ee21f0a2a911"
+        }
+      },
+      "runtime": {
+        "python": "3.13.14",
+        "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+        "packages": {
+          "superglm": "0.33.0",
+          "numpy": "2.5.2",
+          "scipy": "1.18.0",
+          "pandas": "3.0.5",
+          "numba": "0.67.0",
+          "scikit-learn": "1.9.0"
+        },
+        "threadpools": [
+          {
+            "user_api": "blas",
+            "internal_api": "openblas",
+            "num_threads": 1,
+            "prefix": "libscipy_openblas",
+            "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+            "version": "0.3.34.0.0",
+            "threading_layer": "pthreads",
+            "architecture": "SkylakeX"
+          },
+          {
+            "user_api": "blas",
+            "internal_api": "openblas",
+            "num_threads": 1,
+            "prefix": "libscipy_openblas",
+            "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+            "version": "0.3.31.dev",
+            "threading_layer": "pthreads",
+            "architecture": "SkylakeX"
+          },
+          {
+            "user_api": "openmp",
+            "internal_api": "openmp",
+            "num_threads": 1,
+            "prefix": "libgomp",
+            "filepath": "/home/max/projects/superglm/.worktrees/adaptive-interactions/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+            "version": null
+          }
+        ]
+      },
+      "arms": {
+        "k4_additive": {
+          "status": "converged",
+          "variant": {
+            "arm": "k4_additive",
+            "parent_k": 4,
+            "pairs": []
+          },
+          "P": 259,
+          "fitted_smoothing_parameter_count": 23,
+          "fit_seconds": 2.0548736010096036,
+          "loading_seconds": 0.039145572984125465,
+          "preprocessing_seconds": 0.2092981319874525,
+          "model_setup_seconds": 0.0028019939782097936,
+          "validation_prediction_seconds": 0.022883337980601937,
+          "serialization_seconds": 0.018622308038175106,
+          "fit_end_peak_process_rss_mib": 448.94140625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1348040,
+            "numpy_owner_count": 867,
+            "bytes_payload_bytes": 5747921,
+            "bytes_owner_count": 41,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 7095961,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {},
+          "validation": {
+            "primary_loss": 527782521.3538272,
+            "mse": 527782521.3538272,
+            "mean_deviance": 527782521.3538272,
+            "rows": 648
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "d8fc9ad81d6831f3c3062a8141ac0de8cddd9973a235ee08140bc4c75e67697b",
+          "model_pickle_bytes": 10438321,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 42,
+            "DiscretizedSSPGroupMatrix": 23,
+            "DenseGroupMatrix": 9
+          },
+          "process_seconds": 5.132234714983497,
+          "reml": {
+            "n_reml_iter": 7,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "Lot Frontage": 133.86413854060962,
+              "Lot Area": 115.5197387261271,
+              "Overall Qual": 1.3208106129812052,
+              "Year Built": 0.754291358659671,
+              "Year Remod/Add": 11286.106954729925,
+              "Mas Vnr Area": 256.159617351677,
+              "BsmtFin SF 1": 0.4502085403523609,
+              "BsmtFin SF 2": 7.046987652809989,
+              "Bsmt Unf SF": 5.876553914535517,
+              "Total Bsmt SF": 0.19560959272172684,
+              "1st Flr SF": 49.58363572276863,
+              "2nd Flr SF": 0.07062580051918721,
+              "Low Qual Fin SF": 84.03875031985235,
+              "Gr Liv Area": 0.16223837666243215,
+              "TotRms AbvGrd": 29690.8790234138,
+              "Garage Yr Blt": 40336.06337370987,
+              "Garage Area": 9.321058494917299,
+              "Wood Deck SF": 108886.90779563536,
+              "Open Porch SF": 19.682554049184503,
+              "Enclosed Porch": 96.59303181063312,
+              "3Ssn Porch": 188261.91968863478,
+              "Screen Porch": 30049.902768017582,
+              "Pool Area": 3.306248471719735
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 717261484678.2236,
+            "effective_df": 230.67220372137047,
+            "phi": 419366485.4511348,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 183290.22968304978
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 504087033.06105053,
+              "mse": 504087033.06105053,
+              "mean_deviance": 504087033.06105053,
+              "rows": 341
+            },
+            "test_prediction_seconds": 0.07751695701153949,
+            "validation_chosen_arm": "k6_additive",
+            "process_seconds": 2.8743658079765737
+          }
+        },
+        "k4_area_type": {
+          "status": "converged",
+          "variant": {
+            "arm": "k4_area_type",
+            "parent_k": 4,
+            "pairs": [
+              [
+                "Gr Liv Area",
+                "Bldg Type"
+              ]
+            ]
+          },
+          "P": 271,
+          "fitted_smoothing_parameter_count": 27,
+          "fit_seconds": 2.5532198330038227,
+          "loading_seconds": 0.03268927498720586,
+          "preprocessing_seconds": 0.21738863101927564,
+          "model_setup_seconds": 0.0025426489883102477,
+          "validation_prediction_seconds": 0.023776362009812146,
+          "serialization_seconds": 0.019776728993747383,
+          "fit_end_peak_process_rss_mib": 452.30078125,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1359464,
+            "numpy_owner_count": 969,
+            "bytes_payload_bytes": 6305685,
+            "bytes_owner_count": 49,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 7665149,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {
+            "Gr Liv Area:Bldg Type": "SplineCategorical"
+          },
+          "validation": {
+            "primary_loss": 529470754.88292456,
+            "mse": 529470754.88292456,
+            "mean_deviance": 529470754.88292456,
+            "rows": 648
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "099df3d5685ee30a224105cd94a964b2c10d363987ea457495f114dce11558cd",
+          "model_pickle_bytes": 11163132,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 42,
+            "DiscretizedSSPGroupMatrix": 23,
+            "DenseGroupMatrix": 9,
+            "DiscretizedSplineCategoricalGroupMatrix": 4
+          },
+          "process_seconds": 5.5827712080208585,
+          "reml": {
+            "n_reml_iter": 8,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "Lot Frontage": 135.36969498841887,
+              "Lot Area": 141.6563373938097,
+              "Overall Qual": 1.3920738969158832,
+              "Year Built": 0.6582668353865957,
+              "Year Remod/Add": 10001.806297848936,
+              "Mas Vnr Area": 164.7323636265706,
+              "BsmtFin SF 1": 0.4221876332159862,
+              "BsmtFin SF 2": 8.564119330908031,
+              "Bsmt Unf SF": 4.563231243470869,
+              "Total Bsmt SF": 0.17162276082165287,
+              "1st Flr SF": 40.133558748401676,
+              "2nd Flr SF": 0.07329541395208955,
+              "Low Qual Fin SF": 71.14559828944095,
+              "Gr Liv Area": 0.15141268932874194,
+              "TotRms AbvGrd": 14173.052318285645,
+              "Garage Yr Blt": 28742.18974793686,
+              "Garage Area": 9.917769272607362,
+              "Wood Deck SF": 93462.31778009883,
+              "Open Porch SF": 14.048498035437264,
+              "Enclosed Porch": 94.27467373477995,
+              "3Ssn Porch": 153529.92851246815,
+              "Screen Porch": 23762.969215529338,
+              "Pool Area": 3.8349063893563287,
+              "Gr Liv Area:Bldg Type[v:2fmCon]": 592.4511325012253,
+              "Gr Liv Area:Bldg Type[v:Duplex]": 0.6306501178711982,
+              "Gr Liv Area:Bldg Type[v:Twnhs]": 283.17146639672734,
+              "Gr Liv Area:Bldg Type[v:TwnhsE]": 0.24898628687006594
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 707074004377.3844,
+            "effective_df": 237.28593316419833,
+            "phi": 415013193.48905396,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 183108.926432876
+          }
+        },
+        "k6_additive": {
+          "status": "converged",
+          "variant": {
+            "arm": "k6_additive",
+            "parent_k": 6,
+            "pairs": []
+          },
+          "P": 305,
+          "fitted_smoothing_parameter_count": 23,
+          "fit_seconds": 3.4861753399600275,
+          "loading_seconds": 0.028328859014436603,
+          "preprocessing_seconds": 0.18812387302750722,
+          "model_setup_seconds": 0.00253889401210472,
+          "validation_prediction_seconds": 0.0200292730005458,
+          "serialization_seconds": 0.021171086002141237,
+          "fit_end_peak_process_rss_mib": 460.8515625,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1422152,
+            "numpy_owner_count": 867,
+            "bytes_payload_bytes": 7988763,
+            "bytes_owner_count": 41,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 9410915,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {},
+          "validation": {
+            "primary_loss": 488646458.75075585,
+            "mse": 488646458.75075585,
+            "mean_deviance": 488646458.75075585,
+            "rows": 648
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "a997923117a65745ff0dcd7febfbdaa2be1a317c09b4a40aadee4d4e89f046fe",
+          "model_pickle_bytes": 13371528,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 42,
+            "DiscretizedSSPGroupMatrix": 23,
+            "DenseGroupMatrix": 9
+          },
+          "process_seconds": 6.538594760000706,
+          "reml": {
+            "n_reml_iter": 12,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "Lot Frontage": 906.9048018138826,
+              "Lot Area": 116.68402330413285,
+              "Overall Qual": 1.552159110866705,
+              "Year Built": 0.9399361939234133,
+              "Year Remod/Add": 6280.548720328344,
+              "Mas Vnr Area": 570.2657241677381,
+              "BsmtFin SF 1": 0.007232880318774446,
+              "BsmtFin SF 2": 23.58844267670648,
+              "Bsmt Unf SF": 4.319603723802086,
+              "Total Bsmt SF": 1.3298632543408833,
+              "1st Flr SF": 0.3774572868961464,
+              "2nd Flr SF": 0.043455795780883,
+              "Low Qual Fin SF": 281.7580688272404,
+              "Gr Liv Area": 0.0008632535644686032,
+              "TotRms AbvGrd": 29146.27422422601,
+              "Garage Yr Blt": 24335.065790351524,
+              "Garage Area": 3.3924739540368174,
+              "Wood Deck SF": 0.054692005282086203,
+              "Open Porch SF": 11291.39415569348,
+              "Enclosed Porch": 92.03166108796698,
+              "3Ssn Porch": 225703.014984392,
+              "Screen Porch": 2916.2052668393776,
+              "Pool Area": 3.851558014360123
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 581730068249.5498,
+            "effective_df": 244.88657255376754,
+            "phi": 342975458.6627061,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 177490.04273248743
+          },
+          "evaluation": {
+            "status": "evaluated",
+            "test": {
+              "primary_loss": 426676939.22894573,
+              "mse": 426676939.22894573,
+              "mean_deviance": 426676939.22894573,
+              "rows": 341
+            },
+            "test_prediction_seconds": 0.05958071904024109,
+            "validation_chosen_arm": "k6_additive",
+            "process_seconds": 2.9745738380006514
+          }
+        },
+        "k6_area_type": {
+          "status": "converged",
+          "variant": {
+            "arm": "k6_area_type",
+            "parent_k": 6,
+            "pairs": [
+              [
+                "Gr Liv Area",
+                "Bldg Type"
+              ]
+            ]
+          },
+          "P": 325,
+          "fitted_smoothing_parameter_count": 27,
+          "fit_seconds": 5.460815322003327,
+          "loading_seconds": 0.035379243025090545,
+          "preprocessing_seconds": 0.20061960798921064,
+          "model_setup_seconds": 0.0026583190192468464,
+          "validation_prediction_seconds": 0.027604517992585897,
+          "serialization_seconds": 0.02377810498001054,
+          "fit_end_peak_process_rss_mib": 467.3984375,
+          "retained_model_storage": {
+            "scope": "numpy_and_byte_buffer_owner_payloads_v1",
+            "numpy_owned_bytes": 1441752,
+            "numpy_owner_count": 969,
+            "bytes_payload_bytes": 9089847,
+            "bytes_owner_count": 49,
+            "bytearray_payload_bytes": 0,
+            "bytearray_owner_count": 0,
+            "total_payload_bytes": 10531599,
+            "unmeasured_buffer_count": 0,
+            "unmeasured_buffer_types": {}
+          },
+          "resolved_direct_backend": "gram",
+          "interaction_classes": {
+            "Gr Liv Area:Bldg Type": "SplineCategorical"
+          },
+          "validation": {
+            "primary_loss": 492615439.85891104,
+            "mse": 492615439.85891104,
+            "mean_deviance": 492615439.85891104,
+            "rows": 648
+          },
+          "warnings": [],
+          "max_reml_iter": 100,
+          "numerical_tolerances": "unchanged production defaults",
+          "model_pickle_sha256": "4c912ce3c6250215b0627b232a82f5798f7b06c87f79a3e4ef7ec8c76639e79c",
+          "model_pickle_bytes": 14798406,
+          "backend_group_counts": {
+            "CategoricalGroupMatrix": 42,
+            "DiscretizedSSPGroupMatrix": 23,
+            "DenseGroupMatrix": 9,
+            "DiscretizedSplineCategoricalGroupMatrix": 4
+          },
+          "process_seconds": 8.64567368599819,
+          "reml": {
+            "n_reml_iter": 17,
+            "converged": true,
+            "termination_reason": "score_objective_tolerance",
+            "lambdas": {
+              "Lot Frontage": 708.5225156230425,
+              "Lot Area": 110.53319776251843,
+              "Overall Qual": 1.4911065657213831,
+              "Year Built": 0.8008472130757235,
+              "Year Remod/Add": 7218.6801191540635,
+              "Mas Vnr Area": 4306.471176032624,
+              "BsmtFin SF 1": 0.008422187408619388,
+              "BsmtFin SF 2": 20.832354701367628,
+              "Bsmt Unf SF": 2.7566543066096716,
+              "Total Bsmt SF": 1.2801385939671186,
+              "1st Flr SF": 0.3910380852309621,
+              "2nd Flr SF": 0.041006274275837355,
+              "Low Qual Fin SF": 230.0811602089694,
+              "Gr Liv Area": 0.0008273749772348534,
+              "TotRms AbvGrd": 24.104371580497514,
+              "Garage Yr Blt": 9589.912289454114,
+              "Garage Area": 2.7504061071659556,
+              "Wood Deck SF": 94220.3994490658,
+              "Open Porch SF": 29651.781964652808,
+              "Enclosed Porch": 80.56700277973164,
+              "3Ssn Porch": 206908.40047935653,
+              "Screen Porch": 480.4963670980992,
+              "Pool Area": 1.5664213377256888,
+              "Gr Liv Area:Bldg Type[v:2fmCon]": 0.979912061238688,
+              "Gr Liv Area:Bldg Type[v:Duplex]": 237.0433163089776,
+              "Gr Liv Area:Bldg Type[v:Twnhs]": 0.7425216939518651,
+              "Gr Liv Area:Bldg Type[v:TwnhsE]": 0.4633199763604724
+            }
+          },
+          "fit_telemetry": {
+            "method": "fit_reml",
+            "fit_meta": {
+              "method": "fit_reml",
+              "discrete": true,
+              "direct_backend": "gram",
+              "direct_fallback_reason": "the model has no RandomEffect or FactorSmooth term"
+            },
+            "deviance": 568623507962.6385,
+            "effective_df": 251.83683860080833,
+            "phi": 336626920.78334254,
+            "n_iter": 1,
+            "converged": true,
+            "intercept": 177504.13589580928
+          }
+        }
+      },
+      "costs": {
+        "all_model_fit_seconds": 13.555084095976781,
+        "all_fit_worker_process_seconds": 25.89927436900325,
+        "all_evaluation_worker_process_seconds": 5.848939645977225
+      },
+      "matched_comparisons": {
+        "4": {
+          "chosen_arm": "k4_additive",
+          "test_primary_loss_relative_reduction": 0,
+          "selected_fit_over_matching_additive_fit": 1,
+          "fit_end_peak_rss_ratio": 1,
+          "retained_payload_ratio": 1
+        },
+        "6": {
+          "chosen_arm": "k6_additive",
+          "test_primary_loss_relative_reduction": 0,
+          "selected_fit_over_matching_additive_fit": 1,
+          "fit_end_peak_rss_ratio": 1,
+          "retained_payload_ratio": 1
+        }
+      },
+      "k6_additive_prediction_exact_replay_of_pilot": true
+    }
+  },
+  "bike_posthoc_monthly_audit": {
+    "scope": "Descriptive time-block check after selection; no independence, confidence, tuning or confirmation claim",
+    "blocks": [
+      {
+        "month": "2012-08",
+        "rows": 600,
+        "additive_poisson_deviance": 56.45456333864788,
+        "selected_two_pair_poisson_deviance": 30.039109151563075,
+        "relative_reduction": 0.46790644767951317
+      },
+      {
+        "month": "2012-09",
+        "rows": 720,
+        "additive_poisson_deviance": 73.20087491163274,
+        "selected_two_pair_poisson_deviance": 31.798217170150625,
+        "relative_reduction": 0.5656033181497206
+      },
+      {
+        "month": "2012-10",
+        "rows": 708,
+        "additive_poisson_deviance": 61.26222710327648,
+        "selected_two_pair_poisson_deviance": 30.09081245134497,
+        "relative_reduction": 0.5088194818543312
+      },
+      {
+        "month": "2012-11",
+        "rows": 718,
+        "additive_poisson_deviance": 56.630735014785145,
+        "selected_two_pair_poisson_deviance": 35.29446696930804,
+        "relative_reduction": 0.37676127706812623
+      },
+      {
+        "month": "2012-12",
+        "rows": 742,
+        "additive_poisson_deviance": 54.84939649024454,
+        "selected_two_pair_poisson_deviance": 34.263628637293884,
+        "relative_reduction": 0.3753143912278418
+      }
+    ]
+  },
+  "outcomes": {
+    "attempted_fits": 10,
+    "converged_fits": 10,
+    "evaluated_models": 6,
+    "warnings": 0,
+    "timeouts": 0,
+    "reruns": 0
+  },
+  "verification": {
+    "all_data_manifest_split_preprocessing_hashes_match_pilot_and_gbm": true,
+    "all_fit_receipt_and_owned_model_hashes_match": true,
+    "all_prediction_archives_recompute_reported_scores_exactly": true,
+    "all_reported_thread_pools_single_threaded": true,
+    "all_actual_backends_gram": true,
+    "both_k6_additive_prediction_archives_exactly_replay_pilot": true,
+    "targeted_tests_passed": 4,
+    "combined_targeted_gbm_adapter_tests_passed": 36,
+    "combined_test_command": "OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 uv run --no-sync pytest benchmarks/test_targeted_interactions.py benchmarks/test_gbm_interactions.py benchmarks/test_real_interactions.py -q",
+    "convergence_guard_mutation": "In-memory removal of the convergence guard selects an unfinished lower-loss model; unchanged measured implementation selects the converged control. Runner file was never changed.",
+    "ruff_check": "passed",
+    "ruff_format_check": "passed"
+  },
+  "raw_artifact_sha256": {
+    "ames_housing/choice.json": "ecee19b67617d8ddce5cd58e76dde1a7b5e572b34b23f0c430011bbcc11d3b99",
+    "ames_housing/k4_additive/evaluate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ames_housing/k4_additive/evaluate_process.json": "df667c2f71a04a880dacc18bf2a3e2ecbe20538a7b1b985ee7223e22a5490a2d",
+    "ames_housing/k4_additive/evaluation.json": "323e848646aafe3d217140c77fa6b52f12631c7e5e76346828efc490cbe81f45",
+    "ames_housing/k4_additive/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ames_housing/k4_additive/fit_process.json": "7ec6d0c46c86771e7e3baa6bc4f79845327eda9ab3f9df9edd4f6e0bb964ee3e",
+    "ames_housing/k4_additive/model.pkl": "d8fc9ad81d6831f3c3062a8141ac0de8cddd9973a235ee08140bc4c75e67697b",
+    "ames_housing/k4_additive/result.json": "bc09a70c60935642f33f615590098c06200b246b066d661fcf88b477deaffdda",
+    "ames_housing/k4_additive/test_predictions.npz": "041b58bd172c0885afcc7334a97b4516f967d23ab872c5b62a638aec6e734f14",
+    "ames_housing/k4_area_type/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ames_housing/k4_area_type/fit_process.json": "eb19d326d9f8b60733a2a82e7747d390aa45e41cc5b304aea0b0a2055a8729b9",
+    "ames_housing/k4_area_type/model.pkl": "099df3d5685ee30a224105cd94a964b2c10d363987ea457495f114dce11558cd",
+    "ames_housing/k4_area_type/result.json": "21ddb708a4745818c56a570a5b2e34854295cf84dd063dd718c6fe4281b9c513",
+    "ames_housing/k6_additive/evaluate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ames_housing/k6_additive/evaluate_process.json": "3115c93cebec0381a8dac1a0cb6b020ea921ea75b1f62f6f2515b37cc0de70ab",
+    "ames_housing/k6_additive/evaluation.json": "036c0b7d4793d313374b4ce9f7ba30ebb19dfae8e05fc6663429ae07fdf28520",
+    "ames_housing/k6_additive/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ames_housing/k6_additive/fit_process.json": "b4ef7bb76b36285b92b444045ca2dee2ed07c17fbc92e336bf9faf3d9d10d523",
+    "ames_housing/k6_additive/model.pkl": "a997923117a65745ff0dcd7febfbdaa2be1a317c09b4a40aadee4d4e89f046fe",
+    "ames_housing/k6_additive/result.json": "833345a66fed46fcf9ca55f952706683f2aa7f85584c7ecee0c4da0b8c691d5f",
+    "ames_housing/k6_additive/test_predictions.npz": "0e57b80849ac81da2e4e2db4676b66b0c5c52bd699f6eac6e3b3054d6360f86b",
+    "ames_housing/k6_area_type/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ames_housing/k6_area_type/fit_process.json": "3b17d19c0bf40a19437cdbef843ce9ea7cc6b7907aee3425773272d8f4e9d73d",
+    "ames_housing/k6_area_type/model.pkl": "4c912ce3c6250215b0627b232a82f5798f7b06c87f79a3e4ef7ec8c76639e79c",
+    "ames_housing/k6_area_type/result.json": "4b65d7bb81df3c8e38b76b80cec0b2cdaf8d43aace9fb68775a3ee21f0a2a911",
+    "protocol.json": "ee822861db0fcb988f8b352c84904da3622e8be284a303b566a35f310675cc2d",
+    "suite.json": "7e835b96965833975f6013c78a800d353f1c3c1bd3958cca2e28c91278b17ae6",
+    "uci_bike_sharing/choice.json": "2e1d124c6be9da1df48abef749459f6f43f701dc5e0e4e942bc8a1ab269ecde4",
+    "uci_bike_sharing/k4_additive/evaluate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k4_additive/evaluate_process.json": "25b2c2ba9be9d0f8d29863af4d778b2d8983d5d6f033090b8aaf188b16b71667",
+    "uci_bike_sharing/k4_additive/evaluation.json": "2d906e589c1ac7b91f97dc314b5c5a47a2444e91bc2702f9be28b8528b405f34",
+    "uci_bike_sharing/k4_additive/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k4_additive/fit_process.json": "d61b0d4beab08bef79a827339bed09821f458554ed3c0c9d46cc05dde5b4b1f3",
+    "uci_bike_sharing/k4_additive/model.pkl": "ab202eed2c27153c4c354fa640afa19682894c4c9511f3e1fd70e455adc062be",
+    "uci_bike_sharing/k4_additive/result.json": "67d03ac4b7dada4abe593b985c75810556e154eee35555a6ef1cda962b2450c8",
+    "uci_bike_sharing/k4_additive/test_predictions.npz": "a678b69cae348758850864a60a07612880f7305e37a5cbb9e5ca50ec77591006",
+    "uci_bike_sharing/k4_clock/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k4_clock/fit_process.json": "bc11da16551f51ccf3eea99ff5e430cc67c8c35411c1cb449d60661ef93407bf",
+    "uci_bike_sharing/k4_clock/model.pkl": "7b4225d29f67c689c622ac1b2855a82149663711b75acb02d9e880ac145e6b2e",
+    "uci_bike_sharing/k4_clock/result.json": "cda6a510b1ea8f7aecd08193c6ca648149d75329ff9218c1e8cf2f564fe8edd0",
+    "uci_bike_sharing/k4_clock_weather/evaluate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k4_clock_weather/evaluate_process.json": "53b05fb7c23946c36e16dbe74e1b12ba0780944001cf6747ac6778ffdf841afb",
+    "uci_bike_sharing/k4_clock_weather/evaluation.json": "2ce3f85a1f17472fc792be3d4d27b736518577f7d3a2ebc7e63884a060c2a485",
+    "uci_bike_sharing/k4_clock_weather/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k4_clock_weather/fit_process.json": "884ba5d0be1e8ad6085f86ee3d92dae8d0c63d6ce94bd927181a56d7771edfde",
+    "uci_bike_sharing/k4_clock_weather/model.pkl": "08e6f8c57cbd8c6de8f61cd4c605661642c67e27b323ed4e00f25ff26ab7bbd9",
+    "uci_bike_sharing/k4_clock_weather/result.json": "4434d78f23804d853b58d70f769ecb1d1532043476b348fbf6776ec91c0dc1c5",
+    "uci_bike_sharing/k4_clock_weather/test_predictions.npz": "3c0c88f35aa9383ab1bc46dd70b8aee65d2c29a28ba6d5341baca2226c23b123",
+    "uci_bike_sharing/k6_additive/evaluate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k6_additive/evaluate_process.json": "715b24aba874d365df2767d939b10a8f87e69bd8302a43bcd6e1008d8c71ae4d",
+    "uci_bike_sharing/k6_additive/evaluation.json": "59ee582f895a7ba1ed28cb7121c05852c1b8e5a9da39918e870718229c250fa7",
+    "uci_bike_sharing/k6_additive/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k6_additive/fit_process.json": "52512482460ca8fa3c1105e9cbe309c544ca6e39df810b6ad4fe9000bde2ae64",
+    "uci_bike_sharing/k6_additive/model.pkl": "a6b850b144896ca1a36c863dbcd5430c53e6ce581942a198db0ecaf8bf90dfc9",
+    "uci_bike_sharing/k6_additive/result.json": "640b120dd8ec05fa8c58c9f60253b43d634b022d5fe3aad1eea8940166d2ce78",
+    "uci_bike_sharing/k6_additive/test_predictions.npz": "2acb6193c8e9678281c5e8ae5ef047b467427395b7035b92fc235da65dce3ab2",
+    "uci_bike_sharing/k6_clock/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k6_clock/fit_process.json": "c884e2631e670fce7627d71e5a8c42fa7d68fa9fa1fcdfdd780ac514b86935ee",
+    "uci_bike_sharing/k6_clock/model.pkl": "25090798873035598bea57edc9900b4b2744c6774ef82392019b1a9fdaa00363",
+    "uci_bike_sharing/k6_clock/result.json": "4ee643c505e6175ceebe6fd3a7462dc1a8fa49f1a26a1ae7486c81cfd6428012",
+    "uci_bike_sharing/k6_clock_weather/evaluate.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k6_clock_weather/evaluate_process.json": "2c5352d5657b13d89de9137dde332931f9fcd8c5748901b6a14f47d8479503de",
+    "uci_bike_sharing/k6_clock_weather/evaluation.json": "49d5997a6899586e8eb28a49d31641d8f1eba0e0b25b68d1a0baac52caee00f5",
+    "uci_bike_sharing/k6_clock_weather/fit.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "uci_bike_sharing/k6_clock_weather/fit_process.json": "b851ec258f99699aa6453a4f0f568323f37204195e9f814c3a39410cdf7cea05",
+    "uci_bike_sharing/k6_clock_weather/model.pkl": "3baa3e9a12b1e4c3d9c6b1302046d4097b3626d2aa486a4cf54358ff5a82e7dd",
+    "uci_bike_sharing/k6_clock_weather/result.json": "b6bc03a47d8e46461a67a47ab2046b9bbb6f164b03b12d6e2f136e8d7455062d",
+    "uci_bike_sharing/k6_clock_weather/test_predictions.npz": "30e10de673884f2b7e2a0a01f3b5249441f6638d68bb60930c7bc67df37c10ba"
+  }
+}
