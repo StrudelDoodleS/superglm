@@ -111,6 +111,61 @@ def test_fixed_tensor_support_is_lazy_and_shared_with_a_new_owner(monkeypatch):
     assert calls == [((4, 4), (4, 4))]
 
 
+def test_nonidentity_fixed_tensor_handoff_preserves_solver_geometry():
+    gm, group = _tensor_inputs()
+    # Scaling and shear require the general R_inv.T @ omega @ R_inv path.
+    # The null coordinate is fixed; the active map has determinant 4.
+    gm.R_inv[:] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.5, 0.0],
+        [0.0, 0.0, 1.0, 0.5],
+        [0.0, 0.0, 0.0, 2.0],
+    ]
+    source = _build(gm, group)
+    _evaluate(source)
+    old = algebra._context_geometry(source)
+    previous = old.last_evaluation
+
+    target = _build(gm, group, source)
+    current = algebra._context_geometry(target)
+    assert current is not old
+    assert current.support is old.support
+    assert current.last_evaluation is current.last_weights is None
+    assert current.face_support is current.face_activity is None
+    assert current.volume is current.volume_activity is None
+    assert current.fixed_inputs is current.fixed_family is None
+
+    ordinary = algebra.build_penalty_context([gm], [(0, group)])[0]
+    unit = np.finfo(float).eps
+    for original, reused, fresh in zip(source, target, ordinary, strict=True):
+        assert reused is not original
+        assert reused.omega_ssp is original.omega_ssp
+        assert reused.eigvals_omega is original.eigvals_omega
+        assert reused.rank == fresh.rank == 2
+        assert reused.log_det_omega_plus == original.log_det_omega_plus
+        transformed = gm.R_inv.T @ original.omega_raw @ gm.R_inv
+        # These dyadic congruences are exact. Allow dimension-scaled backward
+        # error for each eigendecomposition and retained-space reconstruction.
+        allowance = 8 * group.size * unit * np.linalg.norm(transformed, ord="fro")
+        assert np.linalg.norm(reused.omega_ssp - transformed, ord="fro") <= allowance
+        assert np.linalg.norm(reused.omega_ssp - fresh.omega_ssp, ord="fro") <= 2 * allowance
+
+    weights = (3.0, 4.0)
+    actual = _evaluate(target, weights)
+    expected = _evaluate(ordinary, weights)
+    assert old.last_evaluation is previous
+    assert old.last_weights == (2.0, 3.0)
+    assert actual.rank == expected.rank == 3
+    assert abs(actual.logdet - expected.logdet) <= actual.logdet_error + expected.logdet_error
+    with localcontext() as context:
+        context.prec = 80
+        # det(R_active)**2 * left * right * (left + right).
+        analytic_logdet = float(Decimal(16 * 3 * 4 * 7).ln())
+    assert abs(actual.logdet - analytic_logdet) <= (
+        actual.logdet_error + 2 * unit * abs(analytic_logdet)
+    )
+
+
 def test_fixed_tensor_transfer_consumes_the_handoff_receipt():
     """Final model state must not retain duplicate authorization snapshots."""
     gm, group = _tensor_inputs()
