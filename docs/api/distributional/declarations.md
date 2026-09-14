@@ -11,7 +11,8 @@ return {py:class}`~superglm.BoundTerm` and
 {py:class}`~superglm.BoundPredictor`, which
 {py:func}`~superglm.bind_predictor` also creates by parameter name for custom
 families, and {py:class}`~superglm.Predictor` is the immutable configuration
-underneath. The families and their helper methods are on the
+underneath; those four are described on the [Internals](../internals.md)
+page. The families and their helper methods are on the
 [Families](families.md) page.
 
 ```{eval-rst}
@@ -19,11 +20,7 @@ underneath. The families and their helper methods are on the
    :toctree: ../generated
    :nosignatures:
 
-   superglm.Predictor
-   superglm.BoundPredictor
    superglm.bind_predictor
-   superglm.BoundTerm
-   superglm.BoundInteraction
    superglm.term
    superglm.s
    superglm.cat

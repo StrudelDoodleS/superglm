@@ -32,10 +32,6 @@ profilers estimate the extra parameters those families carry.
    superglm.estimate_tweedie_p
    superglm.estimate_phi
    superglm.TweedieProfileResult
-   superglm.TweedieProfileCIDetails
-   superglm.TweedieProfileCIDensityProvenance
-   superglm.TweedieProfileCIEndpoint
-   superglm.TweedieProfileCIEvaluation
    superglm.tweedie_logpdf
    superglm.generate_tweedie_cpg
 ```
