@@ -47,6 +47,16 @@ downloaded data and fitted pickle caches are ignored local artifacts, not
 committed data. Their manifests and available source/artifact hashes remain
 part of the reproducibility record.
 
+PR preparation exposed a missing-total path in the broad runner: when no arm
+was eligible for test evaluation, final worker-time totals were absent even
+though proposal and fit receipts recorded the spent time. The runner now
+initializes those totals from search costs before evaluation. Regression cases
+cover proposal timeout, no converged fit and exhaustion of the global budget;
+all three fail against the original runner. Every archived case reached
+evaluation, so the recorded experiment totals are unchanged. Its original
+runner and source hash remain preserved in commit `639f499e`; the updated
+runner has a new source identity and cannot stand in for the frozen run.
+
 One archival JSON file had a second final newline removed during PR packaging:
 `2026-09-13-tensor-support-handoff-initial-measurements.json`. Its parsed values
 are unchanged. The original bytes remain in commit `639f499e`, with SHA-256

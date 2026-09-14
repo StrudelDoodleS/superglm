@@ -130,6 +130,46 @@ def test_test_workers_are_limited_by_remaining_total_and_case_budget():
     assert broad.remaining_budget(args, 0, 180, "propose") == 0
 
 
+@pytest.mark.parametrize("failure", ["proposal_timeout", "no_converged_fit", "global_budget"])
+def test_suite_retains_all_attempt_costs_without_test_evaluation(tmp_path, monkeypatch, failure):
+    args = SimpleNamespace(
+        output=tmp_path / "suite",
+        datasets=["uci_airfoil", "uci_concrete"],
+        fit_timeout=120,
+        case_budget=240,
+        total_budget=3 if failure == "global_budget" else 1800,
+    )
+    attempts = []
+
+    def launch(args, dataset, arm, stage, timeout):
+        assert stage in ("propose", "fit"), "No failed search may start test evaluation"
+        cost = 3.0 if stage == "propose" else 4.0
+        attempts.append((dataset, cost))
+        if failure != "no_converged_fit":
+            return {"status": "timeout", "process": {"process_seconds": cost}}
+        if stage == "propose":
+            return {
+                "status": "proposed",
+                "admission": {"pairs": [], "parent_resolutions": [4]},
+                "process": {"process_seconds": cost},
+            }
+        return {"status": "not_converged", "process": {"process_seconds": cost}}
+
+    monkeypatch.setattr(broad, "launch", launch)
+    monkeypatch.setattr(broad, "source_identity", lambda: {"fixture": True})
+    assert broad.run_suite(args) == 1
+    suite = json.loads((args.output / "suite.json").read_text())
+    expected_cost = {dataset: 0.0 for dataset in args.datasets}
+    for dataset, cost in attempts:
+        expected_cost[dataset] += cost
+    for dataset, case in suite["datasets"].items():
+        assert case["evaluation_worker_process_seconds"] == 0.0
+        assert case["all_worker_process_seconds"] == expected_cost[dataset]
+    assert suite["all_worker_process_seconds"] == sum(expected_cost.values())
+    if failure == "global_budget":
+        assert suite["datasets"]["uci_concrete"]["status"] == "budget_exhausted"
+
+
 def test_zero_smoothing_model_uses_coefficient_convergence_without_fictitious_reml():
     state = {"features": {"x": {"kind": "numeric"}, "z": {"kind": "numeric"}}}
     x = np.tile(np.arange(4, dtype=float), 20)

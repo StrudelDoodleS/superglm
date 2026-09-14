@@ -542,10 +542,12 @@ def run_suite(args):
         suite["search_worker_process_seconds"] = spent
         base.write_json(args.output / "suite.json", suite)
     suite["all_choices_persisted_utc"] = datetime.now(UTC).isoformat()
+    suite["all_worker_process_seconds"] = spent
     base.write_json(args.output / "suite.json", suite)
     for dataset, case in suite["datasets"].items():
         case_spent = case.get("search_worker_process_seconds", 0.0)
         case["evaluation_worker_process_seconds"] = 0.0
+        case["all_worker_process_seconds"] = case_spent
         for arm in case.get("choice", {}).get("evaluation_arms", []):
             remaining = remaining_budget(args, spent, case_spent, "evaluate")
             if remaining <= 0:
