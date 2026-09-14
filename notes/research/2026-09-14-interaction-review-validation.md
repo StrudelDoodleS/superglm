@@ -243,3 +243,27 @@ summaries, except the explicitly current `collector_sha256` and
 `current_runner_sha256` fields. Historical runner hashes, raw receipts and
 measured values remain untouched. The new worker's platform tests simulate
 resource observations on Linux; no native macOS run is claimed.
+
+### Follow-up on test isolation and launcher coverage
+
+Claude verified the four corrections at `dd8c4e78` and identified an ambient
+thread dependency in the RSS regressions. Running their module with two-thread
+environment settings reproduced two failures and ten passes. The RSS cases
+now supply their own one-thread observation, separating their unit-conversion
+assertion from the dedicated observed-pool refusal test. All twelve cases pass
+under those same two-thread settings.
+
+The real, targeted and broad launchers now set the same six thread controls as
+the synthetic and GBM launchers. Eight inherited-environment tests cover the
+four real-data launchers; six failed before this follow-up, while the two GBM
+controls already passed. All fifty interrupted-receipt and environment cases
+now pass. The expanded benchmark command above passes all 321 tests in
+10.21 seconds. The original broad audit also replays exactly, including all
+26 saved-array scores and 100 accounted-for arms, after the previously
+documented display-path and menu-field normalization.
+
+The observed-pool contract remains explicit: an empty `threadpools` list
+records no observation, and is not by itself a refusal. Some numerical
+backends are not enumerated by threadpoolctl. The launcher still applies its
+thread controls, but the receipt does not certify the thread count of an
+unobserved backend. No archived completed run relies on this case.

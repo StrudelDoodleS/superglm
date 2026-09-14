@@ -423,7 +423,14 @@ def launch(args, dataset, arm, stage, timeout):
         str(args.data_root),
     ]
     env = os.environ.copy()
-    for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "NUMBA_NUM_THREADS", "MKL_NUM_THREADS"):
+    for name in (
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "NUMBA_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
+    ):
         env[name] = "1"
     receipt = run_isolated(command, log_path=output / f"{stage}.log", timeout=timeout, env=env)
     receipt.update(command=command, timeout_seconds=timeout)

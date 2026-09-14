@@ -17,6 +17,11 @@ The executable is
 [benchmark_many_interactions.py](../../benchmarks/benchmark_many_interactions.py).
 Every case runs in a new owned worker, with a 90-second whole-worker deadline
 and OpenBLAS, OMP, MKL and Numba thread counts set to one. Workers run serially.
+Those four controls describe the measured runs. The current runner also sets
+Accelerate and BLIS limits, converts macOS RSS bytes to MiB, and refuses an
+observed multithreaded pool. The [pre-merge validation record](
+2026-09-14-interaction-review-validation.md#pre-merge-review-and-portable-timing-evidence)
+documents these corrections without changing the measurements.
 Imports and deterministic input generation precede the fit clock. The clock
 covers the entire public `fit` or `fit_reml` call, including construction and
 finalization. The fit-end process high-water is sampled before telemetry,
