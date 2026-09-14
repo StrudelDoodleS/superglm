@@ -70,8 +70,10 @@ are unchanged. The original bytes remain in commit `639f499e`, with SHA-256
 The documentation rebuild in PR #392 moved the roadmap and research files to
 `notes/`. This archive now follows that layout: the roadmap is `notes/ROADMAP.md`
 and the research, scripts, proof project and figures are in `notes/research/`.
-Current commands, test imports, generated-file attributes and the corpus's
-related-research link use those paths. Existing measurement JSON, proof
+Current commands, test imports and generated-file attributes use those paths.
+The hash-pinned corpus registry retains its original related-research string;
+the [corpus note](2026-09-13-interaction-dataset-corpus.md) supplies current links.
+Existing measurement JSON, proof
 receipts and figure bytes retain their original values and hashes, including
 historical `docs/research` paths. Exact-commit links and the installed Lean MCP
 configuration still refer to the preserved original archival worktree.

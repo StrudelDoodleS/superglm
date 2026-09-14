@@ -254,11 +254,14 @@ def launch(args, dataset, arm, stage, timeout):
     process.update(command=command, timeout_seconds=timeout)
     base.write_json(output / f"{stage}_process.json", process)
     path = output / ("result.json" if stage == "fit" else "evaluation.json")
-    record = json.loads(path.read_text()) if path.exists() else {"status": "error"}
+    record = base.load_worker_receipt(path, stage)
     if process["status"] == "timeout":
         record.update(status="timeout", warnings_complete=False)
     elif process["status"] != "success" and record.get("status") != "not_converged":
         record["status"] = "error"
+    if "finished_utc" not in record:
+        record.update(warnings_complete=False, parent_finished_utc=datetime.now(UTC).isoformat())
+    base.write_json(path, record)
     record["process"] = process
     print(
         json.dumps(

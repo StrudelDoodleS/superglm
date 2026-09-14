@@ -6,10 +6,19 @@ import hashlib
 import io
 import json
 import zipfile
+from pathlib import Path
 
 import interaction_datasets as corpus
 import pandas as pd
 import pytest
+
+
+def test_committed_registry_matches_the_frozen_corpus_receipt():
+    root = Path(__file__).resolve().parents[1]
+    receipt = json.loads(
+        (root / "notes/research/2026-09-13-interaction-dataset-corpus-receipt.json").read_text()
+    )
+    assert hashlib.sha256(corpus.MANIFEST.read_bytes()).hexdigest() == receipt["manifest_sha256"]
 
 
 def entry_for(raw=b"x,y\n1,2\n3,4\n"):

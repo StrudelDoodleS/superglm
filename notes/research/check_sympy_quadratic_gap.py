@@ -1,5 +1,8 @@
 """Exact symbolic checks; run with the isolated research environment."""
 
+if not __debug__:
+    raise RuntimeError("Symbolic check requires enabled assertions; remove -O/PYTHONOPTIMIZE")
+
 import json
 import platform
 

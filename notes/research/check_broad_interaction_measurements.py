@@ -175,6 +175,8 @@ def summarize(root, data_root=data.DEFAULT_ROOT):
     unverified_threadpool_workers = []
     declared_arm_count = 0
     for name, case in suite["datasets"].items():
+        if case.get("status") == "budget_exhausted":
+            raise ValueError(f"Audit scope excludes datasets skipped before proposal: {name}")
         case_root = root / name
         prepared = data.load_prepared(name, data_root=data_root)
         proposal = case["proposal"]

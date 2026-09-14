@@ -5,6 +5,9 @@ representation memo. They do not prove arbitrary dimensions or certify
 floating-point evaluation.
 """
 
+if not __debug__:
+    raise RuntimeError("Symbolic check requires enabled assertions; remove -O/PYTHONOPTIMIZE")
+
 import hashlib
 import json
 import platform

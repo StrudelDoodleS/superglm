@@ -47,6 +47,13 @@ test prediction for the three models, 5,173 predictions in total. No model
 is fitted, selected, or altered for these figures. Ruff check and format
 checks pass, and each rendered figure was visually inspected.
 
+The archived receipt's `plot_script_sha256` identifies the
+[original plotter at `639f499e`](https://github.com/StrudelDoodleS/superglm/blob/639f499eaec04967de0b7c31090276671144b99f/docs/research/plot_broad_interaction_surfaces.py),
+whose SHA-256 is `2698a7fa17e2412eec526268f98a224906b209d02edbed511e70f67891b53aa9`.
+It predates the replay and plotting corrections made during PR review. The
+current script has a different hash; the archived receipt and figure bytes
+remain unchanged.
+
 The [receipt](figures/2026-09-14-broad-interactions/receipt.json) records input
 and output hashes, axis bounds, effect ranges and grid shapes. PNG and SVG
 figures, raw-axis/contribution NPZ grids and the combined PDF are retained
@@ -66,3 +73,6 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 NUMBA_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 
 The NPZ values reproduce exactly in this environment. Image/container bytes
 may vary with rendering metadata; the receipt binds the delivered files.
+Without `--output`, the current plotter writes to the ignored
+`.benchmark-artifacts/broad-interaction-surfaces-replay/` directory. It refuses
+an output inside the tracked frozen figure directory.
