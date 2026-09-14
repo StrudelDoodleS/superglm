@@ -627,3 +627,7 @@ Clean strict executed build, zero warnings; `docs/_build/html/index.html` contai
 ### Task 8: Verify
 
 The critic runs: clean strict executed build; `uv run pytest tests/docs -q`; page execution time; screenshots of the page (top, the widget, the maths) and of the landing page in light and dark; checks that every display equation renders, that the two callouts carry the display font, that no `selection_penalty=0.0` remains on the page or the landing page, that the code cells are collapsed by default, and that the widget behaves (fit path changes with the slider, REML iterates drawn). No push; the coordinator opens the pull request.
+
+## Post-fold note (2026-09-14)
+
+The stacked PR #393 never ran the dev-ci `docs` job (stacked PRs get seven checks), so the first strict build of this page without execution was the one on #392 after the fold, and it went red: the four `glue:figure` pastes find no glue data when nothing executes. Fix at 096bc558 on the branch of #392: `docs/conf.py` suppresses `mystnb.glue` only when `SUPERGLM_DOCS_EXECUTE=off`, and `tests/docs/test_conventions.py` pins every glue paste to a glue call on the same page. Run the off-mode CI command locally before pushing any change to this page.
