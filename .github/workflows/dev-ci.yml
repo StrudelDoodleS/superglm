@@ -140,10 +140,36 @@ jobs:
         run: uv python install 3.14
 
       - name: Install documentation dependencies
-        run: uv sync --python 3.14 --group docs --extra plotting
+        run: uv sync --locked --python 3.14 --group docs --extra plotting
 
-      - name: Docs build check
-        run: uv run mkdocs build --strict
+      - name: Docs build check (strict, no execution)
+        env:
+          SUPERGLM_DOCS_EXECUTE: "off"
+        run: uv run sphinx-build -b html -n -W --keep-going -d docs/_build/doctrees docs docs/_build/html
+
+  docs-notebooks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --locked --python 3.14 --extra dev --extra plotting --group docs
+
+      - name: Cache OpenML downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/scikit_learn_data
+          key: openml-mtpl2-v1
+
+      - name: Execute documentation notebooks
+        run: uv run pytest tests/docs -m docs -q
 
   frontend:
     runs-on: ubuntu-latest

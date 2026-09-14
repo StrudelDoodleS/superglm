@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ZeroInflationResult:
-    """Result from :func:`zero_inflation_index`."""
+    """Result from :func:`superglm.zero_inflation_index`."""
 
     observed_zeros: float
     expected_zeros: float
@@ -38,7 +38,7 @@ class ZeroInflationResult:
 
 @dataclass(frozen=True)
 class ScoreTestZIResult:
-    """Result from :func:`score_test_zi`."""
+    """Result from :func:`superglm.score_test_zi`."""
 
     statistic: float
     p_value: float
@@ -47,7 +47,7 @@ class ScoreTestZIResult:
 
 @dataclass(frozen=True)
 class DispersionTestResult:
-    """Result from :func:`dispersion_test`."""
+    """Result from :func:`superglm.dispersion_test`."""
 
     statistic: float
     p_value: float
@@ -57,7 +57,7 @@ class DispersionTestResult:
 
 @dataclass(frozen=True)
 class VuongTestResult:
-    """Result from :func:`vuong_test`."""
+    """Result from :func:`superglm.vuong_test`."""
 
     statistic: float
     p_value: float

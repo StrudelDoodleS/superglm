@@ -79,7 +79,7 @@ findings warrant them.
 
 ## Project direction
 
-Read [docs/ROADMAP.md](docs/ROADMAP.md) when proposing substantial new
+Read [notes/ROADMAP.md](notes/ROADMAP.md) when proposing substantial new
 functionality, making major architectural/API decisions, choosing what to work
 on next, or doing strategic research. It is not required for narrowly scoped
 bug or regression fixes, tests, CI/build work, dependency maintenance,

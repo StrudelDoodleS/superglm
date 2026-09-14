@@ -5,7 +5,7 @@ v0.28.0 substituted a Gaussian-shaped scale profile
 every zero row a ``log(phi)`` the exact compound Poisson-gamma saturated
 likelihood does not contain (a zero row is an atom, phi-free). These tests
 pin the exact Wood Eq. (4) profile against the mgcv 1.9.3 oracle values
-recorded in ``docs/audit/2026-08-20-distribution-estimation/README.md``
+recorded in ``notes/audit/2026-08-20-distribution-estimation/README.md``
 (sections 2.4-2.5); mgcv was run strictly as a black-box oracle on the
 committed fixture CSVs. Every test fails against v0.28.0.
 

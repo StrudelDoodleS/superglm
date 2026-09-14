@@ -294,7 +294,7 @@ class TestEngineSeamSentinels:
     this adapter chain entirely.
 
     That is the other half of audit finding S1
-    (``docs/audit/2026-07-28/subsystems/model-orchestration.md``), which names
+    (``notes/audit/2026-07-28/subsystems/model-orchestration.md``), which names
     the ``run_reml_once`` chain and this one together.  The first half was
     deleted by the PR "Delete the covariance chain no production fit reaches",
     which also dropped ``TestRunnerPathSentinel``: that class drove the deleted

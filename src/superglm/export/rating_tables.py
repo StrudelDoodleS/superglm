@@ -2558,7 +2558,7 @@ def export_rating_tables(
 ) -> Path:
     """Render the rating-table payload to a workbook and return the path.
 
-    A thin renderer over :func:`build_rating_table_payload`, which is where the
+    A thin renderer over ``build_rating_table_payload``, which is where the
     payload's contract lives: what the exported product reproduces, which term
     types are exact and which are binned, what ``centering=`` does and does not
     change, and which errors the export raises.  Read that docstring before
@@ -2586,7 +2586,7 @@ def export_rating_tables(
     mis-rated by 60%, concentrated in the wide intervals the quantile strategy
     opens in the sparse tails.  ``n_bins`` is a budget rather than a target, and
     staying under it is not a route to an exact block -- see
-    :func:`build_rating_table_payload`, where that is measured.
+    ``build_rating_table_payload``, where that is measured.
 
     ``"ppform"`` writes the exact piecewise-polynomial form of the fitted
     curve: one row per knot interval carrying four coefficients.  A consumer

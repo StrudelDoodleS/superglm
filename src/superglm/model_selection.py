@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CrossValidationResult:
-    """Structured result from :func:`cross_validate`.
+    """Structured result from :func:`superglm.cross_validate`.
 
     Attributes
     ----------

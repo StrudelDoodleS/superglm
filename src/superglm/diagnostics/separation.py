@@ -314,6 +314,8 @@ def emit_separation_findings(findings: list[SeparatedTerm], mode: str) -> None:
 
 
 def validate_separation_mode(mode: str) -> str:
+    """Return ``mode`` unchanged when it names a supported separation policy."""
+
     if mode not in ("warn", "error", "ignore"):
         raise ValueError(f"separation must be 'warn', 'error', or 'ignore', got {mode!r}")
     return mode

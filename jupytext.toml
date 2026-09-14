@@ -1,0 +1,3 @@
+# Pair tutorial notebooks: the Markdown file is the source of truth, the
+# .ipynb twin exists for Colab and download and never carries outputs.
+formats = "docs/tutorials//md:myst,docs/tutorials//ipynb"

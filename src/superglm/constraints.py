@@ -488,6 +488,8 @@ def monotonicity_violation(values: NDArray, direction: str) -> float:
 
 
 def curvature_violation(values: NDArray, kind: str) -> float:
+    """Return the largest violation of a convexity or concavity requirement."""
+
     diffs2 = np.diff(values, n=2)
     if kind == "convex":
         bad = np.maximum(0.0, -diffs2)

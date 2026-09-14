@@ -1,3 +1,5 @@
+"""Optional REML iteration tracing written to a debug directory."""
+
 from __future__ import annotations
 
 import csv
@@ -15,6 +17,8 @@ TRACE_SUFFIXES = ("reml", "pirls", "scop")
 
 @dataclass
 class REMLIterRow:
+    """One recorded REML outer iteration."""
+
     run_id: str
     iteration: int
     objective_before: float
@@ -60,6 +64,8 @@ class REMLDebugRun:
 
 
 class REMLDebugRecorder:
+    """Collect REML iteration rows and write them to a debug directory."""
+
     def __init__(self, enabled_level: int, base_dir: Path, run_id: str):
         self.enabled_level = enabled_level
         self.base_dir = base_dir

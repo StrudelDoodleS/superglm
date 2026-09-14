@@ -265,7 +265,7 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert "if: github.event_name == 'push' && matrix.python-version == '3.13'" in coverage
     for step in pytest_steps:
         assert "uv run --with mpmath pytest tests/" in step
-        assert '-m "not browser"' in step
+        assert '-m "not browser and not docs"' in step
         assert "--splits 4" in step
         assert "--group ${{ matrix.group }}" in step
         assert "--splitting-algorithm least_duration" in step
@@ -324,7 +324,7 @@ def test_dev_ci_keeps_browser_and_non_test_checks_independent():
 
     assert "ruff check src/ tests/" in quality_job
     assert "ruff format --check src/ tests/" in quality_job
-    assert "mkdocs build --strict" in docs_job
+    assert "sphinx-build -b html -n -W --keep-going" in docs_job
     assert "npm run check:frontend" in frontend_job
     assert "playwright install --with-deps chromium" in browser_job
     assert "pytest tests/test_editor_browser.py" in browser_job
@@ -335,7 +335,10 @@ def test_pre_push_pytest_uses_uv_dev_environment():
     config = _read(".pre-commit-config.yaml")
     pytest_hook = config.split("- id: pytest", maxsplit=1)[1]
 
-    assert 'entry: uv run --extra dev python -m pytest tests/ -q -m "not slow"' in pytest_hook
+    assert (
+        'entry: uv run --extra dev python -m pytest tests/ -q -m "not slow and not docs"'
+        in pytest_hook
+    )
     assert "language: system" in pytest_hook
 
 
@@ -387,7 +390,9 @@ def test_docs_workflow_scopes_write_permission_to_deploy_job():
     assert "contents: write" not in header
 
     assert "permissions:" in deploy_job
-    assert "contents: write" in deploy_job
+    assert "pages: write" in deploy_job
+    assert "id-token: write" in deploy_job
+    assert "contents: write" not in deploy_job
 
 
 def test_dependabot_updates_python_and_github_actions():

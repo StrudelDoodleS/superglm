@@ -43,6 +43,8 @@ def _aligned_vectors(
 
 @dataclass(frozen=True)
 class GaussianKernelEvaluation:
+    """Row-wise Gaussian likelihood, score and packed Hessian from one evaluation."""
+
     optimizing_log_likelihood: NDArray[np.float64]
     score: NDArray[np.float64] | None
     hessian_packed: NDArray[np.float64] | None
@@ -76,6 +78,8 @@ def initialize_gaussian(
     semantics: WeightSemantics,
     scale_floor: float,
 ) -> NDArray[np.float64]:
+    """Return starting location and scale values for a Gaussian fit."""
+
     response_values, weight_values = _aligned_vectors(
         (response, "response"),
         (weights, "weights"),
@@ -180,6 +184,8 @@ def evaluate_gaussian_rows(
     *,
     derivative_order: int,
 ) -> GaussianKernelEvaluation:
+    """Evaluate the Gaussian log-likelihood and its derivatives row by row."""
+
     response_values, location_values, scale_values, weight_values = _aligned_vectors(
         (response, "response"),
         (location, "location"),
@@ -241,6 +247,8 @@ def gaussian_expected_information(
     weights: NDArray,
     semantics: WeightSemantics,
 ) -> NDArray[np.float64]:
+    """Return the row-wise expected information of the Gaussian kernel."""
+
     scale_values, weight_values = _aligned_vectors(
         (scale, "scale"),
         (weights, "weights"),
@@ -339,6 +347,8 @@ def gaussian_predictor_curvature_directional(
     *,
     scale_floor: float,
 ) -> NDArray[np.float64]:
+    """Return the directional curvature of the Gaussian predictor."""
+
     response_values, weight_values = _aligned_vectors(
         (response, "response"),
         (weights, "weights"),

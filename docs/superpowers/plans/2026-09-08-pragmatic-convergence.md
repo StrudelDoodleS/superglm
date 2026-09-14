@@ -100,5 +100,5 @@ tables, respectively; neither is a reason to reject a practically settled fit.
   background activity recorded. This is not quiet-machine
   approval, a pure backend comparison or a universal speed guarantee.
 - Public guidance, roadmap, numerical receipts and the
-  [follow-through report](../../research/2026-09-pragmatic-convergence.md)
+  [follow-through report](../../../notes/research/2026-09-pragmatic-convergence.md)
   record final results and remaining limits. Original strategy files are preserved.

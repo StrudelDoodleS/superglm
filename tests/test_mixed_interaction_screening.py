@@ -598,7 +598,7 @@ FREQ_SKIP = pytest.mark.skipif(
 
 
 def _fremtpl_features():
-    # This mirrors the worked example in docs/guide/screening.md, and the
+    # This mirrors the worked example in docs/how-to/screen-interactions.md, and the
     # specification is deliberate.  BonusMalus is strongly curved on this book
     # (splined it reports edf 7.5 of rank 11), so specifying it as a Numeric
     # would both mis-fit the margin and demote every BonusMalus pair to the
@@ -664,7 +664,7 @@ def test_fremtpl_mixed_sweep_end_to_end():
 def test_fremtpl_example_specification_is_not_mis_specified():
     """The guide's worked example is an exemplar, so its spec must hold up.
 
-    Two claims in docs/guide/screening.md are load-bearing and both are
+    Two claims in docs/how-to/screen-interactions.md are load-bearing and both are
     measurable: BonusMalus is curved (so specifying it as a Numeric would be
     wrong, and would demote its pairs to the deferred spline x numeric kind),
     and LogDensity is not (so it is an honest Numeric rather than one chosen

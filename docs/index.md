@@ -1,59 +1,91 @@
+---
+html_theme.sidebar_secondary.remove: true
+---
+
+```{rst-class} sg-visually-hidden
+```
+
+# superglm
+
+```{raw} html
 <div class="sg-hero">
-  <div class="sg-hero__logo">
-    <img src="images/logo.png" alt="SuperGLM logo">
-  </div>
+  <div class="sg-hero__logo"><img src="_static/logo.png" alt="superglm"></div>
   <div class="sg-hero__copy">
-    <h1>SuperGLM</h1>
-    <p>
-      Penalised GLMs and GAM-style pricing models for insurance, with exact and
-      discrete REML, solver-backed monotone splines, out-of-fold validation,
-      and deployable fitted estimators.
-    </p>
-    <div class="sg-hero__actions">
-      <a class="md-button md-button--primary" href="guide/workflows/">Recommended Workflows</a>
-      <a class="md-button" href="guide/monotone/">Monotone Splines</a>
-      <a class="md-button" href="api/model/">API Reference</a>
-    </div>
+    <div class="sg-hero__title">Super GLM</div>
+    <p>Penalised GLMs and GAM pricing models for insurance, with the smoothness chosen by REML and the constraints you would otherwise enforce by hand.</p>
+    <a class="sg-btn" href="get-started/index.html">Get started</a>
+    <a class="sg-btn sg-btn--ghost" href="tutorials/index.html">Tutorials</a>
+    <span class="sg-hero__meta">MIT licensed · free for everyone · built on NumPy, SciPy and pandas</span>
   </div>
 </div>
+```
 
-## Start Here
+::::{grid} 1 2 2 4
+:gutter: 3
 
-If you are new to the package, the intended path is:
+:::{grid-item-card} Get started
+:link: get-started/index
+:link-type: doc
 
-1. build an explicit feature spec
-2. fit with `fit_reml()` and `selection_penalty=0`
-3. use `cross_validate(..., fit_mode="fit_reml")` for model comparison
-4. validate challengers with Lorenz and double-lift charts
-5. serialize the fitted estimator for scoring
+Install, then the quick start: which fit to call, and how to read the summary it prints.
+:::
 
-## What It Covers
+:::{grid-item-card} Tutorials
+:link: tutorials/index
+:link-type: doc
 
-<div class="sg-feature-grid">
-  <div class="sg-feature-card">
-    <h3>Workflow-first pricing models</h3>
-    <p>Exact REML for standard GAM-style pricing, discrete REML for large data, and clear guidance on when to use sparse selection instead.</p>
-  </div>
-  <div class="sg-feature-card">
-    <h3>Feature engineering in-model</h3>
-    <p>P-splines, cubic regression splines, natural splines, ordered categoricals, grouped categoricals, and interaction terms.</p>
-  </div>
-  <div class="sg-feature-card">
-    <h3>Monotone solvers</h3>
-    <p>Solver-backed monotone spline fitting through QP and SCOP paths, with post-fit repair retained only as a fallback.</p>
-  </div>
-  <div class="sg-feature-card">
-    <h3>Validation and deployment</h3>
-    <p>Cross-validation with out-of-fold predictions, Lorenz and double-lift charts, diagnostics, and deployable fitted estimators.</p>
-  </div>
-</div>
+Executed notebooks you can open in Colab. First, a distributional model; pricing tutorials on French motor data follow.
+:::
 
-## Example Plots
+:::{grid-item-card} How-to guides
+:link: how-to/index
+:link-type: doc
 
-Poisson frequency model on French MTPL2 (678k policies), fitted with REML
-smoothness selection. Plots show pointwise confidence bands, weighted density,
-and interior knot positions.
+One goal per page: choosing a fit path, features and levels, constraints, screening, validation, deployment.
+:::
 
-| Vehicle Age (`quantile_rows` knots) | Bonus-Malus (`quantile_tempered`, alpha=0.2) |
-|:---:|:---:|
-| [![VehAge](images/readme_vehage.png)](images/readme_vehage.png) | [![BonusMalus](images/readme_bonusmalus.png)](images/readme_bonusmalus.png) |
+:::{grid-item-card} Explanation
+:link: explanation/index
+:link-type: doc
+
+Why REML, what weights mean, how credibility becomes smoothing, what screening can and cannot detect.
+:::
+
+::::
+
+```{rst-class} sg-section-title
+```
+
+## Twelve lines to a fitted model
+
+```python
+from superglm import Categorical, Numeric, Spline, SuperGLM
+
+features = {
+    "DrivAge": Spline(kind="ps", k=14, knot_strategy="quantile_rows"),
+    "VehAge": Spline(kind="cr", k=10, knot_strategy="quantile_rows"),
+    "BonusMalus": Spline(kind="cr", k=12, knot_strategy="quantile_tempered"),
+    "Area": Categorical(base="most_exposed"),
+    "LogDensity": Numeric(),
+}
+model = SuperGLM(family="poisson", features=features)
+model.fit_reml(df, y, sample_weight=exposure)
+print(model.summary())
+```
+
+Why the fitted curves look the way they do: [How REML chooses smoothness](explanation/how-reml-chooses-smoothness.md).
+
+The [API reference](api/index.md) documents every public name. The
+[governance section](governance/index.md) is for model-risk reviewers.
+
+```{toctree}
+:hidden:
+
+get-started/index
+tutorials/index
+how-to/index
+explanation/index
+api/index
+governance/index
+development/index
+```

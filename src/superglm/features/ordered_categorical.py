@@ -856,7 +856,7 @@ class OrderedCategorical:
         (Hofner, Kneib & Hothorn, *Statist. Comput.* 26:1-14, 2016, Sec. 3.3)
         and no proper linear-inequality basis exists for monotone CUBICS at all
         (Meyer, *Ann. Appl. Statist.* 2(3):1013-1033, 2008, Sec. 2). See
-        ``docs/guide/monotone.md`` for the measured cost.
+        ``docs/how-to/constrain-a-smooth.md`` for the measured cost.
         """
         inner = self._basis_spline
         return getattr(inner, "constraint_kind", getattr(inner, "monotone", None))

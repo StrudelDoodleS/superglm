@@ -124,15 +124,15 @@ guarantee from those papers.
 
 ## Relation to the roadmap
 
-The [C3 dossier](../docs/research/2026-09-superglm-feature-roadmap-dossier.md)
+The [C3 dossier](../notes/research/2026-09-superglm-feature-roadmap-dossier.md)
 identifies reliable stationarity and stable penalty calculations as numerical
-requirements. The [C3 follow-through](../docs/research/2026-09-pragmatic-convergence.md)
+requirements. The [C3 follow-through](../notes/research/2026-09-pragmatic-convergence.md)
 already distinguishes useful practical stopping from certified smoothing
 stationarity and records a prior coefficient-stagnation problem in NB2.
 This repair strengthens the shared coefficient stopping and retained-evidence
 checks, fixes Gamma initialization, and admits bounded exact-face replay.
 
-The [roadmap additions](../docs/research/2026-09-superglm-feature-roadmap-additions.md)
+The [roadmap additions](../notes/research/2026-09-superglm-feature-roadmap-additions.md)
 also propose Fisher-based preconditioning and an adaptive Newton controller.
 This repair does not implement those research items. The reproduced failures
 have narrower fixes, and the successful runs do not establish robustness for

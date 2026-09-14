@@ -8,7 +8,7 @@ against the same model plus ``ti(DrivAge, BonusMalus)``, on both the exact and
 the ``discrete=True`` REML paths, recording wall time and the model's own
 ``_reml_profile`` phase timings.
 
-Baseline at f082e9b, n=100_000 (see docs/audit/2026-07-28/measured-tensor-cost.md):
+Baseline at f082e9b, n=100_000 (see notes/audit/2026-07-28/measured-tensor-cost.md):
 one tensor term costs 7.2x on exact and 3.8x on discrete.
 
 Usage::

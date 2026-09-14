@@ -1,3 +1,5 @@
+"""Windowed Type-II Anderson acceleration for the smoothing fixed point."""
+
 from __future__ import annotations
 
 from collections.abc import Hashable
@@ -309,6 +311,8 @@ def _common_scaled_step(
 
 @dataclass(frozen=True)
 class MultisecantProposal:
+    """A candidate smoothing-parameter step proposed by the multisecant model."""
+
     log_lambdas: NDArray[np.float64]
     log_step: NDArray[np.float64]
     raw_residual_norm: float
@@ -319,6 +323,8 @@ class MultisecantProposal:
 
 @dataclass(frozen=True)
 class MultisecantDecision:
+    """The outcome of one acceleration attempt: a proposal, or a refusal reason."""
+
     proposal: MultisecantProposal | None
     refusal_reason: AccelerationRefusalReason | None
 
@@ -350,6 +356,8 @@ def _provenance_equal(left: Hashable, right: Hashable) -> bool:
 
 
 class WindowedTypeIIAnderson:
+    """Type-II Anderson acceleration over a bounded window of past residuals."""
+
     def __init__(self, *, history: int, max_amplification: float) -> None:
         if isinstance(history, bool) or not isinstance(history, int):
             raise TypeError("history must be a positive integer")

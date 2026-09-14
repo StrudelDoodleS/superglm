@@ -393,6 +393,8 @@ def initialize_negative_binomial(
     weights: NDArray,
     semantics: WeightSemantics,
 ) -> NDArray[np.float64]:
+    """Return starting mean and dispersion values for a negative binomial fit."""
+
     response_values, count_values, weight_values, weight_semantics = _primitive_initialization_rows(
         response, exact_count, weights, semantics
     )

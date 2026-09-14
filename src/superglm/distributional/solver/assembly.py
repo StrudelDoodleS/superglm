@@ -59,6 +59,8 @@ class DenseJointGeometry:
 
 
 def dense_predictor_matrices(layout: StackedLayout) -> tuple[NDArray[np.float64], ...]:
+    """Return the dense design matrix of every predictor in a stacked layout."""
+
     if not isinstance(layout, StackedLayout):
         raise TypeError("layout must be a StackedLayout")
     if not layout.predictors:
@@ -179,6 +181,8 @@ def _validated_channels(
 
 
 def validated_dense_penalty(penalty: NDArray, width: int) -> NDArray[np.float64]:
+    """Return ``penalty`` as a finite symmetric matrix of the global layout width."""
+
     try:
         values = np.asarray(penalty, dtype=np.float64)
     except (TypeError, ValueError, OverflowError) as exc:

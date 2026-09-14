@@ -38,8 +38,8 @@ Work in an isolated `.worktrees/` checkout. Use
 for the documentation build. Use `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 NUMBA_NUM_THREADS=2` for numerical witnesses.
 
-This plan owns `docs/research/proofs/psst.md` and P7's entries in
-`docs/research/proofs/index.md`. Coordinate index edits with the LSS work.
+This plan owns `notes/research/proofs/psst.md` and P7's entries in
+`notes/research/proofs/index.md`. Coordinate index edits with the LSS work.
 Use the shared ledger fields and statuses from the design. A runtime repair
 belongs in a separate specification and PR after its invariant and
 cross-backend implementation are concrete.
@@ -48,8 +48,8 @@ cross-backend implementation are concrete.
 
 **Files**
 
-- Create: `docs/research/proofs/psst.md`.
-- Update: P7.S1 in `docs/research/proofs/index.md`.
+- Create: `notes/research/proofs/psst.md`.
+- Update: P7.S1 in `notes/research/proofs/index.md`.
 - Read: `src/superglm/model/screening_ops.py`,
   `src/superglm/screening/_pair_factor.py`, `_score_stat.py`,
   `_structured.py`, `_overlap.py` and `_factor_kernels.py`.
@@ -90,7 +90,7 @@ an approximation to a complete refit and from a statistical significance claim.
 
 **Files**
 
-- Update: `docs/research/proofs/psst.md` and P7.S2 in the index.
+- Update: `notes/research/proofs/psst.md` and P7.S2 in the index.
 - Read: `src/superglm/screening/_score_stat.py`,
   `src/superglm/screening/_structured.py` and
   `src/superglm/model/screening_ops.py`.
@@ -131,7 +131,7 @@ complete ladder or fitted-model calibration.
 
 **Files**
 
-- Update: `docs/research/proofs/psst.md`, P7.S3/P7.S4 in the index,
+- Update: `notes/research/proofs/psst.md`, P7.S3/P7.S4 in the index,
   `docs/guide/screening.md`, `docs/guide/screening-evaluation.md`.
 - Read: `benchmarks/screening_null_floors.py`,
   `benchmarks/screening_worth_gate.py`,

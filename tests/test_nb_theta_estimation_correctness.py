@@ -3,7 +3,7 @@
 Every test here fails against v0.28.0 and passes with the safeguarded,
 data-started theta solve (B2) and the post-REML joint theta/lambda fixed
 point (B1). The mgcv 1.9.3 oracle values are pinned in
-``docs/audit/2026-08-20-distribution-estimation/README.md`` (sections 3.3-3.4);
+``notes/audit/2026-08-20-distribution-estimation/README.md`` (sections 3.3-3.4);
 mgcv was run strictly as a black-box oracle on the committed fixture CSVs.
 
 Fixture provenance (all synthetic):
