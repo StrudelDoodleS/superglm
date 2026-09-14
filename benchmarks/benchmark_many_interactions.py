@@ -103,7 +103,8 @@ def worker(args):
                 model.fit(train, response)
         finally:
             elapsed = time.perf_counter() - started
-            rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            rss_divisor = 1024**2 if sys.platform == "darwin" else 1024
+            rss_mib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_divisor
             if profiler is not None:
                 profiler.disable()
                 profiler.dump_stats(args.output / "fit.prof")
@@ -123,6 +124,9 @@ def worker(args):
     )
     reml = telemetry["reml"]
     converged = bool(model.result.converged) and (args.mode != "reml" or bool(reml["converged"]))
+    pools = threadpool_info()
+    if any(pool["num_threads"] != 1 for pool in pools):
+        raise ValueError("Every observed numerical thread pool must use one thread")
     result = {
         "status": "converged" if converged else "not_converged",
         "rows": args.rows,
@@ -163,7 +167,7 @@ def worker(args):
                 name: importlib.metadata.version(name)
                 for name in ("superglm", "numpy", "scipy", "pandas", "numba", "threadpoolctl")
             },
-            "threadpools": threadpool_info(),
+            "threadpools": pools,
         },
         "backend_groups": [type(group).__name__ for group in model._dm.group_matrices],
         "telemetry": telemetry,
@@ -219,7 +223,14 @@ def main():
     if args.interaction_k is not None:
         command.extend(["--interaction-k", str(args.interaction_k)])
     env = os.environ.copy()
-    for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "NUMBA_NUM_THREADS", "MKL_NUM_THREADS"):
+    for name in (
+        "OPENBLAS_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "NUMBA_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
+    ):
         env[name] = "1"
     receipt = run_isolated(
         command, log_path=args.output / "worker.log", timeout=args.timeout, env=env
