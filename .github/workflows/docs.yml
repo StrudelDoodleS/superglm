@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
 
       - run: uv python install 3.14
 
@@ -36,13 +36,13 @@ jobs:
         run: uv sync --locked --python 3.14 --group docs --extra plotting
 
       - name: Cache OpenML downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/scikit_learn_data
           key: openml-mtpl2-v1
 
       - name: Cache executed notebooks
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: docs/_build/.jupyter_cache
           # The key carries every input that shapes an executed output: the
