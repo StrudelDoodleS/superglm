@@ -18,7 +18,7 @@ jupytext = pytest.importorskip("jupytext")
 nbclient = pytest.importorskip("nbclient")
 
 DOCS = Path(__file__).resolve().parents[2] / "docs"
-SKIP_DIRS = {"superpowers", "_build", "api"}
+SKIP_DIRS = {"superpowers", "_build"}
 
 
 def myst_notebooks() -> list[Path]:
