@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parents[2]
 SOURCE_PARSER = argparse.ArgumentParser(add_help=False)
 SOURCE_PARSER.add_argument("--source-root", type=Path, default=REPO)
 SOURCE_REPO = SOURCE_PARSER.parse_known_args()[0].source_root.resolve()
-sys.path.insert(0, str(SOURCE_REPO / "benchmarks"))
+sys.path[:0] = [str(SOURCE_REPO / "benchmarks"), str(SOURCE_REPO / "src")]
 
 import benchmark_broad_interactions as broad  # noqa: E402
 import benchmark_gbm_interactions as gbm  # noqa: E402

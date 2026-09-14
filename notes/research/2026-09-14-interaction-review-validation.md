@@ -15,6 +15,9 @@ future reruns and verification. The frozen experiment results remain unchanged.
   split evidence while excluding only the two local location fields
   `source_path` and `source_registry`. Archived metadata and its original digest
   are still checked exactly against all worker records.
+- `--source-root` selects both benchmark modules and the package source used
+  for saved-model replay. Two fresh-process regressions demonstrate that a
+  different installed checkout cannot silently supply the package instead.
 - The audit reconstructs the arm menu from the frozen protocol and admission
   record, so dropping an arm from the suite cannot silently reduce attempt counts.
 - An unavailable matching additive baseline is recorded with null comparison

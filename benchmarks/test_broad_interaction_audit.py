@@ -44,6 +44,32 @@ def test_audit_entry_points_reject_disabled_assertions(script, optimization):
 @pytest.mark.parametrize(
     "script", ["check_broad_interaction_measurements.py", "plot_broad_interaction_surfaces.py"]
 )
+def test_source_root_selects_the_package_used_for_replay(script, tmp_path):
+    source = tmp_path / "source"
+    package = source / "src" / "superglm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("# Import-location fixture; no fit code is needed.\n")
+    (source / "benchmarks").symlink_to(RESEARCH.parents[1] / "benchmarks", target_is_directory=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; runpy.run_path(sys.argv[1]); import superglm; print(superglm.__file__)",
+            str(RESEARCH / script),
+            "--source-root",
+            str(source),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()).resolve() == package / "__init__.py"
+
+
+@pytest.mark.parametrize(
+    "script", ["check_broad_interaction_measurements.py", "plot_broad_interaction_surfaces.py"]
+)
 def test_data_identity_allows_relocation_but_preserves_content_and_split_evidence(script):
     tool = load_tool(script)
     original = {
