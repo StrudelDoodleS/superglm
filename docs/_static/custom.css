@@ -266,3 +266,86 @@ html[data-theme="dark"] .bd-content .sg-hero .sg-hero__logo img {
     margin-inline: auto;
   }
 }
+
+/* Plain-words and tariff callouts on explanation pages. */
+div.admonition.sg-plain > .admonition-title,
+div.admonition.sg-pricing > .admonition-title {
+  font-family: var(--sg-display);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  font-size: 1.2rem;
+}
+div.admonition.sg-plain { border-color: var(--sg-ink); }
+div.admonition.sg-plain > .admonition-title { background: var(--sg-yellow); color: #15171c; }
+div.admonition.sg-pricing { border-color: var(--sg-red); box-shadow: 4px 4px 0 var(--sg-red); }
+div.admonition.sg-pricing > .admonition-title { background: var(--sg-red); color: #ffffff; }
+
+/* The lambda slider: two inline SVG panels in one comic panel. */
+figure.sg-slider {
+  margin: 1.75rem 0;
+  padding: 0.75rem;
+  border: 2px solid var(--sg-ink);
+  box-shadow: 4px 4px 0 var(--sg-shadow);
+  background: var(--pst-color-background);
+}
+.sg-slider__panels { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+.sg-slider svg { width: 100%; height: auto; }
+.sg-slider__bar {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 0.5rem; margin-top: 0.6rem;
+}
+.sg-slider__range { flex: 1 1 10rem; accent-color: var(--sg-red); }
+.sg-slider__btn {
+  font-family: var(--sg-display);
+  letter-spacing: 0.04em;
+  border: 2px solid #15171c;
+  background: var(--sg-yellow);
+  color: #15171c;
+  padding: 0.1rem 0.6rem;
+  cursor: pointer;
+}
+.sg-slider__readout {
+  font-family: var(--pst-font-family-monospace);
+  font-size: 0.85rem;
+  color: var(--pst-color-text-base);
+}
+.sg-slider__axis { stroke: var(--pst-color-text-muted); stroke-width: 1; fill: none; }
+.sg-slider__axis-label { fill: var(--pst-color-text-muted); font-size: 11px; }
+.sg-slider__title { fill: var(--pst-color-text-base); font-size: 12px; }
+.sg-slider__pt {
+  fill: none; stroke: var(--pst-color-text-muted);
+  stroke-width: 3.2; stroke-linecap: round; opacity: 0.4;
+}
+.sg-slider__truth {
+  fill: none; stroke: var(--pst-color-text-muted);
+  stroke-width: 1.4; stroke-dasharray: 6 4;
+}
+.sg-slider__fit { fill: none; stroke: var(--sg-ink); stroke-width: 2.4; }
+.sg-slider__fit--reml { stroke: var(--sg-red); }
+.sg-slider__grid { fill: none; stroke: var(--sg-ink); stroke-width: 1.2; }
+.sg-slider__path { fill: none; stroke: var(--sg-red); stroke-width: 1.4; stroke-dasharray: 4 3; }
+.sg-slider__iter { fill: var(--pst-color-background); stroke: var(--sg-red); stroke-width: 2; }
+.sg-slider__iter--on { fill: var(--sg-red); }
+.sg-slider__iternum { fill: var(--sg-red); font-size: 10px; }
+.sg-slider__marker { fill: var(--sg-ink); stroke: none; }
+.sg-slider__tick { stroke: var(--sg-yellow); stroke-width: 3; }
+@media (max-width: 700px) {
+  .sg-slider__panels { grid-template-columns: 1fr; }
+}
+
+/* Narrow screens: a wide display equation scrolls inside its own box, so give
+   it a scrollbar that is always painted rather than an overlay one that only
+   appears once the reader already guessed. */
+@media (max-width: 700px) {
+  div.math mjx-container {
+    overflow-x: auto;
+    scrollbar-width: thin;
+    background-image:
+      linear-gradient(to left, var(--pst-color-background) 62%, transparent),
+      linear-gradient(to left, var(--sg-yellow), transparent);
+    background-position: right center, right center;
+    background-repeat: no-repeat;
+    background-size: 26px 100%, 14px 100%;
+    background-attachment: local, scroll;
+  }
+}

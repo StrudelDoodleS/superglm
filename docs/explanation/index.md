@@ -7,6 +7,7 @@ screening can and cannot detect.
 ```{toctree}
 :maxdepth: 1
 
+how-reml-chooses-smoothness
 families-and-weights
 credibility-as-smoothing
 what-screening-does

@@ -73,6 +73,8 @@ model.fit_reml(df, y, sample_weight=exposure)
 print(model.summary())
 ```
 
+Why the fitted curves look the way they do: [How REML chooses smoothness](explanation/how-reml-chooses-smoothness.md).
+
 The [API reference](api/index.md) documents every public name. The
 [governance section](governance/index.md) is for model-risk reviewers.
 
