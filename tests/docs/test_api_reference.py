@@ -41,9 +41,10 @@ MEMBER_PAGES = {
 
 
 def listed_members(pages: Path, cls_name: str) -> list[str]:
+    """Members listed on the class overview page and on every page in its group directory."""
     prefix = f"superglm.{cls_name}."
     members: list[str] = []
-    for page in sorted(pages.glob("*.md")):
+    for page in [pages.with_suffix(".md"), *sorted(pages.glob("*.md"))]:
         for block in AUTOSUMMARY_BLOCK.findall(page.read_text(encoding="utf-8")):
             for raw in block.splitlines():
                 line = raw.strip().lstrip("~")

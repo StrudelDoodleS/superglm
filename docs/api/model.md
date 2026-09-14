@@ -7,7 +7,7 @@ Construct it with a family and a feature specification, fit it with
 through {py:meth}`~superglm.SuperGLM.summary`,
 {py:meth}`~superglm.SuperGLM.term_inference` and the plotting methods. The
 strip below follows a model through its life. Each page under it opens with
-the members you reach for first, and its table lists every member in the
+the members you reach for first, and its tables list every member in the
 group, each with its own page.
 
 ```{eval-rst}

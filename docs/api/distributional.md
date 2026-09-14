@@ -8,7 +8,7 @@ declaration with {py:func}`~superglm.s`, {py:func}`~superglm.cat`,
 and {py:func}`~superglm.interaction`. Start with the
 [tutorial](../tutorials/distributional-model.md). The strip below follows a
 model through its life. Each page under it opens with the members you reach
-for first, and its table lists every member in the group, each with its own
+for first, and its tables list every member in the group, each with its own
 page.
 
 ```{eval-rst}
