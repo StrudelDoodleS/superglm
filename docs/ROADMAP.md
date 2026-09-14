@@ -198,6 +198,19 @@ check; incomplete searches and all costs remain visible. This supplies
 local candidate groups for C9/C16/C21 research, not an optimal basis rule,
 a many-interaction scaling law, or an end-to-end speed guarantee.
 
+**2026-09-14 representation plan:** the
+[detailed research plan](research/2026-09-14-cheap-interaction-research-plan.md)
+now prioritizes measuring compressibility of known useful interaction groups,
+then fitting compact representations directly. Its
+[first pilot](research/2026-09-14-interaction-compressibility-pilot-plan.md)
+uses saved Gaussian models and performs no new fits. C21 is the main work;
+C16 local refinement is a branch selected by the observed approximation
+errors. C15/C18 follow only if coupled solves remain expensive after
+compression; bounded C9 discovery then includes representation selection and
+its full cost. The plan separates existing Lean identities from the new
+pullback, nested-optimum and numerical upper-bound contracts needed for a
+certified reduced fit. No compressibility result or new proof is yet claimed.
+
 The first existing-tensor performance step is implemented and measured in
 `306f12e0`: exact admission carries selected penalty support from optimizer to
 finalization, reducing the expensive tensor builds from two to one. The
@@ -216,15 +229,15 @@ Equal coefficient counts also give different fit costs as smoothing dimension
 and representation change. These observations do not establish a scaling law
 or a mathematical limit.
 
-The immediate performance gate is exact reuse of unchanged Gaussian tensor
-cross-products across coefficient-solver calls, with retained-memory accounting
+The next unchanged-model performance gate is exact reuse of unchanged Gaussian
+tensor cross-products across coefficient-solver calls, with retained-memory accounting
 and unchanged centering/error evidence. Wide-term work separately investigates
 rank-only support construction and certified structured tensor rank. See the
 [cost analysis](research/2026-09-13-many-interaction-scaling-analysis.md) and
 [support analysis](research/2026-09-13-structured-tensor-support-analysis.md).
 These are implementation candidates, not completed optimizations.
 
-The small C16/C21 hierarchy prototype remains a representation gate: nested
+The small C16/C21 hierarchy prototype remains the local-refinement gate: nested
 transfer, product centering, penalty pullbacks, nullspaces and adjoints before
 adaptive fitting. C15/C18 must also address many coupled terms, including
 preconditioning, smoothing traces and requested uncertainty. The

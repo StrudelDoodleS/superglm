@@ -20,6 +20,15 @@ The [tool setup](research-tools-setup.md) records the installed Lean and SymPy t
 Keep future derivations, counterexamples and formal proof scope under
 `docs/research` with their assumptions, source revisions and references.
 
+The [2026-09-14 research plan](2026-09-14-cheap-interaction-research-plan.md)
+refines the next sequence using the real-data evidence: measure compression
+of known useful groups, fit a compact linear subspace directly, and select
+local or factorized extensions from those results. It maps every milestone
+to the roadmap and separates existing Lean identities from the additional
+numerical-certificate contracts. The original THB design below remains the
+specified local-refinement branch, rather than a prerequisite to the first
+compression diagnostic.
+
 The subsequent [many-interaction probe](2026-09-13-many-interaction-probe.md)
 adds term-count and equal-P controls. It exposes repeated pairwise Gram assembly
 as a different bottleneck from the wide housing tensor's support construction.
