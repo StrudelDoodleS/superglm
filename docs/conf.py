@@ -76,6 +76,9 @@ suppress_warnings = ["mystnb.unknown_mime_type"]
 autosummary_generate = True
 autodoc_member_order = "bysource"
 autodoc_typehints = "signature"
+# SuperGLM documents its constructor parameters on __init__, in numpydoc form;
+# the default "class" content would drop that block from the class page.
+autoclass_content = "both"
 # Wrap long signatures one parameter per line; SuperGLM has 25 constructor
 # arguments and a single-line signature is unreadable.
 maximum_signature_line_length = 88
