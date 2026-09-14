@@ -275,6 +275,46 @@ complete profile, not authorization for a new collection of unrelated solvers.
 
 ## Judge an accuracy/time/memory frontier
 
+### Goal clarification and interpretability, 2026-09-14
+
+The user revisited whether making interactions cheap was an ill-defined or
+unpromising objective. The useful target remains conditional on workload,
+accuracy and the requested model outputs. Distinguish the cost of one known
+interaction, discovering useful pairs, and jointly fitting many coupled
+terms. The [broad trial](2026-09-14-broad-interaction-trials.md) provides
+useful reference groups but does not resolve all three costs.
+
+For a single pair with b retained basis functions per margin, a full tensor
+stores b² coefficients. A factorization C=UVᵀ with rank at most r stores 2br
+factor entries. This elementary storage count is not an identifiable-parameter
+count, fit-time bound or approximation guarantee. An arbitrary C need not
+admit a useful low-rank approximation. Function-error certification must
+account for the basis geometry and observation measure. Rügamer's published
+AFM construction supplies evidence for scalable factorized spline models,
+with complexity dependent on the factor count. It does not establish the
+cost of SuperGLM's complete REML and inference contract.
+[Primary paper](https://proceedings.mlr.press/v238/ruegamer24a.html)
+
+An absolute claim that GBM interactions cannot be separated is incorrect.
+Lengerich et al. give an exact functional-ANOVA purification algorithm for
+piecewise-constant functions, including tree models. Its interpretation
+requires a specified distribution and identification convention. The same
+need for explicit conventions applies to smooth interaction terms.
+[Primary paper](https://proceedings.mlr.press/v108/lengerich20a.html)
+
+Boosting also supports deliberately additive/pairwise models; EBM is one
+example. SuperGLM's intended value should be evaluated through its explicit
+smooth terms, supported model controls, numerical contracts and measured
+cost, with such structured competitors included in comparisons.
+[EBM documentation](https://interpret.ml/docs/ebm.html)
+
+The immediate representation question is the cost needed to preserve a
+known useful interaction to a declared error/accuracy target. Retain the
+separate numerical and statistical tolerances below. A target such as ten
+additive fit times remains a workload-dependent aspiration, not a universal
+promise or a mathematical limit. No new fits or formal proofs accompany
+this clarification.
+
 For each candidate \(a\), report
 \((L_a,T_a/T_0,\mathrm{RSS}_a,\mathrm{RSS}_a/\mathrm{RSS}_0,B_a)\),
 where \(L_a\) is held-out loss and \(B_a\) retained model payload. Include
