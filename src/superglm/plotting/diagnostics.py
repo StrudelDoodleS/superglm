@@ -16,9 +16,9 @@ import numpy as np
 from scipy import stats
 
 from superglm.plotting.common import (
-    _EXP_FILL,
     _LINE_COLOR,
     _LINE_WIDTH,
+    _NEUTRAL_FILL,
     _REF_COLOR,
     _SPECIAL_COLOR,
     _TEXT_COLOR,
@@ -638,7 +638,7 @@ def plot_diagnostics(
     finite = qresid[np.isfinite(qresid)]
     lo, hi = np.percentile(finite, [0.5, 99.5])
     clipped = finite[(finite >= lo) & (finite <= hi)]
-    ax4.hist(clipped, bins=80, density=True, color=_EXP_FILL, edgecolor="none")
+    ax4.hist(clipped, bins=80, density=True, color=_NEUTRAL_FILL, edgecolor="none")
     # N(0,1) overlay
     x_norm = np.linspace(lo, hi, 200)
     ax4.plot(
@@ -743,7 +743,7 @@ def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng, *, weig
             lo_env,
             hi_env,
             alpha=0.5,
-            color=_EXP_FILL,
+            color=_NEUTRAL_FILL,
             label="95% pointwise envelope",
         )
         ax.plot(

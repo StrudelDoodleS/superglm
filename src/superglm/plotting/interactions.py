@@ -9,8 +9,8 @@ from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
 from superglm.plotting.common import (
-    _EXP_FILL,
     _LINE_WIDTH,
+    _NEUTRAL_FILL,
     _PLOTLY_CAT_BAR_COLOR,
     _PLOTLY_COLORWAY,
     _PLOTLY_DENSITY_SCALE,
@@ -403,7 +403,9 @@ def _plot_numeric_categorical_bars_mpl(raw, name, parent_names, figsize):
         if base
         else [raw["relativities_per_unit"][lv] for lv in non_base]
     )
-    colors = [_EXP_FILL] + [_LINE_COLOR] * len(non_base) if base else [_LINE_COLOR] * len(non_base)
+    colors = (
+        [_NEUTRAL_FILL] + [_LINE_COLOR] * len(non_base) if base else [_LINE_COLOR] * len(non_base)
+    )
 
     if figsize is None:
         figsize = (max(4, len(levels) * 0.8), 4)

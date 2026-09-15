@@ -14,7 +14,7 @@ the [model page](model.md).
 
 ## Appearance and observation support
 
-The default plots use blue effects, muted uncertainty bands, grey support and
+The default plots use blue effects, muted uncertainty bands, yellow support and
 orange markers for free levels. Matplotlib main-effect plots place support in
 a separate strip below each effect, with shared x limits and tick labels on the
 bottom axis. Unordered categories use points and error bars; ordered spline
