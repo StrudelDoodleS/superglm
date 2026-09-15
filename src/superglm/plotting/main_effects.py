@@ -6,7 +6,6 @@ import math
 from typing import TYPE_CHECKING
 
 import numpy as np
-import pandas as pd
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator, MaxNLocator
@@ -467,16 +466,10 @@ def plot_term(
     return fig
 
 
-def _plot_level_support(ax, ti, x_pos, X, sample_weight, weight_label, display):
+def _plot_level_support(ax, x_pos, X, sample_weight, weight_label, display):
     """Draw support on the same level coordinates as the effect markers."""
     exp_vals = grouped_level_exposure(display, X, sample_weight)
-    if exp_vals is None:
-        level_exp = (
-            pd.DataFrame({"level": X.column_array(ti.name), "sample_weight": sample_weight})
-            .groupby("level", sort=False)["sample_weight"]
-            .sum()
-        )
-        exp_vals = np.array([level_exp.get(lv, 0.0) for lv in ti.levels])
+    assert exp_vals is not None, "Level support requires a display projection and weights."
     ax.bar(
         x_pos,
         exp_vals,
@@ -539,7 +532,7 @@ def _plot_ordered_spline_panel(
     spacing = _ordered_level_spacing(x_pos)
 
     if ax_support is not None:
-        _plot_level_support(ax_support, ti, x_pos, X, sample_weight, weight_label, display)
+        _plot_level_support(ax_support, x_pos, X, sample_weight, weight_label, display)
 
     ax.axhline(1.0, linestyle="--", linewidth=_REF_LW, color=_REF_COLOR, zorder=0)
 
@@ -640,7 +633,7 @@ def _plot_categorical_panel_vertical(
     x_pos = np.arange(len(levels))
 
     if ax_support is not None:
-        _plot_level_support(ax_support, ti, x_pos, X, sample_weight, weight_label, display)
+        _plot_level_support(ax_support, x_pos, X, sample_weight, weight_label, display)
 
     # Unordered levels have independent effects, so draw points without a connecting line.
     if interval is not None and ti.ci_lower is not None:
@@ -747,16 +740,12 @@ def _plot_relativities_new(
 
         if display_ti.kind in ("spline", "polynomial", "piecewise"):
             _plot_spline_panel(ax, display_ti, interval, show_knots)
-            if idx % ncols == 0:
-                ax.set_ylabel("Relativity")
 
             if ax_den is not None:
                 knots = display_ti.spline.interior_knots if display_ti.spline is not None else None
                 _plot_density_strip(
                     ax_den, display_ti.name, X, sample_weight, display_ti.x, show_knots, knots
                 )
-                if idx % ncols == 0:
-                    ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")
 
         elif display_ti.kind == "categorical" and display_ti.smooth_curve is not None:
@@ -790,17 +779,18 @@ def _plot_relativities_new(
             else:
                 x_grid = np.linspace(0.0, 1.0, 200)
             _plot_numeric_panel_continuous(ax, display_ti, interval, x_grid)
-            if idx % ncols == 0:
-                ax.set_ylabel("Relativity")
 
             if ax_den is not None:
                 _plot_density_strip(ax_den, display_ti.name, X, sample_weight, x_grid, False, None)
-                if idx % ncols == 0:
-                    ax_den.set_ylabel(density_label, fontsize=8)
                 ax_den.set_xlabel("")
 
         else:
             ax.set_visible(False)
+
+        ax.set_ylabel("Relativity" if idx % ncols == 0 else "")
+        if ax_den is not None:
+            support_label = weight_label if display_ti.kind == "categorical" else density_label
+            ax_den.set_ylabel(support_label if idx % ncols == 0 else "", fontsize=8)
 
     # ── Figure-level legend ──
     legend_handles = []

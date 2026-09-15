@@ -11,6 +11,7 @@ import pytest
 
 from superglm.inference._term_types import SmoothCurve, TermInference
 from superglm.plotting import plot_relativities, plot_term
+from superglm.plotting.common import _exposure_kde
 
 
 def _term(kind):
@@ -34,6 +35,15 @@ def _term(kind):
         )
     elif kind == "spline":
         ti = replace(ti, kind="spline", levels=None, x=np.array([0.0, 0.5, 1.0]))
+    elif kind == "numeric":
+        ti = replace(
+            ti,
+            kind="numeric",
+            levels=None,
+            relativity=np.array([1.2]),
+            ci_lower=np.array([1.0]),
+            ci_upper=np.array([1.4]),
+        )
     return ti
 
 
@@ -119,5 +129,47 @@ def test_incomplete_grid_keeps_an_invisible_axis_for_the_unused_cell():
     try:
         axes = np.asarray(fig.axes).reshape(2, 2)
         assert [ax.get_visible() for ax in axes.flat] == [True, True, True, False]
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize("kind", ["categorical", "ordered", "spline", "numeric"])
+def test_grid_y_labels_appear_only_in_the_first_column(kind):
+    terms = [replace(_term(kind), name=f"Feature {i}") for i in range(2)]
+    values = ["B", "A", "Unknown", "B"] if kind in ("categorical", "ordered") else [0, 1, 2, 3]
+    X = pd.DataFrame({ti.name: values for ti in terms})
+    fig = plot_relativities(terms, X=X, sample_weight=[1.0, 2.0, 3.0, 4.0], ncols=2)
+    try:
+        assert [ax.get_ylabel() for ax in fig.axes[::2]] == ["Relativity", ""]
+        support_label = "Weight" if kind in ("categorical", "ordered") else "Weight\ndensity"
+        assert [ax.get_ylabel() for ax in fig.axes[1::2]] == [support_label, ""]
+    finally:
+        plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    "values, weights, grid",
+    [
+        (np.ones(4), np.ones(4), np.ones(10)),
+        (np.ones(4), np.zeros(4), np.linspace(0.0, 1.0, 10)),
+        (np.full(4, 1e10), np.ones(4), np.linspace(0.0, 1.0, 10)),
+    ],
+    ids=["zero-width-grid", "zero-weight", "no-density-in-grid"],
+)
+def test_degenerate_density_strips_are_finite_and_empty(values, weights, grid):
+    with np.errstate(divide="raise", invalid="raise"):
+        density = _exposure_kde(values, weights, grid)
+    np.testing.assert_array_equal(density, np.zeros_like(grid))
+
+
+def test_manual_axis_position_survives_automatic_layout_draw():
+    fig = plot_term(_term("categorical"))
+    try:
+        fig.canvas.draw()
+        ax = fig.axes[0]
+        position = [0.25, 0.25, 0.5, 0.5]
+        ax.set_position(position)
+        fig.canvas.draw()
+        np.testing.assert_array_equal(ax.get_position().bounds, position)
     finally:
         plt.close(fig)

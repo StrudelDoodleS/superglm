@@ -395,7 +395,7 @@ class TestPlotRelativitiesNew:
 
         visible = [ax for ax in fig.get_axes() if ax.get_visible()]
         # Spline (age): main + density strip = 2
-        # Categorical (region): main + twin sample_weight axis = 2 (spans both grid rows)
+        # Categorical (region): main + shared-x support strip = 2
         # Numeric (density): main + density strip = 2
         # + 1 hidden unused grid cell
         assert len(visible) >= 5, f"Expected >= 5 visible axes, got {len(visible)}"
