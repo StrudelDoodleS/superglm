@@ -6,49 +6,52 @@ import numpy as np
 from numpy.typing import NDArray
 
 # ── Matplotlib visual-language constants ───────────────────────────
-_LINE_COLOR = "#006FDD"
-_LINE_WIDTH = 1.35
-_PW_FILL = "#F58518"
-_PW_ALPHA = 0.24
-_PW_EDGE_ALPHA = 0.9
-_PW_EDGE_LW = 1.0
-_SIM_FILL = "#4C78A8"
+_LINE_COLOR = "#1768A6"
+_LINE_WIDTH = 2.0
+_PW_FILL = _LINE_COLOR
+_PW_ALPHA = 0.14
+_PW_EDGE_ALPHA = 0.3
+_PW_EDGE_LW = 0.7
+_SIM_FILL = "#74869B"
 _SIM_ALPHA = 0.16
-_SIM_EDGE_ALPHA = 0.85
-_SIM_EDGE_LW = 0.95
-_EXP_FILL = "#F4D35E"
-_EXP_EDGE = "#D8A10F"
-_EXP_EDGE_LW = 1.1
-_REF_COLOR = "0.45"
+_SIM_EDGE_ALPHA = 0.4
+_SIM_EDGE_LW = 0.7
+_EXP_FILL = "#D3D9DF"
+_EXP_EDGE = "#98A4AF"
+_EXP_EDGE_LW = 0.8
+_REF_COLOR = "#89939E"
 _REF_LW = 0.8
-_KNOT_COLOR = "#006FDD"
-_CAT_BAR_COLOR = "#006FDD"
-_SPECIAL_COLOR = "#7A3EA1"
+_KNOT_COLOR = _LINE_COLOR
+_CAT_BAR_COLOR = _LINE_COLOR
+_SPECIAL_COLOR = "#CF6A32"
+_TEXT_COLOR = "#263445"
+_MUTED_COLOR = "#647181"
+_GRID_COLOR = "#E5E9ED"
 
 # ── Plotly-specific color overrides ────────────────────────────────
-_PLOTLY_LINE_COLOR = "#E10600"
-_PLOTLY_PW_FILL = "#FFD323"
-_PLOTLY_SIM_FILL = "#2F61D5"
-_PLOTLY_EXP_FILL = "#FFD323"
-_PLOTLY_EXP_EDGE = "#A85C00"
-_PLOTLY_KNOT_COLOR = "#FFD323"
-_PLOTLY_CAT_BAR_COLOR = "#E10600"
-_PLOTLY_SPECIAL_COLOR = "#1E63D7"
-_PLOTLY_PAPER = "#f5efe3"
-_PLOTLY_PANEL = "#fffdf8"
-_PLOTLY_GRID = "rgba(23, 20, 17, 0.10)"
-_PLOTLY_AXIS = "rgba(23, 20, 17, 0.34)"
-_PLOTLY_TEXT = "#171411"
+_PLOTLY_LINE_COLOR = _LINE_COLOR
+_PLOTLY_PW_FILL = _PW_FILL
+_PLOTLY_SIM_FILL = _SIM_FILL
+_PLOTLY_EXP_FILL = _EXP_FILL
+_PLOTLY_EXP_EDGE = _EXP_EDGE
+_PLOTLY_KNOT_COLOR = _KNOT_COLOR
+_PLOTLY_CAT_BAR_COLOR = _CAT_BAR_COLOR
+_PLOTLY_SPECIAL_COLOR = _SPECIAL_COLOR
+_PLOTLY_PAPER = "#FFFFFF"
+_PLOTLY_PANEL = "#FFFFFF"
+_PLOTLY_GRID = _GRID_COLOR
+_PLOTLY_AXIS = "#BDC6CE"
+_PLOTLY_TEXT = _TEXT_COLOR
 _PLOTLY_FONT = "Avenir Next, Segoe UI, Helvetica Neue, sans-serif"
 _PLOTLY_COLORWAY = [
-    "#E10600",
-    "#FFD323",
-    "#171411",
-    "#A80C13",
-    "#1E63D7",
-    "#F97316",
-    "#0F766E",
-    "#6D28D9",
+    _LINE_COLOR,
+    _SPECIAL_COLOR,
+    "#278277",
+    "#8B6BA5",
+    "#B4913E",
+    "#5E819D",
+    "#A65572",
+    "#5F7653",
 ]
 _PLOTLY_SURFACE_SCALE = [
     [0.0, "#163C8C"],
@@ -260,7 +263,7 @@ def _apply_plotly_theme(
     legend_x: float = 0.5,
     margin: dict | None = None,
 ) -> None:
-    """Apply a stronger default Plotly visual language."""
+    """Apply the shared effect, uncertainty and support palette."""
     fig.update_layout(
         template="plotly_white",
         paper_bgcolor=_PLOTLY_PAPER,
@@ -268,7 +271,7 @@ def _apply_plotly_theme(
         colorway=_PLOTLY_COLORWAY,
         font=dict(family=_PLOTLY_FONT, size=13, color=_PLOTLY_TEXT),
         hoverlabel=dict(
-            bgcolor="rgba(255, 253, 248, 0.96)",
+            bgcolor="rgba(255, 255, 255, 0.96)",
             bordercolor="rgba(24, 33, 43, 0.14)",
             font=dict(family=_PLOTLY_FONT, size=12, color=_PLOTLY_TEXT),
         ),
@@ -285,9 +288,8 @@ def _apply_plotly_theme(
                 y=legend_y,
                 xanchor="center",
                 x=legend_x,
-                bgcolor="rgba(255, 253, 248, 0.88)",
-                bordercolor="rgba(24, 33, 43, 0.10)",
-                borderwidth=1,
+                bgcolor="rgba(255, 255, 255, 0.88)",
+                borderwidth=0,
             )
         )
     if margin is not None:
@@ -297,6 +299,7 @@ def _apply_plotly_theme(
         showline=True,
         linewidth=1,
         linecolor=_PLOTLY_AXIS,
+        showgrid=False,
         gridcolor=_PLOTLY_GRID,
         zeroline=False,
         ticks="outside",
@@ -352,7 +355,7 @@ def _apply_plotly_scene_style(
         zaxis=dict(
             title=z_title,
             showbackground=True,
-            backgroundcolor="#F1ECE1",
+            backgroundcolor=_PLOTLY_PANEL,
             gridcolor=_PLOTLY_GRID,
             linecolor=_PLOTLY_AXIS,
             zerolinecolor=_PLOTLY_GRID,
@@ -369,6 +372,91 @@ def _apply_plotly_scene_style(
     fig.update_layout(scene=scene)
 
 
+def _style_matplotlib_axis(ax, *, title: str | None = None, support: bool = False):
+    """Style this axis only; leave the caller's rcParams untouched."""
+    ax.set_facecolor("white")
+    ax.set_axisbelow(True)
+    ax.grid(False)
+    if not support:
+        ax.grid(axis="y", color=_GRID_COLOR, linewidth=0.7)
+    for name in ("top", "right"):
+        ax.spines[name].set_visible(False)
+    for name in ("left", "bottom"):
+        ax.spines[name].set_color("#BDC6CE")
+        ax.spines[name].set_linewidth(0.7)
+    if support:
+        ax.spines["left"].set_visible(False)
+    ax.tick_params(axis="both", labelsize=9, colors=_MUTED_COLOR, width=0.7, length=3)
+    ax.xaxis.label.set(size=10, color=_MUTED_COLOR)
+    ax.yaxis.label.set(size=8 if support else 10, color=_MUTED_COLOR)
+    ax.title.set(fontsize=12, fontweight="bold", color=_TEXT_COLOR)
+    if title is not None:
+        # Keep the standard title artist so ax.get_title() still returns the name.
+        ax.set_title(
+            title,
+            loc="center",
+            x=0.0,
+            ha="left",
+            fontsize=12,
+            fontweight="bold",
+            color=_TEXT_COLOR,
+            pad=10,
+        )
+
+
+def _finish_matplotlib_figure(fig, handles, labels, title, subtitle):
+    """Reserve physical space for the heading above the constrained axes layout."""
+    import math
+
+    fig.set_facecolor("white")
+    height = fig.get_figheight()
+    y = 1.0 - 0.12 / height
+    if title:
+        fig.suptitle(
+            title,
+            x=0.065,
+            y=y,
+            ha="left",
+            va="top",
+            fontsize=16,
+            fontweight="bold",
+            color=_TEXT_COLOR,
+        )
+        # An explicit y keeps constrained_layout from moving the heading, while
+        # leaving it in layout includes it in savefig(bbox_inches="tight").
+        y -= 0.34 * len(title.splitlines()) / height
+    if subtitle:
+        fig.text(0.065, y, subtitle, ha="left", va="top", fontsize=10, color=_MUTED_COLOR)
+        y -= 0.22 * len(subtitle.splitlines()) / height
+    if handles:
+        ncols = min(len(handles), max(1, int(fig.get_figwidth() / 2.1)))
+        fig.legend(
+            handles,
+            labels,
+            loc="upper left",
+            bbox_to_anchor=(0.065, y),
+            ncol=ncols,
+            frameon=False,
+            fontsize=9,
+            borderaxespad=0,
+            labelcolor=_MUTED_COLOR,
+            handlelength=2.0,
+        )
+        y -= 0.25 * math.ceil(len(handles) / ncols) / height
+    top = max(0.25, y - 0.12 / height)
+    fig.set_layout_engine("constrained", rect=(0, 0, 1, top), h_pad=0.08, w_pad=0.08)
+
+
+def _make_effect_axes(fig, main_spec, support_spec=None):
+    """Create an effect panel and optional support strip with linked x limits."""
+    ax = fig.add_subplot(main_spec)
+    if support_spec is not None:
+        ax_support = fig.add_subplot(support_spec, sharex=ax)
+        ax.tick_params(axis="x", labelbottom=False)
+        return ax, ax_support
+    return ax, None
+
+
 def _make_continuous_figure(
     needs_strip: bool,
     figsize: tuple[float, float] | None,
@@ -378,22 +466,13 @@ def _make_continuous_figure(
     Returns (fig, ax_main, ax_density_or_None).
     """
     import matplotlib.pyplot as plt
-    from matplotlib.gridspec import GridSpec
 
+    if figsize is None:
+        figsize = (7, 5.5 if needs_strip else 4.5)
+    fig = plt.figure(figsize=figsize)
     if needs_strip:
-        if figsize is None:
-            figsize = (7, 5.5)
-        fig = plt.figure(figsize=figsize)
-        gs = GridSpec(2, 1, figure=fig, height_ratios=[4.2, 1.0], hspace=0.16)
-        ax = fig.add_subplot(gs[0])
-        ax_den = fig.add_subplot(gs[1])
-        ax_den.tick_params(axis="x", labelbottom=False)
-        ax.set_zorder(ax_den.get_zorder() + 1)
-        ax.patch.set_visible(False)
-        ax.tick_params(axis="x", labelbottom=True, pad=-2)
+        gs = fig.add_gridspec(2, 1, height_ratios=[4.2, 1.0], hspace=0.04)
+        ax, ax_den = _make_effect_axes(fig, gs[0], gs[1])
     else:
-        if figsize is None:
-            figsize = (7, 4.5)
-        fig, ax = plt.subplots(figsize=figsize)
-        ax_den = None
+        ax, ax_den = _make_effect_axes(fig, fig.add_gridspec(1, 1)[0])
     return fig, ax, ax_den

@@ -197,7 +197,7 @@ def test_matplotlib_panel_detaches_the_special_level(specials_model):
     ax = fig.axes[0]
 
     ticks = np.asarray(ax.get_xticks(), dtype=np.float64)
-    labels = [t.get_text() for t in ax.get_xticklabels()]
+    labels = [t.get_text() for t in fig.axes[1].get_xticklabels()]
     assert labels == [*BANDS, "MISSING"]
     assert len(ticks) == 11
     assert ticks[10] - ticks[9] > 1.5 * (ticks[9] - ticks[8])
