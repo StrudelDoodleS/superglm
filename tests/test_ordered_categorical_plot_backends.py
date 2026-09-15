@@ -133,7 +133,7 @@ def test_matplotlib_ordered_panel_places_levels_at_fitted_positions(ordered_spli
 
     ax = fig.axes[0]
     np.testing.assert_allclose(np.asarray(ax.get_xticks(), dtype=np.float64), level_x)
-    assert [tick.get_text() for tick in ax.get_xticklabels()] == list(ti.levels)
+    assert [tick.get_text() for tick in fig.axes[1].get_xticklabels()] == list(ti.levels)
 
     bars = fig.axes[1].patches
     centres = np.asarray(

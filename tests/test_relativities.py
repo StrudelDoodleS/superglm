@@ -512,7 +512,7 @@ class TestPlotRelativity:
 
         X, y, sample_weight = sample_data
         fig = fitted_model.plot("region", X=X, sample_weight=sample_weight)
-        # Twin axis for sample_weight bars → 2 axes total
+        # Effect panel and weight strip share the level positions.
         assert len(fig.get_axes()) >= 2
         ax2 = fig.get_axes()[1]
         assert ax2.get_ylabel() == "Weight"
@@ -537,8 +537,7 @@ class TestPlotRelativity:
 
         X, sample_weight, model = collapsed_ordered_model
         fig = model.plot("age_band", X=X, sample_weight=sample_weight)
-        ax = fig.axes[0]
-        labels = [tick.get_text() for tick in ax.get_xticklabels()]
+        labels = [tick.get_text() for tick in fig.axes[1].get_xticklabels()]
 
         assert labels == ["18-24+25-34+35-49", "50-64", "65-80"]
         ax2 = fig.axes[1]
@@ -572,8 +571,7 @@ class TestPlotRelativity:
             sample_weight=sample_weight,
             grouped_level_display="expanded",
         )
-        ax = fig.axes[0]
-        labels = [tick.get_text() for tick in ax.get_xticklabels()]
+        labels = [tick.get_text() for tick in fig.axes[1].get_xticklabels()]
 
         assert labels == ["18-24", "25-34", "35-49", "50-64", "65-80"]
 

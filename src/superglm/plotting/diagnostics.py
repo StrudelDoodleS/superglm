@@ -15,6 +15,15 @@ import numba
 import numpy as np
 from scipy import stats
 
+from superglm.plotting.common import (
+    _EXP_FILL,
+    _LINE_COLOR,
+    _LINE_WIDTH,
+    _REF_COLOR,
+    _SPECIAL_COLOR,
+    _TEXT_COLOR,
+    _style_matplotlib_axis,
+)
 from superglm.solvers.dispersion import PRIOR_WEIGHTS, model_weight_semantics
 
 if TYPE_CHECKING:
@@ -357,13 +366,13 @@ def _trend_line(ax, x, y, n, rng):
         # Full LOWESS
         sm = _lowess(x, y)
         order = np.argsort(x)
-        ax.plot(x[order], sm[order], color="red", linewidth=1.2)
+        ax.plot(x[order], sm[order], color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
     elif n <= _VERY_LARGE_N:
         # Sampled LOWESS
         idx = rng.choice(n, _LOWESS_CAP, replace=False)
         sm = _lowess(x[idx], y[idx])
         order = np.argsort(x[idx])
-        ax.plot(x[idx][order], sm[order], color="red", linewidth=1.2)
+        ax.plot(x[idx][order], sm[order], color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
     else:
         # Quantile-bin medians (equal-count bins)
         _binned_median_line(ax, x, y)
@@ -380,7 +389,7 @@ def _binned_median_line(ax, x, y, n_bins=_BIN_COUNT):
             continue
         mids.append(np.median(x_s[e]))
         medians.append(np.median(y_s[e]))
-    ax.plot(mids, medians, color="red", linewidth=1.2)
+    ax.plot(mids, medians, color=_SPECIAL_COLOR, linewidth=_LINE_WIDTH)
 
 
 def _scatter_or_hexbin(ax, x, y, n, max_points):
@@ -388,14 +397,14 @@ def _scatter_or_hexbin(ax, x, y, n, max_points):
     from matplotlib.colors import LogNorm
 
     if n <= max_points:
-        ax.scatter(x, y, s=6, alpha=0.4, edgecolors="none", color="C0")
+        ax.scatter(x, y, s=6, alpha=0.3, edgecolors="none", color=_LINE_COLOR)
     else:
         gridsize = min(80, max(30, n // 5000))
         ax.hexbin(
             x,
             y,
             gridsize=gridsize,
-            cmap="YlGnBu",
+            cmap="Blues",
             mincnt=1,
             norm=LogNorm(),
         )
@@ -453,13 +462,13 @@ def _panel_calibration(ax, y, mu, w, n_bins=20):
 
     # Calibration scatter + y=x
     ax.scatter(
-        pred_means, obs_means, s=30, color="#1f77b4", zorder=3, edgecolors="white", linewidth=0.5
+        pred_means, obs_means, s=30, color=_LINE_COLOR, zorder=3, edgecolors="white", linewidth=0.5
     )
     lims = [
         min(pred_means.min(), obs_means.min()) * 0.9,
         max(pred_means.max(), obs_means.max()) * 1.1,
     ]
-    ax.plot(lims, lims, color="red", linewidth=0.8, linestyle="--", label="y = x")
+    ax.plot(lims, lims, color=_REF_COLOR, linewidth=0.8, linestyle="--", label="y = x")
     ax.set_xlabel("Predicted (bin mean)")
     ax.set_ylabel("Observed (bin mean)")
     ax.set_title(f"Calibration ({n_bins} equal-weight bins)")
@@ -586,7 +595,14 @@ def plot_diagnostics(
     link_name = type(getattr(model, "_link")).__name__
 
     fig, axes = plt.subplots(2, 2, figsize=figsize)
-    fig.suptitle(f"Diagnostics: {family_name}({link_name})", fontsize=12, y=0.98)
+    fig.set_facecolor("white")
+    fig.suptitle(
+        f"Diagnostics: {family_name}({link_name})",
+        fontsize=14,
+        fontweight="bold",
+        color=_TEXT_COLOR,
+        y=0.98,
+    )
 
     # ── Panel 1: Q-Q with simulation envelope ────────────────────
     ax1 = axes[0, 0]
@@ -611,7 +627,7 @@ def plot_diagnostics(
     # ── Panel 3: Residuals vs Linear Predictor ───────────────────
     ax3 = axes[1, 0]
     _scatter_or_hexbin(ax3, eta, qresid, n, max_points)
-    ax3.axhline(0, color="grey", linewidth=0.7, linestyle="--")
+    ax3.axhline(0, color=_REF_COLOR, linewidth=0.7, linestyle="--")
     _trend_line(ax3, eta, qresid, n, rng)
     ax3.set_xlabel("Linear predictor")
     ax3.set_ylabel("Quantile residuals")
@@ -622,10 +638,12 @@ def plot_diagnostics(
     finite = qresid[np.isfinite(qresid)]
     lo, hi = np.percentile(finite, [0.5, 99.5])
     clipped = finite[(finite >= lo) & (finite <= hi)]
-    ax4.hist(clipped, bins=80, density=True, alpha=0.7, color="C0", edgecolor="none")
+    ax4.hist(clipped, bins=80, density=True, color=_EXP_FILL, edgecolor="none")
     # N(0,1) overlay
     x_norm = np.linspace(lo, hi, 200)
-    ax4.plot(x_norm, stats.norm.pdf(x_norm), "r-", linewidth=1.2, label="N(0,1)")
+    ax4.plot(
+        x_norm, stats.norm.pdf(x_norm), color=_LINE_COLOR, linewidth=_LINE_WIDTH, label="N(0,1)"
+    )
     ax4.legend(fontsize=8)
     ax4.set_xlabel("Quantile residuals")
     ax4.set_ylabel("Density")
@@ -641,7 +659,12 @@ def plot_diagnostics(
     chi2_ratio = m.pearson_chi2 / resid_df
     ax4.set_title(f"Residual Distribution (φ={phi:.3g}, χ²/df={chi2_ratio:.2f})")
 
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    for ax in axes.flat:
+        _style_matplotlib_axis(ax)
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.set_frame_on(False)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     return fig
 
 
@@ -719,22 +742,22 @@ def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng, *, weig
             theoretical,
             lo_env,
             hi_env,
-            alpha=0.25,
-            color="#cccccc",
+            alpha=0.5,
+            color=_EXP_FILL,
             label="95% pointwise envelope",
         )
         ax.plot(
             theoretical,
             obs_grid,
-            color="#1f77b4",
-            linewidth=1.0,
+            color=_LINE_COLOR,
+            linewidth=_LINE_WIDTH,
             zorder=3,
             label="Observed",
         )
         ax.plot(
             theoretical,
             median_sim,
-            color="red",
+            color=_REF_COLOR,
             linewidth=0.8,
             linestyle="--",
             label="Simulated median",
@@ -751,14 +774,14 @@ def _panel_qq_envelope(ax, model, m, mu, w, qresid, n, n_sim, seed, rng, *, weig
         ax.plot(
             theoretical,
             obs_grid,
-            color="#1f77b4",
-            linewidth=1.0,
+            color=_LINE_COLOR,
+            linewidth=_LINE_WIDTH,
         )
         lims = [
             min(theoretical.min(), obs_grid.min()),
             max(theoretical.max(), obs_grid.max()),
         ]
-        ax.plot(lims, lims, color="red", linewidth=0.8, linestyle="--")
+        ax.plot(lims, lims, color=_REF_COLOR, linewidth=0.8, linestyle="--")
         ax.set_title(f"Q-Q Plot (no envelope){title_suffix}")
 
     ax.set_xlabel("Theoretical quantiles")

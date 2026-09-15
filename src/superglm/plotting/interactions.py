@@ -9,14 +9,19 @@ from numpy.typing import NDArray
 
 from superglm._frame import FrameLike, as_eager_frame
 from superglm.plotting.common import (
+    _EXP_FILL,
+    _LINE_WIDTH,
     _PLOTLY_CAT_BAR_COLOR,
+    _PLOTLY_COLORWAY,
     _PLOTLY_DENSITY_SCALE,
     _PLOTLY_LINE_COLOR,
     _PLOTLY_SURFACE_SCALE,
+    _REF_COLOR,
     _apply_plotly_scene_style,
     _apply_plotly_theme,
     _hex_to_rgba,
     _kde_2d,
+    _style_matplotlib_axis,
 )
 
 _CAT_BAR_COLOR = _PLOTLY_CAT_BAR_COLOR
@@ -291,12 +296,13 @@ def _reconstruct_interaction(model, name: str, *, n_points: int) -> dict:
 def _plot_varying_coefficient_mpl(raw, name, parent_names, with_ci, figsize, colormap):
     """Multi-line plot: one curve per categorical level (incl. base)."""
     import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
 
     if figsize is None:
         figsize = (8, 5)
     fig, ax = plt.subplots(figsize=figsize)
 
-    cmap = plt.get_cmap(colormap or "tab10")
+    cmap = plt.get_cmap(colormap) if colormap else ListedColormap(_PLOTLY_COLORWAY)
     x = raw["x"]
     levels = raw["levels"]
     base = raw.get("base_level", "")
@@ -307,7 +313,7 @@ def _plot_varying_coefficient_mpl(raw, name, parent_names, with_ci, figsize, col
             x,
             np.ones_like(x),
             color=cmap(0),
-            linewidth=1.5,
+            linewidth=_LINE_WIDTH,
             linestyle="--",
             label=f"{base} (base)",
         )
@@ -315,7 +321,7 @@ def _plot_varying_coefficient_mpl(raw, name, parent_names, with_ci, figsize, col
     for i, level in enumerate(levels):
         level_data = raw["per_level"][level]
         color = cmap((i + 1) % cmap.N)
-        ax.plot(x, level_data["relativity"], color=color, linewidth=1.5, label=level)
+        ax.plot(x, level_data["relativity"], color=color, linewidth=_LINE_WIDTH, label=level)
         if with_ci and "se_log_relativity" in level_data:
             se = level_data["se_log_relativity"]
             log_rel = level_data["log_relativity"]
@@ -323,11 +329,12 @@ def _plot_varying_coefficient_mpl(raw, name, parent_names, with_ci, figsize, col
             ci_hi = np.exp(log_rel + 1.96 * se)
             ax.fill_between(x, ci_lo, ci_hi, alpha=0.15, color=color)
 
-    ax.axhline(1.0, linestyle=":", color="grey", linewidth=0.6, alpha=0.5)
+    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=0.8)
     ax.set_xlabel(parent_names[0])
     ax.set_ylabel("Relativity")
-    ax.set_title(name)
-    ax.legend()
+    _style_matplotlib_axis(ax, title=name)
+    ax.legend(frameon=False, fontsize=9)
+    fig.set_facecolor("white")
     fig.tight_layout()
     return fig
 
@@ -371,7 +378,9 @@ def _plot_categorical_heatmap_mpl(raw, name, parent_names, figsize, colormap):
     ax.set_yticklabels(levels1)
     ax.set_xlabel(parent_names[1])
     ax.set_ylabel(parent_names[0])
-    ax.set_title(name)
+    _style_matplotlib_axis(ax, title=name)
+    ax.grid(False)
+    fig.set_facecolor("white")
 
     for i in range(len(levels1)):
         for j in range(len(levels2)):
@@ -394,18 +403,17 @@ def _plot_numeric_categorical_bars_mpl(raw, name, parent_names, figsize):
         if base
         else [raw["relativities_per_unit"][lv] for lv in non_base]
     )
-    colors = (
-        ["lightgrey"] + ["steelblue"] * len(non_base) if base else ["steelblue"] * len(non_base)
-    )
+    colors = [_EXP_FILL] + [_LINE_COLOR] * len(non_base) if base else [_LINE_COLOR] * len(non_base)
 
     if figsize is None:
         figsize = (max(4, len(levels) * 0.8), 4)
     fig, ax = plt.subplots(figsize=figsize)
 
     ax.bar(levels, rels, color=colors)
-    ax.axhline(1.0, linestyle="--", color="grey", linewidth=0.8)
+    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=0.8)
     ax.set_ylabel(f"Relativity per unit {parent_names[0]}")
-    ax.set_title(name)
+    _style_matplotlib_axis(ax, title=name)
+    fig.set_facecolor("white")
     fig.tight_layout()
     return fig
 
@@ -420,10 +428,11 @@ def _plot_numeric_interaction_bar_mpl(raw, name, parent_names, figsize):
 
     rel = raw["relativity_per_unit_unit"]
     label = f"{parent_names[0]} x {parent_names[1]}"
-    ax.bar([label], [rel], color="steelblue")
-    ax.axhline(1.0, linestyle="--", color="grey", linewidth=0.8)
+    ax.bar([label], [rel], color=_LINE_COLOR)
+    ax.axhline(1.0, linestyle="--", color=_REF_COLOR, linewidth=0.8)
     ax.set_ylabel("Relativity per unit x unit")
-    ax.set_title(name)
+    _style_matplotlib_axis(ax, title=name)
+    fig.set_facecolor("white")
     fig.tight_layout()
     return fig
 
@@ -462,7 +471,9 @@ def _plot_surface_mpl(raw, name, parent_names, figsize, colormap, show_contours,
 
     ax.set_xlabel(parent_names[0])
     ax.set_ylabel(parent_names[1])
-    ax.set_title(name)
+    _style_matplotlib_axis(ax, title=name)
+    ax.grid(False)
+    fig.set_facecolor("white")
     fig.tight_layout()
     return fig
 

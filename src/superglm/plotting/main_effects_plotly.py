@@ -68,8 +68,8 @@ def _resolve_plotly_style(style: dict[str, Any] | None) -> dict[str, Any]:
         "error_bar_color": _ERROR_BAR_COLOR,
         "text_color": _PLOTLY_TEXT,
         "text_outline_color": "rgba(255, 255, 255, 0.96)",
-        "line_width": _LINE_WIDTH * 1.7,
-        "curve_line_width": _LINE_WIDTH * 1.5,
+        "line_width": _LINE_WIDTH,
+        "curve_line_width": _LINE_WIDTH,
         "bar_opacity": 0.7,
         "density_opacity": 0.92,
     }
