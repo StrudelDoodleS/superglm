@@ -477,7 +477,15 @@ def _plot_level_support(ax, ti, x_pos, X, sample_weight, weight_label, display):
             .sum()
         )
         exp_vals = np.array([level_exp.get(lv, 0.0) for lv in ti.levels])
-    ax.bar(x_pos, exp_vals, width=_ordered_level_spacing(x_pos) * 0.6, color=_EXP_FILL)
+    ax.bar(
+        x_pos,
+        exp_vals,
+        width=_ordered_level_spacing(x_pos) * 0.6,
+        color=_EXP_FILL,
+        edgecolor=_EXP_EDGE,
+        linewidth=_EXP_EDGE_LW,
+        alpha=0.95,
+    )
     ymax = float(exp_vals.max()) if exp_vals.size else 0.0
     ax.set_ylim(0.0, ymax * 1.12 if ymax > 0 else 1.0)
     ax.set_ylabel(weight_label)
