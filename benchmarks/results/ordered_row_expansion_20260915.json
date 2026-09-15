@@ -1,0 +1,569 @@
+{
+  "rows": 100000,
+  "seed": 64123,
+  "repeats": 3,
+  "platform": "Linux-6.12.100+deb13-amd64-x86_64-with-glibc2.41",
+  "versions": {
+    "python": "3.13.14",
+    "superglm": "0.33.0",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0"
+  },
+  "thread_environment": {
+    "SUPERGLM_BLAS_THREADS": null,
+    "OPENBLAS_NUM_THREADS": null,
+    "OMP_NUM_THREADS": null
+  },
+  "cases": [
+    {
+      "discrete": true,
+      "runs": [
+        {
+          "variant": "lil",
+          "wall_s": 2.938721954007633,
+          "dm_build_s": 0.6861415490275249,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "csr",
+          "wall_s": 2.407147609977983,
+          "dm_build_s": 0.24904563801828772,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "csr",
+          "wall_s": 2.621438500005752,
+          "dm_build_s": 0.23063346289563924,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "lil",
+          "wall_s": 3.094250506022945,
+          "dm_build_s": 0.7702123339986429,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "lil",
+          "wall_s": 2.812735500978306,
+          "dm_build_s": 0.6663533640094101,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "csr",
+          "wall_s": 2.40577731304802,
+          "dm_build_s": 0.21901616093236953,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        }
+      ],
+      "profiles": {
+        "lil": {
+          "cached_optimizer_calls": 1,
+          "exact_solver_calls": 0,
+          "fit_threadpools": [
+            {
+              "internal_api": "openblas",
+              "prefix": "libscipy_openblas",
+              "num_threads": 1
+            },
+            {
+              "internal_api": "openblas",
+              "prefix": "libscipy_openblas",
+              "num_threads": 1
+            },
+            {
+              "internal_api": "openmp",
+              "prefix": "libgomp",
+              "num_threads": 16
+            }
+          ],
+          "row_expansion": [
+            {
+              "file": "_lil.py",
+              "function": "_set_arrayXarray",
+              "calls": 2,
+              "self_s": 0.043595649,
+              "cumulative_s": 0.043640399,
+              "callers": [
+                "_set_arrayXarray_sparse"
+              ]
+            },
+            {
+              "file": "_lil.py",
+              "function": "_set_arrayXarray_sparse",
+              "calls": 2,
+              "self_s": 3.7087e-05,
+              "cumulative_s": 0.045257355000000006,
+              "callers": [
+                "__setitem__"
+              ]
+            },
+            {
+              "file": "benchmark_ordered_row_expansion.py",
+              "function": "_lil_row_expansion",
+              "calls": 2,
+              "self_s": 0.000176576,
+              "cumulative_s": 0.49753651800000004,
+              "callers": [
+                "expander"
+              ]
+            }
+          ]
+        },
+        "csr": {
+          "cached_optimizer_calls": 1,
+          "exact_solver_calls": 0,
+          "fit_threadpools": [
+            {
+              "internal_api": "openblas",
+              "prefix": "libscipy_openblas",
+              "num_threads": 1
+            },
+            {
+              "internal_api": "openblas",
+              "prefix": "libscipy_openblas",
+              "num_threads": 1
+            },
+            {
+              "internal_api": "openmp",
+              "prefix": "libgomp",
+              "num_threads": 16
+            }
+          ],
+          "row_expansion": [
+            {
+              "file": "ordered_categorical.py",
+              "function": "_expand_rows",
+              "calls": 2,
+              "self_s": 0.0005312240000000001,
+              "cumulative_s": 0.00386154,
+              "callers": [
+                "expander"
+              ]
+            }
+          ]
+        }
+      },
+      "medians": {
+        "lil": {
+          "wall_s": 2.938721954007633,
+          "dm_build_s": 0.6861415490275249
+        },
+        "csr": {
+          "wall_s": 2.407147609977983,
+          "dm_build_s": 0.23063346289563924
+        }
+      },
+      "memory": {
+        "lil": {
+          "baseline_rss_mib": 401.91015625,
+          "peak_rss_mib": 472.79296875,
+          "peak_increase_mib": 70.8828125,
+          "retained_increase_mib": 50.1015625,
+          "sampling_interval_s": 0.002,
+          "malloc_trim_used": true,
+          "dispatch": {
+            "backend": "gram",
+            "storage": [
+              "SupportCompressedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "SupportCompressedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "CategoricalGroupMatrix"
+            ],
+            "iterations": 4
+          }
+        },
+        "csr": {
+          "baseline_rss_mib": 402.9453125,
+          "peak_rss_mib": 463.2890625,
+          "peak_increase_mib": 60.34375,
+          "retained_increase_mib": 45.45703125,
+          "sampling_interval_s": 0.002,
+          "malloc_trim_used": true,
+          "dispatch": {
+            "backend": "gram",
+            "storage": [
+              "SupportCompressedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "SupportCompressedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "CategoricalGroupMatrix"
+            ],
+            "iterations": 4
+          }
+        }
+      }
+    },
+    {
+      "discrete": false,
+      "runs": [
+        {
+          "variant": "lil",
+          "wall_s": 2.468327755923383,
+          "dm_build_s": 0.572907105088234,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "csr",
+          "wall_s": 2.0664912880165502,
+          "dm_build_s": 0.23857748799491674,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "csr",
+          "wall_s": 2.1236069310689345,
+          "dm_build_s": 0.2632309279870242,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "lil",
+          "wall_s": 2.5828086680267006,
+          "dm_build_s": 0.6287834619870409,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "lil",
+          "wall_s": 2.4861925480654463,
+          "dm_build_s": 0.6388754709623754,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        },
+        {
+          "variant": "csr",
+          "wall_s": 2.0468978660646826,
+          "dm_build_s": 0.21124642703216523,
+          "backend": "gram",
+          "iterations": 4,
+          "coefficients": 20,
+          "storage": [
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "SupportCompressedSSPGroupMatrix",
+            "CategoricalGroupMatrix",
+            "CategoricalGroupMatrix"
+          ],
+          "identical": {
+            "beta": true,
+            "intercept": true,
+            "predictions": true,
+            "lambdas": true,
+            "deviance": true
+          }
+        }
+      ],
+      "profiles": {
+        "lil": {
+          "cached_optimizer_calls": 0,
+          "exact_solver_calls": 5,
+          "fit_threadpools": [
+            {
+              "internal_api": "openblas",
+              "prefix": "libscipy_openblas",
+              "num_threads": 1
+            },
+            {
+              "internal_api": "openblas",
+              "prefix": "libscipy_openblas",
+              "num_threads": 1
+            },
+            {
+              "internal_api": "openmp",
+              "prefix": "libgomp",
+              "num_threads": 16
+            }
+          ],
+          "row_expansion": [
+            {
+              "file": "_lil.py",
+              "function": "_set_arrayXarray",
+              "calls": 2,
+              "self_s": 0.061224320000000006,
+              "cumulative_s": 0.061264783,
+              "callers": [
+                "_set_arrayXarray_sparse"
+              ]
+            },
+            {
+              "file": "_lil.py",
+              "function": "_set_arrayXarray_sparse",
+              "calls": 2,
+              "self_s": 4.6185000000000006e-05,
+              "cumulative_s": 0.06355514000000001,
+              "callers": [
+                "__setitem__"
+              ]
+            },
+            {
+              "file": "benchmark_ordered_row_expansion.py",
+              "function": "_lil_row_expansion",
+              "calls": 2,
+              "self_s": 0.00016964600000000002,
+              "cumulative_s": 0.41653864700000004,
+              "callers": [
+                "expander"
+              ]
+            }
+          ]
+        },
+        "csr": {
+          "cached_optimizer_calls": 0,
+          "exact_solver_calls": 5,
+          "fit_threadpools": [
+            {
+              "internal_api": "openblas",
+              "prefix": "libscipy_openblas",
+              "num_threads": 1
+            },
+            {
+              "internal_api": "openblas",
+              "prefix": "libscipy_openblas",
+              "num_threads": 1
+            },
+            {
+              "internal_api": "openmp",
+              "prefix": "libgomp",
+              "num_threads": 16
+            }
+          ],
+          "row_expansion": [
+            {
+              "file": "ordered_categorical.py",
+              "function": "_expand_rows",
+              "calls": 2,
+              "self_s": 0.000498738,
+              "cumulative_s": 0.004244948,
+              "callers": [
+                "expander"
+              ]
+            }
+          ]
+        }
+      },
+      "medians": {
+        "lil": {
+          "wall_s": 2.4861925480654463,
+          "dm_build_s": 0.6287834619870409
+        },
+        "csr": {
+          "wall_s": 2.0664912880165502,
+          "dm_build_s": 0.23857748799491674
+        }
+      },
+      "memory": {
+        "lil": {
+          "baseline_rss_mib": 403.18359375,
+          "peak_rss_mib": 464.47265625,
+          "peak_increase_mib": 61.2890625,
+          "retained_increase_mib": 44.375,
+          "sampling_interval_s": 0.002,
+          "malloc_trim_used": true,
+          "dispatch": {
+            "backend": "gram",
+            "storage": [
+              "SupportCompressedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "SupportCompressedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "CategoricalGroupMatrix"
+            ],
+            "iterations": 4
+          }
+        },
+        "csr": {
+          "baseline_rss_mib": 402.37890625,
+          "peak_rss_mib": 454.51953125,
+          "peak_increase_mib": 52.140625,
+          "retained_increase_mib": 34.3828125,
+          "sampling_interval_s": 0.002,
+          "malloc_trim_used": true,
+          "dispatch": {
+            "backend": "gram",
+            "storage": [
+              "SupportCompressedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "SupportCompressedSSPGroupMatrix",
+              "CategoricalGroupMatrix",
+              "CategoricalGroupMatrix"
+            ],
+            "iterations": 4
+          }
+        }
+      }
+    }
+  ]
+}
