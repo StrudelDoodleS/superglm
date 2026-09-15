@@ -23,7 +23,16 @@ terms also show their fitted curve.
 Pass `X` to show the observation distribution. With `sample_weight`, the strips
 show weighted density or weight per level. Without it, they show observation
 density or counts. Use `show_density=False` on `model.plot()` to hide them.
+With frequency weights, bar heights are replication totals. With prior weights,
+they are totals of the supplied precisions. The strips describe these supplied
+weights; they do not change the fitted model's weight contract.
 
 The returned Matplotlib figure remains editable, and plotting does not change
 global Matplotlib settings. Plotly uses the same palette; `plotly_style` can
 override its colours and sizes.
+
+Main-effect figures keep constrained layout active so panels remain aligned
+when resized. Adjust its padding with
+`fig.get_layout_engine().set(h_pad=0.1, w_pad=0.1)`; `fig.subplots_adjust(...)`
+is ignored while that engine is active. Manual `ax.set_position(...)` calls
+remove the chosen axis from automatic layout and survive subsequent draws.

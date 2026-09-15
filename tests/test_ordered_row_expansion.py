@@ -82,9 +82,10 @@ def test_expansion_canonicalizes_sparse_values_without_mutating_input():
     assert (compact.has_sorted_indices, compact.has_canonical_format) == original_flags
 
 
-def test_expansion_avoids_lil_allocation_and_sparse_densification(monkeypatch):
+@pytest.mark.parametrize("storage", [np.asarray, sp.csr_matrix])
+def test_expansion_avoids_lil_allocation_and_sparse_densification(monkeypatch, storage):
     """Guard allocation separately from the numerical row-placement tests."""
-    compact = sp.csr_matrix([[1.0, 0.0], [0.0, 2.0]])
+    compact = storage([[1.0, 0.0], [0.0, 2.0]])
     info = GroupInfo(compact, 2)
 
     def reject_allocation(*args, **kwargs):

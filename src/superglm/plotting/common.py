@@ -152,10 +152,14 @@ def _level_positions_with_specials(
 def _exposure_kde(x_vals, sample_weight, grid, bw_factor=0.03):
     """Weighted KDE for sample_weight distribution, returned on *grid*."""
     bw = bw_factor * (grid[-1] - grid[0])
+    if bw == 0:
+        # A zero-width display range cannot carry a density strip.
+        return np.zeros_like(grid, dtype=np.float64)
     diff = grid[:, None] - x_vals[None, :]
     kernel = np.exp(-0.5 * (diff / bw) ** 2)
     density = kernel @ sample_weight
-    return density / density.max()  # normalise to [0, 1]
+    peak = density.max()
+    return density / peak if peak > 0 else np.zeros_like(density)
 
 
 def piecewise_display_term(ti, n_points: int = 200):
@@ -445,6 +449,7 @@ def _finish_matplotlib_figure(fig, handles, labels, title, subtitle):
         )
         y -= 0.25 * math.ceil(len(handles) / ncols) / height
     top = max(0.25, y - 0.12 / height)
+    # Constrained layout's rect stores left, bottom, width and height.
     fig.set_layout_engine("constrained", rect=(0, 0, 1, top), h_pad=0.08, w_pad=0.08)
 
 
