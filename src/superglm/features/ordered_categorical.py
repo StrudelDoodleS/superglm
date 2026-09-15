@@ -1497,14 +1497,21 @@ class OrderedCategorical:
         """Re-embed an ordered-row basis into full-length rows, zero elsewhere."""
         import dataclasses
 
-        n = len(ordered_mask)
-        compact = info.columns
-        expanded = sp.lil_matrix((n, compact.shape[1]), dtype=np.float64)
-        # Row i of the compact basis must land on the i-th ordered row: every
-        # other coefficient is fitted against these rows, so a permuted scatter
-        # would fit each row against another row's basis.
-        expanded[np.flatnonzero(ordered_mask)] = compact
-        return dataclasses.replace(info, columns=expanded.tocsr())
+        compact = sp.csr_matrix(info.columns, dtype=np.float64, copy=True)
+        compact.sum_duplicates()
+        compact.eliminate_zeros()
+        compact.sort_indices()
+        # Insert empty rows through repeated CSR pointers. Keeping the data and
+        # column indices in order maps each compact row to its own ordered row,
+        # without allocating a Python list for every row as LIL scatter does.
+        indptr = np.zeros(len(ordered_mask) + 1, dtype=compact.indptr.dtype)
+        indptr[1:][ordered_mask] = np.diff(compact.indptr)
+        np.cumsum(indptr, out=indptr)
+        expanded = sp.csr_matrix(
+            (compact.data, compact.indices, indptr),
+            shape=(len(ordered_mask), compact.shape[1]),
+        )
+        return dataclasses.replace(info, columns=expanded)
 
     # ── Transform ──────────────────────────────────────────────────
 
