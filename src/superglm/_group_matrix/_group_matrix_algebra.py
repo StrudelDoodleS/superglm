@@ -462,6 +462,108 @@ def _cross_gram_tensor_tensor_shared_margin(
     return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
 
+def _cross_gram_tensor_tensor_channels(
+    gm_i: DiscretizedTensorGroupMatrix,
+    gm_j: DiscretizedTensorGroupMatrix,
+    W: NDArray,
+    profile: dict[str, Any] | None = None,
+) -> NDArray | None:
+    """Cross-Gram of two tensor terms with distinct ids, staged on one term's grid.
+
+    ``X_i.T @ diag(W) @ X_j`` where row ``r`` of tensor ``i`` is the Kronecker
+    row ``B1_i[idx1_r] (x) B2_i[idx2_r]`` (column order ``a * K2 + b``, as
+    ``_row_kron_dense`` stores it) and row ``r`` of tensor ``j`` is its stored
+    joint row ``B_joint_j[bin_idx_r]``.  The raw product factors through the
+    cell index of tensor ``i``::
+
+        H[i1 * n2 + i2, cd] = sum_{r in cell (i1, i2)} W_r * B_joint_j[bin_idx_r, cd]
+        raw[a * K2 + b, cd] = sum_{i1, i2} B1_i[i1, a] * B2_i[i2, b] * H[i1 * n2 + i2, cd]
+
+    Stage 1 is ``_disc_disc_2d_hist_channels``, one serial O(n) pass over the
+    rows with no ``(n, p)`` panel; stage 2 is the two-GEMM contraction
+    ``_cross_gram_tensor_main`` uses; stage 3 is the ``R_inv`` sandwich.
+
+    ORIENTATION.  Either tensor can be the grid.  The histogram costs
+    ``cells_i = n1_i * n2_i * P_j`` cells with ``i`` as the grid and
+    ``cells_j = n1_j * n2_j * P_i`` with ``j``; the smaller is used, and on a
+    tie the LEFT operand is the grid.  The tie-break is part of the numerical
+    contract: the two orientations sum in different orders and differ at
+    about one ulp, and in the production case (two 256 x 256 grids with 81
+    columns each) the counts tie exactly.  With ``j`` as the grid the block is
+    computed as ``X_j.T @ diag(W) @ X_i`` and transposed;
+    ``block_cross_tensor_tensor_channel_transposed`` counts those blocks.
+
+    GATE.  Returns ``None`` -- the caller then falls through to the routes
+    that ran before, which for distinct margins is the row-expanding
+    contraction of ``_support_support_raw_cross`` -- unless:
+
+    * both operands are ``DiscretizedTensorGroupMatrix`` with different
+      ``tensor_id`` (a shared id keeps the packed-grid route);
+    * the marginal tables, the joint basis and the weights are float64;
+    * ``min(cells_i, cells_j) <= _MAX_AGGREGATE_CELLS`` (8,388,608 cells, 64
+      MiB).  That is the CROSS-shaped aggregate budget, not
+      ``_MAX_DISC_DISC_CHANNEL_HIST_CELLS`` (5,000,000): the production block
+      needs ``256 * 256 * 81 = 5,308,416`` cells, which the channel cap would
+      decline and this budget admits.  Its histogram is 40.5 MiB, strictly
+      below the two 32 MiB row panels the displaced route holds live;
+    * the four marginal tables and the weights pass
+      ``_tensor_operand_in_reassociation_range``.  The joint basis is the
+      row-Kronecker of its two margins, so bounding each margin and the
+      weights by ``2**(+/-128)`` keeps every product of the five factors
+      inside ``2**(+/-640)``, and the three reductions (over rows, then over
+      each grid margin) add at most 189 bits of growth: inside binary64.
+      This is a NEW, stricter policy than the displaced route's, which
+      applies the guard only below the histogram cell cap and skips it above;
+      a decline here lands on exactly that route, so nothing that computed
+      before stops computing.
+
+    EXACTNESS.  The dense route multiplies the STORED joint rows of both
+    tensors.  This route replaces tensor ``i``'s stored joint row by the
+    product of its two marginal rows -- a one-ulp representation change, the
+    joint having been formed as that product at build time -- and it changes
+    the summation order.  The contract is the repo's oracle bound,
+    ``32 * eps * max(n, n1 * n2) * ||abs(X_i).T @ abs(W X_j)||_inf`` plus
+    ``1e-12`` relative Frobenius, not bit identity; measured agreement is
+    ``1e-15`` relative Frobenius on the production block.
+
+    ARITHMETIC, in matched units.  The dense route costs ``n * P_i * P_j``
+    multiply-adds (``2 * n * P_i * P_j`` flops) plus ``n * (P_i + P_j)``
+    doubles of row-panel traffic; this route costs ``n * P_j`` multiply-adds
+    for stage 1 plus ``n1 * n2 * K1 * P_j + K1 * K2 * n2 * P_j`` for the two
+    GEMMs: about 26x fewer on the production block (1.97e9 against 7.5e7
+    multiply-adds).  The measured serial win is 4.5x per block, not 26x,
+    because stage 1 still gathers and accumulates ``P_j`` doubles per row and
+    is memory-bound.  Serial only: no parallel kernel, no cached permutation.
+    """
+    if gm_i.tensor_id == gm_j.tensor_id:
+        return None
+    cells_i = gm_i.n_bins1 * gm_i.n_bins2 * int(gm_j.B_unique.shape[1])
+    cells_j = gm_j.n_bins1 * gm_j.n_bins2 * int(gm_i.B_unique.shape[1])
+    if min(cells_i, cells_j) > _MAX_AGGREGATE_CELLS:
+        return None
+    grid, chan, transposed = (gm_i, gm_j, False) if cells_i <= cells_j else (gm_j, gm_i, True)
+    margins = (grid.B1_unique_t, grid.B2_unique_t, chan.B1_unique_t, chan.B2_unique_t)
+    if any(operand.dtype != np.float64 for operand in (*margins, chan.B_unique, W)):
+        return None
+    if not all(_tensor_operand_in_reassociation_range(v) for v in (*margins, W[:, None])):
+        return None
+
+    B1, B2 = grid.B1_unique_t, grid.B2_unique_t
+    K1, K2 = B1.shape[1], B2.shape[1]
+    n1, n2 = grid.n_bins1, grid.n_bins2
+    p_chan = chan.B_unique.shape[1]
+    H = _disc_disc_2d_hist_channels(grid.idx1, grid.idx2, chan.bin_idx, W, chan.B_unique, n1, n2)
+    tmp = (B1.T @ H.reshape(n1, n2 * p_chan)).reshape(K1, n2, p_chan)
+    raw = np.empty((K1 * K2, p_chan))
+    for a in range(K1):
+        raw[a * K2 : (a + 1) * K2, :] = B2.T @ tmp[a]
+    result = grid.R_inv.T @ raw @ chan.R_inv
+    if transposed:
+        _profile_count(profile, "block_cross_tensor_tensor_channel_transposed")
+        return result.T
+    return result
+
+
 def _cross_gram_tensor_main(
     gm_tensor: DiscretizedTensorGroupMatrix,
     gm_main: DiscretizedSSPGroupMatrix,
@@ -1324,6 +1426,17 @@ def _cross_gram(
         if result is not None:
             _profile_elapsed(profile, "block_cross_tensor_tensor_s", t0)
             return result
+        # Distinct margins, or a shared margin above the compact helper's cap
+        # (every pair at the default 256 bins): stage the block through the
+        # channel histogram. A decline is counted so that a fit which backs
+        # off to the quadratic row route below says so in its profile.
+        t0 = perf_counter() if profile is not None else 0.0
+        result = _cross_gram_tensor_tensor_channels(gm_i, gm_j, W, profile)
+        if result is not None:
+            _profile_elapsed(profile, "block_cross_tensor_tensor_channel_s", t0)
+            _profile_count(profile, "block_cross_tensor_tensor_channel_calls")
+            return result
+        _profile_count(profile, "block_cross_tensor_tensor_channel_declines")
 
     if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(gm_j, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0

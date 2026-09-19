@@ -7,6 +7,7 @@ import tracemalloc
 import numpy as np
 import pytest
 
+from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm.group_matrix import DiscretizedTensorGroupMatrix
 
 
@@ -184,3 +185,226 @@ def test_tensor_matvec_workspace_has_no_observation_by_basis_arrays():
     workspace = 8 * (2 * group.shape[0] + 192 * 5 + 256 * 3 + 15)
     assert peak - before < workspace + 64 * 1024
     assert result.shape == (20_000,)
+
+
+# ── Tensor x tensor cross-Gram over distinct margins: the channel route ────
+
+
+def _tensor_pair(n, left, right, *, shared=False, same_id=False, seed=911):
+    """Two factored tensors over the same ``n`` rows.
+
+    ``left`` and ``right`` are ``(n1, n2, k1, k2, p)``.  Each stored joint
+    support covers EVERY cell of its grid, so the displaced route's
+    ``n_joint`` is fixed by the grid sizes rather than by which cells the
+    draw observed.  ``shared`` makes the first margin's bin index the same
+    array on both sides (one shared margin); ``same_id`` gives the right
+    tensor the left one's margins, indices and id, differing only in its
+    transform (a decomposed subgroup pair).
+    """
+    rng = np.random.default_rng(seed)
+
+    def build(shape, idx1, idx2, tensor_id, margins=None):
+        n1, n2, k1, k2, p = shape
+        if margins is None:
+            margins = (
+                rng.normal(size=(n1, k1)) / np.sqrt(k1),
+                rng.normal(size=(n2, k2)) / np.sqrt(k2),
+            )
+        b1, b2 = margins
+        joint = np.einsum("ia,jb->ijab", b1, b2).reshape(n1 * n2, k1 * k2)
+        transform = rng.normal(size=(k1 * k2, p)) / np.sqrt(k1 * k2)
+        return DiscretizedTensorGroupMatrix(
+            b1, b2, idx1, idx2, joint, transform, idx1 * n2 + idx2, tensor_id=tensor_id
+        )
+
+    def draw(shape):
+        return tuple(rng.integers(bins, size=n, dtype=np.intp) for bins in shape[:2])
+
+    idx1, idx2 = draw(left)
+    first = build(left, idx1, idx2, 1)
+    if same_id:
+        second = build(left, idx1, idx2, 1, (first.B1_unique_t, first.B2_unique_t))
+    else:
+        other1, other2 = draw(right)
+        second = build(right, idx1 if shared else other1, other2, 2)
+    return first, second, rng
+
+
+_ROUTE_COUNTERS = (
+    ("channel", "block_cross_tensor_tensor_channel_calls"),
+    ("rows", "block_cross_disc_disc_rows_calls"),
+    ("hist", "block_cross_disc_disc_hist_calls"),
+)
+
+
+def _route(profile):
+    """The one route a cross block took, read off its profile counters."""
+    routes = [route for route, key in _ROUTE_COUNTERS if profile.get(key, 0)]
+    if "block_cross_tensor_tensor_s" in profile:
+        routes.append("tensor_tensor")
+    assert len(routes) == 1, profile
+    return routes[0]
+
+
+def _dense_cross(left, right, weights):
+    """The literal ``X_i.T @ diag(W) @ X_j`` and the repo's error bound for it."""
+    x = left.toarray()
+    y = right.toarray()
+    expected = x.T @ (weights[:, None] * y)
+    scale = np.linalg.norm(np.abs(x).T @ np.abs(weights[:, None] * y), ord=np.inf)
+    reduction = max(len(weights), left.n_bins1 * left.n_bins2, right.n_bins1 * right.n_bins2)
+    return expected, 32 * np.finfo(float).eps * reduction * scale
+
+
+def _assert_cross_matches(actual, expected, bound):
+    assert np.linalg.norm(actual - expected, ord=np.inf) <= bound
+    assert np.linalg.norm(actual - expected) <= 1e-12 * np.linalg.norm(expected)
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("distinct", "channel"),
+        ("shared_fits", "tensor_tensor"),
+        ("shared_declines", "channel"),
+        ("same_id", "tensor_tensor"),
+    ],
+)
+def test_distinct_margin_tensor_cross_gram_route(case, expected):
+    # 48 x 48 grids put n_joint = 2304**2 above the histogram cell cap, so the
+    # displaced route is the row-expanding one. 200 x 160 x 160 shared cells
+    # put the compact shared-margin helper above ITS cap (5,000,000) while
+    # 5 x 4 x 3 keep it in play; a shared tensor_id keeps the packed grid.
+    n = 6000
+    if case == "distinct":
+        left, right, rng = _tensor_pair(n, (48, 48, 3, 4, 10), (48, 48, 4, 3, 11))
+    elif case == "shared_fits":
+        left, right, rng = _tensor_pair(n, (5, 4, 3, 2, 5), (5, 3, 2, 4, 6), shared=True)
+    elif case == "shared_declines":
+        left, right, rng = _tensor_pair(n, (200, 160, 2, 2, 4), (200, 160, 2, 2, 3), shared=True)
+    else:
+        left, right, rng = _tensor_pair(n, (7, 5, 3, 2, 5), (7, 5, 3, 2, 4), same_id=True)
+    profile = {}
+    algebra._cross_gram(left, right, rng.normal(size=n), profile=profile)
+    assert _route(profile) == expected
+    if expected == "channel":
+        assert profile.get("block_cross_disc_disc_rows_calls", 0) == 0
+
+
+_ORACLE_SHAPES = {
+    "equal_k": ((7, 5, 3, 4, 6), (6, 8, 3, 4, 5), 400),
+    "different_k": ((9, 4, 2, 5, 7), (5, 11, 4, 3, 4), 500),
+    "support_wider_than_n": ((40, 37, 3, 3, 5), (33, 41, 2, 4, 6), 120),
+    "single_bin": ((1, 1, 2, 3, 3), (1, 1, 3, 2, 4), 50),
+    "tall_few_bins": ((3, 2, 2, 2, 3), (2, 3, 2, 2, 3), 5000),
+}
+
+
+def _weights(kind, rng, n):
+    if kind == "uniform":
+        return rng.uniform(0.5, 1.5, size=n)
+    if kind == "zeros":
+        return np.where(rng.random(n) < 0.3, 0.0, rng.uniform(0.5, 1.5, size=n))
+    return rng.normal(size=n)
+
+
+@pytest.mark.parametrize("kind", ["uniform", "zeros", "signed"])
+@pytest.mark.parametrize("shape", list(_ORACLE_SHAPES))
+def test_distinct_margin_tensor_cross_gram_matches_dense_oracle(shape, kind):
+    left_shape, right_shape, n = _ORACLE_SHAPES[shape]
+    left, right, rng = _tensor_pair(n, left_shape, right_shape)
+    weights = _weights(kind, rng, n)
+    expected, bound = _dense_cross(left, right, weights)
+    for first, second in ((left, right), (right, left)):
+        profile = {}
+        actual = algebra._cross_gram(first, second, weights, profile=profile)
+        # The route assertion is what gives the numeric half its teeth: the
+        # displaced route matches this oracle too.
+        assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+        _assert_cross_matches(actual if first is left else actual.T, expected, bound)
+
+
+@pytest.mark.parametrize("case", ["tie", "left_smaller", "right_smaller"])
+def test_channel_route_grids_the_smaller_side_and_the_left_operand_on_a_tie(monkeypatch, case):
+    # The two orientations sum in different orders and differ at about one
+    # ulp, so which side is the grid is part of the numerical contract. In
+    # production both grids are 256 x 256 with 81 columns and the counts tie.
+    small, large = (6, 5, 2, 3, 6), (10, 10, 2, 3, 5)
+    if case == "tie":
+        left, right, rng = _tensor_pair(300, small, (5, 6, 3, 2, 5))
+    elif case == "left_smaller":
+        left, right, rng = _tensor_pair(300, small, large)
+    else:
+        left, right, rng = _tensor_pair(300, large, small)
+    grids = []
+    original = algebra._disc_disc_2d_hist_channels
+
+    def recorded(*args):
+        grids.append("left" if args[0] is left.idx1 else "right" if args[0] is right.idx1 else "?")
+        return original(*args)
+
+    monkeypatch.setattr(algebra, "_disc_disc_2d_hist_channels", recorded)
+    weights = rng.normal(size=300)
+    expected, bound = _dense_cross(left, right, weights)
+    forward_profile, reverse_profile = {}, {}
+    forward = algebra._cross_gram(left, right, weights, profile=forward_profile)
+    reverse = algebra._cross_gram(right, left, weights, profile=reverse_profile)
+    expected_grid = "right" if case == "right_smaller" else "left"
+    # The smaller histogram is the grid whichever way the operands are
+    # passed; only a tie follows the operand order.
+    assert grids == [expected_grid, "right" if case == "tie" else expected_grid]
+    assert forward_profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert reverse_profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert forward_profile.get("block_cross_tensor_tensor_channel_transposed", 0) == int(
+        case == "right_smaller"
+    )
+    assert reverse_profile.get("block_cross_tensor_tensor_channel_transposed", 0) == int(
+        case == "left_smaller"
+    )
+    _assert_cross_matches(forward, expected, bound)
+    _assert_cross_matches(reverse.T, expected, bound)
+
+
+@pytest.mark.parametrize("fits", [True, False])
+def test_channel_route_honours_the_aggregate_cell_budget(monkeypatch, fits):
+    n = 6000
+    left, right, rng = _tensor_pair(n, (48, 48, 3, 4, 10), (48, 48, 4, 3, 11))
+    cells = 48 * 48 * min(left.B_unique.shape[1], right.B_unique.shape[1])
+    monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", cells if fits else cells - 1)
+    weights = rng.normal(size=n)
+    expected, bound = _dense_cross(left, right, weights)
+    profile = {}
+    actual = algebra._cross_gram(left, right, weights, profile=profile)
+    assert profile.get("block_cross_tensor_tensor_channel_calls", 0) == int(fits)
+    # A decline must be visible, not silent: at wider margins the route
+    # backs off to the quadratic row route with no other symptom.
+    assert profile.get("block_cross_tensor_tensor_channel_declines", 0) == int(not fits)
+    assert profile.get("block_cross_disc_disc_rows_calls", 0) == int(not fits)
+    _assert_cross_matches(actual, expected, bound)
+
+
+def test_distinct_margin_tensor_cross_gram_bounds_its_transient():
+    # 120,000 rows at 49 + 49 columns exceed one 64 MiB expansion chunk, so
+    # the displaced route would hold two 85,598 x 49 row panels (67 MB) live.
+    n = 120_000
+    width = 7 * 7
+    assert n > algebra._cross_expansion_chunk_rows(width, width, algebra._MAX_CROSS_EXPANSION_BYTES)
+    left, right, rng = _tensor_pair(n, (64, 64, 7, 7, 40), (64, 64, 7, 7, 40))
+    weights = rng.uniform(0.5, 1.5, size=n)
+    algebra._cross_gram(left, right, weights)
+    tracemalloc.start()
+    try:
+        before, _ = tracemalloc.get_traced_memory()
+        profile = {}
+        result = algebra._cross_gram(left, right, weights, profile=profile)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+    cells = 64 * 64 * width
+    tmp_bytes = 8 * 7 * 64 * width
+    # The stage-1 histogram (cells doubles) is allocated by numba's runtime,
+    # which tracemalloc does not trace, so the ceiling is generous by that
+    # term; what it pins is that no observation-row panel is materialised.
+    assert peak - before <= 8 * cells + tmp_bytes + 64 * 1024
+    assert result.shape == (40, 40)

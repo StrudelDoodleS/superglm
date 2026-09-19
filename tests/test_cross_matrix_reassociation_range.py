@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
-from superglm.group_matrix import DiscretizedSCOPGroupMatrix, DiscretizedSSPGroupMatrix
+from superglm.group_matrix import (
+    DiscretizedSCOPGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+    DiscretizedTensorGroupMatrix,
+)
 
 
 def _groups(left_kind, right_kind, left_exp, right_exp):
@@ -49,3 +53,37 @@ def test_range_gate_preserves_safe_rows_and_histogram_cell_cap(monkeypatch, forc
     expect_rows = force_rows or not extreme
     assert profile.get("block_cross_disc_disc_rows_calls", 0) == int(expect_rows)
     assert profile.get("block_cross_disc_disc_hist_calls", 0) == int(not expect_rows)
+
+
+def _tensors(left_exp, right_exp):
+    # 256 x 256 grids with every cell on the stored joint support: the
+    # displaced route's n_joint is 65536**2, far above the histogram cell cap,
+    # so a decline lands on the bounded row route exactly as it does in
+    # production.
+    indices = np.array([0, 0, 0], dtype=np.intp)
+
+    def tensor(exponent, tensor_id):
+        margin = np.full((256, 2), np.ldexp(1.0, exponent))
+        joint = np.einsum("ia,jb->ijab", margin, margin).reshape(256 * 256, 4)
+        return DiscretizedTensorGroupMatrix(
+            margin, margin, indices, indices, joint, np.eye(4), indices, tensor_id=tensor_id
+        )
+
+    return tensor(left_exp, 1), tensor(right_exp, 2)
+
+
+@pytest.mark.parametrize("extreme", [False, True])
+def test_tensor_channel_route_declines_outside_the_reassociation_range(extreme):
+    # Margins at 2**(-/+200) sit outside the [2**-128, 2**128] operand range
+    # the channel route reassociates under, although their row products
+    # (2**-400 times 2**400) are safe: the route must decline to the bounded
+    # row route rather than reassociate, and the block stays finite either way.
+    left, right = _tensors(-200 if extreme else 0, 200 if extreme else 0)
+    profile = {}
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        actual = algebra._cross_gram(left, right, np.array([1.0, -1.0, 1.0]), profile=profile)
+    assert np.isfinite(actual).all()
+    bound = 8 * np.finfo(actual.dtype).eps * 256 * 256
+    assert np.linalg.norm(actual - np.ones((4, 4)), ord=np.inf) <= bound
+    assert profile.get("block_cross_tensor_tensor_channel_calls", 0) == int(not extreme)
+    assert profile.get("block_cross_disc_disc_rows_calls", 0) == int(extreme)
