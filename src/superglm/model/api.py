@@ -715,7 +715,9 @@ class SuperGLM:
             stalls. The discrete engine's exits are therefore
             ``score_objective_tolerance``, ``active_set_stationary``,
             ``fixed_lambdas``, ``max_reml_iter`` and, from a dead line
-            search on a numeric-by-numeric tensor interaction only,
+            search on a numeric-by-numeric tensor interaction with a
+            known-scale family only (an estimated-scale family takes the
+            generic path even with a tensor interaction),
             ``line_search_failed`` or ``converged_at_precision``, decided
             by the same predicate the exact engine uses. A dead tensor
             search whose active gradient is still above that bar is
