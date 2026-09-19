@@ -174,6 +174,19 @@ def test_screened_pairs_rank_by_z_and_record_the_refusals():
     assert refused == [["c", "d"]]
 
 
+def test_the_screen_sweeps_only_the_pairs_of_the_leading_features():
+    rng = np.random.default_rng(3)
+    design = pd.DataFrame({f"x{i}": rng.normal(size=600) for i in range(25)})
+    response = 3.0 * design["x24"] + 2.0 * design["x23"] + design["x22"] + rng.normal(size=600)
+    train = {"design": design, "response": response.to_numpy()}
+    candidates = gap.screen_candidates(train, list(design.columns))
+    assert len(candidates) == gap.SCREEN_TOP * (gap.SCREEN_TOP - 1) // 2
+    leading = {name for pair in candidates for name in pair}
+    assert {"x24", "x23", "x22"} <= leading
+    assert len(leading) == gap.SCREEN_TOP
+    assert gap.screen_candidates(train, list(design.columns)[: gap.SCREEN_TOP]) is None
+
+
 def test_arm_plan_lifts_the_feature_cap_only_for_the_all_column_ceiling():
     assert gap.arm_plan("A2-8") == {"engine": "superglm", "feature_cap": gap.FEATURE_CAP}
     assert gap.arm_plan("G1-leaves31")["feature_cap"] == gap.FEATURE_CAP
