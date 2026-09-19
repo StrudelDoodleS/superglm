@@ -1,6 +1,7 @@
 {
   "format_version": 1,
   "created_on": "2026-09-14",
+  "extended_on": "2026-09-19, with the eleven competition entries and their pair evidence",
   "inspected_repository_head": "6340fdd8",
   "purpose": "Named interaction candidates from primary sources, with explicit evidence and data-access limits.",
   "executable": false,
@@ -10374,10 +10375,6 @@
     }
   ],
   "exclusions": [
-    {
-      "dataset": "Allstate Claims Severity",
-      "reason": "No sufficiently verified original named-pair construction found in this bounded search; local competition data remain authentication-gated."
-    },
     {
       "dataset": "UCI credit default and WDBC",
       "reason": "The prior memo's suggested pairs remain hypotheses. This bank adds no unsupported evidence grade or competitor provenance to them."

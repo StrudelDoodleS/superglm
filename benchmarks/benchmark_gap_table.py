@@ -33,6 +33,7 @@ from benchmark_housing_tensor import run_isolated, source_fingerprint
 from benchmark_real_interactions import (
     SPLITS,
     digest_json,
+    load_worker_receipt,
     partition_rows,
     prepare_dataset,
     score_predictions,
@@ -57,6 +58,8 @@ DAY_SECONDS = 24 * 60 * 60
 R1_SIGNAL = 0.01
 R2_CLOSURE = 0.5
 R3_FRACTION = 0.8
+# The protocol sets R3's standalone bar at the same number as R2's, not at the same rule.
+R3_STANDALONE = 0.5
 R4_WALL_RATIO = 5.0
 THREAD_VARIABLES = (
     "OPENBLAS_NUM_THREADS",
@@ -64,7 +67,13 @@ THREAD_VARIABLES = (
     "NUMBA_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    # Left unset, SuperGLM caps BLAS to one thread inside every fit, so the
+    # boosting controls would run at four threads against a one-thread solver.
+    "SUPERGLM_BLAS_THREADS",
 )
+PAIR_LIMIT = 16
 SPLIT_STRATEGIES = {
     "time": "chronological_group",
     "time_group": "fixed_year_group",
@@ -72,7 +81,7 @@ SPLIT_STRATEGIES = {
 }
 FAMILIES = {
     "binomial": {"name": "binomial", "power": None, "gbm_loss": "log_loss"},
-    "gaussian": {"name": "gaussian", "power": None, "gbm_loss": "squared_error"},
+    "gaussian": {"name": "gaussian", "power": 0.0, "gbm_loss": "squared_error"},
     "poisson": {"name": "poisson", "power": 1.0, "gbm_loss": "poisson"},
     "gamma": {"name": "gamma", "power": 2.0, "gbm_loss": "gamma"},
     # HistGradientBoosting has no Tweedie loss, so its control trains on Poisson
@@ -114,6 +123,7 @@ RECEIPT_FIELDS = (
     "adapter_rules",
     "feature_cap_rule",
     "kept_features",
+    "smooth_features",
     "valid",
     "test",
     "fit_wall_seconds",
@@ -164,23 +174,26 @@ def apply_sentinels(frame, entry):
     return sorted(entry.get("sentinels", {}))
 
 
-def add_missing_companions(frame, entry):
-    """Give every predictor at or above the missing rate a two-level companion factor."""
-    added = []
+def missing_companions(frame, entry):
+    """Give every numeric predictor at or above the missing rate a two-level companion factor.
+
+    A declared categorical already carries missing as its own level, so a
+    companion there would be exactly collinear with the parent.
+    """
+    declared = set(entry.get("categorical_columns", []))
+    columns = {}
     for column in entry["features"]:
-        if frame[column].isna().mean() < MISSING_RATE:
+        if column in declared or frame[column].isna().mean() < MISSING_RATE:
             continue
-        companion = f"{column}{MISSING_SUFFIX}"
-        frame[companion] = np.where(frame[column].isna(), "missing", "present")
-        added.append(companion)
-    return added
+        columns[f"{column}{MISSING_SUFFIX}"] = np.where(frame[column].isna(), "missing", "present")
+    return columns
 
 
-def add_date_parts(frame, entry):
+def date_parts(frame, entry):
     """Derive calendar predictors from the split's time column, which is never a predictor."""
     column = entry.get("time_column")
     if column is None:
-        return []
+        return {}
     values = frame[column]
     if pd.api.types.is_numeric_dtype(values):
         # TransactionDT counts seconds from a reference the competition never
@@ -194,9 +207,9 @@ def add_date_parts(frame, entry):
             "month": stamps.dt.month,
             "day_of_week": stamps.dt.dayofweek,
         }
-    for suffix, series in derived.items():
-        frame[f"{column}__{suffix}"] = np.asarray(series, dtype=float)
-    return [f"{column}__{suffix}" for suffix in derived]
+    return {
+        f"{column}__{suffix}": np.asarray(series, dtype=float) for suffix, series in derived.items()
+    }
 
 
 def offset_values(frame, entry):
@@ -234,36 +247,44 @@ def subsample_groups(frame, entry, max_rows):
     return frame.iloc[np.sort(np.flatnonzero(np.isin(codes, keep)))].reset_index(drop=True)
 
 
+def gbm_offset_feature(frame, entry):
+    """The offset as a plain column: the smooth arms take it as an offset, the GBM cannot."""
+    if not entry.get("offset_column") or entry.get("exposure_column") is not None:
+        return {}
+    return {f"offset__{entry['offset_column']}": offset_values(frame, entry)}
+
+
 def adapt(frame, entry):
     """Apply every protocol adapter rule, before the split and identically in every arm."""
     sentinels = apply_sentinels(frame, entry)
-    companions = add_missing_companions(frame, entry)
-    dates = add_date_parts(frame, entry)
-    offset_feature = []
-    if entry.get("offset_column") and entry.get("exposure_column") is None:
-        # The smooth arms take this as an offset; the GBM sees it as a plain column.
-        name = f"offset__{entry['offset_column']}"
-        frame[name] = offset_values(frame, entry)
-        offset_feature = [name]
+    companions = missing_companions(frame, entry)
+    dates = date_parts(frame, entry)
+    offset_column = gbm_offset_feature(frame, entry)
+    derived = {**companions, **dates, **offset_column}
+    # One concatenation, not one insertion per column: a wide table fragments.
+    frame = pd.concat([frame, pd.DataFrame(derived, index=frame.index)], axis=1)
+    companion_names, date_names = list(companions), list(dates)
+    offset_names = list(offset_column)
     adapted = {
         **entry,
-        "features": [*entry["features"], *companions, *dates, *offset_feature],
-        "categorical_columns": [*entry.get("categorical_columns", []), *companions],
+        "features": [*entry["features"], *companion_names, *date_names, *offset_names],
+        "categorical_columns": [*entry.get("categorical_columns", []), *companion_names],
         "split": {**entry["split"], "seed": entry["split"].get("seed", SEED)},
-        "offset_feature": offset_feature,
+        "offset_feature": offset_names,
     }
     notes = {
         "sentinel_columns": sentinels,
-        "missing_companions": companions,
+        "missing_companions": companion_names,
         "missing_rate_threshold": MISSING_RATE,
-        "date_features": dates,
+        "missing_rate_measured_on": "the whole adapted table, before the split",
+        "date_features": date_names,
         "offset_expression": entry.get("offset_column"),
-        "offset_as_gbm_feature": offset_feature,
+        "offset_as_gbm_feature": offset_names,
         "exposure_column": entry.get("exposure_column"),
         "weight_column": entry.get("weight_column"),
         "response_transform": entry.get("response_transform"),
     }
-    return adapted, notes
+    return frame, adapted, notes
 
 
 # ── Response, weights and the feature cap ─────────────────────────────────
@@ -321,20 +342,46 @@ def spearman_ranking(train, response, features):
     return list(strength.abs().fillna(0.0).sort_values(ascending=False, kind="stable").index)
 
 
+def declared_rank(entry):
+    """The registry's own importance order: a list of column names, or nothing declared."""
+    rank = entry.get("feature_rank")
+    if rank is None:
+        return []
+    if not isinstance(rank, list):
+        raise ValueError(
+            f"{entry['id']} declares feature_rank as {type(rank).__name__}; "
+            "the field is a list of column names or null, and the prose belongs "
+            "in feature_rank_source"
+        )
+    return rank
+
+
+def known_good_columns(entry):
+    """Every column a catalogue pair names; the cap must not delete the arm it exists to test."""
+    return [
+        end for pair in entry.get("known_good_pairs", []) for end in (pair["left"], pair["right"])
+    ]
+
+
+def ordered_unique(names):
+    return list(dict.fromkeys(names))
+
+
 def capped_features(train, response, entry, cap):
-    """Keep at most `cap` predictors: declared importance first, then training-only Spearman."""
+    """Keep at most `cap` predictors: the declared columns first, then training-only Spearman."""
     features = entry["features"]
     if cap is None or len(features) <= cap:
         return features, "none; the arm keeps every non-excluded predictor"
-    declared = [*entry["offset_feature"]]
-    declared += [name for name in entry.get("feature_rank", []) if name in features]
-    remaining = [name for name in features if name not in set(declared)]
-    kept = [*declared, *spearman_ranking(train, response, remaining)][:cap]
-    rule = (
-        "declared feature_rank then training-only Spearman"
-        if declared
-        else "training-only Spearman"
+    present = set(features)
+    groups = (
+        ("the offset column", [name for name in entry["offset_feature"] if name in present]),
+        ("declared feature_rank", [name for name in declared_rank(entry) if name in present]),
+        ("catalogue pair columns", [n for n in known_good_columns(entry) if n in present]),
     )
+    forced = ordered_unique([name for _, names in groups for name in names])
+    remaining = [name for name in features if name not in set(forced)]
+    kept = [*forced, *spearman_ranking(train, response, remaining)][:cap]
+    rule = " then ".join([*(name for name, names in groups if names), "training-only Spearman"])
     return kept, rule
 
 
@@ -362,8 +409,10 @@ def normalised_gini(response, prediction, weights):
 
 def family_scores(response, prediction, family, weights):
     """Mean deviance for the fitted family, weighted where the competition weighted it."""
-    if family["name"] in {"binomial", "poisson", "gaussian"} and weights is None:
+    if weights is None and family["name"] in {"binomial", "poisson", "gaussian"}:
         return score_predictions(response, prediction, family["name"])
+    if family["power"] is None:
+        raise ValueError(f"The {family['name']} family has no weighted deviance in this runner")
     from sklearn.metrics import mean_tweedie_deviance
 
     deviance = float(
@@ -404,17 +453,18 @@ def superglm_family(family):
     return family["name"]
 
 
-def usable_pairs(requested, state):
+def usable_pairs(requested, smooth_features):
     """Keep only the pairs whose two columns both survived the cap and the adapter."""
-    fitted = set(state["features"])
+    fitted = set(smooth_features)
     return [pair for pair in requested if pair[0] in fitted and pair[1] in fitted]
 
 
-def build_superglm(state, family, pairs):
+def build_superglm(state, family, pairs, smooth_features):
     from superglm import Categorical, Numeric, Spline, SuperGLM
 
     features = {}
-    for name, spec in state["features"].items():
+    for name in smooth_features:
+        spec = state["features"][name]
         if spec["kind"] == "categorical":
             features[name] = Categorical(levels=spec["levels"])
         elif spec["kind"] == "spline":
@@ -447,13 +497,13 @@ def build_gbm(family, structure, capacity):
     )
 
 
-def known_good_pairs(entry, limit=16):
+def known_good_pairs(entry):
     """The catalogue's verified pairs, strongest evidence first, then registry order."""
     pairs = entry.get("known_good_pairs", [])
     ordered = sorted(
         enumerate(pairs), key=lambda item: (EVIDENCE_ORDER.get(item[1]["grade"], 3), item[0])
     )
-    return [[pair["left"], pair["right"]] for _, pair in ordered][:limit]
+    return [[pair["left"], pair["right"]] for _, pair in ordered]
 
 
 def screened_pairs(table, count):
@@ -475,7 +525,7 @@ def prepare_case(dataset, args, cap):
     frame = load_dataset(entry["id"], root=args.data_root, manifest=manifest)
     frame, dropped = drop_unusable_offset_rows(frame, entry)
     frame = subsample_groups(frame, entry, args.max_rows)
-    entry, adapter_notes = adapt(frame, entry)
+    frame, entry, adapter_notes = adapt(frame, entry)
     rows = split_rows(frame, entry)
     kept, cap_rule = capped_features(
         frame.iloc[rows["train"]], response_values(frame.iloc[rows["train"]], entry), entry, cap
@@ -486,11 +536,15 @@ def prepare_case(dataset, args, cap):
         "categorical_columns": [c for c in entry["categorical_columns"] if c in set(kept)],
     }
     state, rows, split_hash = prepare_dataset(frame, entry)
+    offset_feature = set(entry["offset_feature"])
     return {
         "entry": entry,
         "frame": frame,
         "rows": rows,
         "state": state,
+        # The offset is a fixed unit elasticity, so it is never also a free
+        # smooth term; the boosting controls keep it as an ordinary column.
+        "smooth_features": [name for name in state["features"] if name not in offset_feature],
         "family": family_for(entry),
         "split_sha256": split_hash,
         "adapter_sha256": digest_json(state),
@@ -509,7 +563,7 @@ def case_partition(case, name, *, native):
     encode = native_features if native else transform_features
     design = encode(raw.loc[:, entry["features"]], case["state"])
     return {
-        "design": design,
+        "design": design if native else design.loc[:, case["smooth_features"]],
         "response": response_values(raw, entry),
         "offset": offset_values(raw, entry),
         "weights": weight_values(raw, entry),
@@ -517,29 +571,36 @@ def case_partition(case, name, *, native):
     }
 
 
+def timed(record, call):
+    """Run one fit and record the wall and CPU seconds it alone cost."""
+    started, cpu_started = time.perf_counter(), time.process_time()
+    call()
+    record["fit_wall_seconds"] = time.perf_counter() - started
+    record["fit_cpu_seconds"] = time.process_time() - cpu_started
+
+
 def superglm_fit(case, pairs, record):
     """Fit one smooth arm and record its REML trajectory."""
     train = case_partition(case, "train", native=False)
-    model = build_superglm(case["state"], case["family"], pairs)
-    started, cpu_started = time.perf_counter(), time.process_time()
-    model.fit_reml(
-        train["design"],
-        train["response"],
-        sample_weight=train["weights"],
-        offset=train["offset"],
-        max_reml_iter=MAX_REML_ITER,
+    model = build_superglm(case["state"], case["family"], pairs, case["smooth_features"])
+    timed(
+        record,
+        lambda: model.fit_reml(
+            train["design"],
+            train["response"],
+            sample_weight=train["weights"],
+            offset=train["offset"],
+            max_reml_iter=MAX_REML_ITER,
+        ),
     )
-    record["fit_wall_seconds"] = time.perf_counter() - started
-    record["fit_cpu_seconds"] = time.process_time() - cpu_started
     diagnostics = model.reml_diagnostics()
-    result = model._reml_result
     record.update(
-        reml_states=len(diagnostics.get("lambda_history", [])),
-        outer_iterations=int(result.n_reml_iter),
-        converged=bool(result.converged),
-        termination_reason=str(result.termination_reason),
+        reml_states=len(diagnostics["lambda_history"]),
+        outer_iterations=int(diagnostics["n_reml_iter"]),
+        converged=bool(diagnostics["converged"]),
+        termination_reason=str(diagnostics["termination_reason"]),
         coefficient_count=int(len(model.result.beta)),
-        smoothing_parameter_count=len(diagnostics.get("lambdas", {})),
+        smoothing_parameter_count=len(diagnostics["lambdas"]),
     )
     return model, train
 
@@ -549,10 +610,7 @@ def gbm_fit(case, structure, capacity, record):
     train = case_partition(case, "train", native=True)
     target, weights = gbm_training_target(train)
     model = build_gbm(case["family"], structure, capacity)
-    started, cpu_started = time.perf_counter(), time.process_time()
-    model.fit(train["design"], target, sample_weight=weights)
-    record["fit_wall_seconds"] = time.perf_counter() - started
-    record["fit_cpu_seconds"] = time.process_time() - cpu_started
+    timed(record, lambda: model.fit(train["design"], target, sample_weight=weights))
     record.update(
         reml_states=None,
         outer_iterations=int(model.n_iter_),
@@ -607,20 +665,51 @@ def score_arm(case, model, engine, record):
     record["model_fingerprint"] = fingerprint.hexdigest()
 
 
+def screened_by_the_baseline(args):
+    """The pairs A0's screen ranked; a blind arm has nothing to fit without them."""
+    receipt = json.loads((args.case_root / "A0" / "receipt.json").read_text())
+    if "screening" not in receipt:
+        raise ValueError(
+            f"A0 on {args.dataset} recorded no screen ({receipt.get('status')}), "
+            f"so {args.arm} has no ranked pairs"
+        )
+    return receipt["screening"]["pairs"]
+
+
+def distinct_pairs(pairs):
+    """One entry per unordered pair, first come: a tensor term is symmetric in its columns."""
+    distinct = {}
+    for pair in pairs:
+        distinct.setdefault(tuple(sorted(pair)), pair)
+    return list(distinct.values())
+
+
 def arm_pairs(args, case):
-    """Which pairs an arm fits, and why: catalogue evidence, the screen, or their union."""
-    arm = args.arm
+    """What an arm requested, what it can fit after the cap, and where the pairs came from."""
+    arm, fitted = args.arm, case["smooth_features"]
     if arm == "A0":
-        return [], {"source": "none; the additive baseline"}
+        return [], [], {"source": "none; the additive baseline"}
     if arm == "A1":
-        return known_good_pairs(case["entry"]), {"source": "catalogue known-good pairs"}
-    screen = json.loads((args.case_root / "A0" / "receipt.json").read_text())
+        requested = known_good_pairs(case["entry"])
+        return (
+            requested,
+            distinct_pairs(usable_pairs(requested, fitted))[:PAIR_LIMIT],
+            {"source": "catalogue known-good pairs", "limit": PAIR_LIMIT},
+        )
+    screened = screened_by_the_baseline(args)
     if arm == "A3":
-        union = known_good_pairs(case["entry"]) + screen["screening"]["pairs"][: args.union_pairs]
-        deduplicated = list({tuple(pair): pair for pair in union}.values())[:16]
-        return deduplicated, {"source": f"A1 pairs plus the top {args.union_pairs} screened pairs"}
+        requested = known_good_pairs(case["entry"]) + screened[: args.union_pairs]
+        return (
+            requested,
+            distinct_pairs(usable_pairs(requested, fitted))[:PAIR_LIMIT],
+            {
+                "source": f"A1 pairs plus the top {args.union_pairs} screened pairs",
+                "limit": PAIR_LIMIT,
+            },
+        )
     count = int(arm.split("-")[1])
-    return screen["screening"]["pairs"][:count], {"source": f"top {count} screened pairs by z"}
+    pairs = screened[:count]
+    return pairs, pairs, {"source": f"top {count} screened pairs by z"}
 
 
 def run_screen(model, case, train, record):
@@ -639,6 +728,22 @@ def run_screen(model, case, train, record):
     }
 
 
+def fit_one_arm(args, case, plan, record):
+    """Fit the arm this worker is for, and return the model with its training partition."""
+    if plan["engine"] == "gbm":
+        record.update(
+            requested_pairs=[],
+            pairs=[],
+            pair_source={"source": "boosting control"},
+            structure=plan["structure"],
+            capacity=plan["capacity"],
+        )
+        return gbm_fit(case, plan["structure"], plan["capacity"], record)
+    requested, pairs, source = arm_pairs(args, case)
+    record.update(requested_pairs=requested, pairs=pairs, pair_source=source)
+    return superglm_fit(case, pairs, record)
+
+
 def fit_arm(args, record):
     plan = arm_plan(args.arm)
     case = prepare_case(args.dataset, args, plan["feature_cap"])
@@ -653,23 +758,18 @@ def fit_arm(args, record):
         feature_cap=case["feature_cap"],
         feature_cap_rule=case["feature_cap_rule"],
         kept_features=case["kept_features"],
+        smooth_features=case["smooth_features"],
         offset_unusable_rows=case["offset_unusable_rows"],
         entry_sha256=digest_json(case["entry"]),
     )
-    if plan["engine"] == "gbm":
-        record.update(requested_pairs=[], pairs=[], pair_source={"source": "boosting control"})
-        model, _ = gbm_fit(case, plan["structure"], plan["capacity"], record)
-        record["structure"] = plan["structure"]
-        record["capacity"] = plan["capacity"]
-    else:
-        requested, source = arm_pairs(args, case)
-        pairs = usable_pairs(requested, case["state"])
-        record.update(requested_pairs=requested, pairs=pairs, pair_source=source)
-        model, train = superglm_fit(case, pairs, record)
-        if args.arm == "A0":
-            run_screen(model, case, train, record)
+    model, train = fit_one_arm(args, case, plan, record)
     record["status"] = "converged" if record["converged"] else "not_converged"
     score_arm(case, model, plan["engine"], record)
+    if args.arm == "A0":
+        # The screen costs more than the fit on a wide table, and the parent's
+        # deadline kills this process: the scored baseline is on disk first.
+        save_receipt(args, record)
+        run_screen(model, case, train, record)
 
 
 def arm_plan(arm):
@@ -696,7 +796,14 @@ def runtime_identity():
             for name in ("superglm", "numpy", "scipy", "pandas", "scikit-learn", "threadpoolctl")
         },
         "threadpools": threadpool_info(),
+        "thread_environment": {name: os.environ.get(name) for name in THREAD_VARIABLES},
     }
+
+
+def save_receipt(args, record):
+    """Write the receipt as it stands, so a later kill cannot erase what is already measured."""
+    record["missing_receipt_fields"] = missing_receipt_fields(record)
+    write_json(args.output / "receipt.json", record)
 
 
 def worker(args):
@@ -731,8 +838,7 @@ def worker(args):
             ]
             record["worker_seconds"] = time.perf_counter() - started
             record["finished_utc"] = datetime.now(UTC).isoformat()
-            record["missing_receipt_fields"] = missing_receipt_fields(record)
-            write_json(args.output / "receipt.json", record)
+            save_receipt(args, record)
     print(json.dumps({key: record[key] for key in ("dataset", "arm", "status")}), flush=True)
     return 0 if record["status"] in {"converged", "not_converged"} else 1
 
@@ -765,15 +871,19 @@ def launch(args, dataset, arm):
         str(args.union_pairs),
     ]
     environment = {**os.environ, **dict.fromkeys(THREAD_VARIABLES, str(args.threads))}
+    # A0 pays for the screen on top of its fit; the fit's own deadline is the same one.
+    deadline = args.fit_timeout + (args.screen_timeout if arm == "A0" else 0.0)
     process = run_isolated(
-        command, log_path=output / "worker.log", timeout=args.fit_timeout, env=environment
+        command, log_path=output / "worker.log", timeout=deadline, env=environment
     )
     receipt_path = output / "receipt.json"
-    record = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
-    record.setdefault("status", "error")
+    record = load_worker_receipt(receipt_path, arm)
     if process["status"] != "success":
-        record["status"] = process["status"]
-    record["process"] = {**process, "command": command, "timeout_seconds": args.fit_timeout}
+        # A fit the worker already scored and wrote survives a kill during the screen.
+        record["interrupted_by"] = process["status"]
+        if "test" not in record:
+            record["status"] = process["status"]
+    record["process"] = {**process, "command": command, "timeout_seconds": deadline}
     write_json(receipt_path, record)
     print(
         json.dumps(
@@ -834,10 +944,13 @@ def dataset_summary(args, records, entry):
     losses = {arm: test_loss(record) for arm, record in records.items()}
     for structure, arm in selected.items():
         losses[structure] = None if arm is None else losses.get(arm)
-    additive, ceiling, floor = losses.get("A0"), losses.get("G2"), losses.get("G0")
+    additive_smooth = losses.get("A0")
+    unrestricted_gbm, additive_gbm = losses.get("G2"), losses.get("G0")
     smooth_arms = [arm for arm in records if not arm.startswith("G")]
-    fractions = {arm: closure(additive, losses.get(arm), ceiling) for arm in smooth_arms}
-    fractions["G1"] = closure(additive, losses.get("G1"), ceiling)
+    fractions = {
+        arm: closure(additive_smooth, losses.get(arm), unrestricted_gbm) for arm in smooth_arms
+    }
+    fractions["G1"] = closure(additive_smooth, losses.get("G1"), unrestricted_gbm)
     return {
         "test_loss": losses,
         "validation_loss": {
@@ -850,8 +963,8 @@ def dataset_summary(args, records, entry):
         "fit_wall_seconds": {
             arm: record.get("fit_wall_seconds") for arm, record in records.items()
         },
-        "representation_gap_at_zero_interactions": none_difference(additive, floor),
-        "interaction_signal": none_difference(floor, ceiling),
+        "representation_gap_at_zero_interactions": none_difference(additive_smooth, additive_gbm),
+        "interaction_signal": none_difference(additive_gbm, unrestricted_gbm),
         "closure": fractions,
         "has_known_good_list": bool(entry.get("known_good_pairs")),
         "rules": dataset_rules(args, records, losses, fractions),
@@ -869,8 +982,12 @@ def none_difference(left, right):
 
 def dataset_rules(args, records, losses, fractions):
     """R1 admits a dataset to the closure summary; R4 judges each smooth arm's cost."""
-    floor, ceiling = losses.get("G0"), losses.get("G2")
-    signal = None if floor in (None, 0) or ceiling is None else (floor - ceiling) / abs(floor)
+    additive_gbm, unrestricted_gbm = losses.get("G0"), losses.get("G2")
+    signal = (
+        None
+        if additive_gbm in (None, 0) or unrestricted_gbm is None
+        else (additive_gbm - unrestricted_gbm) / abs(additive_gbm)
+    )
     selected = select_gbm_capacity(records, "G2", args.capacities)
     reference = None if selected is None else records[selected].get("fit_wall_seconds")
     cost = {}
@@ -910,7 +1027,7 @@ def suite_rules(args, cases):
         selection[name] = None if known is None or blind is None else blind >= R3_FRACTION * known
     for name, case in without:
         blind = case["closure"].get(screen_arm)
-        selection[name] = None if blind is None else blind >= R2_CLOSURE
+        selection[name] = None if blind is None else blind >= R3_STANDALONE
     decided = [value for value in selection.values() if value is not None]
     return {
         "R1_admitted_datasets": [name for name, _ in admitted],
@@ -920,13 +1037,22 @@ def suite_rules(args, cases):
             "eligible": len(with_list),
             "holds": bool(with_list) and 2 * len(passed) >= len(with_list),
             "threshold": R2_CLOSURE,
+            "undecided": [name for name, value in representation.items() if value is None],
         },
         "R3": {
             "screen_arm": screen_arm,
             "by_dataset": selection,
             "holds": bool(decided) and all(decided),
             "fraction_of_known_good": R3_FRACTION,
-            "standalone_threshold": R2_CLOSURE,
+            "standalone_threshold": R3_STANDALONE,
+            "undecided": [name for name, value in selection.items() if value is None],
+            # A known-good arm that lost ground makes 0.8 x closure(A1) a bar
+            # anything clears, so the pass on these datasets says nothing.
+            "vacuous_known_good_comparison": [
+                name
+                for name, case in with_list
+                if case["closure"].get("A1") is not None and case["closure"]["A1"] <= 0
+            ],
         },
     }
 
@@ -943,6 +1069,7 @@ def run_suite(args):
         "screen_counts": args.pairs,
         "gbm_capacities": args.capacities,
         "fit_timeout_seconds": args.fit_timeout,
+        "screen_timeout_seconds": args.screen_timeout,
         "datasets": {},
     }
     for dataset in args.datasets:
@@ -968,6 +1095,7 @@ def main(argv=None):
     parser.add_argument("--max-rows", type=int, default=300000)
     parser.add_argument("--pairs", nargs="+", type=int, default=[4, 8, 16])
     parser.add_argument("--fit-timeout", type=float, default=900)
+    parser.add_argument("--screen-timeout", type=float, default=900)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -979,8 +1107,8 @@ def main(argv=None):
     if args.smoke:
         args.max_rows, args.pairs = min(args.max_rows, 50000), [4]
     args.capacities = ["leaves15"] if args.smoke else list(CONFIGS)
-    if args.max_rows < 1 or args.threads < 1 or args.fit_timeout <= 0:
-        parser.error("Row cap, thread count and fit timeout must be positive")
+    if args.max_rows < 1 or args.threads < 1 or min(args.fit_timeout, args.screen_timeout) <= 0:
+        parser.error("Row cap, thread count and both timeouts must be positive")
     if len(set(args.datasets)) != len(args.datasets) or any(count < 1 for count in args.pairs):
         parser.error("Datasets must be unique and every screen count positive")
     if args.worker:
