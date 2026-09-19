@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from superglm import SuperGLM
+from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
@@ -1580,3 +1581,120 @@ class TestDiscretizedTensorInteraction:
 
         assert result.B1_unique.shape[0] == 16
         assert result.B2_unique.shape[0] == 12
+
+
+def _two_pair_frame():
+    """Poisson counts with two planted tensor pairs over four P-spline margins."""
+    rng = np.random.default_rng(2026)
+    n = 20_000
+    x = {name: rng.uniform(-1.0, 1.0, n) for name in ("x0", "x1", "x2", "x3")}
+    eta = (
+        -0.5
+        + 0.6 * np.sin(2.5 * x["x0"])
+        + 0.4 * x["x1"] ** 2
+        - 0.3 * np.cos(2.0 * x["x3"])
+        + 0.5 * x["x0"] * x["x1"]
+        + 0.4 * np.sin(2.0 * x["x2"]) * x["x3"]
+    )
+    y = rng.poisson(np.exp(eta)).astype(float)
+    return pd.DataFrame(x), y
+
+
+def _fit_two_pairs(X, y, *, decline_channel, reml):
+    """Fit the two-pair model and count the tensor x tensor routes it took.
+
+    The solvers do not hand a profile dict down to the block assembler, so the
+    routes are observed the way the dispatch tests observe them: through the
+    module-level names the assembler resolves at call time.  The control arm
+    forces the decline by patching the helper itself rather than the
+    aggregate-cell budget, which other routes in the same fit read.
+    """
+    routes = {"channel": 0, "declined": 0, "rows": 0}
+    helper = algebra._cross_gram_tensor_tensor_channels
+    rows = algebra._support_support_raw_cross
+
+    def counted_helper(*args, **kwargs):
+        result = None if decline_channel else helper(*args, **kwargs)
+        routes["channel" if result is not None else "declined"] += 1
+        return result
+
+    def counted_rows(*args, **kwargs):
+        routes["rows"] += 1
+        return rows(*args, **kwargs)
+
+    # 64 bins per margin: each tensor observes about 4,000 of its 4,096 cells,
+    # so the tensor x tensor block's n_joint (about 1.6e7) is above the
+    # histogram cell cap and the displaced route is the row-expanding one.
+    model = SuperGLM(
+        family="poisson",
+        discrete=True,
+        n_bins=64,
+        features={name: Spline(kind="ps", k=8) for name in X.columns},
+        interactions=[("x0", "x1"), ("x2", "x3")],
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(algebra, "_cross_gram_tensor_tensor_channels", counted_helper)
+        patch.setattr(algebra, "_support_support_raw_cross", counted_rows)
+        if reml:
+            model.fit_reml(X, y, max_reml_iter=30, runtime_validation="skip")
+        else:
+            model.fit(X, y)
+    return model, routes
+
+
+def _assert_routes_differ(channel_routes, dense_routes):
+    assert channel_routes["channel"] > 0
+    assert channel_routes["declined"] == 0
+    assert channel_routes["rows"] == 0
+    assert dense_routes["channel"] == 0
+    assert dense_routes["declined"] > 0
+    # Every decline lands on the row route the channel route displaced.
+    assert dense_routes["rows"] == dense_routes["declined"]
+
+
+def test_distinct_margin_tensor_route_reproduces_the_dense_fit():
+    """The channel route changes summation order, not the fit.
+
+    At fixed smoothing the IRLS fixed point contracts a Gram perturbation:
+    the two routes agree to 1e-14 on predictions and 1e-11 on coefficients,
+    the same as re-chunking the dense route's own row sum gives (measured).
+    """
+    X, y = _two_pair_frame()
+    channel, channel_routes = _fit_two_pairs(X, y, decline_channel=False, reml=False)
+    dense, dense_routes = _fit_two_pairs(X, y, decline_channel=True, reml=False)
+    _assert_routes_differ(channel_routes, dense_routes)
+
+    np.testing.assert_allclose(channel.predict(X), dense.predict(X), rtol=1e-12, atol=0)
+    assert channel.result.deviance == pytest.approx(dense.result.deviance, rel=1e-12)
+    assert channel.result.effective_df == pytest.approx(dense.result.effective_df, rel=1e-12)
+    assert channel.result.phi == pytest.approx(dense.result.phi, rel=1e-12)
+    np.testing.assert_allclose(channel.result.beta, dense.result.beta, rtol=1e-10, atol=0)
+
+
+def test_distinct_margin_tensor_route_reaches_the_same_reml_optimum():
+    """Through REML the routes reach the same optimum, not the same coordinates.
+
+    The smoothing parameters are flat to about 2.5e-7 relative at this
+    fixture's optimum, so a 1e-15 change in the Gram moves the fitted lambdas
+    by that much, the coefficients by 3e-9 and the predictions by 1e-11,
+    while the objective moves by 3e-13 and the deviance by 5e-15 (measured).
+    That spread is the fit's own, not the route's: re-chunking the dense
+    route's row sum, a summation-order change inside the displaced route,
+    moves them by 9e-8, 7e-9, 6e-12, 7e-13 and 3e-15.  So the optimum is
+    asserted and the coordinates are not.
+    """
+    X, y = _two_pair_frame()
+    channel, channel_routes = _fit_two_pairs(X, y, decline_channel=False, reml=True)
+    dense, dense_routes = _fit_two_pairs(X, y, decline_channel=True, reml=True)
+    _assert_routes_differ(channel_routes, dense_routes)
+
+    channel_reml = channel.reml_diagnostics()
+    dense_reml = dense.reml_diagnostics()
+    assert channel_reml["termination_reason"] != "max_reml_iter"
+    assert channel_reml["termination_reason"] == dense_reml["termination_reason"]
+    assert channel_reml["n_reml_iter"] == dense_reml["n_reml_iter"]
+    assert channel_reml["objective"] == pytest.approx(dense_reml["objective"], rel=1e-11)
+    assert channel.result.deviance == pytest.approx(dense.result.deviance, rel=1e-12)
+    assert channel.result.phi == pytest.approx(dense.result.phi, rel=1e-12)
+    np.testing.assert_allclose(channel.predict(X), dense.predict(X), rtol=1e-10, atol=0)
+    assert channel.result.effective_df == pytest.approx(dense.result.effective_df, rel=1e-10)
