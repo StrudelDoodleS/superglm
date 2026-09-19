@@ -8,9 +8,14 @@ four threads fell from `48.53 s` to `23.64 s` (2.05x) and its Gram time from
 `35.21 s` to `13.53 s` (2.60x) on the tree that still carried the parallel
 kernel, reaching the same 13 lambda states, the same 11 outer iterations,
 the same termination reason and an objective of `79587.18132998943` against
-`79587.181329993`, 4.5e-14 relative; the settled tree without that kernel is
-the S1 row of the attribution table below (Gram 2.25x per state at four
-threads), and the Bench phase re-measures the whole fit on it. Per
+`79587.181329993`, 4.5e-14 relative. The settled tree without that kernel
+(`b0d5ead3`, S4 + S1 + the review fixes), re-timed back to back against the
+same `e130313d` export in a later quiet session, takes the same fit from
+`35.69 s` to `21.13 s` (1.69x) and its Gram time from `24.87 s` to `12.51 s`
+(1.99x), with the same 13 states, 11 outer iterations, termination reason
+and objective; the two sessions' BEFORE walls (`48.53 s` and `35.69 s`)
+show the machine's session-to-session band, which is why only same-session
+ratios are quoted. Per
 production block at one thread, the stored-row gather's `48.90 ms` becomes
 `17.30 ms` in the raw band (2.83x best of five; 2.17-2.27x on interleaved
 medians, see the S1 rule). The zero-pair and one-pair fits are bit-identical
