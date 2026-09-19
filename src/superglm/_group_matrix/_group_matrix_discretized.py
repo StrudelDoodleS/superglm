@@ -409,6 +409,23 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         self._own_margin_cache: dict[tuple[int, int, int], int | None] = {}
         self._cell_csr: tuple[NDArray, NDArray] | None = None
 
+    def __getstate__(self):
+        # The cell-CSR is eight bytes a row of derivable state: rebuilt on use.
+        dict_state, slot_state = cast(
+            tuple[dict[str, object] | None, dict[str, object]], object.__getstate__(self)
+        )
+        slot_state.pop("_cell_csr")
+        return dict_state, slot_state
+
+    def __setstate__(self, state):
+        # A design pickled before the raw band and the cell cache carries
+        # neither slot: without a band the cross-Gram takes its dense stage.
+        _dict_state, slot_state = state
+        self.raw_channels = None
+        self._cell_csr = None
+        for name, value in slot_state.items():
+            setattr(self, name, value)
+
     def cell_csr(self) -> tuple[NDArray, NDArray]:
         """The rows sorted by grid cell, ``(ptr, order)`` as ``_cell_csr`` returns them.
 
