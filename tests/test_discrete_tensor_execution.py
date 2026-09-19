@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import pickle
 import tracemalloc
 
 import numpy as np
 import pytest
-from numba import config, get_num_threads, set_num_threads
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm.group_matrix import DiscretizedTensorGroupMatrix
@@ -344,21 +344,72 @@ def test_channel_accumulator_is_reused_across_blocks_in_a_build(monkeypatch):
 
     monkeypatch.setattr(algebra, "_cell_hist_raw_kron", recorded)
     cache = algebra._BlockWeightCache()
-    previous = get_num_threads()
-    try:
-        # The serial kernel is the recorded name; the pool decides which runs.
-        set_num_threads(1)
-        for left, right, _rng in (small, large, small):
-            expected, bound = _dense_cross(left, right, weights)
-            actual = algebra._cross_gram(left, right, weights, cache=cache)
-            _assert_cross_matches(actual, expected, bound)
-    finally:
-        set_num_threads(previous)
+    for left, right, _rng in (small, large, small):
+        expected, bound = _dense_cross(left, right, weights)
+        actual = algebra._cross_gram(left, right, weights, cache=cache)
+        _assert_cross_matches(actual, expected, bound)
     first, grown, reused = scratches
     assert grown.size > first.size
     assert not np.shares_memory(first, grown)
     assert np.shares_memory(grown, reused)
     assert reused.shape == first.shape
+
+
+def test_cell_weights_are_permuted_once_per_grid_tensor_in_a_build(monkeypatch):
+    # Two partners of one grid tensor through one build cache read the same
+    # permuted weights -- one O(n) pass where there were two -- and a
+    # different weight vector is permuted afresh.  The 4 x 4 tensor is the
+    # grid side of every block (16 x 3 cells against 100 x 3 and 99 x 3).
+    n = 300
+    grid, first, rng = _tensor_pair(n, (4, 4, 2, 2, 3), (10, 10, 2, 2, 3))
+    _grid, second, _rng = _tensor_pair(n, (4, 4, 2, 2, 3), (9, 11, 2, 2, 3), seed=5)
+    weights = rng.normal(size=n)
+    permuted = []
+    original = algebra._cell_hist_raw_kron
+
+    def recorded(ptr, bin1, bin2, w, *operands):
+        permuted.append(w)
+        return original(ptr, bin1, bin2, w, *operands)
+
+    monkeypatch.setattr(algebra, "_cell_hist_raw_kron", recorded)
+    profile = {}
+    cache = algebra._BlockWeightCache(profile)
+    for partner, w in ((first, weights), (second, weights), (first, weights.copy())):
+        expected, bound = _dense_cross(grid, partner, w)
+        actual = algebra._cross_gram(grid, partner, w, cache=cache, profile=profile)
+        _assert_cross_matches(actual, expected, bound)
+    assert profile["block_cross_tensor_tensor_channel_raw"] == 3
+    assert profile["block_cell_weight_reuses"] == 1
+    assert permuted[0] is permuted[1] and permuted[2] is not permuted[0]
+    np.testing.assert_array_equal(permuted[0], weights[grid.cell_csr()[1]])
+
+
+def test_tensor_group_pickles_without_its_cell_csr_and_loads_from_before_the_band():
+    n = 400
+    left, right, rng = _tensor_pair(n, (7, 5, 3, 4, 6), (6, 8, 3, 4, 5))
+    weights = rng.normal(size=n)
+    expected, bound = _dense_cross(left, right, weights)
+    left.cell_csr()
+    restored = pickle.loads(pickle.dumps(left))
+    assert restored._cell_csr is None
+    np.testing.assert_array_equal(restored.raw_channels.values1, left.raw_channels.values1)
+    profile = {}
+    actual = algebra._cross_gram(restored, right, weights, profile=profile)
+    assert profile["block_cross_tensor_tensor_channel_raw"] == 1
+    _assert_cross_matches(actual, expected, bound)
+
+    # A design pickled before the branch carries neither new slot.  Loaded,
+    # the channel side has no band and the block takes the dense stage.
+    _dict_state, slot_state = right.__getstate__()
+    del slot_state["raw_channels"]
+    old = DiscretizedTensorGroupMatrix.__new__(DiscretizedTensorGroupMatrix)
+    old.__setstate__((None, slot_state))
+    assert old.raw_channels is None and old._cell_csr is None
+    profile = {}
+    actual = algebra._cross_gram(left, old, weights, profile=profile)
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == 0
+    _assert_cross_matches(actual, expected, bound)
 
 
 @pytest.mark.parametrize("case", ["unbanded", "banded_channel", "banded_grid"])
@@ -377,63 +428,6 @@ def test_raw_channel_stage_declines_to_the_dense_kernel_without_a_band(case):
     actual = algebra._cross_gram(left, right, weights, profile=profile)
     assert profile["block_cross_tensor_tensor_channel_calls"] == 1
     assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(case == "banded_channel")
-    _assert_cross_matches(actual, expected, bound)
-
-
-@pytest.mark.parametrize("threads", [1, 4, 16])
-def test_raw_channel_stage_is_bit_identical_across_numba_thread_counts(threads):
-    # One writer per accumulator row and per-cell sums in the stable cell
-    # order, so the histogram -- and with it the block, at a fixed BLAS pool
-    # -- is the same bytes whatever the numba pool.  480 cells over 128
-    # chunks at sixteen threads puts several chunks per thread.
-    if threads > config.NUMBA_NUM_THREADS:
-        pytest.skip("the configured Numba maximum does not permit this many workers")
-    n = 20_000
-    left, right, rng = _tensor_pair(n, (24, 20, 3, 4, 6), (25, 21, 4, 3, 5))
-    weights = rng.normal(size=n)
-    previous = get_num_threads()
-    try:
-        set_num_threads(1)
-        histogram = algebra._tensor_channel_histogram(left, right, weights, None, None)[0].copy()
-        block = algebra._cross_gram(left, right, weights)
-        set_num_threads(threads)
-        profile = {}
-        actual_histogram = algebra._tensor_channel_histogram(left, right, weights, None, profile)
-        actual_block = algebra._cross_gram(left, right, weights, profile=profile)
-    finally:
-        set_num_threads(previous)
-    assert profile["block_cross_tensor_tensor_channel_threads"] == threads
-    assert actual_histogram[0].tobytes() == histogram.tobytes()
-    assert actual_block.tobytes() == block.tobytes()
-
-
-@pytest.mark.parametrize("threads", [1, 4])
-def test_raw_channel_stage_dispatches_on_the_pool_size(monkeypatch, threads):
-    # One thread takes the serial kernel (the parallel runtime costs 5-11%
-    # there); a larger pool takes the prange twin over eight chunks a thread.
-    if threads > config.NUMBA_NUM_THREADS:
-        pytest.skip("the configured Numba maximum does not permit four workers")
-    n = 2000
-    left, right, rng = _tensor_pair(n, (7, 5, 3, 4, 6), (6, 8, 3, 4, 5))
-    weights = rng.normal(size=n)
-    expected, bound = _dense_cross(left, right, weights)
-    chunks = []
-    parallel = algebra._cell_hist_raw_kron_parallel
-
-    def recorded(*args):
-        chunks.append(args[-1])
-        return parallel(*args)
-
-    monkeypatch.setattr(algebra, "_cell_hist_raw_kron_parallel", recorded)
-    previous = get_num_threads()
-    try:
-        set_num_threads(threads)
-        profile = {}
-        actual = algebra._cross_gram(left, right, weights, profile=profile)
-    finally:
-        set_num_threads(previous)
-    assert chunks == ([] if threads == 1 else [8 * threads])
-    assert profile["block_cross_tensor_tensor_channel_threads"] == threads
     _assert_cross_matches(actual, expected, bound)
 
 

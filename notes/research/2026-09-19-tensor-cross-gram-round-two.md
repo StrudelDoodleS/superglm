@@ -1,26 +1,31 @@
 # The tensor cross-Gram in the raw basis, and its cell-parallel accumulation
 
-Three commits cut the constant in front of the quadratic block count again.
-On the ten-pair 300,000-row synthetic design, the default-mode `fit_reml`
-to convergence at four threads falls from `48.53 s` to `23.64 s` (2.05x)
-and its Gram time from `35.21 s` to `13.53 s` (2.60x), reaching the same 13
-lambda states, the same 11 outer iterations, the same termination reason and
-an objective of `79587.18132998943` against `79587.181329993`, 4.5e-14
-relative. Per production block at one thread, the stored-row gather's
-`48.90 ms` becomes `17.30 ms` in the raw band (2.83x) and `9.79 ms` under
-the cell-parallel kernel at four threads (3.52x over the dense stage, 1.40x
-over the raw serial one). The zero-pair and one-pair fits are bit-identical
-to the round-one tree in every recorded quantity. Of the three levers, S1
-(the raw basis) carries the win: at ten pairs and four threads S4 alone is
-1.10x, S1 takes the cumulative figure to 2.25x, and S2's parallel kernel
-adds the last 1.12x. The block count is still `M(M-1)/2`; again, only its
-constant moved.
+Two commits cut the constant in front of the quadratic block count again; a
+third was measured, failed its pre-registered rule and is reverted by the
+review-fix commit that follows this note on the branch. On the ten-pair
+300,000-row synthetic design, the default-mode `fit_reml` to convergence at
+four threads fell from `48.53 s` to `23.64 s` (2.05x) and its Gram time from
+`35.21 s` to `13.53 s` (2.60x) on the tree that still carried the parallel
+kernel, reaching the same 13 lambda states, the same 11 outer iterations,
+the same termination reason and an objective of `79587.18132998943` against
+`79587.181329993`, 4.5e-14 relative; the settled tree without that kernel is
+the S1 row of the attribution table below (Gram 2.25x per state at four
+threads), and the Bench phase re-measures the whole fit on it. Per
+production block at one thread, the stored-row gather's `48.90 ms` becomes
+`17.30 ms` in the raw band (2.83x best of five; 2.17-2.27x on interleaved
+medians, see the S1 rule). The zero-pair and one-pair fits are bit-identical
+to the round-one tree in every recorded quantity. S1 (the raw basis) carries
+the win: at ten pairs and four threads S4 alone is 1.10x and S1 takes the
+cumulative figure to 2.25x; S2's parallel kernel added 1.12x at a pinned
+pool and lost at the default one. The block count is still `M(M-1)/2`;
+again, only its constant moved.
 
 This note records the measurements for `32e0dc8e` (S4, the cached row
 structure), `d885f5b8` (S1, the raw B-spline basis) and `90defad0` (S2, the
 cell-partitioned parallel accumulation) on `perf/interaction-cost-round-two`,
 whose base `e130313d` is v0.34.0 plus round one's discrete tensor step fix
-and channel cross-Gram.
+and channel cross-Gram. S2's measurements stay as the record of its rule's
+failure; the kernel, its dispatch and its tests are gone from the branch.
 
 ## Characterisation and literature
 
@@ -107,10 +112,13 @@ above).
 **S1, `d885f5b8`.** Stage 1 accumulates the channel tensor's row as its raw
 B-spline band — 16 products of 100 for cubic margins — in the grid tensor's
 cached cell order, and applies `kron(P_1, P_2)` after the grid contraction.
-`_gather_cell_order` streams `W` and the two channel bins into cell order in
-three sequential passes, so the cell loop reads everything sequentially;
-gathering through the permutation inside the loop instead measured as slow
-as the dense kernel it replaces, the kernel being latency-bound. The stage
+`_gather_cell_order` streams the two channel bins into cell order in two
+sequential passes and the build cache permutes `W` once per grid tensor per
+build (the review moved it out of the per-block prologue, where it had been
+repeated for every partner of a grid: 35 of 45 passes redundant at ten
+pairs), so the cell loop reads everything sequentially; gathering through
+the permutation inside the loop instead measured as slow as the dense kernel
+it replaces, the kernel being latency-bound. The stage
 is chosen by budget: the raw scratch is wider (`n1 * n2 * k1_raw * k2_raw`,
 52.4 MB in production) than the stored width, and over the aggregate budget
 the route falls back to the dense stage at the stored width, never to the
@@ -118,14 +126,24 @@ row route, so the band never costs a block the channel route it had. A
 cardinal `cr` pair, whose functions are non-zero everywhere, has no narrower
 band and keeps the dense stage.
 
-**S2, `90defad0`.** `_cell_hist_raw_kron_parallel` runs the cell loop under
-`prange` over eight contiguous cell chunks per thread. Every accumulator row
-has exactly one writer and a cell's sum runs over its rows in the stable
-cell order whichever chunk visits it, so the bytes are the same for any
-thread or chunk count by construction — no reduction variable, no
-`fastmath`. The stage dispatches on `get_num_threads()`, taking the serial
-kernel at one thread where the parallel runtime costs 5-11%. The library
-reads the pool and never sets it.
+**Row passes per outer state.** Before this round, one random-access pass
+per tensor-by-tensor block: 45 per ten-pair Gram build. After it, per block
+two sequential permutation passes and one pass over the cell-CSR (135 per
+build), plus one permutation of `W` per grid tensor per build (9 at ten
+pairs; the last tensor is never a grid side) and one counting sort per grid
+tensor per fit. The count rose while the time per block fell 2.3-3.5x
+because every pass now streams. A margin without a band, or a block over
+the raw budget, keeps the dense stage's one random pass.
+
+**S2, `90defad0`, reverted.** `_cell_hist_raw_kron_parallel` ran the cell
+loop under `prange` over eight contiguous cell chunks per thread, with the
+stage dispatching on `get_num_threads()` — the serial kernel at one thread,
+the twin otherwise. Bit-identical for any thread or chunk count by
+construction (one writer per accumulator row, per-cell sums in the stable
+cell order). It failed the speed half of its rule (below) and, on that
+dispatch, made the block slower than the serial kernel at the default
+unpinned pool, so the registered consequence applies: not adopted, deleted
+rather than left behind a flag.
 
 ## Measurements
 
@@ -189,7 +207,8 @@ from the same recorded session whose control re-ran 17% slower.
 is 2.05x; the CPU cost is 1.20x worse. On a machine running one fit that is
 the trade the parallel kernel and the newly-threaded BLAS were asked for; on
 a machine running several it is not, and the pool should be pinned down
-accordingly.
+accordingly. With S2 reverted the route has no parallel region of its own,
+and what remains of the CPU rise is BLAS's in stages 2 and 3.
 
 ### Per state, `interaction_mode="fast_candidate"`, five-iteration cap
 
@@ -227,9 +246,10 @@ Direct `_cross_gram` calls, weights fixed, best of five with the three arms
 interleaved round-robin. The dense arm is produced by hiding `raw_channels`
 on both operands, so the route is the same and only the stage differs; the
 raw-serial and raw-parallel arms differ only in the pool size the stage
-reads. Production is the 81x81 block at 256 bins per margin; the `k=20`
-block is measured at 64 bins because at 256 bins it needs 23.7M aggregate
-cells against the 8,388,608 budget and the route declines outright.
+read (the raw-parallel column is the deleted twin, kept as the record of the
+rule it failed). Production is the 81x81 block at 256 bins per margin; the
+`k=20` block is measured at 64 bins because at 256 bins it needs 23.7M
+aggregate cells against the 8,388,608 budget and the route declines outright.
 
 | Fixture | Threads | Dense ms | Raw serial ms | Raw parallel ms | Dense→raw par | Serial→par |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -284,6 +304,37 @@ production block — because the stage-1 kernel's gain (`1.39 ms` against
 sixteen-thread BLAS pool. **Four threads is the measured optimum on this
 machine for this design.** That is a property of this machine, not a default
 the library should set.
+
+The review measured the numba x BLAS grid the plan promised and this phase
+did not (production block, interleaved medians of 11, `process_time` beside
+`perf_counter`); the raw-serial column is the settled tree:
+
+| numba / BLAS threads | Dense ms | Raw serial ms | Raw parallel (deleted) ms | CPU/wall, parallel arm |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 / 1 | 34.7 | 15.3 | 15.9 | 1.00 |
+| 4 / 1 | 38.5 | 16.1 | 14.0 | 2.71 |
+| 4 / 4 | 43.3 | 14.5 | 11.6 | 5.62 |
+| 8 / 4 | 41.5 | 14.6 | 9.1 | 8.05 |
+| 16 / 16 (the default, unpinned) | 50.6 | 12.8 | 16.2 | 15.6 |
+
+Raising BLAS from one to four threads at numba four moved the raw block
+`14.0 -> 11.6 ms`, as much as the parallel kernel itself; at the default
+pool the twin lost to the serial kernel (0.79x), which is why it could not
+stay behind its dispatch. The serial raw stage beats the dense one at every
+pool (2.27x, 2.99x and 3.95x at 1/1, 4/4 and 16/16). **The recommended pin
+is four on every pool.**
+
+### Memory
+
+Peak RSS of the ten-pair 300,000-row discrete fit at four threads, measured
+by the review: `1156 MiB` on the branch against `1126 MiB` on the
+`e130313d` export, +30 MiB where the design estimated about +45 MB. Nine of
+the ten tensor groups carry a cell-CSR after the fit (eight bytes a row plus
+the cell pointer, 2.9 MiB each at 300,000 rows; the tenth is never a grid
+side); the cell-CSR is not pickled. The per-block transients — two
+`n`-vectors of permuted bins, 4.8 MB, about 216 MB of allocation per
+ten-pair build — could come from the build cache like the accumulator does;
+that is a follow-up.
 
 ### Agreement
 
@@ -355,8 +406,10 @@ not the new kernel's.
 
 **Focused suites.** `tests/test_discrete_tensor_execution.py`,
 `tests/test_discretize_fit.py` and `tests/test_interactions.py`: 283 passed,
-one unrelated deprecation warning, 21.76 s. The full suite was not re-run in
-this phase.
+one unrelated deprecation warning, 21.76 s, at `90defad0`; 280 after the
+review-fix commit (the five S2 tests removed; the once-per-grid weight
+permutation and the pickle round trip added). The full suite was not re-run
+in this phase.
 
 ## Decision rules and outcomes
 
@@ -365,10 +418,15 @@ was built.
 
 **S1 — "adopt if the per-block time falls by at least 2x on the ten-pair
 design and the oracle bound holds; measured interleaved, one thread and
-four." PASSES, comfortably.** Per block at one thread, 48.90 ms to 17.30 ms
-is 2.83x on the production block and 65.60 ms to 16.91 ms is 3.88x on the
-`k=20` one; at four threads, 2.52x and 5.42x. Stage 1 alone is 3.33x serial.
-The oracle bound holds with nine orders of margin on every arm and fixture.
+four." PASSES, by 10-40% over the bar depending on protocol.** Per block at
+one thread, 48.90 ms to 17.30 ms is 2.83x on the production block (best of
+five) and 65.60 ms to 16.91 ms is 3.88x on the `k=20` one; at four threads,
+2.52x and 5.42x. The review's interleaved medians of 11 give 2.27x at one
+thread (34.7 to 15.3 ms) and 2.99x at four on four, and the ten-pair build
+measured 2.17-2.20x per state — all clear of 2x, inside this VM's +/-20%
+session band, so the range and not one number is the finding. Stage 1 alone
+is 3.33x serial. The oracle bound holds with nine orders of margin on every
+arm and fixture.
 
 **S2 — "adopt if the per-block time at four threads is at least 4x below
 serial and the result is bit-identical at 1, 4 and 16 threads." The
@@ -384,11 +442,15 @@ per block at four threads — on a *stage 1 that was still 81 doubles wide*.
 S1 shrank the only parallel region from 59% of the block (28.83 ms of 48.90
 at one thread) to 37% (6.36 ms of 17.30), and Amdahl's law bounds the block
 at 1.6x however many threads the kernel gets. The rule is not met as
-written; the commit is
-retained on the separate ground that it is free at one thread (the dispatch
-takes the serial kernel) and worth 1.40x at four, but that is a judgement
-call replacing a failed rule, and it is recorded here as one rather than
-quietly recoded as a pass. **This is the open item for Max.**
+written, and the review added the arm this phase did not run: at the default
+unpinned pool (16/16) the twin makes the block slower than the serial
+kernel, `12.8 -> 16.2 ms`, while at pinned pools it is 1.15-1.61x. The
+registered consequence — not adopted, deleted rather than left behind a
+flag — is applied by the review-fix commit: the kernel, its dispatch, the
+`get_num_threads` read and the thread-count profile key are gone and the
+stage is serial again. The rule itself stands unamended; a parallel stage 1
+needs a rule written against the 37% of the block it can now touch and the
+numba-beside-BLAS interaction measured above.
 
 **S4 — "no regression." PASSES.** At ten pairs and four threads, Gram
 seconds per state fall from 3.318 to 3.004 and wall from 4.854 to 4.642; no
@@ -418,17 +480,21 @@ per-lambda rebuild both construct new instances — and a test pins that
 `row_subset` does not inherit the cache. It is not enforced by the type: an
 in-place mutation of either index array anywhere would silently return a
 permutation for the old rows. If those arrays ever become writable, this
-needs a guard rather than a comment.
+needs a guard rather than a comment. The cache is dropped on pickle and
+rebuilt on first use, and a tensor design pickled before this branch loads
+with no band and takes the dense stage: the review found the bare slots
+raising on refit of a retained model, fixed with `__setstate__` defaults
+and a test.
 
 **Thread pools.** Everything above is pinned; nothing here is a default.
 Four threads is the optimum for this design on this sixteen-core machine and
 sixteen is worse at the block level, but the shape of that curve depends on
 the grid size, the payload width and the BLAS build, so it must be measured
-per machine. The library reads `get_num_threads()` and never sets it, which
-is right, but it means a caller who leaves the pools unpinned gets whatever
-numba's OMP layer and OpenBLAS's pthreads negotiate — and at sixteen threads
-that was 205 s of CPU for 40 s of wall on a script that needs 47 s of CPU
-serially.
+per machine. With S2 reverted the library neither reads nor sets a numba
+pool on this route; BLAS's pool still decides stages 2 and 3, and a caller
+who leaves it unpinned gets whatever OpenBLAS's pthreads negotiate — at
+sixteen threads that was 205 s of CPU for 40 s of wall on a script that
+needs 47 s of CPU serially.
 
 **The raw-basis representation change, stated exactly.** Stage 1 no longer
 multiplies the stored centred joint row. It forms `(w * raw1) * raw2` on the
@@ -453,8 +519,9 @@ lambdas, oracle errors — are deterministic and are quoted in full.
 
 ## Reproduction
 
-Commits: S4 `32e0dc8e`, S1 `d885f5b8`, S2 `90defad0`, on
-`perf/interaction-cost-round-two` over `e130313d` (v0.34.0 plus round one).
+Commits: S4 `32e0dc8e`, S1 `d885f5b8`, S2 `90defad0` (reverted by the
+review-fix commit), on `perf/interaction-cost-round-two` over `e130313d`
+(v0.34.0 plus round one).
 The before columns were produced against `e130313d`, `32e0dc8e` and
 `d885f5b8` exported with `git archive <rev> src` and imported by
 `PYTHONPATH`, with `superglm.__file__` printed in each log so the arm is

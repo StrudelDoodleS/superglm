@@ -7,14 +7,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import scipy.sparse as sp
-from numba import get_num_threads  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
     _cat_cat_weighted_crosstab,
     _cat_weighted_bincount,
     _cell_hist_raw_kron,
-    _cell_hist_raw_kron_parallel,
     _csr_weighted_bincount,
     _disc_disc_2d_hist,
     _disc_disc_2d_hist_channels,
@@ -73,21 +71,32 @@ def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> 
         _profile_add(profile, key, perf_counter() - start)
 
 
-def _profile_record(profile: dict[str, Any] | None, key: str, value: int) -> None:
-    """A fact of the build (not a count): the last block's value stands."""
-    if profile is not None:
-        profile[key] = value
-
-
 class _BlockWeightCache:
     """Per-block-assembly cache for weighted discrete summaries."""
 
-    __slots__ = ("_hist2d", "_profile", "_channel_scratch")
+    __slots__ = ("_hist2d", "_profile", "_channel_scratch", "_cell_weights")
 
     def __init__(self, profile: dict[str, Any] | None = None) -> None:
         self._hist2d: dict[tuple[int, int, int, int, int], NDArray] = {}
         self._profile = profile
         self._channel_scratch = np.empty(0)
+        self._cell_weights: dict[tuple[int, int], NDArray] = {}
+
+    def cell_weights(self, order: NDArray, W: NDArray) -> NDArray:
+        """``W`` in a grid tensor's cell order, permuted once per grid per build.
+
+        Every partner of a grid tensor reads the same permutation -- ``order``
+        is the grid's cached cell-CSR and ``W`` the build's weights -- so the
+        entry is keyed on their identity, as ``disc_disc_hist``'s is.
+        """
+        key = (id(order), id(W))
+        permuted = self._cell_weights.get(key)
+        if permuted is not None:
+            _profile_count(self._profile, "block_cell_weight_reuses")
+            return permuted
+        permuted = W[order]
+        self._cell_weights[key] = permuted
+        return permuted
 
     def channel_accumulator(self, n_cells: int, width: int) -> NDArray:
         """One ``(n_cells, width)`` scratch per Gram build, grown to the largest request.
@@ -523,42 +532,22 @@ def _tensor_channel_histogram(
     """Stage 1 of the channel route: ``H`` over the cells of ``grid``, and the
     map carrying its channels onto ``chan``'s solver columns.
 
-    RAW STAGE.  When ``chan`` carries its raw band and the ``(cells, k1_raw *
-    k2_raw)`` scratch fits the aggregate budget, the channels are the raw
-    joint columns: each row adds its ``width1 * width2`` band products (16 of
-    100 for cubic margins) into its cell's row, rows visited in the grid's
-    cached cell order so the accumulator row stays in L1 and the scratch is
-    written once, sequentially.  ``kron(P1, P2)`` is applied after the grid
-    contraction, exact up to round-off because the accumulation is linear.
-    The band values are B-spline values in ``[0, 1]`` and the projection a
-    product of orthonormal factors, both inside the reassociation range the
-    route already checks on the stored margins.  Returns ``(H, kron(P1, P2)
-    @ chan.R_inv)``.
+    RAW STAGE, when ``chan`` carries its raw band and the ``(cells, k1_raw *
+    k2_raw)`` scratch fits the aggregate budget: ``_cell_hist_raw_kron`` sums
+    each row's band products (16 of 100 for cubic margins) into its cell's
+    row of ``H`` in the grid's cached cell order, and ``kron(P1, P2)`` is
+    applied after the grid contraction.  Returns ``(H, kron(P1, P2) @
+    chan.R_inv)``.  DENSE STAGE otherwise -- a margin without a band, or a
+    grid too large for the wider scratch though not for the stored width:
+    ``_disc_disc_2d_hist_channels`` gathers ``chan``'s stored centred joint
+    row per observation.  Returns ``(H, chan.R_inv)``.  The stages agree to
+    round-off (3.2e-16 relative Frobenius on the production block).
 
-    DENSE STAGE.  Otherwise -- a margin without a band (the cardinal ``cr``
-    basis), or a grid too large for the wider scratch though not for the
-    stored width -- ``_disc_disc_2d_hist_channels`` gathers ``chan``'s stored
-    centred joint row per observation in natural row order.  Returns
-    ``(H, chan.R_inv)``.  The stages agree to round-off (3.2e-16 relative
-    Frobenius on the production block, measured).
-
-    ROW PASSES per block: the raw stage makes three sequential permutation
-    passes (``W`` and the two channel bins into cell order) and one pass over
-    the cell-CSR; the ``W`` permutation is repeated for each of a grid
-    tensor's partners rather than cached (about 4% of the stage at ten
-    pairs).  The dense stage makes one random-access pass.
-
-    THREADS.  The cell loop runs under ``prange`` over eight contiguous cell
-    chunks per thread when numba's pool (``get_num_threads()``, read here and
-    never set) has more than one thread, and serially on one, where the
-    parallel runtime costs 5-11%.  Same bytes either way: one writer per
-    accumulator row, per-cell sums in the stable cell order.  The permutation
-    prologue and stage 2 (OpenBLAS) stay serial with respect to numba, so the
-    block is bounded below by them whatever the pool; the pool size the fit
-    should pin -- numba's omp layer beside OpenBLAS's pthreads, both spinning
-    after their regions -- is a measured property of the machine, recorded
-    by the benchmark, not a default set here.
-    ``block_cross_tensor_tensor_channel_threads`` records the pool used.
+    ROW PASSES.  The raw stage makes two sequential permutation passes (the
+    channel bins into cell order) and one pass over the cell-CSR per block,
+    plus one permutation of ``W`` per grid tensor per build, held by
+    ``cache`` for every partner of that grid.  The dense stage makes one
+    random-access pass per block.
     """
     n1, n2 = grid.n_bins1, grid.n_bins2
     band = chan.raw_channels
@@ -570,15 +559,12 @@ def _tensor_channel_histogram(
     width = band.projection.shape[0]
     H = np.empty((n1 * n2, width)) if cache is None else cache.channel_accumulator(n1 * n2, width)
     ptr, order = grid.cell_csr()
-    bin1, bin2, w = _gather_cell_order(order, chan.idx1, chan.idx2, W)
-    operands = (band.offsets1, band.values1, band.offsets2, band.values2, band.k2_raw, H)
-    threads = get_num_threads()
-    if threads == 1:
-        _cell_hist_raw_kron(ptr, bin1, bin2, w, *operands)
-    else:
-        _cell_hist_raw_kron_parallel(ptr, bin1, bin2, w, *operands, 8 * threads)
+    bin1, bin2 = _gather_cell_order(order, chan.idx1, chan.idx2)
+    w = W[order] if cache is None else cache.cell_weights(order, W)
+    _cell_hist_raw_kron(
+        ptr, bin1, bin2, w, band.offsets1, band.values1, band.offsets2, band.values2, band.k2_raw, H
+    )
     _profile_count(profile, "block_cross_tensor_tensor_channel_raw")
-    _profile_record(profile, "block_cross_tensor_tensor_channel_threads", threads)
     return H, band.projection @ chan.R_inv
 
 
@@ -671,8 +657,7 @@ def _cross_gram_tensor_tensor_channels(
     to ``n * width1 * width2`` multiply-adds (16 per row) on streaming
     inputs, 10.4 ms against 30-35 ms on the production block at one thread
     (indicative), and widens stage 2 from 81 to 100 channels (+8%): the block
-    2.1-2.4x below the dense stage.  Its cell loop is the one parallel region
-    of the route (see ``_tensor_channel_histogram``); the GEMMs are BLAS's.
+    2.1-2.4x below the dense stage.  Serial: no parallel kernel.
     """
     if gm_i.tensor_id == gm_j.tensor_id:
         return None

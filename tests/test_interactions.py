@@ -2083,10 +2083,20 @@ class TestDiscreteTensorRawBand:
         x2 = rng.uniform(0, 50, 3000)
         _ti, result = self._build(Spline(kind="cr", k=10), x1, Spline(kind="cr", k=10), x2)
         assert result.raw_channels is None
-        _ti, result = self._build(Spline(kind="cr", k=10), x1, Spline(kind="ps", k=10), x2)
+        ti, result = self._build(Spline(kind="cr", k=10), x1, Spline(kind="ps", k=10), x2)
         band = result.raw_channels
         assert band.values1.shape == (64, 10) and band.values2.shape == (64, 4)
         assert not band.offsets1.any()
+        # The raw stage runs on such pairs in production, so the identity it
+        # relies on is pinned here too: each band, expanded and projected,
+        # reproduces its stored centred margin.
+        for offsets, values, marginal, basis in (
+            (band.offsets1, band.values1, ti._marginal1, result.B1_unique),
+            (band.offsets2, band.values2, ti._marginal2, result.B2_unique),
+        ):
+            k_raw = marginal.projection.shape[0]
+            reproduced = self._expand(offsets, values, k_raw) @ marginal.projection
+            assert np.abs(reproduced - basis).max() <= 1e-15
 
     def test_legacy_cr_band_is_clamped_at_the_upper_boundary(self):
         # A cr parent with m=1 stays on the projected B-spline basis, whose
