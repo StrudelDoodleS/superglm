@@ -407,6 +407,27 @@ class TensorMarginalInfo:
     normalize_penalty: bool = False  # rescale before tensor kron assembly
 
 
+# ── Tensor raw band ────────────────────────────────────────────
+@dataclass(frozen=True)
+class TensorRawChannels:
+    """The raw B-spline band of a discretised tensor term's two margins.
+
+    Row ``r`` of margin ``k``'s raw basis on its support is ``values_k[r]``
+    at columns ``offsets_k[r]:offsets_k[r] + values_k.shape[1]`` and zero
+    elsewhere, the window clamped inside the raw columns.  The stored centred
+    margin is that raw row times the marginal projection, so ``projection =
+    kron(P1, P2)`` carries a block accumulated in the raw joint columns
+    (``a1 * k2_raw + a2``) onto the centred ones.
+    """
+
+    offsets1: NDArray  # (n_bins1,) first column of each window, intp
+    values1: NDArray  # (n_bins1, width1) the band
+    offsets2: NDArray  # (n_bins2,)
+    values2: NDArray  # (n_bins2, width2)
+    k2_raw: int  # raw columns of the second margin
+    projection: NDArray  # (k1_raw * k2_raw, K1_eff * K2_eff)
+
+
 # ── Discretized tensor build result ─────────────────────────────
 @dataclass
 class DiscreteTensorBuildResult:
@@ -424,6 +445,7 @@ class DiscreteTensorBuildResult:
     B2_unique: NDArray  # (n_bins2, K2) second marginal at bin centers
     idx1: NDArray  # (n,) first marginal bin index
     idx2: NDArray  # (n,) second marginal bin index
+    raw_channels: TensorRawChannels | None  # the raw band, when narrower than the centred row
 
 
 # ── Fit statistics (summary without sample arrays) ────────────

@@ -734,6 +734,7 @@ def _process_info(
                 R_inv,
                 bin_idx,
                 tensor_id=tensor_id,
+                raw_channels=tensor_build.raw_channels,
             )
         elif use_discrete:
             gm = DiscretizedSSPGroupMatrix(B_unique, R_inv, bin_idx)
@@ -770,6 +771,7 @@ def _process_info(
                 R_inv,
                 bin_idx,
                 tensor_id=tensor_id,
+                raw_channels=tensor_build.raw_channels,
             )
             gm.omega = info.penalty_matrix
         elif use_discrete:
@@ -799,6 +801,7 @@ def _process_info(
                 np.eye(info.n_cols, dtype=np.float64),
                 bin_idx,
                 tensor_id=tensor_id,
+                raw_channels=tensor_build.raw_channels,
             )
             if info.penalty_matrix is not None:
                 gm.omega = info.penalty_matrix
@@ -1249,6 +1252,7 @@ def rebuild_design_matrix_with_lambdas(
                 R_inv_new,
                 gm.bin_idx,
                 tensor_id=gm.tensor_id,
+                raw_channels=gm.raw_channels,
             )
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection

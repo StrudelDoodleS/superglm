@@ -9,6 +9,7 @@ import pytest
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm.group_matrix import DiscretizedTensorGroupMatrix
+from superglm.types import TensorRawChannels
 
 
 def _tensor(n1: int, n2: int, k1: int, k2: int, n: int, p: int):
@@ -190,7 +191,27 @@ def test_tensor_matvec_workspace_has_no_observation_by_basis_arrays():
 # ── Tensor x tensor cross-Gram over distinct margins: the channel route ────
 
 
-def _tensor_pair(n, left, right, *, shared=False, same_id=False, seed=911):
+_BAND = 4
+
+
+def _banded_margin(rng, bins, k):
+    """A margin whose centred basis is a width-4 raw band times a projection.
+
+    Returns ``(offsets, values, projection, basis)`` with ``basis`` the band
+    expanded into its ``k + 3`` raw columns and projected -- the identity the
+    raw stage relies on, here true by construction.  Three spare columns give
+    every row a choice of window, so the offsets vary.
+    """
+    k_raw = k + 3
+    offsets = rng.integers(k_raw - _BAND + 1, size=bins, dtype=np.intp)
+    values = rng.normal(size=(bins, _BAND))
+    projection = rng.normal(size=(k_raw, k)) / np.sqrt(k_raw)
+    expanded = np.zeros((bins, k_raw))
+    np.put_along_axis(expanded, offsets[:, None] + np.arange(_BAND), values, axis=1)
+    return offsets, values, projection, expanded @ projection
+
+
+def _tensor_pair(n, left, right, *, shared=False, same_id=False, seed=911, banded=True):
     """Two factored tensors over the same ``n`` rows.
 
     ``left`` and ``right`` are ``(n1, n2, k1, k2, p)``.  Each stored joint
@@ -200,34 +221,59 @@ def _tensor_pair(n, left, right, *, shared=False, same_id=False, seed=911):
     array on both sides (one shared margin), or both bin indices with
     ``"both"``; ``same_id`` gives the right tensor the left one's margins,
     indices and id, differing only in its transform (a decomposed subgroup
-    pair).
+    pair).  ``banded`` attaches both margins' raw band as ``raw_channels``
+    (the production ``ps`` case) to both tensors, to neither with ``False``,
+    or per side with a ``(left, right)`` pair.
     """
     rng = np.random.default_rng(seed)
+    banded_left, banded_right = (banded, banded) if isinstance(banded, bool) else banded
 
-    def build(shape, idx1, idx2, tensor_id, margins=None):
+    def build(shape, idx1, idx2, tensor_id, margins, with_band):
         n1, n2, k1, k2, p = shape
-        if margins is None:
-            margins = (
-                rng.normal(size=(n1, k1)) / np.sqrt(k1),
-                rng.normal(size=(n2, k2)) / np.sqrt(k2),
-            )
-        b1, b2 = margins
+        (offsets1, values1, projection1, b1), (offsets2, values2, projection2, b2) = margins
         joint = np.einsum("ia,jb->ijab", b1, b2).reshape(n1 * n2, k1 * k2)
         transform = rng.normal(size=(k1 * k2, p)) / np.sqrt(k1 * k2)
-        return DiscretizedTensorGroupMatrix(
-            b1, b2, idx1, idx2, joint, transform, idx1 * n2 + idx2, tensor_id=tensor_id
+        raw = TensorRawChannels(
+            offsets1=offsets1,
+            values1=values1,
+            offsets2=offsets2,
+            values2=values2,
+            k2_raw=k2 + 3,
+            projection=np.kron(projection1, projection2),
         )
+        return DiscretizedTensorGroupMatrix(
+            b1,
+            b2,
+            idx1,
+            idx2,
+            joint,
+            transform,
+            idx1 * n2 + idx2,
+            tensor_id=tensor_id,
+            raw_channels=raw if with_band else None,
+        )
+
+    def margins(shape):
+        return _banded_margin(rng, shape[0], shape[2]), _banded_margin(rng, shape[1], shape[3])
 
     def draw(shape):
         return tuple(rng.integers(bins, size=n, dtype=np.intp) for bins in shape[:2])
 
     idx1, idx2 = draw(left)
-    first = build(left, idx1, idx2, 1)
+    left_margins = margins(left)
+    first = build(left, idx1, idx2, 1, left_margins, banded_left)
     if same_id:
-        second = build(left, idx1, idx2, 1, (first.B1_unique_t, first.B2_unique_t))
+        second = build(left, idx1, idx2, 1, left_margins, banded_right)
     else:
         other1, other2 = draw(right)
-        second = build(right, idx1 if shared else other1, idx2 if shared == "both" else other2, 2)
+        second = build(
+            right,
+            idx1 if shared else other1,
+            idx2 if shared == "both" else other2,
+            2,
+            margins(right),
+            banded_right,
+        )
     return first, second, rng
 
 
@@ -258,6 +304,95 @@ def test_row_subset_does_not_inherit_the_cell_csr():
     assert left_sub._cell_csr is None
     _ptr, order = left_sub.cell_csr()
     np.testing.assert_array_equal(order, _stable_cell_order(left_sub))
+
+    # Proof by mutation that the raw block reads the cache and the subset
+    # cannot read the parent's: a shuffled parent order scrambles which rows
+    # land in which cell, and only the parent's block goes wrong.  The left
+    # tensor is the grid side (35 x 5 < 48 x 6 cells).
+    weights = rng.normal(size=n)
+    expected, bound = _dense_cross(left, right, weights)
+    ptr, order = left.cell_csr()
+    left._cell_csr = (ptr, rng.permutation(order))
+    profile = {}
+    poisoned = algebra._cross_gram(left, right, weights, profile=profile)
+    assert profile["block_cross_tensor_tensor_channel_raw"] == 1
+    assert np.linalg.norm(poisoned - expected, ord=np.inf) > bound
+    right_sub = right.row_subset(rows)
+    sub_expected, sub_bound = _dense_cross(left_sub, right_sub, weights[rows])
+    profile = {}
+    actual = algebra._cross_gram(left_sub, right_sub, weights[rows], profile=profile)
+    assert profile["block_cross_tensor_tensor_channel_raw"] == 1
+    _assert_cross_matches(actual, sub_expected, sub_bound)
+
+
+def test_channel_accumulator_is_reused_across_blocks_in_a_build(monkeypatch):
+    # Three blocks through one build cache: the second needs a larger scratch
+    # (a 10 x 10 grid against 4 x 4), so the buffer grows once; the third fits
+    # the grown buffer and reuses it.  Stale contents cannot leak because the
+    # kernel writes every row, which the oracle check on each block pins.
+    n = 300
+    small = _tensor_pair(n, (4, 4, 2, 2, 3), (4, 4, 2, 2, 3))
+    large = _tensor_pair(n, (10, 10, 2, 2, 3), (10, 10, 2, 2, 3), seed=5)
+    weights = small[2].normal(size=n)
+    scratches = []
+    original = algebra._cell_hist_raw_kron
+
+    def recorded(*args):
+        scratches.append(args[-1])
+        return original(*args)
+
+    monkeypatch.setattr(algebra, "_cell_hist_raw_kron", recorded)
+    cache = algebra._BlockWeightCache()
+    for left, right, _rng in (small, large, small):
+        expected, bound = _dense_cross(left, right, weights)
+        actual = algebra._cross_gram(left, right, weights, cache=cache)
+        _assert_cross_matches(actual, expected, bound)
+    first, grown, reused = scratches
+    assert grown.size > first.size
+    assert not np.shares_memory(first, grown)
+    assert np.shares_memory(grown, reused)
+    assert reused.shape == first.shape
+
+
+@pytest.mark.parametrize("case", ["unbanded", "banded_channel", "banded_grid"])
+def test_raw_channel_stage_declines_to_the_dense_kernel_without_a_band(case):
+    # The smaller grid is the grid side (30 x 5 < 100 x 6 cells), so the raw
+    # kernel runs exactly when the LARGER tensor -- the channel side -- carries
+    # the band; a band on the grid side alone is not consumed.
+    n = 400
+    banded = {"unbanded": False, "banded_channel": (False, True), "banded_grid": (True, False)}
+    left, right, rng = _tensor_pair(n, (6, 5, 2, 3, 6), (10, 10, 2, 3, 5), banded=banded[case])
+    assert (left.raw_channels is None) == (case != "banded_grid")
+    assert (right.raw_channels is None) == (case != "banded_channel")
+    weights = rng.normal(size=n)
+    expected, bound = _dense_cross(left, right, weights)
+    profile = {}
+    actual = algebra._cross_gram(left, right, weights, profile=profile)
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(case == "banded_channel")
+    _assert_cross_matches(actual, expected, bound)
+
+
+def test_raw_stage_declines_to_the_dense_stage_between_the_two_widths(monkeypatch):
+    # 48 x 48 grids with 12 centred and 42 raw channels: a budget between
+    # 2304 * 12 and 2304 * 42 cells admits the channel route at the stored
+    # width but not the raw scratch, so the dense stage runs -- not the row
+    # route.  The raw stage's wider scratch must never cost a block the
+    # channel route it had before.
+    n = 6000
+    left, right, rng = _tensor_pair(n, (48, 48, 3, 4, 10), (48, 48, 4, 3, 11))
+    stored = 48 * 48 * right.B_unique.shape[1]
+    raw = 48 * 48 * right.raw_channels.projection.shape[0]
+    assert stored < raw
+    monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", (stored + raw) // 2)
+    weights = rng.normal(size=n)
+    expected, bound = _dense_cross(left, right, weights)
+    profile = {}
+    actual = algebra._cross_gram(left, right, weights, profile=profile)
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert "block_cross_tensor_tensor_channel_raw" not in profile
+    assert profile.get("block_cross_disc_disc_rows_calls", 0) == 0
+    _assert_cross_matches(actual, expected, bound)
 
 
 @pytest.mark.parametrize(
@@ -372,19 +507,21 @@ def _weights(kind, rng, n):
     return rng.normal(size=n)
 
 
+@pytest.mark.parametrize("banded", [True, False])
 @pytest.mark.parametrize("kind", ["uniform", "zeros", "signed"])
 @pytest.mark.parametrize("shape", list(_ORACLE_SHAPES))
-def test_distinct_margin_tensor_cross_gram_matches_dense_oracle(shape, kind):
+def test_distinct_margin_tensor_cross_gram_matches_dense_oracle(shape, kind, banded):
     left_shape, right_shape, n = _ORACLE_SHAPES[shape]
-    left, right, rng = _tensor_pair(n, left_shape, right_shape)
+    left, right, rng = _tensor_pair(n, left_shape, right_shape, banded=banded)
     weights = _weights(kind, rng, n)
     expected, bound = _dense_cross(left, right, weights)
     for first, second in ((left, right), (right, left)):
         profile = {}
         actual = algebra._cross_gram(first, second, weights, profile=profile)
-        # The route assertion is what gives the numeric half its teeth: the
-        # displaced route matches this oracle too.
+        # The route assertions are what give the numeric half its teeth: the
+        # displaced route and the dense stage match this oracle too.
         assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+        assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(banded)
         _assert_cross_matches(actual if first is left else actual.T, expected, bound)
 
 
@@ -393,13 +530,15 @@ def test_channel_route_grids_the_smaller_side_and_the_left_operand_on_a_tie(monk
     # The two orientations sum in different orders and differ at about one
     # ulp, so which side is the grid is part of the numerical contract. In
     # production both grids are 256 x 256 with 81 columns and the counts tie.
+    # Orientation is decided before the stage; the dense stage is the one
+    # observed here, through the kernel that receives the grid's indices.
     small, large = (6, 5, 2, 3, 6), (10, 10, 2, 3, 5)
     if case == "tie":
-        left, right, rng = _tensor_pair(300, small, (5, 6, 3, 2, 5))
+        left, right, rng = _tensor_pair(300, small, (5, 6, 3, 2, 5), banded=False)
     elif case == "left_smaller":
-        left, right, rng = _tensor_pair(300, small, large)
+        left, right, rng = _tensor_pair(300, small, large, banded=False)
     else:
-        left, right, rng = _tensor_pair(300, large, small)
+        left, right, rng = _tensor_pair(300, large, small, banded=False)
     grids = []
     original = algebra._disc_disc_2d_hist_channels
 
@@ -465,10 +604,14 @@ def test_distinct_margin_tensor_cross_gram_bounds_its_transient():
     finally:
         tracemalloc.stop()
     assert profile["block_cross_tensor_tensor_channel_calls"] == 1
-    cells = 64 * 64 * width
-    tmp_bytes = 8 * 7 * 64 * width
-    # The stage-1 histogram (cells doubles) is allocated by numba's runtime,
-    # which tracemalloc does not trace, so the ceiling is generous by that
-    # term; what it pins is that no observation-row panel is materialised.
-    assert peak - before <= 8 * cells + tmp_bytes + 64 * 1024
+    assert profile["block_cross_tensor_tensor_channel_raw"] == 1
+    raw_width = right.raw_channels.projection.shape[0]
+    cells = 64 * 64 * raw_width
+    gathers = 3 * 8 * n
+    tmp_bytes = 8 * 7 * 64 * raw_width
+    # Without a build cache the raw scratch (cells doubles) is a fresh
+    # allocation, and the three cell-order gathers are n-vectors (24 bytes a
+    # row); both are traced.  What the ceiling pins is that no observation-row
+    # panel (392 bytes a row here) is materialised.
+    assert peak - before <= 8 * cells + gathers + tmp_bytes + 64 * 1024
     assert result.shape == (40, 40)

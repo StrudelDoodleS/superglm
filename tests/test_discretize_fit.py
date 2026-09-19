@@ -6,6 +6,7 @@ import pytest
 
 from superglm import SuperGLM
 from superglm._group_matrix import _group_matrix_algebra as algebra
+from superglm.features import interaction as interaction_module
 from superglm.features.categorical import Categorical
 from superglm.features.numeric import Numeric
 from superglm.features.spline import CubicRegressionSpline, NaturalSpline, Spline
@@ -1600,18 +1601,22 @@ def _two_pair_frame():
     return pd.DataFrame(x), y
 
 
-def _fit_two_pairs(X, y, *, decline_channel, reml):
+def _fit_two_pairs(X, y, *, reml, decline_channel=False, decline_raw=False):
     """Fit the two-pair model and count the tensor x tensor routes it took.
 
     The solvers do not hand a profile dict down to the block assembler, so the
     routes are observed the way the dispatch tests observe them: through the
-    module-level names the assembler resolves at call time.  The control arm
-    forces the decline by patching the helper itself rather than the
-    aggregate-cell budget, which other routes in the same fit read.
+    module-level names the assembler resolves at call time.  The control arms
+    force a decline at its source: the channel arm patches the helper itself
+    rather than the aggregate-cell budget, which other routes in the same fit
+    read; the raw arm patches the band attachment in ``build_discrete``, so
+    every constructor site carries ``raw_channels=None`` and the channel
+    route runs its dense stage.
     """
-    routes = {"channel": 0, "declined": 0, "rows": 0}
+    routes = {"channel": 0, "declined": 0, "rows": 0, "raw": 0}
     helper = algebra._cross_gram_tensor_tensor_channels
     rows = algebra._support_support_raw_cross
+    raw_kernel = algebra._cell_hist_raw_kron
 
     def counted_helper(*args, **kwargs):
         result = None if decline_channel else helper(*args, **kwargs)
@@ -1621,6 +1626,10 @@ def _fit_two_pairs(X, y, *, decline_channel, reml):
     def counted_rows(*args, **kwargs):
         routes["rows"] += 1
         return rows(*args, **kwargs)
+
+    def counted_raw(*args):
+        routes["raw"] += 1
+        return raw_kernel(*args)
 
     # 64 bins per margin: each tensor observes about 4,000 of its 4,096 cells,
     # so the tensor x tensor block's n_joint (about 1.6e7) is above the
@@ -1635,6 +1644,9 @@ def _fit_two_pairs(X, y, *, decline_channel, reml):
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(algebra, "_cross_gram_tensor_tensor_channels", counted_helper)
         patch.setattr(algebra, "_support_support_raw_cross", counted_rows)
+        patch.setattr(algebra, "_cell_hist_raw_kron", counted_raw)
+        if decline_raw:
+            patch.setattr(interaction_module, "_tensor_raw_channels", lambda *args: None)
         if reml:
             model.fit_reml(X, y, max_reml_iter=30, runtime_validation="skip")
         else:
@@ -1698,3 +1710,52 @@ def test_distinct_margin_tensor_route_reaches_the_same_reml_optimum():
     assert channel.result.phi == pytest.approx(dense.result.phi, rel=1e-12)
     np.testing.assert_allclose(channel.predict(X), dense.predict(X), rtol=1e-10, atol=0)
     assert channel.result.effective_df == pytest.approx(dense.result.effective_df, rel=1e-10)
+
+
+def _assert_raw_stage_differs(raw_routes, dense_routes):
+    # Every channel block of the raw arm ran the raw kernel, across all the
+    # rebuilds of the REML loop, so a constructor site dropping raw_channels
+    # would show as a shortfall here; the dense arm never reaches the kernel.
+    assert raw_routes["channel"] > 0
+    assert raw_routes["raw"] == raw_routes["channel"]
+    assert dense_routes["channel"] > 0
+    assert dense_routes["raw"] == 0
+
+
+def test_raw_channel_stage_reproduces_the_dense_fit():
+    """The raw band changes the arithmetic of one stage, not the fit.
+
+    Same tolerances as the channel-versus-dense-route test above: the raw
+    stage forms ``(w * raw1) * raw2`` per row in cell order and projects
+    after the grid contraction, a round-off perturbation of the Gram that the
+    IRLS fixed point contracts.
+    """
+    X, y = _two_pair_frame()
+    raw, raw_routes = _fit_two_pairs(X, y, reml=False)
+    dense, dense_routes = _fit_two_pairs(X, y, reml=False, decline_raw=True)
+    _assert_raw_stage_differs(raw_routes, dense_routes)
+
+    np.testing.assert_allclose(raw.predict(X), dense.predict(X), rtol=1e-12, atol=0)
+    assert raw.result.deviance == pytest.approx(dense.result.deviance, rel=1e-12)
+    assert raw.result.effective_df == pytest.approx(dense.result.effective_df, rel=1e-12)
+    assert raw.result.phi == pytest.approx(dense.result.phi, rel=1e-12)
+    np.testing.assert_allclose(raw.result.beta, dense.result.beta, rtol=1e-10, atol=0)
+
+
+def test_raw_channel_stage_reaches_the_same_reml_optimum():
+    """Through REML the raw and dense stages reach the same optimum."""
+    X, y = _two_pair_frame()
+    raw, raw_routes = _fit_two_pairs(X, y, reml=True)
+    dense, dense_routes = _fit_two_pairs(X, y, reml=True, decline_raw=True)
+    _assert_raw_stage_differs(raw_routes, dense_routes)
+
+    raw_reml = raw.reml_diagnostics()
+    dense_reml = dense.reml_diagnostics()
+    assert raw_reml["termination_reason"] != "max_reml_iter"
+    assert raw_reml["termination_reason"] == dense_reml["termination_reason"]
+    assert raw_reml["n_reml_iter"] == dense_reml["n_reml_iter"]
+    assert raw_reml["objective"] == pytest.approx(dense_reml["objective"], rel=1e-11)
+    assert raw.result.deviance == pytest.approx(dense.result.deviance, rel=1e-12)
+    assert raw.result.phi == pytest.approx(dense.result.phi, rel=1e-12)
+    np.testing.assert_allclose(raw.predict(X), dense.predict(X), rtol=1e-10, atol=0)
+    assert raw.result.effective_df == pytest.approx(dense.result.effective_df, rel=1e-10)

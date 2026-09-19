@@ -250,7 +250,8 @@ def _disc_disc_2d_hist(bin_idx_i, bin_idx_j, W, n_bins_i, n_bins_j):
 
 @njit(cache=True)
 def _disc_disc_2d_hist_channels(bin_idx_i, bin_idx_j, chan_idx, W, chan_vals, n_bins_i, n_bins_j):
-    """Fused multi-channel 2D histogram for tensor-main cross-grams."""
+    """Fused multi-channel 2D histogram: tensor-main cross-grams and the dense
+    stage of the tensor-tensor channel route."""
     n = len(W)
     n_channels = chan_vals.shape[1]
     result = np.zeros((n_bins_i * n_bins_j, n_channels))
@@ -261,6 +262,63 @@ def _disc_disc_2d_hist_channels(bin_idx_i, bin_idx_j, chan_idx, W, chan_vals, n_
         for c in range(n_channels):
             result[row, c] += w * chan_vals[c_src, c]
     return result
+
+
+@njit(inline="always")
+def _add_raw_row(acc, w, bin1, bin2, offsets1, values1, offsets2, values2, k2_raw):
+    """Add ``w * kron(raw1[bin1], raw2[bin2])`` to one accumulator row, band by band."""
+    origin = offsets1[bin1] * k2_raw + offsets2[bin2]
+    # The row's width1 x width2 raw non-zeros: the algorithm is this nested loop.
+    for a in range(values1.shape[1]):
+        weighted = w * values1[bin1, a]
+        base = origin + a * k2_raw
+        for b in range(values2.shape[1]):
+            acc[base + b] += weighted * values2[bin2, b]
+
+
+@njit(cache=True)
+def _gather_cell_order(order, bin1, bin2, W):
+    """Permute a partner's channel bins and the weights into a grid's cell order.
+
+    Three sequential passes (1.1 ms at 300,000 rows) so that the cell loop
+    streams every input; gathering through ``order`` inside the cell loop
+    instead cost as much as the dense kernel it replaces (31.5 against 30.3
+    ms, measured), the kernel being latency-bound on dependent random reads.
+    """
+    n = order.shape[0]
+    bin1_sorted = np.empty(n, dtype=np.intp)
+    bin2_sorted = np.empty(n, dtype=np.intp)
+    w_sorted = np.empty(n)
+    for t in range(n):
+        bin1_sorted[t] = bin1[order[t]]
+    for t in range(n):
+        bin2_sorted[t] = bin2[order[t]]
+    for t in range(n):
+        w_sorted[t] = W[order[t]]
+    return bin1_sorted, bin2_sorted, w_sorted
+
+
+@njit(cache=True)
+def _cell_hist_raw_kron(ptr, bin1, bin2, w, offsets1, values1, offsets2, values2, k2_raw, out):
+    """Raw-band channel histogram over a cell-CSR: ``out[c] = sum over the rows
+    ``t`` of cell ``c`` of ``w[t] * kron(raw1[bin1[t]], raw2[bin2[t]])``.
+
+    ``bin1``, ``bin2`` and ``w`` are in cell order (``_gather_cell_order``), so
+    every input streams, each cell sums into one L1-resident row, and ``out``
+    is written once, sequentially.  Every row of ``out`` is written -- the
+    empty cells with zeros -- so the caller passes scratch without zeroing it.
+    """
+    width = out.shape[1]
+    acc = np.zeros(width)
+    # Explicit loops for the zeroing and the copy: numba's slice assignment
+    # made the whole kernel 2.5x slower (17.6 against 7.1 ms, measured).
+    for cell in range(ptr.shape[0] - 1):
+        for column in range(width):
+            acc[column] = 0.0
+        for t in range(ptr[cell], ptr[cell + 1]):
+            _add_raw_row(acc, w[t], bin1[t], bin2[t], offsets1, values1, offsets2, values2, k2_raw)
+        for column in range(width):
+            out[cell, column] = acc[column]
 
 
 @njit(cache=True)
@@ -641,7 +699,13 @@ def _warmup_group_matrix_kernels() -> None:
     _csr_weighted_bincount(values, csr_indices, csr_indptr, 2, codes, values, 2)
     _disc_disc_2d_hist(codes, codes, values, 2, 2)
     _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)
-    _cell_csr(codes, codes, 2, 2)
+    cell_ptr, cell_order = _cell_csr(codes, codes, 2, 2)
+    bin1, bin2, w = _gather_cell_order(cell_order, codes, codes, values)
+    # Two raw columns per margin at band width two: every window starts at 0.
+    starts = np.zeros(2, dtype=np.intp)
+    _cell_hist_raw_kron(
+        cell_ptr, bin1, bin2, w, starts, matrix, starts, matrix, 2, np.empty((4, 4))
+    )
     _fused_bincount_2(codes, values, values, 2)
     _random_effect_sufficient_stats(codes, values, values, 2)
     _factor_smooth_csr_matvec(values, csr_indices, csr_indptr, codes, matrix)
