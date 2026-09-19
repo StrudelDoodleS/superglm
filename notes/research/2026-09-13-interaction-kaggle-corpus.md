@@ -182,3 +182,57 @@ held-out metrics. Large table size alone does not establish breadth: use the
 core corpus's separate housing, credit and cancer controls as well. This
 acquisition task ran no model fits and makes no claim about automatic feature
 engineering or interaction accuracy.
+
+## Update 2026-09-19: eleven competition tables are now local
+
+The five tables above came from public URLs. Eleven more come from Kaggle
+competitions, which only hand out files to an account that has accepted each
+competition's rules.
+
+What happened, in order. The Kaggle CLI found a login token already sitting in
+its default place; nothing here opened, copied or printed it, and the CLI reads
+it by itself. Asking each of seventeen competitions for its *list* of files
+worked every time. Asking for an actual *file* failed sixteen times out of
+seventeen with "403 Forbidden" — the one that worked was the house-prices
+tutorial competition, whose rules the account holder had accepted long ago.
+The account holder then went to each competition page and accepted its rules,
+after which the same download command worked. One competition,
+`ClaimPredictionChallenge`, is closed to late joining, so its rules can never
+be accepted and its files stay out of reach; that is why eleven competitions
+are registered here and not twelve.
+
+Each table below was downloaded once, checked byte-for-byte against a recorded
+size and SHA-256, and then read through the shared loader, which also checks
+the row count, the exact column list, the missing-value counts per column and
+the target's support. All eleven passed. Together they add 2,799,567 rows in
+842,256,652 bytes.
+
+| Registry ID | Competition table | Rows | Target | Family | Bytes | SHA-256 prefix |
+| --- | --- | ---: | --- | --- | ---: | --- |
+| `kaggle_allstate_claims_severity` | Allstate Claims Severity | 188,318 | `loss` | gamma | 15,848,282 | `fe1dec6e5e9a` |
+| `kaggle_bnp_paribas_cardif_claims` | BNP Paribas Cardif claims management | 114,321 | `target` | binomial | 51,820,265 | `cb7804341e1f` |
+| `kaggle_give_me_some_credit` | Give Me Some Credit | 150,000 | `SeriousDlqin2yrs` | binomial | 2,791,537 | `af11b34ceace` |
+| `kaggle_home_credit_default_risk` | Home Credit Default Risk, `application_train` | 307,511 | `TARGET` | binomial | 37,847,529 | `64289b17dd31` |
+| `kaggle_homesite_quote_conversion` | Homesite Quote Conversion | 260,753 | `QuoteConversion_Flag` | binomial | 38,939,183 | `3d591f0330fe` |
+| `kaggle_ieee_cis_fraud` | IEEE-CIS Fraud Detection, `train_transaction` | 590,540 | `isFraud` | binomial | 61,183,858 | `d426943b8100` |
+| `kaggle_liberty_mutual_fire_peril` | Liberty Mutual Fire Peril Loss Cost | 452,061 | `target` | Tweedie p=1.5 | 580,956,011 | `d1944a670c51` |
+| `kaggle_liberty_mutual_property_inspection` | Liberty Mutual Property Inspection | 50,999 | `Hazard` | poisson | 988,133 | `642cda7127b9` |
+| `kaggle_porto_seguro_safe_driver` | Porto Seguro's Safe Driver Prediction | 595,212 | `target` | binomial | 31,424,352 | `e59be1048328` |
+| `kaggle_prudential_life_assessment` | Prudential Life Insurance Assessment | 59,381 | `Response` | gaussian | 2,538,336 | `9db0613f05d3` |
+| `kaggle_sberbank_housing` | Sberbank Russian Housing Market | 30,471 | `price_doc` | gaussian | 17,919,166 | `2221642984c0` |
+
+Three of these tables need a note before anyone fits them. The Kaggle copy of
+the Allstate file carries junk lines after row 188,318, so the registry stops
+reading there. Fire Peril's target is zero in 99.7 per cent of rows and the
+competition scored it with a per-row weight column, so both the smooth model
+and the boosting control have to carry that weight. Sberbank's price is fitted
+on the log scale with floor area as an offset, which is the price-per-square-
+metre target its winners used.
+
+Reading Fire Peril takes about a minute; the other ten are seconds.
+
+The registry now records `availability: "kaggle_competition"` for these
+eleven. The loader treats that like any other pinned artifact: if the file is
+already there it is verified and read, and if it is missing it runs the pinned
+Kaggle CLI to fetch exactly the one declared member, verifies it, and only then
+publishes it.
