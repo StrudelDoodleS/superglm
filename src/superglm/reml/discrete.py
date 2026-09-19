@@ -24,11 +24,14 @@ from superglm.dm_builder import rebuild_design_matrix_with_lambdas
 from superglm.group_matrix import DesignMatrix, DiscretizedTensorGroupMatrix
 from superglm.links import stabilize_eta
 from superglm.reml.convergence import (
+    FLAT_DIRECTION_FREEZE_FLOOR,
+    classify_dead_feasible_exit,
     direction_penalty_ranks,
     evaluate_reml_candidate,
     freeze_flat_directions,
     mask_frozen_stop_gradient,
     project_reml_gradient,
+    trial_counts_as_precision_evidence,
 )
 from superglm.reml.gradient import reml_direct_gradient, reml_direct_hessian
 from superglm.reml.objective import (
@@ -169,6 +172,156 @@ def _shared_tensor_penalty_pairs(
         if isinstance(gm, DiscretizedTensorGroupMatrix):
             out.append((group_name, (idxs[0], idxs[1])))
     return out
+
+
+def _tensor_trust_ratios(
+    delta: NDArray,
+    names: list[str],
+    shared_tensor_pairs: list[tuple[str, tuple[int, int]]],
+    frozen: NDArray,
+    base_cap: float,
+    cap_u: float,
+    cap_v: float,
+) -> list[tuple[str, float]]:
+    """Constraint ratios of ``delta`` against the shared-tensor trust region.
+
+    The region is the box ``|delta_k| <= base_cap`` on every coordinate,
+    intersected for every shared tensor pair whose two margins are both
+    active with the box ``|u| <= cap_u``, ``|v| <= cap_v`` in the pair's
+    sum/difference coordinates ``u = (d_i + d_j) / 2``,
+    ``v = (d_i - d_j) / 2``. A ratio at or below 1.0 is feasible.
+    """
+    ratios = [(f"base_cap:{names[k]}", abs(float(delta[k])) / base_cap) for k in range(delta.size)]
+    for group_name, (i, j) in shared_tensor_pairs:
+        if frozen[i] or frozen[j]:
+            continue
+        u = 0.5 * (float(delta[i]) + float(delta[j]))
+        v = 0.5 * (float(delta[i]) - float(delta[j]))
+        ratios.append((f"{group_name}:u", abs(u) / cap_u))
+        ratios.append((f"{group_name}:v", abs(v) / cap_v))
+    return ratios
+
+
+def _damped_tensor_newton_step(
+    eigvecs: NDArray,
+    eigvals_pd: NDArray,
+    grad_sub: NDArray,
+    active_idx: NDArray,
+    m: int,
+    names: list[str],
+    shared_tensor_pairs: list[tuple[str, tuple[int, int]]],
+    frozen: NDArray,
+    base_cap: float,
+    cap_u: float,
+    cap_v: float,
+) -> tuple[NDArray, float, list[str]]:
+    """Damped modified-Newton step inside the shared-tensor trust region.
+
+    A line-search method needs a descent direction, ``g . d < 0`` (Nocedal
+    and Wright, *Numerical Optimization*, 2nd ed., Springer 2006, ch. 3).
+    A step bounded by a trust region is obtained by DAMPING the Newton
+    step, never by clipping its coordinates one at a time: with the
+    eigen-floored ``H_pd = V diag(lam) V^T`` already formed,
+    ``delta(mu) = -(H_pd + mu I)^-1 g = -V diag(1 / (lam + mu)) V^T g`` is a
+    descent direction for every ``mu >= 0`` -- ``g . delta(mu)`` is minus a
+    sum of squares over strictly positive ``lam_k + mu`` -- and it shrinks
+    the near-singular directions first (Levenberg-Marquardt; Nocedal and
+    Wright ch. 4; More and Sorensen, "Computing a trust region step", SIAM
+    J. Sci. Stat. Comput. 4 (1983) 553-572, doi:10.1137/0904038, for the
+    exact ellipsoidal subproblem). Projected Newton with coordinate bounds
+    (Bertsekas, SIAM J. Control Optim. 20 (1982) 221-246) is the other
+    standard route, and its analysis is exactly what shows that plain
+    coordinate clipping of a Newton step loses descent: this engine used
+    to clip each shared pair's ``v`` independently of its ``u``, and a pair
+    whose ``v`` was cut by a factor of 17 while ``u`` was cut by 1.9 came
+    back rotated into an ascent direction no line search could accept.
+
+    ``mu = 0`` is tried first, so a step already inside the region is the
+    plain modified-Newton step. Otherwise the smallest feasible ``mu`` is
+    bracketed geometrically and bisected on ``log mu``. The bracket's
+    feasible end is ``|g|_2 / r`` with ``r`` the smallest radius: every
+    constraint functional is bounded by ``|delta|_2 <= |g|_2 / mu``.
+    Each trial costs ``O(q^2)`` on the ``q``-dimensional active subspace.
+    Returns the step, ``mu``, and the names of the constraints on their
+    bound.
+    """
+    vt_g = eigvecs.T @ grad_sub
+
+    def step_at(mu: float) -> NDArray:
+        delta = np.zeros(m)
+        delta[active_idx] = -(eigvecs * (1.0 / (eigvals_pd + mu))) @ vt_g
+        return delta
+
+    def worst(delta: NDArray) -> float:
+        ratios = _tensor_trust_ratios(
+            delta, names, shared_tensor_pairs, frozen, base_cap, cap_u, cap_v
+        )
+        return max((r for _, r in ratios), default=0.0)
+
+    def binding(delta: NDArray) -> list[str]:
+        ratios = _tensor_trust_ratios(
+            delta, names, shared_tensor_pairs, frozen, base_cap, cap_u, cap_v
+        )
+        return [name for name, r in ratios if r >= 1.0 - 1e-6]
+
+    delta = step_at(0.0)
+    if worst(delta) <= 1.0:
+        return delta, 0.0, binding(delta)
+
+    pair_active = any(not (frozen[i] or frozen[j]) for _, (i, j) in shared_tensor_pairs)
+    radius = min(base_cap, cap_u, cap_v) if pair_active else base_cap
+    mu_hi = max(float(np.linalg.norm(grad_sub)) / radius, np.finfo(float).tiny)
+    for _ in range(64):  # round-off guard on the analytic bound
+        if worst(step_at(mu_hi)) <= 1.0:
+            break
+        mu_hi *= 2.0
+    else:  # pragma: no cover - delta(mu) -> 0 as mu -> inf
+        raise RuntimeError(
+            "Discrete tensor trust region could not be satisfied by damping: "
+            f"mu={mu_hi:.6g}, violation ratio={worst(step_at(mu_hi)):.6g}."
+        )
+    mu_lo = 0.5 * mu_hi
+    for _ in range(64):
+        if worst(step_at(mu_lo)) > 1.0:
+            break
+        mu_hi = mu_lo
+        mu_lo *= 0.5
+    else:
+        delta = step_at(mu_hi)
+        return delta, mu_hi, binding(delta)
+    for _ in range(64):
+        if mu_hi <= mu_lo * (1.0 + 1e-9):
+            break
+        mid = float(np.sqrt(mu_lo * mu_hi))
+        if worst(step_at(mid)) <= 1.0:
+            mu_hi = mid
+        else:
+            mu_lo = mid
+    delta = step_at(mu_hi)
+    return delta, mu_hi, binding(delta)
+
+
+def _surrogate_step_lengths(quad_grad: float, quad_curv: float, max_halving: int) -> list[float]:
+    """Step lengths the tensor surrogate backtrack tries, in order.
+
+    ``s = 1`` comes first: the damped step is the model minimiser inside
+    the trust region, so the model predicts a decrease there. Backtracking
+    halves, except that the sequence never steps PAST the unconstrained
+    model minimiser ``s* = -quad_grad / quad_curv``: when the next halving
+    would land below it, ``s*`` itself is tried, the best predicted
+    decrease available. A surrogate trial is scalar arithmetic, so there
+    is no reason to floor the backtrack: the old cap of five halvings
+    stopped at ``s = 1/16`` and killed searches whose minimiser was
+    smaller, with every trial predicting an increase and no candidate.
+    """
+    s_star = -quad_grad / quad_curv if (quad_grad < 0.0 and quad_curv > 0.0) else None
+    steps: list[float] = []
+    step = 1.0
+    for _ in range(max(int(max_halving), 0)):
+        steps.append(step)
+        halved = 0.5 * step
+        step = s_star if (s_star is not None and halved < s_star < step) else halved
+    return steps
 
 
 def optimize_discrete_reml_cached_w(
@@ -324,7 +477,8 @@ def optimize_discrete_reml_cached_w(
     _n_block_structured_cache_solves = 0
     _n_linesearch_surrogate_evals = 0
     _n_linesearch_full_evals = 0
-    _outer_step_stats: list[dict[str, float | int | bool | None | dict[str, float]]] = []
+    _n_dead_line_searches = 0
+    _outer_step_stats: list[dict[str, Any]] = []
     _tensor_post_stall_unlocked = False
     _prev_tensor_v: float | None = None
     structured_runtime_fallback_reason: str | None = None
@@ -638,6 +792,12 @@ def optimize_discrete_reml_cached_w(
             penalty_components=penalties,
         )
         _n_pirls_steps += 1
+        # The candidate is ONE working-model update. Its own convergence
+        # flag says whether that update changed anything: when it did not,
+        # the working model has settled at these lambdas and the next
+        # iteration would recompute the same gradient, Hessian and step --
+        # the discrete analogue of the exact engine's stationary mode.
+        candidate_mode_stationary = bool(pirls_result.converged)
         warm_beta = pirls_result.beta.copy()
         warm_intercept = float(pirls_result.intercept)
         warm_deviance = float(pirls_result.deviance)
@@ -996,50 +1156,74 @@ def optimize_discrete_reml_cached_w(
         delta[active_idx_d] = delta_sub_d
 
         tensor_step_diag = None
+        trust_mu = 0.0
+        trust_binding: list[str] = []
+        gdot_newton = float(grad @ delta)
+        gdot_damped = gdot_newton
         if use_tensor_surrogate_linesearch:
+            # base_cap, cap_u and cap_v ARE the trust-region radii: a box on
+            # every log-lambda coordinate, intersected with a box on each
+            # shared pair's sum/difference coordinates. Shared discrete
+            # tensor penalties are especially sensitive to oversized
+            # log-lambda steps, so the region stays much tighter than the
+            # generic path's; cap_v keeps the bootstrap ratio conservative,
+            # and after one clean full step the widening rule below allows
+            # a one-log-unit ratio move so a finite margin does not crawl
+            # when its partner is heading to working infinity. What the
+            # radii no longer do is truncate coordinates one at a time: the
+            # region is imposed by damping the whole step (see
+            # _damped_tensor_newton_step for the references), because
+            # independent coordinate clips rotate the direction and can
+            # destroy the descent property the line search depends on.
+            # Frozen directions stay out of the active subspace: their
+            # delta is zero and their pairs are not constrained.
             base_cap = 1.0 if not _tensor_post_stall_unlocked else 2.5
-            delta = np.clip(delta, -base_cap, base_cap)
+            cap_u = 2.5 if not _tensor_post_stall_unlocked else 5.0
+            cap_v = 0.25 if not _tensor_post_stall_unlocked else 1.0
+            delta_newton = delta
+            delta, trust_mu, trust_binding = _damped_tensor_newton_step(
+                eigvecs_h,
+                eigvals_pd,
+                grad_sub_d,
+                active_idx_d,
+                m,
+                group_names,
+                shared_tensor_pairs,
+                frozen_d,
+                base_cap,
+                cap_u,
+                cap_v,
+            )
+            gdot_damped = float(grad @ delta)
+            # Descent holds by construction; the only admissible slack is
+            # the round-off of the dot product itself. A violation means
+            # the eigen floor or the active set is inconsistent with the
+            # gradient, and continuing would hand the line search a step
+            # it can never accept: name the state instead of stalling.
+            descent_slack = 1e-12 * float(np.sum(np.abs(grad * delta)))
+            if gdot_damped > descent_slack:
+                raise RuntimeError(
+                    "Damped discrete tensor step is not a descent direction: "
+                    f"iteration {poi_iter + 1}, mu={trust_mu:.6g}, "
+                    f"g.delta={gdot_damped:.6g} (undamped {gdot_newton:.6g}), "
+                    f"binding={trust_binding}, active={active_idx_d.size}/{m}."
+                )
             for group_name, (i, j) in shared_tensor_pairs:
-                # Preserve the active-set Newton scatter. A two-dimensional
-                # pair solve must not reintroduce a frozen margin or overwrite
-                # the live margin with curvature from a settled coordinate.
                 if frozen_d[i] or frozen_d[j]:
                     continue
-                grad_pair = grad[[i, j]]
-                hess_pair = hess[np.ix_([i, j], [i, j])]
-                J = np.array([[1.0, 1.0], [1.0, -1.0]])
-                grad_uv = J.T @ grad_pair
-                hess_uv = J.T @ hess_pair @ J
-                eigvals_uv, eigvecs_uv = np.linalg.eigh(hess_uv)
-                max_eig_uv = max(abs(eigvals_uv).max(), 1e-12)
-                eig_floor_uv = max_eig_uv * _eps**0.7
-                eigvals_uv_pd = np.maximum(np.abs(eigvals_uv), eig_floor_uv)
-                delta_uv = -(eigvecs_uv * (1.0 / eigvals_uv_pd)) @ (eigvecs_uv.T @ grad_uv)
-                raw_u = float(delta_uv[0])
-                raw_v = float(delta_uv[1])
-                cap_u = 2.5 if not _tensor_post_stall_unlocked else 5.0
-                # Keep the bootstrap ratio conservative. After one clean full
-                # step, allow a one-log-unit ratio move so a finite margin does
-                # not crawl when its partner is heading to working infinity.
-                cap_v = 0.25 if not _tensor_post_stall_unlocked else 1.0
-                used_u = float(np.clip(raw_u, -cap_u, cap_u))
-                used_v = float(np.clip(raw_v, -cap_v, cap_v))
-                delta_pair = J @ np.array([used_u, used_v])
-                delta[i] = float(delta_pair[0])
-                delta[j] = float(delta_pair[1])
-                if tensor_step_diag is None:
-                    tensor_step_diag = {
-                        "group_name": group_name,
-                        "delta_u_raw": raw_u,
-                        "delta_u_used": used_u,
-                        "delta_v_raw": raw_v,
-                        "delta_v_used": used_v,
-                    }
+                tensor_step_diag = {
+                    "group_name": group_name,
+                    "delta_u_raw": 0.5 * float(delta_newton[i] + delta_newton[j]),
+                    "delta_u_used": 0.5 * float(delta[i] + delta[j]),
+                    "delta_v_raw": 0.5 * float(delta_newton[i] - delta_newton[j]),
+                    "delta_v_used": 0.5 * float(delta[i] - delta[j]),
+                    "cap_u": cap_u,
+                    "cap_v": cap_v,
+                    "base_cap": base_cap,
+                }
+                break
 
-        # Step capping. Shared discrete tensor penalties are especially
-        # sensitive to oversized log-lambda steps: they trigger many surrogate
-        # halvings even after the cheap trial path is in place. Keep their
-        # trust region much tighter than the generic path.
+        # Step capping on the generic path: scale the whole vector.
         if not use_tensor_surrogate_linesearch:
             local_max_newton_step = max_newton_step
             max_delta = float(np.max(np.abs(delta)))
@@ -1048,8 +1232,7 @@ def optimize_discrete_reml_cached_w(
                 delta *= local_max_newton_step / max_delta
         else:
             max_delta = float(np.max(np.abs(delta)))
-            max_delta_raw = max_delta
-        max_delta_raw = max_delta
+            max_delta_raw = float(np.max(np.abs(delta_newton)))
         quad_grad = float(grad @ delta) if use_tensor_surrogate_linesearch else 0.0
         quad_curv = float(delta @ hess @ delta) if use_tensor_surrogate_linesearch else 0.0
         _t_newton += _time.perf_counter() - _t0
@@ -1059,17 +1242,55 @@ def optimize_discrete_reml_cached_w(
         _t0 = _time.perf_counter()
         accepted = False
         step = 1.0
-        candidate = None
         halving_count = 0
-        local_max_halving = 5 if use_tensor_surrogate_linesearch else max_halving
-        if use_tensor_surrogate_linesearch and max_delta_raw < 1e-12:
+        had_feasible_trial = False
+        evaluated_feasible_trial = False
+        first_full_eval_step: float | None = None
+        # On the shared-tensor path the quadratic surrogate is a free
+        # pre-filter on each step length, so the backtrack is not floored
+        # (the old cap of five stopped at s = 1/16 and killed searches
+        # whose model minimiser was smaller); the penalty build and the
+        # true evaluation happen only for a length the surrogate lets
+        # through, and a rejected true trial backtracks like the generic
+        # path instead of ending the search.
+        local_max_halving = max_halving
+        if use_tensor_surrogate_linesearch and max_delta < 1e-12:
             local_max_halving = 0
+        surrogate_steps = (
+            _surrogate_step_lengths(quad_grad, quad_curv, local_max_halving)
+            if use_tensor_surrogate_linesearch
+            else []
+        )
         for _ls in range(local_max_halving):
+            if use_tensor_surrogate_linesearch:
+                step = surrogate_steps[_ls]
             rho_trial = np.clip(rho + step * delta, log_lo, log_hi)
+            if use_tensor_surrogate_linesearch and bool(
+                np.all(np.abs(rho_trial - rho_clipped) <= 1e-12)
+            ):
+                # Every moving coordinate is pinned at a bound; a shorter
+                # step moves even less. Nothing feasible was tried.
+                break
+            had_feasible_trial = True
             trial_lambdas = lambdas.copy()
             for name, val in zip(group_names, np.exp(rho_trial), strict=False):
                 trial_lambdas[name] = float(np.clip(val, 1e-6, 1e10))
             trial_lambdas.update(fixed_lambdas)
+
+            _n_linesearch_evals += 1
+            if use_tensor_surrogate_linesearch:
+                _tls0 = _time.perf_counter()
+                # The predicted CHANGE is judged, not obj + change: a
+                # decrease below the objective's own resolution is still
+                # a prediction, and the true evaluation it lets through is
+                # the evidence a precision exit needs.
+                predicted_change = step * quad_grad + 0.5 * (step**2) * quad_curv
+                _t_linesearch_surrogate += _time.perf_counter() - _tls0
+                _n_linesearch_surrogate_evals += 1
+                if predicted_change >= 0.0:
+                    halving_count += 1
+                    continue
+                _tfull0 = _time.perf_counter()
 
             S_trial = (
                 None
@@ -1082,23 +1303,6 @@ def optimize_discrete_reml_cached_w(
                     reml_penalties=penalties,
                 )
             )
-
-            _n_linesearch_evals += 1
-            if use_tensor_surrogate_linesearch:
-                _tls0 = _time.perf_counter()
-                trial_quad_obj = obj + step * quad_grad + 0.5 * (step**2) * quad_curv
-                _t_linesearch_surrogate += _time.perf_counter() - _tls0
-                _n_linesearch_surrogate_evals += 1
-                if trial_quad_obj >= obj:
-                    step *= 0.5
-                    halving_count += 1
-                    continue
-                candidate = (
-                    rho_trial,
-                    trial_lambdas,
-                    S_trial,
-                )
-                break
 
             # Solve the cached profiled-intercept system analytically
             # (O(p^3), no data pass).
@@ -1188,6 +1392,15 @@ def optimize_discrete_reml_cached_w(
                 tweedie_scale_data=tweedie_scale_data,
             )
             _n_linesearch_full_evals += 1
+            if use_tensor_surrogate_linesearch:
+                _t_linesearch_full_obj += _time.perf_counter() - _tfull0
+                if first_full_eval_step is None:
+                    first_full_eval_step = float(step)
+            # The cached trial solve is an exact solve of the profiled
+            # working-model system, so the trial's own mode is stationary
+            # by construction; a finite rejected objective is evidence.
+            if trial_counts_as_precision_evidence(trial_pirls.converged, trial_obj):
+                evaluated_feasible_trial = True
 
             if trial_obj < obj:
                 rho = rho_trial
@@ -1197,100 +1410,9 @@ def optimize_discrete_reml_cached_w(
                 accepted = True
                 break
 
-            step *= 0.5
+            if not use_tensor_surrogate_linesearch:
+                step *= 0.5
             halving_count += 1
-
-        if use_tensor_surrogate_linesearch and candidate is not None and not accepted:
-            rho_trial, trial_lambdas, S_trial = candidate
-            _tls0 = _time.perf_counter()
-            if use_structured:
-                if not isinstance(
-                    c_structured_system,
-                    ScalarStructuredSystem | BlockStructuredSystem | SumToZeroBlockStructuredSystem,
-                ):  # pragma: no cover - validated above
-                    raise RuntimeError("Structured cached solve has no block system.")
-                cached_solution = solve_cached_structured(
-                    c_structured_system,
-                    list(dm.group_matrices),
-                    groups,
-                    trial_lambdas,
-                    reml_penalties=penalties,
-                )
-                beta_trial = cached_solution.beta
-                intercept_trial = cached_solution.intercept
-                log_det_H_trial = cached_solution.log_det_H
-                hessian_rank_trial = cached_solution.hessian_rank
-            else:
-                if c_centered_XtWX is None or S_trial is None:
-                    raise RuntimeError("Dense cached solve is missing matrix geometry.")
-                beta_trial, intercept_trial, log_det_H_trial, hessian_rank_trial = (
-                    _solve_cached_profiled_system(
-                        c_centered_XtWX,
-                        S_trial,
-                        c_centered_XtWz,
-                        c_mean_x,
-                        c_sum_W,
-                        c_mean_z,
-                    )
-                )
-            cached_solve_elapsed = _time.perf_counter() - _tls0
-            _t_linesearch_solve += cached_solve_elapsed
-            if use_structured:
-                _t_structured_cache_solve += cached_solve_elapsed
-                _n_structured_cache_solves += 1
-                if isinstance(
-                    c_structured_system,
-                    BlockStructuredSystem | SumToZeroBlockStructuredSystem,
-                ):
-                    _t_block_structured_cache_solve += cached_solve_elapsed
-                    _n_block_structured_cache_solves += 1
-            eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)
-            mu_trial = clip_mu(link.inverse(eta_trial), distribution)
-            dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
-            trial_pirls = PIRLSResult(
-                beta=beta_trial,
-                intercept=intercept_trial,
-                deviance=dev_trial,
-                n_iter=0,
-                converged=True,
-                phi=phi_hat,
-                effective_df=0.0,
-                log_det_H=log_det_H_trial,
-                reml_hessian_rank=hessian_rank_trial,
-            )
-            trial_tensor_pair_evals = evaluate_tensor_pair_logdet_summaries(
-                tensor_pair_summaries, trial_lambdas
-            )
-            trial_obj = reml_laml_objective(
-                dm,
-                distribution,
-                link,
-                groups,
-                y,
-                trial_pirls,
-                trial_lambdas,
-                sample_weight,
-                offset_arr,
-                XtWX=XtWX,
-                penalty_caches=penalty_caches,
-                log_det_H=log_det_H_trial,
-                S_override=S_trial,
-                reml_penalties=penalties,
-                tensor_pair_evaluations=trial_tensor_pair_evals,
-                likelihood_size=likelihood_size,
-                saturated_log_weight=saturated_log_weight,
-                weight_semantics=weight_semantics,
-                gamma_scale_data=gamma_scale_data,
-                tweedie_scale_data=tweedie_scale_data,
-            )
-            _t_linesearch_full_obj += _time.perf_counter() - _tls0
-            _n_linesearch_full_evals += 1
-            if trial_obj < obj:
-                rho = rho_trial
-                warm_beta = beta_trial.copy()
-                warm_intercept = intercept_trial
-                warm_deviance = dev_trial
-                accepted = True
 
         _t_linesearch += _time.perf_counter() - _t0
         if use_tensor_surrogate_linesearch and accepted and halving_count == 0:
@@ -1320,6 +1442,15 @@ def optimize_discrete_reml_cached_w(
                     "accepted_step": step if accepted else 0.0,
                     "halvings": halving_count,
                     "accepted": accepted,
+                    "dead_search": bool(not accepted and had_feasible_trial),
+                    "candidate_mode_stationary": candidate_mode_stationary,
+                    "trust_mu": trust_mu,
+                    "trust_binding": list(trust_binding),
+                    "gdot_newton": gdot_newton,
+                    "gdot_damped": gdot_damped,
+                    "quad_grad": quad_grad,
+                    "quad_curv": quad_curv,
+                    "first_full_eval_step": first_full_eval_step,
                     "tensor_log_ratio": tensor_log_ratio,
                     "tensor_lambdas": tensor_lams,
                     "tensor_uv": tensor_step_diag,
@@ -1335,6 +1466,62 @@ def optimize_discrete_reml_cached_w(
             )
             if tensor_log_ratio is not None:
                 _prev_tensor_v = tensor_log_ratio
+
+        if use_tensor_surrogate_linesearch and not accepted and had_feasible_trial:
+            # A dead line search on the shared-tensor path: every feasible
+            # trial was rejected. The exit mirrors the exact engine's
+            # (direct.py): the active gradient of the CURRENT active set --
+            # the set this dead step actually moved -- is classified by
+            # classify_dead_feasible_exit, which grants converged_at_precision
+            # only when every active gradient is under the precision asked
+            # for AND a true objective was evaluated and rejected, and
+            # names an honest line_search_failed otherwise. Two things
+            # differ from the exact engine, both because this engine's
+            # candidate is ONE working-model update rather than a converged
+            # PIRLS. First, the break waits for candidate_mode_stationary:
+            # a dead search at an unsettled working model is not evidence
+            # of a fixed point -- the gate measured a real additive binomial
+            # fit whose every dead search (candidate PIRLS unconverged at
+            # each) was followed by an accepted step once the next
+            # working-model update moved the gradient at unchanged rho,
+            # and breaking there published a different model, not the same
+            # one sooner. A settled working model at unchanged rho means
+            # the next iteration would recompute the same gradient, Hessian
+            # and step and reject it again; on the measured synthetic stall
+            # the flag turned true at the second dead search and the state
+            # then repeated, digit for digit, for 27 iterations. Second, the
+            # exit is confined to this path: the generic path keeps
+            # iterating through a dead search, as measured, and its numbers
+            # are untouched. A first-iteration exit is withheld like every
+            # other converged exit here, so a loose tolerance cannot bypass
+            # the two-evaluation contract.
+            _n_dead_line_searches += 1
+            if poi_iter > 0 and candidate_mode_stationary:
+                active_grad_norm = (
+                    float(np.max(np.abs(np.where(frozen_d, 0.0, proj_grad_d))))
+                    if proj_grad_d.size
+                    else 0.0
+                )
+                evidence = evaluated_feasible_trial and trial_counts_as_precision_evidence(
+                    candidate_mode_stationary, obj
+                )
+                termination_reason = classify_dead_feasible_exit(
+                    active_grad_norm,
+                    objective=obj,
+                    tolerance=_tol,
+                    evaluated_trial=evidence,
+                )
+                converged = termination_reason == "converged_at_precision"
+                if profile is not None:
+                    profile["reml_dead_line_search"] = {
+                        "iter": poi_iter + 1,
+                        "active_gradient_norm": active_grad_norm,
+                        "bar": float(max(FLAT_DIRECTION_FREEZE_FLOOR, _tol) * score_scale_d),
+                        "evaluated_trial": bool(evidence),
+                        "candidate_mode_stationary": bool(candidate_mode_stationary),
+                        "termination_reason": termination_reason,
+                    }
+                break
 
         current_lambdas = lambdas.copy()
         for name, val in zip(group_names, np.exp(np.clip(rho, log_lo, log_hi)), strict=False):
@@ -1548,6 +1735,7 @@ def optimize_discrete_reml_cached_w(
         profile["reml_n_linesearch_fits"] = _n_linesearch_evals
         profile["reml_n_linesearch_surrogate_evals"] = _n_linesearch_surrogate_evals
         profile["reml_n_linesearch_full_evals"] = _n_linesearch_full_evals
+        profile["reml_n_dead_line_searches"] = _n_dead_line_searches
         profile["reml_n_outer_iter"] = poi_iter + 1
         profile["reml_n_analytical_iters"] = _n_newton_steps
         if _outer_step_stats:

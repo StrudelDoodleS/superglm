@@ -705,16 +705,28 @@ class SuperGLM:
             extra Newton iterations on a 97k benchmark fixture and 5->13 on
             that stress design. A tolerance tighter than the candidate
             machinery can resolve terminates -- on the exact engine, whose
-            line search is where that limit surfaces; the discrete engine's
-            exits are ``score_objective_tolerance``,
-            ``active_set_stationary``, ``fixed_lambdas`` and
-            ``max_reml_iter`` -- as
+            line search is where that limit surfaces, and on the discrete
+            engine's shared-tensor line search -- as
             ``termination_reason="converged_at_precision"`` (every active
             gradient under ``max(1e-7, reml_tol) * (1 + |objective|)``, at
             least one evaluated trial rejected, none left) with
             ``converged=True``; ``line_search_failed`` with
             ``converged=False`` is reserved for genuinely undetermined
-            stalls. The SCOP engine stops on a per-step lambda-change bound
+            stalls. The discrete engine's exits are therefore
+            ``score_objective_tolerance``, ``active_set_stationary``,
+            ``fixed_lambdas``, ``max_reml_iter`` and, from a dead line
+            search on a numeric-by-numeric tensor interaction only,
+            ``line_search_failed`` or ``converged_at_precision``, decided
+            by the same predicate the exact engine uses. A dead tensor
+            search whose active gradient is still above that bar is
+            ``line_search_failed`` with ``converged=False``; the exit fires
+            only once the candidate's own working-model step has settled,
+            so the next iteration would repeat this one, and never on the
+            first iteration. On the discrete engine's other paths a dead
+            search keeps iterating to ``max_reml_iter``: there one
+            working-model update per outer iteration routinely rescues
+            the next search, so a failed search is not evidence of a
+            fixed point. The SCOP engine stops on a per-step lambda-change bound
             against ``reml_tol`` and classifies its endgame as
             ``objective_plateau`` only once steps have stopped contracting
             -- while iterations still buy precision it keeps going toward
