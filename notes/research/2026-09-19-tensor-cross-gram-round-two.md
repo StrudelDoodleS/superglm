@@ -416,6 +416,30 @@ review-fix commit (the five S2 tests removed; the once-per-grid weight
 permutation and the pickle round trip added). The full suite was not re-run
 in this phase.
 
+### Against the published implementation
+
+mgcv's `bam(discrete=TRUE, method="fREML")` (Wood, Li, Shaddick and Augustin
+2017; Li and Wood 2020) is the reference implementation of the discretised
+method. It was run here as a black-box oracle (GPL; none of its source was
+read): mgcv 1.9.3, four threads, the same 300,000-row design exported to CSV,
+six `s(bs="ps", k=10)` margins, one `ti(bs="ps", k=c(10,10))` per pair,
+Poisson with the log-exposure offset. superglm is the settled tree at four
+threads; its accumulation stage is serial, so its CPU equals its wall.
+
+| Pairs | superglm wall / CPU | bam wall / CPU | Fitted values | Deviance superglm / bam |
+| ---: | ---: | ---: | --- | ---: |
+| 3 | 4.69 s / 4.68 s | 6.26 s / 18.86 s | corr 0.9999989, median rel 5.8e-4, max 4.1e-3 | 160412.69 / 160412.51 |
+| 10 | 21.63 s / 21.62 s | 61.87 s / 229.09 s | corr 0.9999987, median rel 6.5e-4, max 5.1e-3 | 158927.86 / 158928.02 |
+
+The two engines select smoothing by different criteria (fREML against this
+engine's REML), so fitted values agree to the smoothing-selection level rather
+than bitwise, and the deviances differ by 0.2 in either direction. On this
+design v0.34.0's six-pair fit took `105.60 s`, far above the oracle; after
+both rounds the ten-pair fit sits 2.9x below it on wall and 10.6x below on
+CPU. The harness is the R formula and settings above plus a CSV export of the
+generator in `time_pairs10.py`; the scripts are session scratch, not
+committed.
+
 ## Decision rules and outcomes
 
 The rules were pre-registered in the round-one plan draft before any of this
