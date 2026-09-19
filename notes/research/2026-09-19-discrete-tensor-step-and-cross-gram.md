@@ -95,7 +95,14 @@ row-expanding route: two `(chunk, 81)` observation panels and a
 compact shared-margin helper also declines — a one-shared-margin pair needs
 `256^3 = 16,777,216` cells against a 5,000,000 cap — so every tensor-by-tensor
 pair took that route. Those blocks were 71% of a Gram assembly at three pairs
-and 94% at six.
+and 94% at six, two figures from two different measurements. The 71% is
+derived from `confirm_route.log`: three times the 0.167 s of one isolated
+tensor-by-tensor block over the 0.706 s of one `_block_xtwx` assembly, because
+that assembly's `block_cross_disc_disc_s = 0.6086` counter bundles the 15
+main-effect histogram calls with the 3 tensor-by-tensor row calls and cannot
+be read off directly. The 94% is read from `projected_gram.log`, 1.813 s of
+tensor-by-tensor time over a 1.930 s assembly at six pairs; that same log
+gives 85% (0.363 s over 0.429 s) at three pairs.
 
 The premise that a cubic B-spline row is sparse is false for this
 representation and would have produced the wrong kernel: the stored marginal
@@ -140,6 +147,16 @@ subspace. Descent is asserted rather than silently repaired, and `mu`, the
 binding constraint names, the raw and used `u`/`v`, and `g . d` before and
 after damping are recorded in `reml_outer_step_stats`.
 
+Relaxing or removing `cap_v` was a live alternative on the evidence — at the
+stalled iteration the *uncapped* pair override was itself a descent
+direction, `g . d = -61.64` against `-32.71` for the element-wise clipped
+Newton step — and damping subsumes it rather than adopting it. Under damping
+a radius can no longer affect descent, only step length, so the size of
+`cap_v` is a step-length tuning question, not a correctness alternative. On
+the repaired engine `x2:x3:v` binds exactly once, at iteration 3, with
+`mu = 0.518` on the three-pair arm and `0.529` on the six-pair arm, and both
+arms converge.
+
 The five-halving floor is gone: the backtrack schedule visits the model
 minimiser `s* = -quad_grad / quad_curv`, the penalty build is deferred until a
 length the surrogate admits, and a rejected true trial backtracks the way the
@@ -169,6 +186,22 @@ On the synthetic stall the flag turned true at the second dead search and the
 state then repeated for 27 iterations. Second, the exit is confined to the
 shared-tensor path; the generic path keeps iterating and its numbers are
 untouched.
+
+The precision-evidence flag is weaker here than in the exact engine, by
+construction. The discrete trial's `PIRLSResult` is built from the cached
+exact solve of the profiled working-model system with `converged=True`, so
+`evaluated_feasible_trial` reduces to "a finite true objective was evaluated
+and rejected"; `direct.py` additionally requires the trial's own PIRLS mode
+to be stationary. After the fix the exit is a safety net that no measured
+arm reaches: none of the real or synthetic arms in the tables below records
+a dead line search (`reml_n_dead_line_searches` is 0 on every one), and only
+the reject-every-move fixture in `tests/test_discrete_tensor_step.py`
+exercises it. Its periodicity precondition — that a settled candidate at
+unchanged `rho` reproduces the same gradient, Hessian and step — therefore
+rests on the pre-fix gate measurement (27 digit-identical repeats) and on
+the analytic argument: the candidate PIRLS is one working-model update
+(`max_iter=1`, `tol=pirls_tol`), so once it reports converged the next outer
+iteration starts from the same working model at the same `rho`.
 
 Gate measurements on v0.34.0, `max_reml_iter=20` (30 for the synthetic arm):
 
@@ -202,7 +235,9 @@ followed by the `R_inv` sandwich every other tensor helper ends with. Stage 1
 is the existing `_disc_disc_2d_hist_channels` njit kernel — one serial
 `O(n)` pass with no observation panel — and stage 2 is the two-GEMM
 contraction `_cross_gram_tensor_main` already uses, so no new compiled code,
-no parallel kernel and no cached permutation were added. Dispatch sits in
+no parallel kernel and no cached permutation were added. That is a scope
+statement, not a verdict on the faster stage-1 variants the prototype phase
+measured; those are deferred, with their numbers, under Limits. Dispatch sits in
 `_cross_gram`'s tensor-by-tensor block, after the shared-margin helper
 declines and before any other branch, so the compact helper keeps priority
 wherever it still fires and the new route picks up both fully distinct pairs
@@ -357,6 +392,15 @@ times and accepts 391, Breast 8-interactions 459 of 459, Bike
 route-switched and yet bit-identical is an observation, not a guarantee; the
 contract remains the oracle bound above.
 
+The interaction-screening path was checked separately
+(`screening_route_check.log`: 60,000 rows, six margins, 256 bins).
+`screen_interactions` itself made no `_cross_gram` call at all, because PSST
+is one fused cell pass per pair, while the confirmatory `fast_candidate`
+refit of the two top-ranked pairs assembled 15 tensor-by-tensor blocks and
+the channel helper accepted 15 of 15. The route therefore reaches the
+workflow that motivated it through the confirmatory refit, not through
+screening.
+
 ### Agreement
 
 The zero-pair fit is bit-identical: objective `80910.58463841362`, deviance
@@ -383,7 +427,9 @@ The focused suites on the changed surfaces pass on the settled tree:
 `tests/test_cross_matrix_reassociation_range.py`,
 `tests/test_cross_matrix_histogram_dispatch.py`, `tests/test_discretize_fit.py`,
 `tests/test_reml_newton_fixes.py` and `tests/test_theory_invariants.py`, 284
-tests, no failures. The full suite was not run in this phase.
+tests, no failures. The full suite was run once, in the critique phase, on
+this tree: 14,714 passed, 426 skipped, 80 deselected, no failures, in 24:03
+wall.
 
 ## Limits
 
@@ -411,8 +457,13 @@ no dead search, so its budget exhaustion is ordinary slow progress rather
 than the defect described here.
 
 **The one-pair objective moved the wrong way.** Within the 1e-6 bar, but it
-moved, and the mechanism (a flat ridge, not a better or worse optimiser) is
-inferred from the lambda magnitudes rather than proved.
+moved — by 0.0142 REML units, two orders of magnitude above the 8.0e-5 that
+`reml_tol = 1e-9` resolves at this objective, with the lambdas on the flat
+directions moving by factors of about 2 — and the mechanism (a flat ridge,
+not a better or worse optimiser) is inferred from the lambda magnitudes
+rather than proved. The movement is deterministic: an independent re-run
+reproduced every digit of the objective and of the eight smoothing
+parameters. It stays a caveat, not a defect.
 
 **Exactness claims elsewhere need re-deriving.** A sweep of the committed
 research artifacts for pinned discrete-tensor numbers found that these
@@ -441,6 +492,44 @@ and its initial variant (one `Latitude:Longitude` pair), and
 `2026-09-14-targeted-interaction-measurements.json` (one tensor mention).
 That distinction was read off the sweep inventory, not re-measured file by
 file, and should be confirmed before any of those artifacts is re-stamped.
+
+**Two faster stage-1 kernels are deferred, not adjudicated.** The prototype
+phase measured two variants of the stage-1 channel histogram that beat the
+shipped kernel, and neither has been adjudicated on this tree.
+`stage1_variants.log` records a Kronecker kernel that rebuilds the `j`
+channel row from its two marginal rows, with the rows pre-sorted by tensor
+`i`'s cell (`v3`), at 19.1 ms against 42.3 ms for the shipped natural-order
+kernel (`v0`) — 2.21x, the fastest serial variant measured — and it was set
+aside solely because its result differed from `v0` by 2.220e-16 max-abs
+(1.229e-16 relative Frobenius). That criterion was the wrong one: bit
+identity to `v0` is not the contract, because the shipped route itself
+already replaces the grid side's stored joint rows by the product of its
+marginal rows, exactly this one-ulp class of change, and is held to the
+oracle bound instead. `stage1_cellcsr.log` records a cell-CSR kernel — a
+stable counting sort by cell (1.4 ms, cacheable per tensor) followed by
+per-cell accumulation, bit-identical to `v0` for any thread count — at
+37.3 ms serial (`v5`) and 15.7 ms on four threads (`v6`) against 28.2 ms for
+`v0` in that log. The "do not adopt the serial cell-CSR" conclusion drawn
+from 37.3 against 28.2 sits inside a 50% spread on `v0` itself between the
+two logs (42.3 ms in one, 28.2 ms in the other, both taken on a shared
+machine), so it is below measurement resolution, as is the whole-block
+parallel ratio (9.12x in `stage1_cellcsr.log`, 12.3x in
+`projected_gram.log`). Before any of them is adopted, every variant must be
+re-measured interleaved in one script against the shipped route on this
+tree, best of N with the thread pools pinned, and the permuted variants must
+be costed with their permutation cached across blocks and outer iterations
+(29.3 ms for an argsort, 1.4 ms for the counting sort, once per tensor).
+
+**Untested corners.** A non-finite gradient on the tensor path now raises
+`RuntimeError` from the damping bracket (the 64-doubling guard on the
+analytic bound for `mu`) instead of spinning silently; that is acceptable
+behaviour and is worth one test.
+`test_distinct_margin_tensor_route_reaches_the_same_reml_optimum` asserts
+equal `n_reml_iter` between the channel and dense arms, which holds on this
+machine; a different BLAS could in principle flip one arm's count by one
+while the objective, deviance and prediction assertions keep their headroom,
+so a CI shard that flips it should relax that one assertion, not the
+tolerances.
 
 **Not swept.** Only the discrete engine was examined for the
 composed-step-without-descent-check pattern. The SCOP EFS path already has a

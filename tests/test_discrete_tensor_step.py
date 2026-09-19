@@ -40,6 +40,7 @@ UNFIXED_STALL_OBJECTIVE = 1011.706149461513
 # Same fixture with the per-pair (u, v) clip removed (the workflow-1
 # counterfactual): converges in 15 iterations at this objective, so the
 # published stall sits at least 13.19 REML units above a reachable point.
+# Provenance for STALL_OBJECTIVE_MARGIN below; no assertion reads this value.
 UNFIXED_STALL_REACHABLE_OBJECTIVE = 998.5159505701776
 # Three quarters of that measured gap is the margin the repair must clear.
 STALL_OBJECTIVE_MARGIN = 10.0
