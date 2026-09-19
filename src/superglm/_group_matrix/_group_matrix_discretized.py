@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
+    _cell_csr,
     _disc_disc_2d_hist,
     _exact_ssp_moments,
     _fused_2d_bincount_2,
@@ -371,6 +372,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         "n_bins2",
         "tensor_id",
         "_own_margin_cache",
+        "_cell_csr",
     )
 
     def __init__(
@@ -393,6 +395,22 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         self.n_bins2 = self.B2_unique_t.shape[0]
         self.tensor_id = tensor_id
         self._own_margin_cache: dict[tuple[int, int, int], int | None] = {}
+        self._cell_csr: tuple[NDArray, NDArray] | None = None
+
+    def cell_csr(self) -> tuple[NDArray, NDArray]:
+        """The rows sorted by grid cell, ``(ptr, order)`` as ``_cell_csr`` returns them.
+
+        Weight-independent, so it is built once per instance and kept for
+        every Gram build of the REML loop (the multi-penalty tensor group is
+        not rebuilt with lambda).  No invalidation is needed: ``idx1`` and
+        ``idx2`` are never written after construction (``_own_margin_cache``
+        already keys on their identity), and every row-changing operation --
+        ``row_subset``, the per-lambda rebuild of a projected tensor --
+        constructs a new instance that sorts its own rows on first use.
+        """
+        if self._cell_csr is None:
+            self._cell_csr = _cell_csr(self.idx1, self.idx2, self.n_bins1, self.n_bins2)
+        return self._cell_csr
 
     def _factored_gram_raw(self, w_grid: NDArray) -> NDArray:
         """Compute the raw tensor Gram, ordered by j1 * K2 + j2.

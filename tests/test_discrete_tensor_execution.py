@@ -197,9 +197,10 @@ def _tensor_pair(n, left, right, *, shared=False, same_id=False, seed=911):
     support covers EVERY cell of its grid, so the displaced route's
     ``n_joint`` is fixed by the grid sizes rather than by which cells the
     draw observed.  ``shared`` makes the first margin's bin index the same
-    array on both sides (one shared margin); ``same_id`` gives the right
-    tensor the left one's margins, indices and id, differing only in its
-    transform (a decomposed subgroup pair).
+    array on both sides (one shared margin), or both bin indices with
+    ``"both"``; ``same_id`` gives the right tensor the left one's margins,
+    indices and id, differing only in its transform (a decomposed subgroup
+    pair).
     """
     rng = np.random.default_rng(seed)
 
@@ -226,8 +227,71 @@ def _tensor_pair(n, left, right, *, shared=False, same_id=False, seed=911):
         second = build(left, idx1, idx2, 1, (first.B1_unique_t, first.B2_unique_t))
     else:
         other1, other2 = draw(right)
-        second = build(right, idx1 if shared else other1, other2, 2)
+        second = build(right, idx1 if shared else other1, idx2 if shared == "both" else other2, 2)
     return first, second, rng
+
+
+def _stable_cell_order(tensor):
+    return np.argsort(tensor.idx1 * tensor.n_bins2 + tensor.idx2, kind="stable")
+
+
+def test_tensor_cell_csr_is_a_stable_counting_sort():
+    # 1480 cells for 120 rows: most cells are empty, so ptr carries runs of
+    # equal offsets and the sort must still place every row.
+    left, _right, _rng = _tensor_pair(120, (40, 37, 3, 3, 5), (33, 41, 2, 4, 6))
+    ptr, order = left.cell_csr()
+    np.testing.assert_array_equal(order, _stable_cell_order(left))
+    counts = np.bincount(left.idx1 * left.n_bins2 + left.idx2, minlength=40 * 37)
+    np.testing.assert_array_equal(ptr, np.concatenate([[0], np.cumsum(counts)]))
+    assert ptr[-1] == left.shape[0]
+    assert order.dtype == np.intp
+    again = left.cell_csr()
+    assert again[0] is ptr and again[1] is order
+
+
+def test_row_subset_does_not_inherit_the_cell_csr():
+    n = 400
+    left, right, rng = _tensor_pair(n, (7, 5, 3, 4, 6), (6, 8, 3, 4, 5))
+    left.cell_csr()
+    rows = rng.choice(n, size=n // 3, replace=False)
+    left_sub = left.row_subset(rows)
+    assert left_sub._cell_csr is None
+    _ptr, order = left_sub.cell_csr()
+    np.testing.assert_array_equal(order, _stable_cell_order(left_sub))
+
+
+@pytest.mark.parametrize(
+    "case,expected,comparisons",
+    [("shared_over_cap", "channel", 0), ("shared_both_one_under_cap", "tensor_tensor", 1)],
+)
+def test_shared_margin_probe_skips_the_row_comparison_above_the_cell_cap(
+    monkeypatch, case, expected, comparisons
+):
+    # Two 256 x 256 grids put every pairing's three-way histogram (16.8M
+    # cells) over the compact helper's cap, so no O(n) index comparison may
+    # run.  With both margins shared on 100 x 300 grids only the (2, 2)
+    # pairing (3M cells) is under the cap: it alone is compared, and the
+    # compact route is taken rather than declined for having two matches.
+    n = 6000
+    if case == "shared_over_cap":
+        left, right, rng = _tensor_pair(n, (256, 256, 2, 2, 4), (256, 256, 2, 2, 3), shared=True)
+    else:
+        left, right, rng = _tensor_pair(n, (100, 300, 2, 2, 4), (100, 300, 2, 2, 3), shared="both")
+    compared = []
+    original = algebra._same_discrete_margin
+
+    def counted(*args):
+        compared.append(args[1:4:2])
+        return original(*args)
+
+    monkeypatch.setattr(algebra, "_same_discrete_margin", counted)
+    weights = rng.normal(size=n)
+    expected_block, bound = _dense_cross(left, right, weights)
+    profile = {}
+    actual = algebra._cross_gram(left, right, weights, profile=profile)
+    assert _route(profile) == expected
+    assert len(compared) == comparisons
+    _assert_cross_matches(actual, expected_block, bound)
 
 
 _ROUTE_COUNTERS = (
