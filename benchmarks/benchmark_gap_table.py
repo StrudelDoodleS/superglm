@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.metadata
+import itertools
 import json
 import math
 import os
@@ -52,6 +53,10 @@ SPLINE_KNOTS = 10
 DISCRETE_BINS = 256
 MAX_REML_ITER = 30
 SCREEN_RETAIN = 32
+# Pre-run amendment of 2026-09-19: the screen sweeps the pairs among the leading
+# features by training-only Spearman (190 pairs), not all pairs of the capped
+# sixty (1,770); the full sweep projected to about an hour per dataset at the row cap.
+SCREEN_TOP = 20
 MISSING_RATE = 0.01
 MISSING_SUFFIX = "__missing"
 DAY_SECONDS = 24 * 60 * 60
@@ -712,16 +717,31 @@ def arm_pairs(args, case):
     return pairs, pairs, {"source": f"top {count} screened pairs by z"}
 
 
+def screen_candidates(train, smooth_features):
+    """Pairs among the leading fitted features by training-only Spearman; None means every pair."""
+    if len(smooth_features) <= SCREEN_TOP:
+        return None
+    leading = spearman_ranking(train["design"], train["response"], smooth_features)[:SCREEN_TOP]
+    return list(itertools.combinations(leading, 2))
+
+
 def run_screen(model, case, train, record):
-    """Rank every pair of fitted features on the training rows with the library's own screen."""
+    """Rank the candidate pairs on the training rows with the library's own screen."""
     started = time.perf_counter()
+    candidates = screen_candidates(train, case["smooth_features"])
     table = model.screen_interactions(
-        train["design"], train["response"], sample_weight=train["weights"]
+        train["design"], train["response"], sample_weight=train["weights"], candidates=candidates
     )
     pairs, refused = screened_pairs(table, SCREEN_RETAIN)
     record["screening"] = {
         "seconds": time.perf_counter() - started,
         "candidate_count": len(table),
+        "candidate_rule": (
+            "every pair of fitted features"
+            if candidates is None
+            else f"pairs among the {SCREEN_TOP} fitted features with the strongest "
+            "training-only Spearman association with the response"
+        ),
         "pairs": pairs,
         "refused_or_nonfinite": refused,
         "deferred_features": table.attrs.get("deferred_features", {}),
