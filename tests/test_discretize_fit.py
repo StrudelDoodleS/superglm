@@ -1616,7 +1616,10 @@ def _fit_two_pairs(X, y, *, reml, decline_channel=False, decline_raw=False):
     routes = {"channel": 0, "declined": 0, "rows": 0, "raw": 0}
     helper = algebra._cross_gram_tensor_tensor_channels
     rows = algebra._support_support_raw_cross
-    raw_kernel = algebra._cell_hist_raw_kron
+    raw_kernels = {
+        name: getattr(algebra, name)
+        for name in ("_cell_hist_raw_kron", "_cell_hist_raw_kron_parallel")
+    }
 
     def counted_helper(*args, **kwargs):
         result = None if decline_channel else helper(*args, **kwargs)
@@ -1627,9 +1630,13 @@ def _fit_two_pairs(X, y, *, reml, decline_channel=False, decline_raw=False):
         routes["rows"] += 1
         return rows(*args, **kwargs)
 
-    def counted_raw(*args):
-        routes["raw"] += 1
-        return raw_kernel(*args)
+    def counted_raw(name):
+        # Either twin is the raw stage; the numba pool decides which runs.
+        def counted(*args):
+            routes["raw"] += 1
+            return raw_kernels[name](*args)
+
+        return counted
 
     # 64 bins per margin: each tensor observes about 4,000 of its 4,096 cells,
     # so the tensor x tensor block's n_joint (about 1.6e7) is above the
@@ -1644,7 +1651,8 @@ def _fit_two_pairs(X, y, *, reml, decline_channel=False, decline_raw=False):
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(algebra, "_cross_gram_tensor_tensor_channels", counted_helper)
         patch.setattr(algebra, "_support_support_raw_cross", counted_rows)
-        patch.setattr(algebra, "_cell_hist_raw_kron", counted_raw)
+        for name in raw_kernels:
+            patch.setattr(algebra, name, counted_raw(name))
         if decline_raw:
             patch.setattr(interaction_module, "_tensor_raw_channels", lambda *args: None)
         if reml:
