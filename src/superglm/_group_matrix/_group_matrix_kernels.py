@@ -5,7 +5,7 @@ from __future__ import annotations
 from fractions import Fraction
 
 import numpy as np
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit, prange  # type: ignore[import-untyped]
 
 
 @njit(cache=True)
@@ -319,6 +319,37 @@ def _cell_hist_raw_kron(ptr, bin1, bin2, w, offsets1, values1, offsets2, values2
             _add_raw_row(acc, w[t], bin1[t], bin2[t], offsets1, values1, offsets2, values2, k2_raw)
         for column in range(width):
             out[cell, column] = acc[column]
+
+
+@njit(cache=True, parallel=True)
+def _cell_hist_raw_kron_parallel(
+    ptr, bin1, bin2, w, offsets1, values1, offsets2, values2, k2_raw, out, n_chunks
+):
+    """``_cell_hist_raw_kron`` with the cells split into ``n_chunks`` contiguous
+    ranges under ``prange``.
+
+    The same bytes as the serial kernel for any thread or chunk count, by
+    construction: every accumulator row has exactly one writer, and a cell's
+    sum runs over its rows in the stable cell order whichever chunk visits
+    it.  No reduction variable, no fastmath; chunking only partitions cells.
+    """
+    n_cells = ptr.shape[0] - 1
+    width = out.shape[1]
+    chunk = (n_cells + n_chunks - 1) // n_chunks
+    for index in prange(n_chunks):  # ty: ignore[not-iterable] -- Numba loop primitive
+        # Cast prange's possibly unsigned index before the signed arithmetic.
+        start = np.intp(index) * chunk
+        stop = min(start + chunk, n_cells)
+        acc = np.zeros(width)
+        for cell in range(start, stop):
+            for column in range(width):
+                acc[column] = 0.0
+            for t in range(ptr[cell], ptr[cell + 1]):
+                _add_raw_row(
+                    acc, w[t], bin1[t], bin2[t], offsets1, values1, offsets2, values2, k2_raw
+                )
+            for column in range(width):
+                out[cell, column] = acc[column]
 
 
 @njit(cache=True)
@@ -705,6 +736,9 @@ def _warmup_group_matrix_kernels() -> None:
     starts = np.zeros(2, dtype=np.intp)
     _cell_hist_raw_kron(
         cell_ptr, bin1, bin2, w, starts, matrix, starts, matrix, 2, np.empty((4, 4))
+    )
+    _cell_hist_raw_kron_parallel(
+        cell_ptr, bin1, bin2, w, starts, matrix, starts, matrix, 2, np.empty((4, 4)), 2
     )
     _fused_bincount_2(codes, values, values, 2)
     _random_effect_sufficient_stats(codes, values, values, 2)

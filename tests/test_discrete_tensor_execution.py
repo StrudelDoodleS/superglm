@@ -6,6 +6,7 @@ import tracemalloc
 
 import numpy as np
 import pytest
+from numba import config, get_num_threads, set_num_threads
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm.group_matrix import DiscretizedTensorGroupMatrix
@@ -343,10 +344,16 @@ def test_channel_accumulator_is_reused_across_blocks_in_a_build(monkeypatch):
 
     monkeypatch.setattr(algebra, "_cell_hist_raw_kron", recorded)
     cache = algebra._BlockWeightCache()
-    for left, right, _rng in (small, large, small):
-        expected, bound = _dense_cross(left, right, weights)
-        actual = algebra._cross_gram(left, right, weights, cache=cache)
-        _assert_cross_matches(actual, expected, bound)
+    previous = get_num_threads()
+    try:
+        # The serial kernel is the recorded name; the pool decides which runs.
+        set_num_threads(1)
+        for left, right, _rng in (small, large, small):
+            expected, bound = _dense_cross(left, right, weights)
+            actual = algebra._cross_gram(left, right, weights, cache=cache)
+            _assert_cross_matches(actual, expected, bound)
+    finally:
+        set_num_threads(previous)
     first, grown, reused = scratches
     assert grown.size > first.size
     assert not np.shares_memory(first, grown)
@@ -370,6 +377,63 @@ def test_raw_channel_stage_declines_to_the_dense_kernel_without_a_band(case):
     actual = algebra._cross_gram(left, right, weights, profile=profile)
     assert profile["block_cross_tensor_tensor_channel_calls"] == 1
     assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(case == "banded_channel")
+    _assert_cross_matches(actual, expected, bound)
+
+
+@pytest.mark.parametrize("threads", [1, 4, 16])
+def test_raw_channel_stage_is_bit_identical_across_numba_thread_counts(threads):
+    # One writer per accumulator row and per-cell sums in the stable cell
+    # order, so the histogram -- and with it the block, at a fixed BLAS pool
+    # -- is the same bytes whatever the numba pool.  480 cells over 128
+    # chunks at sixteen threads puts several chunks per thread.
+    if threads > config.NUMBA_NUM_THREADS:
+        pytest.skip("the configured Numba maximum does not permit this many workers")
+    n = 20_000
+    left, right, rng = _tensor_pair(n, (24, 20, 3, 4, 6), (25, 21, 4, 3, 5))
+    weights = rng.normal(size=n)
+    previous = get_num_threads()
+    try:
+        set_num_threads(1)
+        histogram = algebra._tensor_channel_histogram(left, right, weights, None, None)[0].copy()
+        block = algebra._cross_gram(left, right, weights)
+        set_num_threads(threads)
+        profile = {}
+        actual_histogram = algebra._tensor_channel_histogram(left, right, weights, None, profile)
+        actual_block = algebra._cross_gram(left, right, weights, profile=profile)
+    finally:
+        set_num_threads(previous)
+    assert profile["block_cross_tensor_tensor_channel_threads"] == threads
+    assert actual_histogram[0].tobytes() == histogram.tobytes()
+    assert actual_block.tobytes() == block.tobytes()
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_raw_channel_stage_dispatches_on_the_pool_size(monkeypatch, threads):
+    # One thread takes the serial kernel (the parallel runtime costs 5-11%
+    # there); a larger pool takes the prange twin over eight chunks a thread.
+    if threads > config.NUMBA_NUM_THREADS:
+        pytest.skip("the configured Numba maximum does not permit four workers")
+    n = 2000
+    left, right, rng = _tensor_pair(n, (7, 5, 3, 4, 6), (6, 8, 3, 4, 5))
+    weights = rng.normal(size=n)
+    expected, bound = _dense_cross(left, right, weights)
+    chunks = []
+    parallel = algebra._cell_hist_raw_kron_parallel
+
+    def recorded(*args):
+        chunks.append(args[-1])
+        return parallel(*args)
+
+    monkeypatch.setattr(algebra, "_cell_hist_raw_kron_parallel", recorded)
+    previous = get_num_threads()
+    try:
+        set_num_threads(threads)
+        profile = {}
+        actual = algebra._cross_gram(left, right, weights, profile=profile)
+    finally:
+        set_num_threads(previous)
+    assert chunks == ([] if threads == 1 else [8 * threads])
+    assert profile["block_cross_tensor_tensor_channel_threads"] == threads
     _assert_cross_matches(actual, expected, bound)
 
 

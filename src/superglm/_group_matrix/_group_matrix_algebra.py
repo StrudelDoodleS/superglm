@@ -7,12 +7,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import scipy.sparse as sp
+from numba import get_num_threads  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
     _cat_cat_weighted_crosstab,
     _cat_weighted_bincount,
     _cell_hist_raw_kron,
+    _cell_hist_raw_kron_parallel,
     _csr_weighted_bincount,
     _disc_disc_2d_hist,
     _disc_disc_2d_hist_channels,
@@ -69,6 +71,12 @@ def _profile_count(profile: dict[str, Any] | None, key: str, value: int = 1) -> 
 def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> None:
     if profile is not None:
         _profile_add(profile, key, perf_counter() - start)
+
+
+def _profile_record(profile: dict[str, Any] | None, key: str, value: int) -> None:
+    """A fact of the build (not a count): the last block's value stands."""
+    if profile is not None:
+        profile[key] = value
 
 
 class _BlockWeightCache:
@@ -539,6 +547,18 @@ def _tensor_channel_histogram(
     the cell-CSR; the ``W`` permutation is repeated for each of a grid
     tensor's partners rather than cached (about 4% of the stage at ten
     pairs).  The dense stage makes one random-access pass.
+
+    THREADS.  The cell loop runs under ``prange`` over eight contiguous cell
+    chunks per thread when numba's pool (``get_num_threads()``, read here and
+    never set) has more than one thread, and serially on one, where the
+    parallel runtime costs 5-11%.  Same bytes either way: one writer per
+    accumulator row, per-cell sums in the stable cell order.  The permutation
+    prologue and stage 2 (OpenBLAS) stay serial with respect to numba, so the
+    block is bounded below by them whatever the pool; the pool size the fit
+    should pin -- numba's omp layer beside OpenBLAS's pthreads, both spinning
+    after their regions -- is a measured property of the machine, recorded
+    by the benchmark, not a default set here.
+    ``block_cross_tensor_tensor_channel_threads`` records the pool used.
     """
     n1, n2 = grid.n_bins1, grid.n_bins2
     band = chan.raw_channels
@@ -551,10 +571,14 @@ def _tensor_channel_histogram(
     H = np.empty((n1 * n2, width)) if cache is None else cache.channel_accumulator(n1 * n2, width)
     ptr, order = grid.cell_csr()
     bin1, bin2, w = _gather_cell_order(order, chan.idx1, chan.idx2, W)
-    _cell_hist_raw_kron(
-        ptr, bin1, bin2, w, band.offsets1, band.values1, band.offsets2, band.values2, band.k2_raw, H
-    )
+    operands = (band.offsets1, band.values1, band.offsets2, band.values2, band.k2_raw, H)
+    threads = get_num_threads()
+    if threads == 1:
+        _cell_hist_raw_kron(ptr, bin1, bin2, w, *operands)
+    else:
+        _cell_hist_raw_kron_parallel(ptr, bin1, bin2, w, *operands, 8 * threads)
     _profile_count(profile, "block_cross_tensor_tensor_channel_raw")
+    _profile_record(profile, "block_cross_tensor_tensor_channel_threads", threads)
     return H, band.projection @ chan.R_inv
 
 
@@ -647,7 +671,8 @@ def _cross_gram_tensor_tensor_channels(
     to ``n * width1 * width2`` multiply-adds (16 per row) on streaming
     inputs, 10.4 ms against 30-35 ms on the production block at one thread
     (indicative), and widens stage 2 from 81 to 100 channels (+8%): the block
-    2.1-2.4x below the dense stage.  Serial: no parallel kernel.
+    2.1-2.4x below the dense stage.  Its cell loop is the one parallel region
+    of the route (see ``_tensor_channel_histogram``); the GEMMs are BLAS's.
     """
     if gm_i.tensor_id == gm_j.tensor_id:
         return None
