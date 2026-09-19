@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -214,3 +215,76 @@ def test_string_predictor_requires_an_explicit_categorical_declaration(tmp_path)
     write_source(tmp_path, entry, raw)
     with pytest.raises(ValueError, match="categorical"):
         corpus.fetch_one(entry, tmp_path, allow_download=False)
+
+
+def competition_entry(raw):
+    entry = entry_for(raw)
+    entry["availability"] = "kaggle_competition"
+    entry["source"].pop("url")
+    entry["source"].update(competition="example-competition", member_file="source.csv")
+    return entry
+
+
+def recording_cli(written, calls):
+    """Stand in for the Kaggle CLI, which chooses its own output filename."""
+
+    def run(command, **kwargs):
+        calls.append(command)
+        staging = Path(command[command.index("-p") + 1])
+        (staging / "downloaded-name.csv").write_bytes(written)
+        return subprocess.CompletedProcess(command, 0)
+
+    return run
+
+
+def test_competition_download_publishes_the_pinned_member(tmp_path, monkeypatch):
+    raw = b"x,y\n1,2\n3,4\n"
+    entry = competition_entry(raw)
+    calls = []
+    monkeypatch.setattr(corpus.subprocess, "run", recording_cli(raw, calls))
+    record = corpus.fetch_one(entry, tmp_path)
+    assert record["status"] == "ready"
+    assert record["storage"] == "kaggle_cli"
+    assert record["downloaded_this_run"] is True
+    assert (tmp_path / "example" / "source.csv").read_bytes() == raw
+    assert calls == [
+        [
+            "uv",
+            "run",
+            "--with",
+            "kaggle==2.2.4",
+            "kaggle",
+            "competitions",
+            "download",
+            "-c",
+            "example-competition",
+            "-f",
+            "source.csv",
+            "-p",
+            calls[0][-1],
+        ]
+    ]
+    assert Path(calls[0][-1]).parent == tmp_path / "example"
+
+
+def test_competition_download_of_wrong_bytes_publishes_nothing(tmp_path, monkeypatch):
+    entry = competition_entry(b"x,y\n1,2\n3,4\n")
+    monkeypatch.setattr(corpus.subprocess, "run", recording_cli(b"x,y\n9,9\n9,9\n", []))
+    with pytest.raises(ValueError, match="bytes|SHA256"):
+        corpus.fetch_one(entry, tmp_path)
+    assert not (tmp_path / "example" / "source.csv").exists()
+    assert not list(tmp_path.rglob(".kaggle-*"))
+
+
+def test_existing_competition_member_is_never_refetched(tmp_path, monkeypatch):
+    raw = b"x,y\n1,2\n3,4\n"
+    entry = competition_entry(raw)
+    write_source(tmp_path, entry, raw)
+
+    def unexpected_cli(*args, **kwargs):
+        pytest.fail("An existing pinned member must not trigger the Kaggle CLI")
+
+    monkeypatch.setattr(corpus.subprocess, "run", unexpected_cli)
+    record = corpus.fetch_one(entry, tmp_path)
+    assert record["status"] == "ready"
+    assert record["downloaded_this_run"] is False
