@@ -179,12 +179,16 @@ def test_the_screen_sweeps_only_the_pairs_of_the_leading_features():
     design = pd.DataFrame({f"x{i}": rng.normal(size=600) for i in range(25)})
     response = 3.0 * design["x24"] + 2.0 * design["x23"] + design["x22"] + rng.normal(size=600)
     train = {"design": design, "response": response.to_numpy()}
-    candidates = gap.screen_candidates(train, list(design.columns))
-    assert len(candidates) == gap.SCREEN_TOP * (gap.SCREEN_TOP - 1) // 2
+    kinds = {name: {"kind": "numeric" if name == "x24" else "spline"} for name in design.columns}
+    case = {"smooth_features": list(design.columns), "state": {"features": kinds}}
+    candidates = gap.screen_candidates(train, case)
+    # x24 leads the ranking but is linear, so its nineteen spline partners are skipped.
+    assert len(candidates) == gap.SCREEN_TOP * (gap.SCREEN_TOP - 1) // 2 - (gap.SCREEN_TOP - 1)
     leading = {name for pair in candidates for name in pair}
-    assert {"x24", "x23", "x22"} <= leading
-    assert len(leading) == gap.SCREEN_TOP
-    assert gap.screen_candidates(train, list(design.columns)[: gap.SCREEN_TOP]) is None
+    assert {"x23", "x22"} <= leading and "x24" not in leading
+    assert len(leading) == gap.SCREEN_TOP - 1
+    small = {**case, "smooth_features": list(design.columns)[: gap.SCREEN_TOP]}
+    assert gap.screen_candidates(train, small) is None
 
 
 def test_arm_plan_lifts_the_feature_cap_only_for_the_all_column_ceiling():

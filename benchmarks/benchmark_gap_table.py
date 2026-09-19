@@ -717,18 +717,26 @@ def arm_pairs(args, case):
     return pairs, pairs, {"source": f"top {count} screened pairs by z"}
 
 
-def screen_candidates(train, smooth_features):
+def screen_candidates(train, case):
     """Pairs among the leading fitted features by training-only Spearman; None means every pair."""
-    if len(smooth_features) <= SCREEN_TOP:
+    names = case["smooth_features"]
+    if len(names) <= SCREEN_TOP:
         return None
-    leading = spearman_ranking(train["design"], train["response"], smooth_features)[:SCREEN_TOP]
-    return list(itertools.combinations(leading, 2))
+    kinds = {name: case["state"]["features"][name]["kind"] for name in names}
+    leading = spearman_ranking(train["design"], train["response"], names)[:SCREEN_TOP]
+    # The screen has no refit target for a spline by a linear numeric and skips
+    # that pair by itself when it is given no candidate list.
+    return [
+        pair
+        for pair in itertools.combinations(leading, 2)
+        if {kinds[pair[0]], kinds[pair[1]]} != {"spline", "numeric"}
+    ]
 
 
 def run_screen(model, case, train, record):
     """Rank the candidate pairs on the training rows with the library's own screen."""
     started = time.perf_counter()
-    candidates = screen_candidates(train, case["smooth_features"])
+    candidates = screen_candidates(train, case)
     table = model.screen_interactions(
         train["design"], train["response"], sample_weight=train["weights"], candidates=candidates
     )
