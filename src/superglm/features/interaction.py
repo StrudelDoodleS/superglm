@@ -29,7 +29,12 @@ from superglm.features.categorical import (
     _warn_unseen_routed,
 )
 from superglm.group_matrix import _discretize_column
-from superglm.types import DiscreteTensorBuildResult, GroupInfo, TensorMarginalInfo
+from superglm.types import (
+    DiscreteTensorBuildResult,
+    GroupInfo,
+    TensorMarginalInfo,
+    TensorRawChannels,
+)
 
 
 def _categorical_build_labels(x: NDArray, cat_spec, *, context: str) -> NDArray:
@@ -1383,6 +1388,60 @@ _TENSOR_SCORE_SAMPLE_SIZE = 4096
 _MAX_TENSOR_SCORE_SUPPORT_CELLS = 2_000_000
 
 
+def _raw_band(raw: NDArray) -> tuple[NDArray, NDArray]:
+    """Band-compress a raw spline support into ``(offsets, values)``.
+
+    Row ``r`` of ``raw`` is ``values[r]`` at columns ``offsets[r]:offsets[r] +
+    width``, with ``width`` the widest span of non-zeros over the rows
+    (``degree + 1`` for a B-spline basis).  The window is clamped to the row,
+    ``offsets <= k - width``: a clamped knot vector puts a lone non-zero in
+    the LAST column at the upper boundary (a legacy ``cr`` margin whose exact
+    support includes ``max(x)``), and the kernel indexes the whole window
+    without a bounds check.
+    """
+    nonzero = raw != 0.0
+    first = np.argmax(nonzero, axis=1)
+    last = raw.shape[1] - 1 - np.argmax(nonzero[:, ::-1], axis=1)
+    width = int(np.max(last - first + 1))
+    offsets = np.minimum(first, raw.shape[1] - width).astype(np.intp)
+    return offsets, np.take_along_axis(raw, offsets[:, None] + np.arange(width), axis=1)
+
+
+def _tensor_raw_channels(
+    info1: TensorMarginalInfo,
+    support1: NDArray,
+    info2: TensorMarginalInfo,
+    support2: NDArray,
+) -> TensorRawChannels | None:
+    """The raw band of both margins with the joint projection, or ``None``.
+
+    ``info.basis`` is ``raw @ info.projection`` on the clipped support --
+    ``tensor_marginal_info`` and ``compact_legacy`` both form it so -- hence
+    a cross-Gram block accumulated in the band and projected afterwards is
+    the same block up to round-off: bitwise for ``ps`` margins, round-off for
+    the Z-projected ``ns`` and legacy ``cr`` ones.  A pair keeps its stored
+    centred channels when the band is no narrower than the centred joint row
+    (the cardinal ``cr`` basis: every cardinal function is non-zero across
+    the range).  A custom spline whose ``raw_basis_eval`` disagrees with the
+    basis it returned would make the raw block silently wrong; the identity
+    is pinned by a test, not re-checked here.
+    """
+    raw1 = np.asarray(info1.raw_basis_eval(np.clip(support1, info1.lo, info1.hi)), dtype=np.float64)
+    raw2 = np.asarray(info2.raw_basis_eval(np.clip(support2, info2.lo, info2.hi)), dtype=np.float64)
+    offsets1, values1 = _raw_band(raw1)
+    offsets2, values2 = _raw_band(raw2)
+    if values1.shape[1] * values2.shape[1] >= info1.K_eff * info2.K_eff:
+        return None
+    return TensorRawChannels(
+        offsets1=offsets1,
+        values1=values1,
+        offsets2=offsets2,
+        values2=values2,
+        k2_raw=raw2.shape[1],
+        projection=np.kron(info1.projection, info2.projection),
+    )
+
+
 # ── TensorInteraction ─────────────────────────────────────────
 
 
@@ -1780,6 +1839,7 @@ class TensorInteraction:
             B2_unique=B2_unique,
             idx1=idx1.astype(np.intp),
             idx2=idx2.astype(np.intp),
+            raw_channels=_tensor_raw_channels(m1, support1, m2, support2),
         )
 
     def set_reparametrisation(self, R_inv: NDArray) -> None:

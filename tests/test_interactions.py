@@ -2035,6 +2035,80 @@ class TestTensorMarginalParentGeometry:
         np.testing.assert_array_equal(ti._marginal1.knots, ref_info.knots)
 
 
+class TestDiscreteTensorRawBand:
+    """build_discrete carries the raw B-spline band beside the centred margins."""
+
+    @staticmethod
+    def _expand(offsets, values, k_raw):
+        expanded = np.zeros((len(offsets), k_raw))
+        np.put_along_axis(expanded, offsets[:, None] + np.arange(values.shape[1]), values, axis=1)
+        return expanded
+
+    @staticmethod
+    def _build(spec1, x1, spec2, x2):
+        spec1.build(x1)
+        spec2.build(x2)
+        ti = TensorInteraction("a", "b")
+        return ti, ti.build_discrete(x1, x2, {"a": spec1, "b": spec2}, (64, 64))
+
+    def test_discrete_tensor_build_carries_the_raw_band(self):
+        rng = np.random.default_rng(31)
+        x1 = rng.uniform(0, 100, 3000)
+        x2 = rng.uniform(0, 50, 3000)
+        ti, result = self._build(Spline(kind="ps", k=10), x1, Spline(kind="ps", k=10), x2)
+        band = result.raw_channels
+        assert band.values1.shape == (64, 4) and band.values2.shape == (64, 4)
+        assert band.offsets1.min() >= 0 and band.offsets1.max() <= 6
+        assert band.k2_raw == 10
+        assert band.projection.shape == (100, 81)
+        np.testing.assert_array_equal(
+            band.projection, np.kron(ti._marginal1.projection, ti._marginal2.projection)
+        )
+        # Expanding the band and projecting reproduces the stored centred
+        # margin bitwise: same raw evaluation, same projection, same product.
+        for offsets, values, marginal, basis in (
+            (band.offsets1, band.values1, ti._marginal1, result.B1_unique),
+            (band.offsets2, band.values2, ti._marginal2, result.B2_unique),
+        ):
+            reproduced = self._expand(offsets, values, 10) @ marginal.projection
+            assert np.abs(reproduced - basis).max() <= 1e-15
+
+    def test_cardinal_cr_margins_carry_no_band(self):
+        # Every cardinal function is non-zero across the range, so the raw
+        # row is dense: two such margins give a 100-wide joint window, no
+        # narrower than the 81 centred columns, and no band is attached.
+        # Beside a ps margin the joint window is 10 x 4 = 40 and still pays.
+        rng = np.random.default_rng(32)
+        x1 = rng.uniform(0, 100, 3000)
+        x2 = rng.uniform(0, 50, 3000)
+        _ti, result = self._build(Spline(kind="cr", k=10), x1, Spline(kind="cr", k=10), x2)
+        assert result.raw_channels is None
+        _ti, result = self._build(Spline(kind="cr", k=10), x1, Spline(kind="ps", k=10), x2)
+        band = result.raw_channels
+        assert band.values1.shape == (64, 10) and band.values2.shape == (64, 4)
+        assert not band.offsets1.any()
+
+    def test_legacy_cr_band_is_clamped_at_the_upper_boundary(self):
+        # A cr parent with m=1 stays on the projected B-spline basis, whose
+        # knot vector is clamped with exact boundary knots.  On an
+        # integer-valued column the exact support includes max(x), where the
+        # raw row is a lone one in the LAST column: the window must be
+        # clamped inside the raw columns or the kernel would index past them.
+        rng = np.random.default_rng(33)
+        x1 = rng.integers(0, 40, 3000).astype(np.float64)
+        x2 = rng.uniform(0, 50, 3000)
+        ti, result = self._build(Spline(kind="cr", k=10, m=1), x1, Spline(kind="ps", k=10), x2)
+        band = result.raw_channels
+        k_raw = ti._marginal1.projection.shape[0]
+        width = band.values1.shape[1]
+        # The exact support is sorted, so its last row is max(x).
+        assert band.offsets1[-1] == k_raw - width
+        np.testing.assert_array_equal(band.values1[-1], np.r_[np.zeros(width - 1), 1.0])
+        # Z-projected, so the identity holds at round-off rather than bitwise.
+        reproduced = self._expand(band.offsets1, band.values1, k_raw) @ ti._marginal1.projection
+        assert np.abs(reproduced - result.B1_unique).max() <= 1e-14
+
+
 class TestPolynomialInteractionStoredFactor:
     """Margins flow through the parents' stored orthonormalization factors."""
 

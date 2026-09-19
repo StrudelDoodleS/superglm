@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -18,6 +18,9 @@ from ._group_matrix_kernels import (
     _tensor_operand_in_reassociation_range,
 )
 from ._row_lookup import build_row_lookup
+
+if TYPE_CHECKING:
+    from ..types import TensorRawChannels
 
 
 class DiscretizedSSPGroupMatrix:
@@ -361,6 +364,12 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
     The materialized B_joint is still kept as ``self.B_unique`` (inherited)
     for fallback compatibility in any code path that doesn't know about
     the factored representation.
+
+    ``raw_channels`` is the raw B-spline band of the two margins (see
+    ``TensorRawChannels``) when the build found one narrower than the centred
+    joint row, else ``None``; the tensor x tensor cross-Gram accumulates in
+    it.  Weight- and row-independent, so subsets and lambda rebuilds carry
+    it through unchanged.
     """
 
     __slots__ = (
@@ -371,6 +380,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         "n_bins1",
         "n_bins2",
         "tensor_id",
+        "raw_channels",
         "_own_margin_cache",
         "_cell_csr",
     )
@@ -385,6 +395,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         R_inv: NDArray,
         pair_idx: NDArray,
         tensor_id: int,
+        raw_channels: TensorRawChannels | None = None,
     ):
         super().__init__(B_joint, R_inv, pair_idx)
         self.B1_unique_t = np.asarray(B1_unique)
@@ -394,6 +405,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         self.n_bins1 = self.B1_unique_t.shape[0]
         self.n_bins2 = self.B2_unique_t.shape[0]
         self.tensor_id = tensor_id
+        self.raw_channels = raw_channels
         self._own_margin_cache: dict[tuple[int, int, int], int | None] = {}
         self._cell_csr: tuple[NDArray, NDArray] | None = None
 
@@ -525,6 +537,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
             self.R_inv,
             self.bin_idx[idx],
             tensor_id=self.tensor_id,
+            raw_channels=self.raw_channels,
         )
         sub.omega = self.omega
         sub.projection = self.projection
