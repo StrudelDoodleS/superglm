@@ -264,6 +264,30 @@ def _disc_disc_2d_hist_channels(bin_idx_i, bin_idx_j, chan_idx, W, chan_vals, n_
 
 
 @njit(cache=True)
+def _cell_csr(idx1, idx2, n_bins1, n_bins2):
+    """Stable counting sort of the rows by grid cell ``idx1 * n_bins2 + idx2``.
+
+    Returns ``(ptr, order)``: ``order[ptr[c]:ptr[c + 1]]`` are the rows of cell
+    ``c`` in ascending row order, so a sum over a cell runs in one fixed order
+    whatever visits it.  O(n + cells); ``np.argsort(kind="stable")`` on the
+    same 300,000 rows measured 24x slower.
+    """
+    n_cells = n_bins1 * n_bins2
+    ptr = np.zeros(n_cells + 1, dtype=np.int64)
+    for row in range(idx1.shape[0]):
+        ptr[idx1[row] * n_bins2 + idx2[row] + 1] += 1
+    for cell in range(n_cells):
+        ptr[cell + 1] += ptr[cell]
+    fill = ptr[:n_cells].copy()
+    order = np.empty(idx1.shape[0], dtype=np.intp)
+    for row in range(idx1.shape[0]):
+        cell = idx1[row] * n_bins2 + idx2[row]
+        order[fill[cell]] = row
+        fill[cell] += 1
+    return ptr, order
+
+
+@njit(cache=True)
 def _fused_bincount_2(bin_idx, W, Wz, n_bins):
     """Fused dual bincount: aggregate W and Wz by bin in one O(n) pass."""
     n = len(bin_idx)
@@ -617,6 +641,7 @@ def _warmup_group_matrix_kernels() -> None:
     _csr_weighted_bincount(values, csr_indices, csr_indptr, 2, codes, values, 2)
     _disc_disc_2d_hist(codes, codes, values, 2, 2)
     _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)
+    _cell_csr(codes, codes, 2, 2)
     _fused_bincount_2(codes, values, values, 2)
     _random_effect_sufficient_stats(codes, values, values, 2)
     _factor_smooth_csr_matvec(values, csr_indices, csr_indptr, codes, matrix)

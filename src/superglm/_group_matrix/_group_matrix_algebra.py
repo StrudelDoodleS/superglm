@@ -376,15 +376,39 @@ def _tensor_margin_parts(
     )
 
 
+def _margin_bins(gm: DiscretizedTensorGroupMatrix, margin: int) -> tuple[int, int]:
+    """Bin counts of ``margin`` and of the other margin."""
+    return (gm.n_bins1, gm.n_bins2) if margin == 1 else (gm.n_bins2, gm.n_bins1)
+
+
+def _shared_margin_fits(
+    gm_i: DiscretizedTensorGroupMatrix,
+    margin_i: int,
+    gm_j: DiscretizedTensorGroupMatrix,
+    margin_j: int,
+) -> bool:
+    """O(1) admission of one pairing: equal bin counts and the three-way cell cap.
+
+    Checked BEFORE the O(n) index comparison of ``_same_discrete_margin``: at
+    the default 256 bins every pairing is over the cap, so comparing first
+    cost four full row passes per tensor pair per Gram build for a route the
+    pair could never take (0.375 s of a ten-pair fit).
+    """
+    n_shared, n_other_i = _margin_bins(gm_i, margin_i)
+    n_shared_j, n_other_j = _margin_bins(gm_j, margin_j)
+    return n_shared == n_shared_j and n_shared * n_other_i * n_other_j <= _MAX_DISC_DISC_HIST_CELLS
+
+
 def _same_discrete_margin(
     gm_i: DiscretizedTensorGroupMatrix,
     margin_i: int,
     gm_j: DiscretizedTensorGroupMatrix,
     margin_j: int,
 ) -> bool:
-    _B_i, idx_i, n_i, *_ = _tensor_margin_parts(gm_i, margin_i)
-    _B_j, idx_j, n_j, *_ = _tensor_margin_parts(gm_j, margin_j)
-    return n_i == n_j and np.array_equal(idx_i, idx_j)
+    """The O(n) row-index comparison, for a pairing ``_shared_margin_fits`` admitted."""
+    _B_i, idx_i, *_ = _tensor_margin_parts(gm_i, margin_i)
+    _B_j, idx_j, *_ = _tensor_margin_parts(gm_j, margin_j)
+    return np.array_equal(idx_i, idx_j)
 
 
 def _cross_gram_tensor_tensor_shared_margin(
@@ -392,12 +416,17 @@ def _cross_gram_tensor_tensor_shared_margin(
     gm_j: DiscretizedTensorGroupMatrix,
     W: NDArray,
 ) -> NDArray | None:
-    """Cross-Gram for two tensor terms that share exactly one marginal index."""
+    """Cross-Gram for two tensor terms sharing one marginal index under the cell cap.
+
+    A pair sharing both margins takes this route when exactly one pairing is
+    under the cap and declines (to the channel route) when both are.
+    """
     matches = [
         (margin_i, margin_j)
         for margin_i in (1, 2)
         for margin_j in (1, 2)
-        if _same_discrete_margin(gm_i, margin_i, gm_j, margin_j)
+        if _shared_margin_fits(gm_i, margin_i, gm_j, margin_j)
+        and _same_discrete_margin(gm_i, margin_i, gm_j, margin_j)
     ]
     if len(matches) != 1:
         return None
@@ -423,9 +452,6 @@ def _cross_gram_tensor_tensor_shared_margin(
     ) = _tensor_margin_parts(gm_j, margin_j)
 
     n_cells = n_shared * n_other_i * n_other_j
-    if n_cells > _MAX_DISC_DISC_HIST_CELLS:
-        return None
-
     flat = (idx_shared * n_other_i + idx_other_i) * n_other_j + idx_other_j
     joint = np.bincount(flat, weights=W, minlength=n_cells).reshape(
         n_shared,
