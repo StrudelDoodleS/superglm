@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -32,6 +33,9 @@ import pandas as pd
 MANIFEST = Path(__file__).with_suffix(".json")
 DEFAULT_ROOT = Path(__file__).resolve().parents[1] / ".benchmark-artifacts/interaction-datasets"
 DEFAULT_BUDGET = 300 * 1024**2
+READY_AVAILABILITY = frozenset({"fetchable", "local_reference", "kaggle_competition"})
+KAGGLE_CLI_REQUIREMENT = "kaggle==2.2.4"
+KAGGLE_DOWNLOAD_TIMEOUT = 1800
 
 
 def read_manifest(path=MANIFEST):
@@ -119,6 +123,44 @@ def download(source, destination, *, timeout=30):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def download_competition_file(source, destination, *, timeout=KAGGLE_DOWNLOAD_TIMEOUT):
+    """Publish one pinned competition member through the official CLI, which reads its own token.
+
+    Credentials stay with the CLI: this never opens, copies or logs them.
+    """
+    if source["bytes"] > source["max_bytes"]:
+        raise ValueError("Declared artifact bytes exceed its byte limit")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent, prefix=".kaggle-") as staging:
+        subprocess.run(
+            [
+                "uv",
+                "run",
+                "--with",
+                KAGGLE_CLI_REQUIREMENT,
+                "kaggle",
+                "competitions",
+                "download",
+                "-c",
+                source["competition"],
+                "-f",
+                source["member_file"],
+                "-p",
+                staging,
+            ],
+            check=True,
+            timeout=timeout,
+            capture_output=True,
+        )
+        # The CLI names its own output, so the empty staging directory identifies it.
+        written = sorted(Path(staging).iterdir())
+        if len(written) != 1:
+            raise ValueError(f"The competition download wrote {len(written)} files, not one")
+        verify_bytes(source, written[0])
+        # link() is atomic and refuses an existing destination, as download() does.
+        os.link(written[0], destination)
 
 
 def read_frame(source, path):
@@ -225,7 +267,7 @@ def load_dataset(dataset_id, *, root=DEFAULT_ROOT, manifest=MANIFEST):
     """Return the verified raw frame, without encoding, imputation or splitting."""
     entries = {entry["id"]: entry for entry in read_manifest(manifest)}
     entry = entries[dataset_id]
-    if entry["availability"] not in {"fetchable", "local_reference"}:
+    if entry["availability"] not in READY_AVAILABILITY:
         raise ValueError(f"{dataset_id} is {entry['availability']}; it is not a ready table")
     path = source_path(entry, root)
     verify_bytes(entry["source"], path)
@@ -236,14 +278,17 @@ def load_dataset(dataset_id, *, root=DEFAULT_ROOT, manifest=MANIFEST):
 
 def fetch_one(entry, root, *, allow_download=True, timeout=30):
     """Fetch if absent, then require every data-integrity check before readiness."""
-    if entry["availability"] not in {"fetchable", "local_reference"}:
+    if entry["availability"] not in READY_AVAILABILITY:
         raise ValueError(f"Dataset is {entry['availability']}")
     path = source_path(entry, root)
     downloaded = False
     if not path.exists():
         if not allow_download or entry["availability"] == "local_reference":
             raise FileNotFoundError(path)
-        download(entry["source"], path, timeout=timeout)
+        if entry["availability"] == "kaggle_competition":
+            download_competition_file(entry["source"], path)
+        else:
+            download(entry["source"], path, timeout=timeout)
         downloaded = True
     digest = verify_bytes(entry["source"], path)
     frame = read_frame(entry["source"], path)
@@ -259,7 +304,9 @@ def fetch_one(entry, root, *, allow_download=True, timeout=30):
         "independent_unit": entry.get("independent_unit", entry["id"]),
         "counts_as_real_source": entry.get("counts_as_real_source", True),
         "status": "ready",
-        "storage": "local_reference" if entry["availability"] == "local_reference" else "download",
+        "storage": {"local_reference": "local_reference", "kaggle_competition": "kaggle_cli"}.get(
+            entry["availability"], "download"
+        ),
         "path": str(path.resolve()),
         "sha256": digest,
         "bytes": path.stat().st_size,
@@ -281,7 +328,7 @@ def run_collection(entries, root, *, download, budget_bytes=DEFAULT_BUDGET, time
     records = []
     reserved = 0
     for entry in entries:
-        if entry["availability"] not in {"fetchable", "local_reference"}:
+        if entry["availability"] not in READY_AVAILABILITY:
             records.append(
                 {
                     "id": entry["id"],
@@ -292,7 +339,7 @@ def run_collection(entries, root, *, download, budget_bytes=DEFAULT_BUDGET, time
             continue
         try:
             path = source_path(entry, root)
-            if download and not path.exists() and entry["availability"] == "fetchable":
+            if download and not path.exists() and entry["availability"] != "local_reference":
                 # Reserve the cap even when a download fails. An incomplete
                 # response still consumed network bytes from this run's budget.
                 cap = entry["source"]["max_bytes"]
@@ -368,9 +415,7 @@ def main(argv=None):
             print(f"{entry['id']:32s} {entry['availability']:16s} {entry.get('title', '')}")
         return 0
     if not args.ids:
-        entries = [
-            entry for entry in entries if entry["availability"] in {"fetchable", "local_reference"}
-        ]
+        entries = [entry for entry in entries if entry["availability"] in READY_AVAILABILITY]
     path, receipt = run_collection(
         entries,
         args.root,
