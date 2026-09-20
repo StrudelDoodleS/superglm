@@ -950,11 +950,15 @@ def test_prevalidated_signed_compressed_fast_path_matches_dense_and_profiles_onc
     assert moments.xtw is None
     assert moments.xt_rhs == ()
     assert profile["block_calls"] == 1
+    assert profile["block_solver_support_builds"] == 1
+    assert profile["block_solver_support_reuses"] == 1
     assert set(profile) == {
         "block_calls",
         "block_diag_discrete_ssp_s",
         "block_diag_other_s",
         "block_cross_disc_other_s",
+        "block_solver_support_builds",
+        "block_solver_support_reuses",
     }
     for key in set(profile) - {"block_calls"}:
         assert profile[key] > 0.0

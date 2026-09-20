@@ -9,7 +9,50 @@ import pytest
 import scipy.sparse as sp
 
 from superglm._group_matrix import _group_matrix_core as core
+from superglm._group_matrix._group_matrix_algebra import _weighted_row_chunk
+from superglm._group_matrix._group_matrix_kernels import _csr_row_chunk
 from superglm.group_matrix import SparseSSPGroupMatrix
+
+
+@pytest.mark.parametrize("rows", [100, 9_999, 10_001])
+@pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
+def test_weighted_csr_subhalf_chunks_share_indices(rows, index_dtype):
+    group = _group(20_000, 8, full=True)
+    group.B.indices = group.B.indices.astype(index_dtype)
+    group.B.indptr = group.B.indptr.astype(index_dtype)
+    weights = np.linspace(0.5, 1.5, group.shape[0])
+    chunk = _weighted_row_chunk(group.B, weights, 0, rows)
+    assert np.shares_memory(chunk.indices, group.B.indices)
+    assert chunk.indices.dtype == index_dtype
+    assert chunk.indptr.dtype == index_dtype
+    np.testing.assert_array_equal(chunk.toarray(), group.B[:rows].toarray() * weights[:rows, None])
+    unweighted = _csr_row_chunk(group.B, 1, rows + 1)
+    assert np.shares_memory(unweighted.data, group.B.data)
+    assert np.shares_memory(unweighted.indices, group.B.indices)
+    np.testing.assert_array_equal(unweighted.toarray(), group.B[1 : rows + 1].toarray())
+
+
+@pytest.mark.parametrize("budget", [256 << 10, 1 << 20])
+def test_projected_sparse_gram_accounts_for_subhalf_slice_scratch(monkeypatch, budget):
+    n = 20_000
+    basis = np.zeros((n, 8))
+    basis[:, 0], basis[:, 1] = 1, 1 + 1e-8 * np.linspace(-1, 1, n)
+    transform = np.zeros((8, 8))
+    transform[:2, 0] = [1, -1]
+    transform[0, 1:] = 1
+    group = SparseSSPGroupMatrix(sp.csr_matrix(basis), transform)
+    weights = np.linspace(0.5, 1.5, n)
+    group.gram(weights)
+    monkeypatch.setattr(core, "_MAX_SSP_GRAM_WORKSPACE_BYTES", budget)
+    tracemalloc.start()
+    try:
+        group.gram(weights)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # Observation scratch is bounded by the cap. Allow fixed coefficient
+    # products and Python/SciPy allocation bookkeeping, not a fraction of n.
+    assert peak <= budget + (32 << 10) + 64 * transform.shape[1] ** 2
 
 
 def _group(rows, width, *, full):

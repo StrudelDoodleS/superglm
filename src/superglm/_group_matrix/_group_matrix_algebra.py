@@ -13,6 +13,7 @@ from ._group_matrix_kernels import (
     _cat_cat_weighted_crosstab,
     _cat_weighted_bincount,
     _cell_hist_raw_kron,
+    _csr_row_chunk,
     _csr_weighted_bincount,
     _disc_disc_2d_hist,
     _disc_disc_2d_hist_channels,
@@ -74,13 +75,50 @@ def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> 
 class _BlockWeightCache:
     """Per-block-assembly cache for weighted discrete summaries."""
 
-    __slots__ = ("_hist2d", "_profile", "_channel_scratch", "_cell_weights")
+    __slots__ = (
+        "_hist2d",
+        "_profile",
+        "_channel_scratch",
+        "_cell_weights",
+        "_supports",
+        "_sparse_grams",
+    )
 
     def __init__(self, profile: dict[str, Any] | None = None) -> None:
         self._hist2d: dict[tuple[int, int, int, int, int], NDArray] = {}
         self._profile = profile
         self._channel_scratch = np.empty(0)
         self._cell_weights: dict[tuple[int, int], NDArray] = {}
+        self._supports: dict[GroupMatrix, NDArray] = {}
+        self._sparse_grams: dict[GroupMatrix, tuple[NDArray, bool]] = {}
+
+    def sparse_gram(self, gm: GroupMatrix, weights: NDArray) -> tuple[NDArray, bool]:
+        """Share a sparse diagonal's cancellation decision with its crosses.
+
+        This cache belongs to one weighted assembly. A cross may request the
+        right diagonal early; the diagonal loop then reuses that same result.
+        """
+        result = self._sparse_grams.get(gm)
+        if result is None:
+            result = gm._gram_with_projection(weights)
+            self._sparse_grams[gm] = result
+        return result
+
+    def solver_support(self, gm: GroupMatrix) -> NDArray:
+        """Project each live support once within this synchronous assembly.
+
+        Keys retain the owning blocks. A new moments call creates a new cache,
+        so changed factors, weights, subsets and reparameterizations cannot
+        reuse a previous assembly's projection.
+        """
+        support = self._supports.get(gm)
+        if support is None:
+            support = gm.B_unique @ gm.R_inv
+            self._supports[gm] = support
+            _profile_count(self._profile, "block_solver_support_builds")
+        else:
+            _profile_count(self._profile, "block_solver_support_reuses")
+        return support
 
     def cell_weights(self, order: NDArray, W: NDArray) -> NDArray:
         """``W`` in a grid tensor's cell order, permuted once per grid per build.
@@ -231,7 +269,13 @@ def _agg_by_bin_width(gm: GroupMatrix) -> int:
     return int(gm.shape[1])
 
 
-def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> NDArray:
+def _agg_by_bin(
+    gm: GroupMatrix,
+    bin_idx: NDArray,
+    W: NDArray,
+    n_bins: int,
+    cache: _BlockWeightCache | None = None,
+) -> NDArray:
     """Aggregate W * gm's columns by bin index → (n_bins, p_g) dense array.
 
     Dispatches to the most efficient kernel for each GroupMatrix type:
@@ -264,6 +308,10 @@ def _agg_by_bin(gm: GroupMatrix, bin_idx: NDArray, W: NDArray, n_bins: int) -> N
             n_bins,
         )
     if isinstance(gm, SparseSSPGroupMatrix):
+        if type(gm) is SparseSSPGroupMatrix:
+            local_cache = _BlockWeightCache() if cache is None else cache
+            if local_cache.sparse_gram(gm, W)[1]:
+                return _aggregate_group_matrix_columns(gm, bin_idx, W, n_bins)
         B_agg = _csr_weighted_bincount(
             gm._data, gm._indices, gm._indptr, gm._p_b, bin_idx, W, n_bins
         )
@@ -692,6 +740,7 @@ def _cross_gram_tensor_main(
     gm_tensor: DiscretizedTensorGroupMatrix,
     gm_main: DiscretizedSSPGroupMatrix,
     W: NDArray,
+    cache: _BlockWeightCache | None = None,
 ) -> NDArray:
     """Blocked cross-gram between a tensor and a main-effect discretized group.
 
@@ -705,7 +754,9 @@ def _cross_gram_tensor_main(
     """
     B1 = gm_tensor.B1_unique_t
     B2 = gm_tensor.B2_unique_t
-    B_main = gm_main.B_unique
+    # The tensor margins are already projected. Project the main support
+    # before the channel contraction so its small columns do not cancel raw moments.
+    B_main = gm_main.B_unique @ gm_main.R_inv if cache is None else cache.solver_support(gm_main)
     K1, K2 = B1.shape[1], B2.shape[1]
     K_main_raw = B_main.shape[1]
 
@@ -730,7 +781,7 @@ def _cross_gram_tensor_main(
             result_raw = np.empty((K_main_raw, K1 * K2))
             for j1 in range(K1):
                 result_raw[:, j1 * K2 : (j1 + 1) * K2] = tmp_3d[:, :, j1] @ B2
-            return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+            return result_raw @ gm_tensor.R_inv
 
         H_flat = _disc_disc_2d_hist_channels(
             gm_main.bin_idx,
@@ -747,7 +798,7 @@ def _cross_gram_tensor_main(
         result_raw = np.empty((K_main_raw, K1 * K2))
         for j2 in range(K2):
             result_raw[:, j2::K2] = tmp_3d[:, :, j2] @ B1
-        return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+        return result_raw @ gm_tensor.R_inv
 
     result_raw = np.zeros((K_main_raw, K1 * K2))
     if not channel_over_b2:
@@ -761,7 +812,7 @@ def _cross_gram_tensor_main(
                 gm_tensor.n_bins2,
             )
             result_raw[:, j1 * K2 : (j1 + 1) * K2] = B_main.T @ H @ B2
-        return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+        return result_raw @ gm_tensor.R_inv
 
     for j2 in range(K2):
         # Weight observations by B2[idx2[obs], j2]
@@ -777,7 +828,7 @@ def _cross_gram_tensor_main(
         # Contract: (K_main, n_bins_main) × (n_bins_main, n_bins1) × (n_bins1, K1)
         result_raw[:, j2::K2] = B_main.T @ H @ B1
 
-    return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+    return result_raw @ gm_tensor.R_inv
 
 
 def _cross_gram_tensor_own_margin(
@@ -813,7 +864,11 @@ def _cross_gram_tensor_own_margin(
 
     B1 = gm_tensor.B1_unique_t
     B2 = gm_tensor.B2_unique_t
-    B_main = gm_main.B_unique
+    # Centered assembly also calls this with a weight-grid-only cache.
+    project_support = getattr(cache, "solver_support", None)
+    B_main = (
+        gm_main.B_unique @ gm_main.R_inv if project_support is None else project_support(gm_main)
+    )
     K1, K2 = B1.shape[1], B2.shape[1]
     K_main_raw = B_main.shape[1]
     result_raw = np.empty((K_main_raw, K1 * K2), dtype=np.float64)
@@ -839,7 +894,7 @@ def _cross_gram_tensor_own_margin(
                 B2 * weighted_margin1[:, j1][:, None]
             )
 
-    return gm_main.R_inv.T @ result_raw @ gm_tensor.R_inv
+    return result_raw @ gm_tensor.R_inv
 
 
 def _cross_gram_tensor_spline_categorical(
@@ -1032,34 +1087,13 @@ def _mixed_chunk_stop(
 
 
 def _weighted_row_chunk(csr, W_rows: NDArray, start_row: int, stop_row: int):
-    """``diag(W[a:b]) @ csr[a:b]`` at ONE live buffer per stored entry.
-
-    ``csr[a:b].multiply(w[:, None])`` costs three: the slice is a full copy
-    (12 B/entry), and scipy routes the product through COO, allocating a row
-    array, gathered weights and the product itself before returning -- measured
-    32.2 B/entry against the ``// 12`` the chunk budget assumes, so the budget
-    was optimistic by 2.7x exactly where it is load-bearing.
-
-    Slicing ``indptr``/``indices``/``data`` directly keeps the index array a
-    VIEW, and scaling into the ``repeat`` buffer rather than out of it leaves
-    one float64 array live: measured 8.6 B/entry at full density and 8.9 at
-    35%, which puts the budget back on the conservative side of the truth.
-
-    Bit-exact, not merely close: the same two floats are multiplied in the same
-    order as ``multiply`` performs them, so no reassociation occurs and fitted
-    values are unchanged.  Scaling the DENSE side instead would be cheaper
-    still, but computes ``b * (w * c)`` where this computes ``(w * b) * c``.
-    """
+    """Weight CSR rows using one owned value buffer and shared column indices."""
     lo = int(csr.indptr[start_row])
     hi = int(csr.indptr[stop_row])
     row_ptr = csr.indptr[start_row : stop_row + 1]
     data = np.repeat(W_rows[start_row:stop_row], np.diff(row_ptr))
     data *= csr.data[lo:hi]
-    # The weighted view preserves the input's CSR storage class.
-    return csr.__class__(
-        (data, csr.indices[lo:hi], row_ptr - lo),
-        shape=(stop_row - start_row, csr.shape[1]),
-    )
+    return _csr_row_chunk(csr, start_row, stop_row, data=data)
 
 
 def _support_csr_raw_cross(
@@ -1402,7 +1436,9 @@ def _full_csr_values(basis) -> NDArray | None:
     return None
 
 
-def _cross_gram_sparse_ssp(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> NDArray | None:
+def _cross_gram_sparse_ssp(
+    gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray, cache: _BlockWeightCache | None = None
+) -> NDArray | None:
     """Contract live raw SSP bases before mapping the small cross product."""
     B_i, B_j = gm_i.B, gm_j.B
     R_i, R_j = gm_i.R_inv, gm_j.R_inv
@@ -1455,6 +1491,25 @@ def _cross_gram_sparse_ssp(gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray) -> 
     right = sp.csr_matrix((B_j.data, B_j.indices, B_j.indptr), shape=B_j.shape, copy=False)
     if not left.has_canonical_format or not right.has_canonical_format:
         return None
+    cache = _BlockWeightCache() if cache is None else cache
+    if cache.sparse_gram(gm_i, W)[1] or cache.sparse_gram(gm_j, W)[1]:
+        # Retain bounded row products only for cancellation-sensitive blocks.
+        # The ordinary sparse raw cross and tensor channel routes stay intact.
+        pointer_bytes = max(left.indptr.dtype.itemsize, right.indptr.dtype.itemsize)
+        chunk = max(
+            1,
+            (_MAX_CROSS_EXPANSION_BYTES - 2 * pointer_bytes)
+            // (8 * (p_i + p_j) + 2 * pointer_bytes),
+        )
+        result = np.zeros((p_i, p_j))
+        for start in range(0, n, chunk):
+            stop = min(n, start + chunk)
+            first = _csr_row_chunk(left, start, stop) @ R_i
+            second = _csr_row_chunk(right, start, stop) @ R_j
+            second *= W[start:stop, None]
+            result += first.T @ second
+            del first, second
+        return result
     dense_i, dense_j = _full_csr_values(left), _full_csr_values(right)
     if dense_j is not None and (dense_i is None or left.nnz <= right.nnz):
         weighted = _weighted_row_chunk(left, W, 0, n)
@@ -1623,7 +1678,7 @@ def _cross_gram(
         if own_margin is not None:
             _profile_elapsed(profile, "block_cross_tensor_own_margin_s", t0)
             return own_margin.T
-        result = _cross_gram_tensor_main(gm_i, gm_j, W).T
+        result = _cross_gram_tensor_main(gm_i, gm_j, W, cache).T
         _profile_elapsed(profile, "block_cross_tensor_main_s", t0)
         return result
     if (
@@ -1636,15 +1691,29 @@ def _cross_gram(
         if own_margin is not None:
             _profile_elapsed(profile, "block_cross_tensor_own_margin_s", t0)
             return own_margin
-        result = _cross_gram_tensor_main(gm_j, gm_i, W)
+        result = _cross_gram_tensor_main(gm_j, gm_i, W, cache)
         _profile_elapsed(profile, "block_cross_tensor_main_s", t0)
         return result
 
     DiscTypes = (DiscretizedSSPGroupMatrix, DiscretizedSCOPGroupMatrix)
     if isinstance(gm_i, DiscTypes) and isinstance(gm_j, DiscTypes):
         t0 = perf_counter() if profile is not None else 0.0
-        B_i = gm_i.B_unique if isinstance(gm_i, DiscretizedSSPGroupMatrix) else gm_i.B_scop_unique
-        B_j = gm_j.B_unique if isinstance(gm_j, DiscretizedSSPGroupMatrix) else gm_j.B_scop_unique
+        # Preserve the established histogram association if projecting a
+        # factor first could overflow/underflow. Ordinary support products use
+        # solver coordinates; this gate changes arithmetic, not rank policy.
+        parts = []
+        for gm in (gm_i, gm_j):
+            if not isinstance(gm, DiscretizedSSPGroupMatrix):
+                parts.append((gm.B_scop_unique, None))
+            elif all(
+                operand.dtype == np.float64 and _tensor_operand_in_reassociation_range(operand)
+                for operand in (gm.B_unique, gm.R_inv)
+            ):
+                support = gm.B_unique @ gm.R_inv if cache is None else cache.solver_support(gm)
+                parts.append((support, None))
+            else:
+                parts.append((gm.B_unique, gm.R_inv))
+        (B_i, R_i), (B_j, R_j) = parts
         n_i, p_i = B_i.shape
         n_j, p_j = B_j.shape
         n_joint = n_i * n_j
@@ -1683,10 +1752,10 @@ def _cross_gram(
                 )
                 raw = B_i.T @ W_2d @ B_j
                 _profile_count(profile, "block_cross_disc_disc_hist_calls")
-            if isinstance(gm_i, DiscretizedSSPGroupMatrix):
-                raw = gm_i.R_inv.T @ raw
-            if isinstance(gm_j, DiscretizedSSPGroupMatrix):
-                raw = raw @ gm_j.R_inv
+            if R_i is not None:
+                raw = R_i.T @ raw
+            if R_j is not None:
+                raw = raw @ R_j
             _profile_elapsed(profile, "block_cross_disc_disc_s", t0)
             return raw
 
@@ -1696,7 +1765,7 @@ def _cross_gram(
             result = _cross_gram_by_columns(gm_i, gm_j, W)
             _profile_elapsed(profile, "block_cross_fallback_s", t0)
             return result
-        WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins)
+        WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins, cache)
         result = gm_i.B_scop_unique.T @ WX_agg
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
         return result
@@ -1707,7 +1776,7 @@ def _cross_gram(
             result = _cross_gram_by_columns(gm_i, gm_j, W)
             _profile_elapsed(profile, "block_cross_fallback_s", t0)
             return result
-        WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
+        WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins, cache)
         result = (gm_j.B_scop_unique.T @ WX_agg).T
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
         return result
@@ -1723,8 +1792,9 @@ def _cross_gram(
             result = _cross_gram_by_columns(gm_i, gm_j, W)
             _profile_elapsed(profile, "block_cross_fallback_s", t0)
             return result
-        WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins)
-        result = gm_i.R_inv.T @ (gm_i.B_unique.T @ WX_agg)
+        WX_agg = _agg_by_bin(gm_j, gm_i.bin_idx, W, gm_i.n_bins, cache)
+        support = gm_i.B_unique @ gm_i.R_inv if cache is None else cache.solver_support(gm_i)
+        result = support.T @ WX_agg
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
         return result
 
@@ -1736,8 +1806,9 @@ def _cross_gram(
             result = _cross_gram_by_columns(gm_i, gm_j, W)
             _profile_elapsed(profile, "block_cross_fallback_s", t0)
             return result
-        WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins)
-        result = (gm_j.R_inv.T @ (gm_j.B_unique.T @ WX_agg)).T
+        WX_agg = _agg_by_bin(gm_i, gm_j.bin_idx, W, gm_j.n_bins, cache)
+        support = gm_j.B_unique @ gm_j.R_inv if cache is None else cache.solver_support(gm_j)
+        result = (support.T @ WX_agg).T
         _profile_elapsed(profile, "block_cross_disc_other_s", t0)
         return result
 
@@ -1763,7 +1834,7 @@ def _cross_gram(
 
     if type(gm_i) is _SparseSSPGroupMatrix and type(gm_j) is _SparseSSPGroupMatrix:
         t0 = perf_counter() if profile is not None else 0.0
-        result = _cross_gram_sparse_ssp(gm_i, gm_j, W)
+        result = _cross_gram_sparse_ssp(gm_i, gm_j, W, cache)
         if result is not None:
             _profile_count(profile, "block_cross_ssp_ssp_calls")
             _profile_elapsed(profile, "block_cross_ssp_ssp_s", t0)

@@ -21,6 +21,28 @@ def _fraction_matrix(values):
     return np.vectorize(lambda value: Fraction(float(value)), otypes=[object])(values)
 
 
+def test_sparse_raw_gram_cancellation_recomputes_projected_rows():
+    n = 20_000
+    basis = np.zeros((n, 8))
+    basis[:, 0] = 1
+    basis[:, 1] = 1 + 1e-8 * np.linspace(-1, 1, n)
+    transform = np.zeros((8, 2))
+    transform[0] = [1, 1]
+    transform[1] = [-1, 0]
+    group = core.SparseSSPGroupMatrix(sp.csr_matrix(basis), transform)
+    weights = np.linspace(0.5, 1.5, n)
+    projected = group.toarray().astype(np.longdouble)
+    target = np.asarray(
+        projected.T @ (weights.astype(np.longdouble)[:, None] * projected), dtype=float
+    )
+    scales = np.sqrt(np.diag(target))
+    expected = target / np.outer(scales, scales)
+    actual = group.gram(weights) / np.outer(scales, scales)
+    assert np.linalg.norm(actual - expected, 2) <= 100 * np.finfo(float).eps * np.linalg.norm(
+        expected, 2
+    )
+
+
 def _assert_raw_target(actual, basis, transform, weights):
     """Enclose rounding against the exact represented B, W and R product.
 

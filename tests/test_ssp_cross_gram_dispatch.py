@@ -8,7 +8,46 @@ import pytest
 import scipy.sparse as sp
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
-from superglm.group_matrix import SparseSSPGroupMatrix
+from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
+from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+
+
+@pytest.mark.parametrize("right_kind", ["sparse", "support"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cancellation_sensitive_sparse_cross_uses_projected_rows(right_kind, reverse):
+    n = 20_000
+    x = np.linspace(-1, 1, n)
+    raw = np.zeros((n, 8))
+    raw[:, 0], raw[:, 1] = 1, 1 + 1e-8 * x
+    transform = np.zeros((8, 1))
+    transform[:2, 0] = [1, -1]
+    left = SparseSSPGroupMatrix(sp.csr_matrix(raw), transform)
+    right = (
+        SparseSSPGroupMatrix(sp.csr_matrix(np.sign(x)[:, None]), np.ones((1, 1)))
+        if right_kind == "sparse"
+        else DiscretizedSSPGroupMatrix(
+            np.array([[-1.0], [1.0]]), np.ones((1, 1)), (x > 0).astype(int)
+        )
+    )
+    if reverse:
+        left, right = right, left
+    weights = np.linspace(0.5, 1.5, n)
+    design = np.hstack([left.toarray(), right.toarray()]).astype(np.longdouble)
+    target = np.asarray(design.T @ (weights.astype(np.longdouble)[:, None] * design), dtype=float)
+    scale = np.sqrt(np.diag(target))
+    plan = MatrixExecutionPlan((left, right), n=n)
+    for _ in range(2):
+        actual = plan.moments(weights).gram
+        error = (actual - target) / np.outer(scale, scale)
+        bound = 100 * np.finfo(float).eps * np.linalg.norm(target / np.outer(scale, scale), 2)
+        assert np.linalg.norm(error, 2) <= bound
+        assert (
+            abs(algebra._cross_gram(left, right, weights)[0, 0] - target[0, 1])
+            <= bound * scale.prod()
+        )
+        weights *= 0.5
+        target *= 0.5
+        scale /= np.sqrt(2)
 
 
 def _pair(kind="mixed"):

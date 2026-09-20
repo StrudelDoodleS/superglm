@@ -67,15 +67,17 @@ class DiscretizedSSPGroupMatrix:
         w_agg = np.bincount(self.bin_idx, weights=w, minlength=self.n_bins)
         return self.R_inv.T @ (self.B_unique.T @ w_agg)
 
-    def gram(self, W: NDArray) -> NDArray:
-        # Aggregate W by bin, then dense gram, then sandwich with R_inv
+    def gram(self, W: NDArray, *, _support: NDArray | None = None) -> NDArray:
+        # Project before accumulation: raw moments can cancel after R_inv.
         if _ssp_gram_needs_exact(self.B_unique, self.R_inv, W):
             return _exact_ssp_moments(self.B_unique, self.R_inv, W, bin_indices=self.bin_idx)[0]
         W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
-        BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])
-        return self.R_inv.T @ BtWB @ self.R_inv
+        support = self.B_unique @ self.R_inv if _support is None else _support
+        return support.T @ (support * W_agg[:, None])
 
-    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    def gram_rmatvec(
+        self, W: NDArray, Wz: NDArray, *, _support: NDArray | None = None
+    ) -> tuple[NDArray, NDArray, NDArray]:
         """Compute gram(W), rmatvec(W), rmatvec(Wz) with shared bincount.
 
         Returns (gram, XtW, XtWz) — single O(n) pass for both aggregations.
@@ -86,13 +88,9 @@ class DiscretizedSSPGroupMatrix:
             )
             return gram, cast(NDArray, xtw), cast(NDArray, xtwz)
         W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
-        BtW_agg = self.B_unique.T @ W_agg  # (K,)
-        BtWz_agg = self.B_unique.T @ Wz_agg  # (K,)
-        BtWB = self.B_unique.T @ (self.B_unique * W_agg[:, None])  # (K, K)
-        gram = self.R_inv.T @ BtWB @ self.R_inv
-        xtw = self.R_inv.T @ BtW_agg
-        xtwz = self.R_inv.T @ BtWz_agg
-        return gram, xtw, xtwz
+        support = self.B_unique @ self.R_inv if _support is None else _support
+        gram = support.T @ (support * W_agg[:, None])
+        return gram, support.T @ W_agg, support.T @ Wz_agg
 
     def toarray(self) -> NDArray:
         return (self.B_unique @ self.R_inv)[self.bin_idx]

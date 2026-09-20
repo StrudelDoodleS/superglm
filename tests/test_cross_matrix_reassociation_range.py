@@ -40,6 +40,23 @@ def test_cross_preserves_histogram_exponent_range(left_kind, right_kind, directi
     assert np.linalg.norm(actual / expected_scale - np.ones((4, 4)), ord=np.inf) <= bound
 
 
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_projected_support_defers_when_projection_leaves_float64_range(direction):
+    indices = np.array([0, 0, 0], dtype=np.intp)
+    left = DiscretizedSSPGroupMatrix(
+        np.full((256, 1), np.ldexp(1.0, 600 * direction)),
+        np.array([[np.ldexp(1.0, 600 * direction)]]),
+        indices,
+    )
+    right = DiscretizedSSPGroupMatrix(
+        np.full((256, 1), np.ldexp(1.0, -600 * direction)), np.ones((1, 1)), indices
+    )
+    weights = np.ldexp(np.array([1.0, -1.0, 1.0]), -800 * direction)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        result = algebra._cross_gram(left, right, weights)
+    np.testing.assert_array_equal(result, [[np.ldexp(1.0, -200 * direction)]])
+
+
 @pytest.mark.parametrize("force_rows", [False, True])
 @pytest.mark.parametrize("extreme", [False, True])
 def test_range_gate_preserves_safe_rows_and_histogram_cell_cap(monkeypatch, force_rows, extreme):
