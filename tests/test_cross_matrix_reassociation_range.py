@@ -4,11 +4,71 @@ import numpy as np
 import pytest
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
+from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.group_matrix import (
+    DenseGroupMatrix,
     DiscretizedSCOPGroupMatrix,
     DiscretizedSSPGroupMatrix,
     DiscretizedTensorGroupMatrix,
 )
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_projected_histogram_checks_weighted_intermediate_range(direction):
+    indices = np.zeros(3, dtype=np.intp)
+    left = DiscretizedSSPGroupMatrix(
+        np.full((1, 1), np.ldexp(1.0, 100 * direction)),
+        np.full((1, 1), np.ldexp(1.0, 100 * direction)),
+        indices,
+    )
+    right = DiscretizedSSPGroupMatrix(
+        np.full((1, 1), np.ldexp(1.0, -100 * direction)),
+        np.full((1, 1), np.ldexp(1.0, -100 * direction)),
+        indices,
+    )
+    weights = np.ldexp(np.array([1.0, -1.0, 1.0]), 900 * direction)
+    with np.errstate(over="raise", invalid="raise", under="ignore"):
+        result = algebra._cross_gram(left, right, weights)
+    np.testing.assert_array_equal(result, [[np.ldexp(1.0, 900 * direction)]])
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+@pytest.mark.parametrize("route", ["dense", "tensor_main", "tensor_own_margin"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_mixed_projection_retains_finite_legacy_factor_order(direction, route, reverse):
+    # B@R is outside binary64, but B'@(W*partner), then R', is exact and finite.
+    indices = np.array([0, 0], dtype=np.intp)
+    main = DiscretizedSSPGroupMatrix(
+        np.full((1, 1), np.ldexp(1.0, 600 * direction)),
+        np.full((1, 1), np.ldexp(1.0, 600 * direction)),
+        indices,
+    )
+    partner_rows = np.ldexp(np.array([[1.0], [-1.0]]), -200 * direction)
+    if route == "dense":
+        partner = DenseGroupMatrix(partner_rows)
+    else:
+        idx1 = indices if route == "tensor_own_margin" else np.array([0, 1])
+        idx2 = np.array([0, 1])
+        margin1 = np.ones((idx1.max() + 1, 1))
+        partner = DiscretizedTensorGroupMatrix(
+            margin1,
+            partner_rows,
+            idx1,
+            idx2,
+            partner_rows,
+            np.ones((1, 1)),
+            idx2,
+            tensor_id=1,
+        )
+    weights = np.ldexp(np.array([1.0, -1.0]), -600 * direction)
+    left, right = (partner, main) if reverse else (main, partner)
+    with np.errstate(over="raise", invalid="raise", under="ignore"):
+        result = algebra._cross_gram(left, right, weights)
+    np.testing.assert_array_equal(result, [[np.ldexp(1.0, 400 * direction + 1)]])
+    if route == "dense":
+        with np.errstate(over="raise", invalid="raise", under="ignore"):
+            gram = MatrixExecutionPlan((left, right), n=2).moments(weights, signed=True).gram
+        np.testing.assert_array_equal(gram, [[0, result[0, 0]], [result[0, 0], 0]])
 
 
 def _groups(left_kind, right_kind, left_exp, right_exp):

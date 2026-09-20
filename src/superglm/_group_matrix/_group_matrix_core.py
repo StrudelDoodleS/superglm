@@ -738,6 +738,17 @@ class SparseSSPGroupMatrix:
         if W.dtype == self.R_inv.dtype == np.dtype(np.float64) and _ssp_projection_cancels(
             raw_gram, self.R_inv, gram
         ):
+            if W.min(initial=0) < 0 < W.max(initial=0):
+                # A signed moment can vanish without basis cancellation.
+                # Its absolute error scale is X'|W|X, not |diag(X'WX)|.
+                # Only flagged mixed-sign calls need this companion pass;
+                # take abs per row rather than allocating another W vector.
+                energy_raw = _csr_weighted_gram(
+                    self._data, self._indices, self._indptr, W, self._p_b, True
+                )
+                energy = self.R_inv.T @ energy_raw @ self.R_inv
+                if not _ssp_projection_cancels(energy_raw, self.R_inv, energy):
+                    return gram, False
             return _solver_space_gram(self.B, self.R_inv, W), True
         return gram, False
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
+from math import frexp
 
 import numpy as np
 from numba import njit  # type: ignore[import-untyped]
@@ -17,6 +18,23 @@ def _tensor_operand_in_reassociation_range(values):
             if value != 0.0 and not 2.0**-128 <= abs(value) <= 2.0**128:
                 return False
     return True
+
+
+@njit(cache=True)
+def _operand_exponent_bounds(values):
+    """Enclose nonzero magnitudes by powers of two, without array scratch."""
+    smallest, largest = np.inf, 0.0
+    for row in range(values.shape[0]):
+        for col in range(values.shape[1]):
+            value = abs(values[row, col])
+            if not np.isfinite(value):
+                return -1024, 1024
+            if value:
+                smallest = min(smallest, value)
+                largest = max(largest, value)
+    if largest == 0:
+        return 0, 0
+    return frexp(smallest)[1] - 1, frexp(largest)[1]
 
 
 def _ssp_gram_needs_exact(*operands) -> bool:
@@ -190,12 +208,14 @@ def _indexed_row_dot(left, right, left_idx, right_idx):
 
 
 @njit(cache=True)
-def _csr_weighted_gram(data, indices, indptr, W, p):
+def _csr_weighted_gram(data, indices, indptr, W, p, absolute_weights=False):
     """B.T @ diag(W) @ B exploiting CSR sparsity (symmetric accumulation)."""
     result = np.zeros((p, p))
     n = len(W)
     for i in range(n):
         w = W[i]
+        if absolute_weights:
+            w = abs(w)
         start = indptr[i]
         end = indptr[i + 1]
         for a in range(start, end):

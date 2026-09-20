@@ -21,7 +21,8 @@ def _fraction_matrix(values):
     return np.vectorize(lambda value: Fraction(float(value)), otypes=[object])(values)
 
 
-def test_sparse_raw_gram_cancellation_recomputes_projected_rows():
+@pytest.mark.parametrize("signed", [False, True])
+def test_sparse_raw_gram_cancellation_recomputes_projected_rows(signed):
     n = 20_000
     basis = np.zeros((n, 8))
     basis[:, 0] = 1
@@ -31,16 +32,36 @@ def test_sparse_raw_gram_cancellation_recomputes_projected_rows():
     transform[1] = [-1, 0]
     group = core.SparseSSPGroupMatrix(sp.csr_matrix(basis), transform)
     weights = np.linspace(0.5, 1.5, n)
+    if signed:
+        weights[::2] *= -1
     projected = group.toarray().astype(np.longdouble)
     target = np.asarray(
         projected.T @ (weights.astype(np.longdouble)[:, None] * projected), dtype=float
     )
-    scales = np.sqrt(np.diag(target))
+    # Signed moments have an absolute error scale from |W|, not a relative
+    # accuracy target at a possibly zero signed diagonal.
+    energy = projected.T @ (abs(weights.astype(np.longdouble))[:, None] * projected)
+    scales = np.sqrt(np.asarray(np.diag(energy), dtype=float))
     expected = target / np.outer(scales, scales)
-    actual = group.gram(weights) / np.outer(scales, scales)
+    gram, projected_rows = group._gram_with_projection(weights)
+    assert projected_rows
+    actual = gram / np.outer(scales, scales)
     assert np.linalg.norm(actual - expected, 2) <= 100 * np.finfo(float).eps * np.linalg.norm(
-        expected, 2
+        np.asarray(energy, dtype=float) / np.outer(scales, scales), 2
     )
+
+
+def test_signed_diagonal_cancellation_does_not_require_projected_rows(monkeypatch):
+    basis = np.zeros((4000, 8))
+    basis[::2, 0], basis[1::2, 1] = 1, 1
+    transform = np.zeros((8, 2))
+    transform[:2] = [[1, 1], [1, -1]]
+    weights = np.tile([1.0, -1.0], 2000)
+    group = core.SparseSSPGroupMatrix(sp.csr_matrix(basis), transform)
+    monkeypatch.setattr(core, "_solver_space_gram", _forbidden)
+    gram, projected = group._gram_with_projection(weights)
+    assert not projected
+    np.testing.assert_array_equal(gram, [[0, 4000], [4000, 0]])
 
 
 def _assert_raw_target(actual, basis, transform, weights):
