@@ -296,6 +296,54 @@ def test_tensor_cell_csr_is_a_stable_counting_sort():
     assert again[0] is ptr and again[1] is order
 
 
+@pytest.mark.parametrize("index", ["idx1", "idx2"])
+@pytest.mark.parametrize("replace", [False, True])
+def test_tensor_cell_cache_revalidates_live_indices(index, replace):
+    left, right, rng = _tensor_pair(400, (7, 5, 3, 4, 6), (6, 8, 3, 4, 5))
+    weights = rng.normal(size=400)
+    algebra._cross_gram(left, right, weights)
+    old = left.cell_csr()
+    values = getattr(left, index)
+    changed = (values + 1) % (left.n_bins1 if index == "idx1" else left.n_bins2)
+    if replace:
+        setattr(left, index, changed)
+    else:
+        values[:] = changed
+    # Tensor storage duplicates the row addresses for the packed-row methods.
+    left.bin_idx = left.idx1 * left.n_bins2 + left.idx2
+    ptr, order = left.cell_csr()
+    np.testing.assert_array_equal(order, _stable_cell_order(left))
+    assert ptr is not old[0] and order is not old[1]
+    expected, bound = _dense_cross(left, right, weights)
+    actual = algebra._cross_gram(left, right, weights)
+    _assert_cross_matches(actual, expected, bound)
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+@pytest.mark.parametrize("factor", ["raw_values", "projection_map"])
+def test_raw_channel_stage_declines_exceptional_source_factors(direction, factor):
+    left, right, rng = _tensor_pair(40, (4, 5, 2, 2, 3), (6, 7, 2, 2, 3))
+    band = right.raw_channels
+    weights = rng.uniform(0.5, 1.5, 40)
+    if factor == "raw_values":
+        band.values1[:] *= np.ldexp(1.0, 500 * direction)
+        band.values2[:] *= np.ldexp(1.0, 500 * direction)
+        band.projection[:] *= np.ldexp(1.0, -1000 * direction)
+        weights *= np.ldexp(1.0, 100 * direction)
+    else:
+        band.values1[:] *= np.ldexp(1.0, -300 * direction)
+        band.values2[:] *= np.ldexp(1.0, -300 * direction)
+        band.projection[:] *= np.ldexp(1.0, 600 * direction)
+        right.R_inv *= np.ldexp(1.0, 500 * direction)
+    expected, bound = _dense_cross(left, right, weights)
+    profile = {}
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        actual = algebra._cross_gram(left, right, weights, profile=profile)
+    _assert_cross_matches(actual, expected, bound)
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == 0
+
+
 def test_row_subset_does_not_inherit_the_cell_csr():
     n = 400
     left, right, rng = _tensor_pair(n, (7, 5, 3, 4, 6), (6, 8, 3, 4, 5))
@@ -306,18 +354,16 @@ def test_row_subset_does_not_inherit_the_cell_csr():
     _ptr, order = left_sub.cell_csr()
     np.testing.assert_array_equal(order, _stable_cell_order(left_sub))
 
-    # Proof by mutation that the raw block reads the cache and the subset
-    # cannot read the parent's: a shuffled parent order scrambles which rows
-    # land in which cell, and only the parent's block goes wrong.  The left
-    # tensor is the grid side (35 x 5 < 48 x 6 cells).
+    # A malformed parent cache is rebuilt without affecting the subset's
+    # independent order. The left tensor is the grid side (35 x 5 < 48 x 6).
     weights = rng.normal(size=n)
     expected, bound = _dense_cross(left, right, weights)
     ptr, order = left.cell_csr()
     left._cell_csr = (ptr, rng.permutation(order))
     profile = {}
-    poisoned = algebra._cross_gram(left, right, weights, profile=profile)
+    repaired = algebra._cross_gram(left, right, weights, profile=profile)
     assert profile["block_cross_tensor_tensor_channel_raw"] == 1
-    assert np.linalg.norm(poisoned - expected, ord=np.inf) > bound
+    _assert_cross_matches(repaired, expected, bound)
     right_sub = right.row_subset(rows)
     sub_expected, sub_bound = _dense_cross(left_sub, right_sub, weights[rows])
     profile = {}
@@ -673,3 +719,94 @@ def test_distinct_margin_tensor_cross_gram_bounds_its_transient():
     # panel (392 bytes a row here) is materialised.
     assert peak - before <= 8 * cells + gathers + tmp_bytes + 64 * 1024
     assert result.shape == (40, 40)
+
+
+@pytest.mark.parametrize("budget", [256 << 10, 1 << 20])
+@pytest.mark.parametrize("raw_fits", [False, True])
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("cold", [False, True])
+def test_raw_channel_admission_counts_retained_and_simultaneous_workspace(
+    monkeypatch, budget, raw_fits, cached, cold
+):
+    bins = int(np.sqrt(budget / (2 * 8 * 36)))
+    n = budget // (128 if raw_fits else 32)
+    left, right, rng = _tensor_pair(n, (bins, bins, 3, 3, 6), (bins, bins, 3, 3, 6))
+    weights = rng.uniform(0.5, 1.5, n)
+    expected, bound = _dense_cross(left, right, weights)
+    algebra._cross_gram(left, right, weights)  # Compile and build the retained cell index.
+    band, right.raw_channels = right.raw_channels, None
+    algebra._cross_gram(left, right, weights)  # Compile the dense fallback too.
+    right.raw_channels = band
+    retained = sum(array.nbytes for array in left.cell_csr())
+    if cold:
+        left._cell_csr = None
+        retained = 0
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+    monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", budget // 8)
+    tracemalloc.start()
+    try:
+        cache = algebra._BlockWeightCache() if cached else None
+        profile = {}
+        actual = algebra._cross_gram(left, right, weights, cache=cache, profile=profile)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak + retained <= budget + (32 << 10)
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(raw_fits)
+    _assert_cross_matches(actual, expected, bound)
+
+
+def test_raw_channel_budget_includes_new_cached_weights_during_stage_two(monkeypatch):
+    budget, n = 72 << 10, 2000
+    left, right, rng = _tensor_pair(n, (4, 4, 32, 3, 6), (10, 10, 2, 2, 6))
+    weights = rng.uniform(0.5, 1.5, n)
+    expected, bound = _dense_cross(left, right, weights)
+    algebra._cross_gram(left, right, weights)
+    band, right.raw_channels = right.raw_channels, None
+    algebra._cross_gram(left, right, weights)
+    right.raw_channels = band
+    retained = sum(array.nbytes for array in left.cell_csr())
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+    tracemalloc.start()
+    try:
+        cache = algebra._BlockWeightCache()
+        profile = {}
+        actual = algebra._cross_gram(left, right, weights, cache=cache, profile=profile)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak + retained <= budget + (4 << 10)
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == 0
+    _assert_cross_matches(actual, expected, bound)
+
+
+def test_channel_workspace_growth_and_dense_fallback_release_unused_buffers(monkeypatch):
+    n, budget = 2048, 200 << 10
+    small = _tensor_pair(n, (4, 4, 3, 3, 6), (4, 4, 3, 3, 6))
+    large = _tensor_pair(n, (21, 21, 3, 3, 6), (21, 21, 3, 3, 6))
+    weights = small[2].uniform(0.5, 1.5, n)
+    expected = []
+    for left, right, _rng in (small, large):
+        algebra._cross_gram(left, right, weights)
+        expected.append(_dense_cross(left, right, weights))
+    retained = max(sum(a.nbytes for a in pair[0].cell_csr()) for pair in (small, large))
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+    tracemalloc.start()
+    try:
+        cache = algebra._BlockWeightCache()
+        for pair, oracle in ((small, expected[0]), (large, expected[1]), (small, expected[0])):
+            profile = {}
+            actual = algebra._cross_gram(*pair[:2], weights, cache=cache, profile=profile)
+            assert profile["block_cross_tensor_tensor_channel_raw"] == 1
+            _assert_cross_matches(actual, *oracle)
+        # The stored-width stage fits after unused raw workspace is released.
+        monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", 64 << 10)
+        large[1].raw_channels = None
+        actual = algebra._cross_gram(*large[:2], weights, cache=cache)
+        _assert_cross_matches(actual, *expected[1])
+        assert cache._channel_scratch.size == 0 and not cache._cell_weights
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak + retained <= budget + (32 << 10)

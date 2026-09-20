@@ -373,7 +373,6 @@ def optimize_discrete_reml_cached_w(
     _t_linesearch_solve = 0.0
     _t_structured_cache_solve = 0.0
     _t_block_structured_cache_solve = 0.0
-    _t_linesearch_surrogate = 0.0
     _t_linesearch_full_obj = 0.0
     _t_rebuild_dm = 0.0
     _t_map_beta = 0.0
@@ -387,7 +386,7 @@ def optimize_discrete_reml_cached_w(
         cache=penalty_context_cache,
     )
     _t_tensor_summary += _time.perf_counter() - _t0
-    use_tensor_surrogate_linesearch = scale_known and bool(shared_tensor_groups)
+    use_tensor_linesearch = scale_known and bool(shared_tensor_groups)
     # estimated_mask[i] = True  => component i is free to be optimized
     #                     False => component i has a fixed lambda (policy)
     if estimated_names is not None:
@@ -428,7 +427,6 @@ def optimize_discrete_reml_cached_w(
     _n_linesearch_evals = 0
     _n_structured_cache_solves = 0
     _n_block_structured_cache_solves = 0
-    _n_linesearch_surrogate_evals = 0
     _n_linesearch_full_evals = 0
     _n_dead_line_searches = 0
     _outer_step_stats: list[dict[str, Any]] = []
@@ -1113,7 +1111,7 @@ def optimize_discrete_reml_cached_w(
         trust_binding: list[str] = []
         gdot_newton = float(grad @ delta)
         gdot_damped = gdot_newton
-        if use_tensor_surrogate_linesearch:
+        if use_tensor_linesearch:
             # Bound log-lambda coordinates and each shared pair's difference
             # by damping the whole step. The coordinate bound also bounds
             # each pair's mean. Widen after one accepted full step so a
@@ -1164,7 +1162,7 @@ def optimize_discrete_reml_cached_w(
                 break
 
         # Step capping on the generic path: scale the whole vector.
-        if not use_tensor_surrogate_linesearch:
+        if not use_tensor_linesearch:
             local_max_newton_step = max_newton_step
             max_delta = float(np.max(np.abs(delta)))
             max_delta_raw = max_delta
@@ -1173,8 +1171,6 @@ def optimize_discrete_reml_cached_w(
         else:
             max_delta = float(np.max(np.abs(delta)))
             max_delta_raw = float(np.max(np.abs(delta_newton)))
-        quad_grad = float(grad @ delta) if use_tensor_surrogate_linesearch else 0.0
-        quad_curv = float(delta @ hess @ delta) if use_tensor_surrogate_linesearch else 0.0
         _t_newton += _time.perf_counter() - _t0
         _n_newton_steps += 1
 
@@ -1185,25 +1181,18 @@ def optimize_discrete_reml_cached_w(
         halving_count = 0
         had_feasible_trial = False
         evaluated_feasible_trial = False
-        first_full_eval_step: float | None = None
-        # On the shared-tensor path the quadratic surrogate is a free
-        # pre-filter on each step length, so the backtrack is not floored
-        # (the old cap of five stopped at s = 1/16 and killed searches
-        # whose model minimiser was smaller); the penalty build and the
-        # true evaluation happen only for a length the surrogate lets
-        # through, and a rejected true trial backtracks like the generic
-        # path instead of ending the search.
+        # Every feasible trial pays for a cached solve and true objective.
+        # With A = H_pd + mu I and delta = -A^-1 g, H <= A gives
+        # delta' H delta <= -g' delta. Thus the quadratic predicts descent
+        # at every 0 < step <= 1; it cannot filter these damped steps.
+        # Keep the full budget because higher-order objective terms can
+        # still require a small step, regardless of that local prediction.
         local_max_halving = max_halving
-        if use_tensor_surrogate_linesearch and max_delta < 1e-12:
+        if use_tensor_linesearch and max_delta < 1e-12:
             local_max_halving = 0
-        # H_pd - H is positive semidefinite. Along the damped direction,
-        # positive curvature therefore places the quadratic minimizer at
-        # s >= 1. No special interior step is needed during backtracking.
         for _ls in range(local_max_halving):
             rho_trial = np.clip(rho + step * delta, log_lo, log_hi)
-            if use_tensor_surrogate_linesearch and bool(
-                np.all(np.abs(rho_trial - rho_clipped) <= 1e-12)
-            ):
+            if use_tensor_linesearch and bool(np.all(np.abs(rho_trial - rho_clipped) <= 1e-12)):
                 # Every moving coordinate is pinned at a bound; a shorter
                 # step moves even less. Nothing feasible was tried.
                 break
@@ -1214,19 +1203,7 @@ def optimize_discrete_reml_cached_w(
             trial_lambdas.update(fixed_lambdas)
 
             _n_linesearch_evals += 1
-            if use_tensor_surrogate_linesearch:
-                _tls0 = _time.perf_counter()
-                # The predicted CHANGE is judged, not obj + change: a
-                # decrease below the objective's own resolution is still
-                # a prediction, and the true evaluation it lets through is
-                # the evidence a precision exit needs.
-                predicted_change = step * quad_grad + 0.5 * (step**2) * quad_curv
-                _t_linesearch_surrogate += _time.perf_counter() - _tls0
-                _n_linesearch_surrogate_evals += 1
-                if predicted_change >= 0.0:
-                    step *= 0.5
-                    halving_count += 1
-                    continue
+            if use_tensor_linesearch:
                 _tfull0 = _time.perf_counter()
 
             S_trial = (
@@ -1286,9 +1263,7 @@ def optimize_discrete_reml_cached_w(
                     _t_block_structured_cache_solve += cached_solve_elapsed
                     _n_block_structured_cache_solves += 1
 
-            # Evaluate full REML at trial point once the cached surrogate
-            # suggests an improving direction (or for all trials on the
-            # non-tensor / estimated-scale path).
+            # Only the true objective can accept this trial.
             eta_trial = stabilize_eta(dm.matvec(beta_trial) + intercept_trial + offset_arr, link)
             mu_trial = clip_mu(link.inverse(eta_trial), distribution)
             dev_trial = float(np.sum(sample_weight * distribution.deviance_unit(y, mu_trial)))
@@ -1328,11 +1303,11 @@ def optimize_discrete_reml_cached_w(
                 gamma_scale_data=gamma_scale_data,
                 tweedie_scale_data=tweedie_scale_data,
             )
+            if isinstance(trial_obj, REMLObjectiveEvaluation):
+                raise TypeError("Trial objective must be scalar when return_evaluation=False")
             _n_linesearch_full_evals += 1
-            if use_tensor_surrogate_linesearch:
+            if use_tensor_linesearch:
                 _t_linesearch_full_obj += _time.perf_counter() - _tfull0
-                if first_full_eval_step is None:
-                    first_full_eval_step = float(step)
             # The cached trial solve is an exact solve of the profiled
             # working-model system, so the trial's own mode is stationary
             # by construction; a finite rejected objective is evidence.
@@ -1351,7 +1326,7 @@ def optimize_discrete_reml_cached_w(
             halving_count += 1
 
         _t_linesearch += _time.perf_counter() - _t0
-        if use_tensor_surrogate_linesearch and accepted and halving_count == 0:
+        if use_tensor_linesearch and accepted and halving_count == 0:
             _tensor_post_stall_unlocked = True
 
         if not accepted:
@@ -1360,7 +1335,7 @@ def optimize_discrete_reml_cached_w(
             # refit report lambdas that were never accepted by the criterion.
             rho = rho_clipped
 
-        if use_tensor_surrogate_linesearch:
+        if use_tensor_linesearch:
             tensor_names = [pc.name for pc in penalties if pc.group_name in shared_tensor_groups]
             tensor_lams = {name: float(cand_lambdas[name]) for name in tensor_names}
             tensor_log_ratio = None
@@ -1384,9 +1359,6 @@ def optimize_discrete_reml_cached_w(
                     "trust_binding": list(trust_binding),
                     "gdot_newton": gdot_newton,
                     "gdot_damped": gdot_damped,
-                    "quad_grad": quad_grad,
-                    "quad_curv": quad_curv,
-                    "first_full_eval_step": first_full_eval_step,
                     "tensor_log_ratio": tensor_log_ratio,
                     "tensor_lambdas": tensor_lams,
                     "tensor_uv": tensor_step_diag,
@@ -1403,7 +1375,7 @@ def optimize_discrete_reml_cached_w(
             if tensor_log_ratio is not None:
                 _prev_tensor_v = tensor_log_ratio
 
-        if use_tensor_surrogate_linesearch and not accepted and had_feasible_trial:
+        if use_tensor_linesearch and not accepted and had_feasible_trial:
             # A dead line search on the shared-tensor path: every feasible
             # trial was rejected. The exit mirrors the exact engine's
             # (direct.py): the active gradient of the CURRENT active set --
@@ -1661,7 +1633,6 @@ def optimize_discrete_reml_cached_w(
         # never traverses row-scale design data.
         profile["reml_structured_cache_data_passes"] = 0
         profile["reml_block_structured_cache_data_passes"] = 0
-        profile["reml_linesearch_surrogate_s"] = _t_linesearch_surrogate
         profile["reml_linesearch_full_obj_s"] = _t_linesearch_full_obj
         profile["reml_rebuild_dm_s"] = _t_rebuild_dm
         profile["reml_map_beta_s"] = _t_map_beta
@@ -1669,7 +1640,6 @@ def optimize_discrete_reml_cached_w(
         profile["reml_tensor_summary_s"] = _t_tensor_summary
         profile["reml_fp_update_s"] = 0.0
         profile["reml_n_linesearch_fits"] = _n_linesearch_evals
-        profile["reml_n_linesearch_surrogate_evals"] = _n_linesearch_surrogate_evals
         profile["reml_n_linesearch_full_evals"] = _n_linesearch_full_evals
         profile["reml_n_dead_line_searches"] = _n_dead_line_searches
         profile["reml_n_outer_iter"] = poi_iter + 1

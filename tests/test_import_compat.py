@@ -131,6 +131,11 @@ values = np.array([1.0, 2.0], dtype=np.float64)
 codes = np.array([0, 1], dtype=np.intp)
 csr_indices = np.array([0, 1], dtype=np.int32)
 csr_indptr = np.array([0, 1, 2], dtype=np.int32)
+cell_ptr, cell_order = group_kernels._cell_csr(codes, codes, 2, 2)
+frozen_codes, = readonly(codes.copy())
+for first in (codes, frozen_codes):
+    for second in (codes, frozen_codes):
+        assert group_kernels._cell_csr_matches(cell_ptr, cell_order, first, second, 2, 2)
 group_kernels._csr_weighted_gram(
     values, csr_indices, csr_indptr, values, 2, absolute_weights=True
 )

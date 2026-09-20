@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from ._group_matrix_kernels import (
     _cell_csr,
+    _cell_csr_matches,
     _disc_disc_2d_hist,
     _exact_ssp_moments,
     _fused_2d_bincount_2,
@@ -72,6 +73,11 @@ class DiscretizedSSPGroupMatrix:
         if _ssp_gram_needs_exact(self.B_unique, self.R_inv, W):
             return _exact_ssp_moments(self.B_unique, self.R_inv, W, bin_indices=self.bin_idx)[0]
         W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
+        if self.B_unique.dtype != np.float64 or self.R_inv.dtype != np.float64:
+            # Weighting promotes integer/float32 inputs before projection in
+            # the established association. Do not multiply their factors first.
+            raw = self.B_unique.T @ (self.B_unique * W_agg[:, None])
+            return self.R_inv.T @ raw @ self.R_inv
         support = self.B_unique @ self.R_inv if _support is None else _support
         return support.T @ (support * W_agg[:, None])
 
@@ -88,6 +94,13 @@ class DiscretizedSSPGroupMatrix:
             )
             return gram, cast(NDArray, xtw), cast(NDArray, xtwz)
         W_agg, Wz_agg = _fused_bincount_2(self.bin_idx, W, Wz, self.n_bins)
+        if self.B_unique.dtype != np.float64 or self.R_inv.dtype != np.float64:
+            raw = self.B_unique.T @ (self.B_unique * W_agg[:, None])
+            return (
+                self.R_inv.T @ raw @ self.R_inv,
+                self.R_inv.T @ (self.B_unique.T @ W_agg),
+                self.R_inv.T @ (self.B_unique.T @ Wz_agg),
+            )
         support = self.B_unique @ self.R_inv if _support is None else _support
         gram = support.T @ (support * W_agg[:, None])
         return gram, support.T @ W_agg, support.T @ Wz_agg
@@ -412,7 +425,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         dict_state, slot_state = cast(
             tuple[dict[str, object] | None, dict[str, object]], object.__getstate__(self)
         )
-        slot_state.pop("_cell_csr")
+        slot_state.pop("_cell_csr", None)
         return dict_state, slot_state
 
     def __setstate__(self, state):
@@ -427,14 +440,14 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
     def cell_csr(self) -> tuple[NDArray, NDArray]:
         """The rows sorted by grid cell, ``(ptr, order)`` as ``_cell_csr`` returns them.
 
-        Weight-independent, so it is built once per instance and kept for
-        every Gram build of the REML loop (the multi-penalty tensor group is
-        not rebuilt with lambda).  No invalidation is needed: ``idx1`` and
-        ``idx2`` are never written after construction (``_own_margin_cache``
-        already keys on their identity), and every row-changing operation --
-        ``row_subset``, the per-lambda rebuild of a projected tensor --
-        constructs a new instance that sorts its own rows on first use.
+        The public indices may be replaced or mutated through shared arrays.
+        Check their cell membership and stable row order before reuse. This
+        costs one allocation-free scan, rather than retained index snapshots.
         """
+        if self._cell_csr is not None and not _cell_csr_matches(
+            *self._cell_csr, self.idx1, self.idx2, self.n_bins1, self.n_bins2
+        ):
+            self._cell_csr = None
         if self._cell_csr is None:
             self._cell_csr = _cell_csr(self.idx1, self.idx2, self.n_bins1, self.n_bins2)
         return self._cell_csr
@@ -486,7 +499,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
             G_K1K1_K2K2 = B1_outer.T @ C.reshape(n1, K2 * K2)
         return G_K1K1_K2K2.reshape(K1, K1, K2, K2).transpose(0, 2, 1, 3).reshape(K1 * K2, K1 * K2)
 
-    def gram(self, W: NDArray) -> NDArray:
+    def gram(self, W: NDArray, *, _support: NDArray | None = None) -> NDArray:
         w_grid = _disc_disc_2d_hist(self.idx1, self.idx2, W, self.n_bins1, self.n_bins2)
         G_raw = self._factored_gram_raw(w_grid)
         return self.R_inv.T @ G_raw @ self.R_inv
@@ -502,7 +515,9 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         xtwz = self.R_inv.T @ (B1.T @ wz_grid @ B2).ravel()
         return gram, xtw, xtwz
 
-    def gram_rmatvec(self, W: NDArray, Wz: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    def gram_rmatvec(
+        self, W: NDArray, Wz: NDArray, *, _support: NDArray | None = None
+    ) -> tuple[NDArray, NDArray, NDArray]:
         """Factored gram + rmatvec with shared 2D bincount."""
         w_grid, wz_grid = _fused_2d_bincount_2(
             self.idx1, self.idx2, W, Wz, self.n_bins1, self.n_bins2
