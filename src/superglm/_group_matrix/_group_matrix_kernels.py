@@ -356,6 +356,26 @@ def _cell_hist_raw_kron(ptr, bin1, bin2, w, offsets1, values1, offsets2, values2
 
 
 @njit(cache=True)
+def _cell_csr_matches(ptr, order, idx1, idx2, n_bins1, n_bins2):
+    """Validate live cell membership without retaining another index copy."""
+    n = len(idx1)
+    if len(idx2) != n or len(order) != n or len(ptr) != n_bins1 * n_bins2 + 1:
+        return False
+    if ptr[0] != 0 or ptr[-1] != n:
+        return False
+    for cell in range(len(ptr) - 1):
+        if not 0 <= ptr[cell] <= ptr[cell + 1] <= n:
+            return False
+        previous = -1
+        for position in range(ptr[cell], ptr[cell + 1]):
+            row = order[position]
+            if not previous < row < n or idx1[row] * n_bins2 + idx2[row] != cell:
+                return False
+            previous = row
+    return True
+
+
+@njit(cache=True)
 def _cell_csr(idx1, idx2, n_bins1, n_bins2):
     """Stable counting sort of the rows by grid cell ``idx1 * n_bins2 + idx2``.
 
@@ -737,6 +757,9 @@ def _warmup_group_matrix_kernels() -> None:
     _disc_disc_2d_hist(codes, codes, values, 2, 2)
     _disc_disc_2d_hist_channels(codes, codes, codes, values, matrix, 2, 2)
     cell_ptr, cell_order = _cell_csr(codes, codes, 2, 2)
+    for first in (codes, frozen_codes):
+        for second in (codes, frozen_codes):
+            _cell_csr_matches(cell_ptr, cell_order, first, second, 2, 2)
     bin1, bin2 = _gather_cell_order(cell_order, codes, codes)
     w = values[cell_order]
     # Two raw columns per margin at band width two: every window starts at 0.

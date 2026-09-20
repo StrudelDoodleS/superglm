@@ -9,9 +9,44 @@ from superglm import Spline, SuperGLM
 from superglm._group_matrix._group_matrix_algebra import _cross_gram_tensor_own_margin
 from superglm._group_matrix._group_matrix_centered import _TensorGridCache
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
-from superglm.group_matrix import DiscretizedSSPGroupMatrix
+from superglm.group_matrix import DenseGroupMatrix, DiscretizedSSPGroupMatrix
 from superglm.solvers import rank
 from superglm.solvers.centered_system import build_centered_system
+
+
+@pytest.mark.parametrize("dtype", [np.int64, np.float32])
+@pytest.mark.parametrize("signed", [False, True])
+def test_non_float64_supports_retain_weight_promoted_moments(dtype, signed):
+    value = 2**32 if dtype == np.int64 else 1 + 2**-12
+    basis = np.array([[value]], dtype=dtype)
+    group = DiscretizedSSPGroupMatrix(basis, basis.copy(), np.zeros(1, dtype=int))
+    weight = np.array([-1.0 if signed else 1.0])
+    rhs = np.array([0.5])
+    # Promotion by weights preceded both transform products before project-first.
+    # The represented source factors have an exact binary64 product here.
+    x = float(value) ** 2
+    target = weight[0] * x**2
+    bound = 16 * np.finfo(float).eps * abs(target)
+    assert abs(group.gram(weight)[0, 0] - target) <= bound
+    gram, xtw, xtrhs = group.gram_rmatvec(weight, rhs)
+    assert abs(gram[0, 0] - target) <= bound
+    np.testing.assert_allclose(xtw, weight * x, rtol=8 * np.finfo(float).eps, atol=0)
+    np.testing.assert_allclose(xtrhs, rhs * x, rtol=8 * np.finfo(float).eps, atol=0)
+
+    plan = MatrixExecutionPlan((group, DenseGroupMatrix(np.ones((1, 1)))), n=1)
+    for fused in (False, True):
+        moments = plan.moments(
+            weight, signed=signed, rhs=(rhs,) if fused else (), include_xtw=fused
+        )
+        expected = weight[0] * np.array([[x**2, x], [x, 1]])
+        np.testing.assert_allclose(moments.gram, expected, rtol=16 * np.finfo(float).eps, atol=0)
+        if fused:
+            np.testing.assert_allclose(
+                moments.xtw, weight[0] * np.array([x, 1]), rtol=8 * np.finfo(float).eps, atol=0
+            )
+            np.testing.assert_allclose(
+                moments.xt_rhs[0], rhs[0] * np.array([x, 1]), rtol=8 * np.finfo(float).eps, atol=0
+            )
 
 
 @pytest.mark.parametrize("fused", [False, True])

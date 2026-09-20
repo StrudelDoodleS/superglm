@@ -8,6 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from superglm._group_matrix._group_matrix_algebra import (
+    _BlockWeightCache,
     _cross_gram,
     _random_effect_cross_gram,
 )
@@ -125,6 +126,7 @@ def build_scalar_structured_system(
         raise ValueError("Structured layout does not match the supplied grouped design.")
 
     if len(layout.small_indices):
+        weight_cache = _BlockWeightCache()
         if layout.dense_small_matrix is not None:
             A, xtw_small, xtwz_small = _dense_small_weighted_moments(
                 layout.dense_small_matrix,
@@ -139,6 +141,7 @@ def build_scalar_structured_system(
                 rhs=(weighted_rhs,),
                 include_xtw=True,
                 signed=bool(np.any(weights < 0.0)),
+                _cache=weight_cache,
             )
             if small_moments.xtw is None:  # pragma: no cover - requested above
                 raise RuntimeError("Structured small moment plan omitted X'W.")
@@ -147,7 +150,7 @@ def build_scalar_structured_system(
             xtwz_small = small_moments.xt_rhs[0]
         C = np.concatenate(
             [
-                _random_effect_cross_gram(dominant, matrix, weights)
+                _random_effect_cross_gram(dominant, matrix, weights, weight_cache)
                 for matrix in layout.small_matrices
             ],
             axis=1,

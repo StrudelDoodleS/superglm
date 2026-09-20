@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.sparse as sp
 
 import superglm.solvers._structured.moments as structured_moments
 from superglm import RandomEffect, Spline, SuperGLM
@@ -11,6 +12,7 @@ from superglm.dm_builder import build_design_matrix, should_discretize
 from superglm.group_matrix import (
     DenseGroupMatrix,
     RandomEffectGroupMatrix,
+    SparseSSPGroupMatrix,
 )
 from superglm.model.reml_setup import collect_reml_groups
 from superglm.reml.discrete import _solve_cached_profiled_system
@@ -22,6 +24,48 @@ from superglm.solvers.structured import (
     solve_cached_scalar_structured,
 )
 from superglm.types import GroupSlice, PenaltyComponent
+
+
+@pytest.mark.parametrize("sensitive", [False, True])
+def test_structured_sparse_diagonal_is_reused_by_level_crosses(monkeypatch, sensitive):
+    n = 40
+    x = np.linspace(-1, 1, n)
+    basis = np.zeros((n, 8))
+    basis[:, 0], basis[:, 1] = 1, 1 + 1e-8 * x if sensitive else x
+    transform = np.zeros((8, 2))
+    transform[:2] = [[1, 1], [-1, 0]] if sensitive else np.eye(2)
+    spline = SparseSSPGroupMatrix(sp.csr_matrix(basis), transform)
+    random = RandomEffectGroupMatrix(np.arange(n) % 4, 4)
+    groups = [GroupSlice("spline", 0, 2, True), GroupSlice("random", 2, 6, True)]
+    original = SparseSSPGroupMatrix._gram_with_projection
+    calls = []
+
+    def recorded(group, weights):
+        calls.append(group)
+        return original(group, weights)
+
+    monkeypatch.setattr(SparseSSPGroupMatrix, "_gram_with_projection", recorded)
+    weights = np.linspace(0.5, 1.5, n)
+    for iteration in range(2):
+        system = build_scalar_structured_system(
+            [spline, random], groups, weights, weights * x, dominant_group_index=1
+        )
+        assert len(calls) == iteration + 1
+        design = spline.toarray().astype(np.longdouble)
+        mass = weights.astype(np.longdouble)
+        expected_a = np.asarray(design.T @ (mass[:, None] * design), dtype=float)
+        expected_c = np.asarray(random.toarray().T @ (mass[:, None] * design), dtype=float)
+        scale = np.sqrt(np.diag(expected_a))
+        bound = 100 * np.finfo(float).eps
+        assert (
+            np.linalg.norm((system.operator.A - expected_a) / np.outer(scale, scale), 2)
+            <= 2 * bound
+        )
+        assert np.linalg.norm((system.operator.C - expected_c) / scale, 2) <= bound * np.sqrt(
+            weights.sum()
+        )
+        weights *= 0.75
+        spline.R_inv[:, 1] *= 0.5
 
 
 def _build_random_effect_design(

@@ -27,11 +27,14 @@ from ._group_matrix_kernels import (
 if TYPE_CHECKING:
     from ..group_matrix import (
         DenseGroupMatrix,
+        DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
         DiscretizedTensorGroupMatrix,
         FactorSmoothGroupMatrix,
         GroupMatrix,
         RandomEffectGroupMatrix,
+        SparseSSPGroupMatrix,
+        SplineCategoricalGroupMatrix,
     )
 else:
     GroupMatrix = Any
@@ -73,25 +76,34 @@ def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> 
         _profile_add(profile, key, perf_counter() - start)
 
 
-def _cross_support(gm: GroupMatrix, cache, *partners: NDArray) -> tuple[NDArray, NDArray | None]:
-    """Project support only when the remaining cross factors retain range.
+def _cross_factors_in_range(*operands: NDArray) -> bool:
+    """Bound every partial cross product and reduction, not just its result.
 
     Sum negative/positive exponent bounds separately to bound every partial
     product, not just the final product. The product of operand dimensions
     overbounds reduction lengths in either association. Non-cancelling terms
     then stay normal; cancellation still follows ordinary rounded arithmetic.
-    A mixed route supplies its already-weighted aggregate, whose construction
-    is unchanged. Tensor/histogram routes supply W and all pending factors.
     """
     lower = upper = 0
-    for operand in (gm.B_unique, gm.R_inv, *partners):
+    for operand in operands:
         if operand.dtype != np.float64:
-            return gm.B_unique, gm.R_inv
+            return False
         values = operand if operand.ndim == 2 else operand[:, None]
         lo, hi = _operand_exponent_bounds(values)
         lower += min(0, lo)
         upper += max(0, hi) + sum((max(1, size) - 1).bit_length() for size in operand.shape)
-    if lower < -1022 or upper > 1022:
+    return lower >= -1022 and upper <= 1022
+
+
+def _cross_support(
+    gm: DiscretizedSSPGroupMatrix, cache, *partners: NDArray
+) -> tuple[NDArray, NDArray | None]:
+    """Project support when the remaining cross factors retain range.
+
+    Mixed routes pass their already-weighted aggregate. Tensor/histogram
+    routes pass W and all pending factors; declined inputs keep raw association.
+    """
+    if not _cross_factors_in_range(gm.B_unique, gm.R_inv, *partners):
         return gm.B_unique, gm.R_inv
     # Centered tensor assembly supplies a weight-grid-only cache.
     project = getattr(cache, "solver_support", None)
@@ -115,10 +127,10 @@ class _BlockWeightCache:
         self._profile = profile
         self._channel_scratch = np.empty(0)
         self._cell_weights: dict[tuple[int, int], NDArray] = {}
-        self._supports: dict[GroupMatrix, NDArray] = {}
-        self._sparse_grams: dict[GroupMatrix, tuple[NDArray, bool]] = {}
+        self._supports: dict[DiscretizedSSPGroupMatrix, NDArray] = {}
+        self._sparse_grams: dict[SparseSSPGroupMatrix, tuple[NDArray, bool]] = {}
 
-    def sparse_gram(self, gm: GroupMatrix, weights: NDArray) -> tuple[NDArray, bool]:
+    def sparse_gram(self, gm: SparseSSPGroupMatrix, weights: NDArray) -> tuple[NDArray, bool]:
         """Share a sparse diagonal's cancellation decision with its crosses.
 
         This cache belongs to one weighted assembly. A cross may request the
@@ -130,7 +142,7 @@ class _BlockWeightCache:
             self._sparse_grams[gm] = result
         return result
 
-    def solver_support(self, gm: GroupMatrix) -> NDArray:
+    def solver_support(self, gm: DiscretizedSSPGroupMatrix) -> NDArray:
         """Project each live support once within this synchronous assembly.
 
         Keys retain the owning blocks. A new moments call creates a new cache,
@@ -173,6 +185,9 @@ class _BlockWeightCache:
         """
         cells = n_cells * width
         if self._channel_scratch.size < cells:
+            # No consumer keeps the borrowed scratch between cross blocks.
+            # Release it before growth so old and new capacities do not overlap.
+            self._channel_scratch = np.empty(0)
             self._channel_scratch = np.empty(cells)
         return self._channel_scratch[:cells].reshape(n_cells, width)
 
@@ -423,6 +438,7 @@ def _random_effect_cross_gram(
     random_effect: RandomEffectGroupMatrix,
     other: GroupMatrix,
     W: NDArray,
+    cache: _BlockWeightCache | None = None,
 ) -> NDArray:
     """Return ``X_re.T @ diag(W) @ X_other`` by direct level aggregation."""
     # Guarded like every other _agg_by_bin caller.  The output is
@@ -437,6 +453,7 @@ def _random_effect_cross_gram(
         random_effect.codes,
         W,
         random_effect.n_levels,
+        cache,
     )
 
 
@@ -596,50 +613,126 @@ def _cross_gram_tensor_tensor_shared_margin(
     return gm_i.R_inv.T @ raw @ gm_j.R_inv
 
 
+def _tensor_channel_workspace_bytes(
+    grid: DiscretizedTensorGroupMatrix,
+    chan: DiscretizedTensorGroupMatrix,
+    width: int,
+    cache: _BlockWeightCache | None,
+    *,
+    raw: bool,
+) -> int:
+    """Bound active channel workspace, including retained reusable arrays.
+
+    This is not a whole-model/RSS limit: other groups' cell indexes and input
+    factors remain model storage. Include the active grid's index even when
+    retained, and every permuted weight vector retained by this assembly.
+    """
+    n, cells = len(grid.idx1), grid.n_bins1 * grid.n_bins2
+    index_bytes = np.dtype(np.intp).itemsize
+    retained_index = 0 if grid._cell_csr is None else sum(a.nbytes for a in grid._cell_csr)
+    if raw:
+        # Invalidated indexes are released before rebuilding. Reserve the
+        # counting-sort fill even on warm calls to cover live-index mutation.
+        retained_index = max(retained_index, 8 * (cells + 1) + index_bytes * n)
+    scratch = 0 if cache is None else cache._channel_scratch.nbytes
+    weights = 0 if cache is None else sum(a.nbytes for a in cache._cell_weights.values())
+    histogram = 8 * cells * width
+    base = retained_index + weights + (max(scratch, histogram) if raw else scratch + histogram)
+    # Reserve a new W permutation even if an old cell order has cached one:
+    # live-index invalidation can require a fresh permutation in this call.
+    if raw and cache is not None:
+        base += 8 * n  # A new permutation stays cached through stage two.
+    stage1 = (
+        max(8 * cells, (2 * index_bytes + (8 if cache is None else 0)) * n + 8 * width)
+        if raw
+        else 0
+    )
+    k1, k2 = grid.B1_unique_t.shape[1], grid.B2_unique_t.shape[1]
+    p_grid, p_chan = grid.shape[1], chan.shape[1]
+    stage2 = 8 * (
+        k1 * grid.n_bins2 * width  # tmp
+        + k1 * k2 * width  # raw
+        + k2 * width  # one contraction result while assigning into raw
+        + p_grid * width
+        + p_grid * p_chan  # the two final products
+        + (width * p_chan if raw else 0)  # projected channel map
+    )
+    return base + max(stage1, stage2)
+
+
 def _tensor_channel_histogram(
     grid: DiscretizedTensorGroupMatrix,
     chan: DiscretizedTensorGroupMatrix,
     W: NDArray,
     cache: _BlockWeightCache | None,
     profile: dict[str, Any] | None,
-) -> tuple[NDArray, NDArray]:
+) -> tuple[NDArray, NDArray] | None:
     """Stage 1 of the channel route: ``H`` over the cells of ``grid``, and the
     map carrying its channels onto ``chan``'s solver columns.
 
-    RAW STAGE, when ``chan`` carries its raw band and the ``(cells, k1_raw *
-    k2_raw)`` scratch fits the aggregate budget: ``_cell_hist_raw_kron`` sums
-    each row's band products (16 of 100 for cubic margins) into its cell's
-    row of ``H`` in the grid's cached cell order, and ``kron(P1, P2)`` is
-    applied after the grid contraction.  Returns ``(H, kron(P1, P2) @
-    chan.R_inv)``.  DENSE STAGE otherwise -- a margin without a band, or a
-    grid too large for the wider scratch though not for the stored width:
-    ``_disc_disc_2d_hist_channels`` gathers ``chan``'s stored centred joint
-    row per observation.  Returns ``(H, chan.R_inv)``.  The stages agree to
-    round-off (3.2e-16 relative Frobenius on the production block).
-
-    ROW PASSES.  The raw stage makes two sequential permutation passes (the
-    channel bins into cell order) and one pass over the cell-CSR per block,
-    plus one permutation of ``W`` per grid tensor per build, held by
-    ``cache`` for every partner of that grid.  The dense stage makes one
-    random-access pass per block.
+    Raw bands accumulate in cell order and project after contraction. The
+    dense stage gathers stored joint rows. Both must fit the per-operation
+    byte budget, including active retained storage and subsequent contraction
+    workspace. Clear derived build-cache buffers under memory pressure;
+    decline to the existing row route only if neither stage fits on its own.
     """
     n1, n2 = grid.n_bins1, grid.n_bins2
     band = chan.raw_channels
-    if band is None or n1 * n2 * band.projection.shape[0] > _MAX_AGGREGATE_CELLS:
-        H = _disc_disc_2d_hist_channels(
-            grid.idx1, grid.idx2, chan.bin_idx, W, chan.B_unique, n1, n2
+    for raw in (True, False):
+        if raw:
+            if band is None or not _cross_factors_in_range(
+                W,
+                grid.B1_unique_t,
+                grid.B2_unique_t,
+                grid.R_inv,
+                band.values1,
+                band.values2,
+                band.projection,
+                chan.R_inv,
+            ):
+                continue
+            width = band.projection.shape[0]
+        else:
+            width = chan.B_unique.shape[1]
+        if n1 * n2 * width > _MAX_AGGREGATE_CELLS:
+            continue
+        workspace = _tensor_channel_workspace_bytes(grid, chan, width, cache, raw=raw)
+        if cache is not None and workspace > _MAX_CROSS_EXPANSION_BYTES:
+            cache._channel_scratch = np.empty(0)
+            cache._cell_weights.clear()
+            workspace = _tensor_channel_workspace_bytes(grid, chan, width, cache, raw=raw)
+        if workspace > _MAX_CROSS_EXPANSION_BYTES:
+            continue
+        if not raw:
+            H = _disc_disc_2d_hist_channels(
+                grid.idx1, grid.idx2, chan.bin_idx, W, chan.B_unique, n1, n2
+            )
+            return H, chan.R_inv
+        assert band is not None
+        ptr, order = grid.cell_csr()
+        H = (
+            np.empty((n1 * n2, width))
+            if cache is None
+            else cache.channel_accumulator(n1 * n2, width)
         )
-        return H, chan.R_inv
-    width = band.projection.shape[0]
-    H = np.empty((n1 * n2, width)) if cache is None else cache.channel_accumulator(n1 * n2, width)
-    ptr, order = grid.cell_csr()
-    bin1, bin2 = _gather_cell_order(order, chan.idx1, chan.idx2)
-    w = W[order] if cache is None else cache.cell_weights(order, W)
-    _cell_hist_raw_kron(
-        ptr, bin1, bin2, w, band.offsets1, band.values1, band.offsets2, band.values2, band.k2_raw, H
-    )
-    _profile_count(profile, "block_cross_tensor_tensor_channel_raw")
-    return H, band.projection @ chan.R_inv
+        bin1, bin2 = _gather_cell_order(order, chan.idx1, chan.idx2)
+        w = W[order] if cache is None else cache.cell_weights(order, W)
+        _cell_hist_raw_kron(
+            ptr,
+            bin1,
+            bin2,
+            w,
+            band.offsets1,
+            band.values1,
+            band.offsets2,
+            band.values2,
+            band.k2_raw,
+            H,
+        )
+        del bin1, bin2, w
+        _profile_count(profile, "block_cross_tensor_tensor_channel_raw")
+        return H, band.projection @ chan.R_inv
+    return None
 
 
 def _cross_gram_tensor_tensor_channels(
@@ -660,78 +753,23 @@ def _cross_gram_tensor_tensor_channels(
         H[i1 * n2 + i2, cd] = sum_{r in cell (i1, i2)} W_r * B_joint_j[bin_idx_r, cd]
         raw[a * K2 + b, cd] = sum_{i1, i2} B1_i[i1, a] * B2_i[i2, b] * H[i1 * n2 + i2, cd]
 
-    Stage 1 is ``_tensor_channel_histogram`` -- the raw-band accumulation in
-    the grid's cell order, or the stored-row gather -- with no ``(n, p)``
-    panel; stage 2 is the two-GEMM contraction ``_cross_gram_tensor_main``
-    uses; stage 3 maps the channels onto solver columns and applies the grid's
-    ``R_inv``.  This is Li and Wood (2020, Stat. Comput. 30:19-25) Algorithm
-    2/3 -- accumulate the compact rows of one term by the index of the other,
-    then contract -- with the compact row replaced by its B-spline band and
-    the accumulation reordered by cell.
+    Accumulate channels over the grid, contract with its two margins, then
+    apply the coefficient maps. Choose the smaller stored-width histogram;
+    ties use the left grid, preserving the established summation orientation.
 
-    ORIENTATION.  Either tensor can be the grid.  The histogram costs
-    ``cells_i = n1_i * n2_i * P_j`` cells with ``i`` as the grid and
-    ``cells_j = n1_j * n2_j * P_i`` with ``j``; the smaller is used, and on a
-    tie the LEFT operand is the grid.  The tie-break is part of the numerical
-    contract: the two orientations sum in different orders and differ at
-    about one ulp, and in the production case (two 256 x 256 grids with 81
-    columns each) the counts tie exactly.  With ``j`` as the grid the block is
-    computed as ``X_j.T @ diag(W) @ X_i`` and transposed;
-    ``block_cross_tensor_tensor_channel_transposed`` counts those blocks.
+    Both stages require float64 operands and a histogram below the aggregate
+    cell cap. The stored-margin range guard bounds five factors and three
+    reductions; the raw stage also checks its actual band and map factors.
+    Its byte admission includes active retained buffers and the contraction
+    peak, not just H. If neither stage fits, return None for the bounded row
+    fallback. Other tensors' model-owned cell indexes are not charged to this
+    per-operation workspace limit.
 
-    GATE.  Returns ``None`` -- the caller then falls through to the routes
-    that ran before, which for distinct margins is the row-expanding
-    contraction of ``_support_support_raw_cross`` -- unless:
-
-    * both operands are ``DiscretizedTensorGroupMatrix`` with different
-      ``tensor_id`` (a shared id keeps the packed-grid route);
-    * the marginal tables, the joint basis and the weights are float64;
-    * ``min(cells_i, cells_j) <= _MAX_AGGREGATE_CELLS`` (8,388,608 cells, 64
-      MiB).  That is the CROSS-shaped aggregate budget, not
-      ``_MAX_DISC_DISC_CHANNEL_HIST_CELLS`` (5,000,000): the production block
-      needs ``256 * 256 * 81 = 5,308,416`` cells, which the channel cap would
-      decline and this budget admits.  The raw stage's scratch is wider,
-      ``n1 * n2 * k1_raw * k2_raw`` (6,553,600 cells, 52.4 MB, in
-      production), and is budgeted by the STAGE, not the route: over the
-      budget at the raw width the dense stage runs at the stored width, so
-      the band never costs a block the channel route it had (40.5 MiB,
-      strictly below the two 32 MiB row panels the displaced route holds
-      live);
-    * the four marginal tables and the weights pass
-      ``_tensor_operand_in_reassociation_range``.  The joint basis is the
-      row-Kronecker of its two margins, so bounding each margin and the
-      weights by ``2**(+/-128)`` keeps every product of the five factors
-      inside ``2**(+/-640)``, and the three reductions (over rows, then over
-      each grid margin) add at most 189 bits of growth: inside binary64.
-      This is a NEW, stricter policy than the displaced route's, which
-      applies the guard only below the histogram cell cap and skips it above;
-      a decline here lands on exactly that route, so nothing that computed
-      before stops computing.
-
-    EXACTNESS.  The dense route multiplies the STORED joint rows of both
-    tensors.  This route replaces tensor ``i``'s stored joint row by the
-    product of its two marginal rows -- a one-ulp representation change, the
-    joint having been formed as that product at build time -- and it changes
-    the summation order; the raw stage further forms tensor ``j``'s row as
-    ``(w * raw1) * raw2`` on the raw B-spline values, sums each cell in its
-    stable row order, and projects after the grid contraction.  The contract
-    is the repo's oracle bound, ``32 * eps * max(n, n1 * n2) * ||abs(X_i).T
-    @ abs(W X_j)||_inf`` plus ``1e-12`` relative Frobenius, not bit identity;
-    measured agreement is ``1.3e-15`` (dense stage) and ``1.9e-15`` (raw
-    stage) relative Frobenius on the production block.
-
-    ARITHMETIC, in matched units.  The dense route costs ``n * P_i * P_j``
-    multiply-adds (``2 * n * P_i * P_j`` flops) plus ``n * (P_i + P_j)``
-    doubles of row-panel traffic; the dense stage costs ``n * P_j``
-    multiply-adds for stage 1 plus ``n1 * n2 * K1 * P_j + K1 * K2 * n2 *
-    P_j`` for the two GEMMs: about 26x fewer on the production block (1.97e9
-    against 7.5e7 multiply-adds), a measured 4.5x per block because stage 1
-    gathers and accumulates ``P_j`` doubles per row at random and is bound by
-    those dependent reads, not by the arithmetic.  The raw stage cuts stage 1
-    to ``n * width1 * width2`` multiply-adds (16 per row) on streaming
-    inputs, 10.4 ms against 30-35 ms on the production block at one thread
-    (indicative), and widens stage 2 from 81 to 100 channels (+8%): the block
-    2.1-2.4x below the dense stage.  Serial: no parallel kernel.
+    Stored joint rows, products of centered margins, and projected raw bands
+    are related by rounded matrix products. Reassociation changes both that
+    representation error and accumulation error; it does not promise bit
+    identity. Numerical tests check the dimension/epsilon absolute-product
+    bound against the stored-row oracle, separately from backend dispatch.
     """
     if gm_i.tensor_id == gm_j.tensor_id:
         return None
@@ -749,7 +787,10 @@ def _cross_gram_tensor_tensor_channels(
     B1, B2 = grid.B1_unique_t, grid.B2_unique_t
     K1, K2 = B1.shape[1], B2.shape[1]
     n1, n2 = grid.n_bins1, grid.n_bins2
-    H, chan_map = _tensor_channel_histogram(grid, chan, W, cache, profile)
+    histogram = _tensor_channel_histogram(grid, chan, W, cache, profile)
+    if histogram is None:
+        return None
+    H, chan_map = histogram
     width = H.shape[1]
     tmp = (B1.T @ H.reshape(n1, n2 * width)).reshape(K1, n2, width)
     raw = np.empty((K1 * K2, width))
@@ -1252,8 +1293,8 @@ def _cross_gram_categorical_spline_categorical(
 
 
 def _cross_gram_spline_categorical_spline_categorical(
-    gm_i: GroupMatrix,
-    gm_j: GroupMatrix,
+    gm_i: SplineCategoricalGroupMatrix | DiscretizedSplineCategoricalGroupMatrix,
+    gm_j: SplineCategoricalGroupMatrix | DiscretizedSplineCategoricalGroupMatrix,
     W: NDArray,
 ) -> NDArray:
     """Cross-gram between compact spline-category level groups."""
@@ -1348,7 +1389,7 @@ def _cross_gram_spline_categorical_spline_categorical(
 
 def _cross_gram_discrete_spline_categorical(
     gm_disc: DiscretizedSSPGroupMatrix,
-    gm_spline_cat: GroupMatrix,
+    gm_spline_cat: DiscretizedSplineCategoricalGroupMatrix,
     W: NDArray,
 ) -> NDArray | None:
     """Cross-gram X_disc.T W X_spline_cat from compressed support bins."""
@@ -1371,7 +1412,7 @@ def _cross_gram_discrete_spline_categorical(
 
 def _support_support_cross_gram(
     gm_disc: DiscretizedSSPGroupMatrix,
-    gm_spline_cat: GroupMatrix,
+    gm_spline_cat: DiscretizedSplineCategoricalGroupMatrix,
     W: NDArray,
 ) -> NDArray:
     """The same product as :func:`_cross_gram_discrete_spline_categorical`,
@@ -1459,7 +1500,10 @@ def _full_csr_values(basis) -> NDArray | None:
 
 
 def _cross_gram_sparse_ssp(
-    gm_i: GroupMatrix, gm_j: GroupMatrix, W: NDArray, cache: _BlockWeightCache | None = None
+    gm_i: SparseSSPGroupMatrix,
+    gm_j: SparseSSPGroupMatrix,
+    W: NDArray,
+    cache: _BlockWeightCache | None = None,
 ) -> NDArray | None:
     """Contract live raw SSP bases before mapping the small cross product."""
     B_i, B_j = gm_i.B, gm_j.B

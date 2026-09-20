@@ -243,8 +243,10 @@ class MatrixExecutionPlan:
             left_columns = self._group_columns[left_index]
             diagonal_start = perf_counter() if profile is not None else 0.0
             support = None
-            if self._support_mask[left_index] and not _ssp_gram_needs_exact(
-                left_group.B_unique, left_group.R_inv
+            if (
+                self._support_mask[left_index]
+                and left_group.B_unique.dtype == left_group.R_inv.dtype == np.float64
+                and not _ssp_gram_needs_exact(left_group.B_unique, left_group.R_inv)
             ):
                 support = cache.solver_support(left_group)
             if self._support_mask[left_index]:
@@ -297,9 +299,10 @@ class MatrixExecutionPlan:
         include_xtw: bool = False,
         signed: bool = False,
         profile: dict | None = None,
+        _cache: _BlockWeightCache | None = None,
     ) -> WeightedMoments:
         """Return moments for fit-internal arrays with established domains."""
-        if signed and not rhs and not include_xtw and not self._ordinary_indices:
+        if _cache is None and signed and not rhs and not include_xtw and not self._ordinary_indices:
             _profile_count(profile, "block_calls")
             return WeightedMoments(
                 gram=self._compressed_signed_gram(weights, profile=profile),
@@ -313,6 +316,7 @@ class MatrixExecutionPlan:
             signed=signed,
             profile=profile,
             validate_inputs=False,
+            _cache=_cache,
         )
 
     def _moments_impl(
@@ -324,11 +328,16 @@ class MatrixExecutionPlan:
         signed: bool,
         profile: dict | None,
         validate_inputs: bool,
+        _cache: _BlockWeightCache | None = None,
     ) -> WeightedMoments:
         """Return a Gram and transpose products through one hybrid plan.
 
         The public route coerces and validates its inputs. The private route
         trusts fit-internal arrays and skips coercion plus domain scans.
+        Ordinary float64 supports project before accumulation. Exceptional
+        factors/dtypes retain source-factor associations, so the accuracy
+        contract is a bounded product error, not one bit-identical dense design.
+        A supplied cache must belong to this same synchronous weighted assembly.
         """
         if validate_inputs:
             W = np.asarray(weights, dtype=np.float64)
@@ -348,7 +357,13 @@ class MatrixExecutionPlan:
             rhs_vectors = rhs
         _profile_count(profile, "block_calls")
 
-        if signed and not rhs_vectors and not include_xtw and not self._ordinary_indices:
+        if (
+            _cache is None
+            and signed
+            and not rhs_vectors
+            and not include_xtw
+            and not self._ordinary_indices
+        ):
             return WeightedMoments(
                 gram=self._compressed_signed_gram(W, profile=profile),
                 xtw=None,
@@ -405,7 +420,7 @@ class MatrixExecutionPlan:
             if ordinary_is_full:
                 return WeightedMoments(gram=gram, xtw=xtw, xt_rhs=tuple(xt_rhs))
 
-        cache = _BlockWeightCache(profile)
+        cache = _BlockWeightCache(profile) if _cache is None else _cache
         for left_index, (left_span, left_group) in enumerate(self._group_entries):
             left_is_ordinary = ordinary_split is not None and self._ordinary_mask[left_index]
             if not left_is_ordinary:
@@ -415,8 +430,10 @@ class MatrixExecutionPlan:
                 # Preserve the exact source-factor route before evaluating a
                 # support product that may itself overflow or cancel to NaN.
                 support = None
-                if self._support_mask[left_index] and not _ssp_gram_needs_exact(
-                    left_group.B_unique, left_group.R_inv
+                if (
+                    self._support_mask[left_index]
+                    and left_group.B_unique.dtype == left_group.R_inv.dtype == np.float64
+                    and not _ssp_gram_needs_exact(left_group.B_unique, left_group.R_inv)
                 ):
                     support = cache.solver_support(left_group)
                 if fusion_vector is not None and self._fused_mask[left_index]:

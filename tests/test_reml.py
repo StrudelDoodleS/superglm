@@ -1564,7 +1564,7 @@ class TestREMLObjectiveFastPath:
 
 
 class TestDiscreteCachedSolve:
-    def test_tensor_surrogate_linesearch_defers_profiled_solve(self, monkeypatch):
+    def test_tensor_linesearch_solves_each_true_objective_trial_once(self, monkeypatch):
         import superglm.reml.discrete as discrete_reml
 
         rng = np.random.default_rng(77)
@@ -1599,7 +1599,8 @@ class TestDiscreteCachedSolve:
         model.fit_reml(X, y, max_reml_iter=3, reml_tol=1e-12)
 
         assert model._reml_result.n_reml_iter >= 1
-        assert model._reml_profile["reml_n_linesearch_surrogate_evals"] >= solve_calls
+        assert solve_calls > 0
+        assert model._reml_profile["reml_n_linesearch_fits"] == solve_calls
         assert model._reml_profile["reml_n_linesearch_full_evals"] == solve_calls
 
     def test_penalty_block_trace_matches_materialized_hessian_product(self):

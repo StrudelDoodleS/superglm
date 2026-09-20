@@ -14,14 +14,16 @@ objective is evaluated, ``rho`` never moves and the loop runs to
 The repair imposes the same trust region by DAMPING the step
 (Levenberg-Marquardt: ``delta(mu) = -(H_pd + mu I)^-1 g`` is a descent
 direction for every ``mu >= 0``; Nocedal and Wright ch. 4; More and
-Sorensen, SIAM J. Sci. Stat. Comput. 4 (1983) 553-572), lifts the surrogate
-backtrack floor, and lets a dead tensor line search name its exit through
+Sorensen, SIAM J. Sci. Stat. Comput. 4 (1983) 553-572), retains full
+true-objective backtracking, and lets a dead tensor line search name its exit through
 the exact engine's ``classify_dead_feasible_exit``.
 
 Every pinned number below was measured on the UNFIXED engine (v0.34.0) with
 the fixture builders in this file; the descent-direction tests fail there
 for the reasons their docstrings give.
 """
+
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -46,10 +48,28 @@ UNFIXED_STALL_REACHABLE_OBJECTIVE = 998.5159505701776
 STALL_OBJECTIVE_MARGIN = 10.0
 # Additive discrete Poisson: never enters the tensor branch.
 UNFIXED_ADDITIVE_OBJECTIVE = 860.770270858582
-UNFIXED_ADDITIVE_LAMBDAS = {"x": 0.45392953968926786, "z": 4110319.212586605}
+UNFIXED_ADDITIVE_PREDICTIONS = [
+    3.5173810822833405,
+    1.4098278339999943,
+    3.38167113106048,
+    1.5165919111161623,
+    0.5660554137544208,
+    4.557913927102061,
+    0.7586145951064456,
+    0.6104927940249637,
+]
 # The same additive fit stopped at max_reml_iter=3.
 UNFIXED_ADDITIVE_MAXITER3_OBJECTIVE = 860.8097629812323
-UNFIXED_ADDITIVE_MAXITER3_LAMBDAS = {"x": 0.4539935346095709, "z": 3648.391372339347}
+UNFIXED_ADDITIVE_MAXITER3_PREDICTIONS = [
+    3.5133386551457835,
+    1.412701181230101,
+    3.3909867495574044,
+    1.5150265865134074,
+    0.5675142290906372,
+    4.567946259024691,
+    0.758065878744712,
+    0.6083893212610809,
+]
 # A one-pair fit that already converges on the surrogate path, chosen so
 # that every lambda is DETERMINED (all four between 2.8 and 7.1, none
 # parked against a bound where a relative comparison means nothing).
@@ -111,12 +131,13 @@ def _additive_frame():
     return pd.DataFrame({"x": x, "z": z}), y
 
 
-def _gamma_frame():
+def _gamma_frame(*, curved=False):
     rng = np.random.default_rng(909)
     n = 2000
     x2 = rng.uniform(-1.0, 1.0, n)
     x3 = rng.uniform(-1.0, 1.0, n)
-    mu = np.exp(0.5 + 0.8 * np.sin(2.4 * x2) + 0.3 * x3 + 0.6 * np.sin(2.0 * x2) * x3)
+    z = np.sin(2.4 * x3) if curved else x3
+    mu = np.exp(0.5 + 0.8 * np.sin(2.4 * x2) + 0.3 * z + 0.6 * np.sin(2.0 * x2) * z)
     y = rng.gamma(shape=6.0, scale=mu / 6.0)
     return pd.DataFrame({"x2": x2, "x3": x3}), y
 
@@ -137,6 +158,48 @@ def _additive_model():
         discrete=True,
         n_bins=48,
         features={"x": Spline(kind="ps", k=8), "z": Spline(kind="ps", k=8)},
+    )
+
+
+def _forbid_tensor_step(*_args, **_kwargs):
+    pytest.fail("this fit must use the generic, not the damped tensor, Newton step")
+
+
+def _assert_additive_reference(model, X, objective, predictions):
+    """Compare stable outputs, allowing conditioned floating-point arithmetic error.
+
+    The z smoothing direction is flat, so its lambda is not a forward-accuracy
+    oracle. Bound output error using gamma_(n+p^3) for row reductions and dense
+    solves, amplified by the equilibrated penalized coefficient Hessian's
+    condition number. The reference predictions are every 200th training row.
+    """
+    dm, result = model._dm, model._reml_result
+    design = np.column_stack((np.ones(len(X)), *(g.toarray() for g in dm.group_matrices)))
+    fitted = model.predict(X)
+    penalty = discrete_reml.build_penalty_matrix(
+        dm.group_matrices,
+        model._groups,
+        result.lambdas,
+        dm.p,
+        reml_penalties=result.reml_penalties,
+    )
+    hessian = design.T @ (fitted[:, None] * design)
+    hessian[1:, 1:] += penalty
+    scale = np.sqrt(np.diag(hessian))
+    condition = np.linalg.cond(hessian / np.outer(scale, scale))
+    operations = len(X) + design.shape[1] ** 3
+    gamma = operations * np.finfo(float).eps / (1 - operations * np.finfo(float).eps)
+    bound = gamma * condition
+    assert np.isfinite(bound)
+    # Require at least half of float64's significant digits. A deteriorating
+    # fixture must fail here instead of silently widening its comparison.
+    assert bound < np.sqrt(np.finfo(float).eps)
+    assert abs(result.objective - objective) <= bound * (1 + abs(objective))
+    np.testing.assert_allclose(
+        fitted[::200],
+        predictions,
+        rtol=0,
+        atol=bound * (1 + np.max(np.abs(predictions))),
     )
 
 
@@ -198,7 +261,7 @@ class TestDiscreteTensorStepIsADescentDirection:
         model.fit_reml(X, y, max_reml_iter=12, runtime_validation="skip")
 
         stats = model.reml_diagnostics()["profile"]["reml_outer_step_stats"]
-        assert stats, "the surrogate branch must have run"
+        assert stats, "the damped tensor branch must have run"
         gdots = [entry["gdot_damped"] for entry in stats]
         assert all(g <= 0.0 for g in gdots), gdots
         assert any(g < 0.0 for g in gdots), gdots
@@ -251,28 +314,39 @@ class TestDiscreteTensorStepIsADescentDirection:
         assert record["evaluated_trial"] is True
         assert record["active_gradient_norm"] > record["bar"]
 
-    def test_surrogate_backtrack_reaches_below_one_thirty_second(self, monkeypatch):
-        """Fails unfixed: the surrogate stops at halving 5, above ``s = 1/32``.
+    def test_true_objective_backtrack_accepts_below_one_thirty_second(self, monkeypatch):
+        """A legitimate damped direction still needs true-objective backtracking.
 
-        ``local_max_halving = 5`` floored the backtrack at ``s = 1/16``,
-        so a direction whose model minimiser sits below ``1/32`` died with
-        every trial predicting an increase and no true objective evaluated
-        (the workflow-1 counterfactual arm: ``s* = 0.0149``). Such a state
-        cannot arise from the damped step itself (its minimiser is at or
-        beyond ``s = 1``), so the step is injected through the damping
-        seam -- the unfixed engine has no such seam and no such schedule.
-        The injected direction is 100x the modified-Newton step, whose
-        model minimiser is therefore ``s* = 1/100``.
+        Add a quartic in log-lambda displacement to the real objective. Its
+        gradient and Hessian vanish at the candidate, so the unmodified
+        Newton direction remains legitimate, but the local quadratic cannot
+        see this higher-order cost. This avoids pinning a small accepted step
+        to the sign of roundoff near an actual fit's stationary point.
+        Restoring the old five-trial budget makes the acceptance assertion fail.
         """
-        real = discrete_reml._damped_tensor_newton_step
+        real = discrete_reml.reml_laml_objective
+        origin = {}
+        scale = 0.0
 
-        def hundredfold_newton(eigvecs, eigvals_pd, grad_sub, active_idx, m, *args, **kwargs):
-            delta = np.zeros(m)
-            delta[active_idx] = -(eigvecs * (1.0 / eigvals_pd)) @ (eigvecs.T @ grad_sub)
-            return 100.0 * delta, 0.0, []
+        def with_quartic(*args, **kwargs):
+            nonlocal scale
+            evaluation = real(*args, **kwargs)
+            value = (
+                evaluation.value
+                if isinstance(evaluation, discrete_reml.REMLObjectiveEvaluation)
+                else evaluation
+            )
+            lambdas = args[6]
+            if not origin:
+                origin.update(lambdas)
+                scale = 32**4 * (1 + abs(value))
+            displacement = np.log([lambdas[name] / lam for name, lam in origin.items()])
+            value += scale * float(displacement @ displacement) ** 2
+            if isinstance(evaluation, discrete_reml.REMLObjectiveEvaluation):
+                return replace(evaluation, value=value)
+            return value
 
-        assert callable(real)
-        monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", hundredfold_newton)
+        monkeypatch.setattr(discrete_reml, "reml_laml_objective", with_quartic)
 
         X, y = _mild_frame()
         model = _tensor_model()
@@ -280,22 +354,19 @@ class TestDiscreteTensorStepIsADescentDirection:
 
         profile = model.reml_diagnostics()["profile"]
         entry = profile["reml_outer_step_stats"][0]
-        s_star = -entry["quad_grad"] / entry["quad_curv"]
-        assert entry["quad_grad"] < 0.0 and s_star < 1.0 / 32.0, entry
-        # The surrogate vetoed every length down to and including 1/32 ...
-        assert entry["halvings"] >= 5, entry
-        # ... and the true objective was consulted below it.
-        assert entry["first_full_eval_step"] is not None
-        assert entry["first_full_eval_step"] < 1.0 / 32.0, entry
-        assert profile["reml_n_linesearch_full_evals"] >= 1
+        assert entry["gdot_damped"] < 0.0
+        assert entry["accepted"]
+        assert 0.0 < entry["accepted_step"] < 1.0 / 32.0, entry
+        assert profile["reml_n_linesearch_full_evals"] == entry["halvings"] + 1
 
 
 # ── Regression guards: pass on the unfixed engine by design ──────────────
 
 
 class TestUntouchedByTheTensorRepair:
-    def test_additive_discrete_fit_is_bit_identical(self):
-        """Regression guard: an additive fit never enters the tensor branch."""
+    def test_additive_discrete_fit_keeps_its_predictions_and_generic_step(self, monkeypatch):
+        """Generic dispatch and stable outputs do not require stack-specific bits."""
+        monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", _forbid_tensor_step)
         X, y = _additive_frame()
         model = _additive_model()
         model.fit_reml(X, y, runtime_validation="skip")
@@ -303,18 +374,20 @@ class TestUntouchedByTheTensorRepair:
         result = model._reml_result
         assert result.converged
         assert result.termination_reason == "score_objective_tolerance"
-        assert result.objective == UNFIXED_ADDITIVE_OBJECTIVE
-        assert result.lambdas == UNFIXED_ADDITIVE_LAMBDAS
+        _assert_additive_reference(
+            model, X, UNFIXED_ADDITIVE_OBJECTIVE, UNFIXED_ADDITIVE_PREDICTIONS
+        )
         assert "reml_outer_step_stats" not in model.reml_diagnostics()["profile"]
 
-    def test_additive_discrete_fit_keeps_its_iteration_limit(self):
+    def test_additive_discrete_fit_keeps_its_iteration_limit(self, monkeypatch):
         """Regression guard: a budget-limited additive fit stays unconverged.
 
         The C3 contract for this change: an additive discrete fit that
         terminates at ``max_reml_iter`` today must keep ``converged=False``
         and ``max_reml_iter`` -- it must not acquire ``converged_at_precision``
-        or ``line_search_failed`` -- and publish the same numbers.
+        or ``line_search_failed`` -- and preserve the fitted predictions.
         """
+        monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", _forbid_tensor_step)
         X, y = _additive_frame()
         model = _additive_model()
         model.fit_reml(X, y, max_reml_iter=3, runtime_validation="skip")
@@ -323,16 +396,17 @@ class TestUntouchedByTheTensorRepair:
         assert not result.converged
         assert result.termination_reason == "max_reml_iter"
         assert result.n_reml_iter == 3
-        assert result.objective == UNFIXED_ADDITIVE_MAXITER3_OBJECTIVE
-        assert result.lambdas == UNFIXED_ADDITIVE_MAXITER3_LAMBDAS
+        _assert_additive_reference(
+            model, X, UNFIXED_ADDITIVE_MAXITER3_OBJECTIVE, UNFIXED_ADDITIVE_MAXITER3_PREDICTIONS
+        )
 
     def test_additive_dead_search_never_becomes_converged(self, monkeypatch):
-        """C3 on the non-surrogate path: a dead search there keeps iterating.
+        """C3 on the generic path: a dead search there keeps iterating.
 
         The gate measured a real additive binomial fit that accepts a step
         immediately after every one of its dead searches (one working-model
         update per outer iteration moves the gradient at unchanged rho), so
-        the dead-search exit is restricted to the surrogate path. This fit
+        the dead-search exit is restricted to the known-scale tensor path. This fit
         runs the 25-halving true-objective path with every move rejected:
         it keeps ``converged=False`` and ``max_reml_iter`` and never sees
         the dead-search record.
@@ -356,25 +430,36 @@ class TestUntouchedByTheTensorRepair:
 
         This is a dispatch contract. Bit-identical objectives and lambdas in
         flat directions are not numerical invariants after project-first
-        accumulation. Gamma fit accuracy has separate real-data parity tests.
+        accumulation. The flat x3 directions put this fixture at the original
+        twelve-iteration budget edge on some numerical stacks. Convergence is
+        checked separately on curved margins below. Gamma numerical coverage
+        also lives in test_realdata_parity.TestGammaDiscreteREML and
+        test_reml_newton_fixes.TestDiscretePath.test_discrete_gamma_estimated_scale.
         """
-
-        def forbidden_tensor_step(*_args, **_kwargs):
-            pytest.fail("unknown-scale Gamma must not enter the tensor surrogate step")
-
-        monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", forbidden_tensor_step)
+        monkeypatch.setattr(discrete_reml, "_damped_tensor_newton_step", _forbid_tensor_step)
         X, y = _gamma_frame()
+        model = _tensor_model(family="gamma")
+        model.fit_reml(X, y, max_reml_iter=3, runtime_validation="skip")
+
+        result = model._reml_result
+        assert np.isfinite(result.objective)
+        assert "reml_outer_step_stats" not in model.reml_diagnostics()["profile"]
+
+    def test_gamma_interaction_with_determined_margins_converges(self):
+        """Curvature in both margins keeps the convergence fixture off flat directions."""
+        X, y = _gamma_frame(curved=True)
         model = _tensor_model(family="gamma")
         model.fit_reml(X, y, max_reml_iter=12, runtime_validation="skip")
 
         result = model._reml_result
         assert result.converged
         assert result.termination_reason == "score_objective_tolerance"
+        assert not any(model.reml_diagnostics()["profile"]["reml_freeze_decision"]["frozen"])
         assert np.isfinite(result.objective)
-        assert "reml_outer_step_stats" not in model.reml_diagnostics()["profile"]
+        assert np.all(np.isfinite(model.predict(X)))
 
     def test_converging_one_pair_fit_finds_the_same_optimum(self):
-        """Regression guard: a converging surrogate-path fit keeps its optimum.
+        """Regression guard: a converging known-scale tensor fit keeps its optimum.
 
         The step changed, so this fit need not be bit-identical, but it
         must reach the same optimum and still exit on the objective
