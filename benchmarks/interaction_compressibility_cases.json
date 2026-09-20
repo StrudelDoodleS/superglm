@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "scope": "post_fit_compression_development_only",
+  "run_root": ".benchmark-artifacts/broad-interactions/frozen-20260914",
+  "measurement_path": "notes/research/2026-09-14-broad-interaction-measurements.json",
+  "measurement_sha256": "45e1934e516b4b2db3aadc0b9072d5b81bc656912c95d6a25aa631fbb942f7fc",
+  "cases": {
+    "uci_airfoil": "k4_s2",
+    "uci_concrete": "k6_s4",
+    "kaggle_king_county_sales": "k6_s4"
+  },
+  "partitions": ["train", "valid"],
+  "rank_menu": "all integers from zero through min(left_width,right_width)",
+  "modal_menu": "nested marginal prefixes from zero through full width",
+  "candidate_scope": ["one_term_at_a_time", "all_terms_common_budget"],
+  "fit_allowed": false,
+  "test_evaluation_allowed": false
+}
