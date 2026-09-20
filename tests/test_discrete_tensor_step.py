@@ -169,6 +169,29 @@ def _reject_every_move():
 
 
 class TestDiscreteTensorStepIsADescentDirection:
+    @pytest.mark.parametrize("base_cap,cap_v", [(1.0, 0.25), (2.5, 1.0)])
+    def test_damping_preserves_descent_and_the_coordinate_and_ratio_bounds(self, base_cap, cap_v):
+        gradient = np.array([4.0, -3.0, 2.0])
+        eigenvectors, _ = np.linalg.qr(np.random.default_rng(29).normal(size=(3, 3)))
+        delta, mu, _ = discrete_reml._damped_tensor_newton_step(
+            eigenvectors,
+            np.array([0.01, 0.4, 2.0]),
+            gradient,
+            np.arange(3),
+            3,
+            ["x", "z", "w"],
+            [("x:z", (0, 1)), ("z:w", (1, 2))],
+            np.zeros(3, dtype=bool),
+            base_cap=base_cap,
+            cap_v=cap_v,
+        )
+        slack = 64 * np.finfo(float).eps
+        assert np.max(np.abs(delta)) <= base_cap * (1 + slack)
+        assert abs(delta[0] - delta[1]) / 2 <= cap_v * (1 + slack)
+        assert abs(delta[1] - delta[2]) / 2 <= cap_v * (1 + slack)
+        assert gradient @ delta < 0
+        assert mu > 0
+
     def test_every_tensor_step_is_a_descent_direction(self):
         """Fails unfixed: iterations 3-12 build a step with ``g . d = +6.98``.
 

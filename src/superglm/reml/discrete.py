@@ -180,24 +180,21 @@ def _tensor_trust_ratios(
     shared_tensor_pairs: list[tuple[str, tuple[int, int]]],
     frozen: NDArray,
     base_cap: float,
-    cap_u: float,
     cap_v: float,
 ) -> list[tuple[str, float]]:
     """Constraint ratios of ``delta`` against the shared-tensor trust region.
 
     The region is the box ``|delta_k| <= base_cap`` on every coordinate,
     intersected for every shared tensor pair whose two margins are both
-    active with the box ``|u| <= cap_u``, ``|v| <= cap_v`` in the pair's
-    sum/difference coordinates ``u = (d_i + d_j) / 2``,
-    ``v = (d_i - d_j) / 2``. A ratio at or below 1.0 is feasible.
+    active with ``|(d_i - d_j) / 2| <= cap_v``. The coordinate box already
+    bounds ``|(d_i + d_j) / 2|`` by ``base_cap``. A ratio at or below 1.0
+    is feasible.
     """
     ratios = [(f"base_cap:{names[k]}", abs(float(delta[k])) / base_cap) for k in range(delta.size)]
     for group_name, (i, j) in shared_tensor_pairs:
         if frozen[i] or frozen[j]:
             continue
-        u = 0.5 * (float(delta[i]) + float(delta[j]))
         v = 0.5 * (float(delta[i]) - float(delta[j]))
-        ratios.append((f"{group_name}:u", abs(u) / cap_u))
         ratios.append((f"{group_name}:v", abs(v) / cap_v))
     return ratios
 
@@ -212,38 +209,21 @@ def _damped_tensor_newton_step(
     shared_tensor_pairs: list[tuple[str, tuple[int, int]]],
     frozen: NDArray,
     base_cap: float,
-    cap_u: float,
     cap_v: float,
 ) -> tuple[NDArray, float, list[str]]:
     """Damped modified-Newton step inside the shared-tensor trust region.
 
-    A line-search method needs a descent direction, ``g . d < 0`` (Nocedal
-    and Wright, *Numerical Optimization*, 2nd ed., Springer 2006, ch. 3).
-    A step bounded by a trust region is obtained by DAMPING the Newton
-    step, never by clipping its coordinates one at a time: with the
-    eigen-floored ``H_pd = V diag(lam) V^T`` already formed,
-    ``delta(mu) = -(H_pd + mu I)^-1 g = -V diag(1 / (lam + mu)) V^T g`` is a
-    descent direction for every ``mu >= 0`` -- ``g . delta(mu)`` is minus a
-    sum of squares over strictly positive ``lam_k + mu`` -- and it shrinks
-    the near-singular directions first (Levenberg-Marquardt; Nocedal and
-    Wright ch. 4; More and Sorensen, "Computing a trust region step", SIAM
-    J. Sci. Stat. Comput. 4 (1983) 553-572, doi:10.1137/0904038, for the
-    exact ellipsoidal subproblem). Projected Newton with coordinate bounds
-    (Bertsekas, SIAM J. Control Optim. 20 (1982) 221-246) is the other
-    standard route, and its analysis is exactly what shows that plain
-    coordinate clipping of a Newton step loses descent: this engine used
-    to clip each shared pair's ``v`` independently of its ``u``, and a pair
-    whose ``v`` was cut by a factor of 17 while ``u`` was cut by 1.9 came
-    back rotated into an ascent direction no line search could accept.
+    With positive eigenvalues, ``delta(mu) = -(H_pd + mu I)^-1 g`` has
+    ``g . delta < 0`` for every nonzero gradient and ``mu >= 0``. Unlike
+    coordinate clipping, damping preserves that descent property.
 
-    ``mu = 0`` is tried first, so a step already inside the region is the
-    plain modified-Newton step. Otherwise the smallest feasible ``mu`` is
-    bracketed geometrically and bisected on ``log mu``. The bracket's
-    feasible end is ``|g|_2 / r`` with ``r`` the smallest radius: every
-    constraint functional is bounded by ``|delta|_2 <= |g|_2 / mu``.
-    Each trial costs ``O(q^2)`` on the ``q``-dimensional active subspace.
-    Returns the step, ``mu``, and the names of the constraints on their
-    bound.
+    Try the undamped step first, then bracket a feasible damping value
+    using ``|delta|_2 <= |g|_2 / mu`` and refine its infeasible/feasible
+    bracket on ``log mu``. Individual constraint values need not be
+    monotone in mu, so this finds neither the smallest feasible damping
+    globally nor the exact box-constrained minimizer. Each trial costs
+    ``O(q^2)`` on the active subspace. Return the step, damping value and
+    binding constraints. See the September 19 tensor-step research note.
     """
     vt_g = eigvecs.T @ grad_sub
 
@@ -253,15 +233,11 @@ def _damped_tensor_newton_step(
         return delta
 
     def worst(delta: NDArray) -> float:
-        ratios = _tensor_trust_ratios(
-            delta, names, shared_tensor_pairs, frozen, base_cap, cap_u, cap_v
-        )
+        ratios = _tensor_trust_ratios(delta, names, shared_tensor_pairs, frozen, base_cap, cap_v)
         return max((r for _, r in ratios), default=0.0)
 
     def binding(delta: NDArray) -> list[str]:
-        ratios = _tensor_trust_ratios(
-            delta, names, shared_tensor_pairs, frozen, base_cap, cap_u, cap_v
-        )
+        ratios = _tensor_trust_ratios(delta, names, shared_tensor_pairs, frozen, base_cap, cap_v)
         return [name for name, r in ratios if r >= 1.0 - 1e-6]
 
     delta = step_at(0.0)
@@ -269,7 +245,7 @@ def _damped_tensor_newton_step(
         return delta, 0.0, binding(delta)
 
     pair_active = any(not (frozen[i] or frozen[j]) for _, (i, j) in shared_tensor_pairs)
-    radius = min(base_cap, cap_u, cap_v) if pair_active else base_cap
+    radius = min(base_cap, cap_v) if pair_active else base_cap
     mu_hi = max(float(np.linalg.norm(grad_sub)) / radius, np.finfo(float).tiny)
     for _ in range(64):  # round-off guard on the analytic bound
         if worst(step_at(mu_hi)) <= 1.0:
@@ -299,29 +275,6 @@ def _damped_tensor_newton_step(
             mu_lo = mid
     delta = step_at(mu_hi)
     return delta, mu_hi, binding(delta)
-
-
-def _surrogate_step_lengths(quad_grad: float, quad_curv: float, max_halving: int) -> list[float]:
-    """Step lengths the tensor surrogate backtrack tries, in order.
-
-    ``s = 1`` comes first: the damped step is the model minimiser inside
-    the trust region, so the model predicts a decrease there. Backtracking
-    halves, except that the sequence never steps PAST the unconstrained
-    model minimiser ``s* = -quad_grad / quad_curv``: when the next halving
-    would land below it, ``s*`` itself is tried, the best predicted
-    decrease available. A surrogate trial is scalar arithmetic, so there
-    is no reason to floor the backtrack: the old cap of five halvings
-    stopped at ``s = 1/16`` and killed searches whose minimiser was
-    smaller, with every trial predicting an increase and no candidate.
-    """
-    s_star = -quad_grad / quad_curv if (quad_grad < 0.0 and quad_curv > 0.0) else None
-    steps: list[float] = []
-    step = 1.0
-    for _ in range(max(int(max_halving), 0)):
-        steps.append(step)
-        halved = 0.5 * step
-        step = s_star if (s_star is not None and halved < s_star < step) else halved
-    return steps
 
 
 def optimize_discrete_reml_cached_w(
@@ -1161,24 +1114,12 @@ def optimize_discrete_reml_cached_w(
         gdot_newton = float(grad @ delta)
         gdot_damped = gdot_newton
         if use_tensor_surrogate_linesearch:
-            # base_cap, cap_u and cap_v ARE the trust-region radii: a box on
-            # every log-lambda coordinate, intersected with a box on each
-            # shared pair's sum/difference coordinates. Shared discrete
-            # tensor penalties are especially sensitive to oversized
-            # log-lambda steps, so the region stays much tighter than the
-            # generic path's; cap_v keeps the bootstrap ratio conservative,
-            # and after one clean full step the widening rule below allows
-            # a one-log-unit ratio move so a finite margin does not crawl
-            # when its partner is heading to working infinity. What the
-            # radii no longer do is truncate coordinates one at a time: the
-            # region is imposed by damping the whole step (see
-            # _damped_tensor_newton_step for the references), because
-            # independent coordinate clips rotate the direction and can
-            # destroy the descent property the line search depends on.
-            # Frozen directions stay out of the active subspace: their
-            # delta is zero and their pairs are not constrained.
+            # Bound log-lambda coordinates and each shared pair's difference
+            # by damping the whole step. The coordinate bound also bounds
+            # each pair's mean. Widen after one accepted full step so a
+            # finite margin can move when its partner approaches infinity.
+            # Frozen coordinates stay outside the active subspace.
             base_cap = 1.0 if not _tensor_post_stall_unlocked else 2.5
-            cap_u = 2.5 if not _tensor_post_stall_unlocked else 5.0
             cap_v = 0.25 if not _tensor_post_stall_unlocked else 1.0
             delta_newton = delta
             delta, trust_mu, trust_binding = _damped_tensor_newton_step(
@@ -1191,7 +1132,6 @@ def optimize_discrete_reml_cached_w(
                 shared_tensor_pairs,
                 frozen_d,
                 base_cap,
-                cap_u,
                 cap_v,
             )
             gdot_damped = float(grad @ delta)
@@ -1217,7 +1157,7 @@ def optimize_discrete_reml_cached_w(
                     "delta_u_used": 0.5 * float(delta[i] + delta[j]),
                     "delta_v_raw": 0.5 * float(delta_newton[i] - delta_newton[j]),
                     "delta_v_used": 0.5 * float(delta[i] - delta[j]),
-                    "cap_u": cap_u,
+                    "cap_u": base_cap,
                     "cap_v": cap_v,
                     "base_cap": base_cap,
                 }
@@ -1256,14 +1196,10 @@ def optimize_discrete_reml_cached_w(
         local_max_halving = max_halving
         if use_tensor_surrogate_linesearch and max_delta < 1e-12:
             local_max_halving = 0
-        surrogate_steps = (
-            _surrogate_step_lengths(quad_grad, quad_curv, local_max_halving)
-            if use_tensor_surrogate_linesearch
-            else []
-        )
+        # H_pd - H is positive semidefinite. Along the damped direction,
+        # positive curvature therefore places the quadratic minimizer at
+        # s >= 1. No special interior step is needed during backtracking.
         for _ls in range(local_max_halving):
-            if use_tensor_surrogate_linesearch:
-                step = surrogate_steps[_ls]
             rho_trial = np.clip(rho + step * delta, log_lo, log_hi)
             if use_tensor_surrogate_linesearch and bool(
                 np.all(np.abs(rho_trial - rho_clipped) <= 1e-12)
@@ -1288,6 +1224,7 @@ def optimize_discrete_reml_cached_w(
                 _t_linesearch_surrogate += _time.perf_counter() - _tls0
                 _n_linesearch_surrogate_evals += 1
                 if predicted_change >= 0.0:
+                    step *= 0.5
                     halving_count += 1
                     continue
                 _tfull0 = _time.perf_counter()
@@ -1410,8 +1347,7 @@ def optimize_discrete_reml_cached_w(
                 accepted = True
                 break
 
-            if not use_tensor_surrogate_linesearch:
-                step *= 0.5
+            step *= 0.5
             halving_count += 1
 
         _t_linesearch += _time.perf_counter() - _t0
