@@ -115,7 +115,7 @@ def test_signed_rectangular_discrete_cross_matches_stored_basis_oracle(
     assert np.linalg.norm(reverse.T - expected, ord=np.inf) <= bound
 
 
-def test_short_discrete_cross_expands_only_bounded_stored_support_panels(monkeypatch):
+def test_short_discrete_cross_expands_only_bounded_support_panels(monkeypatch):
     n = 173
     left, _ = _group("ssp", n=n, bins=256, width=7, seed=40)
     right, _ = _group("ssp", n=n, bins=257, width=5, seed=41)
@@ -125,16 +125,20 @@ def test_short_discrete_cross_expands_only_bounded_stored_support_panels(monkeyp
     original = algebra._expand_support_rows
 
     def recorded(support, indices):
-        assert support is left.B_unique or support is right.B_unique
         panels.append((len(indices), support.shape[1]))
         return original(support, indices)
 
     monkeypatch.setattr(algebra, "_expand_support_rows", recorded)
     _plan(left, right, n).cross_moment(np.linspace(-2.0, 1.0, n))
     assert panels
-    assert sum(rows for rows, width in panels if width == 7) == n
-    assert sum(rows for rows, width in panels if width == 5) == n
-    assert all(rows <= 9 for rows, _width in panels)
+    assert len(panels) % 2 == 0
+    assert sum(rows for rows, _ in panels[::2]) == n
+    assert sum(rows for rows, _ in panels[1::2]) == n
+    for (left_rows, left_width), (right_rows, right_width) in zip(
+        panels[::2], panels[1::2], strict=True
+    ):
+        assert left_rows == right_rows
+        assert left_rows * (left_width + right_width) * np.dtype(float).itemsize <= budget
 
 
 def test_histogram_cell_ceiling_still_overrides_favorable_compression(monkeypatch):

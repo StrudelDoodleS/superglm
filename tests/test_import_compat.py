@@ -110,6 +110,7 @@ for values in (
     frozen.setflags(write=False)
     for operand in (values, frozen):
         assert group_kernels._tensor_operand_in_reassociation_range(operand)
+        assert group_kernels._operand_exponent_bounds(operand) == (0, 1)
 assert signatures() == compiled, "range checks compiled new layouts after public warmup"
 
 writable_profile_arrays = (
@@ -130,6 +131,9 @@ values = np.array([1.0, 2.0], dtype=np.float64)
 codes = np.array([0, 1], dtype=np.intp)
 csr_indices = np.array([0, 1], dtype=np.int32)
 csr_indptr = np.array([0, 1, 2], dtype=np.int32)
+group_kernels._csr_weighted_gram(
+    values, csr_indices, csr_indptr, values, 2, absolute_weights=True
+)
 dense_small, = readonly(np.eye(2, dtype=np.float64))
 group_kernels._dense_small_weighted_moments(dense_small, values, values)
 group_kernels._factor_smooth_csr_dense_cross(
