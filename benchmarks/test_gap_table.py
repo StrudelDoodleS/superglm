@@ -91,6 +91,11 @@ def test_closure_is_undefined_when_boosting_finds_no_signal():
     assert gap.closure(1.0, None, 0.5) is None
 
 
+@pytest.mark.parametrize("arm_loss", [0.75, 1.0, 1.2])
+def test_closure_is_undefined_when_the_smooth_baseline_already_beats_the_ceiling(arm_loss):
+    assert gap.closure(1.0, arm_loss, 1.2) is None
+
+
 def test_r1_admits_only_datasets_whose_ceiling_beats_the_additive_gbm():
     losses = {"G0": 1.0, "G2": 0.98}
     rules = gap.dataset_rules(
@@ -445,6 +450,121 @@ def summary_case(fractions, *, has_list, admitted=True):
         "has_known_good_list": has_list,
         "rules": {"R1": {"enters_closure_summary": admitted}},
     }
+
+
+@pytest.mark.parametrize("known_outcome, expected", [(0.9, None), (0.1, False)])
+def test_r3_does_not_claim_success_from_only_the_completed_subset(known_outcome, expected):
+    cases = {
+        "completed": summary_case({"A2-8": known_outcome}, has_list=False),
+        "missing": summary_case({"A2-8": None}, has_list=False),
+    }
+    result = gap.suite_rules(gap_args(union_pairs=8), cases)["R3"]
+    assert result["holds"] is expected
+    assert result["undecided"] == ["missing"]
+
+
+def test_r3_requires_an_admitted_dataset():
+    result = gap.suite_rules(gap_args(union_pairs=8), {})["R3"]
+    assert result["holds"] is None
+
+
+def test_dataset_summary_explains_absent_closure_headroom():
+    records = {
+        "A0": {"test": {"primary_loss": 1.0}},
+        "A1": {"test": {"primary_loss": 1.2}},
+        "G0-leaves15": {"valid": {"primary_loss": 1.4}, "test": {"primary_loss": 1.4}},
+        "G2-leaves15": {"valid": {"primary_loss": 1.2}, "test": {"primary_loss": 1.2}},
+    }
+    summary = gap.dataset_summary(gap_args(capacities=["leaves15"]), records, {})
+    assert summary["closure"]["A1"] is None
+    assert summary["additive_to_ceiling_gap"] == pytest.approx(-0.2)
+    assert summary["closure_status"] == "no_positive_headroom"
+
+
+def test_worker_checkpoints_immutable_identity_before_fitting(tmp_path, monkeypatch):
+    seen = {}
+
+    def fail_during_fit(args, record):
+        receipt = args.output / "receipt.json"
+        seen.update(json.loads(receipt.read_text()) if receipt.exists() else {})
+        raise RuntimeError("fit interrupted")
+
+    monkeypatch.setattr(gap, "fit_arm", fail_during_fit)
+    args = gap_args(output=tmp_path, dataset="synthetic_case", arm="A1")
+    assert gap.worker(args) == 1
+    assert seen.get("dataset") == "synthetic_case"
+    assert seen["arm"] == "A1"
+    assert seen["status"] == "starting"
+    assert len(seen["package_source_sha256"]) == 64
+    assert len(seen["runner_sha256"]) == 64
+    assert seen["git_head"]
+    assert seen["identity_source"] == "worker"
+    assert "test" in seen["missing_receipt_fields"]
+
+
+def test_launch_preserves_identity_when_the_worker_times_out_before_starting(tmp_path, monkeypatch):
+    def timeout_before_start(command, **kwargs):
+        return {"status": "timeout", "process_seconds": 1.0}
+
+    monkeypatch.setattr(gap, "run_isolated", timeout_before_start)
+    args = gap_args(
+        output=tmp_path,
+        data_root=tmp_path / "data",
+        max_rows=100,
+        union_pairs=8,
+        threads=1,
+        fit_timeout=1.0,
+        screen_timeout=1.0,
+    )
+    receipt = gap.launch(args, "synthetic_case", "A1")
+    assert receipt.get("dataset") == "synthetic_case"
+    assert receipt["arm"] == "A1"
+    assert receipt["status"] == "timeout"
+    assert receipt["identity_source"] == "launcher"
+    assert len(receipt["package_source_sha256"]) == 64
+    assert len(receipt["runner_sha256"]) == 64
+    assert receipt["git_head"]
+    assert "test" in receipt["missing_receipt_fields"]
+    assert json.loads((tmp_path / "synthetic_case" / "A1" / "receipt.json").read_text()) == receipt
+
+
+def test_launch_does_not_overwrite_an_existing_arm_receipt(tmp_path, monkeypatch):
+    output = tmp_path / "synthetic_case" / "A1"
+    output.mkdir(parents=True)
+    receipt = output / "receipt.json"
+    receipt.write_text('{"status": "historical"}\n')
+    previous = receipt.read_bytes()
+    monkeypatch.setattr(
+        gap, "run_isolated", lambda *args, **kwargs: {"status": "timeout", "process_seconds": 1.0}
+    )
+    args = gap_args(
+        output=tmp_path,
+        data_root=tmp_path / "data",
+        max_rows=100,
+        union_pairs=8,
+        threads=1,
+        fit_timeout=1.0,
+        screen_timeout=1.0,
+    )
+    with pytest.raises(FileExistsError, match="fresh output"):
+        gap.launch(args, "synthetic_case", "A1")
+    assert receipt.read_bytes() == previous
+
+
+def test_an_interrupted_checkpoint_preserves_the_previous_receipt(tmp_path, monkeypatch):
+    args = gap_args(output=tmp_path)
+    gap.save_receipt(args, {"dataset": "synthetic_case", "status": "starting"})
+    receipt = tmp_path / "receipt.json"
+    previous = json.loads(receipt.read_text())
+
+    def interrupted_write(path, record):
+        path.write_text('{"partial":')
+        raise OSError("interrupted write")
+
+    monkeypatch.setattr(gap, "write_json", interrupted_write)
+    with pytest.raises(OSError, match="interrupted write"):
+        gap.save_receipt(args, {"dataset": "synthetic_case", "status": "converged"})
+    assert json.loads(receipt.read_text()) == previous
 
 
 def test_suite_rules_grade_the_admitted_datasets_and_name_the_undecided():

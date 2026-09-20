@@ -282,16 +282,19 @@ prologue from the kernel:
 | k=20 | 4 | 72.70 | 2.92 | 5.81 | 1.64 | 3.54x |
 | k=20 | 16 | 57.89 | 2.29 | 5.50 | 0.78 | 7.02x |
 
-At one thread the parallel kernel is 25% slower than the serial one on the
-production block, which is why the stage dispatches on the pool rather than
-always taking the twin. The whole stage (prologue plus kernel) beats the
+At one thread the experimental parallel kernel was 25% slower than the serial
+one on the production block. The S2 tree at `90defad0` therefore dispatched on
+the pool. That kernel and dispatch were removed by `b0d5ead3`. The historical
+whole stage (prologue plus kernel) beat the
 dense gather by 3.33x serial and 5.12x at four threads on the production
 block, 7.70x and 15.95x on the `k=20` one.
 
 ### Thread scaling
 
-Ten pairs, `fast_candidate`, the settled tree, with the whole-script
-`cpu/wall` beside the per-state figures:
+Ten pairs, `fast_candidate`, on the S2 experimental source at `90defad0`,
+with whole-script `cpu/wall` beside the per-state figures. This table predates
+the removal of the parallel kernel in `b0d5ead3`; it is not threading evidence
+for the retained implementation:
 
 | Threads | Wall s/state | Gram s/state | Script wall s | Script CPU s | CPU/wall |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -306,9 +309,9 @@ Sixteen threads buys 6.5% of wall over four for 2.48x the CPU, and at the
 block level it is actively worse — `13.27 ms` against `9.79 ms` on the
 production block — because the stage-1 kernel's gain (`1.39 ms` against
 `2.82 ms`) is more than spent by the prologue and the GEMMs under a
-sixteen-thread BLAS pool. **Four threads is the measured optimum on this
-machine for this design.** That is a property of this machine, not a default
-the library should set.
+sixteen-thread BLAS pool. Four threads was the best of the three tested counts
+for this experimental implementation and design. It establishes no optimum
+for the retained implementation or another machine.
 
 The review measured the numba x BLAS grid the plan promised and this phase
 did not (production block, interleaved medians of 11, `process_time` beside
@@ -326,8 +329,9 @@ Raising BLAS from one to four threads at numba four moved the raw block
 `14.0 -> 11.6 ms`, as much as the parallel kernel itself; at the default
 pool the twin lost to the serial kernel (0.79x), which is why it could not
 stay behind its dispatch. The serial raw stage beats the dense one at every
-pool (2.27x, 2.99x and 3.95x at 1/1, 4/4 and 16/16). **The recommended pin
-is four on every pool.**
+pool (2.27x, 2.99x and 3.95x at 1/1, 4/4 and 16/16). These are block timings;
+the settled-tree complete-fit comparison in the opening paragraph uses four
+threads. Neither result establishes a general thread-count recommendation.
 
 ### Memory
 
