@@ -1,0 +1,2455 @@
+{
+  "driver_sha256": [
+    "df01a5c21e381b67a0ed3684debb871472088d5ba20a256a386c36eefa1e80b8"
+  ],
+  "versions": {
+    "python": "3.13.14 (main, Jul 23 2026, 14:44:45) [Clang 22.1.3 ]",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0"
+  },
+  "threadpools": {
+    "blas1-numba1": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ],
+    "blas4-numba4": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 4,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 4,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ],
+    "blas1-numba4": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 4,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 4,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ],
+    "blas4-numba1": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ]
+  },
+  "receipt_sha256": {
+    "gamma1-n2000-candidate-b1-j1-r0/receipt.json": "3ddbba943651684152eb021101ece17357b1faee5747ebb2ffd35a1ee6c623f8",
+    "gamma1-n2000-pregram-b1-j1-r0/receipt.json": "5c6ba31cf47a402b40ff34cd4824ee3f3e24ac259d04f06c8b3074ff6693e115",
+    "gaussian10-n100000-candidate-b1-j1-r0/receipt.json": "7262b22a1f6d91bb1bc96bc81d57471d4ed9fc8ff9ff96509acd6558c0d826b6",
+    "gaussian10-n100000-candidate-b1-j1-r1/receipt.json": "2a9c09facff45b1ef99dd00ace50cbbcbba60d17b2d219e8a69b9722517b2c4c",
+    "gaussian10-n100000-candidate-b1-j1-r2/receipt.json": "0a6b18e18c32000cd30ec7eea796400f20867cb77afacdce6c136b9107e535dc",
+    "gaussian10-n100000-candidate-b4-j4-r0/receipt.json": "8ddb808b09e3132311227d028908aef1b926713c0d2f1b23f7528f2cdd118f25",
+    "gaussian10-n100000-candidate-b4-j4-r1/receipt.json": "55c0217228f1cd05641f43a39aa6d95aaecbc696297a84cf1c24f21a441c8c94",
+    "gaussian10-n100000-candidate-b4-j4-r2/receipt.json": "59cfb95d04c77bd7d25eab241bc0f65a98c1bdb128c3d670263de6d308840ac1",
+    "gaussian10-n100000-pregram-b1-j1-r0/receipt.json": "2a72671477f2fcbce87eb7e97f3e31265916357d2e2b702d0e407ab581ca82b1",
+    "gaussian10-n100000-pregram-b1-j1-r1/receipt.json": "a6c4fbac280fb8c54719836b9955c692cf46f2bd985fff572f859ad0e683dbcf",
+    "gaussian10-n100000-pregram-b1-j1-r2/receipt.json": "865be8275784957bfe77dca9a945d587ac8bcf582d1a43c57986d46690d46e09",
+    "gaussian10-n100000-pregram-b4-j4-r0/receipt.json": "0779a18e6b92ecf42b1cbfbf2110c741979e7f99cea8380421b9a26c28228a89",
+    "gaussian10-n100000-pregram-b4-j4-r1/receipt.json": "cbefe785ac072a216f116a4cb0de712335c4f3238a7e8a5da26eb7075e91e302",
+    "gaussian10-n100000-pregram-b4-j4-r2/receipt.json": "aa311eaa0f35c09befb3d72bd084589c6f3355c5cc62d3bfea5687f7ec7c8d73",
+    "gaussian50-n100000-candidate-b1-j1-r0/receipt.json": "c36d49dc26caa11534e7fbb8627987b643893e4c7019ff61d5b405cf4e283fb3",
+    "gaussian50-n100000-candidate-b1-j1-r1/receipt.json": "8373f7aaf94d495e1f18e52836b4b46d0aba5f6a70c7b0fc2233509dc01f8b36",
+    "gaussian50-n100000-candidate-b1-j1-r2/receipt.json": "1a0c5e3cb253866883c600b818f8bfc310232d05e233d0b424ec99cf2f3463bb",
+    "gaussian50-n100000-candidate-b4-j4-r0/receipt.json": "69a26e4bc3c19fce4ec7413032df22b70548b1a84f2271b442c2a4da9f080c62",
+    "gaussian50-n100000-candidate-b4-j4-r1/receipt.json": "6e3891189b81bd0c1844f8c53837b3e815b13a9daca73edf3ef1c0f647b4fcdc",
+    "gaussian50-n100000-candidate-b4-j4-r2/receipt.json": "ca6c3047d9262217dd3cb1130a4ad3c5c4925bf2f1bdee36f956f7ad7b664929",
+    "gaussian50-n100000-pregram-b1-j1-r0/receipt.json": "68ce168c3607755443b6152789066d79f671a71a0fb4f2b3597ea7024fb802d3",
+    "gaussian50-n100000-pregram-b1-j1-r1/receipt.json": "a2932c31e41be64adaed299f9a1f683c50dce9a0928c77574c49a8d97ead93fd",
+    "gaussian50-n100000-pregram-b1-j1-r2/receipt.json": "d1064ef664bd60a93431099c8ccbe2277009fd871ade9c2c4945981256f4c81c",
+    "gaussian50-n100000-pregram-b4-j4-r0/receipt.json": "8ee75a10df1f5ba7663ab3a1d08557e7c899e21fb79fd1a3dfb4b6d2e64c6288",
+    "gaussian50-n100000-pregram-b4-j4-r1/receipt.json": "e0f58586863329ebc87e3a054447534cea24fe853a93fed885229052b371ec80",
+    "gaussian50-n100000-pregram-b4-j4-r2/receipt.json": "7c79007abfcda655fdfae61c5320228ab416189241588b41e231a6586098c16a",
+    "poisson30-n100000-candidate-b1-j1-r0/receipt.json": "c87659488f8e7ac6abc66b6ae562f6acd9a65ca8ac90eb3658873ab63948b3a5",
+    "poisson30-n100000-candidate-b1-j1-r1/receipt.json": "f41128ce2d30f61e537cb247aecc428f474541f02d17e6808722756cf13f5b2e",
+    "poisson30-n100000-candidate-b1-j1-r2/receipt.json": "311b2a3e311fef4d0a23d92e88f2a2a5e1381c36be740913fc7f7782cac069de",
+    "poisson30-n100000-candidate-b4-j4-r0/receipt.json": "5e486e663f0b13a14b58295b6c9743fde9c1bc6912dde9f2f250420e8b802076",
+    "poisson30-n100000-candidate-b4-j4-r1/receipt.json": "a959a0d616e22c4132169ff1bba7db553823d34506b03bac0c9fec6906bb1641",
+    "poisson30-n100000-candidate-b4-j4-r2/receipt.json": "27598375fb5d722d5f599ba019e1a8676468484c2794695a507a4795704d06af",
+    "poisson30-n100000-pregram-b1-j1-r0/receipt.json": "5eecb06312f4881031a26674b43360732b33b05ba3d9e82bd2566ffe16bc68d7",
+    "poisson30-n100000-pregram-b1-j1-r1/receipt.json": "75f76b07b090d4d9abb9ab9a5a3032479ece395f07343f43312268a1d6aa7cb9",
+    "poisson30-n100000-pregram-b1-j1-r2/receipt.json": "1eccfc160c0f7504a8e3ee80e08d81a84892d2a55302f18a31c49594e9f37b7a",
+    "poisson30-n100000-pregram-b4-j4-r0/receipt.json": "a05d69264fe8d4216b907989178cda7bb4775351748aa954aa6df113e4691124",
+    "poisson30-n100000-pregram-b4-j4-r1/receipt.json": "da2f2d237b2c0ce575aea2b0ef73be0c9eb86045f5afddfc32792f1eac532faa",
+    "poisson30-n100000-pregram-b4-j4-r2/receipt.json": "9694059a4d21a9d4c96dbe4dfbebd5d19e75105c807c6ac95b3a80cabc7807eb",
+    "support10-n100000-candidate-b1-j1-r0/receipt.json": "b04949513240a110f6428f49af3bbf05b9b1f50fc949c488f89579c229302215",
+    "support10-n100000-candidate-b1-j1-r1/receipt.json": "0a3815ef85c2aa4ff928f91b69764e15de043be3e6f275d842cd6e5801812cc8",
+    "support10-n100000-candidate-b1-j1-r2/receipt.json": "e316d0edf6005d8e201fb24e023c1487e4b40d480c2d10edc6bf2dbf899381fc",
+    "support10-n100000-candidate-b4-j4-r0/receipt.json": "422207b140e0bedb5090a55bf6a5c989d1c314240f4190e068ffe8e2579f8dfe",
+    "support10-n100000-candidate-b4-j4-r1/receipt.json": "936b40ff9a5ba84cb1b42ab4382eb08fe21cabb8da00bb01449e9fe240ed4a72",
+    "support10-n100000-candidate-b4-j4-r2/receipt.json": "9a2198f66714c8a4ee759a828e8441693e3d87f983d1bb94ce78bc81402f3125",
+    "support10-n100000-pregram-b1-j1-r0/receipt.json": "e0ecc483fdb03d7fad50d5329eb6609bc29849d44500992e9e812699f0716192",
+    "support10-n100000-pregram-b1-j1-r1/receipt.json": "d766b532d523ab31cf109a1f72e8fe38ca6a0edec042cff47baebcb17a2ab163",
+    "support10-n100000-pregram-b1-j1-r2/receipt.json": "908257dca33bdfcb49f1e4dda9065a4e15037aa5ade9ea000eccaeb6b8c9d70f",
+    "support10-n100000-pregram-b4-j4-r0/receipt.json": "95f21f831358abb1c61374893885de88f0e46f4d1e999b176c2a998f977b636c",
+    "support10-n100000-pregram-b4-j4-r1/receipt.json": "f48e264ecbd77a134519803e60dce4587750df86e58ee9f0d9ac6b156596ada7",
+    "support10-n100000-pregram-b4-j4-r2/receipt.json": "cbe82666c70c05bf63d650f8199106a5a9bd0df2238ebdf4f2468faedcaf8609",
+    "tensor10-n100000-candidate-b1-j1-r0/receipt.json": "698ae71c85b3bd248ee24eba4e92acc80c76352b89fafa4eb66d5487ddc4c671",
+    "tensor10-n100000-candidate-b1-j1-r0-profile/receipt.json": "0a9001264b7e88b91ff9af6bde759d1cde7121662e3c6ba527788f2e08e3c9e5",
+    "tensor10-n100000-candidate-b1-j1-r1/receipt.json": "20dcf2a2728f03367689db16c61433ac9874631973a22e6af0644450eaacb9dd",
+    "tensor10-n100000-candidate-b1-j1-r2/receipt.json": "541382ae3697dc84a731971f03435c836cf8e7e1dc5d3c834a91665ec52822f4",
+    "tensor10-n100000-candidate-b1-j4-r0/receipt.json": "a040ad82c40bbf42b18d63e69da37a2defbc14d634ccf4f43c0e8b973f43ea83",
+    "tensor10-n100000-candidate-b1-j4-r1/receipt.json": "a0ee255927a55198c84846eaa1f877465b91404e59007b62b35b242c104d0d6e",
+    "tensor10-n100000-candidate-b1-j4-r2/receipt.json": "a9f93674be7292cc441417b3132e4a58d74d9dd63c51704d5508c77bac53a419",
+    "tensor10-n100000-candidate-b4-j1-r0/receipt.json": "823b41dde498aaf893125fe6ef7d63c42f9463e2c2745e4a839125b79f6c8334",
+    "tensor10-n100000-candidate-b4-j1-r1/receipt.json": "92b56d8a9fb54a6212bac29fe3b07a3e1e90c2907c30a2d7e6e1fc150db54b70",
+    "tensor10-n100000-candidate-b4-j1-r2/receipt.json": "bbdf8aa4983cf860000c82ed2d8e7bd6d5739cf2fd79a971a7fc2a45ecf7daac",
+    "tensor10-n100000-candidate-b4-j4-r0/receipt.json": "92d331da8ac323e735ff18cf98a87c22ef0e38b0d64dbb7f2a687a91f8b6d5ca",
+    "tensor10-n100000-candidate-b4-j4-r0-profile/receipt.json": "36188561c9fa70e2bcb85a9fff54809f31dd4a985172c4a224674ad5a529660e",
+    "tensor10-n100000-candidate-b4-j4-r1/receipt.json": "69f9f6a893d1b333a0832ef7f8b698417e98c0af08be4d50db1d847595eba2b2",
+    "tensor10-n100000-candidate-b4-j4-r2/receipt.json": "abea0b82f2c01f48a3b3000bfce102894f9a344c09bbcf1f242cbb2983ed559c",
+    "tensor10-n100000-master-b1-j1-r0/receipt.json": "0b649e99010c89a2b2cc440dea668080ff6f74238bcb11e7883692dc92800e3e",
+    "tensor10-n100000-master-b4-j4-r0/receipt.json": "bcff998281da40628c1a9e9c129a004cca4318237ad31f526b63e98dcdb15002",
+    "tensor10-n100000-pregram-b1-j1-r0/receipt.json": "44f04b8cb6091e0d238eb96e3595510e63eab4a427b26a8f96f02abb29d11020",
+    "tensor10-n100000-pregram-b1-j1-r1/receipt.json": "a195e7f3a975867f46f3095e87ee96a8bc15b5965bdd99e5304d58abfb8c3727",
+    "tensor10-n100000-pregram-b1-j1-r2/receipt.json": "82456983a2a2d5eb067c1ce443baffd873049b70e8cd710ac1f9391f21db9108",
+    "tensor10-n100000-pregram-b4-j4-r0/receipt.json": "e047dd563dc85da33393dd96d1b72697df7d35851f3eaf1d394a3bab31d841e4",
+    "tensor10-n100000-pregram-b4-j4-r1/receipt.json": "f991893797db87d3b02477c362883147f7f86faddfd288fed0d64beeff5e72f0",
+    "tensor10-n100000-pregram-b4-j4-r2/receipt.json": "83568f20e62cc1acc51b0e8222732f120d970446842090e26d50041590722fbb",
+    "tensor10-n300000-candidate-b4-j4-r0/receipt.json": "94a7c12409463a6738219b797b18e3550f7331b729538d69898004d3930c9cdd",
+    "tensor10-n300000-pregram-b4-j4-r0/receipt.json": "bb28dbd29fb138e693827fa6d907ed3a2ca18fc30155cb93d0b03aa816da78c1"
+  },
+  "results": [
+    {
+      "case": "gamma1",
+      "rows": 2000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.19500658311881125
+      ],
+      "cpu_seconds": [
+        0.19489411499999987
+      ],
+      "median_wall_seconds": 0.19500658311881125,
+      "median_cpu_seconds": 0.19489411499999987,
+      "median_fit_peak_rss_mib": 385.01953125,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "4518a1489214a2f1bf8146b3cc1207aaeadc699d7d7867a079179582d72ba66d"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 2
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        48,
+        48,
+        1345
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        1935.8168444314026
+      ],
+      "edf": [
+        11.71037978256554
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.0978860834632413,
+          "fit_peak_rss_ratio": 1.0016361123531563,
+          "prediction_max_abs_difference": 3.91370491570342e-10,
+          "prediction_relative_l2_difference": 1.837879447547476e-11,
+          "objective_difference": 3.7118752516107634e-9,
+          "edf_difference": 4.116616381111271e-9
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gamma1",
+      "rows": 2000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.17762005189433694
+      ],
+      "cpu_seconds": [
+        0.17757909500000002
+      ],
+      "median_wall_seconds": 0.17762005189433694,
+      "median_cpu_seconds": 0.17757909500000002,
+      "median_fit_peak_rss_mib": 384.390625,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "4518a1489214a2f1bf8146b3cc1207aaeadc699d7d7867a079179582d72ba66d"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 2
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        48,
+        48,
+        1345
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        1935.8168444276907
+      ],
+      "edf": [
+        11.710379778448923
+      ]
+    },
+    {
+      "case": "gaussian10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.2586849178187549,
+        0.26123658986762166,
+        0.276425844989717
+      ],
+      "cpu_seconds": [
+        0.25782220599999994,
+        0.26103538699999995,
+        0.2763297450000002
+      ],
+      "median_wall_seconds": 0.26123658986762166,
+      "median_cpu_seconds": 0.26103538699999995,
+      "median_fit_peak_rss_mib": 407.35546875,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        null
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74381.43950832202,
+        74381.43950832202,
+        74381.43950832202
+      ],
+      "edf": [
+        9.43470593719203,
+        9.43470593719203,
+        9.43470593719203
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 0.9759942804432579,
+          "fit_peak_rss_ratio": 0.9999904108012735,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gaussian10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.27339147101156414,
+        0.31526246992871165,
+        0.259974610991776
+      ],
+      "cpu_seconds": [
+        1.5268168009999994,
+        1.6442853739999999,
+        1.356998194
+      ],
+      "median_wall_seconds": 0.27339147101156414,
+      "median_cpu_seconds": 1.5268168009999994,
+      "median_fit_peak_rss_mib": 413.50390625,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        null
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74381.43950832202,
+        74381.43950832202,
+        74381.43950832202
+      ],
+      "edf": [
+        9.43470593719226,
+        9.43470593719226,
+        9.43470593719226
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 0.9092915653552911,
+          "fit_peak_rss_ratio": 0.9997355621665014,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gaussian10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.267662008991465,
+        0.2893688571639359,
+        0.25105732306838036
+      ],
+      "cpu_seconds": [
+        0.2676074079999997,
+        0.28897908500000025,
+        0.25094264300000013
+      ],
+      "median_wall_seconds": 0.267662008991465,
+      "median_cpu_seconds": 0.2676074079999997,
+      "median_fit_peak_rss_mib": 407.359375,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        null
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74381.43950832202,
+        74381.43950832202,
+        74381.43950832202
+      ],
+      "edf": [
+        9.43470593719203,
+        9.43470593719203,
+        9.43470593719203
+      ]
+    },
+    {
+      "case": "gaussian10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.30872262292541564,
+        0.28165887389332056,
+        0.30066425492987037
+      ],
+      "cpu_seconds": [
+        1.65140341,
+        1.5315491799999998,
+        1.639214221
+      ],
+      "median_wall_seconds": 0.30066425492987037,
+      "median_cpu_seconds": 1.639214221,
+      "median_fit_peak_rss_mib": 413.61328125,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        null
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74381.43950832202,
+        74381.43950832202,
+        74381.43950832202
+      ],
+      "edf": [
+        9.43470593719226,
+        9.43470593719226,
+        9.43470593719226
+      ]
+    },
+    {
+      "case": "gaussian50",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.42083339486271143,
+        0.39026032690890133,
+        0.36294037592597306
+      ],
+      "cpu_seconds": [
+        0.4190709159999999,
+        0.3896890660000001,
+        0.36086213999999983
+      ],
+      "median_wall_seconds": 0.39026032690890133,
+      "median_cpu_seconds": 0.3896890660000001,
+      "median_fit_peak_rss_mib": 414.90625,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        null
+      ],
+      "outer_iterations": [
+        4
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74389.98307495318,
+        74389.98307495318,
+        74389.98307495318
+      ],
+      "edf": [
+        18.789042553461112,
+        18.789042553461112,
+        18.789042553461112
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.0564005459534238,
+          "fit_peak_rss_ratio": 0.9998305627200331,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gaussian50",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.493621515808627,
+        0.48727835388854146,
+        0.4922138450201601
+      ],
+      "cpu_seconds": [
+        2.763218089,
+        2.74074837,
+        2.754486258
+      ],
+      "median_wall_seconds": 0.4922138450201601,
+      "median_cpu_seconds": 2.754486258,
+      "median_fit_peak_rss_mib": 434.828125,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        null
+      ],
+      "outer_iterations": [
+        4
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74389.98307495318,
+        74389.98307495318,
+        74389.98307495318
+      ],
+      "edf": [
+        18.789042553460575,
+        18.789042553460575,
+        18.789042553460575
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 0.9638340001580665,
+          "fit_peak_rss_ratio": 0.9998203635841058,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gaussian50",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.3694245789665729,
+        0.40327418595552444,
+        0.3612510890234262
+      ],
+      "cpu_seconds": [
+        0.36892679000000017,
+        0.4024484389999998,
+        0.35755802299999995
+      ],
+      "median_wall_seconds": 0.3694245789665729,
+      "median_cpu_seconds": 0.36892679000000017,
+      "median_fit_peak_rss_mib": 414.9765625,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        null
+      ],
+      "outer_iterations": [
+        4
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74389.98307495318,
+        74389.98307495318,
+        74389.98307495318
+      ],
+      "edf": [
+        18.789042553461112,
+        18.789042553461112,
+        18.789042553461112
+      ]
+    },
+    {
+      "case": "gaussian50",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.5106832140590996,
+        0.48785434290766716,
+        0.5116580720059574
+      ],
+      "cpu_seconds": [
+        2.845998552,
+        2.7586377349999998,
+        2.847858265
+      ],
+      "median_wall_seconds": 0.5106832140590996,
+      "median_cpu_seconds": 2.845998552,
+      "median_fit_peak_rss_mib": 434.90625,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        null
+      ],
+      "outer_iterations": [
+        4
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74389.98307495318,
+        74389.98307495318,
+        74389.98307495318
+      ],
+      "edf": [
+        18.789042553460575,
+        18.789042553460575,
+        18.789042553460575
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        1.136079550953582,
+        1.0809054949786514,
+        1.2784564029425383
+      ],
+      "cpu_seconds": [
+        1.1353106800000001,
+        1.079521751,
+        1.277714305
+      ],
+      "median_wall_seconds": 1.136079550953582,
+      "median_cpu_seconds": 1.1353106800000001,
+      "median_fit_peak_rss_mib": 438.203125,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 2
+        }
+      ],
+      "support_rows": [
+        null,
+        null
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.128858533030726,
+          "fit_peak_rss_ratio": 1.000410223482619,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        1.2089684158563614,
+        1.1393497148528695,
+        1.2130497058387846
+      ],
+      "cpu_seconds": [
+        7.713328505,
+        7.331977294,
+        7.709002292000001
+      ],
+      "median_wall_seconds": 1.2089684158563614,
+      "median_cpu_seconds": 7.709002292000001,
+      "median_fit_peak_rss_mib": 455.38671875,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 2
+        }
+      ],
+      "support_rows": [
+        null,
+        null
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454
+      ],
+      "edf": [
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.1380027627132576,
+          "fit_peak_rss_ratio": 1.0006523437164707,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        1.006396743003279,
+        1.0040326148737222,
+        1.0167564798612148
+      ],
+      "cpu_seconds": [
+        1.005887886,
+        1.00083771,
+        1.013602578
+      ],
+      "median_wall_seconds": 1.006396743003279,
+      "median_cpu_seconds": 1.005887886,
+      "median_fit_peak_rss_mib": 438.0234375,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 2
+        }
+      ],
+      "support_rows": [
+        null,
+        null
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        1.0623598250094801,
+        1.0643039939459413,
+        0.9784826771356165
+      ],
+      "cpu_seconds": [
+        6.829467909,
+        6.798121610000001,
+        6.313070569999999
+      ],
+      "median_wall_seconds": 1.0623598250094801,
+      "median_cpu_seconds": 6.798121610000001,
+      "median_fit_peak_rss_mib": 455.08984375,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SparseSSPGroupMatrix",
+          "count": 2
+        }
+      ],
+      "support_rows": [
+        null,
+        null
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454
+      ],
+      "edf": [
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958
+      ]
+    },
+    {
+      "case": "support10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.2500066040083766,
+        0.28383535984903574,
+        0.2434159459080547
+      ],
+      "cpu_seconds": [
+        0.2497669090000001,
+        0.28369176100000004,
+        0.243218924
+      ],
+      "median_wall_seconds": 0.2500066040083766,
+      "median_cpu_seconds": 0.2497669090000001,
+      "median_fit_peak_rss_mib": 402.4296875,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "a6c595fecc054091da2554de359884dfa9e0ea24f2b0ca2e17064e9756fcebea"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SupportCompressedSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        38000
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        72676.27465238619,
+        72676.27465238619,
+        72676.27465238619
+      ],
+      "edf": [
+        9.667256149670868,
+        9.667256149670868,
+        9.667256149670868
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 0.9101127387644143,
+          "fit_peak_rss_ratio": 1.0011564288699066,
+          "prediction_max_abs_difference": 9.5767838104166e-13,
+          "prediction_relative_l2_difference": 1.0091225031525714e-13,
+          "objective_difference": 0,
+          "edf_difference": -5.1514348342607263e-14
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "support10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.26233691698871553,
+        0.283844554098323,
+        0.26826639007776976
+      ],
+      "cpu_seconds": [
+        1.317674095,
+        1.367695195,
+        1.335760182
+      ],
+      "median_wall_seconds": 0.26826639007776976,
+      "median_cpu_seconds": 1.335760182,
+      "median_fit_peak_rss_mib": 422.34765625,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "a6c595fecc054091da2554de359884dfa9e0ea24f2b0ca2e17064e9756fcebea"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SupportCompressedSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        38000
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        72676.27465238619,
+        72676.27465238619,
+        72676.27465238619
+      ],
+      "edf": [
+        9.667256149670672,
+        9.667256149670672,
+        9.667256149670672
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 0.9688006283288414,
+          "fit_peak_rss_ratio": 1.0358005058246476,
+          "prediction_max_abs_difference": 5.915268275202834e-13,
+          "prediction_relative_l2_difference": 6.81667670633797e-14,
+          "objective_difference": 0,
+          "edf_difference": -7.069900220812997e-13
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "support10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.25718254316598177,
+        0.288476490881294,
+        0.2746984998229891
+      ],
+      "cpu_seconds": [
+        0.2571014039999999,
+        0.2883207769999998,
+        0.27459655400000016
+      ],
+      "median_wall_seconds": 0.2746984998229891,
+      "median_cpu_seconds": 0.27459655400000016,
+      "median_fit_peak_rss_mib": 401.96484375,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "a6c595fecc054091da2554de359884dfa9e0ea24f2b0ca2e17064e9756fcebea"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SupportCompressedSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        38000
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        72676.27465238619,
+        72676.27465238619,
+        72676.27465238619
+      ],
+      "edf": [
+        9.66725614967092,
+        9.66725614967092,
+        9.66725614967092
+      ]
+    },
+    {
+      "case": "support10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.2862862558104098,
+        0.2769056730903685,
+        0.2636700470466167
+      ],
+      "cpu_seconds": [
+        1.3993504849999998,
+        1.3471314629999998,
+        1.297645992
+      ],
+      "median_wall_seconds": 0.2769056730903685,
+      "median_cpu_seconds": 1.3471314629999998,
+      "median_fit_peak_rss_mib": 407.75,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "a6c595fecc054091da2554de359884dfa9e0ea24f2b0ca2e17064e9756fcebea"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "SupportCompressedSSPGroupMatrix",
+          "count": 1
+        }
+      ],
+      "support_rows": [
+        38000
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        72676.27465238619,
+        72676.27465238619,
+        72676.27465238619
+      ],
+      "edf": [
+        9.66725614967138,
+        9.66725614967138,
+        9.66725614967138
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        18.11755504203029,
+        17.909662458812818,
+        17.815402226056904
+      ],
+      "cpu_seconds": [
+        18.095064811999997,
+        17.884834404,
+        17.796823043000003
+      ],
+      "median_wall_seconds": 17.909662458812818,
+      "median_cpu_seconds": 17.884834404,
+      "median_fit_peak_rss_mib": 949.390625,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267,
+        26532.43613424267,
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916,
+        36.65470175207916,
+        36.65470175207916
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.092019062765792,
+          "fit_peak_rss_ratio": 1.0012688682354491,
+          "prediction_max_abs_difference": 8.854583732897936e-13,
+          "prediction_relative_l2_difference": 3.153479381792051e-13,
+          "objective_difference": -1.4915713109076023e-10,
+          "edf_difference": 6.80557832311024e-11
+        },
+        "master": {
+          "wall_ratio": 0.2918411767761734,
+          "fit_peak_rss_ratio": 1.0062642062509575,
+          "prediction_max_abs_difference": 0.0005962930901387553,
+          "prediction_relative_l2_difference": 0.00016952290524540256,
+          "objective_difference": 0.006763699177099625,
+          "edf_difference": 0.02674890243527983
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0,
+      "thread_reference_prediction_max_abs_difference": 0,
+      "thread_reference_prediction_relative_l2_difference": 0
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": true,
+      "wall_seconds": [
+        17.58626010781154
+      ],
+      "cpu_seconds": [
+        17.564976408
+      ],
+      "median_wall_seconds": 17.58626010781154,
+      "median_cpu_seconds": 17.564976408,
+      "median_fit_peak_rss_mib": 951.7265625,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916
+      ],
+      "kernel_calls": [
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 79,
+          "name": "_cross_factors_in_range",
+          "calls": 2835,
+          "cumulative_seconds": 0.5964953350000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 616,
+          "name": "_tensor_channel_workspace_bytes",
+          "calls": 945,
+          "cumulative_seconds": 0.020097592
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 738,
+          "name": "_cross_gram_tensor_tensor_channels",
+          "calls": 945,
+          "cumulative_seconds": 10.073359089
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 663,
+          "name": "_tensor_channel_histogram",
+          "calls": 945,
+          "cumulative_seconds": 5.304873908
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_discretized.py",
+          "line": 440,
+          "name": "cell_csr",
+          "calls": 945,
+          "cumulative_seconds": 1.005536841
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/solvers/irls_direct.py",
+          "line": 409,
+          "name": "fit_irls_direct",
+          "calls": 15,
+          "cumulative_seconds": 14.107777184000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/solvers/centered_system.py",
+          "line": 186,
+          "name": "build_centered_system",
+          "calls": 21,
+          "cumulative_seconds": 12.241726014000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 161,
+          "name": "cell_weights",
+          "calls": 945,
+          "cumulative_seconds": 0.048162843000000004
+        }
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        18.186449410859495,
+        18.370465188054368,
+        17.45353186200373
+      ],
+      "cpu_seconds": [
+        18.165422407,
+        18.347996592999998,
+        17.426985991000002
+      ],
+      "median_wall_seconds": 18.186449410859495,
+      "median_cpu_seconds": 18.165422407,
+      "median_fit_peak_rss_mib": 948.80859375,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267,
+        26532.43613424267,
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916,
+        36.65470175207916,
+        36.65470175207916
+      ],
+      "comparisons": {},
+      "repeat_prediction_max_abs_difference": 0,
+      "thread_reference_prediction_max_abs_difference": 0,
+      "thread_reference_prediction_relative_l2_difference": 0
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        16.103024531155825,
+        16.78098397492431,
+        16.89995494694449
+      ],
+      "cpu_seconds": [
+        73.404177653,
+        76.382915312,
+        76.901729916
+      ],
+      "median_wall_seconds": 16.78098397492431,
+      "median_cpu_seconds": 76.382915312,
+      "median_fit_peak_rss_mib": 956.16796875,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424187,
+        26532.43613424187,
+        26532.43613424187
+      ],
+      "edf": [
+        36.65470175201703,
+        36.65470175201703,
+        36.65470175201703
+      ],
+      "comparisons": {},
+      "repeat_prediction_max_abs_difference": 0,
+      "thread_reference_prediction_max_abs_difference": 7.16315895488151e-13,
+      "thread_reference_prediction_relative_l2_difference": 2.992654149337626e-13
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        16.701991149922833,
+        18.269752755062655,
+        17.87642377987504
+      ],
+      "cpu_seconds": [
+        76.227957041,
+        82.240787609,
+        80.901864446
+      ],
+      "median_wall_seconds": 17.87642377987504,
+      "median_cpu_seconds": 80.901864446,
+      "median_fit_peak_rss_mib": 957.37890625,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424187,
+        26532.43613424187,
+        26532.43613424187
+      ],
+      "edf": [
+        36.65470175201703,
+        36.65470175201703,
+        36.65470175201703
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.1481157214607507,
+          "fit_peak_rss_ratio": 1.0009965488370194,
+          "prediction_max_abs_difference": 7.448486272210175e-13,
+          "prediction_relative_l2_difference": 3.0036293643762996e-13,
+          "objective_difference": -2.9831426218152046e-10,
+          "edf_difference": 1.0533085514907725e-10
+        },
+        "master": {
+          "wall_ratio": 0.36000117340006355,
+          "fit_peak_rss_ratio": 0.983286192854707,
+          "prediction_max_abs_difference": 0.0005962930903490316,
+          "prediction_relative_l2_difference": 0.00016952290545617927,
+          "objective_difference": 0.006763698409486096,
+          "edf_difference": 0.026748902320392176
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0,
+      "thread_reference_prediction_max_abs_difference": 7.16315895488151e-13,
+      "thread_reference_prediction_relative_l2_difference": 2.992654149337626e-13
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": true,
+      "wall_seconds": [
+        16.906465174164623
+      ],
+      "cpu_seconds": [
+        77.733618743
+      ],
+      "median_wall_seconds": 16.906465174164623,
+      "median_cpu_seconds": 77.733618743,
+      "median_fit_peak_rss_mib": 956.84765625,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424187
+      ],
+      "edf": [
+        36.65470175201703
+      ],
+      "kernel_calls": [
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 79,
+          "name": "_cross_factors_in_range",
+          "calls": 2835,
+          "cumulative_seconds": 0.6047655470000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_discretized.py",
+          "line": 440,
+          "name": "cell_csr",
+          "calls": 945,
+          "cumulative_seconds": 1.017390511
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 738,
+          "name": "_cross_gram_tensor_tensor_channels",
+          "calls": 945,
+          "cumulative_seconds": 9.384737703
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 616,
+          "name": "_tensor_channel_workspace_bytes",
+          "calls": 945,
+          "cumulative_seconds": 0.021131027
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 663,
+          "name": "_tensor_channel_histogram",
+          "calls": 945,
+          "cumulative_seconds": 7.5949084330000005
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/solvers/irls_direct.py",
+          "line": 409,
+          "name": "fit_irls_direct",
+          "calls": 15,
+          "cumulative_seconds": 13.311615375
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/solvers/centered_system.py",
+          "line": 186,
+          "name": "build_centered_system",
+          "calls": 21,
+          "cumulative_seconds": 11.989299164
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 161,
+          "name": "cell_weights",
+          "calls": 945,
+          "cumulative_seconds": 0.05233299
+        }
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "master",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        61.367839372949675
+      ],
+      "cpu_seconds": [
+        61.283787315000005
+      ],
+      "median_wall_seconds": 61.367839372949675,
+      "median_cpu_seconds": 61.283787315000005,
+      "median_fit_peak_rss_mib": 943.48046875,
+      "source_sha256": [
+        "7ab368f43350ac83540817cf759072c940954bb74bd068e3afa65cd83f44c377"
+      ],
+      "git_heads": [
+        "99ca0eddadedde08386634c01fd92a314f8e8a18"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.429370543494
+      ],
+      "edf": [
+        36.62795284964388
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "master",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        49.656570869032294
+      ],
+      "cpu_seconds": [
+        207.830709696
+      ],
+      "median_wall_seconds": 49.656570869032294,
+      "median_cpu_seconds": 207.830709696,
+      "median_fit_peak_rss_mib": 973.65234375,
+      "source_sha256": [
+        "7ab368f43350ac83540817cf759072c940954bb74bd068e3afa65cd83f44c377"
+      ],
+      "git_heads": [
+        "99ca0eddadedde08386634c01fd92a314f8e8a18"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.42937054346
+      ],
+      "edf": [
+        36.62795284969664
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        16.4752149770502,
+        15.812620778102428,
+        16.400503498036414
+      ],
+      "cpu_seconds": [
+        16.452611818999998,
+        15.786180567999999,
+        16.369783227
+      ],
+      "median_wall_seconds": 16.400503498036414,
+      "median_cpu_seconds": 16.369783227,
+      "median_fit_peak_rss_mib": 948.1875,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424282,
+        26532.43613424282,
+        26532.43613424282
+      ],
+      "edf": [
+        36.65470175201111,
+        36.65470175201111,
+        36.65470175201111
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        15.986396400956437,
+        15.570228197146207,
+        14.151645086007193
+      ],
+      "cpu_seconds": [
+        73.19663996300001,
+        71.68463460699999,
+        65.751335577
+      ],
+      "median_wall_seconds": 15.570228197146207,
+      "median_cpu_seconds": 71.68463460699999,
+      "median_fit_peak_rss_mib": 956.42578125,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        51320,
+        51296,
+        51334,
+        51390,
+        51281,
+        51189,
+        51235,
+        51329,
+        51230,
+        51387
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424217,
+        26532.43613424217,
+        26532.43613424217
+      ],
+      "edf": [
+        36.6547017519117,
+        36.6547017519117,
+        36.6547017519117
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 300000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        24.059901888947934
+      ],
+      "cpu_seconds": [
+        103.67110774300001
+      ],
+      "median_wall_seconds": 24.059901888947934,
+      "median_cpu_seconds": 103.67110774300001,
+      "median_fit_peak_rss_mib": 1161.1171875,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "52d330baaac96e39b07080fb1a7c8292098c6bec"
+      ],
+      "fixture_sha256": [
+        "ccf3ecc78062b51a9cefe4c6dcb93c588d9cad799c291ea6681394ec6ee6e5ab"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        64884,
+        64857,
+        64830,
+        64904,
+        64857,
+        64844,
+        64881,
+        64870,
+        64885,
+        64861
+      ],
+      "outer_iterations": [
+        11
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        79587.18132997058
+      ],
+      "edf": [
+        53.04236005443926
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.0766150971472404,
+          "fit_peak_rss_ratio": 0.992649784435977,
+          "prediction_max_abs_difference": 5.966338534335591e-13,
+          "prediction_relative_l2_difference": 1.6006470689331467e-13,
+          "objective_difference": -5.020410753786564e-9,
+          "edf_difference": 8.469669410260394e-12
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "tensor10",
+      "rows": 300000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        22.34772849897854
+      ],
+      "cpu_seconds": [
+        97.129230754
+      ],
+      "median_wall_seconds": 22.34772849897854,
+      "median_cpu_seconds": 97.129230754,
+      "median_fit_peak_rss_mib": 1169.71484375,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "ccf3ecc78062b51a9cefe4c6dcb93c588d9cad799c291ea6681394ec6ee6e5ab"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        {
+          "type": "DiscretizedSSPGroupMatrix",
+          "count": 6
+        },
+        {
+          "type": "DiscretizedTensorGroupMatrix",
+          "count": 10
+        }
+      ],
+      "support_rows": [
+        256,
+        256,
+        256,
+        256,
+        256,
+        256,
+        64884,
+        64857,
+        64830,
+        64904,
+        64857,
+        64844,
+        64881,
+        64870,
+        64885,
+        64861
+      ],
+      "outer_iterations": [
+        11
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        79587.1813299756
+      ],
+      "edf": [
+        53.04236005443079
+      ]
+    }
+  ],
+  "protocol": {
+    "source_commit": "52d330baaac96e39b07080fb1a7c8292098c6bec",
+    "prior_reviewed_head": "4b94232044d8981d7ba9c6274bbd448539f7f9a6",
+    "master_commit": "99ca0eddadedde08386634c01fd92a314f8e8a18",
+    "pregram_commit": "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c",
+    "completed_workers": 74,
+    "unprofiled_workers": 72,
+    "profiled_workers": 2,
+    "all_converged": true,
+    "process_timeout_seconds": 240,
+    "warmup": "Same fixture, first 2,000 rows, two REML iterations before timing.",
+    "scheduling": "Serial fresh processes; candidate/pre-Gram variants rotated between three repetitions.",
+    "thread_limits": "BLAS limits varied independently of NUMBA_NUM_THREADS; OMP_NUM_THREADS follows Numba; NUMEXPR_NUM_THREADS remains one.",
+    "baselines": "One master reference per matched 1/1 and 4/4 thread setting. Three candidate/pre-Gram repeats for 100,000-row cases. One 300,000-row and Gamma run per source; no master 300,000-row retry.",
+    "raw_artifacts": ".benchmark-artifacts/cheap-interactions-integration/pr406-acceptance/",
+    "limitations": "Warmed fits on one host, three timing repetitions or marked single runs. Comparison with pre-Gram measures the whole correctness integration, not only the PR-review follow-up. Profiles are excluded from timing ratios. RSS is process high-water through fit, not isolated allocation."
+  }
+}
