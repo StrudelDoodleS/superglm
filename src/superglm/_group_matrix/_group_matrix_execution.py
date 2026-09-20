@@ -16,6 +16,8 @@ from ._group_matrix_algebra import (
     _profile_elapsed,
     _runtime_group_matrix_types,
 )
+from ._group_matrix_discretized import DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix
+from ._group_matrix_kernels import _ssp_gram_needs_exact
 from ._group_matrix_tabmat import _build_tabmat_split, _tabmat_vector
 
 _MIN_AUTO_TABMAT_MOMENT_ROWS = 50_000
@@ -143,6 +145,11 @@ class MatrixExecutionPlan:
         self._fused_mask = tuple(
             isinstance(group, self._fused_group_types) for group in self.group_matrices
         )
+        self._support_mask = tuple(
+            type(group) in (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix)
+            for group in self.group_matrices
+        )
+        self._sparse_mask = tuple(type(group) is runtime_types[6] for group in self.group_matrices)
         self._layout_frozen = True
 
     def _ordinary_partition_decision(self) -> OrdinaryPartitionDecision:
@@ -235,7 +242,17 @@ class MatrixExecutionPlan:
         for left_index, (left_span, left_group) in enumerate(self._group_entries):
             left_columns = self._group_columns[left_index]
             diagonal_start = perf_counter() if profile is not None else 0.0
-            gram[left_columns, left_columns] = _gram_any_sign(left_group, weights)
+            support = None
+            if self._support_mask[left_index] and not _ssp_gram_needs_exact(
+                left_group.B_unique, left_group.R_inv
+            ):
+                support = cache.solver_support(left_group)
+            if self._support_mask[left_index]:
+                gram[left_columns, left_columns] = left_group.gram(weights, _support=support)
+            elif self._sparse_mask[left_index]:
+                gram[left_columns, left_columns] = cache.sparse_gram(left_group, weights)[0]
+            else:
+                gram[left_columns, left_columns] = _gram_any_sign(left_group, weights)
             if profile is not None:
                 if self._tensor_mask[left_index]:
                     diagonal_profile_key = "block_diag_tensor_s"
@@ -395,11 +412,22 @@ class MatrixExecutionPlan:
                 columns = left_span.columns
                 diagonal_start = perf_counter() if profile is not None else 0.0
                 fusion_vector = rhs_vectors[0] if rhs_vectors else (W if xtw is not None else None)
+                # Preserve the exact source-factor route before evaluating a
+                # support product that may itself overflow or cancel to NaN.
+                support = None
+                if self._support_mask[left_index] and not _ssp_gram_needs_exact(
+                    left_group.B_unique, left_group.R_inv
+                ):
+                    support = cache.solver_support(left_group)
                 if fusion_vector is not None and self._fused_mask[left_index]:
                     if self._tensor_mask[left_index]:
                         w_grid, rhs_grid = cache.tensor_w_wz_grid(left_group, W, fusion_vector)
                         group_gram, group_xtw, group_rhs = left_group.gram_rmatvec_from_grids(
                             w_grid, rhs_grid
+                        )
+                    elif self._support_mask[left_index]:
+                        group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(
+                            W, fusion_vector, _support=support
                         )
                     else:
                         group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(W, fusion_vector)
@@ -410,9 +438,14 @@ class MatrixExecutionPlan:
                         xt_rhs[0][columns] = group_rhs
                     remaining_rhs = zip(xt_rhs[1:], rhs_vectors[1:], strict=True)
                 else:
-                    gram[columns, columns] = (
-                        _gram_any_sign(left_group, W) if signed else left_group.gram(W)
-                    )
+                    if self._support_mask[left_index]:
+                        gram[columns, columns] = left_group.gram(W, _support=support)
+                    elif self._sparse_mask[left_index]:
+                        gram[columns, columns] = cache.sparse_gram(left_group, W)[0]
+                    else:
+                        gram[columns, columns] = (
+                            _gram_any_sign(left_group, W) if signed else left_group.gram(W)
+                        )
                     if xtw is not None:
                         xtw[columns] = left_group.rmatvec(W)
                     remaining_rhs = zip(xt_rhs, rhs_vectors, strict=True)

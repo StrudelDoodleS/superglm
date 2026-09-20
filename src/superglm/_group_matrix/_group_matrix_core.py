@@ -15,6 +15,7 @@ from superglm.factor_smooth_geometry import (
 
 from ._group_matrix_discretized import DiscretizedSSPGroupMatrix
 from ._group_matrix_kernels import (
+    _csr_row_chunk,
     _csr_weighted_gram,
     _exact_ssp_moments,
     _factor_smooth_csr_dense_cross,
@@ -695,13 +696,17 @@ class SparseSSPGroupMatrix:
         return self.R_inv.T @ np.asarray(self.B.T @ w).ravel()
 
     def gram(self, W: NDArray) -> NDArray:
+        return self._gram_with_projection(W)[0]
+
+    def _gram_with_projection(self, W: NDArray) -> tuple[NDArray, bool]:
+        """Return the Gram and whether cross products need projected rows."""
         if _ssp_gram_needs_exact(self._data, self.R_inv, W):
             raw_basis = sp.csr_matrix(
                 (self._data, self._indices, self._indptr),
                 shape=(self.shape[0], self._p_b),
                 copy=False,
             )
-            return _exact_ssp_moments(raw_basis, self.R_inv, W)[0]
+            return _exact_ssp_moments(raw_basis, self.R_inv, W)[0], False
         raw_gram = None
         cells = self.shape[0] * self._p_b
         if (
@@ -729,7 +734,12 @@ class SparseSSPGroupMatrix:
             # raw symmetry; copying adds no rounding to the weighted dots.
             lower = np.tril_indices(self._p_b, -1)
             raw_gram[lower] = raw_gram.T[lower]
-        return self.R_inv.T @ raw_gram @ self.R_inv
+        gram = self.R_inv.T @ raw_gram @ self.R_inv
+        if W.dtype == self.R_inv.dtype == np.dtype(np.float64) and _ssp_projection_cancels(
+            raw_gram, self.R_inv, gram
+        ):
+            return _solver_space_gram(self.B, self.R_inv, W), True
+        return gram, False
 
     def toarray(self) -> NDArray:
         return np.asarray(self.B @ self.R_inv)
@@ -760,6 +770,45 @@ _DENSE_LEVEL_SATURATION = 0.9
 
 # Bound observation-dependent scratch, independently of the p-by-p products.
 _MAX_SSP_GRAM_WORKSPACE_BYTES = 64 << 20
+
+
+def _ssp_projection_cancels(raw: NDArray, transform: NDArray, gram: NDArray) -> bool:
+    """Screen cancellation in the two raw-moment projection products.
+
+    With unit roundoff u=eps/2, the two products' componentwise error scale
+    is gamma_(2*k) |R|' |G| |R|, where gamma_m=m*u/(1-m*u).
+    If even a diagonal exceeds a dimension/epsilon resolution budget, form
+    projected rows instead. This is an arithmetic dispatch screen, not a
+    rank certificate; the solver's existing rank checks remain authoritative.
+    """
+    absolute = np.abs(transform)
+    envelope = np.sum((absolute.T @ np.abs(raw)) * absolute.T, axis=1)
+    eps = np.finfo(float).eps
+    unit = eps / 2
+    count_u = 2 * transform.shape[0] * unit
+    gamma = count_u / (1 - count_u)
+    return bool(np.any(gamma * envelope > max(100, gram.shape[0]) * eps * np.abs(np.diag(gram))))
+
+
+def _solver_space_gram(basis: sp.csr_matrix, transform: NDArray, weights: NDArray) -> NDArray:
+    """Accumulate projected CSR rows with bounded observation scratch."""
+    width = transform.shape[1]
+    pointer_bytes = basis.indptr.dtype.itemsize
+    # Two solver panels while weighting, or one panel and two pointer arrays
+    # while constructing the CSR view. Entry buffers are genuine views.
+    bytes_per_row = 16 * width + 2 * pointer_bytes
+    # The broadcast multiply can also use NumPy's fixed-size iterator buffer.
+    available = _MAX_SSP_GRAM_WORKSPACE_BYTES - 8 * np.getbufsize() - 2 * pointer_bytes
+    block_rows = max(1, available // bytes_per_row)
+    gram = np.zeros((width, width))
+    for start in range(0, basis.shape[0], block_rows):
+        stop = min(basis.shape[0], start + block_rows)
+        support = _csr_row_chunk(basis, start, stop) @ transform
+        gram += (support * weights[start:stop, None]).T @ support
+        del support
+    lower = np.tril_indices(width, -1)
+    gram[lower] = gram.T[lower]
+    return gram
 
 
 def _saturated_ssp_gram(basis: sp.csr_matrix, weights: NDArray) -> NDArray | None:

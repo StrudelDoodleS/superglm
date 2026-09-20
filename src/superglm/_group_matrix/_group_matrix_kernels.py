@@ -210,6 +210,22 @@ def _csr_weighted_gram(data, indices, indptr, W, p):
     return result
 
 
+def _csr_row_chunk(csr, start: int, stop: int, *, data=None):
+    """CSR rows with shared entries and owned, rebased row pointers.
+
+    SciPy's array constructor prunes small slices by copying their backing
+    arrays, even with copy=False. Attach the buffers after constructing an
+    empty CSR to preserve genuine views and the source index dtype. Weighted
+    callers can supply their one owned value buffer without a second CSR.
+    """
+    lo, hi = int(csr.indptr[start]), int(csr.indptr[stop])
+    result = csr.__class__((stop - start, csr.shape[1]), dtype=csr.dtype)
+    result.data = csr.data[lo:hi] if data is None else data
+    result.indices = csr.indices[lo:hi]
+    result.indptr = csr.indptr[start : stop + 1] - lo
+    return result
+
+
 @njit(cache=True)
 def _weighted_bincount_2d(bin_idx, W, M, n_bins):
     """Fused W-weighted multi-column bincount for dense M."""
