@@ -1,8 +1,8 @@
 """Pre-registered gap table: smooth tensor interactions against gradient boosting.
 
-Every arm, adapter rule, cap and decision rule comes from the 2026-09-19
-protocol. One fit per fresh worker process, one receipt per fit, one summary
-with the closure fractions and the R1-R4 outcomes.
+Arms, adapter rules and caps follow the 2026-09-19 protocol. The 2026-09-20
+amendment defines closure only for positive headroom and keeps incomplete
+R3 evidence undecided. One fit per fresh worker, with checkpointed receipts.
 
     uv run python benchmarks/benchmark_gap_table.py --datasets kaggle_sberbank_housing \
         --output .benchmark-artifacts/gap-table/run1
@@ -48,6 +48,7 @@ MANIFESTS = (
     Path(__file__).with_name("interaction_kaggle_datasets.json"),
 )
 SEED = 20260919
+PROTOCOL = "2026-09-19 gap table; 2026-09-20 reporting/provenance amendment"
 FEATURE_CAP = 60
 SPLINE_KNOTS = 10
 DISCRETE_BINS = 256
@@ -139,6 +140,9 @@ RECEIPT_FIELDS = (
     "termination_reason",
     "model_fingerprint",
     "package_source_sha256",
+    "runner_sha256",
+    "git_head",
+    "runtime",
 )
 OFFSET_EXPRESSION = re.compile(r"log\((\w+)\)")
 
@@ -758,6 +762,7 @@ def run_screen(model, case, train, record):
 
 def fit_one_arm(args, case, plan, record):
     """Fit the arm this worker is for, and return the model with its training partition."""
+    record["status"] = "fitting"
     if plan["engine"] == "gbm":
         record.update(
             requested_pairs=[],
@@ -766,9 +771,11 @@ def fit_one_arm(args, case, plan, record):
             structure=plan["structure"],
             capacity=plan["capacity"],
         )
+        save_receipt(args, record)
         return gbm_fit(case, plan["structure"], plan["capacity"], record)
     requested, pairs, source = arm_pairs(args, case)
     record.update(requested_pairs=requested, pairs=pairs, pair_source=source)
+    save_receipt(args, record)
     return superglm_fit(case, pairs, record)
 
 
@@ -831,7 +838,20 @@ def runtime_identity():
 def save_receipt(args, record):
     """Write the receipt as it stands, so a later kill cannot erase what is already measured."""
     record["missing_receipt_fields"] = missing_receipt_fields(record)
-    write_json(args.output / "receipt.json", record)
+    temporary = args.output / "receipt.json.tmp"
+    write_json(temporary, record)
+    temporary.replace(args.output / "receipt.json")
+
+
+def source_identity():
+    """Identify the source at the point this process records its checkpoint."""
+    return {
+        "package_source_sha256": source_fingerprint(),
+        "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "git_head": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip(),
+    }
 
 
 def worker(args):
@@ -841,17 +861,14 @@ def worker(args):
         "arm": args.arm,
         "status": "starting",
         "started_utc": datetime.now(UTC).isoformat(),
-        "protocol": "2026-09-19 gap table",
+        "protocol": PROTOCOL,
     }
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
-            record["package_source_sha256"] = source_fingerprint()
-            record["runner_sha256"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-            record["git_head"] = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-            ).strip()
+            record.update(source_identity(), identity_source="worker")
             record["runtime"] = runtime_identity()
+            save_receipt(args, record)
             fit_arm(args, record)
         except Exception as error:
             record.update(
@@ -878,6 +895,10 @@ def launch(args, dataset, arm):
     """Run one fit in a fresh process with every numerical thread pool pinned."""
     case_root = args.output / dataset
     output = case_root / arm
+    if (output / "receipt.json").exists():
+        raise FileExistsError(
+            f"Arm receipt already exists at {output}; choose a fresh output directory"
+        )
     output.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
@@ -901,18 +922,30 @@ def launch(args, dataset, arm):
     environment = {**os.environ, **dict.fromkeys(THREAD_VARIABLES, str(args.threads))}
     # A0 pays for the screen on top of its fit; the fit's own deadline is the same one.
     deadline = args.fit_timeout + (args.screen_timeout if arm == "A0" else 0.0)
+    record = {
+        "dataset": dataset,
+        "arm": arm,
+        "status": "starting",
+        "started_utc": datetime.now(UTC).isoformat(),
+        "protocol": PROTOCOL,
+        "identity_source": "launcher",
+        "requested_threads": args.threads,
+        **source_identity(),
+    }
+    receipt_args = argparse.Namespace(output=output)
+    save_receipt(receipt_args, record)
     process = run_isolated(
         command, log_path=output / "worker.log", timeout=deadline, env=environment
     )
     receipt_path = output / "receipt.json"
-    record = load_worker_receipt(receipt_path, arm)
+    record.update(load_worker_receipt(receipt_path, arm))
     if process["status"] != "success":
         # A fit the worker already scored and wrote survives a kill during the screen.
         record["interrupted_by"] = process["status"]
         if "test" not in record:
             record["status"] = process["status"]
     record["process"] = {**process, "command": command, "timeout_seconds": deadline}
-    write_json(receipt_path, record)
+    save_receipt(receipt_args, record)
     print(
         json.dumps(
             {
@@ -960,7 +993,7 @@ def closure(additive_loss, arm_loss, ceiling_loss):
     if additive_loss is None or arm_loss is None or ceiling_loss is None:
         return None
     signal = additive_loss - ceiling_loss
-    return None if signal == 0 else (additive_loss - arm_loss) / signal
+    return None if signal <= 0 else (additive_loss - arm_loss) / signal
 
 
 def dataset_summary(args, records, entry):
@@ -974,6 +1007,7 @@ def dataset_summary(args, records, entry):
         losses[structure] = None if arm is None else losses.get(arm)
     additive_smooth = losses.get("A0")
     unrestricted_gbm, additive_gbm = losses.get("G2"), losses.get("G0")
+    headroom = none_difference(additive_smooth, unrestricted_gbm)
     smooth_arms = [arm for arm in records if not arm.startswith("G")]
     fractions = {
         arm: closure(additive_smooth, losses.get(arm), unrestricted_gbm) for arm in smooth_arms
@@ -993,6 +1027,14 @@ def dataset_summary(args, records, entry):
         },
         "representation_gap_at_zero_interactions": none_difference(additive_smooth, additive_gbm),
         "interaction_signal": none_difference(additive_gbm, unrestricted_gbm),
+        "additive_to_ceiling_gap": headroom,
+        "closure_status": (
+            "missing_losses"
+            if headroom is None
+            else "positive_headroom"
+            if headroom > 0
+            else "no_positive_headroom"
+        ),
         "closure": fractions,
         "has_known_good_list": bool(entry.get("known_good_pairs")),
         "rules": dataset_rules(args, records, losses, fractions),
@@ -1056,7 +1098,11 @@ def suite_rules(args, cases):
     for name, case in without:
         blind = case["closure"].get(screen_arm)
         selection[name] = None if blind is None else blind >= R3_STANDALONE
-    decided = [value for value in selection.values() if value is not None]
+    selection_holds = None
+    if any(value is False for value in selection.values()):
+        selection_holds = False
+    elif selection and all(value is True for value in selection.values()):
+        selection_holds = True
     return {
         "R1_admitted_datasets": [name for name, _ in admitted],
         "R2": {
@@ -1070,7 +1116,7 @@ def suite_rules(args, cases):
         "R3": {
             "screen_arm": screen_arm,
             "by_dataset": selection,
-            "holds": bool(decided) and all(decided),
+            "holds": selection_holds,
             "fraction_of_known_good": R3_FRACTION,
             "standalone_threshold": R3_STANDALONE,
             "undecided": [name for name, value in selection.items() if value is None],
@@ -1088,8 +1134,8 @@ def suite_rules(args, cases):
 def run_suite(args):
     args.output.mkdir(parents=True, exist_ok=True)
     suite = {
-        "schema_version": 1,
-        "protocol": "2026-09-19 gap table",
+        "schema_version": 2,
+        "protocol": PROTOCOL,
         "started_utc": datetime.now(UTC).isoformat(),
         "seed": SEED,
         "threads": args.threads,
