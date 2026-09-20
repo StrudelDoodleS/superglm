@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
+from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix import _group_matrix_core as core
 from superglm._group_matrix._group_matrix_algebra import _weighted_row_chunk
 from superglm._group_matrix._group_matrix_kernels import _csr_row_chunk
@@ -53,6 +54,46 @@ def test_projected_sparse_gram_accounts_for_subhalf_slice_scratch(monkeypatch, b
     # Observation scratch is bounded by the cap. Allow fixed coefficient
     # products and Python/SciPy allocation bookkeeping, not a fraction of n.
     assert peak <= budget + (32 << 10) + 64 * transform.shape[1] ** 2
+
+
+@pytest.mark.parametrize("budget", [256 << 10, 1 << 20])
+def test_sensitive_int64_sparse_cross_bounds_actual_peak(monkeypatch, budget):
+    n, p = 20_000, 8
+    basis = np.zeros((n, p))
+    basis[:, 0], basis[:, 1] = 1, 1 + 1e-8 * np.linspace(-1, 1, n)
+    transform = np.zeros((p, p))
+    transform[:2, 0], transform[0, 1:] = [1, -1], 1
+    groups = [SparseSSPGroupMatrix(sp.csr_matrix(basis), transform.copy()) for _ in range(2)]
+    for group in groups:
+        group.B.indices = group.B.indices.astype(np.int64)
+        group.B.indptr = group.B.indptr.astype(np.int64)
+    weights = np.linspace(0.5, 1.5, n)
+    algebra._cross_gram(*groups, weights)
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+    monkeypatch.setattr(core, "_MAX_SSP_GRAM_WORKSPACE_BYTES", budget)
+    original = algebra._csr_row_chunk
+    rows = []
+    shared = []
+
+    def record(csr, start, stop):
+        shared.append(
+            csr.indices.dtype == csr.indptr.dtype == np.dtype(np.int64)
+            and any(np.shares_memory(csr.indices, group.B.indices) for group in groups)
+            and any(np.shares_memory(csr.indptr, group.B.indptr) for group in groups)
+        )
+        rows.append(stop - start)
+        return original(csr, start, stop)
+
+    monkeypatch.setattr(algebra, "_csr_row_chunk", record)
+    tracemalloc.start()
+    try:
+        result = algebra._cross_gram_sparse_ssp(*groups, weights)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result is not None and rows and max(rows) < n
+    assert peak <= budget + (32 << 10) + 64 * p**2
+    assert all(shared)
 
 
 def _group(rows, width, *, full):

@@ -9,12 +9,35 @@ import scipy.sparse as sp
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.group_matrix import DenseGroupMatrix, DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_sensitive_sparse_dense_cross_matches_the_projected_diagonal(reverse):
+    eps = np.finfo(float).eps
+    basis = np.zeros((3, 8))
+    basis[:, 0], basis[:, 1] = 1, [1 + eps, 1, 1]
+    transform = np.zeros((8, 2))
+    transform[0], transform[1] = [1, 1], [-1, 0]
+    groups = [
+        SparseSSPGroupMatrix(sp.csr_matrix(basis), transform),
+        DenseGroupMatrix(np.ones((3, 1))),
+    ]
+    if reverse:
+        groups.reverse()
+    design = np.hstack([group.toarray() for group in groups]).astype(np.longdouble)
+    target = np.asarray(design.T @ design, dtype=float)
+    scale = np.sqrt(np.diag(target))
+    reference = target / np.outer(scale, scale)
+    actual = MatrixExecutionPlan(groups, n=3).moments(np.ones(3)).gram
+    error = (actual - target) / np.outer(scale, scale)
+    assert np.linalg.norm(error, 2) <= 100 * eps * np.linalg.norm(reference, 2)
 
 
 @pytest.mark.parametrize("right_kind", ["sparse", "support"])
 @pytest.mark.parametrize("reverse", [False, True])
-def test_cancellation_sensitive_sparse_cross_uses_projected_rows(right_kind, reverse):
+@pytest.mark.parametrize("signed", [False, True])
+def test_cancellation_sensitive_sparse_cross_uses_projected_rows(right_kind, reverse, signed):
     n = 20_000
     x = np.linspace(-1, 1, n)
     raw = np.zeros((n, 8))
@@ -32,14 +55,19 @@ def test_cancellation_sensitive_sparse_cross_uses_projected_rows(right_kind, rev
     if reverse:
         left, right = right, left
     weights = np.linspace(0.5, 1.5, n)
+    if signed:
+        weights[::2] *= -1
     design = np.hstack([left.toarray(), right.toarray()]).astype(np.longdouble)
     target = np.asarray(design.T @ (weights.astype(np.longdouble)[:, None] * design), dtype=float)
-    scale = np.sqrt(np.diag(target))
+    energy = np.asarray(
+        design.T @ (abs(weights.astype(np.longdouble))[:, None] * design), dtype=float
+    )
+    scale = np.sqrt(np.diag(energy))
     plan = MatrixExecutionPlan((left, right), n=n)
     for _ in range(2):
-        actual = plan.moments(weights).gram
+        actual = plan.moments(weights, signed=signed).gram
         error = (actual - target) / np.outer(scale, scale)
-        bound = 100 * np.finfo(float).eps * np.linalg.norm(target / np.outer(scale, scale), 2)
+        bound = 100 * np.finfo(float).eps * np.linalg.norm(energy / np.outer(scale, scale), 2)
         assert np.linalg.norm(error, 2) <= bound
         assert (
             abs(algebra._cross_gram(left, right, weights)[0, 0] - target[0, 1])
@@ -47,6 +75,7 @@ def test_cancellation_sensitive_sparse_cross_uses_projected_rows(right_kind, rev
         )
         weights *= 0.5
         target *= 0.5
+        energy *= 0.5
         scale /= np.sqrt(2)
 
 
