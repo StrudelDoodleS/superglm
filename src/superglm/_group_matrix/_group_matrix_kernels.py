@@ -704,9 +704,11 @@ def _warmup_group_matrix_kernels() -> None:
     # operands. Cover both mutabilities so their first fit need not compile.
     for operand in (matrix, np.asfortranarray(matrix), np.ones((3, 4))[:, ::2]):
         _tensor_operand_in_reassociation_range(operand)
+        _operand_exponent_bounds(operand)
         frozen_operand = operand.view()
         frozen_operand.setflags(write=False)
         _tensor_operand_in_reassociation_range(frozen_operand)
+        _operand_exponent_bounds(frozen_operand)
     for support in (matrix, frozen_matrix):
         for indices in (codes, frozen_codes):
             _indexed_row_dot(matrix, support, indices, indices)
@@ -729,6 +731,7 @@ def _warmup_group_matrix_kernels() -> None:
         array.setflags(write=False)
 
     _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2)
+    _csr_weighted_gram(values, csr_indices, csr_indptr, values, 2, absolute_weights=True)
     _weighted_bincount_2d(codes, values, matrix, 2)
     _csr_weighted_bincount(values, csr_indices, csr_indptr, 2, codes, values, 2)
     _disc_disc_2d_hist(codes, codes, values, 2, 2)
