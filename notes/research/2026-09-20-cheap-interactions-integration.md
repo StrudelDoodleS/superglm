@@ -2,20 +2,23 @@
 
 ## Status and scope
 
-Local integration branch: `codex/cheap-interactions-integration`.
+Integration branch: `codex/cheap-interactions-integration`, draft PR #406.
+The results in this report describe the candidate before external PR review.
 Complete-fit measurements use `7369564aa8bf922d51be89868f15baa1aba27664`.
-The final verified source is `9f760e5abb72dbc16068c2571a065681fbe2fa39`.
+The locally verified source is `9f760e5abb72dbc16068c2571a065681fbe2fa39`.
 The only later production change adds three public-warmup compilation calls;
 fitting arithmetic is unchanged. The full-suite rerun passes after that
-correction. Nothing has been pushed or merged. Original worktrees and historical
-receipts remain intact. The performance costs below still need an integration
-decision; a green correctness suite does not make them disappear.
+correction. Published PR head `4b94232044d8981d7ba9c6274bbd448539f7f9a6` adds
+the report and measurements. Original worktrees and historical receipts remain
+intact. The performance costs below still need an integration decision; a green
+local correctness suite does not make them disappear or establish CI portability.
 
 This integrates the retained tensor execution work, finishes the Gram repair,
 corrects gap-table reporting, and preserves the saved interaction-compression
 pilot outside production code. ADMM/OSQP experiments, scalar-family optimization,
-cold-start work and further solver research are unchanged. No dependency,
-version or public solver-selection change is included.
+cold-start work and further solver research are unchanged. The original candidate
+has no dependency, version or public solver-selection change. Subsequent review
+fixes and CI remediation are recorded separately below.
 
 The comparisons have two different purposes:
 
@@ -30,7 +33,8 @@ promised speedup for every complete fit or thread setting.
 
 ## Production changes and maintainability
 
-Against master, `src/` changes ten files: 1,103 lines added, 242 removed,
+At the published pre-review head, `src/` changes ten files against master:
+1,103 lines added, 242 removed,
 861 net. The distribution is:
 
 | Area | Net lines |
@@ -151,12 +155,22 @@ Master's 100,000-row ten-pair references took 62.1312 seconds with one thread an
 faster than master on this fixture. All these fits converged in 12 outer
 iterations. At 300,000 rows, candidate and pre-Gram both converged in 11.
 
+Four threads do not improve the candidate's wall time on this fixture:
+15.6021 seconds becomes 15.6535 seconds. Median CPU time rises from 15.58 to
+71.73 seconds. The runs changed BLAS and Numba thread limits together, so these
+measurements do not identify which pool causes the additional CPU use. The raw
+channel histogram itself is serial. Independent thread-pool measurements are
+needed before attributing the result or recommending a threading default.
+
 The near-cutoff support fixture has 38,000 distinct rows and actually uses
 `SupportCompressedSSPGroupMatrix`. Its one-thread increase and the Poisson
 increases remain costs of this candidate. These observations do not support
 a blanket ordinary-fit performance-parity claim. Three repetitions on one
 machine do not establish a universal percentage or a statistical confidence
 interval. No dispatch thresholds were retuned to fit these measurements.
+In particular, the small tensor differences and the single-run 300,000-row
+difference do not establish a performance improvement or regression. They are
+observations within a small, noisy sample.
 
 The 300,000-row master worker exceeded its 240-second process limit. Its log and
 timeout record are preserved. Since that limit covers startup, warmup, fitting
@@ -263,3 +277,173 @@ matrix. The end-to-end script also exited successfully.
 Advisory impact: `release:patch`. This is corrective numerical, performance and
 memory work without a new public solver API. No version bump, tag or publication
 is authorized or performed.
+
+## PR review follow-up
+
+External review of `4b942320` found defects not caught by the first local suite.
+The original CI run also failed three numerical tests on Python 3.12/3.13,
+exceeded the type-check budget, and reported three advisories against the
+existing locked AnyIO version. The earlier local results above are historical
+evidence, not a claim that the original PR passed CI.
+
+The corrective source changes are bounded to the reviewed paths:
+
+- Cell-CSR reuse validates current tensor indices and stable ordering with an
+  allocation-free scan. Public index mutation and replacement remain supported.
+  Public warmup includes the new validator.
+- Integer and float32 support moments keep the original weight-promoted
+  multiplication order. Raw-channel admission checks its actual raw factors
+  and projection, including compensating extreme factors.
+- Channel workspace admission counts the active grid's CSR arrays, retained
+  scratch and permuted weights, construction/gather temporaries, and the
+  contraction/map/result peak. A newly cached weight vector remains counted
+  during contraction. Reusable buffers are released before growth or fallback
+  when needed. This bounds the operation's array workspace, not whole-model
+  retained storage or process RSS.
+- Structured random-effect crosses reuse the diagonal's existing per-assembly
+  cache instead of computing a sparse Gram only to discard it.
+- The tensor REML quadratic pre-filter and its unused diagnostics are removed.
+  For the legitimate damped direction, its quadratic predicts a decrease at
+  every positive trial length up to one, so it cannot reject a trial. The
+  25-trial budget, true-objective acceptance, descent and stationarity checks
+  remain. Each feasible trial requires a cached solve and objective evaluation.
+
+REML loses 30 production lines relative to the reviewed head. The Gram fixes,
+typed contracts and cache handoff add 102 net lines, including shorter contract
+documentation. Together the follow-up adds 72 net source lines. Against master
+`99ca0edd`, the resulting source diff is 1,200 additions and 267 deletions across
+11 files, net 933. No solver framework or OSQP dependency is added.
+
+The additive regressions now check generic dispatch independently and compare
+stable objectives and predictions with conditioning-scaled error bounds. They
+do not require bit-identical flat-direction lambdas. Gamma dispatch retains
+the original fixture; convergence has a separate curved-margin fixture whose
+smoothing directions are determined. Its original 12-iteration budget is
+unchanged. The benchmark driver's Gamma fixture is also unchanged.
+
+The backtracking regression retains the legitimate damped step and adds a
+controlled quartic objective term with zero gradient and Hessian at the current
+candidate. Restoring the old five-trial limit makes acceptance fail. Real-fit
+descent, stall and optimum regressions remain separate. Source regressions
+first reproduced stale indices, integer/float32 errors, exceptional raw factors,
+workspace undercounting and duplicate sparse-Gram work. A second regression
+caught a newly cached weight vector omitted from the first workspace repair.
+
+Independent review found no production blocker in the corrective diff. Its
+minor test finding was addressed by giving fused vector assertions explicit
+binary64-epsilon tolerances; the old default allowed the float32 error the
+fixture was meant to catch. The signed-loop duplication, redundant xtw-only
+fusion, and own-margin identity-cache concerns were traced to master and left
+for separate work. They are not silently treated as fixed by this PR.
+
+AnyIO alone moves from 4.14.1 to 4.14.2 in `uv.lock`. The hash-checked audit of
+all locked extras/groups then reports no known vulnerabilities. Project
+dependency declarations and the package's own version remain unchanged.
+
+The corrected source's type check reports 846 diagnostics, compared with 890
+on master under the same checker/environment and 910 on the reviewed head.
+The accepted CI ceiling remains 903. This is a passing backlog gate, not a
+claim of a clean type-checking baseline.
+
+Python 3.12 and 3.14 each pass 566 affected tests. After the review's stricter
+assertions, the complete Gram-regression module passes another 22 tests on each
+of Python 3.12, 3.13 and 3.14. Benchmark/reporting contracts pass 245 tests, and
+the separate high-thread follow-up passes nine. Ruff, formatting, lock checks,
+dependency consistency and the end-to-end smoke test pass.
+
+The combined Python 3.13 full suite passes 15,251 tests, with 85 reported skips
+and no failures or errors across four shard processes, all exiting zero. All
+84 required freMTPL2 tests pass. The source tested and measured for this follow-up
+is `52d330baaac96e39b07080fb1a7c8292098c6bec`, with source-tree SHA-256
+`4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746`.
+The stricter assertion-only follow-up was separately rerun on all three Python
+versions after review; production source did not change.
+
+### Fresh complete-fit results after review
+
+All 74 workers complete and converge: 72 unprofiled fits and two separate
+profiles. The campaign exits zero. Source and fixture hashes remain stable.
+The committed worker is unchanged. Timing still includes construction and the
+complete fit after the same 2,000-row, two-iteration warmup. No other test jobs
+run during timing. Candidate/pre-Gram variants use three serial, rotated
+repetitions; master references, the 300,000-row check and Gamma use one run.
+The earlier master timeout is not repeated or converted into a speedup bound.
+
+The following matched-thread medians are seconds. Percentages compare the whole
+correctness integration with pre-Gram `97ba3b00`, not just the review fixes.
+The original PR head was not rerun as a separate control in this campaign.
+
+| Fixture | Rows | BLAS/Numba threads | Pre-Gram | Candidate | Change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Gaussian, k=10 | 100,000 | 1/1 | 0.2677 | 0.2612 | -2.4% |
+| Gaussian, k=10 | 100,000 | 4/4 | 0.3007 | 0.2734 | -9.1% |
+| Gaussian, k=50 | 100,000 | 1/1 | 0.3694 | 0.3903 | +5.6% |
+| Gaussian, k=50 | 100,000 | 4/4 | 0.5107 | 0.4922 | -3.6% |
+| Poisson, two k=30 terms | 100,000 | 1/1 | 1.0064 | 1.1361 | +12.9% |
+| Poisson, two k=30 terms | 100,000 | 4/4 | 1.0624 | 1.2090 | +13.8% |
+| Lossless support, k=10 | 100,000 | 1/1 | 0.2747 | 0.2500 | -9.0% |
+| Lossless support, k=10 | 100,000 | 4/4 | 0.2769 | 0.2683 | -3.1% |
+| Poisson, ten pairs | 100,000 | 1/1 | 16.4005 | 17.9097 | +9.2% |
+| Poisson, ten pairs | 100,000 | 4/4 | 15.5702 | 17.8764 | +14.8% |
+| Poisson, ten pairs, single run | 300,000 | 4/4 | 22.3477 | 24.0599 | +7.7% |
+| Gamma, one pair, single run | 2,000 | 1/1 | 0.1776 | 0.1950 | +9.8% |
+
+Fresh master references take 61.3678 and 49.6566 seconds at 1/1 and 4/4.
+The candidate is therefore 3.43x and 2.78x faster than master on this fixture.
+That does not cancel the measured cost against the already-accelerated branch.
+All 100,000-row tensor fits take 12 outer iterations; the larger pair takes 11.
+The Gaussian/support timing ranges overlap, so their percentages do not
+establish improvements. This remains a small sample on one host, not a general
+performance guarantee. The individual samples are saved, not just the medians.
+
+Candidate tensor fit RSS is 949.4/957.4 MiB at 100,000 rows with 1/1 and 4/4
+threads, about 0.13%/0.10% above pre-Gram. The 300,000-row candidate reaches
+1,161.1 MiB, about 0.74% below its single pre-Gram reference. The largest
+ordinary-fit RSS increase is again the four-thread support fixture, 3.6%.
+These are process high-water measurements, not exact live-allocation totals.
+
+Gaussian and ordinary Poisson predictions remain bit-identical to pre-Gram.
+Support/tensor prediction differences are below 9.6e-13. Gamma's maximum
+difference is 3.91e-10 and relative L2 difference 1.84e-11. Against master,
+tensor relative L2 difference remains about 1.70e-4; the combined REML change
+is still not a bit-identical optimizer. Repeated candidate predictions are
+identical within each setting. Changing BLAS thread limits changes tensor
+predictions by at most 7.17e-13; changing Numba/OMP at fixed BLAS leaves them
+identical.
+
+### Independent thread limits
+
+These are candidate medians for the 100,000-row ten-pair fit, with three runs
+per cell. BLAS limits apply per library, not to total process CPU usage.
+Receipts verify actual BLAS and Numba settings. OMP follows the Numba limit;
+NumExpr stays at one thread.
+
+| BLAS limit | Numba limit | Wall seconds | CPU seconds |
+| ---: | ---: | ---: | ---: |
+| 1 | 1 | 17.9097 | 17.8848 |
+| 1 | 4 | 18.1864 | 18.1654 |
+| 4 | 1 | 16.7810 | 76.3829 |
+| 4 | 4 | 17.8764 | 80.9019 |
+
+The extra CPU follows the BLAS setting in this experiment. The higher Numba/OMP
+limit does not supply a measured speedup here. BLAS 4/Numba 1 is about 6.3% faster
+than 1/1 by the medians, while consuming over four times the CPU. Using four
+for both barely changes median wall time. This does not establish why each
+library thread is busy, or justify a universal threading default.
+
+The separate one-thread profile records 945 channel contractions and 945
+cell-CSR requests, confirming the raw-channel route remains active. Cell-CSR
+checking/building takes 1.01 seconds cumulatively; cross-factor range checks
+take 0.60 seconds across 2,835 calls. Workspace accounting itself takes 0.020
+seconds across 945 calls. These are profiled costs, excluded from timing ratios.
+Validating once within the existing weighted-assembly cache is a concrete
+follow-up candidate, provided mutation between assemblies stays observable.
+No such extra optimization or threading-policy change is included here.
+
+The numerical results and CI repairs do not establish performance acceptance.
+The PR remains a draft pending that decision and external re-review. The new
+measurements, source identities, sample times, numerical comparisons, thread
+libraries and hash manifest for all 74 receipts are recorded in
+`2026-09-21-pr406-review-measurements.json`. Raw receipts and arrays stay under
+the ignored `pr406-acceptance/` artifact directory. Earlier receipts and
+measurements remain unchanged.
