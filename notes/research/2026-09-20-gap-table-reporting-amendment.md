@@ -31,3 +31,22 @@ evidence. Any amended summary derived from them belongs in a new directory
 with input hashes and the summarizer's identity. Missing historical source
 hashes stay missing. Recomputing a summary is not a new fit or evidence that
 the Gram repair improved those models.
+
+## Recomputed historical summaries
+
+The amendment was applied to the saved Kaggle and corpus receipts on
+September 20, without new fits. All test losses and validation-selected
+boosting capacities match their original summaries. SHA-256 checks before
+and after confirmed that all 216 input files were unchanged.
+
+The Kaggle R3 result changes from true to null because required evidence is
+missing. Eleven historical timeout receipts lack source identity; the derived
+summary lists them without inventing hashes. The corpus R3 result remains
+false. Ames has negative smooth-to-boosting headroom, so its closure fractions
+are now null rather than reversing the meaning of improvement.
+
+Derived summaries and input hashes are stored locally under
+`.benchmark-artifacts/cheap-interactions-integration/amended-summaries/`.
+The source receipts remain in the interaction-recovery worktree. These results
+qualify the original benchmark's conclusions, not the integrated source's fit
+performance or numerical behavior.
