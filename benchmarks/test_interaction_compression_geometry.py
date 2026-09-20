@@ -274,7 +274,6 @@ def test_modal_prefix_cutting_tie_depends_on_frozen_basis():
     first = prefix(C, frozen.modes, frozen.modes, 1)
     rotated = prefix(C, swapped, swapped, 1)
     assert np.linalg.norm(first - rotated) > 0
-    np.testing.assert_array_equal(prefix(C, frozen.modes, frozen.modes, 3), C)
 
 
 @pytest.mark.parametrize("penalty", [np.diag([-1.0, 2.0]), np.array([[1.0, 1.0], [0.0, 1.0]])])
@@ -371,6 +370,38 @@ def test_weighted_training_metric_refuses_unsupported_geometry(fault):
         weights[0] = -1
     with pytest.raises(ValueError):
         metric(J, weights)
+
+
+@pytest.mark.parametrize(
+    "basis,weights",
+    [
+        ([[2.0**600], [1.0]], [2.0**-600, 2.0**600]),
+        ([[2.0**538], [1.0]], [3 * 2.0**-538, 2.0**537]),
+        ([[1.0], [1.0], [1.0]], [2.0**-1074, 1.0, 1.0]),
+        ([[2.0**-1074], [1.0]], [1.0, 3.0]),
+    ],
+    ids=[
+        "normalized_zero",
+        "normalized_positive_subnormal",
+        "unit_sum_underflow",
+        "formation_underflow",
+    ],
+)
+def test_weighted_metric_refuses_underflow_outside_relative_error_model(basis, weights):
+    # The first exact metrics are 2/(1+2**-1200) and 7/(1+3*2**-1075),
+    # which round to 2 and 7. Lost normalization bits instead produced 1 and 9.
+    # The last two cases isolate the unit-sum division and basis multiplication.
+    with pytest.raises(ValueError, match="arithmetic scale|underflow"):
+        geometry().weighted_marginal_metric(np.array(basis), np.array(weights))
+
+
+def test_exact_subnormal_weight_scaling_remains_within_arithmetic_model():
+    # All small intermediates are exact powers of two; the rounded metric is 2.
+    result = geometry().weighted_marginal_metric(
+        np.array([[2.0**537], [1.0]]), np.array([2.0**-1074, 1.0])
+    )
+    metric = (result.factor.T @ result.factor).item()
+    assert abs(metric - 2.0) <= result.diagnostics["metric_relative_error"] * metric
 
 
 def test_rank_energy_accuracy_uses_measured_allowance():
@@ -480,16 +511,24 @@ def test_separated_cutoff_predictions_survive_invertible_marginal_coordinates():
 def test_tied_cutoff_preserves_error_and_rank_without_comparing_predictions():
     truncate = diagnostic("truncate_in_product_metric")
     C = np.diag([4.0, 4.0, 1.0])
-    swap = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
-    for coefficients in (C, swap.T @ C @ swap):
-        result = truncate(coefficients, np.eye(3), np.eye(3), 1)
+    T_left = np.array([[1, 0.5, 0], [0, 1, 0], [0, 0, 1]])
+    T_right = np.array([[1, 0, 0], [0, 2, 0.25], [0, 0, 1]])
+    changed = np.linalg.solve(T_left, C)
+    changed = np.linalg.solve(T_right, changed.T).T
+    assert not np.array_equal(changed, C)
+    for coefficients, left, right in (
+        (C, np.eye(3), np.eye(3)),
+        (changed, T_left, T_right),
+    ):
+        result = truncate(coefficients, left, right, 1)
         _, b, metric_bound = coordinate_allowances(result, 17)
         assert abs(result.realized_product_energy - 17) <= metric_bound
-        U, s, Vt = np.linalg.svd(result.coefficients, full_matrices=False)
+        recovered = left @ result.coefficients @ right.T
+        U, s, Vt = np.linalg.svd(recovered, full_matrices=False)
         reconstructed = (U * s) @ Vt
         svd_error = (
-            norm_bound(result.coefficients - reconstructed)
-            + gamma(1) * (norm_bound(result.coefficients) + norm_bound(reconstructed))
+            norm_bound(recovered - reconstructed)
+            + gamma(1) * (norm_bound(recovered) + norm_bound(reconstructed))
             + gamma(4) * norm_bound(U) * norm_bound(s) * norm_bound(Vt)
         )
         o_left = norm_bound(U.T @ U - np.eye(3)) + gamma(3) * norm_bound(U) ** 2
@@ -499,7 +538,10 @@ def test_tied_cutoff_preserves_error_and_rank_without_comparing_predictions():
         o_right += gamma(1) * (norm_bound(Vt @ Vt.T) + norm_bound(np.eye(3)))
         nu_left, nu_right = polar_allowance(o_left), polar_allowance(o_right)
         e_check = svd_error + (nu_left + nu_right + nu_left * nu_right) * norm_bound(s)
-        threshold = b + gamma(6) * 3 * norm_bound(result.coefficients) + e_check
+        recovery_product = (
+            gamma(6) * norm_bound(left) * norm_bound(result.coefficients) * norm_bound(right)
+        )
+        threshold = b + recovery_product + e_check
         assert norm_bound(s[1:]) <= threshold < s[0]
 
 

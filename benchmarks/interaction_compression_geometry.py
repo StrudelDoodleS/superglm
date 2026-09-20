@@ -132,8 +132,14 @@ def weighted_marginal_metric(basis: Array, weights: Array) -> MarginalMetric:
         or weights.max(initial=0) <= 0
     ):
         raise ValueError("Training basis/weights do not define an admitted marginal metric")
-    scaled = weights / weights.max()
-    A = _finite_array(np.sqrt(scaled / scaled.sum())[:, None] * basis, "weighted basis")
+    try:
+        # Inexact subnormals invalidate the relative formation allowance, even
+        # when they remain positive. Exact subnormal operations need no repair.
+        with np.errstate(under="raise"):
+            scaled = weights / weights.max()
+            A = _finite_array(np.sqrt(scaled / scaled.sum())[:, None] * basis, "weighted basis")
+    except FloatingPointError as exc:
+        raise ValueError("Unsupported arithmetic scale in weight normalization/formation") from exc
     if not np.any(A):
         raise ValueError("Weighted basis has zero rank")
     try:
