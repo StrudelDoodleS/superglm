@@ -1,0 +1,1074 @@
+{
+  "driver_sha256": [
+    "df01a5c21e381b67a0ed3684debb871472088d5ba20a256a386c36eefa1e80b8"
+  ],
+  "versions": {
+    "python": "3.13.14 (main, Jul 23 2026, 14:44:45) [Clang 22.1.3 ]",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0"
+  },
+  "threadpools": {
+    "blas1-numba1": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ],
+    "blas4-numba4": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 4,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 4,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ]
+  },
+  "receipt_sha256": {
+    "gamma1-n2000-candidate-b1-j1-r0/receipt.json": "8aaa42b76f77ef1803efd4f1fcaa3a669154aea682c5713536919f4f1502843e",
+    "gamma1-n2000-reviewed-b1-j1-r0/receipt.json": "3eb0151b98ef292e54f89d8eec8ecf696e399166cf0c956e01d4c54309e209df",
+    "poisson30-n100000-candidate-b1-j1-r0/receipt.json": "79d048256d5a09940c2379afebe6fc09eda3bc05305cb7cca21ce9c76cd26787",
+    "poisson30-n100000-reviewed-b1-j1-r0/receipt.json": "26b61dfa0b409d2a7e3443bca047fcc20960ec9a541db19be9e8f73a47fea414",
+    "tensor10-n100000-candidate-b1-j1-r0/receipt.json": "0b33ad2a46b37ef20399ea3562f2bbf5260acf25ab1d48f23fc3778225fff1b6",
+    "tensor10-n100000-candidate-b1-j1-r0-profile/receipt.json": "92b61e97a96f6c1dcd45f2eaa42961658653479d75c8a48c5dd1ed6a1dbb8856",
+    "tensor10-n100000-candidate-b1-j1-r1/receipt.json": "deb55da22a3c5624dc7e8dd3dd61a8c519510e4f4da1253339dbe9adf155851c",
+    "tensor10-n100000-candidate-b1-j1-r2/receipt.json": "00153bde0b66086e53c1b5e20bbfa44b89beff1807ba493a94c11829f2bb28ec",
+    "tensor10-n100000-candidate-b4-j4-r0/receipt.json": "68815697303e54b9d8a5865bcee5a82ec087fe30c06784127ec4ed5c65e8f0ad",
+    "tensor10-n100000-candidate-b4-j4-r1/receipt.json": "9bbc099791b9c9d69841e2017a1a1f762f347cb670be93eb7c0acbc14a6efce9",
+    "tensor10-n100000-candidate-b4-j4-r2/receipt.json": "105d22dacac98b16c85def17978a6daa71d6847894fb8acb44acbc472964d54b",
+    "tensor10-n100000-pregram-b1-j1-r0/receipt.json": "477fd3842514b0fe13d24c87f98d2d0692f84e65b20944fe0b0e41d178944593",
+    "tensor10-n100000-pregram-b1-j1-r1/receipt.json": "2ef0bef6731b55afea47bc094996ae8307681e0c4bd05e8a519a1b1d3d862750",
+    "tensor10-n100000-pregram-b1-j1-r2/receipt.json": "ad953318d9e760998c21e5b38bd48b7f04fa202d3a6b0d1cc1849aea1150455a",
+    "tensor10-n100000-pregram-b4-j4-r0/receipt.json": "eb5f05948f461ecf6d1949877d8b32251289ea1cb376d53f01888acf98fe174a",
+    "tensor10-n100000-pregram-b4-j4-r1/receipt.json": "85f18c03bd355b36c54e2fa3f54dbee16c14053c3f4f4be4090ce82a297404fe",
+    "tensor10-n100000-pregram-b4-j4-r2/receipt.json": "6bb4a2b650810cd7f38e56bda0399b21d3225daad93c199f40a7cad21f427d8c",
+    "tensor10-n100000-reviewed-b1-j1-r0/receipt.json": "b4a7d1f86ff666bcd2e5bd5c10d884c4857d095fee23c741aec959e56c9f3bb5",
+    "tensor10-n100000-reviewed-b1-j1-r0-profile/receipt.json": "19d6fac6d79afcd8cba7c0e8e399afa371d5e87d9cfd47f4cde0218abe0a23e0",
+    "tensor10-n100000-reviewed-b1-j1-r1/receipt.json": "c90eed4f64419e9c43b535b7d4186bc2b113afb782a1c834de8e566dbcee4aba",
+    "tensor10-n100000-reviewed-b1-j1-r2/receipt.json": "2e777ba1628dc2f02b0c484aa3a2499e7e08522cb7d208dfe145e8c033d16db9",
+    "tensor10-n100000-reviewed-b4-j4-r0/receipt.json": "892a716f6522b68536e7096c9a62af74c2f635f313f4a86fde02a9fd1151036f",
+    "tensor10-n100000-reviewed-b4-j4-r1/receipt.json": "f704b9302f9d4bb06d5ffe4f3f6f65a09b5dbf74811d4780f627bdd1dac92f4b",
+    "tensor10-n100000-reviewed-b4-j4-r2/receipt.json": "6f61fb0daa50417564ad123a279d46f720f570c66cdbea086b0fbb68386607fa"
+  },
+  "results": [
+    {
+      "case": "gamma1",
+      "rows": 2000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.23066902393475175
+      ],
+      "cpu_seconds": [
+        0.230214111
+      ],
+      "fit_peak_rss_mib": [
+        384.96484375
+      ],
+      "median_wall_seconds": 0.23066902393475175,
+      "median_cpu_seconds": 0.230214111,
+      "source_sha256": [
+        "34e317514c44bd597bcd6df77c10fc41fd4d1b69326cefb97e1b2ede04dc5d0f"
+      ],
+      "git_heads": [
+        "9e67e2c6aca0fd90d7c24118701cf30822f512e9"
+      ],
+      "fixture_sha256": [
+        "4518a1489214a2f1bf8146b3cc1207aaeadc699d7d7867a079179582d72ba66d"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        1935.8168444314026
+      ],
+      "edf": [
+        11.71037978256554
+      ],
+      "comparisons": {
+        "reviewed": {
+          "wall_ratio": 0.9598552516964103,
+          "fit_peak_rss_ratio": 0.9614075136332153,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gamma1",
+      "rows": 2000,
+      "source": "reviewed",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.240316468058154
+      ],
+      "cpu_seconds": [
+        0.24028435099999967
+      ],
+      "fit_peak_rss_mib": [
+        400.41796875
+      ],
+      "median_wall_seconds": 0.240316468058154,
+      "median_cpu_seconds": 0.24028435099999967,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "db0e3ac827042cf892345e27189d5986009e6f6f"
+      ],
+      "fixture_sha256": [
+        "4518a1489214a2f1bf8146b3cc1207aaeadc699d7d7867a079179582d72ba66d"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        1935.8168444314026
+      ],
+      "edf": [
+        11.71037978256554
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        1.2733926260843873
+      ],
+      "cpu_seconds": [
+        1.2715511089999998
+      ],
+      "fit_peak_rss_mib": [
+        438.16796875
+      ],
+      "median_wall_seconds": 1.2733926260843873,
+      "median_cpu_seconds": 1.2715511089999998,
+      "source_sha256": [
+        "34e317514c44bd597bcd6df77c10fc41fd4d1b69326cefb97e1b2ede04dc5d0f"
+      ],
+      "git_heads": [
+        "9e67e2c6aca0fd90d7c24118701cf30822f512e9"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824
+      ],
+      "comparisons": {
+        "reviewed": {
+          "wall_ratio": 1.0858412201633507,
+          "fit_peak_rss_ratio": 0.9704045262647935,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "reviewed",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        1.1727245221845806
+      ],
+      "cpu_seconds": [
+        1.172020854
+      ],
+      "fit_peak_rss_mib": [
+        451.53125
+      ],
+      "median_wall_seconds": 1.1727245221845806,
+      "median_cpu_seconds": 1.172020854,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "db0e3ac827042cf892345e27189d5986009e6f6f"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        18.53501206287183,
+        18.613682705909014,
+        20.235466848127544
+      ],
+      "cpu_seconds": [
+        18.488611744000004,
+        18.580692236,
+        20.197878417000002
+      ],
+      "fit_peak_rss_mib": [
+        948.1171875,
+        948.88671875,
+        948.6015625
+      ],
+      "median_wall_seconds": 18.613682705909014,
+      "median_cpu_seconds": 18.580692236,
+      "source_sha256": [
+        "34e317514c44bd597bcd6df77c10fc41fd4d1b69326cefb97e1b2ede04dc5d0f"
+      ],
+      "git_heads": [
+        "9e67e2c6aca0fd90d7c24118701cf30822f512e9"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267,
+        26532.43613424267,
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916,
+        36.65470175207916,
+        36.65470175207916
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 0.959339671874704,
+          "fit_peak_rss_ratio": 0.9999505875958394,
+          "prediction_max_abs_difference": 8.854583732897936e-13,
+          "prediction_relative_l2_difference": 3.1534793817920503e-13,
+          "beta_max_abs_difference": 2.5446311724408588e-12,
+          "objective_difference": -1.4915713109076023e-10,
+          "edf_difference": 6.80557832311024e-11
+        },
+        "reviewed": {
+          "wall_ratio": 0.9463079335480378,
+          "fit_peak_rss_ratio": 0.9995719213323125,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": true,
+      "wall_seconds": [
+        18.747052780818194
+      ],
+      "cpu_seconds": [
+        18.725229243
+      ],
+      "fit_peak_rss_mib": [
+        948.7890625
+      ],
+      "median_wall_seconds": 18.747052780818194,
+      "median_cpu_seconds": 18.725229243,
+      "source_sha256": [
+        "34e317514c44bd597bcd6df77c10fc41fd4d1b69326cefb97e1b2ede04dc5d0f"
+      ],
+      "git_heads": [
+        "9e67e2c6aca0fd90d7c24118701cf30822f512e9"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916
+      ],
+      "kernel_calls": [
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 79,
+          "name": "_cross_factors_in_range",
+          "calls": 2835,
+          "cumulative_seconds": 0.195168853
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 715,
+          "name": "_tensor_channel_histogram",
+          "calls": 945,
+          "cumulative_seconds": 5.079684466000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 662,
+          "name": "_tensor_channel_workspace_bytes",
+          "calls": 945,
+          "cumulative_seconds": 0.025335015000000002
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_kernels.py",
+          "line": 40,
+          "name": "_ssp_gram_needs_exact",
+          "calls": 252,
+          "cumulative_seconds": 0.033781148000000004
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 793,
+          "name": "_cross_gram_tensor_tensor_channels",
+          "calls": 945,
+          "cumulative_seconds": 10.407745419000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_discretized.py",
+          "line": 440,
+          "name": "cell_csr",
+          "calls": 189,
+          "cumulative_seconds": 0.212433332
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 159,
+          "name": "cell_csr",
+          "calls": 945,
+          "cumulative_seconds": 0.214253608
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 103,
+          "name": "_cross_support",
+          "calls": 1890,
+          "cumulative_seconds": 0.10626941100000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 142,
+          "name": "weight_range",
+          "calls": 3780,
+          "cumulative_seconds": 0.013472149000000001
+        }
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        16.50659736711532,
+        16.065355022903532,
+        17.150364981032908
+      ],
+      "cpu_seconds": [
+        75.39145282499999,
+        73.287636593,
+        77.726821444
+      ],
+      "fit_peak_rss_mib": [
+        956.859375,
+        956.63671875,
+        956.08203125
+      ],
+      "median_wall_seconds": 16.50659736711532,
+      "median_cpu_seconds": 75.39145282499999,
+      "source_sha256": [
+        "34e317514c44bd597bcd6df77c10fc41fd4d1b69326cefb97e1b2ede04dc5d0f"
+      ],
+      "git_heads": [
+        "9e67e2c6aca0fd90d7c24118701cf30822f512e9"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424187,
+        26532.43613424187,
+        26532.43613424187
+      ],
+      "edf": [
+        36.65470175201703,
+        36.65470175201703,
+        36.65470175201703
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 0.9870452156314132,
+          "fit_peak_rss_ratio": 1.0001796981887239,
+          "prediction_max_abs_difference": 7.448486272210175e-13,
+          "prediction_relative_l2_difference": 3.0036293643762996e-13,
+          "beta_max_abs_difference": 5.950944598209773e-12,
+          "objective_difference": -2.9831426218152046e-10,
+          "edf_difference": 1.0533085514907725e-10
+        },
+        "reviewed": {
+          "wall_ratio": 0.8628857327517403,
+          "fit_peak_rss_ratio": 1.0003063425154397,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        18.99572610994801,
+        19.402598737040535,
+        20.662902876967564
+      ],
+      "cpu_seconds": [
+        18.962663412,
+        19.367576567,
+        20.629668836
+      ],
+      "fit_peak_rss_mib": [
+        948.734375,
+        948.5390625,
+        948.6484375
+      ],
+      "median_wall_seconds": 19.402598737040535,
+      "median_cpu_seconds": 19.367576567,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424282,
+        26532.43613424282,
+        26532.43613424282
+      ],
+      "edf": [
+        36.65470175201111,
+        36.65470175201111,
+        36.65470175201111
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        16.04858633503318,
+        16.723243379034102,
+        16.888781455811113
+      ],
+      "cpu_seconds": [
+        73.72335357,
+        75.674937051,
+        75.91875692400001
+      ],
+      "fit_peak_rss_mib": [
+        956.46484375,
+        956.36328125,
+        956.6328125
+      ],
+      "median_wall_seconds": 16.723243379034102,
+      "median_cpu_seconds": 75.674937051,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424217,
+        26532.43613424217,
+        26532.43613424217
+      ],
+      "edf": [
+        36.6547017519117,
+        36.6547017519117,
+        36.6547017519117
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "reviewed",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        19.669794626068324,
+        19.510357707040384,
+        21.43169751786627
+      ],
+      "cpu_seconds": [
+        19.631098361,
+        19.477485127999998,
+        21.344019439999997
+      ],
+      "fit_peak_rss_mib": [
+        983.6015625,
+        949.0078125,
+        948.37109375
+      ],
+      "median_wall_seconds": 19.669794626068324,
+      "median_cpu_seconds": 19.631098361,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "db0e3ac827042cf892345e27189d5986009e6f6f"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267,
+        26532.43613424267,
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916,
+        36.65470175207916,
+        36.65470175207916
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "reviewed",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": true,
+      "wall_seconds": [
+        19.03154741693288
+      ],
+      "cpu_seconds": [
+        19.005853813
+      ],
+      "fit_peak_rss_mib": [
+        949.34765625
+      ],
+      "median_wall_seconds": 19.03154741693288,
+      "median_cpu_seconds": 19.005853813,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "db0e3ac827042cf892345e27189d5986009e6f6f"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916
+      ],
+      "kernel_calls": [
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 713,
+          "name": "_tensor_channel_histogram",
+          "calls": 945,
+          "cumulative_seconds": 5.198619881
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 661,
+          "name": "_tensor_channel_workspace_bytes",
+          "calls": 945,
+          "cumulative_seconds": 0.024278931
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_kernels.py",
+          "line": 40,
+          "name": "_ssp_gram_needs_exact",
+          "calls": 252,
+          "cumulative_seconds": 0.03404796
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 791,
+          "name": "_cross_gram_tensor_tensor_channels",
+          "calls": 945,
+          "cumulative_seconds": 10.515753528000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 79,
+          "name": "_cross_factors_in_range",
+          "calls": 2835,
+          "cumulative_seconds": 0.492437483
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_discretized.py",
+          "line": 440,
+          "name": "cell_csr",
+          "calls": 189,
+          "cumulative_seconds": 0.211700776
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 158,
+          "name": "cell_csr",
+          "calls": 945,
+          "cumulative_seconds": 0.21342045
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 102,
+          "name": "_cross_support",
+          "calls": 1890,
+          "cumulative_seconds": 0.40561124000000004
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-db0/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 141,
+          "name": "weight_range",
+          "calls": 1890,
+          "cumulative_seconds": 0.010931487
+        }
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "reviewed",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        16.694167603971437,
+        19.129528674064204,
+        19.495532730827108
+      ],
+      "cpu_seconds": [
+        75.89017968600001,
+        85.73727554800001,
+        87.244918956
+      ],
+      "fit_peak_rss_mib": [
+        956.34375,
+        956.91796875,
+        956.21875
+      ],
+      "median_wall_seconds": 19.129528674064204,
+      "median_cpu_seconds": 85.73727554800001,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "db0e3ac827042cf892345e27189d5986009e6f6f"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424187,
+        26532.43613424187,
+        26532.43613424187
+      ],
+      "edf": [
+        36.65470175201703,
+        36.65470175201703,
+        36.65470175201703
+      ]
+    }
+  ],
+  "compared_commits": {
+    "pregram": "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c",
+    "reviewed": "db0e3ac827042cf892345e27189d5986009e6f6f",
+    "candidate": "9e67e2c6aca0fd90d7c24118701cf30822f512e9"
+  },
+  "method": "24 fresh serial workers: three rotated tensor100k repetitions per source and matched BLAS/Numba setting, single Gamma/ordinary-Poisson controls, two separate tensor profiles. Same 2000-row/two-iteration warmup; timed construction plus complete fit. No concurrent numerical tests. All 9 matched candidate/reviewed receipts have identical saved predictions, coefficients, objective and EDF. Overlapping samples on one host do not establish performance parity or attribute the full timing difference to this repair.",
+  "range_check_callers": {
+    "reviewed": {
+      "total_calls": 2835,
+      "total_cumulative_seconds": 0.492437483,
+      "support_calls": 1890,
+      "support_cumulative_seconds": 0.397905273,
+      "channel_calls": 945,
+      "channel_cumulative_seconds": 0.09453221
+    },
+    "candidate": {
+      "total_calls": 2835,
+      "total_cumulative_seconds": 0.195168853,
+      "support_calls": 1890,
+      "support_cumulative_seconds": 0.09861208,
+      "channel_calls": 945,
+      "channel_cumulative_seconds": 0.09655677300000001
+    }
+  }
+}
