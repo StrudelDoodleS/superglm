@@ -76,13 +76,16 @@ def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> 
         _profile_add(profile, key, perf_counter() - start)
 
 
-def _cross_factors_in_range(*operands: NDArray, cache: _BlockWeightCache | None = None) -> bool:
+def _cross_factors_in_range(*operands: NDArray, cache=None) -> bool:
     """Bound every partial cross product and reduction, not just its result.
 
     Sum negative/positive exponent bounds separately to bound every partial
     product, not just the final product. The product of operand dimensions
     overbounds reduction lengths in either association. Non-cancelling terms
     then stay normal; cancellation still follows ordinary rounded arithmetic.
+
+    Look up weight_range optionally: centered assembly uses a weight-grid-only
+    cache without that method.
     """
     weight_range = getattr(cache, "weight_range", None)
     lower = upper = 0
