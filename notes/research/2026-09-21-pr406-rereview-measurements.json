@@ -1,0 +1,2472 @@
+{
+  "driver_sha256": [
+    "df01a5c21e381b67a0ed3684debb871472088d5ba20a256a386c36eefa1e80b8"
+  ],
+  "versions": {
+    "python": "3.13.14 (main, Jul 23 2026, 14:44:45) [Clang 22.1.3 ]",
+    "numpy": "2.5.2",
+    "scipy": "1.18.0"
+  },
+  "threadpools": {
+    "blas1-numba1": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 1,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 1,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ],
+    "blas4-numba4": [
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/numpy.libs/libscipy_openblas64_-61654e39.so",
+        "version": "0.3.34.0.0",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "blas",
+        "internal_api": "openblas",
+        "num_threads": 4,
+        "prefix": "libscipy_openblas",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/scipy.libs/libscipy_openblas-5f890258.so",
+        "version": "0.3.31.dev",
+        "threading_layer": "pthreads",
+        "architecture": "SkylakeX"
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 4,
+        "prefix": "libgomp",
+        "filepath": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.venv/lib/python3.13/site-packages/tabmat.libs/libgomp-e985bcbb.so.1.0.0",
+        "version": null
+      },
+      {
+        "user_api": "openmp",
+        "internal_api": "openmp",
+        "num_threads": 4,
+        "prefix": "libgomp",
+        "filepath": "/usr/lib/x86_64-linux-gnu/libgomp.so.1.0.0",
+        "version": null
+      }
+    ]
+  },
+  "receipt_sha256": {
+    "gamma1-n2000-candidate-b1-j1-r0/receipt.json": "a19183841890092cc858a0082cee8521d47a8fa8ff49ee9e16efabb519dd2ea3",
+    "gamma1-n2000-second_review-b1-j1-r0/receipt.json": "021c5cb47b358d170fcae7c6006c165b305a0caa837bbc581279676027f40e8c",
+    "gaussian10-n100000-candidate-b1-j1-r0/receipt.json": "a3b4ae5f2b868f83e4886499627bf1a9d18168e6178069b95fe29bc3110d559f",
+    "gaussian10-n100000-candidate-b4-j4-r0/receipt.json": "bda4abfe729f4374f234d1ebe5de40b23f97e3172beab6fbda5893126612059c",
+    "gaussian10-n100000-second_review-b1-j1-r0/receipt.json": "81b51409a006cf030af46cd3d3de938b6136ce81ae5896bb83337afbb815d390",
+    "gaussian10-n100000-second_review-b4-j4-r0/receipt.json": "d888e28869aa022464216355f5a75e447e3ec81a63b9fa3295cb888440e81667",
+    "gaussian50-n100000-candidate-b1-j1-r0/receipt.json": "703c55ec3165b581ad5fe1ef1a70648345407a014dc10159180be0eb3fb0bfff",
+    "gaussian50-n100000-candidate-b4-j4-r0/receipt.json": "3c1defb93413c279412b59851b49e213cfa810971f52250e17e1a4b5b3b43a63",
+    "gaussian50-n100000-second_review-b1-j1-r0/receipt.json": "0f26a563ba3154e21e0ff1007f613330a3ce373ca5dde74a14d16d4a642b4938",
+    "gaussian50-n100000-second_review-b4-j4-r0/receipt.json": "73164b62dba3aaa97d9fef356ff3963f002aaf0aac7fb8e007c904406d6ab58f",
+    "poisson30-n100000-candidate-b1-j1-r0/receipt.json": "4a8f7deb745dfed6f616678d7591d93b8c4090d9707424955ad4a538066c34a1",
+    "poisson30-n100000-candidate-b1-j1-r0-profile/receipt.json": "28705ee2d04315c39031b10cf202858e01ce075cdfaaf5c2faa51de8114e9f94",
+    "poisson30-n100000-candidate-b1-j1-r1/receipt.json": "f07ee5313e10afbdb04e9eb91352677be1898aca0f6d6e2db8f54079f71621ae",
+    "poisson30-n100000-candidate-b1-j1-r2/receipt.json": "dcbdeded0b1c0dc5d9a8ecd91ecef7eeb0cb467b36e5329f0a7a8c0aa3af9d9c",
+    "poisson30-n100000-candidate-b1-j1-r3/receipt.json": "b321ba8b50d564db00249b7ac6c558df8c32b01604027fcb9e1d170e7b01f990",
+    "poisson30-n100000-candidate-b1-j1-r4/receipt.json": "61d8d57a262f01379b50ba97120d6662a4e83ad35a77554d7342db07d56916d3",
+    "poisson30-n100000-candidate-b4-j4-r0/receipt.json": "9f0f02f3ff707e4bf9167e4d501a65f759784a0063786391700bba6ab49bb915",
+    "poisson30-n100000-candidate-b4-j4-r1/receipt.json": "f1dac60d6d88c32e75b54fbda763dfdf10a3d1c3051a32a68874b6192b562c55",
+    "poisson30-n100000-candidate-b4-j4-r2/receipt.json": "0de139b89996320fed7865ede3834bd09e13da643ebe88bb12d865eb18426fb2",
+    "poisson30-n100000-candidate-b4-j4-r3/receipt.json": "f35ab191e9409731da8596ae50bc5ffd886d8d5a99d9a7789ba030e99f1ce688",
+    "poisson30-n100000-candidate-b4-j4-r4/receipt.json": "0eb603174d9b2ad6eaab39b8f1f7ae204bebc7d3ce99d8cffe42ce46020b2746",
+    "poisson30-n100000-first_review-b1-j1-r0/receipt.json": "28676ed98838900035890627944cc638d02692402ba58828f75302e0760ae19c",
+    "poisson30-n100000-first_review-b1-j1-r1/receipt.json": "0321463f849156e6a716c124a25c37f7fd5297b47f3873c677d0ee81417787f4",
+    "poisson30-n100000-first_review-b1-j1-r2/receipt.json": "30701c1d79000e50951fd1d638bae22f8b25073e69ad0d7234bbbed634ad1ef1",
+    "poisson30-n100000-first_review-b1-j1-r3/receipt.json": "4a226061cfa4e153360af8f988710f446bf0c651fae6221de67e76a30b66bf1a",
+    "poisson30-n100000-first_review-b1-j1-r4/receipt.json": "51475f34e5b19379e8c652ef67135e96e627826db346a57dbbb538d4e0a6e315",
+    "poisson30-n100000-first_review-b4-j4-r0/receipt.json": "7ed73cfa7c0a377bfa76c432e4c0a6de8106995c3adc553ebab18946da6ec937",
+    "poisson30-n100000-first_review-b4-j4-r1/receipt.json": "41ab16dbb724b2e64d870986255858aa1c37b872f0f26b61f647c1d672765adc",
+    "poisson30-n100000-first_review-b4-j4-r2/receipt.json": "7fdb5a29133046c463a9b36c549432118b1c35c11442ec595a4b5f150ec1b022",
+    "poisson30-n100000-first_review-b4-j4-r3/receipt.json": "5fcae19d455efec9fc4c8227b646c6191198d5e368cdbdb8f162cd2f385afc91",
+    "poisson30-n100000-first_review-b4-j4-r4/receipt.json": "d8d045556310e0315037a4707acc74377acf53865c75d8463f19e59f6b5e2319",
+    "poisson30-n100000-pregram-b1-j1-r0/receipt.json": "f0dd7d1439712cbf1cfa51c27d513462501b7b4722ae34b663fd279d7eba3c06",
+    "poisson30-n100000-pregram-b1-j1-r1/receipt.json": "6f4de0a6ba33e415bff1f12b340f4a3ee77f401c168062ec74102aace65ccf52",
+    "poisson30-n100000-pregram-b1-j1-r2/receipt.json": "e13945ff5c7ef0e90e2947095ff61581a7987ee290669d9dde3029f19560ecfb",
+    "poisson30-n100000-pregram-b1-j1-r3/receipt.json": "b4c0ade95696551d85eea7f558726d3fdc34d09dece50d221ccf3cf6e72038ef",
+    "poisson30-n100000-pregram-b1-j1-r4/receipt.json": "78308d89428e9bd8287546df0bd99557308f0a940fed612fe4037d370b52136c",
+    "poisson30-n100000-pregram-b4-j4-r0/receipt.json": "4c8ac2d4a08a328cd18c10415ed6bba1ceeb6eaf9bedef38a7e0a8deb10fc6be",
+    "poisson30-n100000-pregram-b4-j4-r1/receipt.json": "31aa41eaaa6e1730ff461fc2b46f83f4dc68fe155fe067150e164f4eb68dcd9e",
+    "poisson30-n100000-pregram-b4-j4-r2/receipt.json": "22399d11997fdff11eb0bec4598be5aeb05b5d2dc45fb824fb2845b846c8538c",
+    "poisson30-n100000-pregram-b4-j4-r3/receipt.json": "c350e5e19f6506ebb5cfb8128e33d8cd19695661f422bf55035b4538806a6ff7",
+    "poisson30-n100000-pregram-b4-j4-r4/receipt.json": "f1446707a65462252efd4ec7fc6ff17997992718e863861f42d0bce3f2cf3fe8",
+    "poisson30-n100000-second_review-b1-j1-r0/receipt.json": "f1f6421687c177ee359745ba96798e0a20e0f77746ddd0794bfbf2b9b921693a",
+    "poisson30-n100000-second_review-b1-j1-r0-profile/receipt.json": "83f58720ab0ca5c2657050d7ad7bb0a660d15673976e618ff4d46e443019cf19",
+    "poisson30-n100000-second_review-b1-j1-r1/receipt.json": "a76f014a517e51657a574c0b25356faca49adf261bea884ac631618d80975ac7",
+    "poisson30-n100000-second_review-b1-j1-r2/receipt.json": "7ded9671a7300c5fb78493870396bc1f16a574a20b3b8222093d2b2c441e8d1d",
+    "poisson30-n100000-second_review-b1-j1-r3/receipt.json": "abd5fb3e53eeafe96fafa6d2f129c4c00ec69904d0e190d94311516712c6c843",
+    "poisson30-n100000-second_review-b1-j1-r4/receipt.json": "59e625a17154e1d809a433f11dc7612cc589ac1e6dcac827f863c8c296b9c045",
+    "poisson30-n100000-second_review-b4-j4-r0/receipt.json": "defd982350d674524a81cff60745562906e6dd949ca503d63da9ea1ea646c66b",
+    "poisson30-n100000-second_review-b4-j4-r1/receipt.json": "a61d7954187a0801b631a5a058f2d80add2ced366b789a6d4c8b7295cf5fe722",
+    "poisson30-n100000-second_review-b4-j4-r2/receipt.json": "3f5fa8b3ca48fd7ec0da5f8a3dfc083e9f6aad6a17eb4eba6e8817307527cfce",
+    "poisson30-n100000-second_review-b4-j4-r3/receipt.json": "b91aaba17bf48a0229768ceaddd25008988e30dac1c6b2411359c62f88d73ab9",
+    "poisson30-n100000-second_review-b4-j4-r4/receipt.json": "5474320dad677e929b02e92801f48b43eb6928eeaab9733aff0f49a53d06b513",
+    "support10-n100000-candidate-b1-j1-r0/receipt.json": "d2824bc63357a4920806c71ee827718d1a9413a29e4cd8bc480d56798ec20c8b",
+    "support10-n100000-candidate-b4-j4-r0/receipt.json": "930d5e307a7e89ec45c51ada5003329beb5544c5a16074042d5e1cf78154d41f",
+    "support10-n100000-second_review-b1-j1-r0/receipt.json": "2be6303745a098343a5e35c083ac2198b22a25e4b74fffbd5ab5b04d8e62449e",
+    "support10-n100000-second_review-b4-j4-r0/receipt.json": "b0d51e547960b784b44575cb413209cb454a3256fa1c05821326f3619b32f72b",
+    "tensor10-n100000-candidate-b1-j1-r0/receipt.json": "06f44fb57d69ccc27b3a02420e01842052b455409a96929eef664d0a6d02c44c",
+    "tensor10-n100000-candidate-b1-j1-r0-profile/receipt.json": "35f3ca7440b933d9bb0728d2f8f9999dd4485c372c77256356ebac2b4c79d9c5",
+    "tensor10-n100000-candidate-b1-j1-r1/receipt.json": "05fb4488540f551914176705543657f19045a2d204ebd4a1e71ae370786fd122",
+    "tensor10-n100000-candidate-b1-j1-r2/receipt.json": "77202d155b7a284fb2352b801c3079d611d5931d9f8ed0a1c2b4af6be50dd061",
+    "tensor10-n100000-candidate-b4-j4-r0/receipt.json": "90ab3cf4ea278509674d5a515dd0d1c0ef692649ca76de98a628b0fc28ec4ae6",
+    "tensor10-n100000-candidate-b4-j4-r1/receipt.json": "e45fd9e9ecf94ff655dd513645b7fd0c4ea50310a38def16b9e41d0fcc5e5033",
+    "tensor10-n100000-candidate-b4-j4-r2/receipt.json": "44872aaad4cc4bdfc4ccd75b2665bf11068f3b6310af386a4d0f737c30ba2305",
+    "tensor10-n100000-pregram-b1-j1-r0/receipt.json": "c7248508fb9c841b253b188eeccf4aa5a306a4a28c1b249b7317b0e7d371ee05",
+    "tensor10-n100000-pregram-b1-j1-r1/receipt.json": "e4726c5c1b1d28f1123fa474912751d1f88c14acab311840e2256c1f5e825b53",
+    "tensor10-n100000-pregram-b1-j1-r2/receipt.json": "d0c633af62997150ab59ca18f2ad71b4e0fa3812a85a1215e375b330d7c5ad91",
+    "tensor10-n100000-pregram-b4-j4-r0/receipt.json": "ac12833b96dac5b5b838aadf269dc86797e549184f3f094f894a9c5dc609d65b",
+    "tensor10-n100000-pregram-b4-j4-r1/receipt.json": "737c25cc77e1450b58a1a536e5b41fb7bcb09568133a205ff8301d6752ac155d",
+    "tensor10-n100000-pregram-b4-j4-r2/receipt.json": "342114c31e2a614445c16c9dc5198f1533747e436399435e369be418c1344b34",
+    "tensor10-n100000-second_review-b1-j1-r0/receipt.json": "9f77ff076858b7a3ce3d2f8835999174957a13d69a5494c28feaf659f0fabf41",
+    "tensor10-n100000-second_review-b1-j1-r0-profile/receipt.json": "9df5721a17527f7ad8a443da584d0d8f9507ba889ccca8e4cd52d25a5ee630d0",
+    "tensor10-n100000-second_review-b1-j1-r1/receipt.json": "ed2e67314abf8e228cda153476441d98942c2a8e7575162e5040bd14c06029b3",
+    "tensor10-n100000-second_review-b1-j1-r2/receipt.json": "8bd84c19d05321f1f1b0f3e20613d13b6159e8777e1e89a5598268079c41d85c",
+    "tensor10-n100000-second_review-b4-j4-r0/receipt.json": "29d004b11415e124a2a572346834438812dc307bc107dd4a5ffac81cad37584e",
+    "tensor10-n100000-second_review-b4-j4-r1/receipt.json": "0b0a82fecd6e5ab78b5dfa96558ce0dc5b0af25f46bfce1278ad21aacf1a8ae6",
+    "tensor10-n100000-second_review-b4-j4-r2/receipt.json": "5934b985ef71e0855b4db87387bd7ab1dad1a0cb1b299e83da415c70f54a148e",
+    "tensor10-n300000-candidate-b4-j4-r0/receipt.json": "831639f35884f9ff72647963a608b66d7493648c007fdde4c314992135a206dc",
+    "tensor10-n300000-second_review-b4-j4-r0/receipt.json": "0adc565e029132ff735e73b61d515dd908239474688b2ef197a90ad522bc647d"
+  },
+  "results": [
+    {
+      "case": "gamma1",
+      "rows": 2000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.20006104977801442
+      ],
+      "cpu_seconds": [
+        0.19999966599999985
+      ],
+      "fit_peak_rss_mib": [
+        385.10546875
+      ],
+      "median_wall_seconds": 0.20006104977801442,
+      "median_cpu_seconds": 0.19999966599999985,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "4518a1489214a2f1bf8146b3cc1207aaeadc699d7d7867a079179582d72ba66d"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        1935.8168444314026
+      ],
+      "edf": [
+        11.71037978256554
+      ],
+      "comparisons": {
+        "second_review": {
+          "wall_ratio": 0.9296635026781046,
+          "fit_peak_rss_ratio": 0.9665960742788792,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gamma1",
+      "rows": 2000,
+      "source": "second_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.21519727213308215
+      ],
+      "cpu_seconds": [
+        0.214303798
+      ],
+      "fit_peak_rss_mib": [
+        398.4140625
+      ],
+      "median_wall_seconds": 0.21519727213308215,
+      "median_cpu_seconds": 0.214303798,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "4518a1489214a2f1bf8146b3cc1207aaeadc699d7d7867a079179582d72ba66d"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        1935.8168444314026
+      ],
+      "edf": [
+        11.71037978256554
+      ]
+    },
+    {
+      "case": "gaussian10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.2658193411771208
+      ],
+      "cpu_seconds": [
+        0.26561667099999986
+      ],
+      "fit_peak_rss_mib": [
+        407.48828125
+      ],
+      "median_wall_seconds": 0.2658193411771208,
+      "median_cpu_seconds": 0.26561667099999986,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74381.43950832202
+      ],
+      "edf": [
+        9.43470593719203
+      ],
+      "comparisons": {
+        "second_review": {
+          "wall_ratio": 1.0453914727139395,
+          "fit_peak_rss_ratio": 0.9997604032891837,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gaussian10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.2625566301867366
+      ],
+      "cpu_seconds": [
+        1.4657905600000003
+      ],
+      "fit_peak_rss_mib": [
+        413.609375
+      ],
+      "median_wall_seconds": 0.2625566301867366,
+      "median_cpu_seconds": 1.4657905600000003,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74381.43950832202
+      ],
+      "edf": [
+        9.43470593719226
+      ],
+      "comparisons": {
+        "second_review": {
+          "wall_ratio": 0.8928350507543147,
+          "fit_peak_rss_ratio": 0.9997828283305163,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gaussian10",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.2542773191817105
+      ],
+      "cpu_seconds": [
+        0.25415116700000007
+      ],
+      "fit_peak_rss_mib": [
+        407.5859375
+      ],
+      "median_wall_seconds": 0.2542773191817105,
+      "median_cpu_seconds": 0.25415116700000007,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74381.43950832202
+      ],
+      "edf": [
+        9.43470593719203
+      ]
+    },
+    {
+      "case": "gaussian10",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.29407070204615593
+      ],
+      "cpu_seconds": [
+        1.6001545289999997
+      ],
+      "fit_peak_rss_mib": [
+        413.69921875
+      ],
+      "median_wall_seconds": 0.29407070204615593,
+      "median_cpu_seconds": 1.6001545289999997,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74381.43950832202
+      ],
+      "edf": [
+        9.43470593719226
+      ]
+    },
+    {
+      "case": "gaussian50",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.3823021170683205
+      ],
+      "cpu_seconds": [
+        0.3821474359999999
+      ],
+      "fit_peak_rss_mib": [
+        414.875
+      ],
+      "median_wall_seconds": 0.3823021170683205,
+      "median_cpu_seconds": 0.3821474359999999,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        4
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74389.98307495318
+      ],
+      "edf": [
+        18.789042553461112
+      ],
+      "comparisons": {
+        "second_review": {
+          "wall_ratio": 1.0319867531466835,
+          "fit_peak_rss_ratio": 0.9997552572622701,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gaussian50",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.4552422291599214
+      ],
+      "cpu_seconds": [
+        2.5763421610000004
+      ],
+      "fit_peak_rss_mib": [
+        434.73046875
+      ],
+      "median_wall_seconds": 0.4552422291599214,
+      "median_cpu_seconds": 2.5763421610000004,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        4
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74389.98307495318
+      ],
+      "edf": [
+        18.789042553460575
+      ],
+      "comparisons": {
+        "second_review": {
+          "wall_ratio": 0.8409210955676699,
+          "fit_peak_rss_ratio": 0.9992816801501289,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "gaussian50",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.37045254302211106
+      ],
+      "cpu_seconds": [
+        0.37039886899999996
+      ],
+      "fit_peak_rss_mib": [
+        414.9765625
+      ],
+      "median_wall_seconds": 0.37045254302211106,
+      "median_cpu_seconds": 0.37039886899999996,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        4
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74389.98307495318
+      ],
+      "edf": [
+        18.789042553461112
+      ]
+    },
+    {
+      "case": "gaussian50",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.5413614090066403
+      ],
+      "cpu_seconds": [
+        2.866519897
+      ],
+      "fit_peak_rss_mib": [
+        435.04296875
+      ],
+      "median_wall_seconds": 0.5413614090066403,
+      "median_cpu_seconds": 2.866519897,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "bbd6f4e876448768e2299d80c034e6291cc868f53746868a18b06f3ffb036484"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        4
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        74389.98307495318
+      ],
+      "edf": [
+        18.789042553460575
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        1.0896438399795443,
+        1.102973567089066,
+        1.0908242689911276,
+        1.115352228982374,
+        1.23922996991314
+      ],
+      "cpu_seconds": [
+        1.0894579399999997,
+        1.1021659900000003,
+        1.087366421,
+        1.114452272,
+        1.2384450949999999
+      ],
+      "fit_peak_rss_mib": [
+        438.4140625,
+        438.41015625,
+        438.19921875,
+        440.1640625,
+        438.125
+      ],
+      "median_wall_seconds": 1.102973567089066,
+      "median_cpu_seconds": 1.1021659900000003,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.1049628160503733,
+          "fit_peak_rss_ratio": 1.0010167768174885,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        },
+        "first_review": {
+          "wall_ratio": 0.974152544411828,
+          "fit_peak_rss_ratio": 1.0001960592098813,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        },
+        "second_review": {
+          "wall_ratio": 0.9529429173506376,
+          "fit_peak_rss_ratio": 1.0000534630703841,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": true,
+      "wall_seconds": [
+        1.1311622729990631
+      ],
+      "cpu_seconds": [
+        1.1306611720000002
+      ],
+      "fit_peak_rss_mib": [
+        438.49609375
+      ],
+      "median_wall_seconds": 1.1311622729990631,
+      "median_cpu_seconds": 1.1306611720000002,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824
+      ],
+      "kernel_calls": [
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_kernels.py",
+          "line": 40,
+          "name": "_ssp_gram_needs_exact",
+          "calls": 70,
+          "cumulative_seconds": 0.031497623
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 1562,
+          "name": "_cross_gram_sparse_ssp",
+          "calls": 35,
+          "cumulative_seconds": 0.45958239100000003
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_core.py",
+          "line": 701,
+          "name": "_gram_with_projection",
+          "calls": 70,
+          "cumulative_seconds": 0.241625957
+        }
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        1.1097969030961394,
+        1.077619943069294,
+        1.1107842300552875,
+        1.215373462997377,
+        1.224486798979342
+      ],
+      "cpu_seconds": [
+        7.1140952639999995,
+        6.887324937000001,
+        7.184523748999999,
+        7.780812730999999,
+        7.739023038999999
+      ],
+      "fit_peak_rss_mib": [
+        455.45703125,
+        455.5,
+        455.43359375,
+        455.38671875,
+        455.56640625
+      ],
+      "median_wall_seconds": 1.1107842300552875,
+      "median_cpu_seconds": 7.184523748999999,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454
+      ],
+      "edf": [
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 0.9501071924838138,
+          "fit_peak_rss_ratio": 1.0009614971884793,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        },
+        "first_review": {
+          "wall_ratio": 0.9403458315749473,
+          "fit_peak_rss_ratio": 0.9998542199049857,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        },
+        "second_review": {
+          "wall_ratio": 0.8782370250424697,
+          "fit_peak_rss_ratio": 1.000343179731805,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "first_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        1.0409934578929096,
+        1.101889074081555,
+        1.164193799952045,
+        1.1322390660643578,
+        1.1998533469159156
+      ],
+      "cpu_seconds": [
+        1.040233893,
+        1.101047612,
+        1.1635955910000002,
+        1.1311287440000002,
+        1.1988446820000003
+      ],
+      "fit_peak_rss_mib": [
+        455.79296875,
+        438.32421875,
+        438.1484375,
+        438.37890625,
+        438.2890625
+      ],
+      "median_wall_seconds": 1.1322390660643578,
+      "median_cpu_seconds": 1.1311287440000002,
+      "source_sha256": [
+        "e587bb2c69601defb25a91d539c33860b08f9f10d56d2090bc775dccb8a95de4"
+      ],
+      "git_heads": [
+        "4b94232044d8981d7ba9c6274bbd448539f7f9a6"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "first_review",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        1.1812507619615644,
+        1.1748144400771707,
+        1.0928736380301416,
+        1.1994504551403224,
+        1.2221151271369308
+      ],
+      "cpu_seconds": [
+        7.576721823,
+        7.481807985,
+        7.023600991,
+        7.679404974,
+        7.812422680999999
+      ],
+      "fit_peak_rss_mib": [
+        455.1640625,
+        455.5859375,
+        455.65625,
+        455.5234375,
+        455.359375
+      ],
+      "median_wall_seconds": 1.1812507619615644,
+      "median_cpu_seconds": 7.576721823,
+      "source_sha256": [
+        "e587bb2c69601defb25a91d539c33860b08f9f10d56d2090bc775dccb8a95de4"
+      ],
+      "git_heads": [
+        "4b94232044d8981d7ba9c6274bbd448539f7f9a6"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454
+      ],
+      "edf": [
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.9525132961571217,
+        0.9316591899842024,
+        0.9981997141148895,
+        1.2544111260212958,
+        1.1557844341732562
+      ],
+      "cpu_seconds": [
+        0.9523771479999998,
+        0.9309244410000002,
+        0.9950535209999998,
+        1.253649776,
+        1.1551220670000002
+      ],
+      "fit_peak_rss_mib": [
+        437.75390625,
+        438.38671875,
+        438.05859375,
+        437.96484375,
+        437.73046875
+      ],
+      "median_wall_seconds": 0.9981997141148895,
+      "median_cpu_seconds": 0.9950535209999998,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        1.1691146418452263,
+        1.066597149008885,
+        1.072911174967885,
+        1.1893432510551065,
+        1.2644096999429166
+      ],
+      "cpu_seconds": [
+        7.457549627999999,
+        6.828673664,
+        6.857049248,
+        7.544251751999999,
+        7.957099136999999
+      ],
+      "fit_peak_rss_mib": [
+        455.09765625,
+        455.01953125,
+        455.14453125,
+        455.00390625,
+        454.81640625
+      ],
+      "median_wall_seconds": 1.1691146418452263,
+      "median_cpu_seconds": 7.457549627999999,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454
+      ],
+      "edf": [
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        1.067332061007619,
+        1.1574392830953002,
+        1.0922019290737808,
+        1.1848854259587824,
+        1.2342114469502121
+      ],
+      "cpu_seconds": [
+        1.0668142660000002,
+        1.155578359,
+        1.0912756899999998,
+        1.18404339,
+        1.2325443579999997
+      ],
+      "fit_peak_rss_mib": [
+        455.98046875,
+        438.34375,
+        438.34765625,
+        438.45703125,
+        438.38671875
+      ],
+      "median_wall_seconds": 1.1574392830953002,
+      "median_cpu_seconds": 1.155578359,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459,
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824,
+        22.67350444079824
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": true,
+      "wall_seconds": [
+        1.2137070649769157
+      ],
+      "cpu_seconds": [
+        1.2130361699999999
+      ],
+      "fit_peak_rss_mib": [
+        438.30078125
+      ],
+      "median_wall_seconds": 1.2137070649769157,
+      "median_cpu_seconds": 1.2130361699999999,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286459
+      ],
+      "edf": [
+        22.67350444079824
+      ],
+      "kernel_calls": [
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_kernels.py",
+          "line": 40,
+          "name": "_ssp_gram_needs_exact",
+          "calls": 70,
+          "cumulative_seconds": 0.032535297000000005
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 1502,
+          "name": "_cross_gram_sparse_ssp",
+          "calls": 35,
+          "cumulative_seconds": 0.5134536390000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_core.py",
+          "line": 701,
+          "name": "_gram_with_projection",
+          "calls": 70,
+          "cumulative_seconds": 0.24606319100000001
+        }
+      ]
+    },
+    {
+      "case": "poisson30",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        1.2647886599879712,
+        1.0593008529394865,
+        1.044566442957148,
+        1.2679497238714248,
+        1.275182985002175
+      ],
+      "cpu_seconds": [
+        8.061745827000001,
+        6.798669705999999,
+        6.75215823,
+        8.002307479,
+        8.074949325999999
+      ],
+      "fit_peak_rss_mib": [
+        455.0234375,
+        455.41796875,
+        455.17578125,
+        455.30078125,
+        455.375
+      ],
+      "median_wall_seconds": 1.2647886599879712,
+      "median_cpu_seconds": 8.002307479,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "ecbd5e0c67c5a236865f1ac25b8a6ef9def5d94550fe6d9f4f86003cea8e9bc0"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SparseSSPGroupMatrix",
+        "SparseSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        6
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454,
+        56268.34914286454
+      ],
+      "edf": [
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958,
+        22.67350444079958
+      ]
+    },
+    {
+      "case": "support10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.2591200468596071
+      ],
+      "cpu_seconds": [
+        0.258787082
+      ],
+      "fit_peak_rss_mib": [
+        402.51953125
+      ],
+      "median_wall_seconds": 0.2591200468596071,
+      "median_cpu_seconds": 0.258787082,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "a6c595fecc054091da2554de359884dfa9e0ea24f2b0ca2e17064e9756fcebea"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SupportCompressedSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        72676.27465238619
+      ],
+      "edf": [
+        9.667256149670868
+      ],
+      "comparisons": {
+        "second_review": {
+          "wall_ratio": 1.136841106654308,
+          "fit_peak_rss_ratio": 0.9999902955961415,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "support10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.25862909108400345
+      ],
+      "cpu_seconds": [
+        1.2949318279999997
+      ],
+      "fit_peak_rss_mib": [
+        422.4140625
+      ],
+      "median_wall_seconds": 0.25862909108400345,
+      "median_cpu_seconds": 1.2949318279999997,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "a6c595fecc054091da2554de359884dfa9e0ea24f2b0ca2e17064e9756fcebea"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SupportCompressedSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        72676.27465238619
+      ],
+      "edf": [
+        9.667256149670672
+      ],
+      "comparisons": {
+        "second_review": {
+          "wall_ratio": 0.9063714448654545,
+          "fit_peak_rss_ratio": 1.0001109816325398,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "support10",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        0.22792987106367946
+      ],
+      "cpu_seconds": [
+        0.22786345399999997
+      ],
+      "fit_peak_rss_mib": [
+        402.5234375
+      ],
+      "median_wall_seconds": 0.22792987106367946,
+      "median_cpu_seconds": 0.22786345399999997,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "a6c595fecc054091da2554de359884dfa9e0ea24f2b0ca2e17064e9756fcebea"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SupportCompressedSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        72676.27465238619
+      ],
+      "edf": [
+        9.667256149670868
+      ]
+    },
+    {
+      "case": "support10",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        0.2853455860167742
+      ],
+      "cpu_seconds": [
+        1.403059838
+      ],
+      "fit_peak_rss_mib": [
+        422.3671875
+      ],
+      "median_wall_seconds": 0.2853455860167742,
+      "median_cpu_seconds": 1.403059838,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "a6c595fecc054091da2554de359884dfa9e0ea24f2b0ca2e17064e9756fcebea"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "SupportCompressedSSPGroupMatrix"
+      ],
+      "outer_iterations": [
+        3
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        72676.27465238619
+      ],
+      "edf": [
+        9.667256149670672
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        18.783487893873826,
+        18.668654409004375,
+        17.802297193091363
+      ],
+      "cpu_seconds": [
+        18.763409418000002,
+        18.645195322999996,
+        17.780009405
+      ],
+      "fit_peak_rss_mib": [
+        949.203125,
+        948.73828125,
+        947.703125
+      ],
+      "median_wall_seconds": 18.668654409004375,
+      "median_cpu_seconds": 18.645195322999996,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267,
+        26532.43613424267,
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916,
+        36.65470175207916,
+        36.65470175207916
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.110279637944423,
+          "fit_peak_rss_ratio": 1.000745788970564,
+          "prediction_max_abs_difference": 8.854583732897936e-13,
+          "prediction_relative_l2_difference": 3.1534793817920503e-13,
+          "beta_max_abs_difference": 2.5446311724408588e-12,
+          "objective_difference": -1.4915713109076023e-10,
+          "edf_difference": 6.80557832311024e-11
+        },
+        "second_review": {
+          "wall_ratio": 0.9294545031145675,
+          "fit_peak_rss_ratio": 0.9993868968752314,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": true,
+      "wall_seconds": [
+        17.97211468499154
+      ],
+      "cpu_seconds": [
+        17.94931711
+      ],
+      "fit_peak_rss_mib": [
+        949.18359375
+      ],
+      "median_wall_seconds": 17.97211468499154,
+      "median_cpu_seconds": 17.94931711,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916
+      ],
+      "kernel_calls": [
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 713,
+          "name": "_tensor_channel_histogram",
+          "calls": 945,
+          "cumulative_seconds": 4.966081051000001
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 661,
+          "name": "_tensor_channel_workspace_bytes",
+          "calls": 945,
+          "cumulative_seconds": 0.022744907
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 791,
+          "name": "_cross_gram_tensor_tensor_channels",
+          "calls": 945,
+          "cumulative_seconds": 9.987894892
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_kernels.py",
+          "line": 40,
+          "name": "_ssp_gram_needs_exact",
+          "calls": 252,
+          "cumulative_seconds": 0.030203638
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_discretized.py",
+          "line": 440,
+          "name": "cell_csr",
+          "calls": 189,
+          "cumulative_seconds": 0.19377142500000002
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 79,
+          "name": "_cross_factors_in_range",
+          "calls": 2835,
+          "cumulative_seconds": 0.47094936600000004
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 158,
+          "name": "cell_csr",
+          "calls": 945,
+          "cumulative_seconds": 0.195343292
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 141,
+          "name": "weight_range",
+          "calls": 1890,
+          "cumulative_seconds": 0.009910703
+        }
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        17.2560382920783,
+        17.083061123033985,
+        15.479571896139532
+      ],
+      "cpu_seconds": [
+        78.091241185,
+        79.326461088,
+        71.3710542
+      ],
+      "fit_peak_rss_mib": [
+        957.671875,
+        956.83984375,
+        956.78125
+      ],
+      "median_wall_seconds": 17.083061123033985,
+      "median_cpu_seconds": 78.091241185,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424187,
+        26532.43613424187,
+        26532.43613424187
+      ],
+      "edf": [
+        36.65470175201703,
+        36.65470175201703,
+        36.65470175201703
+      ],
+      "comparisons": {
+        "pregram": {
+          "wall_ratio": 1.0310353805641663,
+          "fit_peak_rss_ratio": 1.0007967118272891,
+          "prediction_max_abs_difference": 7.448486272210175e-13,
+          "prediction_relative_l2_difference": 3.0036293643762996e-13,
+          "beta_max_abs_difference": 5.950944598209773e-12,
+          "objective_difference": -2.9831426218152046e-10,
+          "edf_difference": 1.0533085514907725e-10
+        },
+        "second_review": {
+          "wall_ratio": 0.9845456096155422,
+          "fit_peak_rss_ratio": 0.9998,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        16.814371597021818,
+        17.707317556021735,
+        16.337992602959275
+      ],
+      "cpu_seconds": [
+        16.790395396999998,
+        17.679370843999997,
+        16.313604884
+      ],
+      "fit_peak_rss_mib": [
+        947.81640625,
+        948.03125,
+        948.33203125
+      ],
+      "median_wall_seconds": 16.814371597021818,
+      "median_cpu_seconds": 16.790395396999998,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424282,
+        26532.43613424282,
+        26532.43613424282
+      ],
+      "edf": [
+        36.65470175201111,
+        36.65470175201111,
+        36.65470175201111
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "pregram",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        18.006755395792425,
+        16.568840841995552,
+        15.500782737974077
+      ],
+      "cpu_seconds": [
+        81.770549526,
+        75.215810654,
+        71.57863406
+      ],
+      "fit_peak_rss_mib": [
+        955.890625,
+        956.16796875,
+        956.078125
+      ],
+      "median_wall_seconds": 16.568840841995552,
+      "median_cpu_seconds": 75.215810654,
+      "source_sha256": [
+        "bd1aa4abf6373c9a4e1c38af655411fe3cbd9a93636fea2facfa2126145fcf0a"
+      ],
+      "git_heads": [
+        "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424217,
+        26532.43613424217,
+        26532.43613424217
+      ],
+      "edf": [
+        36.6547017519117,
+        36.6547017519117,
+        36.6547017519117
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": false,
+      "wall_seconds": [
+        21.69106796104461,
+        20.085603272076696,
+        17.154085605870932
+      ],
+      "cpu_seconds": [
+        21.650064518,
+        20.052800687999998,
+        17.137691624
+      ],
+      "fit_peak_rss_mib": [
+        979.78125,
+        948.4140625,
+        949.3203125
+      ],
+      "median_wall_seconds": 20.085603272076696,
+      "median_cpu_seconds": 20.052800687999998,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267,
+        26532.43613424267,
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916,
+        36.65470175207916,
+        36.65470175207916
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 1,
+      "numba_threads": 1,
+      "profiled": true,
+      "wall_seconds": [
+        18.672130648046732
+      ],
+      "cpu_seconds": [
+        18.650105054
+      ],
+      "fit_peak_rss_mib": [
+        949.80859375
+      ],
+      "median_wall_seconds": 18.672130648046732,
+      "median_cpu_seconds": 18.650105054,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424267
+      ],
+      "edf": [
+        36.65470175207916
+      ],
+      "kernel_calls": [
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 79,
+          "name": "_cross_factors_in_range",
+          "calls": 2835,
+          "cumulative_seconds": 0.612035065
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 616,
+          "name": "_tensor_channel_workspace_bytes",
+          "calls": 945,
+          "cumulative_seconds": 0.02164316
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_kernels.py",
+          "line": 40,
+          "name": "_ssp_gram_needs_exact",
+          "calls": 252,
+          "cumulative_seconds": 0.030724044000000002
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 738,
+          "name": "_cross_gram_tensor_tensor_channels",
+          "calls": 945,
+          "cumulative_seconds": 10.671508716
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_algebra.py",
+          "line": 663,
+          "name": "_tensor_channel_histogram",
+          "calls": 945,
+          "cumulative_seconds": 5.64725371
+        },
+        {
+          "file": "/home/max/projects/superglm/.worktrees/cheap-interactions-integration/.benchmark-artifacts/cheap-interactions-integration/pr406-control-9609/src/superglm/_group_matrix/_group_matrix_discretized.py",
+          "line": 440,
+          "name": "cell_csr",
+          "calls": 945,
+          "cumulative_seconds": 1.0551506860000002
+        }
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 100000,
+      "source": "second_review",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        19.740304567152634,
+        17.35121355089359,
+        16.724096323130652
+      ],
+      "cpu_seconds": [
+        88.82552426000001,
+        78.542418906,
+        76.255107197
+      ],
+      "fit_peak_rss_mib": [
+        956.671875,
+        957.31640625,
+        957.03125
+      ],
+      "median_wall_seconds": 17.35121355089359,
+      "median_cpu_seconds": 78.542418906,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "d7cb08ee0d49a96701eeb2d590549ae4c3cd2c0e7cd1055d27c31fe99eb00647"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        12
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        26532.43613424187,
+        26532.43613424187,
+        26532.43613424187
+      ],
+      "edf": [
+        36.65470175201703,
+        36.65470175201703,
+        36.65470175201703
+      ]
+    },
+    {
+      "case": "tensor10",
+      "rows": 300000,
+      "source": "candidate",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        22.118612348102033
+      ],
+      "cpu_seconds": [
+        95.90346147000001
+      ],
+      "fit_peak_rss_mib": [
+        1161.6796875
+      ],
+      "median_wall_seconds": 22.118612348102033,
+      "median_cpu_seconds": 95.90346147000001,
+      "source_sha256": [
+        "2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d"
+      ],
+      "git_heads": [
+        "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+      ],
+      "fixture_sha256": [
+        "ccf3ecc78062b51a9cefe4c6dcb93c588d9cad799c291ea6681394ec6ee6e5ab"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        11
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        79587.18132997058
+      ],
+      "edf": [
+        53.04236005443926
+      ],
+      "comparisons": {
+        "second_review": {
+          "wall_ratio": 0.908830794862233,
+          "fit_peak_rss_ratio": 1.0025350764231151,
+          "prediction_max_abs_difference": 0,
+          "prediction_relative_l2_difference": 0,
+          "beta_max_abs_difference": 0,
+          "objective_difference": 0,
+          "edf_difference": 0
+        }
+      },
+      "repeat_prediction_max_abs_difference": 0
+    },
+    {
+      "case": "tensor10",
+      "rows": 300000,
+      "source": "second_review",
+      "blas_threads": 4,
+      "numba_threads": 4,
+      "profiled": false,
+      "wall_seconds": [
+        24.337437147973105
+      ],
+      "cpu_seconds": [
+        104.649872558
+      ],
+      "fit_peak_rss_mib": [
+        1158.7421875
+      ],
+      "median_wall_seconds": 24.337437147973105,
+      "median_cpu_seconds": 104.649872558,
+      "source_sha256": [
+        "4238856cd27722bfd9823a8074d36388aaff8c3743247babd0ac19d643fd7746"
+      ],
+      "git_heads": [
+        "9609b0e76f86e514c00ebd8c0d75741fe7046414"
+      ],
+      "fixture_sha256": [
+        "ccf3ecc78062b51a9cefe4c6dcb93c588d9cad799c291ea6681394ec6ee6e5ab"
+      ],
+      "backend": [
+        "gram"
+      ],
+      "group_types": [
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedSSPGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix",
+        "DiscretizedTensorGroupMatrix"
+      ],
+      "outer_iterations": [
+        11
+      ],
+      "termination": [
+        "score_objective_tolerance"
+      ],
+      "objective": [
+        79587.18132997058
+      ],
+      "edf": [
+        53.04236005443926
+      ]
+    }
+  ],
+  "compared_commits": {
+    "pregram": "97ba3b00c41da5d6ef3856c20b232cb4cb138a9c",
+    "first_review": "4b94232044d8981d7ba9c6274bbd448539f7f9a6",
+    "second_review": "9609b0e76f86e514c00ebd8c0d75741fe7046414",
+    "candidate": "328373d4c0fbf3b424793d098a3e31a48bf036d4"
+  },
+  "method": "Fresh serial workers; rotated repetitions; five Poisson and three 100k tensor samples per source/setting; other unprofiled pairs single checks; profiling separate. Timings include construction and the complete fit after a 2000-row, two-iteration warmup. No concurrent numerical test jobs. One host, substantial sample overlap; medians are not confidence intervals."
+}
+
