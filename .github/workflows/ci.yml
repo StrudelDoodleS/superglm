@@ -30,9 +30,10 @@ jobs:
     # Keep the 3.14 names listed in the Protect master ruleset.
     name: Python ${{ matrix.runtime.python-version }} · non-browser regression suite · balanced ${{ matrix.label }}${{ matrix.runtime.suffix }}
     runs-on: ${{ matrix.runtime.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: true
-      max-parallel: 4
+      max-parallel: 16
       matrix:
         group: [1, 2, 3, 4]
         runtime:

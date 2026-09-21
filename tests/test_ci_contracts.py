@@ -145,6 +145,26 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert "continue-on-error: true" not in workflow
 
 
+def test_compatibility_shards_do_not_queue_platforms_behind_each_other() -> None:
+    workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    block = _jobs(workflow)["test-compatibility"]
+    strategy = yaml.safe_load(block)["test-compatibility"]["strategy"]
+    cases = _compatibility_cases(block)
+    assert strategy.get("max-parallel", len(cases)) >= len(cases)
+
+
+def test_compatibility_shards_bound_work_after_failure_or_a_hang() -> None:
+    workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    job = yaml.safe_load(workflow)["jobs"]["test-compatibility"]
+    assert 0 < job.get("timeout-minutes", 0) <= 15
+    assert job["strategy"].get("fail-fast", True) is True
+    pytest_commands = [
+        shlex.split(step["run"]) for step in job["steps"] if "pytest" in step.get("run", "")
+    ]
+    assert pytest_commands
+    assert all("-x" in command or "--exitfirst" in command for command in pytest_commands)
+
+
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
 def test_python_floor_aggregate_executes_the_matrix_verdict(result: str) -> None:
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

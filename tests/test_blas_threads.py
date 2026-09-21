@@ -35,6 +35,8 @@ def test_resolver_policy(monkeypatch):
 def test_context_caps_and_restores(monkeypatch):
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
     before = _blas_thread_counts()
+    if not before:
+        pytest.skip("threadpoolctl exposes no BLAS pools; thread counts cannot be verified")
     with solver_blas_threads():
         inside = _blas_thread_counts()
         assert inside and all(count == 1 for count in inside)
