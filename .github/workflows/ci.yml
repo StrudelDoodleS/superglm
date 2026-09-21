@@ -32,7 +32,7 @@ jobs:
     runs-on: ${{ matrix.runtime.os }}
     timeout-minutes: 15
     strategy:
-      fail-fast: true
+      fail-fast: false
       max-parallel: 16
       matrix:
         group: [1, 2, 3, 4]
@@ -83,19 +83,30 @@ jobs:
       - name: Run duration-balanced regression shard
         if: github.event_name != 'push' || matrix.runtime.python-version != '3.12'
         run: >-
-          uv run --with mpmath pytest tests/ -q -x -m "not browser and not docs"
+          uv run --with mpmath pytest tests/ -q --maxfail=0 -m "not browser and not docs"
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
+          --junitxml=pytest-results.xml
 
       - name: Run duration-balanced coverage shard
         if: github.event_name == 'push' && matrix.runtime.python-version == '3.12'
         env:
           COVERAGE_FILE: .coverage.${{ matrix.group }}
         run: >-
-          uv run --with mpmath pytest tests/ -q -x -m "not browser and not docs"
+          uv run --with mpmath pytest tests/ -q --maxfail=0 -m "not browser and not docs"
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
+          --junitxml=pytest-results.xml
           --cov=superglm --cov-branch --cov-report=
+
+      - name: Upload shard results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pytest-${{ runner.os }}-py${{ matrix.runtime.python-version }}-${{ matrix.group }}
+          path: pytest-results.xml
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload coverage database
         if: github.event_name == 'push' && matrix.runtime.python-version == '3.12'

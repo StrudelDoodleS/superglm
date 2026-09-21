@@ -153,16 +153,49 @@ def test_compatibility_shards_do_not_queue_platforms_behind_each_other() -> None
     assert strategy.get("max-parallel", len(cases)) >= len(cases)
 
 
-def test_compatibility_shards_bound_work_after_failure_or_a_hang() -> None:
+def test_compatibility_shards_collect_all_failures_with_a_hang_limit() -> None:
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     job = yaml.safe_load(workflow)["jobs"]["test-compatibility"]
     assert 0 < job.get("timeout-minutes", 0) <= 15
-    assert job["strategy"].get("fail-fast", True) is True
+    assert job["strategy"].get("fail-fast", True) is False
     pytest_commands = [
         shlex.split(step["run"]) for step in job["steps"] if "pytest" in step.get("run", "")
     ]
     assert pytest_commands
-    assert all("-x" in command or "--exitfirst" in command for command in pytest_commands)
+    assert all("-x" not in command and "--exitfirst" not in command for command in pytest_commands)
+    assert all("--maxfail=0" in command for command in pytest_commands)
+    assert all("--junitxml=pytest-results.xml" in command for command in pytest_commands)
+    report_step = next(step for step in job["steps"] if step.get("name") == "Upload shard results")
+    assert report_step["if"] == "${{ always() }}"
+    assert report_step["with"]["path"] == "pytest-results.xml"
+
+
+@pytest.mark.parametrize("step_index", [0, 1], ids=["regression", "coverage"])
+def test_shard_failure_options_report_both_failures(tmp_path: Path, step_index: int) -> None:
+    """Changing either command back to exit-first loses the second failure."""
+    workflow = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    commands = [
+        shlex.split(step["run"])
+        for step in workflow["jobs"]["test-compatibility"]["steps"]
+        if "pytest" in step.get("run", "")
+    ]
+    stop_options = [
+        arg
+        for arg in commands[step_index]
+        if arg in ("-x", "--exitfirst") or arg.startswith("--maxfail=")
+    ]
+    fixture = tmp_path / "test_failures.py"
+    fixture.write_text("def test_first(): assert False\ndef test_second(): assert False\n")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-o", "addopts=", *stop_options, str(fixture)],
+        cwd=tmp_path,
+        env=os.environ | {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "2 failed" in completed.stdout, completed.stdout + completed.stderr
 
 
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
