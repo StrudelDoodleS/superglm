@@ -7,15 +7,193 @@ measure, and has to say which tree it measured.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from benchmarks import rank_deficient_complete_fit as bench
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "benchmarks" / "rank_deficient_complete_fit.py"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "rank_deficient_complete_fit",
+        "multi_penalty_support",
+        "solver_repair_complete_fit",
+        "c3_c1_complete_fit",
+    ],
+)
+def test_imported_drivers_do_not_require_posix_modules(name):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib, os, sys; sys.modules['resource'] = None; "
+            "os.process_cpu_count = os.cpu_count; "
+            "[delattr(os, name) for name in ('getloadavg', 'sched_getaffinity') "
+            "if hasattr(os, name)]; importlib.import_module(sys.argv[1])",
+            f"benchmarks.{name}",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("platform", "raw", "unit"), [("linux", 3072, "kib"), ("darwin", 3145728, "bytes")]
+)
+def test_peak_rss_converts_posix_units(monkeypatch, platform, raw, unit):
+    monitor = import_module("benchmarks._platform")
+    monkeypatch.setattr(monitor, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setitem(
+        sys.modules,
+        "resource",
+        SimpleNamespace(RUSAGE_SELF=0, getrusage=lambda who: SimpleNamespace(ru_maxrss=raw)),
+    )
+    peak = monitor.peak_rss()
+    assert peak.bytes == 3145728
+    assert peak.source == "resource.ru_maxrss"
+    assert peak.ru_maxrss_unit == unit
+
+
+def test_windows_peak_rss_uses_high_water_mark_not_current_rss(monkeypatch):
+    monitor = import_module("benchmarks._platform")
+    monkeypatch.setattr(monitor, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setitem(sys.modules, "resource", None)
+    memory = SimpleNamespace(peak_wset=3145728, rss=1048576)
+    monkeypatch.setitem(
+        sys.modules,
+        "psutil",
+        SimpleNamespace(Process=lambda: SimpleNamespace(memory_info=lambda: memory)),
+    )
+    peak = monitor.peak_rss()
+    assert peak.bytes == 3145728
+    assert peak.source == "psutil.peak_wset"
+    assert peak.ru_maxrss_unit is None
+
+
+def test_missing_posix_load_and_affinity_are_unknown(monkeypatch):
+    monitor = import_module("benchmarks._platform")
+    monkeypatch.setattr(monitor, "os", SimpleNamespace(cpu_count=lambda: 6))
+    assert monitor.load_average() is None
+    assert monitor.cpu_affinity() is None
+    assert monitor.available_cpu_count() == 6
+
+
+def test_available_cpu_count_respects_affinity(monkeypatch):
+    monitor = import_module("benchmarks._platform")
+    monkeypatch.setattr(
+        monitor,
+        "os",
+        SimpleNamespace(sched_getaffinity=lambda pid: {1, 3}, cpu_count=lambda: 6),
+    )
+    assert monitor.available_cpu_count() == 2
+
+
+def test_c3_environment_snapshot_without_posix_load_or_affinity(monkeypatch):
+    driver = import_module("benchmarks.c3_c1_complete_fit")
+    monkeypatch.setattr(driver, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.delattr(driver.os, "getloadavg", raising=False)
+    monkeypatch.delattr(driver.os, "sched_getaffinity", raising=False)
+    snapshot = driver.environment_snapshot()
+    assert snapshot["load_average"] is None
+    assert snapshot["affinity"] is None
+    assert snapshot["process_activity"] is None
+
+
+@pytest.mark.parametrize("name", ["multi_penalty_support", "solver_repair_complete_fit"])
+@pytest.mark.parametrize("threads", ["0", "-1", "1.5"])
+def test_complete_fit_drivers_reject_invalid_threads(monkeypatch, tmp_path, capsys, name, threads):
+    driver = import_module(f"benchmarks.{name}")
+    case = "scalar" if name == "multi_penalty_support" else "qp"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            name,
+            "--case",
+            case,
+            "--label",
+            "test",
+            "--out",
+            str(tmp_path / "r.json"),
+            "--threads",
+            threads,
+        ],
+    )
+    with pytest.raises(SystemExit) as rejected:
+        driver.main()
+    assert rejected.value.code == 2
+    assert "--threads" in capsys.readouterr().err
+
+
+def test_timing_load_guard_refuses_missing_load_average(monkeypatch, tmp_path, capsys):
+    driver = import_module("benchmarks.multi_penalty_support")
+    monkeypatch.delattr(import_module("os"), "getloadavg", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            driver.__file__,
+            "--case",
+            "scalar",
+            "--label",
+            "test",
+            "--out",
+            str(tmp_path / "r.json"),
+            "--measure-time",
+        ],
+    )
+    with pytest.raises(SystemExit) as rejected:
+        driver.main()
+    assert rejected.value.code == 2
+    assert "load average is unavailable" in capsys.readouterr().err
+
+
+def test_unmeasured_fit_records_unknown_load_without_posix_apis(monkeypatch, tmp_path):
+    driver = import_module("benchmarks.multi_penalty_support")
+    monitor = import_module("benchmarks._platform")
+    monkeypatch.setattr(monitor, "os", SimpleNamespace(cpu_count=lambda: 6))
+    frame = bench.pd.DataFrame({"x": [0.0, 1.0]})
+    model = SimpleNamespace(fit=lambda *_args: None)
+    monkeypatch.setattr(
+        driver, "_fixture", lambda *_args, **_kwargs: (model, frame, bench.np.ones(2), {})
+    )
+    monkeypatch.setattr(driver, "_source_identity", lambda: {"source_digest": "test"})
+    monkeypatch.setattr(driver, "_fit_outputs", lambda *_args: {"coefficients": [1.0]})
+    path = tmp_path / "receipt.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            driver.__file__,
+            "--case",
+            "scalar",
+            "--mode",
+            "fixed",
+            "--label",
+            "test",
+            "--out",
+            str(path),
+        ],
+    )
+    driver.main()
+    receipt = json.loads(path.read_text())
+    assert receipt["load_before"] is None and receipt["load_after"] is None
+    assert receipt["available_cores"] == 6
+    assert receipt["fit_seconds"] is None
+    assert receipt["process_peak_rss_mib"] > 0
+    assert receipt["outputs"] == {"coefficients": [1.0]}
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
