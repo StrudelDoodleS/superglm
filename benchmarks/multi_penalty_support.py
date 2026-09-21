@@ -76,6 +76,8 @@ def _kernel_dispatch(sampler=None):
     support_shapes = Counter()
     compiled_results = Counter()
     compiled_signatures = []
+    batched_results = Counter()
+    batched_signatures = []
     patches = []
     targets = [
         (multi_penalty, "similarity_transform_logdet"),
@@ -85,6 +87,7 @@ def _kernel_dispatch(sampler=None):
         (multi_penalty, "_triangular_solve"),
         (multi_penalty, "_compensated_dot"),
         (multi_penalty, "_dot2_value"),
+        (multi_penalty, "_dot2_selected"),
         (multi_penalty, "_inverse_gram_enclosed"),
         (multi_penalty, "_positive_product"),
         (multi_penalty, "_positive_native_product"),
@@ -115,6 +118,12 @@ def _kernel_dispatch(sampler=None):
                 ranks[f"{name}:{result.rank}"] += 1
             if name == "_dot2_value":
                 compiled_results["native" if result[1] else "fallback_requested"] += 1
+            elif name == "_dot2_selected":
+                selected = len(args[2])
+                native = int(np.count_nonzero(result[1]))
+                batched_results.update(
+                    selected_entries=selected, native=native, fallback_requested=selected - native
+                )
             return result
 
         return wrapped
@@ -126,6 +135,10 @@ def _kernel_dispatch(sampler=None):
         replacement = wrapper(original, name)
         for module_name, module in tuple(sys.modules.items()):
             if not module_name.startswith("superglm.") or module is None:
+                continue
+            if module_name == "superglm.reml._compensated":
+                # Observe Python entry points, not globals compiled kernels
+                # call internally. Replacing those globals breaks cold JIT.
                 continue
             for attribute, value in tuple(vars(module).items()):
                 if value is original:
@@ -139,11 +152,18 @@ def _kernel_dispatch(sampler=None):
             "support_shapes": support_shapes,
             "compiled_dot2_results": compiled_results,
             "compiled_dot2_signatures": compiled_signatures,
+            "batched_dot2_results": batched_results,
+            "batched_dot2_signatures": batched_signatures,
         }
     finally:
         compiled = next((original for _, name, original in patches if name == "_dot2_value"), None)
         if compiled is not None:
             compiled_signatures.extend(map(str, compiled.nopython_signatures))
+        batched = next(
+            (original for _, name, original in patches if name == "_dot2_selected"), None
+        )
+        if batched is not None:
+            batched_signatures.extend(map(str, batched.nopython_signatures))
         for module, attribute, original in reversed(patches):
             setattr(module, attribute, original)
 

@@ -198,3 +198,138 @@ def test_actual_float64_native_dispatch_has_no_fastmath_or_owned_scratch():
     assert "NRT_MemInfo_alloc" not in llvm
     np.testing.assert_array_equal(x, [1.0, 2.0, 3.0])
     np.testing.assert_array_equal(y, [4.0, 5.0, 6.0])
+
+
+def test_reference_action_refinement_batches_scalar_validation_work(monkeypatch):
+    from superglm.reml import multi_penalty as module
+
+    root = np.tile([1e16, 1.0, -1e16], (8, 1))
+    inverse = np.tile([[1.0], [1.0], [1.0]], (1, 4))
+    original_dot, original_positive = module._compensated_dot, module._positive_product
+    dots, products = [], []
+
+    def dot(*args):
+        dots.append(1)
+        return original_dot(*args)
+
+    def positive(left, right):
+        products.append((left.shape, right.shape))
+        return original_positive(left, right)
+
+    monkeypatch.setattr(module, "_compensated_dot", dot)
+    monkeypatch.setattr(module, "_positive_product", positive)
+    module._reference_root_actions([root], np.array([4.0]), inverse)
+    # All 32 normal-range dots need refinement. Validating/bounding each
+    # separately recreates the measured million-call complete-fit bottleneck.
+    assert len(dots) == 0
+    assert len(products) <= 3
+
+
+def test_selected_dot2_dispatch_preserves_the_scalar_recurrence_and_status():
+    from numba.core.registry import CPUDispatcher
+
+    from superglm.reml._compensated import _dot2_selected
+
+    left = np.array([[1e16, 1.0, -1e16], [np.nextafter(0.0, 1.0), 1.0, 0.0]])
+    right = np.array([[1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
+    left.flags.writeable = right.flags.writeable = False
+    indices = np.array([[0, 1], [1, 0], [0, 0]])
+    values, success = _dot2_selected(left, right, indices)
+    assert isinstance(_dot2_selected, CPUDispatcher)
+    assert _dot2_selected.nopython_signatures
+    assert _dot2_selected.targetoptions.get("fastmath", False) is False
+    np.testing.assert_array_equal(success, [True, False, True])
+    np.testing.assert_array_equal(values, [-1.0, 0.0, 1.0])
+    for index in (0, 2):
+        row, column = indices[index]
+        assert Fraction.from_float(values[index]) == _exact_dot(left[row], right[:, column])
+
+
+def test_refined_actions_recompute_after_root_weight_and_inverse_changes():
+    from superglm.reml import multi_penalty as module
+
+    root = np.tile([1e16, 1.0, -1e16], (2, 1))
+    inverse, weights = np.ones((3, 1)), np.ones(1)
+    for changed, expected in (
+        (None, [1.0, 1.0]),
+        ("root", [3.0, 1.0]),
+        ("weight", [6.0, 2.0]),
+        ("inverse", [12.0, 4.0]),
+    ):
+        if changed == "root":
+            root[0, 1] = 3.0
+        elif changed == "weight":
+            weights[0] = 4.0
+        elif changed == "inverse":
+            inverse[1, 0] = 2.0
+        (action,), _ = module._reference_root_actions([root], weights, inverse)
+        np.testing.assert_array_equal(action[:, 0], expected)
+
+
+def test_batched_refinement_routes_only_unsupported_selected_entries_to_scalar(monkeypatch):
+    from superglm.reml import multi_penalty as module
+
+    root = np.ones((1, 2))
+    tiny = np.nextafter(0.0, 1.0)
+    inverse = np.array([[1.0, 1.0], [tiny, -1.0]])
+    original, fallback_inputs = module._compensated_dot, []
+
+    def dot(left, right):
+        fallback_inputs.append(tuple(right))
+        return original(left, right)
+
+    monkeypatch.setattr(module, "_compensated_dot", dot)
+    module._reference_root_actions([root], np.array([4.0]), inverse)
+    assert fallback_inputs == [(1.0, tiny)]
+
+
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("scale_exponent", [-250, -1, 1, 250])
+def test_refined_root_actions_enclose_exact_weighted_cancellation(strided, scale_exponent):
+    from superglm.reml import multi_penalty as module
+
+    root = np.tile([1e16, 1.0, -1e16], (3, 1))
+    inverse = np.array([[1.0, 1.0, 2.0], [1.0, -1.0, 3.0], [1.0, 1.0, 2.0]])
+    if strided:
+        root = np.repeat(np.repeat(root, 2, axis=0), 2, axis=1)[::2, ::2]
+        inverse = np.repeat(np.repeat(inverse, 2, axis=0), 2, axis=1)[::2, ::2]
+    root.flags.writeable = inverse.flags.writeable = False
+    before_root, before_inverse = root.copy(), inverse.copy()
+    weight = np.array([2.0 ** (2 * scale_exponent)])
+    (action,), (error,) = module._reference_root_actions([root], weight, inverse)
+    scale = Fraction.from_float(2.0**scale_exponent)
+    for row, column in np.ndindex(action.shape):
+        exact = scale * _exact_dot(root[row], inverse[:, column])
+        assert abs(Fraction.from_float(action[row, column]) - exact) <= Fraction.from_float(
+            error[row, column]
+        )
+    np.testing.assert_array_equal(root, before_root)
+    np.testing.assert_array_equal(inverse, before_inverse)
+
+
+@pytest.mark.parametrize("without_fma", [False, True])
+@pytest.mark.parametrize(
+    ("root", "inverse", "weight"),
+    [
+        ([[1e301, 1e301]], [[1e-301, 0.0], [-1e-301, 1e-301]], 4.0),
+        ([[1.0, 1.0]], [[1.0, 1.0], [np.nextafter(0.0, 1.0), -1.0]], 4.0),
+        ([[1e308, 1e308]], [[1.0, 1.0], [-1.0, 0.0]], 2.0**-20),
+    ],
+    ids=["split-overflow", "subnormal-input", "unweighted-magnitude-overflow"],
+)
+def test_refinement_retains_scalar_range_fallback(monkeypatch, without_fma, root, inverse, weight):
+    import math
+
+    from superglm.reml import multi_penalty as module
+
+    if without_fma:
+        monkeypatch.delattr(math, "fma", raising=False)
+    root, inverse = np.array(root), np.array(inverse)
+    # A small positive weight makes the third fixture's native action finite
+    # even though its unweighted absolute dot is not representable.
+    (action,), (error,) = module._reference_root_actions([root], np.array([weight]), inverse)
+    for row, column in np.ndindex(action.shape):
+        exact = Fraction.from_float(math.sqrt(weight)) * _exact_dot(root[row], inverse[:, column])
+        assert abs(Fraction.from_float(action[row, column]) - exact) <= Fraction.from_float(
+            error[row, column]
+        )

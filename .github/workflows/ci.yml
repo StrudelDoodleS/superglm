@@ -31,7 +31,7 @@ jobs:
     name: Python ${{ matrix.runtime.python-version }} · non-browser regression suite · balanced ${{ matrix.label }}${{ matrix.runtime.suffix }}
     runs-on: ${{ matrix.runtime.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       max-parallel: 4
       matrix:
         group: [1, 2, 3, 4]
@@ -82,7 +82,7 @@ jobs:
       - name: Run duration-balanced regression shard
         if: github.event_name != 'push' || matrix.runtime.python-version != '3.12'
         run: >-
-          uv run --with mpmath pytest tests/ -q -m "not browser and not docs"
+          uv run --with mpmath pytest tests/ -q -x -m "not browser and not docs"
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
 
@@ -91,7 +91,7 @@ jobs:
         env:
           COVERAGE_FILE: .coverage.${{ matrix.group }}
         run: >-
-          uv run --with mpmath pytest tests/ -q -m "not browser and not docs"
+          uv run --with mpmath pytest tests/ -q -x -m "not browser and not docs"
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
           --cov=superglm --cov-branch --cov-report=

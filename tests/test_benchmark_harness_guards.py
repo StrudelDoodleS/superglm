@@ -196,6 +196,25 @@ def test_unmeasured_fit_records_unknown_load_without_posix_apis(monkeypatch, tmp
     assert receipt["outputs"] == {"coefficients": [1.0]}
 
 
+def test_batched_compensation_dispatch_counts_entries_and_fallbacks():
+    driver = import_module("benchmarks.multi_penalty_support")
+    kernels = import_module("superglm.reml.multi_penalty")
+    original = kernels._dot2_selected
+    left = bench.np.array([[1.0, 2.0], [bench.np.nextafter(0.0, 1.0), 0.0]])
+    right = bench.np.ones((2, 1))
+    indices = bench.np.array([[0, 0], [1, 0]])
+    with driver._kernel_dispatch() as observed:
+        kernels._dot2_selected(left, right, indices)
+    assert kernels._dot2_selected is original
+    assert observed["calls"].get("_dot2_selected", 0) == 1
+    assert observed["batched_dot2_results"] == {
+        "selected_entries": 2,
+        "native": 1,
+        "fallback_requested": 1,
+    }
+    assert observed["batched_dot2_signatures"]
+
+
 def _run(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],

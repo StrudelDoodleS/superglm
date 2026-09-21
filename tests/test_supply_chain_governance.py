@@ -239,7 +239,7 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
 
     assert '      - ".test_durations"' in header
 
-    assert "fail-fast: false" in compatibility_job
+    assert "fail-fast: true" in compatibility_job
     assert "max-parallel: 4" in compatibility_job
     cases = _compatibility_cases(compatibility_job)
     assert len(cases) == 16
@@ -273,6 +273,7 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert "if: github.event_name == 'push' && matrix.runtime.python-version == '3.12'" in coverage
     for step in pytest_steps:
         assert "uv run --with mpmath pytest tests/" in step
+        assert "-x" in step.split()
         assert '-m "not browser and not docs"' in step
         assert "--splits 4" in step
         assert "--group ${{ matrix.group }}" in step

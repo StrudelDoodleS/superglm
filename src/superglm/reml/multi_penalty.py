@@ -16,7 +16,7 @@ import numpy as np
 import scipy.linalg
 from numpy.typing import NDArray
 
-from superglm.reml._compensated import _dot2_value
+from superglm.reml._compensated import _dot2_selected, _dot2_value
 from superglm.reml.penalty_support import (
     PenaltyNumericalError,
     _finite_double,
@@ -486,7 +486,43 @@ def _reference_root_actions(
         scaling_underflow = np.where((root != 0) & (weight != 0), _TINY_LD, _LD(0))
         error += _positive_product(scaling_underflow, np.abs(J))
         error += np.abs(product_value - action.astype(_LD)) + (2 * root.shape[1] + 4) * _TINY_LD
-        for row, column in np.argwhere(error > dot_budget) if _refine else ():
+        selected = np.argwhere(error > dot_budget) if _refine else np.empty((0, 2), dtype=int)
+        if len(selected):
+            try:
+                # The scalar Dot2 enclosure needs |root| @ |J|, not the
+                # rounded weighted H magnitude. Build it once per component.
+                # All reuse ends here: a changed root, weight or J recomputes.
+                dot_magnitude = _positive_product(np.abs(root), np.abs(J))
+                dots, success = _dot2_selected(np.asarray(root, dtype=_LD), J, selected)
+                row, column = selected.T
+                unit, inner = _LD(_EPS) / 2, root.shape[1]
+                dot_error = (
+                    unit * np.abs(dots)
+                    + _LD(_gamma(inner)) ** 2 * dot_magnitude[row, column]
+                    + 5 * inner * _TINY_LD
+                ) / (1 - unit)
+                dot_error = _upper(dot_error / (1 - _gamma(12, _U_LD)))
+                scale = np.sqrt(_LD(weight))
+                scale_error = _gamma(1, _U_LD) * abs(scale) + _TINY_LD
+                scaled = scale * dots
+                refined = _finite_double(scaled, "compensated root action")
+                refined_error = (
+                    abs(scale) * dot_error
+                    + scale_error * (np.abs(dots) + dot_error)
+                    + _gamma(1, _U_LD) * np.abs(scaled)
+                    + np.abs(scaled - refined)
+                    + 2 * _TINY_LD
+                )
+                refined_error = _upper(refined_error / (1 - _gamma(12, _U_LD)))
+                use = success & (refined_error < error[row, column])
+                action[row[use], column[use]] = refined[use]
+                error[row[use], column[use]] = refined_error[use]
+                selected = selected[~use]
+            except PenaltyNumericalError:
+                # A batch magnitude or scaled bound can exceed the range
+                # even when individual selected entries remain refinable.
+                pass
+        for row, column in selected:
             try:
                 dot, dot_error = _compensated_dot(root[row], J[:, column])
                 scale = np.sqrt(_LD(weight))

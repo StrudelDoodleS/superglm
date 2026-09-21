@@ -78,3 +78,17 @@ def _dot2_value(x, y):
             return 0.0, False
     value = product + correction
     return value, math.isfinite(value)
+
+
+@njit(cache=True, fastmath=False)
+def _dot2_selected(left, right, indices):
+    """Batch selected matrix entries through the unchanged scalar recurrence."""
+    values = np.zeros(len(indices), dtype=np.float64)
+    success = np.zeros(len(indices), dtype=np.bool_)
+    for index in range(len(indices)):
+        row, column = indices[index]
+        value, valid = _dot2_value(left[row], right[:, column])
+        if valid:
+            values[index] = value
+            success[index] = True
+    return values, success
