@@ -198,6 +198,11 @@ record = {
         len(group.B_unique) if hasattr(group, "B_unique") else None
         for group in model._dm.group_matrices
     ],
+    "raw_channel_snapshot_bytes": sum(
+        array.nbytes
+        for group in model._dm.group_matrices
+        for array in (getattr(group, "_raw_channel_state", None) or ())[1:]
+    ),
     "numba_threads": numba.get_num_threads(),
     "fit_profile": diagnostics.get("profile"),
     "threadpools": threadpool_info(),
