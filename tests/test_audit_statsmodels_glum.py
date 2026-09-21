@@ -249,15 +249,26 @@ def test_known_dispersion_frequency_rows_match_statsmodels_and_replication(
 
 
 @pytest.mark.parametrize(
-    ("family", "seed"),
+    ("family", "seed", "expected_weight_hash"),
     [
-        pytest.param("gaussian", 21901, id="gaussian"),
-        pytest.param("gamma", 21902, id="gamma"),
+        pytest.param(
+            "gaussian",
+            21901,
+            "b69e5c6d72203a528a27cf52ff14edb312ccaf555e94b9a67f0123cc85d9da3d",
+            id="gaussian",
+        ),
+        pytest.param(
+            "gamma",
+            21902,
+            "f35b6cead22a64489e3406b090051c9a07ac9c5d855f64f3d981017e5157302c",
+            id="gamma",
+        ),
     ],
 )
 def test_literal_frequency_weight_wald_coverage_is_calibrated(
     family: str,
     seed: int,
+    expected_weight_hash: str,
 ) -> None:
     """A bounded seeded ensemble checks phi recovery and 95% Wald coverage.
 
@@ -282,18 +293,29 @@ def test_literal_frequency_weight_wald_coverage_is_calibrated(
     frame = pd.DataFrame({"x": x})
     design = np.column_stack([np.ones(len(x)), x])
 
-    rng = np.random.default_rng(seed)
+    # PCG64 guarantees its seeded integer stream; multinomial's floating-point
+    # sampling gave different ensembles on Linux and macOS. Taking integers
+    # modulo eight is unbiased because eight divides the 64-bit output range.
+    rng = np.random.PCG64(seed)
     n_trials = 160
+    trial_weights = np.array(
+        [
+            np.bincount((rng.random_raw(640) % 8).astype(np.intp), minlength=8)
+            for _ in range(n_trials)
+        ],
+        dtype=np.float64,
+    )
+    weight_fingerprint = hashlib.sha256(
+        trial_weights.astype("<f8", copy=False).tobytes()
+    ).hexdigest()
+    assert weight_fingerprint == expected_weight_hash, "coverage fixture changed across platforms"
     covered = 0
     reference_covered = 0
-    weight_fingerprint = hashlib.sha256()
     cutoff = norm.ppf(0.975)
     phi_estimates = np.empty(n_trials, dtype=np.float64)
     standardized_errors = np.empty(n_trials, dtype=np.float64)
 
-    for trial in range(n_trials):
-        weights = rng.multinomial(640, np.full(len(x), 1.0 / len(x))).astype(np.float64)
-        weight_fingerprint.update(weights.astype("<f8", copy=False).tobytes())
+    for trial, weights in enumerate(trial_weights):
         model, metrics = _fit_model(family, frame, y, weights)
         estimate = float(model.result.beta[0])
         standard_error = float(metrics.coefficient_se["x"][0])
@@ -340,5 +362,5 @@ def test_literal_frequency_weight_wald_coverage_is_calibrated(
     assert 0.8 < float(np.std(standardized_errors)) < 1.2
     assert 0.90 <= coverage <= 0.99, (
         f"covered={covered}/{n_trials}, reference_covered={reference_covered}, "
-        f"weights_sha256={weight_fingerprint.hexdigest()}"
+        f"weights_sha256={weight_fingerprint}"
     )
