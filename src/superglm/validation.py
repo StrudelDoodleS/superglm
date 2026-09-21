@@ -189,65 +189,53 @@ def _sum_scaled_partials(partials: list[tuple[float, int]]) -> tuple[float, int]
     )
 
 
-def _scaled_product_sums(left: NDArray, right: NDArray, ends: NDArray):
-    """Weighted sums at selected prefix ends, retaining each product residual.
+def _two_product(left: float, right: float) -> tuple[float, float]:
+    """Error-free product of the bounded mantissas used by these reductions."""
+    product = left * right
+    splitter = float(2**27 + 1)
+    a, b = splitter * left, splitter * right
+    ah, bh = a - (a - left), b - (b - right)
+    al, bl = left - ah, right - bh
+    return product, al * bl - (((product - ah * bh) - al * bh) - ah * bl)
+
+
+def _scaled_product_sums(
+    left: NDArray, right: NDArray, ends: NDArray, *, exposure: NDArray | None = None
+):
+    """Rounded output snapshots of weighted sums, not reusable prefix operands.
 
     Dekker's TwoProduct is exact on frexp mantissas: their products, splitter
     products and nonzero residuals are all normal binary64 values. Feed both
-    scalar terms into the local prefix accumulator before cancellation; no
-    high/low operand arrays or widened array arithmetic are constructed.
+    scalar terms into the accumulator before cancellation. An optional raw
+    exposure contributes both product terms before the final loss product;
+    callers must not round left*exposure first. Snapshots do not alter state.
     """
     lm, le = np.frexp(left)
     rm, re = np.frexp(right)
+    em, ee = (None, None) if exposure is None else np.frexp(exposure)
     sums, powers = np.empty(len(ends)), np.empty(len(ends), dtype=np.int64)
     partials = []
     start = 0
-    splitter = float(2**27 + 1)
     for index, end in enumerate(ends):
         for row in range(start, end):
-            a, b = float(lm[row]), float(rm[row])
-            product = a * b
-            sa, sb = splitter * a, splitter * b
-            ah, bh = sa - (sa - a), sb - (sb - b)
-            al, bl = a - ah, b - bh
-            residual = al * bl - (((product - ah * bh) - al * bh) - ah * bl)
-            power = int(le[row]) + int(re[row])
-            _add_scaled_partial(partials, product, power)
-            _add_scaled_partial(partials, residual, power)
+            terms, power = (float(lm[row]),), int(le[row]) + int(re[row])
+            if em is not None:
+                terms = _two_product(terms[0], float(em[row]))
+                power += int(ee[row])
+            for term in terms:
+                part, shift = math.frexp(term)
+                for value in _two_product(part, float(rm[row])):
+                    _add_scaled_partial(partials, value, power + shift)
         sums[index], powers[index] = _sum_scaled_partials(partials)
         start = end
     return sums, powers
 
 
-def _scaled_product_total(left: NDArray, right: NDArray) -> tuple[float, int]:
-    sums, powers = _scaled_product_sums(left, right, np.array([len(left)]))
+def _scaled_product_total(
+    left: NDArray, right: NDArray, *, exposure: NDArray | None = None
+) -> tuple[float, int]:
+    sums, powers = _scaled_product_sums(left, right, np.array([len(left)]), exposure=exposure)
     return float(sums[0]), int(powers[0])
-
-
-def _scaled_prefix(mantissa: NDArray, exponent: NDArray) -> tuple[NDArray, NDArray]:
-    if not len(mantissa):
-        return np.empty(0), np.empty(0, dtype=np.int64)
-    nonzero = mantissa != 0
-    top = int(np.max(exponent[nonzero])) if np.any(nonzero) else 0
-    normalized = np.ldexp(mantissa, exponent - top)
-    if np.any(nonzero & (np.abs(normalized) < np.finfo(float).tiny)):
-        partials = []
-        sums, powers = np.empty(len(mantissa)), np.empty(len(mantissa), dtype=np.int64)
-        for i, (value, power) in enumerate(zip(mantissa, exponent, strict=True)):
-            _add_scaled_partial(partials, value, power)
-            sums[i], powers[i] = _sum_scaled_partials(partials)
-        return sums, powers
-    sums, powers = np.frexp(_compensated_cumsum(normalized))
-    return sums, powers + top
-
-
-def _scaled_blocks(mantissa: NDArray, exponent: NDArray, starts: NDArray):
-    ends = np.append(starts[1:], len(mantissa))
-    pairs = [
-        _scaled_sum(mantissa[start:end], exponent[start:end])
-        for start, end in zip(starts, ends, strict=True)
-    ]
-    return np.array([p[0] for p in pairs]), np.array([p[1] for p in pairs])
 
 
 def _validated_vector(name: str, value, n_rows: int | None = None) -> NDArray:
@@ -393,50 +381,28 @@ def _quantile_bins(sort_values: NDArray, weights: NDArray, n_bins: int) -> NDArr
     return result
 
 
-def _compensated_cumsum(values: NDArray) -> NDArray:
-    """Return Neumaier-compensated float64 cumulative sums."""
-    result = np.empty(len(values), dtype=np.float64)
-    total = 0.0
-    correction = 0.0
-    for index, value in enumerate(np.asarray(values, dtype=np.float64)):
-        updated = total + float(value)
-        if abs(total) >= abs(value):
-            correction += (total - updated) + float(value)
-        else:
-            correction += (float(value) - updated) + total
-        total = updated
-        result[index] = total + correction
-    return result
-
-
-def _float64_block_sums(values: NDArray, block_starts: NDArray) -> NDArray:
-    """Sum consecutive tie blocks with compensated scalar summation."""
-    array = np.asarray(values, dtype=np.float64)
-    ends = np.concatenate([block_starts[1:], [len(array)]])
-    return np.asarray(
-        [
-            math.fsum(array[int(start) : int(end)].tolist())
-            for start, end in zip(block_starts, ends, strict=True)
-        ],
-        dtype=np.float64,
-    )
-
-
 def _lorenz_cumulative_by_score(
     scores: NDArray,
-    exposures: NDArray,
+    weights: NDArray,
+    exposure: NDArray,
     losses: NDArray,
     *,
-    total_exp: float,
+    total_exp: tuple[float, int],
     total_loss: tuple[float, int],
 ) -> tuple[NDArray, NDArray]:
-    """Lorenz cumulative shares in separate exposure and loss exponent units."""
+    """Final Lorenz shares from raw weight/exposure/loss operands."""
     order = np.argsort(scores, kind="stable")
     _, starts = np.unique(scores[order], return_index=True)
-    exp_blocks = _float64_block_sums(exposures[order], starts)
-    cumulative_exposure = _compensated_cumsum(exp_blocks) / total_exp
+    ends = np.append(starts[1:], len(order))
+    cumulative_exposure = _scaled_product_sums(weights[order], exposure[order], ends)
     cumulative_loss = _scaled_product_sums(
-        exposures[order], losses[order], np.append(starts[1:], len(order))
+        weights[order], losses[order], ends, exposure=exposure[order]
+    )
+    exposure_shares = np.array(
+        [
+            _scaled_ratio(pair, total_exp, "Lorenz cumulative shares")
+            for pair in zip(*cumulative_exposure, strict=True)
+        ]
     )
     loss_shares = np.array(
         [
@@ -444,38 +410,66 @@ def _lorenz_cumulative_by_score(
             for pair in zip(*cumulative_loss, strict=True)
         ]
     )
-    if not np.all(np.isfinite(cumulative_exposure)):
-        raise ValueError("Lorenz cumulative shares must be finite")
-    return cumulative_exposure, loss_shares
+    return exposure_shares, loss_shares
 
 
-def _weighted_pair_concordance(scores, weights, centered_target) -> tuple[float, int]:
-    """Pair differences in original weight units, including extreme ratios."""
+def _weighted_pair_concordance(
+    scores, weights, centered_target, *, exposure=None
+) -> tuple[float, int]:
+    """Contract retained prefix/block parts; rounded prefix snapshots are unsafe.
+
+    For each strict-score block, add W_previous*T_block - T_previous*W_block.
+    Every block and prefix stays as scalar partials until after contraction,
+    including product residuals. Tied rows enter the prefix only after the
+    block's contribution, so no within-tie pair is counted.
+    """
     order = np.argsort(scores, kind="stable")
     _, starts = np.unique(np.asarray(scores)[order], return_index=True)
     wm, we = np.frexp(weights)
     tm, te = centered_target
-    weight_blocks = _scaled_blocks(wm[order], we[order], starts)
-    target_blocks = _scaled_blocks((wm * tm)[order], (we + te)[order], starts)
-    previous_weight = _scaled_prefix(weight_blocks[0][:-1], weight_blocks[1][:-1])
-    previous_target = _scaled_prefix(target_blocks[0][:-1], target_blocks[1][:-1])
-    prior_wm, prior_we = np.r_[0.0, previous_weight[0]], np.r_[0, previous_weight[1]]
-    prior_tm, prior_te = np.r_[0.0, previous_target[0]], np.r_[0, previous_target[1]]
-    return _scaled_sum(
-        np.r_[prior_wm * target_blocks[0], -prior_tm * weight_blocks[0]],
-        np.r_[prior_we + target_blocks[1], prior_te + weight_blocks[1]],
-    )
+    em, ee = (None, None) if exposure is None else np.frexp(exposure)
+    previous_weight, previous_target, pairs = [], [], []
+    for start, end in zip(starts, np.append(starts[1:], len(order)), strict=True):
+        block_weight, block_target = [], []
+        for row in order[start:end]:
+            terms, power = (float(wm[row]),), int(we[row])
+            if em is not None:
+                terms = _two_product(terms[0], float(em[row]))
+                power += int(ee[row])
+            for term in terms:
+                part, shift = math.frexp(term)
+                _add_scaled_partial(block_weight, part, power + shift)
+                for value in _two_product(part, float(tm[row])):
+                    _add_scaled_partial(block_target, value, power + shift + int(te[row]))
+        for prefix, block, sign in (
+            (previous_weight, block_target, 1),
+            (previous_target, block_weight, -1),
+        ):
+            for a, ap in prefix:
+                for b, bp in block:
+                    for value in _two_product(a, sign * b):
+                        _add_scaled_partial(pairs, value, ap + bp)
+        for prefix, block in ((previous_weight, block_weight), (previous_target, block_target)):
+            for part, power in block:
+                _add_scaled_partial(prefix, part, power)
+    return _sum_scaled_partials(pairs)
 
 
-def _gini_coefficients(y_obs, y_pred, sample_weight=None) -> tuple[float, float, float]:
+def _gini_coefficients(
+    y_obs, y_pred, sample_weight=None, *, exposure=None
+) -> tuple[float, float, float]:
     """Tie-collapsed pair concordance using portable scaled products."""
     y_obs = _ensure_array(y_obs)
     y_pred = _ensure_array(y_pred)
     weights = _default_weights(sample_weight, len(y_obs))
     if y_obs.size == 0 or not np.any(weights > 0):
         return 0.0, 0.0, 0.0
-    total_weight = _scaled_sum(*np.frexp(weights))
-    total_loss = _scaled_product_total(weights, y_obs)
+    total_weight = (
+        _scaled_sum(*np.frexp(weights))
+        if exposure is None
+        else _scaled_product_total(weights, exposure)
+    )
+    total_loss = _scaled_product_total(weights, y_obs, exposure=exposure)
     if total_loss[0] <= 0:
         return 0.0, 0.0, 0.0
     # Center before multiplying so almost-constant targets retain their
@@ -490,10 +484,10 @@ def _gini_coefficients(y_obs, y_pred, sample_weight=None) -> tuple[float, float,
         unit = np.maximum(ye, minimum_exponent)
         cm[overflow] = np.ldexp(ym, ye - unit) - np.ldexp(minimum, minimum_exponent - unit)
         ce[overflow] = unit
-    perfect = _weighted_pair_concordance(y_obs, weights, (cm, ce))
+    perfect = _weighted_pair_concordance(y_obs, weights, (cm, ce), exposure=exposure)
     if perfect[0] <= 0:
         return 0.0, 0.0, 0.0
-    model = _weighted_pair_concordance(y_pred, weights, (cm, ce))
+    model = _weighted_pair_concordance(y_pred, weights, (cm, ce), exposure=exposure)
     denominator = total_weight[0] * total_loss[0], total_weight[1] + total_loss[1]
     model_gini = _scaled_ratio(model, denominator, "Gini coefficients")
     perfect_gini = _scaled_ratio(perfect, denominator, "Gini coefficients")
@@ -855,12 +849,11 @@ def lorenz_curve(
     n = len(y_obs)
     exp = vectors.get("exposure", np.ones(n, dtype=float))
 
-    exposures = np.asarray(w, dtype=float) * np.asarray(exp, dtype=float)
     losses = y_obs
-    total_loss = _scaled_product_total(exposures, losses)
-    total_exp = math.fsum(exposures.tolist())
+    total_loss = _scaled_product_total(w, losses, exposure=exp)
+    total_exp = _scaled_product_total(w, exp)
 
-    if total_loss[0] <= 0 or total_exp <= 0:
+    if total_loss[0] <= 0 or total_exp[0] <= 0:
         # Degenerate: all zeros or no exposure
         curve_df = pd.DataFrame(
             {
@@ -910,7 +903,8 @@ def lorenz_curve(
     # fake ranking information.
     cum_exp_model, cum_loss_model = _lorenz_cumulative_by_score(
         y_pred,
-        exposures,
+        w,
+        exp,
         losses,
         total_exp=total_exp,
         total_loss=total_loss,
@@ -921,7 +915,8 @@ def lorenz_curve(
     loss_ratio = np.where(exp > 0, y_obs, 0.0)
     cum_exp_perfect, cum_loss_perfect = _lorenz_cumulative_by_score(
         loss_ratio,
-        exposures,
+        w,
+        exp,
         losses,
         total_exp=total_exp,
         total_loss=total_loss,
@@ -938,7 +933,8 @@ def lorenz_curve(
     gini_model, gini_perfect, gini_ratio = _gini_coefficients(
         y_obs,
         y_pred,
-        exposures,
+        w,
+        exposure=exp,
     )
 
     # Build curve DataFrame — use model ordering x-axis for all curves

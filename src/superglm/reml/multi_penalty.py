@@ -919,7 +919,7 @@ def _derivative_values(
             if fast is not None:
                 cross, arithmetic = fast
             else:
-                cross, product, product_bound = _cross_value(factors[i], factors[j])
+                product, product_bound = _matmul_enclosed(factors[i], factors[j].T)
                 product_bound = _upper(
                     (
                         product_bound.astype(_LD)

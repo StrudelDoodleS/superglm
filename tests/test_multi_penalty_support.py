@@ -1,5 +1,6 @@
 """Analytic finite-weight geometry and adversarial reference-root checks."""
 
+from dataclasses import replace
 from decimal import Decimal, localcontext
 from fractions import Fraction
 
@@ -356,14 +357,15 @@ def test_compensated_dot_refuses_unrepresentable_intermediate_magnitudes():
 def test_cancelling_gram_inner_product_uses_root_contraction(monkeypatch):
     from superglm.reml import multi_penalty as module
 
-    original = module._cross_value
+    original = module._matmul_enclosed
     calls = []
 
-    def tracked(*args):
-        calls.append(1)
-        return original(*args)
+    def tracked(left, right, **kwargs):
+        if left.shape == (1, 2) and right.shape == (2, 1):
+            calls.append(1)
+        return original(left, right, **kwargs)
 
-    monkeypatch.setattr(module, "_cross_value", tracked)
+    monkeypatch.setattr(module, "_matmul_enclosed", tracked)
     components = [np.diag([1.0, 0.0]), np.diag([0.0, 1.0]), np.diag([0.0, 1.0])]
     result = module.similarity_transform_logdet(components, np.ones(3))
     assert calls
@@ -373,6 +375,38 @@ def test_cancelling_gram_inner_product_uses_root_contraction(monkeypatch):
         np.ones(3),
         np.array([1.0, 0.5, 0.5]),
         np.array([[0.0, 0.0, 0.0], [0.0, 0.25, -0.25], [0.0, -0.25, 0.25]]),
+    )
+
+
+def test_derivative_root_fallback_reduces_each_squared_norm_once(monkeypatch):
+    from superglm.reml import multi_penalty as module
+
+    factors = (np.eye(2) / 2, np.eye(2) * np.sqrt(0.75))
+    original = module._compensated_dot
+    calls = []
+
+    def counted(left, right):
+        calls.append(left.size)
+        return original(left, right)
+
+    monkeypatch.setattr(module, "_gram_cross", lambda *_: None)
+    monkeypatch.setattr(module, "_compensated_dot", counted)
+    module._derivative_values(factors, tuple(np.zeros_like(factor) for factor in factors), 1e-15)
+    # Two gradient norms and one cross norm, without a discarded first cross reduction.
+    assert calls == [4, 4, 4]
+
+
+def test_uncached_hessian_retains_the_cross_value_consumer():
+    components = [np.eye(2), 2.0 * np.eye(2)]
+    weights = np.array([2.0, 3.0])
+    result = similarity_transform_logdet(components, weights)
+    uncached = replace(result, _hessian=None)
+    expected = 0.375 * np.array([[1.0, -1.0], [-1.0, 1.0]])
+    np.testing.assert_allclose(
+        logdet_s_hessian(uncached, components, weights),
+        expected,
+        rtol=64 * np.finfo(float).eps,
+        atol=0,
     )
 
 

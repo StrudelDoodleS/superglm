@@ -974,7 +974,7 @@ def test_lorenz_rejects_shares_or_gini_outside_float64_output_range():
 
 
 @pytest.mark.parametrize("mixed", [False, True])
-def test_scaled_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mixed):
+def test_weighted_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mixed):
     import superglm.validation as validation
 
     values = np.full(256 if mixed else 32, 1e-310)
@@ -989,21 +989,23 @@ def test_scaled_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mixe
         return original(mantissa, exponent)
 
     monkeypatch.setattr(validation, "_scaled_sum", counted)
-    validation._scaled_prefix(*np.frexp(values))
+    validation._scaled_product_sums(np.ones_like(values), values, np.arange(1, len(values) + 1))
     # These fixtures need at most a few nonoverlapping scalar partials.
     # Revisiting all 1+...+n source prefixes violates this linear-work bound.
     assert visits <= 4 * len(values)
 
 
-def test_scaled_prefix_retains_small_terms_after_full_range_cancellation():
+def test_weighted_prefix_retains_small_terms_after_full_range_cancellation():
     import math
     from fractions import Fraction
 
-    from superglm.validation import _scaled_prefix
+    from superglm.validation import _scaled_product_sums
 
     tiny = np.nextafter(0.0, 1.0)
     values = np.array([tiny, 1e300, tiny, -1e300, tiny, 1.0, -1.0])
-    mantissas, exponents = _scaled_prefix(*np.frexp(values))
+    mantissas, exponents = _scaled_product_sums(
+        np.ones_like(values), values, np.arange(1, len(values) + 1)
+    )
     exact = Fraction(0)
     for value, mantissa, exponent in zip(values, mantissas, exponents, strict=True):
         exact += Fraction.from_float(value)
@@ -1070,3 +1072,87 @@ def test_weighted_mean_keeps_exact_zero_before_hull_scaling():
     )
     assert result.bins.loc[0, "observed"] == 0.0
     assert result.bins.loc[0, "predicted"] == 0.0
+
+
+@pytest.mark.parametrize("split_tie", [False, True])
+def test_gini_retains_prefix_and_block_parts_through_pair_contractions(split_tie):
+    from fractions import Fraction
+
+    from superglm.validation import _normalized_gini
+
+    small = 2.0**-55
+    y = np.array([1.0, 1.0, 0.0, 1.0] if split_tie else [1.0, 0.0, 1.0])
+    scores = np.array([0.0, 0.0, 1.0, 2.0] if split_tie else [0.0, 1.0, 2.0])
+    weights = np.array([1.0, small, small, 1.0] if split_tie else [1.0, small, 1.0])
+    targets, exact_weights = (
+        list(map(Fraction.from_float, y)),
+        list(map(Fraction.from_float, weights)),
+    )
+
+    def pair_sum(ordering):
+        return sum(
+            exact_weights[i] * exact_weights[j] * (targets[j] - targets[i])
+            for i in range(len(y))
+            for j in range(len(y))
+            if ordering[i] < ordering[j]
+        )
+
+    model, perfect = pair_sum(scores), pair_sum(y)
+    expected = float(model / perfect)
+    result = lorenz_curve(y, scores, sample_weight=weights)
+    scored = _normalized_gini(y, scores, weights)
+    if not split_tie:
+        assert model == 0 and perfect == Fraction(1, 2**54)
+        assert result.gini_ratio == scored == 0.0
+    else:
+        assert model == -Fraction(1, 2**110)
+        allowance = 8 * len(y) * np.finfo(float).eps
+        assert result.gini_ratio == pytest.approx(expected, rel=allowance, abs=0)
+        assert scored == pytest.approx(expected, rel=allowance, abs=0)
+
+
+def test_lorenz_keeps_exposure_product_residuals_until_loss_reduction():
+    from fractions import Fraction
+
+    d = 2.0**-30
+    y, weights, exposure = np.array([-1.0, 1.0]), np.array([1 - d, 1.0]), np.array([1 + d, 1.0])
+    losses = [
+        Fraction.from_float(a) * Fraction.from_float(b) * Fraction.from_float(c)
+        for a, b, c in zip(y, weights, exposure, strict=True)
+    ]
+    total = sum(losses)
+    assert total == Fraction(1, 2**60)
+    result = lorenz_curve(y, y, sample_weight=weights, exposure=exposure)
+    expected = [0.0, float(losses[0] / total), 1.0]
+    np.testing.assert_array_equal(result.curve["cum_loss_share_model"], expected)
+    np.testing.assert_array_equal(result.curve["cum_loss_share_perfect"], expected)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_gini_pair_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mixed):
+    import superglm.validation as validation
+
+    size = 256
+    weights = np.full(size, 1e-310)
+    if mixed:
+        weights[1:] = 1.0
+    visits = 0
+    original_add = validation._add_scaled_partial
+    original_sum = validation._scaled_sum
+
+    def counted_add(partials, value, exponent):
+        nonlocal visits
+        visits += len(partials) + 1
+        return original_add(partials, value, exponent)
+
+    def counted_sum(mantissa, exponent):
+        nonlocal visits
+        visits += len(mantissa)
+        return original_sum(mantissa, exponent)
+
+    monkeypatch.setattr(validation, "_add_scaled_partial", counted_add)
+    monkeypatch.setattr(validation, "_scaled_sum", counted_sum)
+    validation._weighted_pair_concordance(np.arange(size), weights, np.frexp(np.arange(size) % 2))
+    # The two weight scales need only a bounded number of scalar parts.
+    # This counts reduction work, independently of the exact-pair oracle.
+    assert visits <= 64 * size
