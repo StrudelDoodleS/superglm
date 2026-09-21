@@ -657,3 +657,40 @@ comparisons, profile caller costs and hashes for all 24 receipts. Raw receipts
 and arrays remain in the ignored `pr406-third-review-fits/` directory. Candidate
 source-tree SHA-256 is
 `34e317514c44bd597bcd6df77c10fc41fd4d1b69326cefb97e1b2ede04dc5d0f`.
+
+### Fourth review response
+
+Claude found no correctness blocker in the M1 repair; Codex reported no major
+issue at `fbb644a1`. K1 is corrected by dropping the false `_BlockWeightCache`
+restriction from `_cross_factors_in_range` and explaining its optional method
+lookup locally. A direct typed call with the centered `_TensorGridCache` gave
+one invalid-argument diagnostic before this change and passes afterward.
+The module's AST is identical after removing only that annotation and docstring.
+No numerical operation, gate, ownership rule or cache lifetime changes.
+
+K3 adds three dense-oracle cases for channel-first cache use followed by a
+tensor/main, tensor/own-margin or discrete/discrete cross. They stay separate
+from the existing dispatch/scan-count test. The oracle uses signed weights,
+nonidentity projections and a dimension/epsilon/absolute-product bound. All
+three fail their numerical assertion when an in-memory mutation omits the
+cached support projection, and pass with the real implementation.
+
+K2 is recorded without adding cache machinery. An assembly with one support
+range request and no channel consumer also computes an unused legacy range
+scan. Two requests amortize those scans; a lone SSP/SCOP cross can pay one extra
+weight scan. This bounded tradeoff does not justify separate lazy entries on
+the current evidence. L1/L2 and F2/F3/F6 remain deferred.
+
+The four-thread reviewed samples use 75.89, 85.74 and 87.24 CPU seconds, against
+73.3 to 77.7 on the candidate. This within-campaign spread reinforces the
+warning against attributing the 13.7% median difference to the repair. The
+separate profile's 0.299-second reduction identifies removed work, not a
+certified upper bound on whole-fit speedup.
+
+Focused verification passes all 135 tests in the two affected files. Ruff and
+formatting pass, and type diagnostics remain 846 against the unchanged 903
+budget. The completed full-suite and 24-worker measurements above were not
+rerun for this annotation/docstring and test-only follow-up. The executable
+numerical code is unchanged; those measurements still refer to `9e67e2c6`, not
+to a new measured source hash. Hosted checks on the follow-up need their own
+result. The PR remains draft and performance acceptance remains open.

@@ -474,6 +474,29 @@ def test_channel_invariant_scans_run_once_per_assembly(monkeypatch, cached):
     }
 
 
+@pytest.mark.parametrize("cross", ["tensor_main", "tensor_own_margin", "discrete_discrete"])
+def test_mixed_cross_values_after_channel_primes_assembly_cache(cross):
+    grid, partner, rng = _tensor_pair(300, (4, 4, 2, 2, 3), (10, 10, 2, 2, 3))
+    weights = rng.normal(size=300)
+    own_margin = DiscretizedSSPGroupMatrix(grid.B1_unique_t, rng.normal(size=(2, 2)), grid.idx1)
+    main = DiscretizedSSPGroupMatrix(
+        rng.normal(size=(5, 2)), rng.normal(size=(2, 2)), rng.integers(5, size=300)
+    )
+    cache = algebra._BlockWeightCache()
+    algebra._cross_gram(grid, partner, weights, cache=cache)
+    left, right = {
+        "tensor_main": (grid, main),
+        "tensor_own_margin": (grid, own_margin),
+        "discrete_discrete": (main, own_margin),
+    }[cross]
+    x, y = left.toarray(), right.toarray()
+    expected = x.T @ (weights[:, None] * y)
+    scale = np.linalg.norm(abs(x).T @ (abs(weights[:, None]) * abs(y)), ord=np.inf)
+    bound = 32 * np.finfo(float).eps * max(*x.shape, *y.shape) * scale
+    actual = algebra._cross_gram(left, right, weights, cache=cache)
+    assert np.linalg.norm(actual - expected, ord=np.inf) <= bound
+
+
 @pytest.mark.parametrize("cached", [False, True])
 def test_cached_weight_range_preserves_inclusive_legacy_endpoints(cached):
     left, right, _rng = _tensor_pair(32, (4, 4, 2, 2, 3), (10, 10, 2, 2, 3))
