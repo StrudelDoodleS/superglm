@@ -10,8 +10,13 @@ import numpy as np
 import pytest
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
-from superglm.group_matrix import DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix
-from superglm.types import TensorRawChannels
+from superglm.dm_builder import rebuild_design_matrix_with_lambdas
+from superglm.group_matrix import (
+    DesignMatrix,
+    DiscretizedSSPGroupMatrix,
+    DiscretizedTensorGroupMatrix,
+)
+from superglm.types import GroupSlice, TensorRawChannels
 
 
 def _tensor(n1: int, n2: int, k1: int, k2: int, n: int, p: int):
@@ -547,6 +552,64 @@ def test_channel_invariants_observe_mutations_between_assemblies(cached, replace
         _assert_cross_matches(actual, expected, bound)
 
 
+@pytest.mark.parametrize("margin", ["B1_unique_t", "B2_unique_t"])
+@pytest.mark.parametrize("replace", [False, True])
+@pytest.mark.parametrize("transfer", ["direct", "subset", "pickle", "lambda"])
+def test_tensor_cross_observes_changed_marginals(margin, replace, transfer):
+    left, right, rng = _tensor_pair(64, (4, 4, 2, 2, 3), (10, 10, 2, 2, 4))
+    weights = rng.normal(size=64)
+    algebra._cross_gram(left, right, weights)
+    values = getattr(right, margin)
+    if replace:
+        setattr(right, margin, 2.0 * values)
+    else:
+        values *= 2.0
+    right.B_unique = np.einsum("ia,jb->ijab", right.B1_unique_t, right.B2_unique_t).reshape(
+        right.n_bins1 * right.n_bins2, -1
+    )
+    if transfer == "subset":
+        rows = np.arange(0, 64, 2)
+        left, right = left.row_subset(rows), right.row_subset(rows)
+        weights = weights[rows]
+    elif transfer == "pickle":
+        right = pickle.loads(pickle.dumps(right))
+    elif transfer == "lambda":
+        right.omega = np.eye(right.B_unique.shape[1])
+        dm = DesignMatrix([right], 64, right.shape[1])
+        groups = [GroupSlice("tensor", 0, right.shape[1])]
+        rebuilt = rebuild_design_matrix_with_lambdas(dm, groups, {"tensor": 2.0}, np.ones(64), 1.0)
+        right = rebuilt.group_matrices[0]
+    expected, bound = _dense_cross(left, right, weights)
+    actual = algebra._cross_gram(left, right, weights, cache=algebra._BlockWeightCache())
+    _assert_cross_matches(actual, expected, bound)
+
+
+@pytest.mark.parametrize("margin", ["B1_unique_t", "B2_unique_t"])
+@pytest.mark.parametrize("changed", [False, True])
+def test_raw_band_dispatch_checks_marginal_values(margin, changed):
+    left, right, rng = _tensor_pair(64, (4, 4, 2, 2, 3), (10, 10, 2, 2, 4))
+    setattr(right, margin, getattr(right, margin).copy() * (2 if changed else 1))
+    right.B_unique = np.einsum("ia,jb->ijab", right.B1_unique_t, right.B2_unique_t).reshape(
+        right.n_bins1 * right.n_bins2, -1
+    )
+    profile = {}
+    algebra._cross_gram(left, right, rng.normal(size=64), profile=profile)
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(not changed)
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+
+
+def test_raw_band_dispatch_declines_legacy_pickle_without_marginal_state():
+    left, right, rng = _tensor_pair(64, (4, 4, 2, 2, 3), (10, 10, 2, 2, 4))
+    dict_state, slot_state = right.__getstate__()
+    slot_state.pop("_raw_channel_state", None)
+    restored = DiscretizedTensorGroupMatrix.__new__(DiscretizedTensorGroupMatrix)
+    restored.__setstate__((dict_state, slot_state))
+    profile = {}
+    algebra._cross_gram(left, restored, rng.normal(size=64), profile=profile)
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == 0
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+
+
 class _TaggedTensor(DiscretizedTensorGroupMatrix):
     __slots__ = ("tag_slot", "__dict__")
 
@@ -888,6 +951,28 @@ def test_raw_channel_admission_counts_retained_and_simultaneous_workspace(
     assert profile["block_cross_tensor_tensor_channel_calls"] == 1
     assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == int(raw_fits)
     _assert_cross_matches(actual, expected, bound)
+
+
+def test_raw_channel_budget_includes_marginal_validation_before_histogram(monkeypatch):
+    budget, n = 64 << 10, 64
+    left, right, rng = _tensor_pair(n, (4, 4, 2, 2, 3), (65536, 1, 2, 2, 4))
+    weights = rng.uniform(0.5, 1.5, n)
+    algebra._cross_gram(left, right, weights)
+    band, right.raw_channels = right.raw_channels, None
+    algebra._cross_gram(left, right, weights)
+    right.raw_channels = band
+    retained = sum(array.nbytes for array in left.cell_csr())
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+    tracemalloc.start()
+    try:
+        profile = {}
+        algebra._cross_gram(left, right, weights, profile=profile)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak + retained <= budget + (4 << 10)
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == 0
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
 
 
 def test_raw_channel_budget_includes_new_cached_weights_during_stage_two(monkeypatch):

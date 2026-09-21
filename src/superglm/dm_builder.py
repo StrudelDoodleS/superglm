@@ -1252,7 +1252,7 @@ def rebuild_design_matrix_with_lambdas(
                 R_inv_new,
                 gm.bin_idx,
                 tensor_id=gm.tensor_id,
-                raw_channels=gm.raw_channels,
+                raw_channels=gm._current_raw_channels(),
             )
             new_gm.omega = gm.omega
             new_gm.projection = gm.projection
