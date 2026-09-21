@@ -6320,7 +6320,7 @@ def test_open_directory_detects_wsl_from_proc_version(monkeypatch):
     original_read_text = Path.read_text
 
     def fake_read_text(self, *args, **kwargs):
-        if str(self) == "/proc/version":
+        if self == native_dialogs.Path("/proc/version"):
             return "Linux version 6.6.87.2-microsoft-standard-WSL2"
         return original_read_text(self, *args, **kwargs)
 

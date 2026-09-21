@@ -608,9 +608,8 @@ class TestInvertXtWXPlusPenaltySOverrideParity:
 class TestEndToEndMultiPenaltyDirect:
     """End-to-end: optimize_direct_reml with pc.name != group_name.
 
-    Constructs two synthetic PenaltyComponents for one group (split the
-    single omega into two halves), then runs the direct REML Newton optimizer
-    through convergence.
+    Constructs two synthetic diagonal PenaltyComponents for one group, then
+    runs the direct REML Newton optimizer through convergence.
     """
 
     @pytest.mark.slow
@@ -644,23 +643,19 @@ class TestEndToEndMultiPenaltyDirect:
         assert len(reml_groups) == 1
         idx, g = reml_groups[0]
         gm = m._dm.group_matrices[idx]
-        omega_ssp_full = gm.R_inv.T @ gm.omega @ gm.R_inv
-
-        # Split omega into two synthetic halves via eigendecomposition
-        eigvals, eigvecs = np.linalg.eigh(omega_ssp_full)
-        mid = len(eigvals) // 2
-        omega1 = (eigvecs[:, :mid] * eigvals[:mid]) @ eigvecs[:, :mid].T
-        omega2 = (eigvecs[:, mid:] * eigvals[mid:]) @ eigvecs[:, mid:].T
-        # omega1 + omega2 ≈ omega_ssp_full
-        np.testing.assert_allclose(omega1 + omega2, omega_ssp_full, atol=1e-12)
+        # Component bookkeeping needs independent PSD penalties, not a split
+        # of an eigensolver's signed null-space residue. These diagonal
+        # components retain one common free coordinate and have exact ranks.
+        diagonal = np.arange(g.size, dtype=float)
+        mid = g.size // 2
+        omega1 = np.diag(np.where(np.arange(g.size) < mid, diagonal, 0.0))
+        omega2 = np.diag(np.where(np.arange(g.size) >= mid, diagonal, 0.0))
+        np.testing.assert_array_equal(omega1 + omega2, np.diag(diagonal))
 
         # Build two PenaltyComponents with different names
-        eps_thresh = np.finfo(float).eps ** (2 / 3)
-
         def _make_pc(name, omega_ssp):
-            ev = np.linalg.eigvalsh(omega_ssp)
-            thresh = eps_thresh * max(ev.max(), 1e-12)
-            pos = ev[ev > thresh]
+            ev = np.diag(omega_ssp)
+            pos = ev[ev > 0.0]
             return PenaltyComponent(
                 name=name,
                 group_name=g.name,

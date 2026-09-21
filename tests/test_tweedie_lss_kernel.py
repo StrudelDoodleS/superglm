@@ -1643,9 +1643,37 @@ def test_frozen_cutoff_ledger_covers_upper_power_and_frequency_regimes() -> None
     assert np.nextafter(frequency.cutoffs[1], math.inf) == frequency.cutoffs[2]
 
 
+# Independent 90-digit evaluation of j*zeta - loggamma(j+1) - loggamma(alpha*j)
+# at the exact binary64 fixture inputs. Each window starts at j=1. These
+# integer cutoffs bracket the adjacent-float fixtures with endpoint gaps of
+# at least 0.0304, instead of choosing a side of accumulated libm roundoff.
+_SEPARATED_CUTOFF_WINDOWS = {
+    "lower-positive-adjacent-cutoff": ((38.0, 4), (39.0, 5)),
+    "tiny-positive-adjacent-cutoff": ((38.0, 3), (39.0, 4)),
+    "mid-left-adjacent-cutoff": ((37.0, 28), (38.0, 29)),
+    "mid-right-adjacent-cutoff": ((37.0, 32), (38.0, 33)),
+    "three-quarter-frequency-adjacent-cutoff": ((36.0, 29), (37.0, 30)),
+}
+
+
+@pytest.mark.parametrize("case", FROZEN_CUSTOM_CUTOFF_CASES, ids=lambda case: case.id)
+def test_custom_cutoff_endpoints_match_independent_separated_windows(case) -> None:
+    arrays = tuple(np.array([value], dtype=np.float64) for value in case.row)
+    for cutoff, expected_terms in _SEPARATED_CUTOFF_WINDOWS[case.id]:
+        result = evaluate_tweedie_rows(
+            *arrays,
+            case.semantics,
+            derivative_order=2,
+            log_cutoff=cutoff,
+        )
+        assert result.terms.tolist() == [expected_terms]
+
+
 @pytest.mark.parametrize("case", FROZEN_CUSTOM_CUTOFF_CASES, ids=lambda case: case.id)
 def test_selected_custom_cutoff_endpoints_match_frozen_windows(case) -> None:
     arrays = tuple(np.array([value], dtype=np.float64) for value in case.row)
+    (_, minimum_terms), (_, maximum_terms) = _SEPARATED_CUTOFF_WINDOWS[case.id]
+    selected_terms = []
 
     for cutoff, expected_terms in zip(case.cutoffs, case.terms, strict=True):
         result = evaluate_tweedie_rows(
@@ -1655,7 +1683,12 @@ def test_selected_custom_cutoff_endpoints_match_frozen_windows(case) -> None:
             log_cutoff=cutoff,
         )
 
-        assert result.terms.tolist() == [expected_terms]
+        # Frozen counts record one platform's rounded threshold decisions.
+        # The exact count is asserted at separated cutoffs above; here retain
+        # the bounded monotone transition and all existing output envelopes.
+        terms = int(result.terms[0])
+        assert minimum_terms <= terms <= maximum_terms
+        selected_terms.append(terms)
         _assert_cutoff_channel_matches_frozen(
             result.log_likelihood,
             (case.log_likelihood,),
@@ -1679,6 +1712,7 @@ def test_selected_custom_cutoff_endpoints_match_frozen_windows(case) -> None:
         assert abs(result.hessian_packed[0, 5] - case.hessian[5]) <= (
             _p_p_characterization_envelope(case, terms=expected_terms)
         )
+    assert selected_terms == sorted(selected_terms)
 
 
 @pytest.mark.parametrize("case", FROZEN_CUTOFF_CAP_BOUNDARIES, ids=lambda case: case.id)

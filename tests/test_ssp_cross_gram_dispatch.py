@@ -215,7 +215,14 @@ def test_outside_range_preserves_the_finite_column_product(exponent, reverse, mo
     "decline",
     [
         "weights32",
-        "transform_wide",
+        "transform32",
+        pytest.param(
+            "transform_wide",
+            marks=pytest.mark.skipif(
+                np.dtype(np.longdouble) == np.dtype(np.float64),
+                reason="longdouble has the float64 dtype on this platform",
+            ),
+        ),
         "basis32",
         "weight_shape",
         "group_subclass",
@@ -229,6 +236,8 @@ def test_ineligible_pairs_decline_before_new_weighting(decline, monkeypatch):
     weights = np.ones(12)
     if decline == "weights32":
         weights = weights.astype(np.float32)
+    elif decline == "transform32":
+        right.R_inv = right.R_inv.astype(np.float32)
     elif decline == "transform_wide":
         right.R_inv = right.R_inv.astype(np.longdouble)
     elif decline == "basis32":

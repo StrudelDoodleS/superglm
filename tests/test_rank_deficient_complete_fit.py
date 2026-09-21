@@ -461,6 +461,8 @@ def test_dispatch_comes_from_a_live_process_not_build_metadata(payload: dict) ->
     print the same string on a machine dispatching elsewhere.  A live reading
     carries a filepath and a threading layer; build metadata carries neither.
     """
+    if not any(pool["user_api"] == "blas" for pool in bench.threadpool_info()):
+        pytest.skip("threadpoolctl exposes no live BLAS pool on this platform")
     pools = payload["backend_dispatch"]["blas"]["pools_during_fit"]
     assert any(pool["user_api"] == "blas" for pool in pools)
     for pool in pools:
