@@ -242,17 +242,23 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert "fail-fast: false" in compatibility_job
     assert "max-parallel: 4" in compatibility_job
     cases = _compatibility_cases(compatibility_job)
-    assert len(cases) == 12
+    assert len(cases) == 16
     assert set(cases) == {
-        (version, group, label)
-        for version in ("3.12", "3.13", "3.14")
+        (version, os, group, label, suffix)
+        for version, os, suffix in (
+            ("3.12", "ubuntu-latest", ""),
+            ("3.14", "ubuntu-latest", ""),
+            ("3.13", "windows-2025", " · Windows"),
+            ("3.13", "macos-15", " · macOS ARM64"),
+        )
         for group, label in enumerate("ABCD", start=1)
     }
     assert set(_check_run_names(workflow)["test-compatibility"]) == {
-        f"Python {version} · non-browser regression suite · balanced {label}"
-        for version, _group, label in cases
+        f"Python {version} · non-browser regression suite · balanced {label}{suffix}"
+        for version, _os, _group, label, suffix in cases
     }
-    assert "uv sync --locked --python ${{ matrix.python-version }}" in compatibility_job
+    assert "runs-on: ${{ matrix.runtime.os }}" in compatibility_job
+    assert "uv sync --locked --python ${{ matrix.runtime.python-version }}" in compatibility_job
     assert "--extra dev --extra bench --extra plotting" in compatibility_job
     assert "ruff check" not in compatibility_job
 
@@ -261,8 +267,10 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert len(pytest_steps) == compatibility_job.count("pytest tests/") == 2
     regression, coverage = pytest_steps
     # Complementary conditions make coverage replace the normal invocation.
-    assert "if: github.event_name != 'push' || matrix.python-version != '3.13'" in regression
-    assert "if: github.event_name == 'push' && matrix.python-version == '3.13'" in coverage
+    assert (
+        "if: github.event_name != 'push' || matrix.runtime.python-version != '3.12'" in regression
+    )
+    assert "if: github.event_name == 'push' && matrix.runtime.python-version == '3.12'" in coverage
     for step in pytest_steps:
         assert "uv run --with mpmath pytest tests/" in step
         assert '-m "not browser and not docs"' in step
@@ -275,8 +283,8 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert "--cov-report=" in coverage
     assert "COVERAGE_FILE: .coverage.${{ matrix.group }}" in coverage
     upload = next(step for step in run_steps if "actions/upload-artifact@" in step)
-    assert "if: github.event_name == 'push' && matrix.python-version == '3.13'" in upload
-    assert "name: coverage-py313-${{ matrix.group }}" in upload
+    assert "if: github.event_name == 'push' && matrix.runtime.python-version == '3.12'" in upload
+    assert "name: coverage-Linux-py312-${{ matrix.group }}" in upload
     assert "path: .coverage.${{ matrix.group }}" in upload
     assert "if-no-files-found: error" in upload
     assert "include-hidden-files: true" in upload
@@ -284,7 +292,8 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert "if: github.event_name == 'push'" in coverage_job
     assert "needs: test-compatibility" in coverage_job
     assert "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" in coverage_job
-    assert "pattern: coverage-py313-*" in coverage_job
+    assert "pattern: coverage-Linux-py312-*" in coverage_job
+    assert "uv sync --locked --python 3.12 --extra dev" in coverage_job
     assert "merge-multiple: true" in coverage_job
     assert "uv run coverage combine coverage-data" in coverage_job
     assert "uv run coverage xml -o coverage.xml" in coverage_job

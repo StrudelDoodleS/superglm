@@ -91,6 +91,19 @@ update rather than conforming the implementation to an outdated assumption.
 
 ## Numerical test policy
 
+- SuperGLM's production numerical code targets portable IEEE binary64
+  (`numpy.float64`) on Linux, Windows, and macOS. Do not depend on
+  `longdouble`, `float96`, `float128`, or platform-specific extra mantissa bits
+  or exponent range. This is a repository-local requirement, not a global
+  agent setting.
+- Derive algorithms and error bounds for the actual float64 operations. Use
+  stable scaling, factorizations, and narrowly justified compensated
+  reductions where necessary. Do not replace extended dtypes with a custom
+  arbitrary-precision framework or loosen numerical checks without analysis.
+- Higher-precision arithmetic belongs in independent test references, not in
+  production fitting. Add native Windows/macOS regression coverage for
+  numerical portability fixes; Linux simulation alone does not establish
+  native compatibility. Compare complete-fit cost before accepting a change.
 - Boundary tests assert mathematical or certified invariants such as rank,
   subspace, residual, reconstruction, prediction, or backward error—not the
   sign or magnitude of BLAS/LAPACK roundoff.
