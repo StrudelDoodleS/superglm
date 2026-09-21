@@ -694,3 +694,104 @@ rerun for this annotation/docstring and test-only follow-up. The executable
 numerical code is unchanged; those measurements still refer to `9e67e2c6`, not
 to a new measured source hash. Hosted checks on the follow-up need their own
 result. The PR remains draft and performance acceptance remains open.
+
+### Fifth review response
+
+The PR was subsequently marked ready at the user's request, which triggered
+the automatic Codex review of `2f715ede`. Its two P2 findings were reproduced
+independently. `693d5683` restores subclass dictionary state during tensor
+unpickling, following the neighboring class's existing pattern. Protocols 4
+and 5 both lost the custom attribute before the fix; dictionary and slot state
+now survive. `997f9c70` records the marginal tables associated with each raw
+band and validates them before consuming or propagating that band. Changed
+tables discard the stale band and use the existing dense stage; identical
+replacement tables retain acceleration. Subsets, lambda rebuilds and pickle
+round trips preserve this rule. Legacy state without a saved baseline cannot
+certify an old raw band against new copies of the tables.
+
+All 16 numerical mutation/transfer cases failed against the uncorrected source,
+with errors from 6.19 to 12.16 against bounds below 9e-11. Three dispatch cases
+also failed, while equal-value replacement controls passed. Numerical and
+dispatch assertions remain separate. A further regression caught the new
+comparison allocating 132,009 bytes under a 64 KiB operation budget. Admission
+now reserves that boolean array alongside retained buffers before validation.
+The saved marginal copies are model metadata, not temporary workspace. The
+repair adds 41 production lines and removes eight across three files, net 33.
+The whole PR changes 11 production files, +1,307/-272, net 1,035. No solver,
+public API, dependency, package version or precision-policy change is added.
+
+Fresh verification at `cf50ad64bde892247a258b809dc5710208e2c260` completed all
+six jobs successfully. Python 3.13 has 15,293 full-suite passes, 85 reported
+skips and no failures or errors. All 84 required freMTPL2 tests ran and passed.
+The affected selection passes all 608 tests on each of Python 3.12 and 3.14.
+The 159 focused tests, end-to-end script, Ruff, formatting, lock and dependency
+checks pass. Type diagnostics remain 846 against the unchanged 903 budget,
+not a clean type check. A fresh-context local review found no additional
+defect. Neither external reviewer was tagged again.
+
+All 14 new fit workers completed and converged. The candidate is compared
+with a frozen `2f715ede` control, using the same fixture, dependencies, driver
+and thread limits. Each timing includes construction and the complete fit
+after the same warmup. Three serial repetitions at BLAS/Numba 1/1 and 4/4
+precede one separate 1/1 profile per source. Numerical verification finished
+before timing began. The completion notification was checked against exit
+statuses, XML results, receipts and hashes; no completed run was repeated.
+
+| 100,000-row ten-pair tensor | Reviewed `2f715ede` | Candidate `cf50ad64` |
+| --- | ---: | ---: |
+| BLAS/Numba 1/1, median wall seconds | 18.0821 | 18.0268 |
+| BLAS/Numba 1/1, wall range seconds | 18.0716 to 18.6017 | 17.4106 to 18.8007 |
+| BLAS/Numba 4/4, median wall seconds | 17.2972 | 18.3450 |
+| BLAS/Numba 4/4, wall range seconds | 15.0335 to 18.0704 | 15.8258 to 19.1421 |
+| BLAS/Numba 1/1, median CPU seconds | 18.0552 | 18.0017 |
+| BLAS/Numba 4/4, median CPU seconds | 78.0567 | 82.4867 |
+| BLAS/Numba 1/1, median fit peak RSS MiB | 949.3242 | 949.5547 |
+| BLAS/Numba 4/4, median fit peak RSS MiB | 956.8711 | 957.4414 |
+
+The one-thread median is 0.3% lower and the four-thread median is 6.1% higher.
+All three paired four-thread candidate runs are slower, by 10.7%, 5.3% and
+1.5%. Overlapping ranges do not establish parity or excuse that observation.
+The four-thread pairs all run control before candidate despite rotation of
+the overall sequence, and recorded loads differ. CPU samples also vary, from
+69.45 to 81.77 seconds on the control and 72.46 to 86.07 on the candidate.
+The existing data do not isolate a source-attributable effect. Performance
+acceptance remains open; this report accepts no slowdown, claims no speedup
+and does not replace the earlier master/pre-Gram comparisons.
+
+All seven matched pairs, including the separate profiles, have identical
+saved predictions and coefficients, objective, EDF, deviance, smoothing
+parameters, termination reason and 12 outer iterations. This is a same-stack
+observation, not a cross-platform bit-identity promise. All fits select the
+Gram backend with verified BLAS and Numba thread counts. Both profiles record
+945 raw-stage counter calls from `_tensor_channel_histogram` and 189 model
+cell-order validations. The candidate validator runs 945 times and takes
+0.0572 cumulative seconds in the one-thread profile. This is not a four-thread
+measurement or a certified upper bound on whole-fit cost. Nested cumulative
+profile times must not be added together.
+
+Each candidate retains 368,640 bytes, 360 KiB, of marginal snapshots across
+the ten tensors. The control has none. RSS remains a process high-water
+measurement, not a live-memory bound; all samples are preserved, including
+the control's first one-thread reading of 983.55 MiB. The observed median RSS
+increase is 0.23 MiB at 1/1 and 0.57 MiB at 4/4.
+
+The [fifth-review measurements](2026-09-21-pr406-fifth-review-measurements.json)
+contain all samples, actual thread-library details, paired output comparisons,
+six verification results, raw-stage profile evidence, campaign order and
+hashes for the 14 receipts, 14 output files, two profiles and six XML reports.
+Raw artifacts remain in `pr406-fifth-review-fits/`. Candidate source SHA-256 is
+`bc8c9c7a8ea48f48637b18bd9deebf27326615573c01614a643686338ea17dda`;
+the reviewed control is
+`aba9152548564ac28d87772ceb520e769937d6f43f1a07def8835404066d09be`.
+
+Native Windows and macOS compatibility remain unverified. The reported
+Windows `longdouble` issue is a hypothesis requiring its reproducer, not a
+reason to relax certification. This repair adds no extended-precision
+arithmetic. Separate native Python 3.13 shard sets were discussed, but no CI
+change is included here. Independent corruption of raw-band payloads or
+inconsistent edits to duplicated design storage are not redesigned by this
+repair; such edits can still produce inconsistent arithmetic. The coherent
+marginal-plus-stored-basis mutation in the review is covered. There are no
+new minor review deferrals; K2, L1/L2 and F2/F3/F6 retain their earlier
+dispositions. The PR stays out of draft, without merge or release authority;
+hosted checks on the pushed evidence head need their own result.
