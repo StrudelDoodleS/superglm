@@ -1,5 +1,8 @@
 """Portable binary64 penalty geometry against independent exact models."""
 
+import math
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -140,3 +143,94 @@ def test_source_root_support_does_not_materialize_overflowing_frobenius_scale(wi
         penalty = Decimal.from_float(magnitude) ** 2 * Decimal.from_float(weight)
         exact_logdet = width * penalty.ln()
     assert abs(result.logdet_s_plus - float(exact_logdet)) <= result._certificate.logdet_error
+
+
+def test_direct_candidate_basis_volume_has_one_analytic_logdet_charge():
+    # E0 = C B.T has logdet(E0 E0.T) = 2 log|det C| + logdet(B.T B).
+    # Dropping/doubling that last charge, or retaining the rank-multiplied
+    # norm bound, violates this analytic near-identity volume enclosure.
+    rank, delta = 4, 2.0**-10
+    root = np.column_stack([np.eye(rank), np.zeros(rank)])
+    selected = support._penalty_support_from_roots(
+        [root], resolution_limited=[False], input_error_bounds=[np.zeros_like(root)]
+    )
+    selected = replace(selected, Q_plus=(1 + delta) * root.T)
+    candidate = multi._direct_candidate(selected, np.ones(1), np.finfo(float).eps ** (1 / 3))
+    assert candidate is not None
+    _, _, logdet, bound, _ = candidate
+    volume = 2 * rank * math.log1p(delta)
+    arithmetic = 64 * rank * np.finfo(float).eps
+    assert abs(logdet - volume) <= arithmetic
+    assert volume <= bound
+    # D=t I, t=2*delta+delta**2, and ||D||_F < 1/2. The trace-series
+    # remainder plus r*(t-log1p(t)) is at most 2*r*t**2; arithmetic is O(r*u).
+    t = 2 * delta + delta**2
+    assert bound <= volume + 2 * rank * t**2 + arithmetic
+
+
+def test_direct_candidate_basis_volume_retains_off_diagonal_error(monkeypatch):
+    # This exact stored basis has det(B.T B)=0.8**2. Supply a valid but
+    # uncertain Gram witness so off-diagonal error cannot be mistaken for zero.
+    root = np.column_stack([np.eye(2), np.zeros(2)])
+    selected = support._penalty_support_from_roots(
+        [root], resolution_limited=[False], input_error_bounds=[np.zeros_like(root)]
+    )
+    basis = np.array([[1.0, 0.6], [0.0, 0.8], [0.0, 0.0]])
+    selected = replace(selected, Q_plus=basis)
+    gram = np.array([[1.0, 0.3], [0.3, 1.0]])
+    error = np.array([[0.0, 0.3], [0.3, 4 * np.finfo(float).eps]])
+    monkeypatch.setattr(multi, "_basis_gram", lambda *_: (gram, error))
+    candidate = multi._direct_candidate(selected, np.ones(1), np.finfo(float).eps ** (1 / 3))
+    assert candidate is not None
+    assert abs(2 * math.log(0.8)) <= candidate[3]
+
+
+@pytest.mark.parametrize("uncertainty", [0.25, 1.0])
+def test_direct_candidate_basis_volume_refuses_uncertified_gram(monkeypatch, uncertainty):
+    # The observed product is nonsingular I. At uncertainty=1 its enclosure
+    # also permits a zero eigenvalue, so a finite candidate is not certified.
+    root = np.column_stack([np.eye(2), np.zeros(2)])
+    selected = support._penalty_support_from_roots(
+        [root], resolution_limited=[False], input_error_bounds=[np.zeros_like(root)]
+    )
+    gram, error = np.eye(2), np.diag([uncertainty, 0.0])
+    monkeypatch.setattr(multi, "_basis_gram", lambda *_: (gram, error))
+    candidate = multi._direct_candidate(selected, np.ones(1), np.finfo(float).eps ** (1 / 3))
+    assert (candidate is None) == (uncertainty == 1.0)
+
+
+def test_direct_candidate_basis_volume_reuses_gram_without_duplicate_norms(monkeypatch):
+    # Dispatch/work is separate from the analytic volume assertions above.
+    root = np.column_stack([np.eye(2), np.zeros(2)])
+    selected = support._penalty_support_from_roots(
+        [root], resolution_limited=[False], input_error_bounds=[np.zeros_like(root)]
+    )
+    original_gram, original_bound = multi._basis_gram, multi._logdet_defect_bound
+    original_norm, original_materialization = multi._norm_upper, multi._materialization_logdet_bound
+    pairs, consumed, norm_calls, before_materialization = [], [], [], []
+
+    def gram(*args):
+        pair = original_gram(*args)
+        pairs.append(pair)
+        return pair
+
+    def bound(product, error):
+        consumed.append((product, error))
+        return original_bound(product, error)
+
+    def norm(value):
+        norm_calls.append(1)
+        return original_norm(value)
+
+    def materialization(*args, **kwargs):
+        before_materialization.append(len(norm_calls))
+        return original_materialization(*args, **kwargs)
+
+    monkeypatch.setattr(multi, "_basis_gram", gram)
+    monkeypatch.setattr(multi, "_logdet_defect_bound", bound)
+    monkeypatch.setattr(multi, "_norm_upper", norm)
+    monkeypatch.setattr(multi, "_materialization_logdet_bound", materialization)
+    assert multi._direct_candidate(selected, np.ones(1), np.finfo(float).eps ** (1 / 3)) is not None
+    assert len(pairs) == len(consumed) == 1
+    assert all(a is b for a, b in zip(pairs[0], consumed[0], strict=True))
+    assert before_materialization == [2]

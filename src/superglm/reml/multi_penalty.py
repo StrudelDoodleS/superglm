@@ -697,7 +697,8 @@ def _direct_candidate(
     ]
     volume_scale = rank + math.fsum(map(abs, terms))
     gram, gram_error = _basis_gram(support, basis)
-    orthogonality = _norm_upper(gram.astype(_LD) - np.eye(rank)) + _norm_upper(gram_error)
+    # det((C B.T)(C B.T).T) = det(C)**2 det(B.T B): one basis-volume charge.
+    basis_log_error = _logdet_defect_bound(gram, gram_error)
     materialization = _materialization_logdet_bound(
         compact,
         basis.T,
@@ -706,13 +707,9 @@ def _direct_candidate(
         _gamma(1, _U_LD) * magnitude,
         _product_evidence=product_evidence[0],
     )
-    if orthogonality >= 1 or not np.isfinite(materialization):
+    if not np.isfinite(basis_log_error) or not np.isfinite(materialization):
         return None
-    log_error = (
-        _gamma(4 * len(terms) + 4) * volume_scale
-        - rank * math.log1p(-orthogonality)
-        + 2 * materialization
-    )
+    log_error = _gamma(4 * len(terms) + 4) * volume_scale + basis_log_error + 2 * materialization
     return E, J, math.fsum(terms), log_error, volume_scale
 
 
