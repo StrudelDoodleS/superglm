@@ -338,6 +338,9 @@ def _weighted_mean(values: NDArray, weights: NDArray, name: str) -> float:
     if total_weight <= 0 or not np.isfinite(total_weight):
         raise ValueError(f"{name} weights must have a finite positive total")
     numerator = _scaled_product_total(values, weights)
+    if numerator[0] == 0.0:
+        # Exact zero has no comparison exponent and is already in the hull.
+        return 0.0
     denominator, power = math.frexp(total_weight)
     mean, shift = math.frexp(numerator[0] / denominator)
     exponent = numerator[1] - power + shift

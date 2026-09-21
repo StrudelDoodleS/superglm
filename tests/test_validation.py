@@ -1056,3 +1056,17 @@ def test_weighted_mean_clips_in_scaled_units_at_adjacent_weight_boundary(sign):
     )
     assert result.bins.loc[0, "observed"] == maximum
     assert result.bins.loc[0, "predicted"] == maximum
+
+
+def test_weighted_mean_keeps_exact_zero_before_hull_scaling():
+    tiny = np.nextafter(0.0, 1.0)
+    # Equal positive weights and opposite targets have exactly zero mean,
+    # including when each physical weighted product is below float64 range.
+    result = lift_chart(
+        [-1e-100, 1e-100],
+        [-1e-100, 1e-100],
+        sample_weight=[tiny, tiny],
+        n_bins=1,
+    )
+    assert result.bins.loc[0, "observed"] == 0.0
+    assert result.bins.loc[0, "predicted"] == 0.0
