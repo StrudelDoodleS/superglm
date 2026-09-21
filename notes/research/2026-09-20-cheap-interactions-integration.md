@@ -447,3 +447,134 @@ libraries and hash manifest for all 74 receipts are recorded in
 `2026-09-21-pr406-review-measurements.json`. Raw receipts and arrays stay under
 the ignored `pr406-acceptance/` artifact directory. Earlier receipts and
 measurements remain unchanged.
+
+## Second review response
+
+Claude and Codex reviewed `9609b0e7`. The hosted Python 3.12, 3.13 and 3.14
+regression suites, real-data workflow, type budget and dependency audit all
+passed on that head. Codex found a remaining retained-buffer overlap before
+row fallback. Claude identified repeated scans and several smaller issues.
+The second repair is `328373d4c0fbf3b424793d098a3e31a48bf036d4`.
+
+- Channel scratch and permuted weights are now released before every channel
+  decline reaches fallback, including early aggregate, dtype and range gates.
+  The same overlap was reproduced on admitted same-id and shared-margin tensor
+  routes and repaired there too. Shared-margin declines preserve the channel
+  cache. This does not impose a universal workspace or RSS cap on older routes.
+- Weight-range decisions and validated grid orders are reused inside the
+  existing synchronous assembly cache. Entries retain their input/model owners;
+  they do not retain aliases to released channel scratch. Both original weight
+  predicates remain separate, preserving their inclusive power-of-two endpoints.
+  New assemblies and uncached calls still observe mutations and replacements.
+- An unaffordable raw stage no longer evicts buffers if eviction cannot admit
+  it. The following dense stage may fit with those buffers retained.
+- Claude's N2 claim that CSR `fill` was unbudgeted was not borne out by the code.
+  `retained_index` includes pointers and row order; `stage1` separately reserves
+  `8 * cells` for `fill`, and admission adds `max(stage1, stage2)` to the base.
+  Adding that term again would double-count it. No accounting change was made
+  for N2.
+- N4 was valid. Conditioning of the coefficient Hessian does not certify a
+  free-running outer optimizer's stopping error. The free additive fit now tests
+  convergence and generic dispatch. Historical numerical comparisons remain in
+  the three-iteration fixture, described as a conditioning-scaled regression
+  allowance, not an optimizer error certificate. No exact free-iteration count
+  or arbitrary tolerance padding was added. Two stale duration-cache names
+  were corrected.
+- N5's one-element loop was simplified.
+
+The production repair changes one existing algebra file, adding 78 lines and
+removing 14, net 64. Across the PR, source changes against master `99ca0edd` are
+1,269 additions and 272 deletions across 11 files, net 997. There is no new
+solver, public API, dependency, precision policy or threading default.
+
+Eight regression cases failed before their repairs. At a reduced 262,144-byte
+budget with 32,768 bytes of tracing allowance, the early-decline cases peaked
+at about 432,900 bytes; admitted shared-margin and same-id cases reached
+360,257 and 325,992 bytes. All pass after release. Separate dispatch checks
+verify that four cross blocks over two grids use one legacy weight scan, one
+exponent scan and two cell validations with the cache, versus four of each
+without it. This is a reuse count, not a complete-fit speed claim.
+
+Independent read-only review found no further correctness or maintainability
+issue in the final four-file repair. Parent verification passed 15,266 tests
+with 85 reported skips and no failures or errors across all four full-suite
+shards. All 84 required real-data tests ran and passed. Python 3.12 and 3.14
+each passed the affected 581-test selection. The separate 474-test numerical
+selection, nine high-thread checks and end-to-end script also passed. Ruff,
+formatting, lock and dependency checks passed. Type diagnostics remain 846,
+below the unchanged budget of 903. Source-tree SHA-256 is
+`2a767b68109d0a85f7b23db39fb84e9bfa9f3b9113de6ecc1bc73b3270cde58d`.
+
+### Second review complete-fit measurements
+
+All 78 fresh workers completed and converged: 74 unprofiled fits and four
+separate profiles. The candidate is the exact source at `328373d4`; source
+hashes match before and after every fit. The committed benchmark worker is
+unchanged. Each worker runs the same 2,000-row, two-iteration warmup before
+timing construction and the complete fit. No numerical test jobs ran alongside
+the campaign. Receipts verify actual backend and thread settings.
+
+The 100,000-row tensor fixture has three rotated serial repetitions per variant
+and setting; ordinary Poisson has five. Ordinary Poisson also includes the
+exact first PR head `4b942320`, not an old measurement of it. Medians below are
+seconds. The controls are pre-Gram `97ba3b00`, first PR `4b942320` and reviewed
+head `9609b0e7`.
+
+| Fixture | BLAS/Numba | Pre-Gram | First PR | Reviewed head | Candidate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Poisson, two k=30 terms | 1/1 | 0.9982 | 1.1322 | 1.1574 | 1.1030 |
+| Poisson, two k=30 terms | 4/4 | 1.1691 | 1.1813 | 1.2648 | 1.1108 |
+| Poisson, ten pairs | 1/1 | 16.8144 | — | 20.0856 | 18.6687 |
+| Poisson, ten pairs | 4/4 | 16.5688 | — | 17.3512 | 17.0831 |
+
+Tensor medians are 7.1% and 1.5% lower than the reviewed head at 1/1 and 4/4,
+but remain 11.0% and 3.1% above pre-Gram. Samples overlap substantially: at 1/1,
+the reviewed-head tensor runs span 17.15–21.69 seconds and candidate runs span
+17.80–18.78 seconds. These are small samples on one host, not guaranteed gains
+or performance acceptance. No fresh master control was run; the earlier
+3.43x/2.78x master comparisons remain historical and are not recomputed using
+these new candidate times.
+
+Ordinary Poisson remains 10.5% above pre-Gram at one thread by the medians. At
+four threads its median is 5.0% below, but overlapping variable samples do not
+establish parity or a general improvement. The exact-head controls do not
+establish the previously suggested doubling of the ordinary-Poisson regression
+as a source-caused change. The tensor cache does not run on this fixture, so
+the lower candidate times must not be credited to that optimization. Profiles
+retain 70 projected Gram checks and 35 sparse/SSP crosses on both heads.
+
+The 300,000-row, four-thread tensor pair takes 24.3374 seconds on the reviewed
+head and 22.1186 seconds on the candidate. The 2,000-row Gamma pair takes
+0.2152 and 0.2001 seconds. These and the Gaussian/support fixtures are single
+pairs, useful for dispatch, numerical and memory checks rather than precise
+speed estimates. Every measured fit selects the Gram backend.
+
+Candidate predictions, coefficients, objective and EDF are bit-identical to
+the reviewed head in all saved fixture/setting comparisons. Repeated candidate
+predictions are identical within each setting. Against pre-Gram, tensor
+prediction differences are below 8.9e-13 in maximum absolute value and 3.2e-13
+in relative L2 norm. All 100,000-row tensor fits take 12 outer iterations;
+ordinary Poisson takes six, and the larger tensor pair takes 11.
+
+Candidate tensor peak RSS is 948.7/956.8 MiB at 100,000 rows, versus
+949.3/957.0 MiB on the reviewed head and about 0.08% above pre-Gram. At 300,000
+rows it is 1,161.7 versus 1,158.7 MiB. These remain process high-water readings,
+not a whole-model memory guarantee. Candidate tensor CPU medians are 18.65 and
+78.09 seconds at 1/1 and 4/4: extra BLAS threads still consume much more CPU.
+
+The separate one-thread tensor profiles confirm the intended reuse. Model
+cell-order validation/build calls fall from 945 to 189, and their cumulative
+time falls from 1.055 to 0.194 seconds. The new cache method is still called
+945 times; its cumulative time includes those 189 model calls and must not be
+added to them. Raw-channel contractions remain 945 on both heads. The unit
+call-count regression separately proves weight-scan reuse; the profile does
+not expose those compiled scanners as direct entries. No arithmetic or backend
+change was needed for this reuse.
+
+The [second-review measurements](2026-09-21-pr406-rereview-measurements.json)
+record all individual timing samples, CPU and RSS, numerical comparisons,
+source identities, thread libraries, filtered profiles and hashes for all 78
+receipts. Raw receipts and arrays remain in the ignored `pr406-rereview-fits/`
+artifact directory. Earlier evidence is unchanged. The PR remains a draft:
+these results address the review findings but do not accept the remaining
+performance cost or replace hosted checks on the pushed head.
