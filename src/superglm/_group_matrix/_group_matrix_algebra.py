@@ -76,7 +76,7 @@ def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> 
         _profile_add(profile, key, perf_counter() - start)
 
 
-def _cross_factors_in_range(*operands: NDArray) -> bool:
+def _cross_factors_in_range(*operands: NDArray, cache: _BlockWeightCache | None = None) -> bool:
     """Bound every partial cross product and reduction, not just its result.
 
     Sum negative/positive exponent bounds separately to bound every partial
@@ -89,7 +89,11 @@ def _cross_factors_in_range(*operands: NDArray) -> bool:
         if operand.dtype != np.float64:
             return False
         values = operand if operand.ndim == 2 else operand[:, None]
-        lo, hi = _operand_exponent_bounds(values)
+        lo, hi = (
+            cache.weight_range(operand)[1]
+            if cache is not None and operand.ndim == 1
+            else _operand_exponent_bounds(values)
+        )
         lower += min(0, lo)
         upper += max(0, hi) + sum((max(1, size) - 1).bit_length() for size in operand.shape)
     return lower >= -1022 and upper <= 1022
@@ -120,6 +124,8 @@ class _BlockWeightCache:
         "_cell_weights",
         "_supports",
         "_sparse_grams",
+        "_weight_ranges",
+        "_cell_orders",
     )
 
     def __init__(self, profile: dict[str, Any] | None = None) -> None:
@@ -129,6 +135,42 @@ class _BlockWeightCache:
         self._cell_weights: dict[tuple[int, int], NDArray] = {}
         self._supports: dict[DiscretizedSSPGroupMatrix, NDArray] = {}
         self._sparse_grams: dict[SparseSSPGroupMatrix, tuple[NDArray, bool]] = {}
+        self._weight_ranges: dict[int, tuple[NDArray, bool, tuple[int, int]]] = {}
+        self._cell_orders: dict[DiscretizedTensorGroupMatrix, tuple[NDArray, NDArray]] = {}
+
+    def weight_range(self, W: NDArray) -> tuple[bool, tuple[int, int]]:
+        """Reuse both original range decisions for this assembly's row weights.
+
+        Retain the array, so an identity key cannot outlive its owner. The
+        legacy boolean is separate: exponent bounds round powers of two up.
+        """
+        entry = self._weight_ranges.get(id(W))
+        if entry is None:
+            values = W[:, None]
+            entry = (
+                W,
+                _tensor_operand_in_reassociation_range(values),
+                _operand_exponent_bounds(values),
+            )
+            self._weight_ranges[id(W)] = entry
+        return entry[1], entry[2]
+
+    def cell_csr(self, gm: DiscretizedTensorGroupMatrix) -> tuple[NDArray, NDArray]:
+        """Validate each grid once within an assembly with unchanged inputs.
+
+        Keys own the grids. A fresh assembly and every uncached call validate
+        live indices again; no cross-fit validation result is retained.
+        """
+        result = self._cell_orders.get(gm)
+        if result is None:
+            result = gm.cell_csr()
+            self._cell_orders[gm] = result
+        return result
+
+    def release_channel_buffers(self) -> None:
+        """Drop derived channel workspace before another route spends its budget."""
+        self._channel_scratch = np.empty(0)
+        self._cell_weights.clear()
 
     def sparse_gram(self, gm: SparseSSPGroupMatrix, weights: NDArray) -> tuple[NDArray, bool]:
         """Share a sparse diagonal's cancellation decision with its crosses.
@@ -297,10 +339,9 @@ def _agg_by_bin_width(gm: GroupMatrix) -> int:
     width -- 600 against 4 on the pairing that exposed this.  Budgeting against
     the returned width silently permits the allocation it is meant to stop.
     """
-    for attribute in ("_p_b",):
-        width = getattr(gm, attribute, None)
-        if width is not None:
-            return int(width)
+    width = getattr(gm, "_p_b", None)
+    if width is not None:
+        return int(width)
     matrix = getattr(gm, "M", None)
     if matrix is not None:
         return int(matrix.shape[1])
@@ -471,6 +512,7 @@ def _cross_gram_tensor_tensor(
     if cache is None:
         w_grid = _disc_disc_2d_hist(gm_i.idx1, gm_i.idx2, W, gm_i.n_bins1, gm_i.n_bins2)
     else:
+        cache.release_channel_buffers()
         w_grid = cache.tensor_w_grid(gm_i, W)
     G_raw = gm_i._factored_gram_raw(w_grid)
     return gm_i.R_inv.T @ G_raw @ gm_j.R_inv
@@ -540,6 +582,7 @@ def _cross_gram_tensor_tensor_shared_margin(
     gm_i: DiscretizedTensorGroupMatrix,
     gm_j: DiscretizedTensorGroupMatrix,
     W: NDArray,
+    cache: _BlockWeightCache | None = None,
 ) -> NDArray | None:
     """Cross-Gram for two tensor terms sharing one marginal index under the cell cap.
 
@@ -555,6 +598,8 @@ def _cross_gram_tensor_tensor_shared_margin(
     ]
     if len(matches) != 1:
         return None
+    if cache is not None:
+        cache.release_channel_buffers()
 
     margin_i, margin_j = matches[0]
     (
@@ -620,6 +665,7 @@ def _tensor_channel_workspace_bytes(
     cache: _BlockWeightCache | None,
     *,
     raw: bool,
+    retain_buffers: bool = True,
 ) -> int:
     """Bound active channel workspace, including retained reusable arrays.
 
@@ -634,8 +680,12 @@ def _tensor_channel_workspace_bytes(
         # Invalidated indexes are released before rebuilding. Reserve the
         # counting-sort fill even on warm calls to cover live-index mutation.
         retained_index = max(retained_index, 8 * (cells + 1) + index_bytes * n)
-    scratch = 0 if cache is None else cache._channel_scratch.nbytes
-    weights = 0 if cache is None else sum(a.nbytes for a in cache._cell_weights.values())
+    scratch = 0 if cache is None or not retain_buffers else cache._channel_scratch.nbytes
+    weights = (
+        0
+        if cache is None or not retain_buffers
+        else sum(a.nbytes for a in cache._cell_weights.values())
+    )
     histogram = 8 * cells * width
     base = retained_index + weights + (max(scratch, histogram) if raw else scratch + histogram)
     # Reserve a new W permutation even if an old cell order has cached one:
@@ -689,6 +739,7 @@ def _tensor_channel_histogram(
                 band.values2,
                 band.projection,
                 chan.R_inv,
+                cache=cache,
             ):
                 continue
             width = band.projection.shape[0]
@@ -698,9 +749,11 @@ def _tensor_channel_histogram(
             continue
         workspace = _tensor_channel_workspace_bytes(grid, chan, width, cache, raw=raw)
         if cache is not None and workspace > _MAX_CROSS_EXPANSION_BYTES:
-            cache._channel_scratch = np.empty(0)
-            cache._cell_weights.clear()
-            workspace = _tensor_channel_workspace_bytes(grid, chan, width, cache, raw=raw)
+            workspace = _tensor_channel_workspace_bytes(
+                grid, chan, width, cache, raw=raw, retain_buffers=False
+            )
+            if workspace <= _MAX_CROSS_EXPANSION_BYTES:
+                cache.release_channel_buffers()
         if workspace > _MAX_CROSS_EXPANSION_BYTES:
             continue
         if not raw:
@@ -709,7 +762,7 @@ def _tensor_channel_histogram(
             )
             return H, chan.R_inv
         assert band is not None
-        ptr, order = grid.cell_csr()
+        ptr, order = grid.cell_csr() if cache is None else cache.cell_csr(grid)
         H = (
             np.empty((n1 * n2, width))
             if cache is None
@@ -781,7 +834,14 @@ def _cross_gram_tensor_tensor_channels(
     margins = (grid.B1_unique_t, grid.B2_unique_t, chan.B1_unique_t, chan.B2_unique_t)
     if any(operand.dtype != np.float64 for operand in (*margins, chan.B_unique, W)):
         return None
-    if not all(_tensor_operand_in_reassociation_range(v) for v in (*margins, W[:, None])):
+    if not all(_tensor_operand_in_reassociation_range(v) for v in margins):
+        return None
+    weights_in_range = (
+        _tensor_operand_in_reassociation_range(W[:, None])
+        if cache is None
+        else cache.weight_range(W)[0]
+    )
+    if not weights_in_range:
         return None
 
     B1, B2 = grid.B1_unique_t, grid.B2_unique_t
@@ -1690,7 +1750,7 @@ def _cross_gram(
         gm_j, DiscretizedTensorGroupMatrix
     ):
         t0 = perf_counter() if profile is not None else 0.0
-        result = _cross_gram_tensor_tensor_shared_margin(gm_i, gm_j, W)
+        result = _cross_gram_tensor_tensor_shared_margin(gm_i, gm_j, W, cache)
         if result is not None:
             _profile_elapsed(profile, "block_cross_tensor_tensor_s", t0)
             return result
@@ -1705,6 +1765,10 @@ def _cross_gram(
             _profile_count(profile, "block_cross_tensor_tensor_channel_calls")
             return result
         _profile_count(profile, "block_cross_tensor_tensor_channel_declines")
+        if cache is not None:
+            # Every channel decline, including its early gates, reaches here.
+            # The following routes budget their own workspace independently.
+            cache.release_channel_buffers()
 
     if isinstance(gm_i, DiscretizedTensorGroupMatrix) and isinstance(gm_j, SplineCatTypes):
         t0 = perf_counter() if profile is not None else 0.0

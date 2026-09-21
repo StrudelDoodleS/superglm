@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import tracemalloc
+import weakref
 
 import numpy as np
 import pytest
@@ -430,6 +431,91 @@ def test_cell_weights_are_permuted_once_per_grid_tensor_in_a_build(monkeypatch):
     np.testing.assert_array_equal(permuted[0], weights[grid.cell_csr()[1]])
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_channel_invariant_scans_run_once_per_assembly(monkeypatch, cached):
+    grid, first, rng = _tensor_pair(300, (4, 4, 2, 2, 3), (10, 10, 2, 2, 3))
+    _grid, second, _rng = _tensor_pair(300, (4, 4, 2, 2, 3), (9, 11, 2, 2, 3), seed=5)
+    second.tensor_id = 3
+    weights = rng.normal(size=300)
+    calls = {"legacy": 0, "bounds": 0, "cells": 0}
+    for name, key in (
+        ("_tensor_operand_in_reassociation_range", "legacy"),
+        ("_operand_exponent_bounds", "bounds"),
+    ):
+        original = getattr(algebra, name)
+
+        def recorded(values, original=original, key=key):
+            calls[key] += int(np.shares_memory(values, weights))
+            return original(values)
+
+        monkeypatch.setattr(algebra, name, recorded)
+    original_cells = DiscretizedTensorGroupMatrix.cell_csr
+
+    def recorded_cells(group):
+        calls["cells"] += 1
+        return original_cells(group)
+
+    monkeypatch.setattr(DiscretizedTensorGroupMatrix, "cell_csr", recorded_cells)
+    cache = algebra._BlockWeightCache() if cached else None
+    for left, right in ((grid, first), (grid, second), (grid, first), (second, first)):
+        algebra._cross_gram(left, right, weights, cache=cache)
+    assert calls == {
+        "legacy": 1 if cached else 4,
+        "bounds": 1 if cached else 4,
+        "cells": 2 if cached else 4,
+    }
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_cached_weight_range_preserves_inclusive_legacy_endpoints(cached):
+    left, right, _rng = _tensor_pair(32, (4, 4, 2, 2, 3), (10, 10, 2, 2, 3))
+    cache = algebra._BlockWeightCache() if cached else None
+    for value, admitted in (
+        (2.0**-128, True),
+        (np.nextafter(2.0**-128, 0.0), False),
+        (2.0**128, True),
+        (np.nextafter(2.0**128, np.inf), False),
+    ):
+        result = algebra._cross_gram_tensor_tensor_channels(left, right, np.full(32, value), cache)
+        assert (result is not None) == admitted
+
+
+def test_channel_assembly_retains_identity_key_owners():
+    grid, partner, rng = _tensor_pair(300, (4, 4, 2, 2, 3), (10, 10, 2, 2, 3))
+    weights = rng.normal(size=300)
+    owner = weakref.ref(weights)
+    cache = algebra._BlockWeightCache()
+    algebra._cross_gram(grid, partner, weights, cache=cache)
+    del weights
+    assert owner() is not None  # A replacement must not alias a released identity key.
+    del cache
+    assert owner() is None
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("replace", [False, True])
+def test_channel_invariants_observe_mutations_between_assemblies(cached, replace):
+    grid, partner, rng = _tensor_pair(300, (4, 4, 2, 2, 3), (10, 10, 2, 2, 3))
+    weights = rng.normal(size=300)
+    for iteration in range(2):
+        if iteration:
+            for name, bins in (("idx1", grid.n_bins1), ("idx2", grid.n_bins2)):
+                changed = (getattr(grid, name) + 1) % bins
+                if replace:
+                    setattr(grid, name, changed)
+                else:
+                    getattr(grid, name)[:] = changed
+            grid.bin_idx = grid.idx1 * grid.n_bins2 + grid.idx2
+            if replace:
+                weights = weights * -0.75
+            else:
+                weights *= -0.75
+        expected, bound = _dense_cross(grid, partner, weights)
+        cache = algebra._BlockWeightCache() if cached else None
+        actual = algebra._cross_gram(grid, partner, weights, cache=cache)
+        _assert_cross_matches(actual, expected, bound)
+
+
 def test_tensor_group_pickles_without_its_cell_csr_and_loads_from_before_the_band():
     n = 400
     left, right, rng = _tensor_pair(n, (7, 5, 3, 4, 6), (6, 8, 3, 4, 5))
@@ -810,3 +896,75 @@ def test_channel_workspace_growth_and_dense_fallback_release_unused_buffers(monk
     finally:
         tracemalloc.stop()
     assert peak + retained <= budget + (32 << 10)
+
+
+@pytest.mark.parametrize("route", ["aggregate", "dtype", "range", "shared_margin", "same_id"])
+def test_channel_buffers_are_released_before_other_tensor_routes(monkeypatch, route):
+    n, budget = 4096, 256 << 10
+    first = _tensor_pair(n, (20, 20, 3, 3, 3), (20, 21, 3, 3, 3))
+    if route == "shared_margin":
+        left, right, rng = _tensor_pair(
+            n, (20, 30, 3, 3, 3), (20, 30, 3, 3, 3), shared=True, seed=5
+        )
+    elif route == "same_id":
+        left, right, rng = _tensor_pair(
+            n, (140, 140, 2, 2, 3), (140, 140, 2, 2, 3), same_id=True, seed=5
+        )
+    else:
+        left, right, rng = _tensor_pair(n, (20, 20, 3, 3, 3), (20, 21, 3, 3, 3), seed=5)
+    weights = rng.uniform(0.5, 1.5, n)
+    later_weights = np.ldexp(weights, 140) if route == "range" else weights
+    if route == "dtype":
+        left.B1_unique_t = left.B1_unique_t.astype(np.float32)
+        left.B_unique = np.array(
+            [np.kron(a, b) for a in left.B1_unique_t for b in left.B2_unique_t]
+        )
+    expected, bound = _dense_cross(left, right, later_weights)
+    algebra._cross_gram(*first[:2], weights)
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", budget)
+    if route in ("aggregate", "dtype", "range"):
+        monkeypatch.setattr(algebra, "_MAX_DISC_DISC_HIST_CELLS", 1)
+    with monkeypatch.context() as warm:
+        if route == "aggregate":
+            warm.setattr(algebra, "_MAX_AGGREGATE_CELLS", 1)
+        algebra._cross_gram(left, right, later_weights)
+    tracemalloc.start()
+    try:
+        cache = algebra._BlockWeightCache()
+        algebra._cross_gram(*first[:2], weights, cache=cache)
+        assert cache._channel_scratch.size and cache._cell_weights
+        if route == "aggregate":
+            monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", 1)
+        profile = {}
+        actual = algebra._cross_gram(left, right, later_weights, cache=cache, profile=profile)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak <= budget + (32 << 10)
+    if route in ("aggregate", "dtype", "range"):
+        assert profile["block_cross_tensor_tensor_channel_declines"] == 1
+        assert profile["block_cross_disc_disc_rows_calls"] == 1
+    else:
+        assert "block_cross_tensor_tensor_s" in profile
+    assert cache._channel_scratch.size == 0 and not cache._cell_weights
+    _assert_cross_matches(actual, expected, bound)
+
+
+def test_unaffordable_raw_stage_keeps_buffers_when_dense_stage_fits(monkeypatch):
+    n = 512
+    small = _tensor_pair(n, (5, 5, 3, 3, 3), (5, 5, 3, 3, 3))
+    large = _tensor_pair(n, (17, 17, 3, 3, 3), (17, 17, 3, 3, 3), seed=5)
+    weights = small[2].uniform(0.5, 1.5, n)
+    cache = algebra._BlockWeightCache()
+    monkeypatch.setattr(algebra, "_MAX_CROSS_EXPANSION_BYTES", 64 << 10)
+    algebra._cross_gram(*small[:2], weights, cache=cache)
+    scratch, permutations = cache._channel_scratch, dict(cache._cell_weights)
+    expected, bound = _dense_cross(*large[:2], weights)
+    profile = {}
+    actual = algebra._cross_gram(*large[:2], weights, cache=cache, profile=profile)
+    _assert_cross_matches(actual, expected, bound)
+    assert profile["block_cross_tensor_tensor_channel_calls"] == 1
+    assert profile.get("block_cross_tensor_tensor_channel_raw", 0) == 0
+    assert cache._channel_scratch is scratch
+    assert cache._cell_weights.keys() == permutations.keys()
+    assert all(cache._cell_weights[key] is value for key, value in permutations.items())
