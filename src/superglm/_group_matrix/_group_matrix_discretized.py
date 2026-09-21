@@ -379,8 +379,8 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
     ``raw_channels`` is the raw B-spline band of the two margins (see
     ``TensorRawChannels``) when the build found one narrower than the centred
     joint row, else ``None``; the tensor x tensor cross-Gram accumulates in
-    it.  Weight- and row-independent, so subsets and lambda rebuilds carry
-    it through unchanged.
+    it. Subsets and lambda rebuilds carry it through only while the marginal
+    tables still match the construction-time copies.
     """
 
     __slots__ = (
@@ -392,6 +392,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         "n_bins2",
         "tensor_id",
         "raw_channels",
+        "_raw_channel_state",
         "_own_margin_cache",
         "_cell_csr",
     )
@@ -417,6 +418,11 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         self.n_bins2 = self.B2_unique_t.shape[0]
         self.tensor_id = tensor_id
         self.raw_channels = raw_channels
+        self._raw_channel_state = (
+            None
+            if raw_channels is None
+            else (raw_channels, self.B1_unique_t.copy(), self.B2_unique_t.copy())
+        )
         self._own_margin_cache: dict[tuple[int, int, int], int | None] = {}
         self._cell_csr: tuple[NDArray, NDArray] | None = None
 
@@ -429,15 +435,31 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
         return dict_state, slot_state
 
     def __setstate__(self, state):
-        # A design pickled before the raw band and the cell cache carries
-        # neither slot: without a band the cross-Gram takes its dense stage.
+        # Missing legacy acceleration metadata uses the dense stage. Never
+        # certify a saved raw band against newly snapshotted marginal tables.
         dict_state, slot_state = state
         if dict_state is not None:
             self.__dict__.update(dict_state)
         self.raw_channels = None
+        self._raw_channel_state = None
         self._cell_csr = None
         for name, value in slot_state.items():
             setattr(self, name, value)
+
+    def _current_raw_channels(self) -> TensorRawChannels | None:
+        """Drop a band whose construction-time marginal tables have changed."""
+        band, state = self.raw_channels, self._raw_channel_state
+        if band is not None and (
+            state is None
+            or band is not state[0]
+            or any(
+                current.dtype != saved.dtype or not np.array_equal(current, saved)
+                for current, saved in zip((self.B1_unique_t, self.B2_unique_t), state[1:])
+            )
+        ):
+            self.raw_channels = None
+            self._raw_channel_state = None
+        return self.raw_channels
 
     def cell_csr(self) -> tuple[NDArray, NDArray]:
         """The rows sorted by grid cell, ``(ptr, order)`` as ``_cell_csr`` returns them.
@@ -569,7 +591,7 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
             self.R_inv,
             self.bin_idx[idx],
             tensor_id=self.tensor_id,
-            raw_channels=self.raw_channels,
+            raw_channels=self._current_raw_channels(),
         )
         sub.omega = self.omega
         sub.projection = self.projection

@@ -712,7 +712,14 @@ def _tensor_channel_workspace_bytes(
         + p_grid * p_chan  # the two final products
         + (width * p_chan if raw else 0)  # projected channel map
     )
-    return base + max(stage1, stage2)
+    # Marginal snapshots are model storage. Their array_equal comparison uses
+    # one byte per entry before allocating H, alongside any retained buffers.
+    validation = (
+        retained_index + weights + scratch + max(chan.B1_unique_t.size, chan.B2_unique_t.size)
+        if raw
+        else 0
+    )
+    return max(validation, base + max(stage1, stage2))
 
 
 def _tensor_channel_histogram(
@@ -760,6 +767,8 @@ def _tensor_channel_histogram(
             if workspace <= _MAX_CROSS_EXPANSION_BYTES:
                 cache.release_channel_buffers()
         if workspace > _MAX_CROSS_EXPANSION_BYTES:
+            continue
+        if raw and chan._current_raw_channels() is None:
             continue
         if not raw:
             H = _disc_disc_2d_hist_channels(
