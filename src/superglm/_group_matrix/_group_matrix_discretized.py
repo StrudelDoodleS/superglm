@@ -431,7 +431,9 @@ class DiscretizedTensorGroupMatrix(DiscretizedSSPGroupMatrix):
     def __setstate__(self, state):
         # A design pickled before the raw band and the cell cache carries
         # neither slot: without a band the cross-Gram takes its dense stage.
-        _dict_state, slot_state = state
+        dict_state, slot_state = state
+        if dict_state is not None:
+            self.__dict__.update(dict_state)
         self.raw_channels = None
         self._cell_csr = None
         for name, value in slot_state.items():

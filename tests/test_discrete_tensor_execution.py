@@ -547,6 +547,22 @@ def test_channel_invariants_observe_mutations_between_assemblies(cached, replace
         _assert_cross_matches(actual, expected, bound)
 
 
+class _TaggedTensor(DiscretizedTensorGroupMatrix):
+    __slots__ = ("tag_slot", "__dict__")
+
+
+@pytest.mark.parametrize("protocol", [4, pickle.HIGHEST_PROTOCOL])
+def test_tensor_pickle_preserves_subclass_dictionary(protocol):
+    base, _, _ = _tensor_pair(32, (4, 4, 2, 2, 3), (10, 10, 2, 2, 3))
+    tagged = _TaggedTensor.__new__(_TaggedTensor)
+    tagged.__setstate__(base.__getstate__())
+    tagged.label = {"name": "interaction", "revision": 3}
+    tagged.tag_slot = "slot state"
+    restored = pickle.loads(pickle.dumps(tagged, protocol=protocol))
+    assert restored.label == tagged.label
+    assert restored.tag_slot == tagged.tag_slot
+
+
 def test_tensor_group_pickles_without_its_cell_csr_and_loads_from_before_the_band():
     n = 400
     left, right, rng = _tensor_pair(n, (7, 5, 3, 4, 6), (6, 8, 3, 4, 5))
