@@ -569,14 +569,39 @@ def test_prior_weights_are_chunked_in_step_with_their_rows(weighted_gamma_case) 
     chunked = posterior_bounds(
         fitted, head, ("quantile", 0.75), draws=drawn, weights=w, chunk_rows=7
     )
+    design = build_joint_prediction_design(
+        as_eager_frame(head), fitted.compiled_predictors, fitted.layout
+    )
+    assert np.array_equal(design.local["scale"], np.ones((len(head), 1)))
+    mean_state = next(state for state in fitted.layout.predictors if state.name == "mean")
+    product_scale = np.linalg.norm(design.local["mean"], ord=np.inf) * np.max(
+        np.abs(drawn.coefficients[:, mean_state.coefficient_slice])
+    )
+    eps = np.finfo(float).eps
+    q_eps = design.local["mean"].shape[1] * eps
+    dot_bound = 2.0 * q_eps / (1.0 - q_eps) * product_scale
+    # This fixture's intercept-only scale leaves each draw's Gamma shape fixed.
+    # Its quantile is linear in the mean, so log-link perturbations propagate
+    # relatively without a bound on scipy's inverse incomplete gamma function.
+    # Positive quantiles preserve that relative bound under interpolation.
+    # The two paths allow four eps for exp (as in the pushforward test), six
+    # for their two multiplies and division, and six for interpolation.
+    quantity_rtol = np.expm1(dot_bound + 16.0 * eps / (1.0 - 16.0 * eps))
     for column in ("estimate", "lower", "upper"):
-        assert np.array_equal(chunked[column].to_numpy(), whole[column].to_numpy()), column
+        np.testing.assert_allclose(
+            chunked[column].to_numpy(), whole[column].to_numpy(), rtol=quantity_rtol, atol=0.0
+        )
     # A weight vector read from the head of the frame on every chunk, or read
     # in the wrong row order, agrees on nothing but an accident.
     shuffled = posterior_bounds(
         fitted, head, ("quantile", 0.75), draws=drawn, weights=reversed_weights
     )
-    assert not np.array_equal(shuffled["estimate"].to_numpy(), whole["estimate"].to_numpy())
+    assert not np.allclose(
+        shuffled["estimate"].to_numpy(),
+        whole["estimate"].to_numpy(),
+        rtol=quantity_rtol,
+        atol=0.0,
+    )
 
     # The predictive uniforms are drawn per chunk, so a weighted and an
     # unweighted run of the same seed and chunking share their uniforms: the

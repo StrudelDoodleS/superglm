@@ -1337,7 +1337,12 @@ def _run_iterations(
             alpha *= config.backtrack_factor
             backtracks += 1
         if accepted is None:
-            if stop_policy == "ordinary" and reached_identical_candidate:
+            # Exhausting finite trials can be rounding-limited even when a
+            # small coefficient never becomes bit-identical. The same retained
+            # stationarity proof is required; line-search failure is no proof.
+            if stop_policy == "ordinary" and (
+                reached_identical_candidate or distinct_finite_trial_evaluated
+            ):
                 certified, measured_observed = _objective_and_step_is_certified(
                     context,
                     config,
