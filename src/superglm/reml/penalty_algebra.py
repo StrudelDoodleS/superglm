@@ -91,13 +91,13 @@ def _frozen_array(value: NDArray) -> NDArray:
     return result
 
 
-def _enclosed_bound_sum(*bounds: NDArray | float | np.longdouble) -> NDArray:
+def _enclosed_bound_sum(*bounds: NDArray | float | np.float64) -> NDArray:
     from superglm.reml.multi_penalty import _gamma, _upper
 
-    wide = np.sum(np.asarray(bounds, dtype=np.longdouble), axis=0)
-    unit = np.finfo(np.longdouble).eps / 2
-    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
-    return _upper((wide + len(bounds) * tiny) / (1 - _gamma(len(bounds) + 2, unit)))
+    computed = np.sum(np.asarray(bounds, dtype=np.float64), axis=0)
+    unit = np.finfo(np.float64).eps / 2
+    tiny = np.nextafter(np.float64(0), np.float64(1))
+    return _upper((computed + len(bounds) * tiny) / (1 - _gamma(len(bounds) + 2, unit)))
 
 
 def _enclosed_root_gram(root: NDArray, error: NDArray) -> tuple[NDArray, NDArray]:
@@ -150,7 +150,7 @@ def _retained_coordinate_map(
     result = scipy.linalg.solve(gram, mapped, assume_a="pos", check_finite=False)
     product, product_error = _context_product(gram, result, refine=refine)
     residual = _enclosed_bound_sum(
-        np.abs(product.astype(np.longdouble) - mapped.astype(np.longdouble)),
+        np.abs(product.astype(np.float64) - mapped.astype(np.float64)),
         product_error,
         mapped_error,
         _positive_product(gram_error, np.abs(result)),
@@ -158,8 +158,8 @@ def _retained_coordinate_map(
     # The Neumann series gives an elementwise enclosure of G^-1:
     # |G^-1| <= I + |G-I| + eta**2/(1-eta), since every tail entry is
     # bounded by the corresponding sum of spectral norms.
-    unit = np.finfo(np.longdouble).eps / 2
-    tail = _upper(np.longdouble(eta) ** 2 / (1 - eta) / (1 - _gamma(5, unit)))
+    unit = np.finfo(np.float64).eps / 2
+    tail = _upper(np.float64(eta) ** 2 / (1 - eta) / (1 - _gamma(5, unit)))
     inverse_bound = _enclosed_bound_sum(np.eye(rank), defect_bound, np.full_like(gram, tail))
     return result, _positive_product(inverse_bound, residual)
 
@@ -204,7 +204,8 @@ def _near_identity_logdet(gram: NDArray, error: NDArray) -> tuple[float, float]:
     from superglm.reml.multi_penalty import _gamma, _norm_upper, _upper
     from superglm.reml.penalty_support import PenaltyNumericalError
 
-    defect = gram.astype(np.longdouble) - np.eye(len(gram), dtype=np.longdouble)
+    defect = gram.astype(np.float64) - np.eye(len(gram), dtype=np.float64)
+    error = _enclosed_bound_sum(error, _gamma(1) * np.abs(defect) + np.nextafter(0.0, 1.0))
     eta = float(_upper(_norm_upper(defect) + _norm_upper(error)))
     if eta >= 1:
         raise PenaltyNumericalError("SSP coordinate volume cannot certify injectivity")
@@ -212,14 +213,14 @@ def _near_identity_logdet(gram: NDArray, error: NDArray) -> tuple[float, float]:
     value = math.fsum(map(float, diagonal))
     # For symmetric D with ||D||_2 <= eta < 1,
     # |log det(I+D) - tr D| <= ||D||_F**2 / (2*(1-eta)).
-    wide_eta = np.longdouble(eta)
+    eta_value = np.float64(eta)
     bound = (
-        np.longdouble(math.fsum(map(float, np.diag(error))))
-        + wide_eta**2 / (2 * (1 - wide_eta))
-        + np.longdouble(_gamma(len(gram) + 2)) * math.fsum(map(float, np.abs(diagonal)))
+        np.float64(math.fsum(map(float, np.diag(error))))
+        + eta_value**2 / (2 * (1 - eta_value))
+        + np.float64(_gamma(len(gram) + 2)) * math.fsum(map(float, np.abs(diagonal)))
     )
-    unit = np.finfo(np.longdouble).eps / 2
-    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
+    unit = np.finfo(np.float64).eps / 2
+    tiny = np.nextafter(np.float64(0), np.float64(1))
     return value, float(_upper((bound + 8 * tiny) / (1 - _gamma(8, unit))))
 
 
@@ -282,7 +283,7 @@ def _support_coordinate_volume(
         _enclosed_bound_sum(
             numerator_error,
             denominator_error,
-            _upper(np.longdouble(_gamma(4 * rank + 8)) * np.longdouble(operation_scale)),
+            _upper(np.float64(_gamma(4 * rank + 8)) * np.float64(operation_scale)),
         )
     )
     rows = sum(len(root) for root in support.component_roots)
@@ -317,21 +318,21 @@ def _active_support_volume_error(support) -> float:
     width = basis.shape[0]
     if rank == 0 or rank == width:
         return 0.0
-    unit = np.finfo(np.longdouble).eps / 2
-    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
+    unit = np.finfo(np.float64).eps / 2
+    tiny = np.nextafter(np.float64(0), np.float64(1))
     roots, errors = [], []
     for root, error in zip(
         support.component_roots, support.component_root_error_bounds, strict=True
     ):
-        scale = np.longdouble(np.max(np.abs(root), initial=0.0))
+        scale = np.float64(np.max(np.abs(root), initial=0.0))
         if scale == 0:
-            scale = np.longdouble(1)
-        wide = root.astype(np.longdouble) / scale
-        normalized = _finite_double(wide, "active support roots")
+            scale = np.float64(1)
+        computed = root.astype(np.float64) / scale
+        normalized = _finite_double(computed, "active support roots")
         bound = (
-            error.astype(np.longdouble) / scale
-            + _gamma(1, unit) * np.abs(wide)
-            + np.abs(wide - normalized.astype(np.longdouble))
+            error.astype(np.float64) / scale
+            + _gamma(1, unit) * np.abs(computed)
+            + np.abs(computed - normalized.astype(np.float64))
             + tiny
         ) / (1 - _gamma(6, unit))
         roots.append(normalized)
@@ -362,14 +363,14 @@ def _active_support_volume_error(support) -> float:
     # Their construction need not be an exact orthogonal projection.
     projected, projection_error = _context_product(coordinates, basis.T, refine=False)
     off = _enclosed_bound_sum(
-        np.abs(root.astype(np.longdouble) - projected.astype(np.longdouble)),
+        np.abs(root.astype(np.float64) - projected.astype(np.float64)),
         projection_error,
         root_error,
     )
     off_norm = _norm_upper(off)
     volume_error = float(
         _upper(
-            ((np.longdouble(map_norm) * off_norm) ** 2 / (1 - np.longdouble(eta)) + tiny)
+            ((np.float64(map_norm) * off_norm) ** 2 / (1 - np.float64(eta)) + tiny)
             / (1 - _gamma(8, unit))
         )
     )
@@ -406,11 +407,11 @@ def _joint_near_isometry_volume_error(
     if rank == 0:
         return 0.0
     gram, arithmetic = _matmul_enclosed(row_map, row_map.T)
-    # Subtract in the wider type and enclose its rounding too. This avoids
+    # Enclose subtraction rounding too. This avoids
     # relying on exact diagonal subtraction when the map is malformed.
-    unit = np.finfo(np.longdouble).eps / 2
-    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
-    difference = gram.astype(np.longdouble) - np.eye(len(gram), dtype=np.longdouble)
+    unit = np.finfo(np.float64).eps / 2
+    tiny = np.nextafter(np.float64(0), np.float64(1))
+    difference = gram.astype(np.float64) - np.eye(len(gram), dtype=np.float64)
     defect = _enclosed_bound_sum(
         np.abs(difference), arithmetic, _gamma(1, unit) * np.abs(difference) + tiny
     )
@@ -418,10 +419,7 @@ def _joint_near_isometry_volume_error(
     if delta >= 1:
         raise PenaltyNumericalError("finite coefficient map does not preserve penalty support")
     error = float(
-        _upper(
-            (np.longdouble(rank) * delta / (1 - np.longdouble(delta)) + tiny)
-            / (1 - _gamma(8, unit))
-        )
+        _upper((np.float64(rank) * delta / (1 - np.float64(delta)) + tiny) / (1 - _gamma(8, unit)))
     )
     # Use the existing dimension gamma and its minimum rank operation scale
     # for this additional volume certificate, as in the active-support bound.
@@ -525,9 +523,7 @@ def _raw_penalty_arithmetic() -> tuple:
                 "_reference_root_actions",
                 "_direct_candidate",
                 "_candidate_product",
-                "_wide_product",
-                "_dyadic_product",
-                "_dyadic_slices",
+                "_native_product",
                 "_positive_product",
                 "_gamma",
                 "_upper",

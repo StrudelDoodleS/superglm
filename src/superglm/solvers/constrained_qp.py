@@ -284,12 +284,7 @@ def _consistency_floor(decomposition: RankDecomposition) -> float:
 def _constraint_products(
     A: NDArray, beta: NDArray, abs_A: NDArray | None = None
 ) -> tuple[NDArray, NDArray]:
-    """Signed and absolute row actions without losing intermediate range.
-
-    Keep ordinary float matvecs; reevaluate only subnormal, overflowing, or
-    nonstructural zero actions in extended range. A computed zero is structural
-    only when every product has an exactly zero operand.
-    """
+    """Ordinary binary64 row actions; callers scale exceptional rows below."""
     A = np.asarray(A, dtype=float)
     beta = np.asarray(beta, dtype=float)
     abs_A = np.abs(A) if abs_A is None else np.asarray(abs_A, dtype=float)
@@ -297,18 +292,59 @@ def _constraint_products(
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         products = A @ beta
         magnitude = abs_A @ magnitude_beta
-    unsafe = ((magnitude > 0.0) & (magnitude < np.finfo(float).tiny)) | ~np.isfinite(magnitude)
-    zeros = magnitude == 0.0
-    if np.any(zeros):
-        unsafe[zeros] |= np.any((abs_A[zeros] != 0.0) & (magnitude_beta != 0.0), axis=1)
-    if np.any(unsafe):
-        products = products.astype(np.longdouble)
-        magnitude = magnitude.astype(np.longdouble)
-        rows = np.asarray(A[unsafe], dtype=np.longdouble)
-        values = np.asarray(beta, dtype=np.longdouble)
-        products[unsafe] = rows @ values
-        magnitude[unsafe] = np.abs(rows) @ np.abs(values)
     return products, magnitude
+
+
+def _constraint_actions(A, beta, b, abs_A=None, step=None, *, common=False):
+    """Use a common power of two for each exceptional row's action and RHS.
+
+    Product mantissas lie in [1/4, 1), and the chosen exponent bounds the
+    absolute sum including the direction. No physical product or reciprocal
+    scale is materialized. Terms that underflow in these dimensionless units
+    are below the existing relative dot allowance. Normal rows retain their
+    original matvecs and blocking-ratio rounding. Stationarity requests one
+    common exponent across all rows to preserve multiplier units.
+    """
+    A, beta, b = np.asarray(A, float), np.asarray(beta, float), np.asarray(b, float)
+    products, magnitude = _constraint_products(A, beta, abs_A)
+    action, motion = (
+        _constraint_products(A, step, abs_A)
+        if step is not None
+        else (np.zeros_like(b), np.zeros_like(b))
+    )
+    bound = b.copy()
+    unsafe = np.abs(b) > np.finfo(float).max / 4
+    for vector, absolute in ((beta, magnitude), (step, motion)):
+        if vector is None:
+            continue
+        unsafe |= ~np.isfinite(absolute) | (absolute > np.finfo(float).max / 4)
+        unsafe |= (absolute < np.finfo(float).tiny) & np.any((A != 0) & (vector != 0), axis=1)
+    if not np.any(unsafe):
+        return products, magnitude, bound, action, motion
+    if common:
+        unsafe[:] = True
+    coefficients, powers = np.frexp(A[unsafe])
+    terms = []
+    exponents = np.frexp(b[unsafe])[1]
+    exponents = np.where(b[unsafe] != 0, exponents, -10000)
+    for vector in (beta, step):
+        if vector is None:
+            continue
+        mantissa, exponent = np.frexp(vector)
+        value = coefficients * mantissa
+        exponent = np.where(value != 0, powers + exponent, -10000)
+        exponents = np.maximum(exponents, np.max(exponent, axis=1) + A.shape[1].bit_length())
+        terms.append((value, exponent))
+    if common:
+        exponents[:] = np.max(exponents)
+    for (value, exponent), signed, absolute in zip(
+        terms, (products, action), (magnitude, motion), strict=False
+    ):
+        normalized = np.ldexp(value, exponent - exponents[:, None])
+        signed[unsafe] = np.sum(normalized, axis=1)
+        absolute[unsafe] = np.sum(np.abs(normalized), axis=1)
+    bound[unsafe] = np.ldexp(b[unsafe], -exponents)
+    return products, magnitude, bound, action, motion
 
 
 def _feasibility_slack(
@@ -329,9 +365,9 @@ def _feasibility_slack(
 
     Optional abs_b and abs_A cache those exact input magnitudes.
     """
-    products, magnitude = _constraint_products(A, beta, abs_A)
-    scale = _feasibility_scale(products, b, abs_b=abs_b, abs_products=magnitude)
-    slack = products - b
+    products, magnitude, bounds, _, _ = _constraint_actions(A, beta, b, abs_A)
+    scale = _feasibility_scale(products, bounds, abs_products=magnitude)
+    slack = products - bounds
     return np.divide(slack, scale, out=np.zeros_like(slack), where=scale > 0.0)
 
 
@@ -365,9 +401,10 @@ def _scaled_constraint_step(
     A: NDArray, beta: NDArray, step: NDArray, b: NDArray, abs_A: NDArray
 ) -> tuple[NDArray, NDArray]:
     """Normalize a directional action, including motion off an exact zero row."""
-    products, magnitude = _constraint_products(A, beta, abs_A)
-    action, step_magnitude = _constraint_products(A, step, abs_A)
-    scale = np.maximum(_feasibility_scale(products, b, abs_products=magnitude), step_magnitude)
+    products, magnitude, bounds, action, step_magnitude = _constraint_actions(
+        A, beta, b, abs_A, step
+    )
+    scale = np.maximum(_feasibility_scale(products, bounds, abs_products=magnitude), step_magnitude)
     return np.divide(action, scale, out=np.zeros_like(action), where=scale > 0.0), scale
 
 
@@ -383,19 +420,15 @@ def _stationarity_certificate(
     The clipped, nonnegative multipliers must then reproduce stationarity;
     an uncertain sign alone never supplies a success certificate.
     """
-    extended = np.longdouble
     active_matrix = np.asarray(active_matrix, dtype=float)
-    h_values = np.asarray(H, dtype=extended)
-    beta_values = np.asarray(beta, dtype=extended)
-    g_values = np.asarray(g, dtype=extended)
-    h_action = np.abs(h_values) @ np.abs(beta_values)
+    products, h_action, g_values, _, _ = _constraint_actions(H, beta, g, common=True)
     g_action = np.abs(g_values)
     objective_scale = max(np.max(h_action, initial=0.0), np.max(g_action, initial=0.0))
     if objective_scale == 0.0:
         return True, None, np.zeros(len(active_matrix))
     if not np.isfinite(objective_scale):
         return False, None, np.zeros(len(active_matrix))
-    residual = np.asarray((h_values @ beta_values - g_values) / objective_scale, dtype=float)
+    residual = np.asarray((products - g_values) / objective_scale, dtype=float)
     h_action = np.asarray(h_action / objective_scale, dtype=float)
     g_action = np.asarray(g_action / objective_scale, dtype=float)
     row_scale = np.max(np.abs(active_matrix), axis=1, initial=0.0)
@@ -469,20 +502,21 @@ def _complementarity_certificate(
     """
     if not len(multipliers):
         return True
-    extended = np.longdouble
-    h = np.asarray(H, dtype=extended)
-    x = np.asarray(beta, dtype=extended)
-    score = np.asarray(g, dtype=extended)
-    rows = np.asarray(active_matrix, dtype=extended)
+    x = np.asarray(beta, dtype=float)
+    rows = np.asarray(active_matrix, dtype=float)
     row_scale = np.max(np.abs(rows), axis=1, initial=0.0)
     row_scale = np.where(row_scale > 0.0, row_scale, 1.0)
     rows = rows / row_scale[:, None]
-    bounds = np.asarray(active_bounds, dtype=extended) / row_scale
-    dual = np.asarray(multipliers, dtype=extended)
-    h_action = np.abs(h) @ np.abs(x)
+    dual = np.asarray(multipliers, dtype=float)
+    _, h_action, score, _, _ = _constraint_actions(H, x, g, common=True)
     objective_scale = max(np.max(h_action, initial=0.0), np.max(np.abs(score), initial=0.0))
     if objective_scale == 0.0:
         return bool(np.all(dual == 0.0))
+    # Complementarity is homogeneous in coefficient units as well. Scale
+    # before the energy products, so |x| cannot overflow those reductions.
+    x_scale = max(float(np.max(np.abs(x), initial=0.0)), np.finfo(float).tiny)
+    x = x / x_scale
+    bounds = (np.asarray(active_bounds, dtype=float) / x_scale) / row_scale
     row_action = np.abs(rows) @ np.abs(x) + np.abs(bounds)
     energy = max(
         np.abs(x) @ (h_action / objective_scale),
@@ -650,7 +684,7 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
 
 
 def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDArray:
-    """Repair the largest raw half-space violation, for at most 100 sweeps.
+    """Repair a half-space violation, for at most 100 sweeps.
 
     Termination uses the same homogeneous primal predicate as the QP. Each
     repaired row is normalized before its squared norm is formed, preserving
@@ -660,14 +694,13 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
     """
     beta = beta.copy()
     # Loop-invariant: only ``A @ beta`` changes between sweeps.
-    abs_b = np.abs(b)
     abs_A = np.abs(A)
     for _ in range(100):
         # Inlined rather than calling ``_feasibility_slack``, which would
         # recompute the matvec; the arithmetic is identical term for term.
-        products, magnitude = _constraint_products(A, beta, abs_A)
-        violations = products - b
-        scale = _feasibility_scale(products, b, abs_b=abs_b, abs_products=magnitude)
+        products, magnitude, bounds, _, _ = _constraint_actions(A, beta, b, abs_A)
+        violations = products - bounds
+        scale = _feasibility_scale(products, bounds, abs_products=magnitude)
         slack = np.divide(violations, scale, out=np.zeros_like(violations), where=scale > 0.0)
         if slack.min() >= -tol - _roundoff_tolerance(A.shape[1]):
             break
@@ -714,9 +747,10 @@ def _emit_blocking_decision(
     in its own considered set.
     """
     assert trace_run is not None  # narrowed by the caller's `tracing` guard
-    _, magnitude = _constraint_products(A, beta)
-    _, direction_magnitude = _constraint_products(A, step)
-    derived_scale = _feasibility_scale(products, b, abs_products=magnitude)
+    products, magnitude, bounds, raw_step, direction_magnitude = _constraint_actions(
+        A, beta, b, step=step
+    )
+    derived_scale = _feasibility_scale(products, bounds, abs_products=magnitude)
     direction_scale = np.maximum(derived_scale, direction_magnitude)
     derived_scaled_step = np.divide(
         raw_step, direction_scale, out=np.zeros_like(raw_step), where=direction_scale > 0.0
@@ -735,10 +769,10 @@ def _emit_blocking_decision(
             # a step the convergence test rejects.
             "full_step_is_feasible": _is_feasible(A, beta_new, b, tol),
             "considered_rows": tuple(considered),
-            # The raw inputs the ratio is defined on, so a reader can recompute
-            # alpha exactly rather than trust the recorded value.
+            # The ratio inputs (common power-of-two units on exceptional rows),
+            # so a reader can recompute alpha instead of trusting its value.
             "row_products": tuple(float(products[i]) for i in considered),
-            "row_b": tuple(float(b[i]) for i in considered),
+            "row_b": tuple(float(bounds[i]) for i in considered),
             "row_raw_step": tuple(float(raw_step[i]) for i in considered),
             "row_scaled_slack": tuple(float(scaled_slack[i]) for i in considered),
             # The per-row scale the slack was divided by.  Recorded because it
@@ -1147,8 +1181,7 @@ def solve_constrained_qp(
             alpha_min = 1.0
             blocking = -1
 
-            products, _ = _constraint_products(A, beta, abs_A)
-            raw_step, _ = _constraint_products(A, step, abs_A)
+            products, _, bounds, raw_step, _ = _constraint_actions(A, beta, b, abs_A, step)
             # Same scale ``_is_feasible`` uses, which is what makes "does this
             # step move the row" agree with "is this row satisfied".
             scaled_step, _ = _scaled_constraint_step(A, beta, step, b, abs_A)
@@ -1170,7 +1203,7 @@ def solve_constrained_qp(
                     # the two answers differ by up to an ulp, which would put
                     # an ulp of drift into `beta += alpha_min * step` for no
                     # gain -- the gate is what needed to change, not the ratio.
-                    alpha = float((products[i] - b[i]) / -raw_step[i])
+                    alpha = float((products[i] - bounds[i]) / -raw_step[i])
                     if alpha < alpha_min:
                         alpha_min = alpha
                         blocking = i

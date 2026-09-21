@@ -108,24 +108,76 @@ class LossRatioChartResult:
 # ── Private helpers ──────────────────────────────────────────────
 
 
-_LONGDOUBLE_EXTENDS_FLOAT64 = (
-    np.finfo(np.longdouble).max > np.finfo(np.float64).max
-    and np.finfo(np.longdouble).tiny < np.finfo(np.float64).tiny
-)
-
-
-def _require_extended_range(name: str, *values: NDArray) -> None:
-    """Reject arithmetic that float64-only ``longdouble`` cannot represent."""
-    if _LONGDOUBLE_EXTENDS_FLOAT64:
-        return
+def _scaled_products(*values: NDArray) -> tuple[NDArray, NDArray]:
+    """Binary64 product mantissas with integer exponents, without extra bits."""
+    mantissa = np.ones_like(np.asarray(values[0], dtype=np.float64))
+    exponent = np.zeros_like(mantissa, dtype=np.int64)
     for value in values:
-        magnitudes = np.abs(np.asarray(value, dtype=np.float64))
-        exponents = np.frexp(magnitudes[magnitudes != 0.0])[1]
-        # Dividing by an array's largest scale can retain at most the float64
-        # subnormal exponent range. Check each operand independently: different
-        # physical units across values and weights are not themselves unsafe.
-        if exponents.size and int(np.max(exponents) - np.min(exponents)) >= 1074:
-            raise ValueError(f"{name} requires an extended floating-point range on this platform")
+        part, power = np.frexp(np.asarray(value, dtype=np.float64))
+        mantissa *= part
+        exponent += power
+    return mantissa, exponent
+
+
+def _scaled_sum(mantissa: NDArray, exponent: NDArray) -> tuple[float, int]:
+    """Sum range-scaled terms, retaining cancellation before lower exponents.
+
+    A 512-exponent window keeps every input to fsum normal. If its signed
+    sum cancels, the next window still exists; global normalization would
+    already have erased it. The returned significand is one binary64 scalar.
+    """
+    keep = mantissa != 0
+    mantissa, exponent = np.ravel(mantissa[keep]), np.ravel(exponent[keep])
+    while mantissa.size:
+        top = int(np.max(exponent))
+        group = exponent >= top - 512
+        total = math.fsum(np.ldexp(mantissa[group], exponent[group] - top).tolist())
+        part, power = math.frexp(total)
+        power += top
+        mantissa, exponent = mantissa[~group], exponent[~group]
+        if not mantissa.size:
+            return part, power
+        if part:
+            # Remaining absolute mass is < n*2**max(exponent). Once it is
+            # below half an ulp it cannot undo a retained nonzero direction.
+            if power - int(np.max(exponent)) > 55 + len(mantissa).bit_length():
+                return part, power
+            mantissa = np.append(mantissa, part)
+            exponent = np.append(exponent, power)
+    return 0.0, 0
+
+
+def _scaled_ratio(numerator, denominator, name: str) -> float:
+    if denominator[0] == 0:
+        return float("nan")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        result = float(np.ldexp(numerator[0] / denominator[0], numerator[1] - denominator[1]))
+    if not np.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _scaled_prefix(mantissa: NDArray, exponent: NDArray) -> tuple[NDArray, NDArray]:
+    if not len(mantissa):
+        return np.empty(0), np.empty(0, dtype=np.int64)
+    top = int(np.max(exponent[mantissa != 0], initial=0))
+    normalized = np.ldexp(mantissa, exponent - top)
+    if np.any((mantissa != 0) & (np.abs(normalized) < np.finfo(float).tiny)):
+        # Rare full-range inputs need separate prefix exponents. Ordinary
+        # charts retain the linear-time compensated cumulative reduction.
+        pairs = [_scaled_sum(mantissa[:i], exponent[:i]) for i in range(1, len(mantissa) + 1)]
+        return np.array([p[0] for p in pairs]), np.array([p[1] for p in pairs])
+    sums, powers = np.frexp(_compensated_cumsum(normalized))
+    return sums, powers + top
+
+
+def _scaled_blocks(mantissa: NDArray, exponent: NDArray, starts: NDArray):
+    ends = np.append(starts[1:], len(mantissa))
+    pairs = [
+        _scaled_sum(mantissa[start:end], exponent[start:end])
+        for start, end in zip(starts, ends, strict=True)
+    ]
+    return np.array([p[0] for p in pairs]), np.array([p[1] for p in pairs])
 
 
 def _validated_vector(name: str, value, n_rows: int | None = None) -> NDArray:
@@ -211,90 +263,20 @@ def _validated_chart_inputs(
 
 
 def _weighted_mean(values: NDArray, weights: NDArray, name: str) -> float:
-    """Return a finite weighted mean without overflowing intermediate products."""
-    _require_extended_range(f"{name} weighted mean", values, weights)
-    if not _LONGDOUBLE_EXTENDS_FLOAT64:
-        float_values = np.asarray(values, dtype=np.float64)
-        scale = np.max(np.abs(float_values))
-        if scale == 0.0:
-            return 0.0
-        normalized_values = float_values / scale
-        float_weights = np.asarray(weights, dtype=np.float64)
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            products = float_weights * normalized_values
-        if np.any(~np.isfinite(products)) or np.any(
-            (products == 0.0) & (float_weights != 0.0) & (normalized_values != 0.0)
-        ):
-            raise ValueError(
-                f"{name} weighted mean requires an extended floating-point range on this platform"
-            )
-        total_weight = math.fsum(float_weights.tolist())
-        if total_weight <= 0.0 or not np.isfinite(total_weight):
-            raise ValueError(f"{name} weights must have a finite positive total")
-        mean_scaled = math.fsum(products.tolist()) / total_weight
-        mean_scaled = float(
-            np.clip(mean_scaled, np.min(normalized_values), np.max(normalized_values))
-        )
-        result = float(scale * mean_scaled)
-        if not np.isfinite(result):
-            raise ValueError(f"{name} weighted mean must be finite")
-        return result
-    extended_weights = np.asarray(weights, dtype=np.longdouble)
-    total_weight = np.sum(extended_weights, dtype=np.longdouble)
-    if total_weight <= 0.0 or not np.isfinite(total_weight):
+    """Scale the product and division together, retaining subnormal answers."""
+    total_weight = math.fsum(np.asarray(weights, dtype=float).tolist())
+    if total_weight <= 0 or not np.isfinite(total_weight):
         raise ValueError(f"{name} weights must have a finite positive total")
-    extended_values = np.asarray(values, dtype=np.longdouble)
-    scale = np.max(np.abs(extended_values))
-    if scale == 0.0:
-        return 0.0
-    normalized_values = extended_values / scale
-    mean_scaled = np.sum(
-        extended_weights * normalized_values,
-        dtype=np.longdouble,
-    )
-    mean_scaled /= total_weight
-    # A weighted mean must lie in the convex hull.  Rounding the normalized
-    # shares can otherwise produce 1 + 1 ulp and overflow when rescaled by the
-    # largest finite float.
-    mean_scaled = np.clip(
-        mean_scaled,
-        np.min(normalized_values),
-        np.max(normalized_values),
-    )
-    result = float(scale * mean_scaled)
-    if not np.isfinite(result):
-        raise ValueError(f"{name} weighted mean must be finite")
-    return float(result)
+    numerator = _scaled_sum(*_scaled_products(values, weights))
+    result = _scaled_ratio(numerator, math.frexp(total_weight), f"{name} weighted mean")
+    return float(np.clip(result, np.min(values), np.max(values)))
 
 
 def _weighted_total(values: NDArray, weights: NDArray, name: str) -> float:
-    """Return a finite weighted total, rejecting a mathematically overflowing result."""
-    _require_extended_range(f"{name} weighted total", values, weights)
-    if not _LONGDOUBLE_EXTENDS_FLOAT64:
-        float_values = np.asarray(values, dtype=np.float64)
-        float_weights = np.asarray(weights, dtype=np.float64)
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            products = float_values * float_weights
-        if np.any(~np.isfinite(products)) or np.any(
-            (products == 0.0) & (float_values != 0.0) & (float_weights != 0.0)
-        ):
-            raise ValueError(
-                f"{name} weighted total requires an extended floating-point range on this platform"
-            )
-        try:
-            float_result = math.fsum(products.tolist())
-        except OverflowError:
-            float_result = float("inf")
-        if not np.isfinite(float_result):
-            raise ValueError(f"{name} weighted total must be finite")
-        return float_result
-    extended_result = np.sum(
-        np.asarray(values, dtype=np.longdouble) * np.asarray(weights, dtype=np.longdouble),
-        dtype=np.longdouble,
+    """Refuse an overflowing result after range-safe products and cancellation."""
+    return _scaled_ratio(
+        _scaled_sum(*_scaled_products(values, weights)), (1.0, 0), f"{name} weighted total"
     )
-    if not np.isfinite(extended_result) or abs(extended_result) > np.finfo(np.float64).max:
-        raise ValueError(f"{name} weighted total must be finite")
-    return float(extended_result)
 
 
 def _finite_ratio(numerator: float, denominator: float, name: str) -> float:
@@ -361,152 +343,79 @@ def _float64_block_sums(values: NDArray, block_starts: NDArray) -> NDArray:
 def _lorenz_cumulative_by_score(
     scores: NDArray,
     exposures: NDArray,
-    losses: NDArray,
+    losses: tuple[NDArray, NDArray],
     *,
     total_exp: float,
-    total_loss: float,
+    total_loss: tuple[float, int],
 ) -> tuple[NDArray, NDArray]:
-    """Lorenz cumulative shares after collapsing tied scores into one block."""
+    """Lorenz cumulative shares in separate exposure and loss exponent units."""
     order = np.argsort(scores, kind="stable")
-    scores_sorted = scores[order]
-    exp_sorted = exposures[order]
-    loss_sorted = losses[order]
-
-    _, block_starts = np.unique(scores_sorted, return_index=True)
-    if _LONGDOUBLE_EXTENDS_FLOAT64:
-        exp_blocks = np.add.reduceat(exp_sorted, block_starts)
-        loss_blocks = np.add.reduceat(loss_sorted, block_starts)
-        cum_exp = np.cumsum(exp_blocks, dtype=np.longdouble) / np.longdouble(total_exp)
-        cum_loss = np.cumsum(loss_blocks, dtype=np.longdouble) / np.longdouble(total_loss)
-    else:
-        exp_blocks = _float64_block_sums(exp_sorted, block_starts)
-        loss_blocks = _float64_block_sums(loss_sorted, block_starts)
-        cum_exp = _compensated_cumsum(exp_blocks) / float(total_exp)
-        cum_loss = _compensated_cumsum(loss_blocks) / float(total_loss)
-    float64_max = np.longdouble(np.finfo(np.float64).max)
-    if (
-        np.any(~np.isfinite(cum_exp))
-        or np.any(~np.isfinite(cum_loss))
-        or np.any(np.abs(cum_exp) > float64_max)
-        or np.any(np.abs(cum_loss) > float64_max)
-    ):
+    _, starts = np.unique(scores[order], return_index=True)
+    exp_blocks = _float64_block_sums(exposures[order], starts)
+    cumulative_exposure = _compensated_cumsum(exp_blocks) / total_exp
+    loss_blocks = _scaled_blocks(losses[0][order], losses[1][order], starts)
+    cumulative_loss = _scaled_prefix(*loss_blocks)
+    loss_shares = np.array(
+        [
+            _scaled_ratio(pair, total_loss, "Lorenz cumulative shares")
+            for pair in zip(*cumulative_loss, strict=True)
+        ]
+    )
+    if not np.all(np.isfinite(cumulative_exposure)):
         raise ValueError("Lorenz cumulative shares must be finite")
-    return np.asarray(cum_exp, dtype=np.float64), np.asarray(cum_loss, dtype=np.float64)
+    return cumulative_exposure, loss_shares
 
 
-def _weighted_pair_concordance(scores, weights, centered_target) -> np.longdouble:
-    """Sum weighted target differences between ordered, tie-collapsed blocks."""
+def _weighted_pair_concordance(scores, weights, centered_target) -> tuple[float, int]:
+    """Pair differences in original weight units, including extreme ratios."""
     order = np.argsort(scores, kind="stable")
-    scores_sorted = scores[order]
-    arithmetic_dtype = np.longdouble if _LONGDOUBLE_EXTENDS_FLOAT64 else np.float64
-    weights = np.asarray(weights, dtype=arithmetic_dtype)
-    centered_target = np.asarray(centered_target, dtype=arithmetic_dtype)
-    weights_sorted = weights[order]
-    target_totals_sorted = (weights * centered_target)[order]
-
-    _, block_starts = np.unique(scores_sorted, return_index=True)
-    if _LONGDOUBLE_EXTENDS_FLOAT64:
-        weight_blocks = np.add.reduceat(weights_sorted, block_starts)
-        target_blocks = np.add.reduceat(target_totals_sorted, block_starts)
-    else:
-        weight_blocks = _float64_block_sums(weights_sorted, block_starts)
-        target_blocks = _float64_block_sums(target_totals_sorted, block_starts)
-    # Build exclusive prefixes directly. Subtracting the current block from an
-    # inclusive cumulative total loses a small prior block when the next block
-    # is much larger, corrupting even a two-row reverse ranking.
-    if _LONGDOUBLE_EXTENDS_FLOAT64:
-        prior_weights = np.concatenate(
-            [
-                np.zeros(1, dtype=np.longdouble),
-                np.cumsum(weight_blocks[:-1], dtype=np.longdouble),
-            ]
-        )
-        prior_targets = np.concatenate(
-            [
-                np.zeros(1, dtype=np.longdouble),
-                np.cumsum(target_blocks[:-1], dtype=np.longdouble),
-            ]
-        )
-    else:
-        prior_weights = np.concatenate([[0.0], _compensated_cumsum(weight_blocks[:-1])])
-        prior_targets = np.concatenate([[0.0], _compensated_cumsum(target_blocks[:-1])])
-    terms = prior_weights * target_blocks - prior_targets * weight_blocks
-    if _LONGDOUBLE_EXTENDS_FLOAT64:
-        return np.sum(terms, dtype=np.longdouble)
-    return np.longdouble(math.fsum(np.asarray(terms, dtype=np.float64).tolist()))
+    _, starts = np.unique(np.asarray(scores)[order], return_index=True)
+    wm, we = np.frexp(weights)
+    tm, te = centered_target
+    weight_blocks = _scaled_blocks(wm[order], we[order], starts)
+    target_blocks = _scaled_blocks((wm * tm)[order], (we + te)[order], starts)
+    previous_weight = _scaled_prefix(weight_blocks[0][:-1], weight_blocks[1][:-1])
+    previous_target = _scaled_prefix(target_blocks[0][:-1], target_blocks[1][:-1])
+    prior_wm, prior_we = np.r_[0.0, previous_weight[0]], np.r_[0, previous_weight[1]]
+    prior_tm, prior_te = np.r_[0.0, previous_target[0]], np.r_[0, previous_target[1]]
+    return _scaled_sum(
+        np.r_[prior_wm * target_blocks[0], -prior_tm * weight_blocks[0]],
+        np.r_[prior_we + target_blocks[1], prior_te + weight_blocks[1]],
+    )
 
 
 def _gini_coefficients(y_obs, y_pred, sample_weight=None) -> tuple[float, float, float]:
-    """Return stable model, perfect, and normalized tie-collapsed Gini values."""
+    """Tie-collapsed pair concordance using portable scaled products."""
     y_obs = _ensure_array(y_obs)
     y_pred = _ensure_array(y_pred)
     weights = _default_weights(sample_weight, len(y_obs))
-    if y_obs.size == 0:
+    if y_obs.size == 0 or not np.any(weights > 0):
         return 0.0, 0.0, 0.0
-    _require_extended_range("Gini aggregation", y_obs, weights)
-
-    extended_weights = np.asarray(weights, dtype=np.longdouble)
-    extended_target = np.asarray(y_obs, dtype=np.longdouble)
-    target_scale = np.max(np.abs(extended_target))
-    if not np.any(extended_weights > 0.0) or target_scale == 0.0:
+    total_weight = _scaled_sum(*np.frexp(weights))
+    total_loss = _scaled_sum(*_scaled_products(weights, y_obs))
+    if total_loss[0] <= 0:
         return 0.0, 0.0, 0.0
-    total_weight = np.sum(extended_weights, dtype=np.longdouble)
-    if total_weight <= 0.0 or not np.isfinite(total_weight):
+    # Center before multiplying so almost-constant targets retain their
+    # pair differences. Only opposite-sign extremes need a scaled subtraction.
+    with np.errstate(over="ignore"):
+        centered = y_obs - np.min(y_obs)
+    cm, ce = np.frexp(centered)
+    overflow = ~np.isfinite(centered)
+    if np.any(overflow):
+        ym, ye = np.frexp(y_obs[overflow])
+        minimum, minimum_exponent = math.frexp(float(np.min(y_obs)))
+        unit = np.maximum(ye, minimum_exponent)
+        cm[overflow] = np.ldexp(ym, ye - unit) - np.ldexp(minimum, minimum_exponent - unit)
+        ce[overflow] = unit
+    perfect = _weighted_pair_concordance(y_obs, weights, (cm, ce))
+    if perfect[0] <= 0:
         return 0.0, 0.0, 0.0
-    normalized_weights = extended_weights / total_weight
-    scaled_target = extended_target / target_scale
-    loss_products = normalized_weights * scaled_target
-    if not _LONGDOUBLE_EXTENDS_FLOAT64:
-        float_weights = np.asarray(normalized_weights, dtype=np.float64)
-        float_target = np.asarray(scaled_target, dtype=np.float64)
-        with np.errstate(under="ignore", invalid="ignore"):
-            float_loss_products = float_weights * float_target
-        if np.any((float_loss_products == 0.0) & (float_weights != 0.0) & (float_target != 0.0)):
-            raise ValueError(
-                "Gini aggregation requires an extended floating-point range on this platform"
-            )
-        total_loss = np.longdouble(math.fsum(float_loss_products.tolist()))
-    else:
-        total_loss = np.sum(loss_products, dtype=np.longdouble)
-    if total_loss <= 0.0 or not np.isfinite(total_loss):
-        return 0.0, 0.0, 0.0
-
-    # The usual 1 - 2*AUC calculation loses all precision when the target is
-    # nearly constant. Pair concordance is algebraically equivalent, while
-    # centering removes the common target level before any subtraction.
-    centered_target = scaled_target - np.min(scaled_target)
-    if not _LONGDOUBLE_EXTENDS_FLOAT64:
-        float_centered = np.asarray(centered_target, dtype=np.float64)
-        with np.errstate(under="ignore", invalid="ignore"):
-            float_centered_products = float_weights * float_centered
-        if np.any(
-            (float_centered_products == 0.0) & (float_weights != 0.0) & (float_centered != 0.0)
-        ):
-            raise ValueError(
-                "Gini aggregation requires an extended floating-point range on this platform"
-            )
-    perfect_pair_sum = _weighted_pair_concordance(
-        scaled_target,
-        normalized_weights,
-        centered_target,
-    )
-    if perfect_pair_sum <= 0.0:
-        return 0.0, 0.0, 0.0
-    model_pair_sum = _weighted_pair_concordance(y_pred, normalized_weights, centered_target)
-    gini_model_extended = model_pair_sum / total_loss
-    gini_perfect_extended = perfect_pair_sum / total_loss
-    float64_max = np.longdouble(np.finfo(np.float64).max)
-    if (
-        not np.isfinite(gini_model_extended)
-        or not np.isfinite(gini_perfect_extended)
-        or abs(gini_model_extended) > float64_max
-        or abs(gini_perfect_extended) > float64_max
-    ):
-        raise ValueError("Gini coefficients must be finite")
-    gini_model = float(gini_model_extended)
-    gini_perfect = float(gini_perfect_extended)
-    gini_ratio = np.clip(model_pair_sum / perfect_pair_sum, -1.0, 1.0)
-    return gini_model, gini_perfect, float(gini_ratio)
+    model = _weighted_pair_concordance(y_pred, weights, (cm, ce))
+    denominator = total_weight[0] * total_loss[0], total_weight[1] + total_loss[1]
+    model_gini = _scaled_ratio(model, denominator, "Gini coefficients")
+    perfect_gini = _scaled_ratio(perfect, denominator, "Gini coefficients")
+    ratio = _scaled_ratio(model, perfect, "Gini ratio")
+    return model_gini, perfect_gini, float(np.clip(ratio, -1.0, 1.0))
 
 
 def _normalized_gini(y_obs, y_pred, sample_weight=None) -> float:
@@ -863,39 +772,12 @@ def lorenz_curve(
     n = len(y_obs)
     exp = vectors.get("exposure", np.ones(n, dtype=float))
 
-    _require_extended_range("Lorenz aggregation", w, exp, y_obs)
-    if not _LONGDOUBLE_EXTENDS_FLOAT64:
-        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-            float_exposures = np.asarray(w, dtype=np.float64) * np.asarray(exp, dtype=np.float64)
-            float_losses = float_exposures * np.asarray(y_obs, dtype=np.float64)
-        try:
-            absolute_loss_total = math.fsum(np.abs(float_losses).tolist())
-            exposure_total = math.fsum(float_exposures.tolist())
-        except OverflowError:
-            absolute_loss_total = float("inf")
-            exposure_total = float("inf")
-        if (
-            np.any(~np.isfinite(float_exposures))
-            or np.any(~np.isfinite(float_losses))
-            or not np.isfinite(exposure_total)
-            or not np.isfinite(absolute_loss_total)
-            or np.any((float_losses == 0.0) & (float_exposures != 0.0) & (np.asarray(y_obs) != 0.0))
-        ):
-            raise ValueError(
-                "Lorenz aggregation requires an extended floating-point range on this platform"
-            )
-    if _LONGDOUBLE_EXTENDS_FLOAT64:
-        exposures = np.asarray(w, dtype=np.longdouble) * np.asarray(exp, dtype=np.longdouble)
-        losses = exposures * np.asarray(y_obs, dtype=np.longdouble)
-        total_loss = np.sum(losses, dtype=np.longdouble)
-        total_exp = np.sum(exposures, dtype=np.longdouble)
-    else:
-        exposures = float_exposures
-        losses = float_losses
-        total_loss = math.fsum(losses.tolist())
-        total_exp = math.fsum(exposures.tolist())
+    exposures = np.asarray(w, dtype=float) * np.asarray(exp, dtype=float)
+    losses = _scaled_products(exposures, y_obs)
+    total_loss = _scaled_sum(*losses)
+    total_exp = math.fsum(exposures.tolist())
 
-    if total_loss <= 0 or total_exp <= 0:
+    if total_loss[0] <= 0 or total_exp <= 0:
         # Degenerate: all zeros or no exposure
         curve_df = pd.DataFrame(
             {

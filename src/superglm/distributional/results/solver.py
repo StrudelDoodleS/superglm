@@ -438,7 +438,7 @@ def _assessment_objective_error_bound(
     except ValueError as evidence:
         raise ValueError(f"{failure_context}: invalid original evidence") from evidence
     return float(
-        _enclosed_bound_sum(scalar, np.longdouble(0.5) * error, np.longdouble(0.5) * original_error)
+        _enclosed_bound_sum(scalar, np.float64(0.5) * error, np.float64(0.5) * original_error)
     )
 
 

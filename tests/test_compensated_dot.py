@@ -115,13 +115,15 @@ def test_caller_preserves_the_same_value_and_error_bound(monkeypatch, without_fm
     if without_fma:
         monkeypatch.delattr(math, "fma", raising=False)
     left = np.array([1e6, 1e6 + 1, 1e-6, -3.0])
-    right = np.array([1.0, -1.0, 3.0, 1e-6], dtype=np.longdouble)
-    right[0] += np.longdouble(2) ** -60
+    right = np.array([np.nextafter(1.0, np.inf), -1.0, 3.0, 1e-6])
     compiled = module._compensated_dot(left, right)
     monkeypatch.setattr(module, "_dot2_value", lambda *_: (0.0, False))
     fallback = module._compensated_dot(left, right)
     # Backend equivalence: the recurrence and the caller's enclosure are unchanged.
     assert compiled == fallback
+    assert abs(Fraction.from_float(compiled[0]) - _exact_dot(left, right)) <= Fraction.from_float(
+        compiled[1]
+    )
 
 
 @pytest.mark.parametrize("without_fma", [False, True])
@@ -144,7 +146,7 @@ def test_range_fallback_preserves_the_previous_enclosure_or_refusal(
 
     if without_fma:
         monkeypatch.delattr(math, "fma", raising=False)
-    x, y = np.array([left]), np.array([right], dtype=np.longdouble)
+    x, y = np.array([left]), np.array([right], dtype=np.float64)
 
     def evaluate():
         try:

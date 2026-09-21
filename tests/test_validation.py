@@ -9,8 +9,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import superglm.validation as validation_module
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -26,10 +24,6 @@ from superglm.validation import (
 )
 
 PLOTLY_AVAILABLE = importlib.util.find_spec("plotly") is not None
-EXTENDED_RANGE_AVAILABLE = (
-    np.finfo(np.longdouble).max > np.finfo(np.float64).max
-    and np.finfo(np.longdouble).tiny < np.finfo(np.float64).tiny
-)
 
 
 @pytest.fixture(autouse=True)
@@ -787,10 +781,6 @@ def test_weighted_means_avoid_intermediate_overflow(chart):
     assert np.all(np.isfinite(result[["observed", "predicted"]]))
 
 
-@pytest.mark.skipif(
-    not EXTENDED_RANGE_AVAILABLE,
-    reason="platform longdouble does not extend the float64 exponent range",
-)
 def test_weighted_mean_preserves_a_representable_subnormal_contribution():
     maximum = np.finfo(np.float64).max
     smallest = np.nextafter(0.0, 1.0)
@@ -824,28 +814,21 @@ def test_weighted_mean_clamps_rounding_to_the_input_convex_hull():
     assert result.bins.loc[0, "predicted"] == maximum
 
 
-def test_extreme_aggregation_is_explicit_on_float64_only_longdouble_platforms(
-    monkeypatch,
-):
+def test_extreme_aggregation_retains_a_subnormal_weighted_mean():
     smallest = np.nextafter(0.0, 1.0)
     almost_two = np.nextafter(2.0, 0.0)
-    monkeypatch.setattr(validation_module, "_LONGDOUBLE_EXTENDS_FLOAT64", False)
-
-    with pytest.raises(ValueError, match="requires an extended floating-point range"):
-        lift_chart(
-            np.array([almost_two, smallest]),
-            np.array([almost_two, smallest]),
-            sample_weight=np.array([smallest, 1.0]),
-            n_bins=1,
-        )
+    result = lift_chart(
+        np.array([almost_two, smallest]),
+        np.array([almost_two, smallest]),
+        sample_weight=np.array([smallest, 1.0]),
+        n_bins=1,
+    )
+    assert result.bins.loc[0, "observed"] == 3 * smallest
 
 
-def test_float64_only_range_gate_allows_safe_cross_unit_single_row(
-    monkeypatch,
-):
+def test_float64_aggregation_allows_safe_cross_unit_single_row():
     scale = np.ldexp(1.0, 500)
     smallest = np.nextafter(0.0, 1.0)
-    monkeypatch.setattr(validation_module, "_LONGDOUBLE_EXTENDS_FLOAT64", False)
 
     lift = lift_chart(
         [scale],
@@ -864,54 +847,32 @@ def test_float64_only_range_gate_allows_safe_cross_unit_single_row(
     assert np.all(np.isfinite(lorenz.curve))
 
 
-def test_float64_only_range_gate_rejects_unsafe_normalized_products(
-    monkeypatch,
-):
+def test_float64_aggregation_preserves_cancellation_across_exponents():
     smallest = np.nextafter(0.0, 1.0)
     scale = np.ldexp(1.0, 600)
-    monkeypatch.setattr(validation_module, "_LONGDOUBLE_EXTENDS_FLOAT64", False)
-
-    with pytest.raises(ValueError, match="requires an extended floating-point range"):
-        lift_chart(
-            [scale, -scale, np.ldexp(1.0, 100), np.ldexp(1.0, 100)],
-            [scale, -scale, np.ldexp(1.0, 100), np.ldexp(1.0, 100)],
-            sample_weight=[
-                smallest,
-                smallest,
-                np.ldexp(1.0, -600),
-                np.ldexp(1.0, -600),
-            ],
-            n_bins=1,
-        )
-
-    with pytest.raises(ValueError, match="requires an extended floating-point range"):
-        lorenz_curve(
-            [scale, -scale, 1.0, 0.0],
-            [scale, -scale, 1.0, 0.0],
-            sample_weight=[
-                np.ldexp(1.0, -600),
-                np.ldexp(1.0, -600),
-                np.ldexp(1.0, -600),
-                1.0,
-            ],
-        )
+    lift = lift_chart(
+        [scale, -scale, np.ldexp(1.0, 100), np.ldexp(1.0, 100)],
+        [scale, -scale, np.ldexp(1.0, 100), np.ldexp(1.0, 100)],
+        sample_weight=[smallest, smallest, np.ldexp(1.0, -600), np.ldexp(1.0, -600)],
+        n_bins=1,
+    )
+    assert lift.bins.loc[0, "observed"] == np.ldexp(1.0, 100)
+    lorenz = lorenz_curve(
+        [scale, -scale, 1.0, 0.0],
+        [scale, -scale, 1.0, 0.0],
+        sample_weight=[np.ldexp(1.0, -600), np.ldexp(1.0, -600), np.ldexp(1.0, -600), 1.0],
+    )
+    assert np.all(np.isfinite(lorenz.curve))
 
 
-def test_float64_only_lorenz_gate_rejects_unsafe_finite_products_sum(
-    monkeypatch,
-):
+def test_float64_lorenz_shares_do_not_require_a_representable_total_loss():
     maximum = np.finfo(np.float64).max
-    monkeypatch.setattr(validation_module, "_LONGDOUBLE_EXTENDS_FLOAT64", False)
-
-    with pytest.raises(ValueError, match="requires an extended floating-point range"):
-        lorenz_curve([maximum, maximum], [1.0, 2.0])
+    result = lorenz_curve([maximum, maximum], [1.0, 2.0])
+    np.testing.assert_array_equal(result.curve["cum_loss_share_model"], [0.0, 0.5, 1.0])
 
 
-def test_float64_only_aggregation_uses_compensated_summation(
-    monkeypatch,
-):
+def test_float64_aggregation_uses_compensated_summation():
     values = np.array([1.0, 1e-16, -1.0])
-    monkeypatch.setattr(validation_module, "_LONGDOUBLE_EXTENDS_FLOAT64", False)
 
     lift = lift_chart(values, values, n_bins=1)
     lorenz = lorenz_curve(values, values)
@@ -935,10 +896,6 @@ def test_double_lift_rejects_nonfinite_derived_sort_score():
         )
 
 
-@pytest.mark.skipif(
-    not EXTENDED_RANGE_AVAILABLE,
-    reason="platform longdouble does not extend the float64 exponent range",
-)
 def test_lorenz_scaling_avoids_weighted_loss_overflow():
     maximum = np.finfo(np.float64).max
     result = lorenz_curve(
@@ -953,10 +910,6 @@ def test_lorenz_scaling_avoids_weighted_loss_overflow():
     assert np.isfinite(result.gini_ratio)
 
 
-@pytest.mark.skipif(
-    not EXTENDED_RANGE_AVAILABLE,
-    reason="platform longdouble does not extend the float64 exponent range",
-)
 def test_lorenz_gini_preserves_extreme_positive_weight_ratios():
     maximum = np.finfo(np.float64).max
     smallest = np.nextafter(0.0, 1.0)
@@ -971,10 +924,6 @@ def test_lorenz_gini_preserves_extreme_positive_weight_ratios():
     assert result.gini_ratio == pytest.approx(1.0)
 
 
-@pytest.mark.skipif(
-    not EXTENDED_RANGE_AVAILABLE,
-    reason="platform longdouble does not extend the float64 exponent range",
-)
 def test_lorenz_curve_preserves_balanced_extreme_weight_loss_products():
     maximum = np.finfo(np.float64).max
     smallest = np.nextafter(0.0, 1.0)

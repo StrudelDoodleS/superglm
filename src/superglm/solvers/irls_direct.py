@@ -93,7 +93,11 @@ from superglm.solvers.rank import (
     decompose_symmetric,
 )
 from superglm.solvers.scop import SCOPSolverReparam
-from superglm.solvers.scop_newton import scop_joint_newton_step, scop_newton_step
+from superglm.solvers.scop_newton import (
+    _positive_quadratic_roundoff,
+    scop_joint_newton_step,
+    scop_newton_step,
+)
 from superglm.solvers.structured import (
     BlockSchurFactor,
     BlockStructuredSystem,
@@ -1308,19 +1312,22 @@ def _fit_irls_direct_once(
         # This encloses residual formation without an observation-level
         # calculation on every trial. Other families supply deviance-unit
         # values; the guard covers their weighted accumulation and penalty.
-        gaussian_response_action = (
-            np.sum(
-                np.asarray(weights, dtype=np.longdouble) * np.asarray(y, dtype=np.longdouble) ** 2
+        # Include gamma before squaring. The response action itself may be
+        # outside binary64 even when its roundoff allowance is finite.
+        with np.errstate(over="ignore", invalid="ignore"):
+            gaussian_response_roundoff = (
+                np.sum((np.sqrt(merit_gamma) * np.sqrt(weights) * y) ** 2)
+                if type(family) is Gaussian
+                else 0.0
             )
-            if type(family) is Gaussian
-            else np.longdouble(0.0)
-        )
 
         def with_scop_merit(trial: _SCOPTrialState) -> _SCOPTrialState:
             """Attach deviance plus the latent-coordinate quadratic penalty."""
             penalty_quad = float(trial.irls.beta @ scop_outer_penalty @ trial.irls.beta)
             magnitude = np.abs(trial.irls.beta)
-            penalty_action = np.longdouble(magnitude @ scop_outer_penalty_abs @ magnitude)
+            penalty_roundoff = _positive_quadratic_roundoff(
+                magnitude, scop_outer_penalty_abs, merit_gamma
+            )
             for group_state in trial.groups:
                 group = groups[group_state.group_index]
                 lam_scop = lambda2.get(group.name, 0.0) if isinstance(lambda2, dict) else lambda2
@@ -1329,7 +1336,9 @@ def _fit_irls_direct_once(
                     lam_scop * (group_state.beta_eff @ latent_penalty @ group_state.beta_eff)
                 )
                 magnitude = np.abs(group_state.beta_eff)
-                penalty_action += abs(lam_scop) * (magnitude @ np.abs(latent_penalty) @ magnitude)
+                penalty_roundoff += _positive_quadratic_roundoff(
+                    magnitude, latent_penalty, merit_gamma, abs(lam_scop)
+                )
             retained = replace(
                 trial,
                 irls=replace(
@@ -1337,13 +1346,11 @@ def _fit_irls_direct_once(
                     penalized_deviance=float(trial.irls.deviance + penalty_quad),
                 ),
             )
-            deviance_action = np.longdouble(abs(trial.irls.deviance))
+            deviance_roundoff = merit_gamma * abs(trial.irls.deviance)
             if type(family) is Gaussian:
-                deviance_action = 8.0 * gaussian_response_action + 2.0 * deviance_action
+                deviance_roundoff = 8.0 * gaussian_response_roundoff + 2.0 * deviance_roundoff
             with np.errstate(over="ignore", invalid="ignore"):
-                allowance = float(
-                    merit_gamma * (deviance_action + penalty_action) / (1.0 - merit_gamma)
-                )
+                allowance = float((deviance_roundoff + penalty_roundoff) / (1.0 - merit_gamma))
             scop_merit_errors[id(retained.irls)] = allowance
             return retained
 

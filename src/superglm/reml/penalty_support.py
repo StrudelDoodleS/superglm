@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 
 _EPS = np.finfo(np.float64).eps
-_LD = np.longdouble
+_LD = np.float64
 
 
 class PenaltyNumericalError(np.linalg.LinAlgError):
@@ -188,6 +188,12 @@ def _penalty_support_from_roots(
         balanced.append(root.astype(_LD) / scale)
     stacked = np.vstack(balanced)
     column_max = np.max(np.abs(stacked), axis=0, initial=_LD(0))
+    present = np.any(np.vstack(roots) != 0, axis=0)
+    if np.any(present & (column_max == 0)) or not np.all(np.isfinite(column_max)):
+        # The former wider arithmetic also refused a support coordinate map
+        # below binary64 range. Refuse here before its vanished columns can
+        # incorrectly become a smaller selected support.
+        raise PenaltyNumericalError("balanced support coordinates are not representable")
     normalized = np.zeros_like(stacked)
     np.divide(stacked, column_max, out=normalized, where=column_max > 0)
     column_scale = column_max * np.sqrt(np.sum(normalized * normalized, axis=0))

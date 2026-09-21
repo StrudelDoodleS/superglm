@@ -96,9 +96,7 @@ def test_basis_gram_rejects_changed_working_precision(monkeypatch):
 
     monkeypatch.setattr(module, "_matmul_enclosed", product)
     module._basis_gram(support, support.Q_plus)
-    monkeypatch.setattr(module, "_LD", np.float64)
-    monkeypatch.setattr(module, "_U_LD", np.finfo(float).eps / 2)
-    monkeypatch.setattr(module, "_TINY_LD", np.nextafter(0.0, 1.0))
+    monkeypatch.setattr(module, "_U_LD", np.finfo(float).eps)
     actual = module._basis_gram(support, support.Q_plus)
     assert len(calls) == 2
     _equal(actual, original(support.Q_plus.T, support.Q_plus))
@@ -136,13 +134,11 @@ def test_support_pickle_drops_ephemeral_basis_evidence(monkeypatch):
 
 
 @pytest.mark.parametrize("repeat", [1, 7, 210])
-def test_identical_tiny_error_rows_reuse_one_existing_wide_dot(monkeypatch, repeat):
-    if np.finfo(np.longdouble).nmant <= np.finfo(float).nmant:
-        pytest.skip("The row reuse deliberately excludes binary64 working precision")
+def test_identical_tiny_error_rows_reuse_one_enclosed_dot(monkeypatch, repeat):
     n = 9
-    row = np.arange(1, n + 1, dtype=np.longdouble)[None, :] * np.longdouble(np.nextafter(0.0, 1.0))
+    row = np.arange(1, n + 1, dtype=np.float64)[None, :] * np.float64(np.nextafter(0.0, 1.0))
     left = np.repeat(row, repeat, axis=0)
-    right = np.arange(1, n * 3 + 1, dtype=np.longdouble).reshape(n, 3) * np.longdouble(2.0**400)
+    right = np.arange(1, n * 3 + 1, dtype=np.float64).reshape(n, 3) * np.float64(2.0**400)
     expected = module._positive_product(left, right)
     calls = []
     original = module._positive_product
@@ -170,18 +166,16 @@ def test_identical_tiny_error_rows_reuse_one_existing_wide_dot(monkeypatch, repe
         assert actual[1, 0] == expected[1, 0]
 
 
-@pytest.mark.parametrize("control", ["nonidentical", "native", "binary64", "nonfinite"])
+@pytest.mark.parametrize("control", ["nonidentical", "native", "nonfinite"])
 def test_root_error_row_reuse_keeps_unsupported_inputs_on_original_path(monkeypatch, control):
-    tiny = np.longdouble(np.nextafter(0.0, 1.0))
-    left = np.full((3, 2), tiny, dtype=np.longdouble)
-    right = np.full((2, 2), np.longdouble(2.0**400))
+    tiny = np.float64(np.nextafter(0.0, 1.0))
+    left = np.full((3, 2), tiny, dtype=np.float64)
+    right = np.full((2, 2), np.float64(2.0**400))
     if control == "nonidentical":
         left[1, 0] *= 2
     elif control == "native":
         left[:] = 1
         right[:] = 1
-    elif control == "binary64":
-        monkeypatch.setattr(module, "_LD", np.float64)
     else:
         left[1, 0] = np.inf
     calls = []
@@ -228,20 +222,22 @@ def test_existing_evaluator_stops_recomputing_the_same_basis_gram(monkeypatch):
 
 
 def test_existing_evaluator_stops_repeating_identical_input_error_dots(monkeypatch):
-    if np.finfo(np.longdouble).nmant <= np.finfo(float).nmant:
-        pytest.skip("The row reuse deliberately excludes binary64 working precision")
     roots = [np.eye(3, 4), np.eye(3, 4)]
     support = _penalty_support_from_roots(
         roots,
         resolution_limited=[False, False],
         input_error_bounds=[np.zeros_like(root) for root in roots],
     )
-    scale = 2 * np.longdouble(np.nextafter(0.0, 1.0))
     calls = []
     original = module._positive_product
 
     def product(left, right):
-        if left.shape[1] == 4 and np.all(left == scale):
+        if (
+            left.shape[1] == 4
+            and np.all(left > 0)
+            and np.all(left < np.finfo(float).tiny)
+            and np.all(left == left[:1])
+        ):
             calls.append((left.shape, right.shape))
         return original(left, right)
 

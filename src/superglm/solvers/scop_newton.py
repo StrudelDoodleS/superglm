@@ -22,6 +22,7 @@ the sequential Gauss-Seidel loop that causes slow convergence.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -281,6 +282,52 @@ def _safe_trial_objective_delta(
     return float(objective_delta) if np.isfinite(objective_delta) else np.inf
 
 
+def _positive_sum_parts(values: NDArray, exponents: NDArray) -> tuple[float, int]:
+    """Sum nonnegative contributions in their largest actual exponent unit."""
+    nonzero = values != 0
+    if not np.any(nonzero):
+        return 0.0, 0
+    unit = int(np.max(exponents[nonzero]))
+    total = math.fsum(np.ldexp(values, exponents - unit).ravel().tolist())
+    mantissa, exponent = math.frexp(total)
+    return mantissa, exponent + unit
+
+
+def _positive_quadratic_roundoff(
+    vector: NDArray, matrix: NDArray, *weights: float, right: NDArray | None = None
+) -> float:
+    """Carry range, but no additional significand bits, through an action.
+
+    Ordinary inputs use two native products. Extreme inputs align the actual
+    triple-product exponents, since separately normalizing the coordinates and
+    matrix could erase complementary large/small terms. fsum avoids a p**2
+    reduction allowance; the caller's existing inflation covers the products.
+    """
+    left, matrix = np.abs(vector), np.abs(matrix)
+    right = left if right is None else np.abs(right)
+    if any(weight == 0 for weight in weights):
+        return 0.0
+    ordinary = all(
+        np.all((value == 0) | ((value >= 2.0**-128) & (value <= 2.0**128)))
+        for value in (left, matrix, right)
+    )
+    if ordinary:
+        mantissa, exponent = math.frexp(float(left @ matrix @ right))
+    else:
+        lm, le = np.frexp(left)
+        mm, me = np.frexp(matrix)
+        rm, re = np.frexp(right)
+        terms = lm[:, None] * mm * rm[None, :]
+        powers = le[:, None] + me + re[None, :]
+        mantissa, exponent = _positive_sum_parts(terms, powers)
+    for weight in weights:
+        part, power = np.frexp(weight)
+        mantissa *= part
+        exponent += int(power)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        return float(np.ldexp(mantissa, exponent))
+
+
 def _objective_delta_roundoff(
     *,
     gammas: list[NDArray],
@@ -311,37 +358,96 @@ def _objective_delta_roundoff(
     ku = count * (np.finfo(float).eps / 2.0)
     if ku >= 1.0:
         return np.inf
-    gamma_k = np.longdouble(ku / (1.0 - ku))
+    gamma_k = ku / (1.0 - ku)
     inflation = 1.0 / (1.0 - gamma_k)
-    with np.errstate(over="ignore", invalid="ignore"):
-        column_norms = [
-            np.sqrt(np.asarray(np.diag(gram), dtype=np.longdouble) * inflation) for gram in grams
-        ]
-        response_bound = np.longdouble(response_norm) * inflation
-        current_bound = np.longdouble(0.0)
-        trial_bound = np.longdouble(0.0)
-        delta_bound = np.longdouble(0.0)
-        for current, trial, columns in zip(gammas, trial_gammas, column_norms, strict=True):
-            current = np.asarray(current, dtype=np.longdouble)
-            trial = np.asarray(trial, dtype=np.longdouble)
-            current_bound += np.abs(current) @ columns
-            trial_bound += np.abs(trial) @ columns
-            delta_bound += np.abs(trial - current) @ columns
-        # Absolute linear/quadratic actions, followed by propagation of the
-        # subtraction error in delta_gamma. The final term encloses its square.
-        endpoint_sum = current_bound + trial_bound
-        action = delta_bound * (response_bound + current_bound + 0.5 * delta_bound)
-        action += endpoint_sum * (response_bound + current_bound + delta_bound)
-        action += 0.5 * gamma_k * endpoint_sum**2
+    # Retain separate norm exponents until multiplication. A tiny direction
+    # times a large response can be finite despite an unrepresentable ratio
+    # between their norms, so one common normalization would lose that term.
+    column_norms = [np.sqrt(np.diag(gram)) * np.sqrt(inflation) for gram in grams]
+    terms = [[], [], []]
+    powers = [[], [], []]
+    for current, trial, columns in zip(gammas, trial_gammas, column_norms, strict=True):
+        cm, ce = np.frexp(columns)
+        endpoints = []
+        for endpoint in (current, trial):
+            em, ee = np.frexp(endpoint)
+            product = em * cm
+            exponent = ee + ce
+            endpoints.append((product, exponent))
+        unit = np.maximum(
+            *(np.where(value != 0, exponent, -10000) for value, exponent in endpoints)
+        )
+        delta = np.abs(
+            np.ldexp(endpoints[1][0], endpoints[1][1] - unit)
+            - np.ldexp(endpoints[0][0], endpoints[0][1] - unit)
+        )
+        for index, (value, exponent) in enumerate([*endpoints, (delta, unit)]):
+            terms[index].extend(np.abs(value))
+            powers[index].extend(exponent)
+    current_bound, trial_bound, delta_bound = [
+        _positive_sum_parts(np.asarray(value), np.asarray(exponent, dtype=int))
+        for value, exponent in zip(terms, powers, strict=True)
+    ]
+    response_mantissa, response_exponent = math.frexp(response_norm)
+    response_bound = (response_mantissa * inflation, response_exponent)
+    pairs = [
+        (delta_bound, response_bound, 1.0),
+        (delta_bound, current_bound, 1.0),
+        (delta_bound, delta_bound, 0.5),
+    ]
+    for endpoint in (current_bound, trial_bound):
+        pairs.extend(
+            (endpoint, other, 1.0) for other in (response_bound, current_bound, delta_bound)
+        )
+        pairs.extend((endpoint, other, 0.5 * gamma_k) for other in (current_bound, trial_bound))
+    action, action_exponent = _positive_sum_parts(
+        np.array([left[0] * right[0] * coefficient for left, right, coefficient in pairs]),
+        np.array([left[1] + right[1] for left, right, _ in pairs]),
+    )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        allowance = np.ldexp(gamma_k * inflation * action, action_exponent)
         for current, trial, penalty, lam in zip(
             betas, trial_betas, penalties, lambdas, strict=True
         ):
-            current = np.asarray(current, dtype=np.longdouble)
-            trial = np.asarray(trial, dtype=np.longdouble)
+            if lam == 0:
+                continue
+            ordinary = all(
+                np.all((value == 0) | ((np.abs(value) >= 2.0**-128) & (np.abs(value) <= 2.0**128)))
+                for value in (current, trial, penalty)
+            )
+            if not ordinary:
+                x, t, delta = np.abs(current), np.abs(trial), np.abs(trial - current)
+                # Expand endpoint sums before arithmetic. They need not be
+                # representable individually for the weighted bound to be.
+                pairs = [(x, delta, 1.0), (delta, x, 1.0), (delta, delta, 1.0)]
+                for endpoint in (x, t):
+                    pairs.extend(
+                        [
+                            (x, endpoint, 1.0),
+                            (endpoint, x, 1.0),
+                            (delta, endpoint, 1.0),
+                            (endpoint, delta, 1.0),
+                        ]
+                    )
+                    pairs.extend((endpoint, other, gamma_k) for other in (x, t))
+                for left, right, coefficient in pairs:
+                    allowance += _positive_quadratic_roundoff(
+                        left,
+                        penalty,
+                        0.5 * gamma_k * inflation,
+                        abs(lam),
+                        coefficient,
+                        right=right,
+                    )
+                continue
+            beta_unit = int(np.frexp(max(np.max(np.abs(current)), np.max(np.abs(trial))))[1])
+            matrix_unit = int(np.frexp(np.max(np.abs(penalty), initial=0.0))[1])
+            lam_mantissa, lam_exponent = np.frexp(abs(lam))
+            current, trial = np.ldexp(current, -beta_unit), np.ldexp(trial, -beta_unit)
             x = np.abs(current)
             delta = np.abs(trial - current)
             endpoint_sum = x + np.abs(trial)
-            matrix = np.abs(np.asarray(penalty, dtype=np.longdouble))
+            matrix = np.ldexp(np.abs(penalty), -matrix_unit)
             matrix_x = matrix @ x
             matrix_delta = matrix @ delta
             matrix_sum = matrix @ endpoint_sum
@@ -353,8 +459,10 @@ def _objective_delta_roundoff(
                 + endpoint_sum @ matrix_delta
                 + gamma_k * (endpoint_sum @ matrix_sum)
             )
-            action += 0.5 * abs(lam) * (expansion + subtraction)
-        allowance = float(gamma_k * inflation * action)
+            allowance += np.ldexp(
+                0.5 * gamma_k * inflation * lam_mantissa * (expansion + subtraction),
+                2 * beta_unit + matrix_unit + int(lam_exponent),
+            )
     if not np.isfinite(allowance):
         return np.inf
     return float(np.nextafter(allowance, np.inf)) if allowance > 0.0 else 0.0
