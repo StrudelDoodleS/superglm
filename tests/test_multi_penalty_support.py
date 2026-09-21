@@ -312,8 +312,8 @@ def test_compensated_dot_encloses_a_cancelling_exact_rational_dot(
         monkeypatch.setattr(module, "_dot2_value", lambda *_: (0.0, False), raising=False)
     if without_fma:
         monkeypatch.delattr(math, "fma", raising=False)
-    left = np.array([1e6, 1e6 + 1, 1e-6, -3.0])
-    right = np.array([1.0, -1.0, 3.0, 1e-6], dtype=np.float64)
+    left = np.pad([1e6, 1e6 + 1, 1e-6, -3.0], (0, 252))
+    right = np.pad([1.0, -1.0, 3.0, 1e-6], (0, 252))
     right[0] = np.nextafter(1.0, np.inf)
     value, error = _compensated_dot(left, right)
     exact = sum(
@@ -336,14 +336,14 @@ def test_compensated_dot_uses_the_compiled_scalar_recurrence(monkeypatch):
         return value, success
 
     monkeypatch.setattr(module, "_dot2_value", tracked, raising=False)
-    left = np.array([1e6, 1e6 + 1, 1e-6, -3.0])
-    right = np.array([1.0, -1.0, 3.0, 1e-6], dtype=np.float64)
+    left = np.pad([1e6, 1e6 + 1, 1e-6, -3.0], (0, 252))
+    right = np.pad([1.0, -1.0, 3.0, 1e-6], (0, 252))
     value, error = module._compensated_dot(left, right)
     exact = sum(
         Fraction.from_float(float(x)) * Fraction(*y.as_integer_ratio())
         for x, y in zip(left, right, strict=True)
     )
-    assert calls == [(4, True)]
+    assert calls == [(256, True)]
     assert abs(Fraction.from_float(value) - exact) <= Fraction.from_float(error)
 
 
@@ -836,6 +836,37 @@ def test_unrefined_cache_disagreement_uses_the_existing_second_refined_correctio
         np.ones(2),
         np.array([[0.5, -0.5], [-0.5, 0.5]]),
     )
+
+
+def test_float64_positive_product_reuses_operand_extrema(monkeypatch):
+    from superglm.reml import multi_penalty as module
+
+    original, calls = np.max, []
+
+    def maximum(value, *args, **kwargs):
+        calls.append(1)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(np, "max", maximum)
+    bound = module._positive_product(np.array([[1.0, 0.0, 2.0]]), np.ones((3, 1)))
+    assert bound[0, 0] >= 3.0
+    assert len(calls) == 2
+
+
+def test_float64_outward_rounding_checks_the_final_value_once(monkeypatch):
+    from superglm.reml import multi_penalty as module
+
+    original, calls = module._finite_double, []
+
+    def finite(value, name):
+        calls.append(1)
+        return original(value, name)
+
+    monkeypatch.setattr(module, "_finite_double", finite)
+    value = module._upper(np.array([-1, 0, 1], dtype=np.float32))
+    np.testing.assert_array_equal(value, np.nextafter([0.0, 0.0, 1.0], np.inf))
+    assert value.dtype == np.float64
+    assert len(calls) == 1
 
 
 def _assert_positive_product_enclosed(left, right, bound):

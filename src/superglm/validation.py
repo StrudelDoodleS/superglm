@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -190,13 +191,74 @@ def _sum_scaled_partials(partials: list[tuple[float, int]]) -> tuple[float, int]
 
 
 def _two_product(left: float, right: float) -> tuple[float, float]:
-    """Error-free product of the bounded mantissas used by these reductions."""
+    """Error-free product within these reductions' bounded exponent ranges."""
     product = left * right
     splitter = float(2**27 + 1)
     a, b = splitter * left, splitter * right
     ah, bh = a - (a - left), b - (b - right)
     al, bl = left - ah, right - bh
     return product, al * bl - (((product - ah * bh) - al * bh) - ah * bl)
+
+
+def _two_sum(left, right):
+    total = left + right
+    right_part = total - left
+    return total, (left - (total - right_part)) + (right - right_part)
+
+
+def _ordinary_reduction_range(*operands) -> bool:
+    """Dispatch only: keep all product/prefix residuals normal, or use Python.
+
+    Raw product quanta are >=2**-255, and Gini contraction quanta >=2**-425.
+    Even 2**63 rows keep the largest contraction sums below 2**288.
+    """
+    return (operands[0][0].size + 8) * np.finfo(float).eps <= 0.5 and all(
+        np.all(np.isfinite(mantissa))
+        and np.all((mantissa == 0) | ((exponent >= -32) & (exponent <= 32)))
+        for mantissa, exponent in operands
+    )
+
+
+def _ordinary_product_terms(left, right, exposure=None):
+    """Exact two/three-factor terms, omitting only units and zero channels."""
+    terms = (left,)
+    for factor in (right,) if exposure is None else (exposure, right):
+        expanded = []
+        unit = np.all(factor == 1)
+        for part in terms:
+            if unit:
+                expanded.append(part)
+            elif np.all(part == 1):
+                expanded.append(factor)
+            else:
+                high, low = _two_product(part, factor)
+                expanded.append(high)
+                if np.any(low):
+                    expanded.append(low)
+        terms = tuple(expanded)
+    return terms
+
+
+def _ordinary_prefix_parts(terms):
+    """Keep unrounded prefix corrections, with an enclosure of the remainder.
+
+    Each add.accumulate prefix plus the exact prefix of its TwoSum errors
+    equals the exact input prefix. Recover the correction pass's errors too:
+    only their absolute sum is bounded, never a guessed rounding residual.
+    """
+    high = np.add.accumulate(terms[0])
+    _, low = _two_sum(np.r_[0.0, high[:-1]], terms[0])
+    remainder = np.zeros_like(high)
+    for term in terms[1:]:
+        low, error = _two_sum(low, term)
+        remainder += np.abs(error)
+    correction = np.add.accumulate(low)
+    _, error = _two_sum(np.r_[0.0, correction[:-1]], low)
+    remainder = np.add.accumulate(remainder + np.abs(error))
+    # Positive-sum enclosure: at most n+8 rounded additions per entry.
+    # For (n+8)*eps <= 1/2, 1/(1-gamma_(n+8)) <= 1+(n+8)*eps.
+    error_bound = (1 + 2 * (len(high) + 8) * np.finfo(float).eps) * remainder
+    return high, correction, error_bound
 
 
 def _scaled_product_sums(
@@ -213,6 +275,29 @@ def _scaled_product_sums(
     lm, le = np.frexp(left)
     rm, re = np.frexp(right)
     em, ee = (None, None) if exposure is None else np.frexp(exposure)
+    operands = ((lm, le), (rm, re)) if em is None else ((lm, le), (rm, re), (em, ee))
+    if len(left) and _ordinary_reduction_range(*operands):
+        if len(ends) == 1 and ends[0] == len(left):
+            nonzero = (left != 0) & (right != 0)
+            if exposure is not None:
+                nonzero &= exposure != 0
+            terms = _ordinary_product_terms(
+                left[nonzero], right[nonzero], None if exposure is None else exposure[nonzero]
+            )
+            total = math.fsum(chain.from_iterable(term.tolist() for term in terms))
+            return np.frexp(np.array([total]))
+        terms = _ordinary_product_terms(left, right, exposure)
+        high, low, error = _ordinary_prefix_parts(terms)
+        rounded, residual = _two_sum(high[ends - 1], low[ends - 1])
+        error = error[ends - 1]
+        upper = (np.nextafter(rounded, np.inf) - rounded) / 2
+        lower = (rounded - np.nextafter(rounded, -np.inf)) / 2
+        certified = (error == 0) | (
+            (np.nextafter(residual + error, np.inf) < upper)
+            & (np.nextafter(residual - error, -np.inf) > -lower)
+        )
+        if np.all(certified):
+            return np.frexp(rounded)
     sums, powers = np.empty(len(ends)), np.empty(len(ends), dtype=np.int64)
     partials = []
     start = 0
@@ -389,8 +474,8 @@ def _lorenz_cumulative_by_score(
     *,
     total_exp: tuple[float, int],
     total_loss: tuple[float, int],
-) -> tuple[NDArray, NDArray]:
-    """Final Lorenz shares from raw weight/exposure/loss operands."""
+) -> tuple[NDArray, NDArray, tuple[NDArray, NDArray]]:
+    """Final Lorenz shares and reusable order/tie starts for the same scores."""
     order = np.argsort(scores, kind="stable")
     _, starts = np.unique(scores[order], return_index=True)
     ends = np.append(starts[1:], len(order))
@@ -398,23 +483,79 @@ def _lorenz_cumulative_by_score(
     cumulative_loss = _scaled_product_sums(
         weights[order], losses[order], ends, exposure=exposure[order]
     )
-    exposure_shares = np.array(
-        [
-            _scaled_ratio(pair, total_exp, "Lorenz cumulative shares")
-            for pair in zip(*cumulative_exposure, strict=True)
-        ]
+    shares = []
+    for (mantissa, exponent), total in (
+        (cumulative_exposure, total_exp),
+        (cumulative_loss, total_loss),
+    ):
+        with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+            result = np.ldexp(mantissa / total[0], exponent - total[1])
+        if total[0] != 0 and not np.all(np.isfinite(result)):
+            raise ValueError("Lorenz cumulative shares must be finite")
+        shares.append(result if total[0] != 0 else np.full_like(result, np.nan))
+    exposure_shares, loss_shares = shares
+    return exposure_shares, loss_shares, (order, starts)
+
+
+def _ordinary_pair_concordance(order, starts, weights, target, exposure):
+    """Certify the tie-block contraction without rounding its prefix operands."""
+    w, t = weights[order], target[order]
+    weight_terms = (w,) if exposure is None else _ordinary_product_terms(w, exposure[order])
+    high, low, bound = _ordinary_prefix_parts(weight_terms)
+    high, low, bound = (np.r_[0.0, part] for part in (high, low, bound))
+    ends = np.append(starts[1:], len(order))
+    # For every row in a score block, W_before - W_after equals
+    # W_before + W_through - W_total. Excluding the whole block removes ties.
+    coefficient, first = _two_sum(high[starts], high[ends])
+    coefficient, second = _two_sum(coefficient, -high[-1])
+    correction, rounding = _two_sum(first, second)
+    radius = np.abs(rounding)
+    for term in (low[starts], low[ends], -low[-1]):
+        correction, rounding = _two_sum(correction, term)
+        radius += np.abs(rounding)
+    eps = np.finfo(float).eps
+    radius = (1 + 16 * eps) * (radius + bound[starts] + bound[ends] + bound[-1])
+    counts = ends - starts
+    coefficient, correction, radius = (
+        np.repeat(part, counts) for part in (coefficient, correction, radius)
     )
-    loss_shares = np.array(
-        [
-            _scaled_ratio(pair, total_loss, "Lorenz cumulative shares")
-            for pair in zip(*cumulative_loss, strict=True)
-        ]
+    # A zero target contributes no contraction, but its weight must remain
+    # in the prefixes and tie blocks above.
+    nonzero = t != 0
+    coefficient, correction, radius, t = (
+        part[nonzero] for part in (coefficient, correction, radius, t)
     )
-    return exposure_shares, loss_shares
+    weight_terms = tuple(part[nonzero] for part in weight_terms)
+    mass = tuple(value for part in weight_terms for value in _two_product(part, t) if np.any(value))
+    if not mass:
+        return 0.0, 0
+    products = tuple(
+        value
+        for part in mass
+        for factor in (coefficient, correction)
+        for value in _two_product(part, factor)
+        if np.any(value)
+    )
+    # One fsum recovers a correction to a cheap initial sum, including every
+    # product residual. Its own rounding radius is only that of the correction.
+    initial = float(np.sum(products[0])) if products else 0.0
+    tail = math.fsum(chain((-initial,), chain.from_iterable(part.tolist() for part in products)))
+    value, residual = _two_sum(initial, tail)
+    magnitude = sum(np.abs(part) for part in mass)
+    error = (1 + 16 * eps) * math.fsum((radius * magnitude).tolist())
+    error = (1 + 4 * eps) * (error + (math.ulp(tail) / 2 if tail else 0.0))
+    upper = (math.nextafter(value, math.inf) - value) / 2
+    lower = (value - math.nextafter(value, -math.inf)) / 2
+    if error == 0 or (
+        math.nextafter(residual + error, math.inf) < upper
+        and math.nextafter(residual - error, -math.inf) > -lower
+    ):
+        return math.frexp(value)
+    return None
 
 
 def _weighted_pair_concordance(
-    scores, weights, centered_target, *, exposure=None
+    scores, weights, centered_target, *, exposure=None, score_order=None
 ) -> tuple[float, int]:
     """Contract retained prefix/block parts; rounded prefix snapshots are unsafe.
 
@@ -423,11 +564,19 @@ def _weighted_pair_concordance(
     including product residuals. Tied rows enter the prefix only after the
     block's contribution, so no within-tie pair is counted.
     """
-    order = np.argsort(scores, kind="stable")
-    _, starts = np.unique(np.asarray(scores)[order], return_index=True)
+    if score_order is None:
+        order = np.argsort(scores, kind="stable")
+        _, starts = np.unique(np.asarray(scores)[order], return_index=True)
+    else:
+        order, starts = score_order
     wm, we = np.frexp(weights)
     tm, te = centered_target
     em, ee = (None, None) if exposure is None else np.frexp(exposure)
+    operands = ((wm, we), (tm, te)) if em is None else ((wm, we), (tm, te), (em, ee))
+    if len(order) and _ordinary_reduction_range(*operands):
+        candidate = _ordinary_pair_concordance(order, starts, weights, np.ldexp(tm, te), exposure)
+        if candidate is not None:
+            return candidate
     previous_weight, previous_target, pairs = [], [], []
     for start, end in zip(starts, np.append(starts[1:], len(order)), strict=True):
         block_weight, block_target = [], []
@@ -456,20 +605,23 @@ def _weighted_pair_concordance(
 
 
 def _gini_coefficients(
-    y_obs, y_pred, sample_weight=None, *, exposure=None
+    y_obs, y_pred, sample_weight=None, *, exposure=None, totals=None, score_orders=None
 ) -> tuple[float, float, float]:
-    """Tie-collapsed pair concordance using portable scaled products."""
+    """Pair concordance; Lorenz may supply its same-operand totals and orders."""
     y_obs = _ensure_array(y_obs)
     y_pred = _ensure_array(y_pred)
     weights = _default_weights(sample_weight, len(y_obs))
     if y_obs.size == 0 or not np.any(weights > 0):
         return 0.0, 0.0, 0.0
-    total_weight = (
-        _scaled_sum(*np.frexp(weights))
-        if exposure is None
-        else _scaled_product_total(weights, exposure)
-    )
-    total_loss = _scaled_product_total(weights, y_obs, exposure=exposure)
+    if totals is None:
+        total_weight = (
+            _scaled_sum(*np.frexp(weights))
+            if exposure is None
+            else _scaled_product_total(weights, exposure)
+        )
+        total_loss = _scaled_product_total(weights, y_obs, exposure=exposure)
+    else:
+        total_weight, total_loss = totals
     if total_loss[0] <= 0:
         return 0.0, 0.0, 0.0
     # Center before multiplying so almost-constant targets retain their
@@ -484,10 +636,15 @@ def _gini_coefficients(
         unit = np.maximum(ye, minimum_exponent)
         cm[overflow] = np.ldexp(ym, ye - unit) - np.ldexp(minimum, minimum_exponent - unit)
         ce[overflow] = unit
-    perfect = _weighted_pair_concordance(y_obs, weights, (cm, ce), exposure=exposure)
+    perfect_order, model_order = (None, None) if score_orders is None else score_orders
+    perfect = _weighted_pair_concordance(
+        y_obs, weights, (cm, ce), exposure=exposure, score_order=perfect_order
+    )
     if perfect[0] <= 0:
         return 0.0, 0.0, 0.0
-    model = _weighted_pair_concordance(y_pred, weights, (cm, ce), exposure=exposure)
+    model = _weighted_pair_concordance(
+        y_pred, weights, (cm, ce), exposure=exposure, score_order=model_order
+    )
     denominator = total_weight[0] * total_loss[0], total_weight[1] + total_loss[1]
     model_gini = _scaled_ratio(model, denominator, "Gini coefficients")
     perfect_gini = _scaled_ratio(perfect, denominator, "Gini coefficients")
@@ -901,7 +1058,7 @@ def lorenz_curve(
     # Order by model predictions (ascending = lowest risk first), collapsing
     # tied predictions into a single block so within-tie row order carries no
     # fake ranking information.
-    cum_exp_model, cum_loss_model = _lorenz_cumulative_by_score(
+    cum_exp_model, cum_loss_model, model_order = _lorenz_cumulative_by_score(
         y_pred,
         w,
         exp,
@@ -912,8 +1069,9 @@ def lorenz_curve(
 
     # Order by actual loss ratio (ascending = lowest actual risk first)
     # For perfect foresight ordering
-    loss_ratio = np.where(exp > 0, y_obs, 0.0)
-    cum_exp_perfect, cum_loss_perfect = _lorenz_cumulative_by_score(
+    positive_exposure = exp > 0
+    loss_ratio = np.where(positive_exposure, y_obs, 0.0)
+    cum_exp_perfect, cum_loss_perfect, perfect_order = _lorenz_cumulative_by_score(
         loss_ratio,
         w,
         exp,
@@ -935,6 +1093,8 @@ def lorenz_curve(
         y_pred,
         w,
         exposure=exp,
+        totals=(total_exp, total_loss),
+        score_orders=(perfect_order if np.all(positive_exposure) else None, model_order),
     )
 
     # Build curve DataFrame — use model ordering x-axis for all curves

@@ -1156,3 +1156,362 @@ def test_gini_pair_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, m
     # The two weight scales need only a bounded number of scalar parts.
     # This counts reduction work, independently of the exact-pair oracle.
     assert visits <= 64 * size
+
+
+@pytest.mark.parametrize("consumer", ["lift", "lorenz", "gini"])
+def test_ordinary_validation_consumers_avoid_per_row_python_partials(monkeypatch, consumer):
+    import superglm.validation as validation
+
+    size = 128
+    observed = 1.0 + np.arange(size) / 16.0
+    predicted = observed[::-1].copy()
+    weights = 0.5 + np.arange(size) / 128.0
+    calls = 0
+    original = validation._add_scaled_partial
+
+    def counted(*args):
+        nonlocal calls
+        calls += 1
+        return original(*args)
+
+    monkeypatch.setattr(validation, "_add_scaled_partial", counted)
+    if consumer == "lift":
+        validation.lift_chart(observed, predicted, sample_weight=weights)
+    elif consumer == "lorenz":
+        validation.lorenz_curve(observed, predicted, sample_weight=weights)
+    else:
+        validation._normalized_gini(observed, predicted, weights)
+    assert calls == 0
+
+
+@pytest.mark.parametrize("consumer", ["lift", "lorenz", "gini"])
+def test_ordinary_validation_does_not_initialize_native_kernels(monkeypatch, consumer):
+    from numba.core.registry import CPUDispatcher
+
+    import superglm.validation as validation
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("ordinary validation must not pay for native initialization")
+
+    monkeypatch.setattr(CPUDispatcher, "__call__", forbidden)
+    observed = 1.0 + np.arange(128) / 16.0
+    weights = 0.5 + np.arange(128) / 128.0
+    if consumer == "lift":
+        validation.lift_chart(observed, observed[::-1], sample_weight=weights)
+    elif consumer == "lorenz":
+        validation.lorenz_curve(observed, observed[::-1], sample_weight=weights)
+    else:
+        validation._normalized_gini(observed, observed[::-1], weights)
+
+
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("with_exposure", [False, True])
+def test_ordinary_validation_prefixes_match_exact_products(strided, with_exposure):
+    import math
+    from fractions import Fraction
+
+    import superglm.validation as validation
+
+    d = 2.0**-30
+    values = np.array([-1 - d, 1.0, 2.0**-32, -(2.0**-32), 3.0, -3.0])
+    weights = np.array([1 - d, 1.0, 1.0, 1.0, 1 + d, 1 + d])
+    exposure = np.array([1 + d, 1.0, 1 + d, 1.0, 1 - d, 1 - d])
+    if strided:
+        values, weights, exposure = (
+            np.repeat(array, 2)[::2] for array in (values, weights, exposure)
+        )
+    for array in (values, weights, exposure):
+        array.flags.writeable = False
+    mantissas, powers = validation._scaled_product_sums(
+        weights,
+        values,
+        np.arange(1, len(values) + 1),
+        exposure=exposure if with_exposure else None,
+    )
+    exact = Fraction(0)
+    for i, (mantissa, power) in enumerate(zip(mantissas, powers, strict=True)):
+        term = Fraction.from_float(weights[i]) * Fraction.from_float(values[i])
+        if with_exposure:
+            term *= Fraction.from_float(exposure[i])
+        exact += term
+        assert math.ldexp(float(mantissa), int(power)) == float(exact)
+
+
+@pytest.mark.parametrize(
+    "terms",
+    [
+        [1.0, 2.0**-53, 2.0**-110],
+        [1.0, -(2.0**-54), -(2.0**-110)],
+        [1.0, 2.0**-53, -(2.0**-110)],
+        [1.0, -1.0, 2.0**-160],
+    ],
+)
+def test_ordinary_prefix_enclosure_keeps_halfway_tail_and_cancellation(terms):
+    from fractions import Fraction
+
+    from superglm.validation import _ordinary_prefix_parts
+
+    high, low, bound = _ordinary_prefix_parts((np.array(terms),))
+    exact = Fraction(0)
+    for term, hi, lo, error in zip(terms, high, low, bound, strict=True):
+        exact += Fraction.from_float(term)
+        approximation = Fraction.from_float(hi) + Fraction.from_float(lo)
+        assert abs(exact - approximation) <= Fraction.from_float(error)
+
+
+@pytest.mark.parametrize("power", [-34, -33, 31, 32])
+def test_validation_reduction_range_routes_extremes_to_existing_fallback(monkeypatch, power):
+    import math
+
+    import superglm.validation as validation
+
+    native, fallback = [], []
+    original_native = validation._ordinary_product_terms
+    original_add = validation._add_scaled_partial
+
+    def compiled(*args):
+        native.append(1)
+        return original_native(*args)
+
+    def scalar(*args):
+        fallback.append(1)
+        return original_add(*args)
+
+    monkeypatch.setattr(validation, "_ordinary_product_terms", compiled)
+    monkeypatch.setattr(validation, "_add_scaled_partial", scalar)
+    result = validation._scaled_product_total(np.full(2, 2.0**power), np.ones(2))
+    assert math.ldexp(*result) == 2.0 ** (power + 1)
+    assert len(native) == int(power in (-33, 31))
+    assert bool(fallback) == (power not in (-33, 31))
+
+
+def test_ordinary_validation_gini_preserves_exact_weight_exposure_pairs_and_ties():
+    from fractions import Fraction
+
+    d = 2.0**-30
+    observed, scores = np.array([1.0, 0.0, 1.0, 2.0]), np.array([0.0, 1.0, 2.0, 1.0])
+    weights = np.array([1 + d, 1.0, 1 - d, 2.0**-20])
+    exposure = np.array([1 - d, 1.0, 1 + d, 1.5])
+    mass = [Fraction.from_float(w) * Fraction.from_float(e) for w, e in zip(weights, exposure)]
+
+    def pair_sum(ordering):
+        return sum(
+            mass[i] * mass[j] * Fraction.from_float(observed[j] - observed[i])
+            for i in range(len(observed))
+            for j in range(len(observed))
+            if ordering[i] < ordering[j]
+        )
+
+    expected = float(pair_sum(scores) / pair_sum(observed))
+    result = lorenz_curve(observed, scores, sample_weight=weights, exposure=exposure)
+    assert result.gini_ratio == pytest.approx(
+        expected, rel=8 * len(observed) * np.finfo(float).eps, abs=0
+    )
+
+
+def test_pair_contractions_skip_zero_targets_after_full_weight_prefix(monkeypatch):
+    import superglm.validation as validation
+
+    size = 128
+    target = np.zeros(size)
+    target[[1, 20, 100]] = [0.5, 1.0, 2.0]
+    weights = 0.5 + np.arange(size) / size
+    prefix_rows, product_rows = [], []
+    prefix, product = validation._ordinary_prefix_parts, validation._two_product
+
+    def counted_prefix(terms):
+        prefix_rows.append(len(terms[0]))
+        return prefix(terms)
+
+    def counted_product(left, right):
+        product_rows.append(np.size(left))
+        return product(left, right)
+
+    monkeypatch.setattr(validation, "_ordinary_prefix_parts", counted_prefix)
+    monkeypatch.setattr(validation, "_two_product", counted_product)
+    validation._weighted_pair_concordance(np.arange(size), weights, np.frexp(target))
+    assert prefix_rows == [size]
+    assert product_rows and set(product_rows) == {np.count_nonzero(target)}
+
+
+@pytest.mark.parametrize("with_exposure", [False, True])
+def test_total_only_reductions_skip_exact_zero_operands(monkeypatch, with_exposure):
+    import superglm.validation as validation
+
+    values = np.zeros(128)
+    values[[1, 20, 100]] = [0.5, 1.0, 2.0]
+    weights = np.ones_like(values)
+    exposure = np.ones_like(values) if with_exposure else None
+    if with_exposure:
+        exposure[20] = 0.0
+    visits = []
+    original = validation._ordinary_product_terms
+
+    def counted(left, right, exposure=None):
+        visits.append(len(left))
+        return original(left, right, exposure)
+
+    monkeypatch.setattr(validation, "_ordinary_product_terms", counted)
+    validation._scaled_product_total(weights, values, exposure=exposure)
+    assert visits == [np.count_nonzero(values) - int(with_exposure)]
+    validation._scaled_product_sums(
+        weights, values, np.arange(1, len(values) + 1), exposure=exposure
+    )
+    assert visits[-1] == len(values)
+
+
+def test_zero_target_rows_keep_their_exact_pair_weight_with_exposure():
+    from fractions import Fraction
+
+    from superglm.validation import _normalized_gini
+
+    y = np.array([0.0, 2.0, 0.0, 1.0, 0.0, 0.0])
+    scores = np.array([3.0, 0.0, 3.0, 1.0, 0.0, 4.0])
+    weights = np.array([1.0, 0.75, 2.0, 1.5, 0.5, 1.25])
+    exposure = np.array([0.5, 1.0, 0.75, 1.5, 2.0, 1.25])
+
+    def exact_ratio(mass):
+        def pairs(ordering):
+            return sum(
+                mass[i] * mass[j] * (Fraction.from_float(y[j]) - Fraction.from_float(y[i]))
+                for i in range(len(y))
+                for j in range(len(y))
+                if ordering[i] < ordering[j]
+            )
+
+        return float(pairs(scores) / pairs(y))
+
+    simple = list(map(Fraction.from_float, weights))
+    assert _normalized_gini(y, scores, weights) == exact_ratio(simple)
+    mass = [w * Fraction.from_float(e) for w, e in zip(simple, exposure, strict=True)]
+    result = lorenz_curve(y, scores, sample_weight=weights, exposure=exposure)
+    assert result.gini_ratio == exact_ratio(mass)
+
+
+def test_lorenz_reuses_its_totals_and_score_orders_for_gini(monkeypatch):
+    import superglm.validation as validation
+
+    size = 128
+    y = (np.arange(size) % 7).astype(float)
+    scores = np.arange(size, dtype=float)[::-1]
+    exposure = 0.5 + np.arange(size) / size
+    totals, sorts = [], []
+    total, sort = validation._scaled_product_total, np.argsort
+
+    def counted_total(*args, **kwargs):
+        totals.append(1)
+        return total(*args, **kwargs)
+
+    def counted_sort(values, *args, **kwargs):
+        if np.array_equal(values, y) or np.array_equal(values, scores):
+            sorts.append(1)
+        return sort(values, *args, **kwargs)
+
+    monkeypatch.setattr(validation, "_scaled_product_total", counted_total)
+    monkeypatch.setattr(np, "argsort", counted_sort)
+    validation.lorenz_curve(y, scores, exposure=exposure)
+    assert len(totals) == 2
+    assert len(sorts) == 2
+
+
+@pytest.mark.parametrize("nonzero_residual", [False, True])
+def test_ordinary_products_skip_only_an_identically_zero_low_channel(monkeypatch, nonzero_residual):
+    import superglm.validation as validation
+
+    d = 2.0**-30
+    weights = np.ones(3)
+    exposure = np.array([1 - d, 1.0, 0.5])
+    if nonzero_residual:
+        weights[0] = 1 + d
+    calls = []
+    product = validation._two_product
+
+    def counted(*args):
+        calls.append(1)
+        return product(*args)
+
+    monkeypatch.setattr(validation, "_two_product", counted)
+    validation._ordinary_product_terms(weights, np.array([1.0, -1.0, 2.0]), exposure)
+    assert len(calls) == 1 + 2 * int(nonzero_residual)
+
+
+@pytest.mark.parametrize("zero_exposure", [False, True])
+def test_lorenz_reused_work_matches_standalone_gini_with_ties(zero_exposure):
+    import superglm.validation as validation
+
+    y = np.array([1.0, 0.0, 3.0, 2.0, 1.0])
+    scores = np.array([2.0, 1.0, 1.0, 0.0, 2.0])
+    weights = np.array([0.5, 1.5, 1.0, 0.75, 2.0])
+    exposure = np.array([1.25, 0.5, 1.0, 1.5, 0.75])
+    if zero_exposure:
+        exposure[2] = 0.0
+    active = exposure > 0
+    expected = validation._gini_coefficients(
+        y[active], scores[active], weights[active], exposure=exposure[active]
+    )
+    result = validation.lorenz_curve(y, scores, sample_weight=weights, exposure=exposure)
+    assert (result.gini_model, result.gini_perfect, result.gini_ratio) == expected
+
+
+@pytest.mark.parametrize("unit_factor", [0, 1, 2])
+def test_ordinary_product_terms_do_not_multiply_unit_factors(monkeypatch, unit_factor):
+    import superglm.validation as validation
+
+    factors = [np.array([0.75, 1.25, 1.5]), np.array([2.0, -0.5, 0.25]), np.array([0.5, 1.5, 2.0])]
+    factors[unit_factor] = np.ones(3)
+    calls = []
+    original = validation._two_product
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(validation, "_two_product", counted)
+    validation._ordinary_product_terms(*factors)
+    assert len(calls) == 1
+
+
+def test_unit_weight_prefixes_do_not_carry_zero_product_channels(monkeypatch):
+    import superglm.validation as validation
+
+    values = 0.5 + np.arange(16) / 16
+    channels = []
+    prefix = validation._ordinary_prefix_parts
+
+    def counted(terms):
+        channels.append(len(terms))
+        return prefix(terms)
+
+    monkeypatch.setattr(validation, "_ordinary_prefix_parts", counted)
+    validation._scaled_product_sums(np.ones(16), values, np.arange(1, 17))
+    validation._weighted_pair_concordance(
+        np.arange(16), np.ones(16), np.frexp(np.arange(16)), exposure=values
+    )
+    assert channels == [1, 1]
+
+
+@pytest.mark.parametrize("unit_factor", [0, 1, 2])
+def test_unit_factor_bypass_preserves_exact_products_and_readonly_strides(unit_factor):
+    from fractions import Fraction
+
+    from superglm.validation import _ordinary_product_terms
+
+    d = 2.0**-30
+    factors = [
+        np.array([1 + d, -1.0, 0.5]),
+        np.array([1 - d, 1.0, 2.0]),
+        np.array([1 + d, 2.0, -0.5]),
+    ]
+    factors[unit_factor] = np.ones(3)
+    factors = [np.repeat(factor, 2)[::2] for factor in factors]
+    before = [factor.copy() for factor in factors]
+    for factor in factors:
+        factor.flags.writeable = False
+    parts = _ordinary_product_terms(*factors)
+    for row in range(3):
+        expected = Fraction(1)
+        for factor in factors:
+            expected *= Fraction.from_float(factor[row])
+        assert sum(Fraction.from_float(part[row]) for part in parts) == expected
+    for factor, original in zip(factors, before, strict=True):
+        np.testing.assert_array_equal(factor, original)

@@ -114,9 +114,17 @@ def test_caller_preserves_the_same_value_and_error_bound(monkeypatch, without_fm
 
     if without_fma:
         monkeypatch.delattr(math, "fma", raising=False)
-    left = np.array([1e6, 1e6 + 1, 1e-6, -3.0])
-    right = np.array([np.nextafter(1.0, np.inf), -1.0, 3.0, 1e-6])
+    left = np.pad([1e6, 1e6 + 1, 1e-6, -3.0], (0, 252))
+    right = np.pad([np.nextafter(1.0, np.inf), -1.0, 3.0, 1e-6], (0, 252))
+    original, calls = module._dot2_value, []
+
+    def native(x, y):
+        calls.append(len(x))
+        return original(x, y)
+
+    monkeypatch.setattr(module, "_dot2_value", native)
     compiled = module._compensated_dot(left, right)
+    assert calls == [256]
     monkeypatch.setattr(module, "_dot2_value", lambda *_: (0.0, False))
     fallback = module._compensated_dot(left, right)
     # Backend equivalence: the recurrence and the caller's enclosure are unchanged.
@@ -200,10 +208,38 @@ def test_actual_float64_native_dispatch_has_no_fastmath_or_owned_scratch():
     np.testing.assert_array_equal(y, [4.0, 5.0, 6.0])
 
 
+@pytest.mark.parametrize("without_fma", [False, True])
+def test_small_compensated_reductions_do_not_initialize_native_kernels(monkeypatch, without_fma):
+    import math
+
+    from superglm.reml import multi_penalty as module
+
+    if without_fma:
+        monkeypatch.delattr(math, "fma", raising=False)
+
+    def forbidden(*_):
+        pytest.fail("tiny reduction initialized a native kernel")
+
+    monkeypatch.setattr(module, "_dot2_value", forbidden)
+    monkeypatch.setattr(module, "_dot2_selected", forbidden)
+    for left, right in (
+        ([1e16, 1.0, -1e16], [1.0, 1.0, 1.0]),
+        ([1 + 2**-27, -1.0], [1 - 2**-27, 1.0]),
+    ):
+        left, right = np.asarray(left), np.asarray(right)
+        value, bound = module._compensated_dot(left, right)
+        assert abs(Fraction.from_float(value) - _exact_dot(left, right)) <= Fraction.from_float(
+            bound
+        )
+    root = np.tile([1e16, 1.0, -1e16], (3, 1))
+    (action,), (error,) = module._reference_root_actions([root], np.array([4.0]), np.ones((3, 2)))
+    assert np.all(np.abs(action - 2.0) <= error)
+
+
 def test_reference_action_refinement_batches_scalar_validation_work(monkeypatch):
     from superglm.reml import multi_penalty as module
 
-    root = np.tile([1e16, 1.0, -1e16], (8, 1))
+    root = np.tile([1e16, 1.0, -1e16], (32, 1))
     inverse = np.tile([[1.0], [1.0], [1.0]], (1, 4))
     original_dot, original_positive = module._compensated_dot, module._positive_product
     dots, products = [], []
@@ -219,7 +255,7 @@ def test_reference_action_refinement_batches_scalar_validation_work(monkeypatch)
     monkeypatch.setattr(module, "_compensated_dot", dot)
     monkeypatch.setattr(module, "_positive_product", positive)
     module._reference_root_actions([root], np.array([4.0]), inverse)
-    # All 32 normal-range dots need refinement. Validating/bounding each
+    # All 128 normal-range dots need refinement. Validating/bounding each
     # separately recreates the measured million-call complete-fit bottleneck.
     assert len(dots) == 0
     assert len(products) <= 3
@@ -269,9 +305,10 @@ def test_refined_actions_recompute_after_root_weight_and_inverse_changes():
 def test_batched_refinement_routes_only_unsupported_selected_entries_to_scalar(monkeypatch):
     from superglm.reml import multi_penalty as module
 
-    root = np.ones((1, 2))
+    root = np.ones((1, 256))
     tiny = np.nextafter(0.0, 1.0)
-    inverse = np.array([[1.0, 1.0], [tiny, -1.0]])
+    inverse = np.zeros((256, 2))
+    inverse[:2] = [[1.0, 1.0], [tiny, -1.0]]
     original, fallback_inputs = module._compensated_dot, []
 
     def dot(left, right):
@@ -280,7 +317,7 @@ def test_batched_refinement_routes_only_unsupported_selected_entries_to_scalar(m
 
     monkeypatch.setattr(module, "_compensated_dot", dot)
     module._reference_root_actions([root], np.array([4.0]), inverse)
-    assert fallback_inputs == [(1.0, tiny)]
+    assert fallback_inputs == [tuple(inverse[:, 0])]
 
 
 @pytest.mark.parametrize("strided", [False, True])
@@ -288,7 +325,7 @@ def test_batched_refinement_routes_only_unsupported_selected_entries_to_scalar(m
 def test_refined_root_actions_enclose_exact_weighted_cancellation(strided, scale_exponent):
     from superglm.reml import multi_penalty as module
 
-    root = np.tile([1e16, 1.0, -1e16], (3, 1))
+    root = np.tile([1e16, 1.0, -1e16], (32, 1))
     inverse = np.array([[1.0, 1.0, 2.0], [1.0, -1.0, 3.0], [1.0, 1.0, 2.0]])
     if strided:
         root = np.repeat(np.repeat(root, 2, axis=0), 2, axis=1)[::2, ::2]

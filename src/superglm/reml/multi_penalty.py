@@ -31,6 +31,9 @@ _EPS = np.finfo(float).eps
 _LD = np.float64
 _U_LD = np.finfo(_LD).eps / 2
 _TINY_LD = np.nextafter(_LD(0), _LD(1))
+# A work threshold, not an accuracy threshold: tiny reductions reuse the
+# scalar recurrence without loading Numba's native runtime on a small fit.
+_DOT2_NATIVE_MIN_WORK = 256
 
 
 @dataclass(frozen=True)
@@ -136,8 +139,8 @@ def _gamma(count: int, unit: float = _EPS / 2) -> float:
 
 
 def _upper(value: NDArray | float) -> NDArray:
-    result = _finite_double(np.maximum(value, 0), "arithmetic error bound")
     with np.errstate(over="ignore"):
+        result = np.asarray(np.maximum(value, 0), dtype=np.float64)
         result = np.nextafter(result, np.inf)
     return _finite_double(result, "arithmetic error bound")
 
@@ -172,39 +175,26 @@ def _positive_product(left: NDArray, right: NDArray) -> NDArray:
             if maximum_left == 0 or maximum_right == 0:
                 return np.zeros(shape)
             maximum_exponent = (
-                int(np.frexp(maximum_left)[1])
-                + int(np.frexp(maximum_right)[1])
+                math.frexp(float(maximum_left))[1]
+                + math.frexp(float(maximum_right))[1]
                 + (count - 1).bit_length()
             )
             # Every exact dot is strictly below 2**maximum_exponent.
             # Exponents avoid forming a product below the subnormal range.
             if maximum_exponent <= np.finfo(float).minexp - np.finfo(float).nmant:
                 return np.full(shape, np.nextafter(0.0, 1.0))
-        with np.errstate(over="ignore", under="ignore"):
-            a, b = np.asarray(left, dtype=float), np.asarray(right, dtype=float)
-        if np.all(np.isfinite(a)) and np.all(np.isfinite(b)) and np.all(a >= 0) and np.all(b >= 0):
-            a_nonzero, b_nonzero = a[a > 0], b[b > 0]
-            if (
-                a_nonzero.size
-                and b_nonzero.size
-                and np.min(a_nonzero) >= np.finfo(float).tiny
-                and np.min(b_nonzero) >= np.finfo(float).tiny
-            ):
+            # Both operands are already finite, nonnegative binary64.
+            # Reuse their maxima instead of rescanning/casting them.
+            a_nonzero, b_nonzero = left[left > 0], right[right > 0]
+            minimum_left, minimum_right = np.min(a_nonzero), np.min(b_nonzero)
+            if minimum_left >= np.finfo(float).tiny and minimum_right >= np.finfo(float).tiny:
                 minimum_exponent = (
-                    math.frexp(float(np.min(a_nonzero)))[1]
-                    + math.frexp(float(np.min(b_nonzero)))[1]
-                )
-                maximum_exponent = (
-                    math.frexp(float(np.max(a_nonzero)))[1]
-                    + math.frexp(float(np.max(b_nonzero)))[1]
+                    math.frexp(float(minimum_left))[1] + math.frexp(float(minimum_right))[1]
                 )
                 # frexp mantissas are in [1/2, 1). These integer tests keep
                 # every nonzero product normal and the positive sum finite.
-                if (
-                    minimum_exponent >= -1020
-                    and maximum_exponent + (count - 1).bit_length() <= 1021
-                ):
-                    return _positive_native_product(a, b)
+                if minimum_exponent >= -1020 and maximum_exponent <= 1021:
+                    return _positive_native_product(left, right)
     with np.errstate(over="ignore", invalid="ignore"):
         value = left @ right
     value = (value + (2 * count + 1) * _TINY_LD) / (1 - _gamma(2 * count + 1, _U_LD))
@@ -487,7 +477,7 @@ def _reference_root_actions(
         error += _positive_product(scaling_underflow, np.abs(J))
         error += np.abs(product_value - action.astype(_LD)) + (2 * root.shape[1] + 4) * _TINY_LD
         selected = np.argwhere(error > dot_budget) if _refine else np.empty((0, 2), dtype=int)
-        if len(selected):
+        if len(selected) * root.shape[1] >= _DOT2_NATIVE_MIN_WORK:
             try:
                 # The scalar Dot2 enclosure needs |root| @ |J|, not the
                 # rounded weighted H magnitude. Build it once per component.
@@ -574,7 +564,7 @@ def _compensated_dot(left: NDArray, right: NDArray) -> tuple[float, float]:
     x = _finite_double(left, "compensated operand")
     y = _finite_double(right, "compensated operand")
     magnitude = float(_positive_product(np.abs(x)[None, :], np.abs(y)[:, None])[0, 0])
-    value, compiled = _dot2_value(x, y)
+    value, compiled = _dot2_value(x, y) if len(x) >= _DOT2_NATIVE_MIN_WORK else (0.0, False)
     if not compiled:
         product = float(x[0]) * float(y[0])
         correction = _two_product_error(float(x[0]), float(y[0]), product)
