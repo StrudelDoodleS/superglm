@@ -497,6 +497,21 @@ def _assessment_retained_kkt_ratio(result: DenseSolverResult) -> float:
     return score_norm / (1.0 + abs(float(optimizing)))
 
 
+def _assessment_unchanged_failed_cap(
+    cap: DenseSolverResult, source: DenseSolverResult | None
+) -> bool:
+    """An unchanged stalled refit can seed a face, not certify a finite cap."""
+    return bool(
+        source is not None
+        and source.converged
+        and not cap.converged
+        and cap.convergence_reason == "line_search_failed"
+        and cap.iterations == 0
+        and not cap.history
+        and np.array_equal(cap.coefficients, source.coefficients)
+    )
+
+
 def _assessment_is_numerically_stationary(
     result: DenseSolverResult,
     tolerance: float,

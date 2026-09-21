@@ -25,6 +25,7 @@ from superglm.distributional.result import (
     _assessment_is_numerically_stationary,
     _endpoint_revalidation_projection_bound,
 )
+from superglm.distributional.results.solver import _assessment_unchanged_failed_cap
 from superglm.distributional.smoothing.authority import (
     _endpoint_candidate_refit_bound,
     _endpoint_retained_rank,
@@ -138,6 +139,7 @@ def _check_face_direction(
     initial: NDArray,
     endpoint_initial: NDArray | None = None,
     allow_nonstationary_cap: bool = False,
+    source_fit: DenseSolverResult | None = None,
     solver_config: DenseSolverConfig,
     chunk_size: ChunkSize | None,
     phase_recorder: FitPhaseRecorder | None,
@@ -173,9 +175,14 @@ def _check_face_direction(
         phase_recorder=phase_recorder,
         _reuse_session=_reuse_session,
     )
-    if not cap_fit.converged:
+    # For a sole cap, authority comes from the strict exact-face fit and its
+    # boundary derivative. A stalled unchanged cap is only a warm start;
+    # preserve its failure and compare promotion with the converged source.
+    if not cap_fit.converged and not (
+        allow_nonstationary_cap and _assessment_unchanged_failed_cap(cap_fit, source_fit)
+    ):
         return refused("cap_not_converged", cap_fit)
-    cap_stationary = _assessment_is_numerically_stationary(
+    cap_stationary = cap_fit.converged and _assessment_is_numerically_stationary(
         cap_fit,
         authority_config.tolerance,
     )
@@ -577,6 +584,7 @@ def _try_exact_face(
         endpoint_face=face,
         initial=current_fit.coefficients,
         allow_nonstationary_cap=sole_capped_component,
+        source_fit=current_fit,
         solver_config=solver_config,
         chunk_size=chunk_size,
         phase_recorder=phase_recorder,
@@ -593,7 +601,7 @@ def _try_exact_face(
     cap_ceiling = check.cap_objective + efs_config.objective_tolerance * (
         1.0 + abs(check.cap_objective)
     )
-    cap_stationary = _assessment_is_numerically_stationary(
+    cap_stationary = check.cap_fit.converged and _assessment_is_numerically_stationary(
         check.cap_fit,
         check.coefficient_tolerance,
     )
@@ -664,6 +672,7 @@ def _recheck_exact_face(
                 initial=canonical_fit.coefficients,
                 endpoint_initial=canonical_fit.coefficients,
                 allow_nonstationary_cap=sole_capped_component,
+                source_fit=canonical_fit,
                 solver_config=solver_config,
                 chunk_size=chunk_size,
                 phase_recorder=phase_recorder,
@@ -681,7 +690,7 @@ def _recheck_exact_face(
             cap_ceiling = check.cap_objective + efs_config.objective_tolerance * (
                 1.0 + abs(check.cap_objective)
             )
-            cap_stationary = _assessment_is_numerically_stationary(
+            cap_stationary = check.cap_fit.converged and _assessment_is_numerically_stationary(
                 check.cap_fit,
                 check.coefficient_tolerance,
             )
