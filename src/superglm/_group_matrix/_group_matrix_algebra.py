@@ -84,14 +84,15 @@ def _cross_factors_in_range(*operands: NDArray, cache: _BlockWeightCache | None 
     overbounds reduction lengths in either association. Non-cancelling terms
     then stay normal; cancellation still follows ordinary rounded arithmetic.
     """
+    weight_range = getattr(cache, "weight_range", None)
     lower = upper = 0
     for operand in operands:
         if operand.dtype != np.float64:
             return False
         values = operand if operand.ndim == 2 else operand[:, None]
         lo, hi = (
-            cache.weight_range(operand)[1]
-            if cache is not None and operand.ndim == 1
+            weight_range(operand)[1]
+            if weight_range is not None and operand.ndim == 1
             else _operand_exponent_bounds(values)
         )
         lower += min(0, lo)
@@ -107,7 +108,7 @@ def _cross_support(
     Mixed routes pass their already-weighted aggregate. Tensor/histogram
     routes pass W and all pending factors; declined inputs keep raw association.
     """
-    if not _cross_factors_in_range(gm.B_unique, gm.R_inv, *partners):
+    if not _cross_factors_in_range(gm.B_unique, gm.R_inv, *partners, cache=cache):
         return gm.B_unique, gm.R_inv
     # Centered tensor assembly supplies a weight-grid-only cache.
     project = getattr(cache, "solver_support", None)
@@ -692,6 +693,7 @@ def _tensor_channel_workspace_bytes(
     # live-index invalidation can require a fresh permutation in this call.
     if raw and cache is not None:
         base += 8 * n  # A new permutation stays cached through stage two.
+    # The 8 * cells term reserves the counting-sort fill array during a rebuild.
     stage1 = (
         max(8 * cells, (2 * index_bytes + (8 if cache is None else 0)) * n + 8 * width)
         if raw

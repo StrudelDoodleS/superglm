@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
-from superglm.group_matrix import DiscretizedTensorGroupMatrix
+from superglm.group_matrix import DiscretizedSSPGroupMatrix, DiscretizedTensorGroupMatrix
 from superglm.types import TensorRawChannels
 
 
@@ -437,6 +437,8 @@ def test_channel_invariant_scans_run_once_per_assembly(monkeypatch, cached):
     _grid, second, _rng = _tensor_pair(300, (4, 4, 2, 2, 3), (9, 11, 2, 2, 3), seed=5)
     second.tensor_id = 3
     weights = rng.normal(size=300)
+    own_margin = DiscretizedSSPGroupMatrix(grid.B1_unique_t, np.eye(2), grid.idx1)
+    main = DiscretizedSSPGroupMatrix(rng.normal(size=(5, 2)), np.eye(2), rng.integers(5, size=300))
     calls = {"legacy": 0, "bounds": 0, "cells": 0}
     for name, key in (
         ("_tensor_operand_in_reassociation_range", "legacy"),
@@ -459,9 +461,15 @@ def test_channel_invariant_scans_run_once_per_assembly(monkeypatch, cached):
     cache = algebra._BlockWeightCache() if cached else None
     for left, right in ((grid, first), (grid, second), (grid, first), (second, first)):
         algebra._cross_gram(left, right, weights, cache=cache)
+    profile = {}
+    for left, right in ((grid, main), (grid, own_margin), (main, own_margin)):
+        algebra._cross_gram(left, right, weights, cache=cache, profile=profile)
+    assert "block_cross_tensor_main_s" in profile
+    assert "block_cross_tensor_own_margin_s" in profile
+    assert profile["block_cross_disc_disc_hist_calls"] == 1
     assert calls == {
         "legacy": 1 if cached else 4,
-        "bounds": 1 if cached else 4,
+        "bounds": 1 if cached else 8,
         "cells": 2 if cached else 4,
     }
 
