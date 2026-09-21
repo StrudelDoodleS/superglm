@@ -528,10 +528,14 @@ head `9609b0e7`.
 | Poisson, ten pairs | 4/4 | 16.5688 | — | 17.3512 | 17.0831 |
 
 Tensor medians are 7.1% and 1.5% lower than the reviewed head at 1/1 and 4/4,
-but remain 11.0% and 3.1% above pre-Gram. Samples overlap substantially: at 1/1,
-the reviewed-head tensor runs span 17.15–21.69 seconds and candidate runs span
-17.80–18.78 seconds. These are small samples on one host, not guaranteed gains
-or performance acceptance. No fresh master control was run; the earlier
+but remain 11.0% and 3.1% above pre-Gram. Candidate and reviewed-head samples
+overlap substantially: at 1/1, the reviewed-head tensor runs span 17.15–21.69
+seconds and candidate runs span 17.80–18.78 seconds. Against pre-Gram at 1/1,
+the ranges are disjoint: the candidate's fastest run is 17.802 seconds, above
+pre-Gram's slowest at 17.707 seconds. Those samples support the remaining
+regression more strongly than the gain against the reviewed head. These are
+still small samples on one host, not guaranteed gains or performance acceptance.
+No fresh master control was run; the earlier
 3.43x/2.78x master comparisons remain historical and are not recomputed using
 these new candidate times.
 
@@ -578,3 +582,78 @@ receipts. Raw receipts and arrays remain in the ignored `pr406-rereview-fits/`
 artifact directory. Earlier evidence is unchanged. The PR remains a draft:
 these results address the review findings but do not accept the remaining
 performance cost or replace hosted checks on the pushed head.
+
+## Third review response
+
+Hosted checks passed on `db0e3ac8`. Codex found no major issue; Claude confirmed
+the repairs and withdrew N2, but identified missed weight-scan reuse in
+`_cross_support`. Source commit `9e67e2c6aca0fd90d7c24118701cf30822f512e9`
+forwards the existing assembly cache there. Optional lookup of `weight_range`
+preserves the centered weight-grid-only cache. The change adds five production
+lines and removes three, including the requested CSR-fill comment. It does not
+change arithmetic, range decisions, cache lifetime, public API or dependencies.
+The whole source diff is now +1,271/-272 across 11 files, net 999 against master.
+
+The extended scan-count test covers tensor/main-effect, tensor/own-margin and
+discrete/discrete crosses as well as tensor pairs. Before the repair, it found
+five cached weight-exponent scans against an expected one; afterward it finds
+one, while the uncached case finds eight. Existing exceptional-range and
+centered-cache tests also pass. Independent read-only review found no issue in
+the narrow patch. Completed verification on this source has 15,266 full-suite
+passes, 85 reported skips and no failures or errors, including all 84 required
+real-data tests. Python 3.12 and 3.14 each pass the affected 581-test selection.
+The focused 162 tests, end-to-end script, Ruff, formatting, lock and dependency
+checks pass. Type diagnostics remain 846 against the unchanged 903 budget.
+
+All 24 benchmark workers completed and converged, with stable source hashes
+and verified Gram dispatch/thread limits. Tensor fits use three rotated serial
+repetitions per source and setting; Gamma and ordinary Poisson are single
+checks, and two tensor profiles run separately. Timing includes construction
+and the complete fit after the same warmup. No numerical tests ran alongside
+the campaign. The queued completion message was checked against the saved exit
+status and receipts, not treated as proof by itself.
+
+| 100,000-row ten-pair tensor | Pre-Gram `97ba3b00` | Reviewed `db0e3ac8` | Candidate `9e67e2c6` |
+| --- | ---: | ---: | ---: |
+| BLAS/Numba 1/1, median seconds | 19.4026 | 19.6698 | 18.6137 |
+| BLAS/Numba 4/4, median seconds | 16.7232 | 19.1295 | 16.5066 |
+
+Candidate medians are 5.4%/13.7% below the reviewed head and 4.1%/1.3% below
+pre-Gram in this campaign. All timing ranges overlap. Between-campaign movement
+is substantial, so these samples do not establish performance parity, erase
+the previous measured costs or attribute the full median changes to this fix.
+The earlier one-thread disjoint-range result remains in the report with its
+corrected caveat. No fresh master reference or general speed claim is made.
+
+The fresh profiles identify the removed work more narrowly. Range checks
+called by `_cross_support` take 0.3979 seconds on the reviewed head and 0.0986
+seconds on the candidate, across 1,890 calls each. Total range-check time falls
+from 0.4924 to 0.1952 seconds. Channel-side checking remains about 0.095 seconds;
+the prior review's entire range-check total was not removable weight scanning.
+Weight-cache lookups rise from 1,890 to 3,780 as the previously uncached calls
+reuse it. Raw-channel contractions remain 945 and model cell-order validations
+remain 189. Nested cumulative times must not be added together.
+
+Every one of the nine matched candidate/reviewed receipt pairs has identical
+saved predictions, coefficients, objective, EDF and outer-iteration count.
+Tensor predictions differ from pre-Gram by at most 8.9e-13 in absolute value.
+Candidate tensor median peak RSS is 948.6/956.6 MiB versus 949.0/956.3 MiB on
+the reviewed head. These are process high-water readings, not a live-memory
+bound. Candidate CPU medians are 18.58/75.39 seconds. Single Gamma fits take
+0.2403/0.2307 seconds on reviewed/candidate; ordinary Poisson takes
+1.1727/1.2734 seconds. The latter is off the changed route and neither single
+pair establishes a speed effect. All raw samples remain in the export.
+
+Claude L1 remains a nonblocking follow-up: conditional buffer retention across
+legacy routes needs a joint workspace bound and a representative interleaved
+fit. The current release preserves the reproduced no-overlap contract. L2 is
+a deferred test-only characterization of projected diagonal/raw cross within
+one complete assembly. Neither is claimed fixed; older F2/F3/F6 remain deferred.
+The PR stays draft with performance acceptance open.
+
+[Third-review measurements](2026-09-21-pr406-third-review-measurements.json)
+contain source identities, all individual samples, thread libraries, numerical
+comparisons, profile caller costs and hashes for all 24 receipts. Raw receipts
+and arrays remain in the ignored `pr406-third-review-fits/` directory. Candidate
+source-tree SHA-256 is
+`34e317514c44bd597bcd6df77c10fc41fd4d1b69326cefb97e1b2ede04dc5d0f`.
