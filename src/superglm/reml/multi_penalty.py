@@ -477,13 +477,19 @@ def _reference_root_actions(
         error += _positive_product(scaling_underflow, np.abs(J))
         error += np.abs(product_value - action.astype(_LD)) + (2 * root.shape[1] + 4) * _TINY_LD
         selected = np.argwhere(error > dot_budget) if _refine else np.empty((0, 2), dtype=int)
-        if len(selected) * root.shape[1] >= _DOT2_NATIVE_MIN_WORK:
+        if len(selected):
             try:
                 # The scalar Dot2 enclosure needs |root| @ |J|, not the
                 # rounded weighted H magnitude. Build it once per component.
                 # All reuse ends here: a changed root, weight or J recomputes.
                 dot_magnitude = _positive_product(np.abs(root), np.abs(J))
-                dots, success = _dot2_selected(np.asarray(root, dtype=_LD), J, selected)
+                if len(selected) * root.shape[1] >= _DOT2_NATIVE_MIN_WORK:
+                    dots, success = _dot2_selected(np.asarray(root, dtype=_LD), J, selected)
+                else:
+                    # Keep shared enclosures for tiny batches without paying
+                    # native-kernel startup or revalidating every scalar dot.
+                    dots = np.array([_python_dot2_value(root[r], J[:, c]) for r, c in selected])
+                    success = np.isfinite(dots)
                 row, column = selected.T
                 unit, inner = _LD(_EPS) / 2, root.shape[1]
                 dot_error = (
@@ -553,6 +559,24 @@ def _two_product_error(left: float, right: float, product: float) -> float:
     )
 
 
+def _python_dot2_value(x: NDArray, y: NDArray) -> float:
+    """The value recurrence shared by scalar and tiny-batch Dot2 refinement."""
+    if not len(x):
+        return 0.0
+    product = float(x[0]) * float(y[0])
+    correction = _two_product_error(float(x[0]), float(y[0]), product)
+    for a, b in zip(x[1:], y[1:], strict=True):
+        a, b = float(a), float(b)
+        term = a * b
+        term_error = _two_product_error(a, b, term)
+        updated = product + term
+        recovered = updated - product
+        addition_error = (product - (updated - recovered)) + (term - recovered)
+        correction += addition_error + term_error
+        product = updated
+    return product + correction
+
+
 def _compensated_dot(left: NDArray, right: NDArray) -> tuple[float, float]:
     """Dot2 with its computed-value enclosure, not a rounding heuristic.
 
@@ -566,18 +590,7 @@ def _compensated_dot(left: NDArray, right: NDArray) -> tuple[float, float]:
     magnitude = float(_positive_product(np.abs(x)[None, :], np.abs(y)[:, None])[0, 0])
     value, compiled = _dot2_value(x, y) if len(x) >= _DOT2_NATIVE_MIN_WORK else (0.0, False)
     if not compiled:
-        product = float(x[0]) * float(y[0])
-        correction = _two_product_error(float(x[0]), float(y[0]), product)
-        for a, b in zip(x[1:], y[1:], strict=True):
-            a, b = float(a), float(b)
-            term = a * b
-            term_error = _two_product_error(a, b, term)
-            updated = product + term
-            recovered = updated - product
-            addition_error = (product - (updated - recovered)) + (term - recovered)
-            correction += addition_error + term_error
-            product = updated
-        value = product + correction
+        value = _python_dot2_value(x, y)
     if not math.isfinite(value):
         raise PenaltyNumericalError("compensated dot is not representable")
     unit = _LD(_EPS) / 2

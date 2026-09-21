@@ -261,6 +261,26 @@ def test_reference_action_refinement_batches_scalar_validation_work(monkeypatch)
     assert len(products) <= 3
 
 
+@pytest.mark.parametrize("without_fma", [False, True])
+def test_small_action_batch_keeps_shared_bounds_without_native_startup(monkeypatch, without_fma):
+    import math
+
+    from superglm.reml import multi_penalty as module
+
+    if without_fma:
+        monkeypatch.delattr(math, "fma", raising=False)
+
+    def forbidden(*_):
+        pytest.fail("small batch dispatched native work or repeated scalar validation")
+
+    for name in ("_dot2_selected", "_dot2_value", "_compensated_dot"):
+        monkeypatch.setattr(module, name, forbidden)
+    root = np.tile([1e16, 1.0, -1e16], (3, 1))
+    (action,), (error,) = module._reference_root_actions([root], np.array([4.0]), np.ones((3, 2)))
+    np.testing.assert_array_equal(action, np.full((3, 2), 2.0))
+    assert np.all(error >= 0)
+
+
 def test_selected_dot2_dispatch_preserves_the_scalar_recurrence_and_status():
     from numba.core.registry import CPUDispatcher
 
