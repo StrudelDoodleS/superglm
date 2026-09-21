@@ -115,3 +115,28 @@ def test_support_does_not_silently_drop_a_column_when_balancing_underflows():
         support._penalty_support_from_roots(
             [root], resolution_limited=[False], input_error_bounds=[np.zeros_like(root)]
         )
+
+
+@pytest.mark.parametrize("width", [2, 4])
+def test_source_root_support_does_not_materialize_overflowing_frobenius_scale(width):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+
+    magnitude, weight = 1e308, 1e-308
+    root = magnitude * np.eye(width)
+    selected = support._penalty_support_from_roots(
+        [root], resolution_limited=[False], input_error_bounds=[np.zeros_like(root)]
+    )
+    result = multi._evaluate_penalty_support(selected, np.array([weight]))
+    assert result.rank == width
+    assert np.all(np.isfinite(result.E_sqrt))
+    assert result.E_sqrt.dtype == np.float64
+    exact_inverse = 1 / (Fraction.from_float(magnitude) ** 2 * Fraction.from_float(weight))
+    expected = np.eye(width) * float(exact_inverse)
+    assert np.all(np.abs(result.S_pinv_plus - expected) <= result._certificate.inverse_error)
+    np.testing.assert_array_equal(result._gradient, [width])
+    with localcontext() as context:
+        context.prec = 80
+        penalty = Decimal.from_float(magnitude) ** 2 * Decimal.from_float(weight)
+        exact_logdet = width * penalty.ln()
+    assert abs(result.logdet_s_plus - float(exact_logdet)) <= result._certificate.logdet_error

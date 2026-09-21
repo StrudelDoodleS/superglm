@@ -108,17 +108,6 @@ class LossRatioChartResult:
 # ── Private helpers ──────────────────────────────────────────────
 
 
-def _scaled_products(*values: NDArray) -> tuple[NDArray, NDArray]:
-    """Binary64 product mantissas with integer exponents, without extra bits."""
-    mantissa = np.ones_like(np.asarray(values[0], dtype=np.float64))
-    exponent = np.zeros_like(mantissa, dtype=np.int64)
-    for value in values:
-        part, power = np.frexp(np.asarray(value, dtype=np.float64))
-        mantissa *= part
-        exponent += power
-    return mantissa, exponent
-
-
 def _scaled_sum(mantissa: NDArray, exponent: NDArray) -> tuple[float, int]:
     """Sum range-scaled terms, retaining cancellation before lower exponents.
 
@@ -157,16 +146,97 @@ def _scaled_ratio(numerator, denominator, name: str) -> float:
     return result
 
 
+def _add_scaled_partial(partials: list[tuple[float, int]], value: float, exponent: int) -> None:
+    """Accumulate one prefix term with error-free, range-scaled FastTwoSum.
+
+    Nonoverlapping scalar partials retain cancellation across the binary64
+    exponent range. Their count is bounded by that range, not the row count;
+    this is local reduction state, not an alternative array arithmetic type.
+    """
+    value, shift = math.frexp(float(value))
+    if value == 0:
+        return
+    exponent = int(exponent) + shift
+    retained = []
+    for previous, power in partials:
+        if value == 0:
+            value, exponent = previous, power
+            continue
+        if (exponent, abs(value)) < (power, abs(previous)):
+            value, previous, exponent, power = previous, value, power, exponent
+        if exponent - power > 53:
+            # No overlapping significand bits. Keep the small term in its
+            # own units instead of underflowing it during alignment.
+            retained.append((previous, power))
+            continue
+        small = math.ldexp(previous, power - exponent)
+        total = value + small
+        residual = small - (total - value)
+        if residual:
+            part, shift = math.frexp(residual)
+            retained.append((part, exponent + shift))
+        value, shift = math.frexp(total)
+        exponent += shift
+    if value:
+        retained.append((value, exponent))
+    partials[:] = retained
+
+
+def _sum_scaled_partials(partials: list[tuple[float, int]]) -> tuple[float, int]:
+    return _scaled_sum(
+        np.array([part for part, _ in partials]),
+        np.array([power for _, power in partials], dtype=np.int64),
+    )
+
+
+def _scaled_product_sums(left: NDArray, right: NDArray, ends: NDArray):
+    """Weighted sums at selected prefix ends, retaining each product residual.
+
+    Dekker's TwoProduct is exact on frexp mantissas: their products, splitter
+    products and nonzero residuals are all normal binary64 values. Feed both
+    scalar terms into the local prefix accumulator before cancellation; no
+    high/low operand arrays or widened array arithmetic are constructed.
+    """
+    lm, le = np.frexp(left)
+    rm, re = np.frexp(right)
+    sums, powers = np.empty(len(ends)), np.empty(len(ends), dtype=np.int64)
+    partials = []
+    start = 0
+    splitter = float(2**27 + 1)
+    for index, end in enumerate(ends):
+        for row in range(start, end):
+            a, b = float(lm[row]), float(rm[row])
+            product = a * b
+            sa, sb = splitter * a, splitter * b
+            ah, bh = sa - (sa - a), sb - (sb - b)
+            al, bl = a - ah, b - bh
+            residual = al * bl - (((product - ah * bh) - al * bh) - ah * bl)
+            power = int(le[row]) + int(re[row])
+            _add_scaled_partial(partials, product, power)
+            _add_scaled_partial(partials, residual, power)
+        sums[index], powers[index] = _sum_scaled_partials(partials)
+        start = end
+    return sums, powers
+
+
+def _scaled_product_total(left: NDArray, right: NDArray) -> tuple[float, int]:
+    sums, powers = _scaled_product_sums(left, right, np.array([len(left)]))
+    return float(sums[0]), int(powers[0])
+
+
 def _scaled_prefix(mantissa: NDArray, exponent: NDArray) -> tuple[NDArray, NDArray]:
     if not len(mantissa):
         return np.empty(0), np.empty(0, dtype=np.int64)
-    top = int(np.max(exponent[mantissa != 0], initial=0))
+    nonzero = mantissa != 0
+    top = int(np.max(exponent[nonzero])) if np.any(nonzero) else 0
     normalized = np.ldexp(mantissa, exponent - top)
-    if np.any((mantissa != 0) & (np.abs(normalized) < np.finfo(float).tiny)):
-        # Rare full-range inputs need separate prefix exponents. Ordinary
-        # charts retain the linear-time compensated cumulative reduction.
-        pairs = [_scaled_sum(mantissa[:i], exponent[:i]) for i in range(1, len(mantissa) + 1)]
-        return np.array([p[0] for p in pairs]), np.array([p[1] for p in pairs])
+    if np.any(nonzero & (np.abs(normalized) < np.finfo(float).tiny)):
+        partials = []
+        sums, powers = np.empty(len(mantissa)), np.empty(len(mantissa), dtype=np.int64)
+        for i, (value, power) in enumerate(zip(mantissa, exponent, strict=True)):
+            _add_scaled_partial(partials, value, power)
+            sums[i], powers[i] = _sum_scaled_partials(partials)
+        return sums, powers
     sums, powers = np.frexp(_compensated_cumsum(normalized))
     return sums, powers + top
 
@@ -267,16 +337,25 @@ def _weighted_mean(values: NDArray, weights: NDArray, name: str) -> float:
     total_weight = math.fsum(np.asarray(weights, dtype=float).tolist())
     if total_weight <= 0 or not np.isfinite(total_weight):
         raise ValueError(f"{name} weights must have a finite positive total")
-    numerator = _scaled_sum(*_scaled_products(values, weights))
-    result = _scaled_ratio(numerator, math.frexp(total_weight), f"{name} weighted mean")
-    return float(np.clip(result, np.min(values), np.max(values)))
+    numerator = _scaled_product_total(values, weights)
+    denominator, power = math.frexp(total_weight)
+    mean, shift = math.frexp(numerator[0] / denominator)
+    exponent = numerator[1] - power + shift
+    minimum, maximum = float(np.min(values)), float(np.max(values))
+    # Compare the hull in the mean's units before reconstructing it. Scaling
+    # all inputs to their largest exponent instead would erase tiny means.
+    with np.errstate(over="ignore", under="ignore"):
+        lower, upper = np.ldexp([minimum, maximum], -exponent)
+    if mean <= lower:
+        return minimum
+    if mean >= upper:
+        return maximum
+    return _scaled_ratio((mean, exponent), (1.0, 0), f"{name} weighted mean")
 
 
 def _weighted_total(values: NDArray, weights: NDArray, name: str) -> float:
     """Refuse an overflowing result after range-safe products and cancellation."""
-    return _scaled_ratio(
-        _scaled_sum(*_scaled_products(values, weights)), (1.0, 0), f"{name} weighted total"
-    )
+    return _scaled_ratio(_scaled_product_total(values, weights), (1.0, 0), f"{name} weighted total")
 
 
 def _finite_ratio(numerator: float, denominator: float, name: str) -> float:
@@ -343,7 +422,7 @@ def _float64_block_sums(values: NDArray, block_starts: NDArray) -> NDArray:
 def _lorenz_cumulative_by_score(
     scores: NDArray,
     exposures: NDArray,
-    losses: tuple[NDArray, NDArray],
+    losses: NDArray,
     *,
     total_exp: float,
     total_loss: tuple[float, int],
@@ -353,8 +432,9 @@ def _lorenz_cumulative_by_score(
     _, starts = np.unique(scores[order], return_index=True)
     exp_blocks = _float64_block_sums(exposures[order], starts)
     cumulative_exposure = _compensated_cumsum(exp_blocks) / total_exp
-    loss_blocks = _scaled_blocks(losses[0][order], losses[1][order], starts)
-    cumulative_loss = _scaled_prefix(*loss_blocks)
+    cumulative_loss = _scaled_product_sums(
+        exposures[order], losses[order], np.append(starts[1:], len(order))
+    )
     loss_shares = np.array(
         [
             _scaled_ratio(pair, total_loss, "Lorenz cumulative shares")
@@ -392,7 +472,7 @@ def _gini_coefficients(y_obs, y_pred, sample_weight=None) -> tuple[float, float,
     if y_obs.size == 0 or not np.any(weights > 0):
         return 0.0, 0.0, 0.0
     total_weight = _scaled_sum(*np.frexp(weights))
-    total_loss = _scaled_sum(*_scaled_products(weights, y_obs))
+    total_loss = _scaled_product_total(weights, y_obs)
     if total_loss[0] <= 0:
         return 0.0, 0.0, 0.0
     # Center before multiplying so almost-constant targets retain their
@@ -773,8 +853,8 @@ def lorenz_curve(
     exp = vectors.get("exposure", np.ones(n, dtype=float))
 
     exposures = np.asarray(w, dtype=float) * np.asarray(exp, dtype=float)
-    losses = _scaled_products(exposures, y_obs)
-    total_loss = _scaled_sum(*losses)
+    losses = y_obs
+    total_loss = _scaled_product_total(exposures, losses)
     total_exp = math.fsum(exposures.tolist())
 
     if total_loss[0] <= 0 or total_exp <= 0:

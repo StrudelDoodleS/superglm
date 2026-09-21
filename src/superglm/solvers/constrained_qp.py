@@ -516,7 +516,16 @@ def _complementarity_certificate(
     # before the energy products, so |x| cannot overflow those reductions.
     x_scale = max(float(np.max(np.abs(x), initial=0.0)), np.finfo(float).tiny)
     x = x / x_scale
-    bounds = (np.asarray(active_bounds, dtype=float) / x_scale) / row_scale
+    bound_mantissa, bound_exponent = np.frexp(np.asarray(active_bounds, dtype=float))
+    x_mantissa, x_exponent = np.frexp(x_scale)
+    row_mantissa, row_exponent = np.frexp(row_scale)
+    # Both divisors are applied before restoring range. Sequential physical
+    # divisions can overflow even when their final dimensionless bound is small.
+    with np.errstate(over="ignore", under="ignore"):
+        bounds = np.ldexp(
+            bound_mantissa / (x_mantissa * row_mantissa),
+            bound_exponent - x_exponent - row_exponent,
+        )
     row_action = np.abs(rows) @ np.abs(x) + np.abs(bounds)
     energy = max(
         np.abs(x) @ (h_action / objective_scale),

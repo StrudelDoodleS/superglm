@@ -971,3 +971,88 @@ def test_lorenz_rejects_shares_or_gini_outside_float64_output_range():
         match="Lorenz cumulative shares must be finite|Gini coefficients must be finite",
     ):
         lorenz_curve(y, y, sample_weight=weights)
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_scaled_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mixed):
+    import superglm.validation as validation
+
+    values = np.full(256 if mixed else 32, 1e-310)
+    if mixed:
+        values[1:] = 1.0
+    visits = 0
+    original = validation._scaled_sum
+
+    def counted(mantissa, exponent):
+        nonlocal visits
+        visits += len(mantissa)
+        return original(mantissa, exponent)
+
+    monkeypatch.setattr(validation, "_scaled_sum", counted)
+    validation._scaled_prefix(*np.frexp(values))
+    # These fixtures need at most a few nonoverlapping scalar partials.
+    # Revisiting all 1+...+n source prefixes violates this linear-work bound.
+    assert visits <= 4 * len(values)
+
+
+def test_scaled_prefix_retains_small_terms_after_full_range_cancellation():
+    import math
+    from fractions import Fraction
+
+    from superglm.validation import _scaled_prefix
+
+    tiny = np.nextafter(0.0, 1.0)
+    values = np.array([tiny, 1e300, tiny, -1e300, tiny, 1.0, -1.0])
+    mantissas, exponents = _scaled_prefix(*np.frexp(values))
+    exact = Fraction(0)
+    for value, mantissa, exponent in zip(values, mantissas, exponents, strict=True):
+        exact += Fraction.from_float(value)
+        actual = math.ldexp(float(mantissa), int(exponent))
+        assert abs(Fraction.from_float(actual) - exact) <= np.finfo(float).eps * abs(exact)
+
+
+@pytest.mark.parametrize("bits", [30, 40])
+def test_weighted_aggregation_keeps_exact_product_residuals(bits):
+    from fractions import Fraction
+
+    from superglm.validation import _weighted_mean, _weighted_total
+
+    d = 2.0**-bits
+    values, weights = np.array([-1 - d, 1.0]), np.array([1 - d, 1.0])
+    exact = sum(Fraction.from_float(y) * Fraction.from_float(w) for y, w in zip(values, weights))
+    mean = exact / sum(map(Fraction.from_float, weights))
+    assert _weighted_total(values, weights, "test") == float(exact)
+    assert _weighted_mean(values, weights, "test") == float(mean)
+    lift = lift_chart(values, values, sample_weight=weights, n_bins=1)
+    assert lift.bins.loc[0, "observed"] == float(mean)
+
+
+def test_lorenz_product_cancellation_preserves_positive_loss_and_perfect_ranking():
+    from fractions import Fraction
+
+    d = 2.0**-30
+    values, weights = np.array([-1 - d, 1.0]), np.array([1 - d, 1.0])
+    result = lorenz_curve(values, values, sample_weight=weights)
+    exact_first = Fraction.from_float(values[0]) * Fraction.from_float(weights[0])
+    exact_total = exact_first + 1
+    assert len(result.curve) == 3  # Not the zero-loss fallback.
+    assert result.gini_ratio == 1.0
+    assert result.curve.loc[1, "cum_loss_share_model"] == float(exact_first / exact_total)
+    assert result.curve.loc[2, "cum_loss_share_model"] == 1.0
+
+
+@pytest.mark.parametrize("sign", [-1.0, 1.0])
+def test_weighted_mean_clips_in_scaled_units_at_adjacent_weight_boundary(sign):
+    maximum = sign * np.finfo(float).max
+    _, ax = plt.subplots()
+    # This tests the returned aggregation, not Matplotlib's max-float margins.
+    ax.set_ylim(-1.0, 1.0)
+    result = lift_chart(
+        [maximum, maximum],
+        [maximum, maximum],
+        sample_weight=[np.nextafter(1.0, 2.0), 1.0],
+        n_bins=1,
+        ax=ax,
+    )
+    assert result.bins.loc[0, "observed"] == maximum
+    assert result.bins.loc[0, "predicted"] == maximum
