@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal, localcontext
 
 import numpy as np
 import pytest
@@ -188,6 +189,103 @@ def test_rows_return_exactly_the_requested_derivative_order():
         assert evaluated.valid.dtype == np.bool_ and bool(evaluated.valid[0])
     with pytest.raises(gp.GeneralizedParetoDomainError):
         _rows(3.7, 2.0, 0.5, order=3)
+
+
+@pytest.mark.parametrize(("order", "power_vectors"), [(0, 1), (1, 2), (2, 1)])
+def test_row_hessian_reuses_one_series_power_vector(monkeypatch, order, power_vectors):
+    # Reintroducing separate L1/D/E recurrences repeats this real allocation.
+    original = np.ones_like
+    powers = []
+
+    def record(values, *args, **kwargs):
+        result = original(values, *args, **kwargs)
+        powers.append(result)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(gp.np, "ones_like", record)
+        actual = gp.scale_rows(
+            np.array([0.0, 0.25, 1.0]),
+            np.ones(3),
+            np.zeros(3),
+            np.ones(3),
+            derivative_order=order,
+        )
+    assert len(powers) == power_vectors
+    np.testing.assert_array_equal(actual.optimizing_log_likelihood, [0.0, -0.25, -1.0])
+    if order >= 1:
+        np.testing.assert_array_equal(actual.score, [[-1.0, 0.0], [-0.75, -0.21875], [0.0, -0.5]])
+    if order == 2:
+        expected = np.array([[1.0, 0.0, 0.0], [0.5, 0.1875, 5.0 / 96.0], [-1.0, 0.0, 1.0 / 3.0]])
+        np.testing.assert_allclose(
+            actual.hessian_packed, expected, rtol=4 * np.finfo(float).eps, atol=0
+        )
+
+
+@pytest.mark.parametrize("order", [0, 1, 2])
+def test_mixed_series_rows_match_independent_derivatives_on_readonly_strides(order):
+    shapes = np.array(
+        [
+            -0.9,
+            np.nextafter(-0.5, -1.0),
+            -0.5,
+            np.nextafter(-0.5, 0.0),
+            -1e-12,
+            0.0,
+            1e-12,
+            np.nextafter(0.5, 0.0),
+            0.5,
+            np.nextafter(0.5, 1.0),
+            2.0,
+            -1.0,
+        ]
+    )
+    backing = np.zeros((len(shapes), 2))
+    backing[:, 0] = shapes
+    xi = backing[:, 0]
+    xi.flags.writeable = False
+    ones = np.ones(len(shapes))
+    ones.flags.writeable = False
+    actual = gp.scale_rows(ones, ones, xi, ones, derivative_order=order)
+    assert actual.valid.tolist() == [True] * (len(shapes) - 1) + [False]
+    eps = np.finfo(np.float64).eps
+    for row, shape in enumerate(shapes[:-1]):
+        if shape == 0.0:
+            expected = [-1.0, 0.0, -0.5, -1.0, 0.0, 1.0 / 3.0]
+        else:
+            # Differentiate the density at y=scale=1. Decimal evaluates the
+            # cancellation-prone closed forms, independently of our series.
+            with localcontext() as context:
+                context.prec = 90
+                x = Decimal(float(shape))
+                support = 1 + x
+                log_support = support.ln()
+                expected = list(
+                    map(
+                        float,
+                        (
+                            -(1 + 1 / x) * log_support,
+                            0,
+                            (log_support - x) / x**2,
+                            -1 / support,
+                            0,
+                            (x + 2) / (x**2 * support) - 2 * log_support / x**3,
+                        ),
+                    )
+                )
+        observed = [actual.optimizing_log_likelihood[row]]
+        if order >= 1:
+            observed.extend(actual.score[row])
+        if order == 2:
+            observed.extend(actual.hessian_packed[row])
+        for got, want in zip(observed, expected, strict=False):
+            # Seventy rounded series updates; direct branches are away from zero.
+            assert abs(got - want) <= 70 * eps * max(1.0, abs(want))
+    for channel in (actual.optimizing_log_likelihood, actual.score, actual.hessian_packed):
+        if channel is not None:
+            assert channel.dtype == np.float64 and not channel.flags.writeable
+            assert np.all(channel[-1] == 0.0)
+    np.testing.assert_array_equal(xi, shapes)
 
 
 def test_rows_scale_linearly_with_the_frequency_multiplier():

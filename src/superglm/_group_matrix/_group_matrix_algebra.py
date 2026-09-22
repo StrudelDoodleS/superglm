@@ -26,6 +26,7 @@ from ._group_matrix_kernels import (
 
 if TYPE_CHECKING:
     from ..group_matrix import (
+        CategoricalGroupMatrix,
         DenseGroupMatrix,
         DiscretizedSplineCategoricalGroupMatrix,
         DiscretizedSSPGroupMatrix,
@@ -76,7 +77,14 @@ def _profile_elapsed(profile: dict[str, Any] | None, key: str, start: float) -> 
         _profile_add(profile, key, perf_counter() - start)
 
 
-def _cross_factors_in_range(*operands: NDArray, cache=None) -> bool:
+def _cross_operand_bounds(operand: NDArray) -> tuple[int, int]:
+    """One factor's partial-product bounds, including its reduction lengths."""
+    values = operand if operand.ndim == 2 else operand[:, None]
+    lo, hi = _operand_exponent_bounds(values)
+    return min(0, lo), max(0, hi) + sum((max(1, size) - 1).bit_length() for size in operand.shape)
+
+
+def _cross_factors_in_range(*operands: NDArray, cache=None, support_factors=()) -> bool:
     """Bound every partial cross product and reduction, not just its result.
 
     Sum negative/positive exponent bounds separately to bound every partial
@@ -88,30 +96,37 @@ def _cross_factors_in_range(*operands: NDArray, cache=None) -> bool:
     cache without that method.
     """
     weight_range = getattr(cache, "weight_range", None)
+    support_range = getattr(cache, "support_range", None)
     lower = upper = 0
     for operand in operands:
         if operand.dtype != np.float64:
             return False
-        values = operand if operand.ndim == 2 else operand[:, None]
-        lo, hi = (
-            weight_range(operand)[1]
-            if weight_range is not None and operand.ndim == 1
-            else _operand_exponent_bounds(values)
-        )
-        lower += min(0, lo)
-        upper += max(0, hi) + sum((max(1, size) - 1).bit_length() for size in operand.shape)
+        if support_range is not None and any(operand is factor for factor in support_factors):
+            lo, hi = support_range(operand)
+        elif weight_range is not None and operand.ndim == 1:
+            lo, hi = weight_range(operand)[1]
+        else:
+            lo, hi = _cross_operand_bounds(operand)
+        lower += lo
+        upper += hi
     return lower >= -1022 and upper <= 1022
 
 
 def _cross_support(
-    gm: DiscretizedSSPGroupMatrix, cache, *partners: NDArray
+    gm: DiscretizedSSPGroupMatrix, cache, *partners: NDArray, support_factors=()
 ) -> tuple[NDArray, NDArray | None]:
     """Project support when the remaining cross factors retain range.
 
     Mixed routes pass their already-weighted aggregate. Tensor/histogram
     routes pass W and all pending factors; declined inputs keep raw association.
     """
-    if not _cross_factors_in_range(gm.B_unique, gm.R_inv, *partners, cache=cache):
+    if not _cross_factors_in_range(
+        gm.B_unique,
+        gm.R_inv,
+        *partners,
+        cache=cache,
+        support_factors=(gm.B_unique, gm.R_inv, *support_factors),
+    ):
         return gm.B_unique, gm.R_inv
     # Centered tensor assembly supplies a weight-grid-only cache.
     project = getattr(cache, "solver_support", None)
@@ -129,6 +144,7 @@ class _BlockWeightCache:
         "_supports",
         "_sparse_grams",
         "_weight_ranges",
+        "_support_ranges",
         "_cell_orders",
     )
 
@@ -140,10 +156,22 @@ class _BlockWeightCache:
         self._supports: dict[DiscretizedSSPGroupMatrix, NDArray] = {}
         self._sparse_grams: dict[SparseSSPGroupMatrix, tuple[NDArray, bool]] = {}
         self._weight_ranges: dict[int, tuple[NDArray, bool, tuple[int, int]]] = {}
+        self._support_ranges: dict[int, tuple[NDArray, tuple[int, int]]] = {}
         self._cell_orders: dict[DiscretizedTensorGroupMatrix, tuple[NDArray, NDArray]] = {}
 
+    def for_new_weights(self) -> _BlockWeightCache:
+        """Share only fixed factors within one synchronous derivative call.
+
+        The caller owns unchanged built-in groups for the whole call. Weighted
+        products, range checks and scratch are fresh for every direction.
+        """
+        child = _BlockWeightCache(self._profile)
+        child._supports = self._supports
+        child._support_ranges = self._support_ranges
+        return child
+
     def weight_range(self, W: NDArray) -> tuple[bool, tuple[int, int]]:
-        """Reuse both original range decisions for this assembly's row weights.
+        """Reuse the legacy guard and cross-bound contributions for row weights.
 
         Retain the array, so an identity key cannot outlive its owner. The
         legacy boolean is separate: exponent bounds round powers of two up.
@@ -154,10 +182,22 @@ class _BlockWeightCache:
             entry = (
                 W,
                 _tensor_operand_in_reassociation_range(values),
-                _operand_exponent_bounds(values),
+                _cross_operand_bounds(values),
             )
             self._weight_ranges[id(W)] = entry
         return entry[1], entry[2]
+
+    def support_range(self, factor: NDArray) -> tuple[int, int]:
+        """Cache a fixed factor's complete cross-bound contributions.
+
+        Weighted partners may be reused scratch and must not enter this cache.
+        A fresh assembly observes mutations to the live support factors.
+        """
+        entry = self._support_ranges.get(id(factor))
+        if entry is None:
+            entry = (factor, _cross_operand_bounds(factor))
+            self._support_ranges[id(factor)] = entry
+        return entry[1]
 
     def cell_csr(self, gm: DiscretizedTensorGroupMatrix) -> tuple[NDArray, NDArray]:
         """Validate each grid once within an assembly with unchanged inputs.
@@ -897,7 +937,8 @@ def _cross_gram_tensor_main(
     B2 = gm_tensor.B2_unique_t
     # The tensor margins are already projected. Project the main support
     # before the channel contraction so its small columns do not cancel raw moments.
-    B_main, R_main = _cross_support(gm_main, cache, W, B1, B2, gm_tensor.R_inv)
+    factors = (B1, B2, gm_tensor.R_inv)
+    B_main, R_main = _cross_support(gm_main, cache, W, *factors, support_factors=factors)
     K1, K2 = B1.shape[1], B2.shape[1]
     K_main_raw = B_main.shape[1]
 
@@ -1005,7 +1046,8 @@ def _cross_gram_tensor_own_margin(
 
     B1 = gm_tensor.B1_unique_t
     B2 = gm_tensor.B2_unique_t
-    B_main, R_main = _cross_support(gm_main, cache, W, B1, B2, gm_tensor.R_inv)
+    factors = (B1, B2, gm_tensor.R_inv)
+    B_main, R_main = _cross_support(gm_main, cache, W, *factors, support_factors=factors)
     K1, K2 = B1.shape[1], B2.shape[1]
     K_main_raw = B_main.shape[1]
     result_raw = np.empty((K_main_raw, K1 * K2), dtype=np.float64)
@@ -1573,6 +1615,48 @@ def _full_csr_values(basis) -> NDArray | None:
     return None
 
 
+def _cross_gram_sparse_categorical(
+    spline: SparseSSPGroupMatrix,
+    category: CategoricalGroupMatrix,
+    W: NDArray,
+    cache: _BlockWeightCache | None,
+) -> NDArray | None:
+    """Group the raw sparse basis once, then map the small categorical cross."""
+    B, R, codes = spline.B, spline.R_inv, category.codes
+    n, p = spline.shape
+    bins = category.n_levels + 1  # Include the discarded reference-level sink.
+    if (
+        type(B) is not sp.csr_matrix
+        or any(
+            type(value) is not np.ndarray or value.dtype != np.float64 for value in (W, B.data, R)
+        )
+        or any(
+            type(value) is not np.ndarray
+            or value.dtype not in (np.dtype(np.int32), np.dtype(np.int64))
+            for value in (B.indices, B.indptr, codes)
+        )
+        or W.shape != (n,)
+        or codes.shape != (n,)
+        or B.shape[0] != n
+        or R.shape != (B.shape[1], p)
+        or category.shape != (n, bins - 1)
+        or min(n, p, B.shape[1], bins - 1) <= 0
+        or bins * (B.shape[1] + p) > _MAX_AGGREGATE_CELLS
+        or codes.min() < 0
+        or codes.max() >= bins
+    ):
+        return None
+    local_cache = _BlockWeightCache() if cache is None else cache
+    if not _cross_factors_in_range(W, B.data, R, cache=local_cache, support_factors=(R,)):
+        return None
+    # Check the live indices, not a canonical flag cached before mutation.
+    if not sp.csr_matrix(B, copy=False).has_canonical_format:
+        return None
+    if local_cache.sparse_gram(spline, W)[1]:
+        return None
+    return _agg_by_bin(spline, codes, W, bins, local_cache)[:-1].T
+
+
 def _cross_gram_sparse_ssp(
     gm_i: SparseSSPGroupMatrix,
     gm_j: SparseSSPGroupMatrix,
@@ -1741,7 +1825,11 @@ def _cross_gram(
         _SparseSSPGroupMatrix,
         SplineCategoricalGroupMatrix,
     ) = _runtime_group_matrix_types()
-    from ..group_matrix import DenseGroupMatrix, FactorSmoothGroupMatrix
+    from ..group_matrix import (
+        DenseGroupMatrix,
+        FactorSmoothGroupMatrix,
+        SupportCompressedSSPGroupMatrix,
+    )
 
     SplineCatTypes = (SplineCategoricalGroupMatrix, DiscretizedSplineCategoricalGroupMatrix)
 
@@ -1868,9 +1956,32 @@ def _cross_gram(
         # Preserve the established histogram association if projecting a
         # factor first could overflow/underflow. Ordinary support products use
         # solver coordinates; this gate changes arithmetic, not rank policy.
+        pair_in_range = None
+        builtin_ssp = (
+            DiscretizedSSPGroupMatrix,
+            SupportCompressedSSPGroupMatrix,
+            DiscretizedTensorGroupMatrix,
+        )
+        if type(gm_i) in builtin_ssp and type(gm_j) in builtin_ssp:
+            factors = (gm_i.B_unique, gm_i.R_inv, gm_j.B_unique, gm_j.R_inv)
+            if all(
+                type(value) is np.ndarray and value.dtype == np.float64 for value in (*factors, W)
+            ):
+                # Both orders sum the same integer exponent bounds. Decide
+                # once, preserving each projection and the raw fallback.
+                pair_in_range = _cross_factors_in_range(
+                    *factors, W, cache=cache, support_factors=factors
+                )
         parts = []
         for gm, partner in ((gm_i, gm_j), (gm_j, gm_i)):
-            if not isinstance(gm, DiscretizedSSPGroupMatrix):
+            if pair_in_range is not None:
+                project = getattr(cache, "solver_support", None)
+                parts.append(
+                    ((gm.B_unique @ gm.R_inv if project is None else project(gm)), None)
+                    if pair_in_range
+                    else (gm.B_unique, gm.R_inv)
+                )
+            elif not isinstance(gm, DiscretizedSSPGroupMatrix):
                 parts.append((gm.B_scop_unique, None))
             else:
                 factors = (
@@ -1878,7 +1989,9 @@ def _cross_gram(
                     if isinstance(partner, DiscretizedSSPGroupMatrix)
                     else (partner.B_scop_unique,)
                 )
-                parts.append(_cross_support(gm, cache, W, *factors))
+                # These partners are live support-owned factors, unlike the
+                # transient weighted aggregates used by the mixed routes.
+                parts.append(_cross_support(gm, cache, W, *factors, support_factors=factors))
         (B_i, R_i), (B_j, R_j) = parts
         n_i, p_i = B_i.shape
         n_j, p_j = B_j.shape
@@ -2010,6 +2123,17 @@ def _cross_gram(
             _profile_count(profile, "block_cross_ssp_ssp_calls")
             _profile_elapsed(profile, "block_cross_ssp_ssp_s", t0)
             return result
+
+    sparse_cat = type(gm_i) is _SparseSSPGroupMatrix and type(gm_j) is CategoricalGroupMatrix
+    cat_sparse = type(gm_j) is _SparseSSPGroupMatrix and type(gm_i) is CategoricalGroupMatrix
+    if sparse_cat or cat_sparse:
+        t0 = perf_counter() if profile is not None else 0.0
+        spline, category = (gm_i, gm_j) if sparse_cat else (gm_j, gm_i)
+        result = _cross_gram_sparse_categorical(spline, category, W, cache)
+        if result is not None:
+            _profile_count(profile, "block_cross_ssp_categorical_calls")
+            _profile_elapsed(profile, "block_cross_ssp_categorical_s", t0)
+            return result if sparse_cat else result.T
 
     # Factored support-space groups must never be selected for the generic
     # observation-matrix materialization below. Generate the narrower side a

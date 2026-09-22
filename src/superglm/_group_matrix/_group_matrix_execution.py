@@ -243,14 +243,17 @@ class MatrixExecutionPlan:
             left_columns = self._group_columns[left_index]
             diagonal_start = perf_counter() if profile is not None else 0.0
             support = None
-            if (
+            support_factors_in_range = (
                 self._support_mask[left_index]
                 and left_group.B_unique.dtype == left_group.R_inv.dtype == np.float64
                 and not _ssp_gram_needs_exact(left_group.B_unique, left_group.R_inv)
-            ):
+            )
+            if support_factors_in_range:
                 support = cache.solver_support(left_group)
             if self._support_mask[left_index]:
-                gram[left_columns, left_columns] = left_group.gram(weights, _support=support)
+                gram[left_columns, left_columns] = left_group.gram(
+                    weights, _support=support, _support_factors_in_range=support_factors_in_range
+                )
             elif self._sparse_mask[left_index]:
                 gram[left_columns, left_columns] = cache.sparse_gram(left_group, weights)[0]
             else:
@@ -289,6 +292,36 @@ class MatrixExecutionPlan:
             signed=signed,
             profile=profile,
             validate_inputs=True,
+        )
+
+    def _fixed_support_cache(self) -> _BlockWeightCache | None:
+        """A call-local owner, never retained by this mutable numerical plan."""
+        from ..group_matrix import CategoricalGroupMatrix, DenseGroupMatrix, SparseSSPGroupMatrix
+
+        support_types = (DiscretizedSSPGroupMatrix, SupportCompressedSSPGroupMatrix)
+        allowed = (*support_types, CategoricalGroupMatrix, DenseGroupMatrix, SparseSSPGroupMatrix)
+        if not all(type(group) in allowed for group in self.group_matrices):
+            return None
+        supports = [group for group in self.group_matrices if type(group) in support_types]
+        if not supports or any(
+            group.B_unique.dtype != np.float64 or group.R_inv.dtype != np.float64
+            for group in supports
+        ):
+            return None
+        return _BlockWeightCache()
+
+    def _signed_moments_fixed_support(
+        self, weights: NDArray, owner: _BlockWeightCache
+    ) -> WeightedMoments:
+        """Validated derivative moments with fresh weight-dependent state."""
+        return self._moments_impl(
+            weights,
+            rhs=(),
+            include_xtw=True,
+            signed=True,
+            profile=None,
+            validate_inputs=True,
+            _cache=owner.for_new_weights(),
         )
 
     def _moments_prevalidated(
@@ -430,11 +463,12 @@ class MatrixExecutionPlan:
                 # Preserve the exact source-factor route before evaluating a
                 # support product that may itself overflow or cancel to NaN.
                 support = None
-                if (
+                support_factors_in_range = (
                     self._support_mask[left_index]
                     and left_group.B_unique.dtype == left_group.R_inv.dtype == np.float64
                     and not _ssp_gram_needs_exact(left_group.B_unique, left_group.R_inv)
-                ):
+                )
+                if support_factors_in_range:
                     support = cache.solver_support(left_group)
                 if fusion_vector is not None and self._fused_mask[left_index]:
                     if self._tensor_mask[left_index]:
@@ -444,7 +478,10 @@ class MatrixExecutionPlan:
                         )
                     elif self._support_mask[left_index]:
                         group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(
-                            W, fusion_vector, _support=support
+                            W,
+                            fusion_vector,
+                            _support=support,
+                            _support_factors_in_range=support_factors_in_range,
                         )
                     else:
                         group_gram, group_xtw, group_rhs = left_group.gram_rmatvec(W, fusion_vector)
@@ -456,7 +493,9 @@ class MatrixExecutionPlan:
                     remaining_rhs = zip(xt_rhs[1:], rhs_vectors[1:], strict=True)
                 else:
                     if self._support_mask[left_index]:
-                        gram[columns, columns] = left_group.gram(W, _support=support)
+                        gram[columns, columns] = left_group.gram(
+                            W, _support=support, _support_factors_in_range=support_factors_in_range
+                        )
                     elif self._sparse_mask[left_index]:
                         gram[columns, columns] = cache.sparse_gram(left_group, W)[0]
                     else:

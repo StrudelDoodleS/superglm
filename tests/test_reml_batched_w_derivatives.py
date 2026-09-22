@@ -1,17 +1,27 @@
 """Signed centered REML products: numerical invariants and separate dispatch checks."""
 
+import gc
 import math
+import weakref
 
 import numpy as np
 import pytest
+from scipy import sparse
 
+from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix import _group_matrix_centered
 from superglm._group_matrix._group_matrix_centered import (
     centered_gram_rhs,
     centered_signed_grams,
 )
 from superglm.distributions import Poisson
-from superglm.group_matrix import DenseGroupMatrix, DesignMatrix
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DenseGroupMatrix,
+    DesignMatrix,
+    SparseSSPGroupMatrix,
+    SupportCompressedSSPGroupMatrix,
+)
 from superglm.links import LogLink
 from superglm.reml import w_derivatives
 from superglm.solvers.hessian_factor import as_hessian_factor
@@ -141,12 +151,29 @@ def test_batched_signed_grams_boundaries_without_materializing_rows(monkeypatch,
             centered_signed_grams(dm=dm, weights=channels, mean_x=mean, chunk_size=chunk_size)
 
 
-def _correction_fixture(p=2, shift=1.0e8):
+def _correction_fixture(p=2, shift=1.0e8, storage=None):
     rng = np.random.default_rng(123)
     x = np.linspace(-1.5, 1.5, 320)
     X = np.column_stack((x, x**2 - np.mean(x**2), np.sin(3 * x)))[:, :p]
+    if storage is not None:
+        X[:, 2] = (np.arange(len(x)) % 3 == 0).astype(float)
     y = rng.poisson(np.exp(0.25 + X @ np.array([0.35, -0.15, 0.2])[:p])).astype(float)
-    dm = DesignMatrix([DenseGroupMatrix(X[:, i : i + 1] + shift) for i in range(p)], n=len(x), p=p)
+    matrices = [DenseGroupMatrix(X[:, i : i + 1] + shift) for i in range(p)]
+    if storage is not None:
+
+        class CustomCategorical(CategoricalGroupMatrix):
+            pass
+
+        categorical = CustomCategorical if storage == "custom" else CategoricalGroupMatrix
+        dtype = np.float32 if storage == "float32" else np.float64
+        matrices = [
+            SupportCompressedSSPGroupMatrix(
+                X[:, :1].astype(dtype), np.ones((1, 1), dtype=dtype), np.arange(len(x))
+            ),
+            SparseSSPGroupMatrix(sparse.csr_matrix(X[:, 1:2]), np.ones((1, 1))),
+            categorical(np.where(X[:, 2], 0, -1), n_levels=1),
+        ]
+    dm = DesignMatrix(matrices, n=len(x), p=p)
     groups = [GroupSlice(name=f"x{i}", start=i, end=i + 1) for i in range(p)]
     penalties = [
         PenaltyComponent(
@@ -271,3 +298,141 @@ def test_other_routes_do_not_batch_signed_grams(monkeypatch, route):
         gradient_only=route == "gradient_only",
     )
     assert result is not None
+
+
+def test_derivative_channels_project_each_fixed_support_once(monkeypatch):
+    # Removing derivative-local reuse repeats this real B_unique @ R_inv.
+    kwargs = _correction_fixture(p=3, shift=0, storage="mixed")
+    original = algebra._BlockWeightCache.solver_support
+    builds = []
+    group = kwargs["dm"].group_matrices[0]
+    bounds = algebra._operand_exponent_bounds
+    scans = {id(group.B_unique): 0, id(group.R_inv): 0}
+
+    def counted(cache, group):
+        if group not in cache._supports:
+            builds.append(group)
+        return original(cache, group)
+
+    def scanned(values):
+        if id(values) in scans:
+            scans[id(values)] += 1
+        return bounds(values)
+
+    monkeypatch.setattr(algebra._BlockWeightCache, "solver_support", counted)
+    monkeypatch.setattr(algebra, "_operand_exponent_bounds", scanned)
+    result = w_derivatives.reml_w_correction(**kwargs)
+    assert result is not None
+    assert len(result[1]) == 3
+    assert len(builds) == 1
+    assert list(scans.values()) == [1, 1]
+
+
+def _assert_poisson_correction(kwargs, correction):
+    """Independent literal centered products, with dimension-scaled bounds."""
+    dm = kwargs["dm"]
+    result = kwargs["pirls_result"]
+    centered = dm.toarray() - result.rank_info.mean_x
+    dW = kwargs["sample_weight"] * np.exp(dm.matvec(result.beta) + result.intercept)
+    inverse = as_hessian_factor(kwargs["XtWX_S_inv"])
+    for i, pc in enumerate(kwargs["reml_penalties"]):
+        rhs = np.zeros(dm.p)
+        rhs[pc.group_sl] = kwargs["lambdas"][pc.name] * result.beta[pc.group_sl]
+        weights = dW * (centered @ -inverse.solve(rhs))
+        expected = np.array(
+            [
+                [math.fsum(weights * centered[:, j] * centered[:, k]) for k in range(dm.p)]
+                for j in range(dm.p)
+            ]
+        )
+        bound = 4 * _gram_bound(centered, weights)
+        assert np.all(np.abs(correction[1][i] - expected) <= bound)
+        trace = 0.5 * np.sum(inverse.inverse * expected)
+        scalar = 0.5 * math.fsum(weights) / result.rank_info.sum_w
+        allowance = 0.5 * np.sum(np.abs(inverse.inverse) * bound)
+        allowance += 32 * dm.n * np.finfo(float).eps * (abs(trace) + abs(scalar))
+        assert abs(correction[0][i] - trace - scalar) <= allowance
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_derivative_reuse_observes_factors_and_weights_on_next_call(monkeypatch, replace):
+    kwargs = _correction_fixture(p=3, shift=0, storage="mixed")
+    group = kwargs["dm"].group_matrices[0]
+    original = algebra._BlockWeightCache.solver_support
+    projected = []
+
+    def recorded(cache, group):
+        result = original(cache, group)
+        projected.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(algebra._BlockWeightCache, "solver_support", recorded)
+    for iteration in range(2):
+        if iteration:
+            for name in ("B_unique", "R_inv"):
+                changed = getattr(group, name) * 0.5
+                if replace:
+                    setattr(group, name, changed)
+                else:
+                    getattr(group, name)[:] = changed
+            kwargs["sample_weight"] *= 2
+        correction = w_derivatives.reml_w_correction(**kwargs)
+        _assert_poisson_correction(kwargs, correction)
+        assert projected and all(ref() is None for ref in projected)
+
+
+@pytest.mark.parametrize("storage,builds_expected", [("custom", 3), ("float32", 0)])
+def test_derivative_reuse_keeps_custom_and_dtype_fallback(monkeypatch, storage, builds_expected):
+    kwargs = _correction_fixture(p=3, shift=0, storage=storage)
+    original = algebra._BlockWeightCache.solver_support
+    builds = []
+
+    def counted(cache, group):
+        if group not in cache._supports:
+            builds.append(group)
+        return original(cache, group)
+
+    monkeypatch.setattr(algebra._BlockWeightCache, "solver_support", counted)
+    correction = w_derivatives.reml_w_correction(**kwargs)
+    _assert_poisson_correction(kwargs, correction)
+    assert len(builds) == builds_expected
+
+
+def test_derivative_weighted_cache_sharing_mutation_is_detected(monkeypatch):
+    kwargs = _correction_fixture(p=3, shift=0, storage="mixed")
+    # Reusing the weighted sparse Gram is wrong even though the design is fixed.
+    monkeypatch.setattr(algebra._BlockWeightCache, "for_new_weights", lambda self: self)
+    correction = w_derivatives.reml_w_correction(**kwargs)
+    with pytest.raises(AssertionError):
+        _assert_poisson_correction(kwargs, correction)
+
+
+def test_derivative_reuse_releases_support_after_error(monkeypatch):
+    kwargs = _correction_fixture(p=3, shift=0, storage="mixed")
+    original = algebra._BlockWeightCache.solver_support
+    projected = []
+    calls = 0
+
+    def interrupted(cache, group):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("interrupted derivative")
+        result = original(cache, group)
+        projected.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(algebra._BlockWeightCache, "solver_support", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted derivative"):
+        w_derivatives.reml_w_correction(**kwargs)
+    gc.collect()
+    assert projected and all(ref() is None for ref in projected)
+
+
+@pytest.mark.parametrize("weights", [np.zeros((320, 1)), np.full(320, np.nan)])
+def test_fixed_support_moments_keep_weight_validation(weights):
+    kwargs = _correction_fixture(p=3, shift=0, storage="mixed")
+    plan = kwargs["dm"].execution_plan
+    owner = plan._fixed_support_cache()
+    with pytest.raises(ValueError):
+        plan._signed_moments_fixed_support(weights, owner)

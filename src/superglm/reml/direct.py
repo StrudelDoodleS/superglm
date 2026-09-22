@@ -65,7 +65,11 @@ from superglm.reml.scale import (
     profile_tweedie_reml_scale,
 )
 from superglm.reml.w_derivatives import reml_w_correction, validate_w_correction_order
-from superglm.solvers.centered_system import TabmatCenteringState
+from superglm.solvers.centered_system import (
+    TabmatCenteringState,
+    _FisherDataReuse,
+    _InitialDataReuse,
+)
 from superglm.solvers.hessian_factor import DenseHessianFactor, as_hessian_factor
 from superglm.solvers.irls_direct import fit_irls_direct
 from superglm.solvers.pirls import PIRLSResult
@@ -273,6 +277,10 @@ def optimize_direct_reml(
     _t_linesearch = 0.0
     _n_linesearch_fits = 0
     structured_runtime_fallback_reason: str | None = None
+    # Only a rejected general raw-centering route crosses coefficient fits.
+    # This owner dies with the optimizer; outside/finalization fits stay fresh.
+    raw_moment_policy = TabmatCenteringState()
+    fisher_data_reuse = _FisherDataReuse()
 
     def latch_runtime_backend(
         pirls_result: PIRLSResult,
@@ -334,6 +342,8 @@ def optimize_direct_reml(
         trace_run=trace_run,
         trace_purpose="reml_bootstrap",
         weight_semantics=weight_semantics,
+        _raw_moment_policy=raw_moment_policy,
+        _fisher_data_reuse=fisher_data_reuse,
     )
     _t_pirls += _time.perf_counter() - _t0
     S_boot = latch_runtime_backend(boot_result, boot_lambdas, S_boot)
@@ -504,6 +514,8 @@ def optimize_direct_reml(
                 trace_run=trace_run,
                 trace_purpose="reml_candidate",
                 weight_semantics=weight_semantics,
+                _raw_moment_policy=raw_moment_policy,
+                _fisher_data_reuse=fisher_data_reuse,
             )
             _t_pirls += _time.perf_counter() - _t0
         S_cand = latch_runtime_backend(pirls_result, cand_lambdas, S_cand)
@@ -1101,6 +1113,13 @@ def optimize_direct_reml(
         accepted = False
         had_feasible_trial = False
         evaluated_feasible_trial = False
+        # The synchronous search owns fixed design coordinates and warm state.
+        # Its rejected trials may share initial data, never their penalties.
+        _initial_data_reuse = (
+            _InitialDataReuse()
+            if not use_observed_geometry and debug_recorder is None and trace_run is None
+            else None
+        )
         for _ls in range(max_ls):
             rho_trial = np.clip(rho_clipped + step * delta, log_lo, log_hi)
             if np.all(np.abs(rho_trial - rho_clipped) <= 1e-12):
@@ -1154,6 +1173,9 @@ def optimize_direct_reml(
                 trace_run=trace_run,
                 trace_purpose="reml_line_search",
                 weight_semantics=weight_semantics,
+                _initial_data_reuse=_initial_data_reuse,
+                _raw_moment_policy=raw_moment_policy,
+                _fisher_data_reuse=fisher_data_reuse,
             )
             S_trial = latch_runtime_backend(trial_result, trial_lambdas, S_trial)
 
@@ -1357,6 +1379,7 @@ def optimize_direct_reml(
                 )
             step *= 0.5
 
+        _initial_data_reuse = None
         if not accepted:
             rho = rho_clipped
             _t_linesearch += _time.perf_counter() - _t0

@@ -137,6 +137,35 @@ def series_e(z: NDArray) -> NDArray[np.float64]:
     return _piecewise(z, lambda j: (-1.0) ** (j + 1) * (j + 2) * (j + 1) / (j + 3), direct)
 
 
+def _series_l1_d_e(z: NDArray) -> tuple[NDArray, NDArray, NDArray]:
+    """Evaluate the Hessian's three series with one mask and power sequence.
+
+    Each accumulator keeps the standalone series' coefficient and addition
+    order. Only the identical powers and outer D value are shared.
+    """
+    values = np.asarray(z, dtype=_FLOAT)
+    l1, d, e = (np.empty_like(values) for _ in range(3))
+    inner = np.abs(values) < _Z_SERIES_RADIUS
+    if np.any(inner):
+        arg = values[inner]
+        l1_acc, d_acc, e_acc = (np.zeros_like(arg) for _ in range(3))
+        power = np.ones_like(arg)
+        for j in range(_Z_SERIES_TERMS):
+            l1_acc = l1_acc + ((-1.0) ** j / (j + 1)) * power
+            d_acc = d_acc + ((-1.0) ** j * (j + 1) / (j + 2)) * power
+            e_acc = e_acc + ((-1.0) ** (j + 1) * (j + 2) * (j + 1) / (j + 3)) * power
+            power = power * arg
+        l1[inner], d[inner], e[inner] = l1_acc, d_acc, e_acc
+    outer = ~inner
+    if np.any(outer):
+        arg = values[outer]
+        l1[outer] = np.log1p(arg) / arg
+        direct_d = (np.log1p(arg) - arg / (1.0 + arg)) / (arg * arg)
+        d[outer] = direct_d
+        e[outer] = (1.0 / ((1.0 + arg) * (1.0 + arg)) - 2.0 * direct_d) / arg
+    return l1, d, e
+
+
 def series_e1(a: NDArray) -> NDArray[np.float64]:
     """``expm1(a)/a``, ``1`` at zero; used by the quantile."""
     return _piecewise(a, lambda j: 1.0 / math.factorial(j + 1), lambda b: np.expm1(b) / b)
@@ -186,15 +215,21 @@ def scale_rows(
     if np.any(ordinary):
         ti, zi, si = t[ordinary], z[ordinary], support[ordinary]
         pi, wi = psi[ordinary], weight[ordinary]
-        optimizing[ordinary] = wi * (-np.log(pi) - ti * series_l1(zi) - np.log1p(zi))
+        if hessian is not None:
+            l1, d, e = _series_l1_d_e(zi)
+        else:
+            l1, d = series_l1(zi), None
+        optimizing[ordinary] = wi * (-np.log(pi) - ti * l1 - np.log1p(zi))
         if score is not None:
+            if d is None:
+                d = series_d(zi)
             score[ordinary, 0] = wi * (ti - 1.0) / (pi * si)
-            score[ordinary, 1] = wi * (ti * ti * series_d(zi) - ti / si)
+            score[ordinary, 1] = wi * (ti * ti * d - ti / si)
         if hessian is not None:
             s2 = si * si
             hessian[ordinary, 0] = wi * (1.0 - ti * (2.0 + zi)) / (pi * pi * s2)
             hessian[ordinary, 1] = -wi * ti * (ti - 1.0) / (pi * s2)
-            hessian[ordinary, 2] = wi * (ti**3 * series_e(zi) + ti * ti / s2)
+            hessian[ordinary, 2] = wi * (ti**3 * e + ti * ti / s2)
     if np.any(positive_tail):
         yi, pi, xi_i, wi = (value[positive_tail] for value in (y, psi, xi, weight))
         inverse_t = pi / yi

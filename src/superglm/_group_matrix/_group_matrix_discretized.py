@@ -68,9 +68,18 @@ class DiscretizedSSPGroupMatrix:
         w_agg = np.bincount(self.bin_idx, weights=w, minlength=self.n_bins)
         return self.R_inv.T @ (self.B_unique.T @ w_agg)
 
-    def gram(self, W: NDArray, *, _support: NDArray | None = None) -> NDArray:
+    def gram(
+        self,
+        W: NDArray,
+        *,
+        _support: NDArray | None = None,
+        _support_factors_in_range: bool = False,
+    ) -> NDArray:
         # Project before accumulation: raw moments can cancel after R_inv.
-        if _ssp_gram_needs_exact(self.B_unique, self.R_inv, W):
+        # Only the execution layer's same-call native-float64 B/R check may
+        # certify factors. A supplied projection alone is not a certificate.
+        factors = () if _support_factors_in_range else (self.B_unique, self.R_inv)
+        if _ssp_gram_needs_exact(*factors, W):
             return _exact_ssp_moments(self.B_unique, self.R_inv, W, bin_indices=self.bin_idx)[0]
         W_agg = np.bincount(self.bin_idx, weights=W, minlength=self.n_bins)
         if self.B_unique.dtype != np.float64 or self.R_inv.dtype != np.float64:
@@ -82,13 +91,21 @@ class DiscretizedSSPGroupMatrix:
         return support.T @ (support * W_agg[:, None])
 
     def gram_rmatvec(
-        self, W: NDArray, Wz: NDArray, *, _support: NDArray | None = None
+        self,
+        W: NDArray,
+        Wz: NDArray,
+        *,
+        _support: NDArray | None = None,
+        _support_factors_in_range: bool = False,
     ) -> tuple[NDArray, NDArray, NDArray]:
         """Compute gram(W), rmatvec(W), rmatvec(Wz) with shared bincount.
 
         Returns (gram, XtW, XtWz) — single O(n) pass for both aggregations.
+        Factor certification is private to the execution layer's same-call
+        native-float64 check; weights and RHS always retain their own checks.
         """
-        if _ssp_gram_needs_exact(self.B_unique, self.R_inv, W, Wz):
+        factors = () if _support_factors_in_range else (self.B_unique, self.R_inv)
+        if _ssp_gram_needs_exact(*factors, W, Wz):
             gram, xtw, xtwz = _exact_ssp_moments(
                 self.B_unique, self.R_inv, W, Wz, bin_indices=self.bin_idx
             )

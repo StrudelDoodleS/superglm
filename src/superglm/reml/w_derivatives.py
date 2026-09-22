@@ -527,6 +527,17 @@ def reml_w_correction(
         else None
     )
     pending: list[tuple[int, NDArray, float]] = []
+    # Factors cannot change between these first-order directions. Public moment
+    # calls and later correction calls still start with fresh numerical state.
+    fixed_support = (
+        dm.execution_plan._fixed_support_cache()
+        if type(dm) is DesignMatrix
+        and type(factor) is DenseHessianFactor
+        and w_correction_order == 1
+        and m > 1
+        and not use_stable_signed_gram
+        else None
+    )
 
     def flush_signed_grams() -> None:
         grams = centered_signed_grams(
@@ -571,10 +582,10 @@ def reml_w_correction(
                 z_centered=stable_gram_rhs,
             )
             return result
-        moments = dm.execution_plan.moments(
-            row_weights,
-            include_xtw=True,
-            signed=True,
+        moments = (
+            dm.execution_plan.moments(row_weights, include_xtw=True, signed=True)
+            if fixed_support is None
+            else dm.execution_plan._signed_moments_fixed_support(row_weights, fixed_support)
         )
         if moments.xtw is None:
             raise RuntimeError("centered signed moments omitted X'W1")

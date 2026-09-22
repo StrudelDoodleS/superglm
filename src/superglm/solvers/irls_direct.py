@@ -36,18 +36,32 @@ from superglm._group_matrix._group_matrix_tabmat import (
     _defer_raw_spline_tabmat_plan,
     _is_raw_spline_tabmat_centering_candidate,
 )
-from superglm.distributions import Distribution, Gaussian
+from superglm.distributions import (
+    Binomial,
+    Distribution,
+    Gamma,
+    Gaussian,
+    NegativeBinomial,
+    Poisson,
+    Tweedie,
+)
 from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DenseGroupMatrix,
     DesignMatrix,
     DiscretizedSCOPGroupMatrix,
     DiscretizedSplineCategoricalGroupMatrix,
     DiscretizedSSPGroupMatrix,
     GroupMatrix,
+    SparseSSPGroupMatrix,
+    SupportCompressedSSPGroupMatrix,
 )
-from superglm.links import Link
+from superglm.links import IdentityLink, Link, LogitLink, LogLink
 from superglm.solvers.centered_system import (
     CenteredSystem,
     TabmatCenteringState,
+    _FisherDataReuse,
+    _InitialDataReuse,
     build_anchor_centered_system,
     build_centered_system,
     grouped_augmented_factor,
@@ -128,7 +142,7 @@ from superglm.solvers.working_rows import (
     pearson_chi2,
     supports_observed_newton,
 )
-from superglm.types import GroupSlice, PenaltyComponent
+from superglm.types import GroupSlice, LinearConstraintSet, PenaltyComponent
 
 logger = logging.getLogger(__name__)
 
@@ -449,10 +463,11 @@ def fit_irls_direct(
     separation: str = "warn",
     *,
     weight_semantics: str,
+    _initial_data_reuse: _InitialDataReuse | None = None,
+    _raw_moment_policy: TabmatCenteringState | None = None,
+    _fisher_data_reuse: _FisherDataReuse | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit by direct IRLS, retrying automatic globally-ineligible SZ fits on Gram."""
-    if max_iter < 1:
-        raise ValueError(f"max_iter must be at least 1, got {max_iter}")
 
     def run_once(
         resolved_direct_solve: str,
@@ -495,19 +510,31 @@ def fit_irls_direct(
             _compute_scop_postfit_inference=_compute_scop_postfit_inference,
             separation=separation,
             weight_semantics=weight_semantics,
+            _initial_data_reuse=_initial_data_reuse,
+            _raw_moment_policy=_raw_moment_policy,
+            _fisher_data_reuse=_fisher_data_reuse,
         )
 
+    result = None
     try:
-        return run_once(direct_solve)
-    except SumToZeroIdentifiabilityError as error:
-        if direct_solve != "auto":
-            raise
-        fallback_reason = str(error)
-        result = run_once("gram")
-        result[0].direct_fallback_reason = fallback_reason
-        if profile is not None:
-            profile["direct_fallback_reason"] = fallback_reason
+        if max_iter < 1:
+            raise ValueError(f"max_iter must be at least 1, got {max_iter}")
+        try:
+            result = run_once(direct_solve)
+        except SumToZeroIdentifiabilityError as error:
+            if _fisher_data_reuse is not None:
+                _fisher_data_reuse.clear()
+            if direct_solve != "auto":
+                raise
+            fallback_reason = str(error)
+            result = run_once("gram")
+            result[0].direct_fallback_reason = fallback_reason
+            if profile is not None:
+                profile["direct_fallback_reason"] = fallback_reason
         return result
+    finally:
+        if _fisher_data_reuse is not None and (result is None or not result[0].converged):
+            _fisher_data_reuse.clear()
 
 
 def _fit_irls_direct_once(
@@ -549,6 +576,9 @@ def _fit_irls_direct_once(
     separation: str = "warn",
     *,
     weight_semantics: str,
+    _initial_data_reuse: _InitialDataReuse | None = None,
+    _raw_moment_policy: TabmatCenteringState | None = None,
+    _fisher_data_reuse: _FisherDataReuse | None = None,
 ) -> tuple[PIRLSResult, NDArray] | tuple[PIRLSResult, NDArray, NDArray]:
     """Fit a penalised GLM via direct IRLS (no BCD).
 
@@ -1142,6 +1172,46 @@ def _fit_irls_direct_once(
     _tabmat_centering_state = TabmatCenteringState(
         raw_spline_eligible=False if _defer_raw_spline else None
     )
+    fixed_owners = ()
+    if _raw_moment_policy is not None or _fisher_data_reuse is not None:
+        # A negative route choice is safe for changed W; no accepted preflight,
+        # weighted system or penalty survives. Fixed-coordinate QP is eligible.
+        fixed_owners = (
+            (dm, dm.execution_plan, family, link, *gms, *groups)
+            if type(dm) is DesignMatrix
+            and type(family) in (Poisson, Gaussian, Gamma, Binomial, NegativeBinomial, Tweedie)
+            and type(link) in (LogLink, IdentityLink, LogitLink)
+            and all(
+                type(gm)
+                in (
+                    CategoricalGroupMatrix,
+                    DenseGroupMatrix,
+                    SparseSSPGroupMatrix,
+                    SupportCompressedSSPGroupMatrix,
+                )
+                for gm in gms
+            )
+            and all(
+                type(group) is GroupSlice
+                and (group.constraints is None or type(group.constraints) is LinearConstraintSet)
+                for group in groups
+            )
+            and not (_use_qr or _use_structured or _has_scop)
+            and debug_recorder is None
+            and trace_run is None
+            else ()
+        )
+        if _raw_moment_policy is not None:
+            _tabmat_centering_state.raw_moment_eligible = _raw_moment_policy.seed_raw_rejection(
+                fixed_owners
+            )
+            if not fixed_owners:
+                _raw_moment_policy = None
+    if _fisher_data_reuse is not None and not (
+        fixed_owners and type(family) is Gamma and type(link) is LogLink and not has_constraints
+    ):
+        _fisher_data_reuse.clear()
+        _fisher_data_reuse = None
     if profile is not None and _defer_raw_spline:
         profile["centered_spline_tabmat_cold_policy_rejections"] = (
             profile.get("centered_spline_tabmat_cold_policy_rejections", 0) + 1
@@ -1149,9 +1219,52 @@ def _fit_irls_direct_once(
     _constant_centered_cache: CenteredSystem | None = None
     _constant_centered_z: NDArray | None = None
     _centered_factor_certification: _CenteredFactorCertification | None = None
+    _initial_data_pending = (
+        _initial_data_reuse is not None
+        and type(family) is Poisson
+        and type(link) is LogLink
+        and type(dm) is DesignMatrix
+        and all(
+            type(gm)
+            in (
+                CategoricalGroupMatrix,
+                DenseGroupMatrix,
+                SparseSSPGroupMatrix,
+                SupportCompressedSSPGroupMatrix,
+            )
+            for gm in gms
+        )
+        and not (_use_qr or _use_structured or has_constraints or _has_scop)
+        and debug_recorder is None
+        and trace_run is None
+    )
+    # These objects stay live throughout the owner line search. A new design
+    # or warm state cannot consume an entry from the previous coordinates.
+    _initial_data_key = (
+        (
+            id(dm),
+            id(dm.execution_plan),
+            id(family),
+            id(link),
+            beta.tobytes(),
+            np.float64(intercept).tobytes(),
+        )
+        if _initial_data_pending
+        else None
+    )
 
     def get_centered_system(W_current: NDArray, z_off_current: NDArray) -> CenteredSystem:
         nonlocal _constant_centered_cache, _constant_centered_z
+        nonlocal _initial_data_pending
+        reuse = _initial_data_reuse if _initial_data_pending else None
+        _initial_data_pending = False
+        before = replace(_tabmat_centering_state) if reuse is not None else None
+        if reuse is not None:
+            reused = reuse.take(
+                _initial_data_key, W_current, z_off_current, _tabmat_centering_state, np.asarray(S)
+            )
+            if reused is not None:
+                return reused
         if (
             _can_reuse_weighted_gram
             and _constant_centered_cache is not None
@@ -1167,6 +1280,14 @@ def _fit_irls_direct_once(
             )
             _constant_centered_z = z_off_current.copy()
             return _constant_centered_cache
+        fisher = (
+            _fisher_data_reuse if _can_reuse_weighted_gram and not _observed_newton_active else None
+        )
+        data = (
+            fisher.take((*fixed_owners, weight_semantics), W_current)
+            if fisher is not None
+            else None
+        )
         system = build_centered_system(
             dm=dm,
             W=W_current,
@@ -1175,7 +1296,16 @@ def _fit_irls_direct_once(
             tabmat_split=_tabmat_split,
             tabmat_state=_tabmat_centering_state,
             profile=profile,
+            _data=data,
         )
+        if fisher is not None and fisher.data is None:
+            fisher.remember(W_current, system)
+        if _raw_moment_policy is not None and _tabmat_centering_state.raw_moment_eligible is False:
+            _raw_moment_policy.raw_moment_eligible = False
+        if reuse is not None:
+            reuse.remember(
+                _initial_data_key, W_current, z_off_current, before, _tabmat_centering_state, system
+            )
         if _can_reuse_weighted_gram:
             _constant_centered_cache = system
             _constant_centered_z = z_off_current.copy()
@@ -1189,6 +1319,8 @@ def _fit_irls_direct_once(
     ) -> _CenteredFactorCertification:
         """Return a factor certificate for one immutable centered geometry."""
         nonlocal _centered_factor_certification
+        if _fisher_data_reuse is not None:
+            _fisher_data_reuse.clear()
         cached = _centered_factor_certification
         same_geometry = bool(
             cached is not None
@@ -1444,6 +1576,8 @@ def _fit_irls_direct_once(
         W = working_rows.weights
         z = working_rows.response
         if working_rows.fallback_reason is not None:
+            if _fisher_data_reuse is not None:
+                _fisher_data_reuse.clear()
             # Once exact observed rows fail their fit-wide safety contract,
             # keep all later proposals on one coherent Fisher-scoring route.
             _observed_newton_active = False
@@ -2338,6 +2472,8 @@ def _fit_irls_direct_once(
             break
 
         if curvature_rescue_activated:
+            if _fisher_data_reuse is not None:
+                _fisher_data_reuse.clear()
             _observed_newton_active = True
             _can_reuse_weighted_gram = False
             _constant_centered_cache = None
@@ -2352,6 +2488,8 @@ def _fit_irls_direct_once(
                 it + 1,
             )
         elif fisher_fallback_activated:
+            if _fisher_data_reuse is not None:
+                _fisher_data_reuse.clear()
             _observed_newton_active = False
             _observed_newton_available = False
             _can_reuse_weighted_gram = _has_constant_irls_weights(family, link)
