@@ -48,6 +48,7 @@ data/
 
 # Other
 .claude/
+.worktrees/
 .ruff_cahce/
 scratch/
 
