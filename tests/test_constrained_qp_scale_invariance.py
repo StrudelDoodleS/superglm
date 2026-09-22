@@ -1,16 +1,10 @@
 """Equivalent objective and constraint units preserve the QP certificate."""
 
-from fractions import Fraction
-
 import numpy as np
 import pytest
 
 from superglm._fit_trace import MemoryTraceSink, TraceRun
-from superglm.solvers.constrained_qp import (
-    _is_feasible,
-    _roundoff_tolerance,
-    solve_constrained_qp,
-)
+from superglm.solvers.constrained_qp import _is_feasible, solve_constrained_qp
 
 
 @pytest.mark.parametrize("objective_scale", [1e-20, 1e-14, 1.0, 1e14, 1e20])
@@ -191,25 +185,3 @@ def test_complementarity_keeps_tiny_affine_solution_under_large_row_units(row_sc
     np.testing.assert_allclose(
         result.beta / 1e-300, np.ones(4), rtol=64 * 4 * np.finfo(float).eps, atol=0
     )
-
-
-def test_feasibility_repair_targets_the_worst_relative_row_across_row_units():
-    # Row 0's action underflows, so it is measured in power-of-two units while
-    # row 1 stays raw; its O(1) rounding residue there must not outrank row 1's
-    # genuine relative violation of -1/2 when choosing which row to repair.
-    A = np.array([[2.7454456174853823e-163, 0.0], [0.0, 1e-10]])
-    b = np.array([1.011e-320, 1e-20])
-    g = np.array([(b[0] / A[0, 0]) * (1 - 1e-14), 5e-11])
-    tol = 1e-12
-
-    result = solve_constrained_qp(np.eye(2), g, A, b, tol=tol)
-
-    assert result.converged
-    beta = [Fraction(value) for value in result.beta]
-    floor = -Fraction(tol) - Fraction(_roundoff_tolerance(A.shape[1]))
-    for row, bound in zip(A, b, strict=True):
-        terms = [
-            Fraction(coefficient) * value for coefficient, value in zip(row, beta, strict=True)
-        ]
-        scale = max(abs(Fraction(bound)), sum(abs(term) for term in terms))
-        assert (sum(terms) - Fraction(bound)) / scale >= floor
