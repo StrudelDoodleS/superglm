@@ -981,18 +981,18 @@ def test_weighted_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mi
     if mixed:
         values[1:] = 1.0
     visits = 0
-    original = validation._scaled_sum
+    original = validation._round_scaled
 
-    def counted(mantissa, exponent):
+    def counted(integer, base):
         nonlocal visits
-        visits += len(mantissa)
-        return original(mantissa, exponent)
+        visits += 1
+        return original(integer, base)
 
-    monkeypatch.setattr(validation, "_scaled_sum", counted)
+    monkeypatch.setattr(validation, "_round_scaled", counted)
     validation._scaled_product_sums(np.ones_like(values), values, np.arange(1, len(values) + 1))
-    # These fixtures need at most a few nonoverlapping scalar partials.
-    # Revisiting all 1+...+n source prefixes violates this linear-work bound.
-    assert visits <= 4 * len(values)
+    # A constant tiny unit stays on the fast path. The mixed column's exact
+    # path keeps one integer prefix state and rounds each reported prefix once.
+    assert visits == (len(values) if mixed else 0)
 
 
 def test_weighted_prefix_retains_small_terms_after_full_range_cancellation():
@@ -1137,25 +1137,18 @@ def test_gini_pair_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, m
     if mixed:
         weights[1:] = 1.0
     visits = 0
-    original_add = validation._add_scaled_partial
-    original_sum = validation._scaled_sum
+    original = validation._round_scaled
 
-    def counted_add(partials, value, exponent):
+    def counted(integer, base):
         nonlocal visits
-        visits += len(partials) + 1
-        return original_add(partials, value, exponent)
+        visits += 1
+        return original(integer, base)
 
-    def counted_sum(mantissa, exponent):
-        nonlocal visits
-        visits += len(mantissa)
-        return original_sum(mantissa, exponent)
-
-    monkeypatch.setattr(validation, "_add_scaled_partial", counted_add)
-    monkeypatch.setattr(validation, "_scaled_sum", counted_sum)
-    validation._weighted_pair_concordance(np.arange(size), weights, np.frexp(np.arange(size) % 2))
-    # The two weight scales need only a bounded number of scalar parts.
-    # This counts reduction work, independently of the exact-pair oracle.
-    assert visits <= 64 * size
+    monkeypatch.setattr(validation, "_round_scaled", counted)
+    validation._weighted_pair_concordance(np.arange(size), weights, np.arange(size) % 2.0)
+    # The exact contraction carries integer block and prefix state and
+    # rounds its one result once; a constant tiny unit stays on the fast path.
+    assert visits == int(mixed)
 
 
 @pytest.mark.parametrize("consumer", ["lift", "lorenz", "gini"])
@@ -1167,14 +1160,14 @@ def test_ordinary_validation_consumers_avoid_per_row_python_partials(monkeypatch
     predicted = observed[::-1].copy()
     weights = 0.5 + np.arange(size) / 128.0
     calls = 0
-    original = validation._add_scaled_partial
+    original = validation._exact_terms
 
     def counted(*args):
         nonlocal calls
         calls += 1
         return original(*args)
 
-    monkeypatch.setattr(validation, "_add_scaled_partial", counted)
+    monkeypatch.setattr(validation, "_exact_terms", counted)
     if consumer == "lift":
         validation.lift_chart(observed, predicted, sample_weight=weights)
     elif consumer == "lorenz":
@@ -1259,30 +1252,33 @@ def test_ordinary_prefix_enclosure_keeps_halfway_tail_and_cancellation(terms):
         assert abs(exact - approximation) <= Fraction.from_float(error)
 
 
-@pytest.mark.parametrize("power", [-34, -33, 31, 32])
-def test_validation_reduction_range_routes_extremes_to_existing_fallback(monkeypatch, power):
+@pytest.mark.parametrize("unit", [-900, 0, 900])
+@pytest.mark.parametrize("excess", [0, 1])
+def test_validation_reduction_range_routes_extremes_to_existing_fallback(monkeypatch, unit, excess):
     import math
 
     import superglm.validation as validation
 
     native, fallback = [], []
     original_native = validation._ordinary_product_terms
-    original_add = validation._add_scaled_partial
+    original_exact = validation._exact_terms
 
     def compiled(*args):
         native.append(1)
         return original_native(*args)
 
-    def scalar(*args):
+    def exact(*args):
         fallback.append(1)
-        return original_add(*args)
+        return original_exact(*args)
 
     monkeypatch.setattr(validation, "_ordinary_product_terms", compiled)
-    monkeypatch.setattr(validation, "_add_scaled_partial", scalar)
-    result = validation._scaled_product_total(np.full(2, 2.0**power), np.ones(2))
-    assert math.ldexp(*result) == 2.0 ** (power + 1)
-    assert len(native) == int(power in (-33, 31))
-    assert bool(fallback) == (power not in (-33, 31))
+    monkeypatch.setattr(validation, "_exact_terms", exact)
+    values = np.array([2.0**unit, 2.0 ** (unit - validation._ORDINARY_RANGE - excess)])
+    result = validation._scaled_product_total(np.ones(2), values)
+    assert math.ldexp(*result) == math.fsum(values)
+    # The spread within a column decides the route; its unit never does.
+    assert len(native) == int(excess == 0)
+    assert bool(fallback) == bool(excess)
 
 
 def test_ordinary_validation_gini_preserves_exact_weight_exposure_pairs_and_ties():
@@ -1329,7 +1325,7 @@ def test_pair_contractions_skip_zero_targets_after_full_weight_prefix(monkeypatc
 
     monkeypatch.setattr(validation, "_ordinary_prefix_parts", counted_prefix)
     monkeypatch.setattr(validation, "_two_product", counted_product)
-    validation._weighted_pair_concordance(np.arange(size), weights, np.frexp(target))
+    validation._weighted_pair_concordance(np.arange(size), weights, target)
     assert prefix_rows == [size]
     assert product_rows and set(product_rows) == {np.count_nonzero(target)}
 
@@ -1485,7 +1481,7 @@ def test_unit_weight_prefixes_do_not_carry_zero_product_channels(monkeypatch):
     monkeypatch.setattr(validation, "_ordinary_prefix_parts", counted)
     validation._scaled_product_sums(np.ones(16), values, np.arange(1, 17))
     validation._weighted_pair_concordance(
-        np.arange(16), np.ones(16), np.frexp(np.arange(16)), exposure=values
+        np.arange(16), np.ones(16), np.arange(16.0), exposure=values
     )
     assert channels == [1, 1]
 
