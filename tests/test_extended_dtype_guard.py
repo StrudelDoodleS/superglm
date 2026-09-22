@@ -30,10 +30,18 @@ CODES = frozenset({"g", "G", "f12", "f16", "c24", "c32"})
 
 
 def _dtype_codes(node: ast.Call) -> list[str]:
-    """String dtype codes passed to np.dtype(...), .astype(...) or dtype=."""
+    """String dtype codes passed to a NumPy call, .astype(...) or dtype=.
+
+    Positional codes count too, as in np.asarray(x, "g") or np.finfo("g").
+    """
     arguments = [keyword.value for keyword in node.keywords if keyword.arg == "dtype"]
-    if isinstance(node.func, ast.Attribute) and node.func.attr in {"dtype", "astype"}:
-        arguments.extend(node.args[:1])
+    func = node.func
+    numpy_call = isinstance(func, ast.Attribute) and (
+        func.attr == "astype"
+        or (isinstance(func.value, ast.Name) and func.value.id in {"np", "numpy"})
+    )
+    if numpy_call:
+        arguments.extend(node.args)
     strings = (arg.value for arg in arguments if isinstance(arg, ast.Constant))
     return [
         code.lstrip("<>=|")
