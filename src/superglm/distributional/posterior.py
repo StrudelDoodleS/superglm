@@ -50,8 +50,7 @@ from superglm.distributional.prediction_design import build_joint_prediction_des
 from superglm.distributional.smoothing.derivatives import LamlDerivatives, laml_derivatives
 from superglm.distributional.solver.assembly import dense_predictor_matrices
 from superglm.reml.multi_penalty import (
-    _LD,
-    _U_LD,
+    _UNIT_ROUNDOFF,
     _gamma,
     _matmul_enclosed,
     _norm_upper,
@@ -239,8 +238,8 @@ def _authenticated_terminal_fit(fitted: Any, smoothing: Any) -> tuple[Any, Any]:
 
 def _posterior_bound_sum(*terms: NDArray) -> NDArray:
     """Add nonnegative bounds without losing their outward direction."""
-    total = np.sum(np.asarray(terms, dtype=_LD), axis=0, dtype=_LD)
-    return _upper(total / (1 - _gamma(len(terms) + 2, _U_LD)))
+    total = np.sum(np.asarray(terms, dtype=np.float64), axis=0, dtype=np.float64)
+    return _upper(total / (1 - _gamma(len(terms) + 2, _UNIT_ROUNDOFF)))
 
 
 def _binary_congruence(matrix: NDArray) -> tuple[NDArray, NDArray, NDArray]:
@@ -301,7 +300,7 @@ def _certify_smoothing_invertibility(matrix: NDArray, bound: NDArray) -> None:
         _positive_product(np.abs(inverse_factor), input_error), np.abs(inverse_factor.T)
     )
     defect = _posterior_bound_sum(
-        np.abs(metric.astype(_LD) - np.eye(len(matrix), dtype=_LD)),
+        np.abs(metric - np.eye(len(matrix))),
         metric_error,
         _positive_product(first_error, np.abs(inverse_factor.T)),
         propagated,
@@ -658,7 +657,7 @@ def _posterior_covariance_factor(matrix: NDArray) -> NDArray:
         reconstruction, reconstruction_error = _matmul_enclosed(root, root.T)
         error = _norm_upper(
             _posterior_bound_sum(
-                np.abs(reconstruction.astype(_LD) - scaled.astype(_LD)),
+                np.abs(reconstruction - scaled),
                 reconstruction_error,
                 scaling_error,
             )

@@ -96,7 +96,7 @@ def test_basis_gram_rejects_changed_working_precision(monkeypatch):
 
     monkeypatch.setattr(module, "_matmul_enclosed", product)
     module._basis_gram(support, support.Q_plus)
-    monkeypatch.setattr(module, "_U_LD", np.finfo(float).eps)
+    monkeypatch.setattr(module, "_UNIT_ROUNDOFF", np.finfo(float).eps)
     actual = module._basis_gram(support, support.Q_plus)
     assert len(calls) == 2
     _equal(actual, original(support.Q_plus.T, support.Q_plus))

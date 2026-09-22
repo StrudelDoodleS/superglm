@@ -96,7 +96,7 @@ def _enclosed_bound_sum(*bounds: NDArray | float | np.float64) -> NDArray:
 
     computed = np.sum(np.asarray(bounds, dtype=np.float64), axis=0)
     unit = np.finfo(np.float64).eps / 2
-    tiny = np.nextafter(np.float64(0), np.float64(1))
+    tiny = np.nextafter(0.0, 1.0)
     return _upper((computed + len(bounds) * tiny) / (1 - _gamma(len(bounds) + 2, unit)))
 
 
@@ -150,7 +150,7 @@ def _retained_coordinate_map(
     result = scipy.linalg.solve(gram, mapped, assume_a="pos", check_finite=False)
     product, product_error = _context_product(gram, result, refine=refine)
     residual = _enclosed_bound_sum(
-        np.abs(product.astype(np.float64) - mapped.astype(np.float64)),
+        np.abs(product - mapped),
         product_error,
         mapped_error,
         _positive_product(gram_error, np.abs(result)),
@@ -204,7 +204,7 @@ def _near_identity_logdet(gram: NDArray, error: NDArray) -> tuple[float, float]:
     from superglm.reml.multi_penalty import _gamma, _norm_upper, _upper
     from superglm.reml.penalty_support import PenaltyNumericalError
 
-    defect = gram.astype(np.float64) - np.eye(len(gram), dtype=np.float64)
+    defect = gram - np.eye(len(gram))
     error = _enclosed_bound_sum(error, _gamma(1) * np.abs(defect) + np.nextafter(0.0, 1.0))
     eta = float(_upper(_norm_upper(defect) + _norm_upper(error)))
     if eta >= 1:
@@ -220,7 +220,7 @@ def _near_identity_logdet(gram: NDArray, error: NDArray) -> tuple[float, float]:
         + np.float64(_gamma(len(gram) + 2)) * math.fsum(map(float, np.abs(diagonal)))
     )
     unit = np.finfo(np.float64).eps / 2
-    tiny = np.nextafter(np.float64(0), np.float64(1))
+    tiny = np.nextafter(0.0, 1.0)
     return value, float(_upper((bound + 8 * tiny) / (1 - _gamma(8, unit))))
 
 
@@ -319,22 +319,17 @@ def _active_support_volume_error(support) -> float:
     if rank == 0 or rank == width:
         return 0.0
     unit = np.finfo(np.float64).eps / 2
-    tiny = np.nextafter(np.float64(0), np.float64(1))
+    tiny = np.nextafter(0.0, 1.0)
     roots, errors = [], []
     for root, error in zip(
         support.component_roots, support.component_root_error_bounds, strict=True
     ):
-        scale = np.float64(np.max(np.abs(root), initial=0.0))
+        scale = np.max(np.abs(root), initial=0.0)
         if scale == 0:
-            scale = np.float64(1)
-        computed = root.astype(np.float64) / scale
+            scale = 1.0
+        computed = root / scale
         normalized = _finite_double(computed, "active support roots")
-        bound = (
-            error.astype(np.float64) / scale
-            + _gamma(1, unit) * np.abs(computed)
-            + np.abs(computed - normalized.astype(np.float64))
-            + tiny
-        ) / (1 - _gamma(6, unit))
+        bound = (error / scale + _gamma(1, unit) * np.abs(computed) + tiny) / (1 - _gamma(6, unit))
         roots.append(normalized)
         errors.append(_finite_double(_upper(bound), "active support root errors"))
     root, root_error = np.vstack(roots), np.vstack(errors)
@@ -363,7 +358,7 @@ def _active_support_volume_error(support) -> float:
     # Their construction need not be an exact orthogonal projection.
     projected, projection_error = _context_product(coordinates, basis.T, refine=False)
     off = _enclosed_bound_sum(
-        np.abs(root.astype(np.float64) - projected.astype(np.float64)),
+        np.abs(root - projected),
         projection_error,
         root_error,
     )
@@ -410,8 +405,8 @@ def _joint_near_isometry_volume_error(
     # Enclose subtraction rounding too. This avoids
     # relying on exact diagonal subtraction when the map is malformed.
     unit = np.finfo(np.float64).eps / 2
-    tiny = np.nextafter(np.float64(0), np.float64(1))
-    difference = gram.astype(np.float64) - np.eye(len(gram), dtype=np.float64)
+    tiny = np.nextafter(0.0, 1.0)
+    difference = gram - np.eye(len(gram))
     defect = _enclosed_bound_sum(
         np.abs(difference), arithmetic, _gamma(1, unit) * np.abs(difference) + tiny
     )
@@ -505,11 +500,9 @@ def _raw_penalty_arithmetic() -> tuple:
     from superglm.solvers import rank
 
     return (
-        multi_penalty._LD,
         multi_penalty._EPS,
-        multi_penalty._U_LD,
-        multi_penalty._TINY_LD,
-        penalty_support._LD,
+        multi_penalty._UNIT_ROUNDOFF,
+        multi_penalty._SMALLEST_SUBNORMAL,
         penalty_support._EPS,
         _raw_evidence_value(rank.SHARED_RANK_POLICY),
         _raw_evidence_value(multi_penalty.SHARED_RANK_POLICY),

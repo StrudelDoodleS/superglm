@@ -190,13 +190,7 @@ def test_hessian_positivity_does_not_trust_a_corrupted_triangular_inverse(monkey
         )
 
 
-def test_posterior_controls_with_binary64_working_arithmetic(monkeypatch):
-    import superglm.reml.multi_penalty as kernel
-
-    for module in (kernel, posterior):
-        monkeypatch.setattr(module, "_LD", np.float64)
-        monkeypatch.setattr(module, "_U_LD", np.finfo(float).eps / 2)
-    monkeypatch.setattr(kernel, "_TINY_LD", np.nextafter(0.0, 1.0))
+def test_posterior_controls_with_binary64_working_arithmetic():
     result = posterior.posterior_covariance(_diagonal_hessian_fit(-1060), kind="corrected")
     np.testing.assert_array_equal(result, np.diag([1.0, 2.0]))
     test_hessian_certificate_must_exclude_an_indefinite_enclosed_matrix(False)
@@ -205,17 +199,7 @@ def test_posterior_controls_with_binary64_working_arithmetic(monkeypatch):
     test_binary_congruence_encloses_off_diagonal_scaling_underflow()
 
 
-@pytest.mark.parametrize("binary64", [False, True])
-def test_sampling_accepts_exact_spd_hadamard_covariance_on_both_working_precisions(
-    monkeypatch, binary64
-):
-    import superglm.reml.multi_penalty as kernel
-
-    if binary64:
-        for module in (kernel, posterior):
-            monkeypatch.setattr(module, "_LD", np.float64)
-            monkeypatch.setattr(module, "_U_LD", np.finfo(float).eps / 2)
-        monkeypatch.setattr(kernel, "_TINY_LD", np.nextafter(0.0, 1.0))
+def test_sampling_accepts_exact_spd_hadamard_covariance():
     signs = hadamard(8).astype(float)
     values = 1.0 + np.arange(8) * 2.0**-20
     covariance = (signs * values) @ signs.T / 8

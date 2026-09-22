@@ -176,12 +176,9 @@ def test_active_support_preserves_extraction_and_projection_evidence():
     assert np.all(result._support.support_projection_bounds[0] >= projection[0])
 
 
-def test_root_scaling_underflow_is_propagated_at_the_actual_working_dtype(monkeypatch):
+def test_root_scaling_underflow_is_propagated_at_the_actual_working_dtype():
     from superglm.reml import multi_penalty as module
 
-    monkeypatch.setattr(module, "_LD", np.float64)
-    monkeypatch.setattr(module, "_U_LD", np.finfo(float).eps / 2)
-    monkeypatch.setattr(module, "_TINY_LD", np.nextafter(0.0, 1.0))
     root, weight, inverse = 1e-170, 1e-308, 1e154
     actions, bounds = module._reference_root_actions(
         (np.array([[root]]),), np.array([weight]), np.array([[inverse]])
@@ -887,9 +884,6 @@ def test_positive_bound_uses_outward_native_operands_without_mutating_inputs(
 ):
     from superglm.reml import multi_penalty as module
 
-    monkeypatch.setattr(module, "_LD", working_dtype)
-    monkeypatch.setattr(module, "_U_LD", np.finfo(working_dtype).eps / 2)
-    monkeypatch.setattr(module, "_TINY_LD", np.nextafter(working_dtype(0), working_dtype(1)))
     step = working_dtype(2) ** -60
     left = np.array([[1 + step, 0], [3 - step, 2 + step]], dtype=working_dtype)
     right = np.array([[2 - step, 1 + step], [0, 4 - step]], dtype=working_dtype)
@@ -972,9 +966,6 @@ def test_positive_bound_zero_and_overflow_controls(monkeypatch):
 def test_strictly_sub_minimum_positive_bound_uses_an_exact_fill(monkeypatch, working_dtype):
     from superglm.reml import multi_penalty as module
 
-    monkeypatch.setattr(module, "_LD", working_dtype)
-    monkeypatch.setattr(module, "_U_LD", np.finfo(working_dtype).eps / 2)
-    monkeypatch.setattr(module, "_TINY_LD", np.nextafter(working_dtype(0), working_dtype(1)))
     left = np.full((3, 16), np.ldexp(working_dtype(0.75), -550))[:, ::2]
     right = np.full((16, 4), np.ldexp(working_dtype(0.75), -527))[::2, :]
     left.flags.writeable = right.flags.writeable = False
@@ -1167,9 +1158,6 @@ def test_materialization_evidence_preserves_operand_and_output_changes(
 ):
     from superglm.reml import multi_penalty as module
 
-    monkeypatch.setattr(module, "_LD", working_dtype)
-    monkeypatch.setattr(module, "_U_LD", np.finfo(working_dtype).eps / 2)
-    monkeypatch.setattr(module, "_TINY_LD", np.nextafter(working_dtype(0), working_dtype(1)))
     left = np.array([[1.25, 0.5], [-0.25, 2.0]])
     right = np.array([[1.0, 0.125, -0.5], [0.25, 1.5, 0.75]])
     evidence = []
