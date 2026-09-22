@@ -13,7 +13,6 @@ import importlib.metadata
 import json
 import os
 import platform
-import resource
 import subprocess
 import sys
 import time
@@ -21,6 +20,11 @@ import traceback
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
+
+if __package__:
+    from benchmarks import _platform
+else:  # The parent starts workers by filename with a frozen source PYTHONPATH.
+    import _platform
 
 
 def digest(path):
@@ -80,10 +84,10 @@ def environment_snapshot():
             continue
     return {
         "time_ns": time.time_ns(),
-        "load_average": os.getloadavg(),
+        "load_average": _platform.load_average(),
         "cpu_count": os.cpu_count(),
-        "affinity": sorted(os.sched_getaffinity(0)),
-        "process_activity": processes,
+        "affinity": _platform.cpu_affinity(),
+        "process_activity": processes if sys.platform == "linux" else None,
     }
 
 
@@ -523,6 +527,7 @@ def worker(args):
         "source": source_receipt(source),
         "imported_module": str(imported),
         "harness_sha256": digest(__file__),
+        "platform_helper_sha256": digest(_platform.__file__),
         "fixtures_sha256": digest(Path(__file__).with_name("_c3_c1_fixtures.py")),
         "python": sys.version,
         "executable": sys.executable,
@@ -576,7 +581,8 @@ def worker(args):
                 superglm.warmup()
             report["warmup_seconds"] = time.perf_counter() - warm_start
             report["environment_fit_start"] = environment_snapshot()
-            quiet = os.getloadavg()[0] <= 2 * len(os.sched_getaffinity(0))
+            load = _platform.load_average()
+            quiet = load is not None and load[0] <= 2 * _platform.available_cpu_count()
             if args.measure_time and (not args.quiet_profile or not quiet or args.instrument):
                 raise RuntimeError(
                     "Timing needs --quiet-profile, load <= 2x available CPUs, and no --instrument"
@@ -611,9 +617,9 @@ def worker(args):
                 sys.setprofile(None)
                 if args.instrument:
                     recorder.restore_kernel_witnesses()
-                report["peak_fit_process_rss_bytes"] = (
-                    resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-                )
+                memory = _platform.peak_rss()
+                report["peak_fit_process_rss_bytes"] = memory.bytes
+                report["peak_rss_source"] = memory.source
                 report["environment_fit_end"] = environment_snapshot()
                 report["instrumentation"] = {
                     "enabled": args.instrument,
@@ -629,7 +635,12 @@ def worker(args):
                     ),
                     "kernel_attributes_missing": recorder.kernel_attributes_missing,
                 }
-            if args.measure_time and os.getloadavg()[0] <= 2 * len(os.sched_getaffinity(0)):
+            load = _platform.load_average()
+            if (
+                args.measure_time
+                and load is not None
+                and load[0] <= 2 * _platform.available_cpu_count()
+            ):
                 report.update(
                     timing_status="operator-asserted quiet serial measurement", fit_seconds=elapsed
                 )
@@ -747,7 +758,9 @@ def worker(args):
         if not report["source_stable"]:
             report["timing_status"] = "unmeasured: source changed during run"
             report.pop("fit_seconds", None)
-        report["peak_process_rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        memory = _platform.peak_rss()
+        report["peak_process_rss_bytes"] = memory.bytes
+        report["peak_rss_source"] = memory.source
         write_json(output, report)
     return 0 if report["status"] == "ok" else 1
 

@@ -13,9 +13,7 @@ import functools
 import hashlib
 import json
 import math
-import os
 import platform
-import resource
 import sys
 import time
 import warnings
@@ -27,7 +25,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import scipy
-from benchmarks import rank_deficient_complete_fit
+from benchmarks import _platform, rank_deficient_complete_fit
+from benchmarks._platform import available_cpu_count, load_average, peak_rss
 from benchmarks.rank_deficient_complete_fit import (
     _DispatchSampler,
     _git_state,
@@ -56,12 +55,11 @@ def _source_identity() -> dict:
         "git_dirty": dirty,
         "driver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "helper_files": {
-            "benchmarks.rank_deficient_complete_fit": {
-                "path": str(Path(rank_deficient_complete_fit.__file__).resolve()),
-                "sha256": hashlib.sha256(
-                    Path(rank_deficient_complete_fit.__file__).read_bytes()
-                ).hexdigest(),
+            module.__name__: {
+                "path": str(Path(module.__file__).resolve()),
+                "sha256": hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest(),
             }
+            for module in (rank_deficient_complete_fit, _platform)
         },
         "python": platform.python_version(),
         "numpy": np.__version__,
@@ -78,6 +76,8 @@ def _kernel_dispatch(sampler=None):
     support_shapes = Counter()
     compiled_results = Counter()
     compiled_signatures = []
+    batched_results = Counter()
+    batched_signatures = []
     patches = []
     targets = [
         (multi_penalty, "similarity_transform_logdet"),
@@ -87,6 +87,7 @@ def _kernel_dispatch(sampler=None):
         (multi_penalty, "_triangular_solve"),
         (multi_penalty, "_compensated_dot"),
         (multi_penalty, "_dot2_value"),
+        (multi_penalty, "_dot2_selected"),
         (multi_penalty, "_inverse_gram_enclosed"),
         (multi_penalty, "_positive_product"),
         (multi_penalty, "_positive_native_product"),
@@ -117,6 +118,12 @@ def _kernel_dispatch(sampler=None):
                 ranks[f"{name}:{result.rank}"] += 1
             if name == "_dot2_value":
                 compiled_results["native" if result[1] else "fallback_requested"] += 1
+            elif name == "_dot2_selected":
+                selected = len(args[2])
+                native = int(np.count_nonzero(result[1]))
+                batched_results.update(
+                    selected_entries=selected, native=native, fallback_requested=selected - native
+                )
             return result
 
         return wrapped
@@ -128,6 +135,10 @@ def _kernel_dispatch(sampler=None):
         replacement = wrapper(original, name)
         for module_name, module in tuple(sys.modules.items()):
             if not module_name.startswith("superglm.") or module is None:
+                continue
+            if module_name == "superglm.reml._compensated":
+                # Observe Python entry points, not globals compiled kernels
+                # call internally. Replacing those globals breaks cold JIT.
                 continue
             for attribute, value in tuple(vars(module).items()):
                 if value is original:
@@ -141,11 +152,18 @@ def _kernel_dispatch(sampler=None):
             "support_shapes": support_shapes,
             "compiled_dot2_results": compiled_results,
             "compiled_dot2_signatures": compiled_signatures,
+            "batched_dot2_results": batched_results,
+            "batched_dot2_signatures": batched_signatures,
         }
     finally:
         compiled = next((original for _, name, original in patches if name == "_dot2_value"), None)
         if compiled is not None:
             compiled_signatures.extend(map(str, compiled.nopython_signatures))
+        batched = next(
+            (original for _, name, original in patches if name == "_dot2_selected"), None
+        )
+        if batched is not None:
+            batched_signatures.extend(map(str, batched.nopython_signatures))
         for module, attribute, original in reversed(patches):
             setattr(module, attribute, original)
 
@@ -316,16 +334,22 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--discrete", action="store_true")
     parser.add_argument("--measure-time", action="store_true")
+    parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--tensor-rows", type=int, default=2000)
     args = parser.parse_args()
+    if args.threads < 1:
+        parser.error("--threads must be positive")
     if args.tensor_rows < 1:
         parser.error("--tensor-rows must be positive")
     if args.tensor_rows != 2000 and args.case != "scalar_tensor":
         parser.error("--tensor-rows applies only to --case scalar_tensor")
-    load_before = os.getloadavg()
-    cores = len(os.sched_getaffinity(0))
-    if args.measure_time and load_before[0] > 2 * cores:
-        parser.error("machine load exceeds the repository wall-time threshold")
+    load_before = load_average()
+    cores = available_cpu_count()
+    if args.measure_time:
+        if load_before is None:
+            parser.error("load average is unavailable; cannot verify the wall-time threshold")
+        if load_before[0] > 2 * cores:
+            parser.error("machine load exceeds the repository wall-time threshold")
     model, frame, y, lambdas = _fixture(args.case, args.discrete, tensor_rows=args.tensor_rows)
     data_bytes = frame.to_numpy().tobytes() + y.tobytes()
     receipt = {
@@ -338,6 +362,7 @@ def main():
         "provenance": _source_identity(),
         "load_before": load_before,
         "available_cores": cores,
+        "threads_requested": args.threads,
         "wall_time_status": "measured; see comparison execution conditions"
         if args.measure_time
         else "unmeasured",
@@ -350,7 +375,7 @@ def main():
         if args.measure_time
         else _kernel_dispatch(sampler)
     )
-    with warnings.catch_warnings(record=True) as recorded, threadpool_limits(limits=1):
+    with warnings.catch_warnings(record=True) as recorded, threadpool_limits(limits=args.threads):
         with sampler if sampler is not None else nullcontext(), dispatch_context as dispatch:
             started = time.perf_counter() if args.measure_time else None
             cpu_started = time.process_time() if args.measure_time else None
@@ -376,9 +401,10 @@ def main():
         receipt["warnings"] = [str(item.message) for item in recorded]
     receipt["fit_seconds"] = elapsed if args.measure_time else None
     receipt["fit_cpu_seconds"] = cpu_elapsed if args.measure_time else None
-    receipt["load_after"] = os.getloadavg()
-    rss_unit = 1024.0**2 if sys.platform == "darwin" else 1024.0
-    receipt["process_peak_rss_mib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_unit
+    receipt["load_after"] = load_average()
+    memory = peak_rss()
+    receipt["process_peak_rss_mib"] = memory.bytes / 1024.0**2
+    receipt["peak_rss_source"] = memory.source
     receipt.update(_native_pool_receipt(sampler))
     receipt["outputs"] = _fit_outputs(model, frame, scalar)
     if not scalar:

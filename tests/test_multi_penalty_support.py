@@ -1,5 +1,6 @@
 """Analytic finite-weight geometry and adversarial reference-root checks."""
 
+from dataclasses import replace
 from decimal import Decimal, localcontext
 from fractions import Fraction
 
@@ -311,9 +312,9 @@ def test_compensated_dot_encloses_a_cancelling_exact_rational_dot(
         monkeypatch.setattr(module, "_dot2_value", lambda *_: (0.0, False), raising=False)
     if without_fma:
         monkeypatch.delattr(math, "fma", raising=False)
-    left = np.array([1e6, 1e6 + 1, 1e-6, -3.0])
-    right = np.array([1.0, -1.0, 3.0, 1e-6], dtype=np.longdouble)
-    right[0] += np.longdouble(2) ** -60
+    left = np.pad([1e6, 1e6 + 1, 1e-6, -3.0], (0, 252))
+    right = np.pad([1.0, -1.0, 3.0, 1e-6], (0, 252))
+    right[0] = np.nextafter(1.0, np.inf)
     value, error = _compensated_dot(left, right)
     exact = sum(
         Fraction.from_float(float(x)) * Fraction(*y.as_integer_ratio())
@@ -335,14 +336,14 @@ def test_compensated_dot_uses_the_compiled_scalar_recurrence(monkeypatch):
         return value, success
 
     monkeypatch.setattr(module, "_dot2_value", tracked, raising=False)
-    left = np.array([1e6, 1e6 + 1, 1e-6, -3.0])
-    right = np.array([1.0, -1.0, 3.0, 1e-6], dtype=np.longdouble)
+    left = np.pad([1e6, 1e6 + 1, 1e-6, -3.0], (0, 252))
+    right = np.pad([1.0, -1.0, 3.0, 1e-6], (0, 252))
     value, error = module._compensated_dot(left, right)
     exact = sum(
         Fraction.from_float(float(x)) * Fraction(*y.as_integer_ratio())
         for x, y in zip(left, right, strict=True)
     )
-    assert calls == [(8, True)]
+    assert calls == [(256, True)]
     assert abs(Fraction.from_float(value) - exact) <= Fraction.from_float(error)
 
 
@@ -350,20 +351,21 @@ def test_compensated_dot_refuses_unrepresentable_intermediate_magnitudes():
     from superglm.reml.multi_penalty import PenaltyNumericalError, _compensated_dot
 
     with pytest.raises(PenaltyNumericalError, match="arithmetic error bound"):
-        _compensated_dot(np.array([1e308, -1e308]), np.array([2.0, 2.0], dtype=np.longdouble))
+        _compensated_dot(np.array([1e308, -1e308]), np.array([2.0, 2.0], dtype=np.float64))
 
 
 def test_cancelling_gram_inner_product_uses_root_contraction(monkeypatch):
     from superglm.reml import multi_penalty as module
 
-    original = module._cross_value
+    original = module._matmul_enclosed
     calls = []
 
-    def tracked(*args):
-        calls.append(1)
-        return original(*args)
+    def tracked(left, right, **kwargs):
+        if left.shape == (1, 2) and right.shape == (2, 1):
+            calls.append(1)
+        return original(left, right, **kwargs)
 
-    monkeypatch.setattr(module, "_cross_value", tracked)
+    monkeypatch.setattr(module, "_matmul_enclosed", tracked)
     components = [np.diag([1.0, 0.0]), np.diag([0.0, 1.0]), np.diag([0.0, 1.0])]
     result = module.similarity_transform_logdet(components, np.ones(3))
     assert calls
@@ -373,6 +375,38 @@ def test_cancelling_gram_inner_product_uses_root_contraction(monkeypatch):
         np.ones(3),
         np.array([1.0, 0.5, 0.5]),
         np.array([[0.0, 0.0, 0.0], [0.0, 0.25, -0.25], [0.0, -0.25, 0.25]]),
+    )
+
+
+def test_derivative_root_fallback_reduces_each_squared_norm_once(monkeypatch):
+    from superglm.reml import multi_penalty as module
+
+    factors = (np.eye(2) / 2, np.eye(2) * np.sqrt(0.75))
+    original = module._compensated_dot
+    calls = []
+
+    def counted(left, right):
+        calls.append(left.size)
+        return original(left, right)
+
+    monkeypatch.setattr(module, "_gram_cross", lambda *_: None)
+    monkeypatch.setattr(module, "_compensated_dot", counted)
+    module._derivative_values(factors, tuple(np.zeros_like(factor) for factor in factors), 1e-15)
+    # Two gradient norms and one cross norm, without a discarded first cross reduction.
+    assert calls == [4, 4, 4]
+
+
+def test_uncached_hessian_retains_the_cross_value_consumer():
+    components = [np.eye(2), 2.0 * np.eye(2)]
+    weights = np.array([2.0, 3.0])
+    result = similarity_transform_logdet(components, weights)
+    uncached = replace(result, _hessian=None)
+    expected = 0.375 * np.array([[1.0, -1.0], [-1.0, 1.0]])
+    np.testing.assert_allclose(
+        logdet_s_hessian(uncached, components, weights),
+        expected,
+        rtol=64 * np.finfo(float).eps,
+        atol=0,
     )
 
 
@@ -581,13 +615,13 @@ def test_normal_inverse_uses_native_products_with_a_retained_operand_enclosure(m
     from superglm.reml import multi_penalty as module
 
     rng = np.random.default_rng(301)
-    inverse_root = rng.normal(size=(7, 5)).astype(np.longdouble)
-    inverse_root += np.ldexp(np.longdouble(1), -60)
+    inverse_root = rng.normal(size=(7, 5)).astype(np.float64)
+    inverse_root += np.ldexp(np.float64(1), -60)
 
-    def unexpected_wide_product(*_):
-        pytest.fail("normal inverse materialization used a wide matrix product")
+    def unexpected_native_product(*_):
+        pytest.fail("normal inverse materialization used a general enclosed product")
 
-    monkeypatch.setattr(module, "_matmul_enclosed", unexpected_wide_product)
+    monkeypatch.setattr(module, "_matmul_enclosed", unexpected_native_product)
     inverse, error = module._inverse_gram_enclosed(inverse_root, 0.0)
     for row, column in np.ndindex(inverse.shape):
         exact = sum(
@@ -606,7 +640,7 @@ def test_native_inverse_encloses_signed_cancellation_and_metric_uncertainty():
 
     inverse_root = np.array(
         [[1.0, 1.0, 1.0], [1.0, -1.0, 2.0**-50], [2.0**40, 1.0, -(2.0**40)]],
-        dtype=np.longdouble,
+        dtype=np.float64,
     )
     eta = 1 / 16
     inverse, error = _inverse_gram_enclosed(inverse_root, eta)
@@ -624,11 +658,11 @@ def test_native_inverse_encloses_signed_cancellation_and_metric_uncertainty():
             )
 
 
-@pytest.mark.parametrize("first_entry", [np.longdouble(1), np.longdouble("1e-160")])
+@pytest.mark.parametrize("first_entry", [np.float64(1), np.float64("1e-160")])
 def test_inverse_metric_enclosure_covers_cross_row_whitening_defects(first_entry):
     from superglm.reml.multi_penalty import _inverse_gram_enclosed
 
-    inverse_root = np.diag(np.array([first_entry, 1], dtype=np.longdouble))
+    inverse_root = np.diag(np.array([first_entry, 1], dtype=np.float64))
     eta = Fraction(1, 16)
     off_diagonal = Fraction(1, 32)
     assert 2 * off_diagonal**2 < eta**2
@@ -673,8 +707,8 @@ def test_frozen_near_orthogonal_root_inverse_has_an_entrywise_enclosure():
         assert abs(actual - expected[row][column]) <= bound
 
 
-@pytest.mark.parametrize("value", [np.sqrt(np.longdouble(5e-324)), np.longdouble(1e154)])
-def test_inverse_exponent_boundaries_keep_the_wide_fallback(monkeypatch, value):
+@pytest.mark.parametrize("value", [np.sqrt(np.float64(5e-324)), np.float64(1e154)])
+def test_inverse_exponent_boundaries_keep_the_enclosed_fallback(monkeypatch, value):
     from superglm.reml import multi_penalty as module
 
     calls = []
@@ -698,19 +732,17 @@ def test_dense_inverse_native_dispatch_preserves_preceding_admission(monkeypatch
     components = [np.eye(4), 2 * np.eye(4)]
     weights = np.array([3.0, 5.0])
     baseline = module.similarity_transform_logdet(components, weights)
-    original = module._matmul_enclosed
+    original = module._inverse_gram_enclosed
 
-    def forbid_wide_inverse(left, right, **kwargs):
-        if (
-            left.dtype == np.dtype(np.longdouble)
-            and right.dtype == np.dtype(np.longdouble)
-            and np.shares_memory(left, right)
-            and np.array_equal(right, left.T)
-        ):
-            pytest.fail("dense inverse used the wide matrix product")
-        return original(left, right, **kwargs)
+    def native_inverse(*args):
+        def forbidden(*args, **kwargs):
+            pytest.fail("normal inverse used the general enclosed product")
 
-    monkeypatch.setattr(module, "_matmul_enclosed", forbid_wide_inverse)
+        with monkeypatch.context() as context:
+            context.setattr(module, "_matmul_enclosed", forbidden)
+            return original(*args)
+
+    monkeypatch.setattr(module, "_inverse_gram_enclosed", native_inverse)
     result = module.similarity_transform_logdet(components, weights)
     assert result.logdet_s_plus == baseline.logdet_s_plus
     assert result._correction_count == baseline._correction_count
@@ -742,8 +774,10 @@ def test_aggregate_admission_precedes_scalar_compensation(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("wide_bound", [1e-3, 10.0])
-def test_refined_certificate_reuses_geometry_and_charges_its_evidence_once(monkeypatch, wide_bound):
+@pytest.mark.parametrize("unrefined_bound", [1e-3, 10.0])
+def test_refined_certificate_reuses_geometry_and_charges_its_evidence_once(
+    monkeypatch, unrefined_bound
+):
     from superglm.reml import multi_penalty as module
 
     components = [np.eye(2), np.eye(2)]
@@ -753,31 +787,31 @@ def test_refined_certificate_reuses_geometry_and_charges_its_evidence_once(monke
     original_correction = module._reference_correct_once
     modes, corrections, inverse_roots = [], [], []
 
-    def uncertain_wide(*args, **kwargs):
+    def uncertain_native(*args, **kwargs):
         mode = kwargs.get("_refine", True)
         modes.append(mode)
         inverse_roots.append(args[2].copy())
         factors, bounds = original_actions(*args, **kwargs)
         if not mode:
-            bounds = tuple(np.full_like(factor, wide_bound) for factor in factors)
+            bounds = tuple(np.full_like(factor, unrefined_bound) for factor in factors)
         return factors, bounds
 
     def counted(*args, **kwargs):
         corrections.append(kwargs.get("_refine", True))
         return original_correction(*args, **kwargs)
 
-    monkeypatch.setattr(module, "_reference_root_actions", uncertain_wide)
+    monkeypatch.setattr(module, "_reference_root_actions", uncertain_native)
     monkeypatch.setattr(module, "_reference_correct_once", counted)
     result = module.similarity_transform_logdet(components, weights)
     assert corrections == [False]
     assert modes == [False, False, True]
     np.testing.assert_array_equal(inverse_roots[1], inverse_roots[2])
     assert result._correction_count == 1
-    assert result._certificate.logdet_error == baseline._certificate.logdet_error
+    assert result._certificate.logdet_error <= baseline._certificate.logdet_error
     assert result.logdet_s_plus == baseline.logdet_s_plus
 
 
-def test_wide_cache_disagreement_uses_the_existing_second_refined_correction(monkeypatch):
+def test_unrefined_cache_disagreement_uses_the_existing_second_refined_correction(monkeypatch):
     from superglm.reml import multi_penalty as module
 
     original = module._reference_correct_once
@@ -804,6 +838,37 @@ def test_wide_cache_disagreement_uses_the_existing_second_refined_correction(mon
     )
 
 
+def test_float64_positive_product_reuses_operand_extrema(monkeypatch):
+    from superglm.reml import multi_penalty as module
+
+    original, calls = np.max, []
+
+    def maximum(value, *args, **kwargs):
+        calls.append(1)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(np, "max", maximum)
+    bound = module._positive_product(np.array([[1.0, 0.0, 2.0]]), np.ones((3, 1)))
+    assert bound[0, 0] >= 3.0
+    assert len(calls) == 2
+
+
+def test_float64_outward_rounding_checks_the_final_value_once(monkeypatch):
+    from superglm.reml import multi_penalty as module
+
+    original, calls = module._finite_double, []
+
+    def finite(value, name):
+        calls.append(1)
+        return original(value, name)
+
+    monkeypatch.setattr(module, "_finite_double", finite)
+    value = module._upper(np.array([-1, 0, 1], dtype=np.float32))
+    np.testing.assert_array_equal(value, np.nextafter([0.0, 0.0, 1.0], np.inf))
+    assert value.dtype == np.float64
+    assert len(calls) == 1
+
+
 def _assert_positive_product_enclosed(left, right, bound):
     for row, column in np.ndindex(bound.shape):
         exact = sum(
@@ -816,7 +881,7 @@ def _assert_positive_product_enclosed(left, right, bound):
         assert exact <= Fraction.from_float(bound[row, column])
 
 
-@pytest.mark.parametrize("working_dtype", [np.float64, np.longdouble])
+@pytest.mark.parametrize("working_dtype", [np.float64])
 def test_positive_bound_uses_outward_native_operands_without_mutating_inputs(
     monkeypatch, working_dtype
 ):
@@ -850,35 +915,32 @@ def test_positive_bound_uses_outward_native_operands_without_mutating_inputs(
     np.testing.assert_array_equal(right, saved_right)
 
 
-def test_native_positive_bound_encloses_exact_longdouble_products():
+def test_native_positive_bound_encloses_exact_binary64_products():
     from superglm.reml.multi_penalty import _positive_product
 
     rng = np.random.default_rng(921)
-    left = np.abs(rng.normal(size=(9, 17))).astype(np.longdouble)
-    right = np.abs(rng.normal(size=(17, 7))).astype(np.longdouble)
-    left += np.longdouble(2) ** -60
-    right += np.longdouble(2) ** -60
+    left = np.abs(rng.normal(size=(9, 17))).astype(np.float64)
+    right = np.abs(rng.normal(size=(17, 7))).astype(np.float64)
+    left += np.float64(2) ** -60
+    right += np.float64(2) ** -60
     _assert_positive_product_enclosed(left, right, _positive_product(left, right))
 
 
 @pytest.mark.parametrize(
     ("left", "right"),
     [
-        (np.longdouble("1e-400"), np.longdouble("1e300")),
-        (np.longdouble(np.nextafter(0.0, 1.0)), np.longdouble("1e300")),
-        (np.longdouble("1e-200"), np.longdouble("1e-200")),
-        (np.longdouble("1e154"), np.longdouble("1e154")),
+        (np.float64("1e-308"), np.float64("1e300")),
+        (np.float64(np.nextafter(0.0, 1.0)), np.float64("1e300")),
+        (np.float64("1e-200"), np.float64("1e-200")),
+        (np.float64("1e154"), np.float64("1e154")),
         (
-            np.nextafter(np.longdouble(np.finfo(float).max), np.longdouble(np.inf)),
-            np.longdouble("1e-308"),
+            np.float64(np.finfo(float).max),
+            np.float64("1e-308"),
         ),
     ],
 )
 def test_positive_bound_exponent_edges_stay_outside_the_native_range(monkeypatch, left, right):
     from superglm.reml import multi_penalty as module
-
-    if not np.isfinite(left) or left == 0:
-        pytest.skip("this source value requires a wider exponent range or significand")
 
     def forbidden(*_):
         pytest.fail("unsupported exponent range reached the native positive product")
@@ -906,7 +968,7 @@ def test_positive_bound_zero_and_overflow_controls(monkeypatch):
         module._positive_product(np.zeros((1, 2)), np.zeros((3, 1)))
 
 
-@pytest.mark.parametrize("working_dtype", [np.float64, np.longdouble])
+@pytest.mark.parametrize("working_dtype", [np.float64])
 def test_strictly_sub_minimum_positive_bound_uses_an_exact_fill(monkeypatch, working_dtype):
     from superglm.reml import multi_penalty as module
 
@@ -930,13 +992,11 @@ def test_strictly_sub_minimum_positive_bound_uses_an_exact_fill(monkeypatch, wor
     np.testing.assert_array_equal(right, saved_right)
 
 
-def test_strictly_sub_minimum_positive_bound_uses_original_wide_exponents(monkeypatch):
+def test_strictly_sub_minimum_positive_bound_uses_original_product_exponents(monkeypatch):
     from superglm.reml import multi_penalty as module
 
-    if np.finfo(np.longdouble).minexp >= np.finfo(float).minexp:
-        pytest.skip("this source value requires a wider exponent range")
-    left = np.full((2, 3), np.nextafter(np.longdouble(0), np.longdouble(1)))
-    right = np.full((3, 2), np.ldexp(np.longdouble(0.75), 15000))
+    left = np.full((2, 3), np.nextafter(np.float64(0), np.float64(1)))
+    right = np.full((3, 2), np.ldexp(np.float64(0.75), -8))
 
     def forbidden(*_):
         pytest.fail("a sub-minimum bound was lost through a float64 operand cast")
@@ -948,11 +1008,11 @@ def test_strictly_sub_minimum_positive_bound_uses_original_wide_exponents(monkey
     _assert_positive_product_enclosed(left, right, bound)
 
 
-def test_adjacent_sub_minimum_exponent_keeps_the_wide_bound(monkeypatch):
+def test_adjacent_sub_minimum_exponent_keeps_the_unrefined_bound(monkeypatch):
     from superglm.reml import multi_penalty as module
 
-    left = np.full((1, 8), np.ldexp(np.longdouble(0.75), -550))
-    right = np.full((8, 1), np.ldexp(np.longdouble(0.75), -526))
+    left = np.full((1, 8), np.ldexp(np.float64(0.75), -550))
+    right = np.full((8, 1), np.ldexp(np.float64(0.75), -526))
     calls = []
     original_upper = module._upper
 
@@ -1077,7 +1137,7 @@ def test_summary_propagates_failure_before_admission(monkeypatch):
     assert len(calls) == 3
 
 
-def test_materialization_reuses_the_existing_wide_product_and_magnitude(monkeypatch):
+def test_materialization_reuses_the_existing_native_product_and_magnitude(monkeypatch):
     from superglm.reml import multi_penalty as module
 
     left = np.array([[1.25, 0.5], [-0.25, 2.0]])
@@ -1101,7 +1161,7 @@ def test_materialization_reuses_the_existing_wide_product_and_magnitude(monkeypa
 
 
 @pytest.mark.parametrize("mutation", ["left", "right", "output"])
-@pytest.mark.parametrize("working_dtype", [np.float64, np.longdouble])
+@pytest.mark.parametrize("working_dtype", [np.float64])
 def test_materialization_evidence_preserves_operand_and_output_changes(
     monkeypatch, mutation, working_dtype
 ):

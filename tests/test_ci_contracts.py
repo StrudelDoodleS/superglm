@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,12 +36,12 @@ def _check_run_names(workflow: str) -> dict[str, list[str]]:
             published[job_id] = [job_id]
             continue
         template = declared.group(1).strip().strip("\"'")
-        if "${{ matrix.python-version }}" in template:
+        if "${{ matrix.runtime.python-version }}" in template:
             published[job_id] = [
-                template.replace("${{ matrix.python-version }}", version).replace(
-                    "${{ matrix.label }}", label
-                )
-                for version, _group, label in _compatibility_cases(block)
+                template.replace("${{ matrix.runtime.python-version }}", version)
+                .replace("${{ matrix.label }}", label)
+                .replace("${{ matrix.runtime.suffix }}", suffix)
+                for version, _os, _group, label, suffix in _compatibility_cases(block)
             ]
             continue
         matrix_key = re.fullmatch(r"\$\{\{ *matrix\.([\w-]+) *\}\}", template)
@@ -56,21 +58,21 @@ def _check_run_names(workflow: str) -> dict[str, list[str]]:
     return published
 
 
-def _compatibility_cases(block: str) -> list[tuple[str, int, str]]:
-    """Expand the two literal matrix axes and their group-to-label additions."""
-    versions = re.search(r"(?m)^        python-version: (\[.+\])$", block)
-    groups = re.search(r"(?m)^        group: (\[.+\])$", block)
-    assert versions is not None and groups is not None
-    labels = re.findall(r"- group: (\d+)\n +label: ([A-D])\n", block)
-    by_group = {int(group): label for group, label in labels}
-    group_values = json.loads(groups.group(1))
-    assert len(labels) == len(by_group) == len(group_values)
-    assert set(by_group) == set(group_values)
-    assert "exclude:" not in block
+def _compatibility_cases(block: str) -> list[tuple[str, str, int, str, str]]:
+    """Expand this workflow's runtime/shard product and shard labels."""
+    matrix = yaml.safe_load(block)["test-compatibility"]["strategy"]["matrix"]
+    assert set(matrix) == {"runtime", "group", "include"}, (
+        "native compatibility must run every shard on every declared runtime"
+    )
+    labels = matrix["include"]
+    assert all(set(item) == {"group", "label"} for item in labels)
+    by_group = {item["group"]: item["label"] for item in labels}
+    assert len(labels) == len(by_group) == len(matrix["group"])
+    assert set(by_group) == set(matrix["group"])
     return [
-        (version, group, by_group[group])
-        for version in json.loads(versions.group(1))
-        for group in group_values
+        (runtime["python-version"], runtime["os"], group, by_group[group], runtime["suffix"])
+        for runtime in matrix["runtime"]
+        for group in matrix["group"]
     ]
 
 
@@ -134,13 +136,66 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert "needs: test-compatibility" in floor[0]
     matrix = _jobs(workflow)["test-compatibility"]
     assert {case for case in _compatibility_cases(matrix) if case[0] == "3.12"} == {
-        ("3.12", group, label) for group, label in enumerate("ABCD", start=1)
+        ("3.12", "ubuntu-latest", group, label, "") for group, label in enumerate("ABCD", start=1)
     }
     assert "uv run --with mpmath pytest tests/" in matrix
     assert "--extra dev --extra bench --extra plotting" in matrix, (
         "the compatibility test matrix must install the bench and plotting extras"
     )
     assert "continue-on-error: true" not in workflow
+
+
+def test_compatibility_shards_do_not_queue_platforms_behind_each_other() -> None:
+    workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    block = _jobs(workflow)["test-compatibility"]
+    strategy = yaml.safe_load(block)["test-compatibility"]["strategy"]
+    cases = _compatibility_cases(block)
+    assert strategy.get("max-parallel", len(cases)) >= len(cases)
+
+
+def test_compatibility_shards_collect_all_failures_with_a_hang_limit() -> None:
+    workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    job = yaml.safe_load(workflow)["jobs"]["test-compatibility"]
+    assert 0 < job.get("timeout-minutes", 0) <= 15
+    assert job["strategy"].get("fail-fast", True) is False
+    pytest_commands = [
+        shlex.split(step["run"]) for step in job["steps"] if "pytest" in step.get("run", "")
+    ]
+    assert pytest_commands
+    assert all("-x" not in command and "--exitfirst" not in command for command in pytest_commands)
+    assert all("--maxfail=0" in command for command in pytest_commands)
+    assert all("--junitxml=pytest-results.xml" in command for command in pytest_commands)
+    report_step = next(step for step in job["steps"] if step.get("name") == "Upload shard results")
+    assert report_step["if"] == "${{ always() }}"
+    assert report_step["with"]["path"] == "pytest-results.xml"
+
+
+@pytest.mark.parametrize("step_index", [0, 1], ids=["regression", "coverage"])
+def test_shard_failure_options_report_both_failures(tmp_path: Path, step_index: int) -> None:
+    """Changing either command back to exit-first loses the second failure."""
+    workflow = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    commands = [
+        shlex.split(step["run"])
+        for step in workflow["jobs"]["test-compatibility"]["steps"]
+        if "pytest" in step.get("run", "")
+    ]
+    stop_options = [
+        arg
+        for arg in commands[step_index]
+        if arg in ("-x", "--exitfirst") or arg.startswith("--maxfail=")
+    ]
+    fixture = tmp_path / "test_failures.py"
+    fixture.write_text("def test_first(): assert False\ndef test_second(): assert False\n")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-o", "addopts=", *stop_options, str(fixture)],
+        cwd=tmp_path,
+        env=os.environ | {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "2 failed" in completed.stdout, completed.stdout + completed.stderr
 
 
 @pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
@@ -150,8 +205,10 @@ def test_python_floor_aggregate_executes_the_matrix_verdict(result: str) -> None
     assert "TEST_RESULT: ${{ needs.test-compatibility.result }}" in aggregate
     commands = re.findall(r"(?m)^        run: (.+)$", aggregate)
     assert len(commands) == 1
+    command = shlex.split(commands[0])
+    assert command[:2] == ["python", "-c"]
     completed = subprocess.run(
-        ["bash", "-e", "-c", commands[0]],
+        [sys.executable, *command[1:]],
         env=os.environ | {"TEST_RESULT": result},
         capture_output=True,
         text=True,

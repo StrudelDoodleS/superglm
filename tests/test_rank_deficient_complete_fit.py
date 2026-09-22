@@ -17,11 +17,9 @@ and that the measurement happened when it claims to have happened.
 from __future__ import annotations
 
 import json
-import resource
 import subprocess
 import sys
 import threading
-from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -292,6 +290,7 @@ def test_timed_rank_fit_has_no_observer_and_keeps_first_use_inside_clock(monkeyp
     assert blas["observation"]["status"] == "not_observed_in_timed_fit"
 
 
+@pytest.mark.parametrize("threads", [None, 4])
 @pytest.mark.parametrize(
     ("driver_name", "case", "mode"),
     [
@@ -303,7 +302,7 @@ def test_timed_rank_fit_has_no_observer_and_keeps_first_use_inside_clock(monkeyp
     ],
 )
 def test_timed_complete_fit_drivers_have_no_observer(
-    monkeypatch, tmp_path, driver_name, case, mode
+    monkeypatch, tmp_path, driver_name, case, mode, threads
 ):
     from importlib import import_module
 
@@ -338,7 +337,7 @@ def test_timed_complete_fit_drivers_have_no_observer(
     def rss(*_args):
         assert not clock_active
         events.append("rss")
-        return SimpleNamespace(ru_maxrss=1024.0)
+        return SimpleNamespace(bytes=1048576, source="test")
 
     fixture = (
         (Model(), frame, response, {})
@@ -349,9 +348,19 @@ def test_timed_complete_fit_drivers_have_no_observer(
     monkeypatch.setattr(driver, "_source_identity", lambda: {"source_digest": "test"})
     monkeypatch.setattr(driver, "_fit_outputs", outputs)
     monkeypatch.setattr(driver.time, "perf_counter", clock)
-    monkeypatch.setattr(driver.resource, "getrusage", rss)
-    monkeypatch.setattr(driver, "threadpool_limits", lambda **_kwargs: nullcontext())
-    monkeypatch.setattr(driver.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(driver, "peak_rss", rss)
+    # Exercise the real pool limit: accepting a flag without applying it must fail.
+    requested_threads = 1 if threads is None else threads
+    original_fit = Model.fit
+
+    def fit_with_thread_check(self, *args, **kwargs):
+        pools = bench.threadpool_info()
+        assert pools and all(pool["num_threads"] == requested_threads for pool in pools)
+        return original_fit(self, *args, **kwargs)
+
+    monkeypatch.setattr(Model, "fit", fit_with_thread_check)
+    monkeypatch.setattr(Model, "fit_reml", fit_with_thread_check)
+    monkeypatch.setattr(driver, "load_average", lambda: (0.0, 0.0, 0.0))
     monkeypatch.setattr(driver, "_DispatchSampler", _unexpected_observer)
     observer = "_kernel_dispatch" if driver_name == "multi_penalty_support" else "_solver_dispatch"
     monkeypatch.setattr(driver, observer, _unexpected_observer)
@@ -369,6 +378,8 @@ def test_timed_complete_fit_drivers_have_no_observer(
     ]
     if driver_name == "multi_penalty_support":
         argv.extend(["--mode", mode])
+    if threads is not None:
+        argv.extend(["--threads", str(threads)])
     monkeypatch.setattr(sys, "argv", argv)
     driver.main()
     receipt = json.loads(path.read_text())
@@ -377,6 +388,9 @@ def test_timed_complete_fit_drivers_have_no_observer(
     assert receipt["native_pool_samples"] == 0 and receipt["native_pools_during_fit"] == []
     assert receipt["native_pool_observation"]["status"] == "not_observed_in_timed_fit"
     assert receipt["outputs"] == {"coefficients": [1.0]}
+    assert receipt["threads_requested"] == requested_threads
+    assert receipt["process_peak_rss_mib"] == 1.0
+    assert receipt["peak_rss_source"] == "test"
 
 
 def test_peak_memory_records_how_many_fits_it_covers(payload: dict) -> None:
@@ -401,11 +415,20 @@ def test_the_memory_unit_matches_the_platform(payload: dict) -> None:
     from so the conversion can be checked rather than trusted.
     """
     unit = payload["memory"]["ru_maxrss_unit"]
-    assert unit in {"bytes", "kib"}
-    assert unit == ("bytes" if sys.platform == "darwin" else "kib")
+    if sys.platform == "win32":
+        import psutil
 
-    raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    divisor = 1024.0**2 if unit == "bytes" else 1024.0
+        assert unit is None
+        assert payload["memory"]["peak_rss_source"] == "psutil.peak_wset"
+        raw = psutil.Process().memory_info().peak_wset
+        divisor = 1024.0**2
+    else:
+        import resource
+
+        assert unit == ("bytes" if sys.platform == "darwin" else "kib")
+        assert payload["memory"]["peak_rss_source"] == "resource.ru_maxrss"
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        divisor = 1024.0**2 if unit == "bytes" else 1024.0
     # the reported figure is this process's own mark, so it must be in range
     assert payload["memory"]["peak_rss_mib"] == pytest.approx(raw / divisor, rel=0.5)
 
@@ -438,6 +461,8 @@ def test_dispatch_comes_from_a_live_process_not_build_metadata(payload: dict) ->
     print the same string on a machine dispatching elsewhere.  A live reading
     carries a filepath and a threading layer; build metadata carries neither.
     """
+    if not any(pool["user_api"] == "blas" for pool in bench.threadpool_info()):
+        pytest.skip("threadpoolctl exposes no live BLAS pool on this platform")
     pools = payload["backend_dispatch"]["blas"]["pools_during_fit"]
     assert any(pool["user_api"] == "blas" for pool in pools)
     for pool in pools:

@@ -4619,6 +4619,10 @@ def test_high_start_boundary_telemetry_never_changes_the_fit() -> None:
     while EFS initially walks lambda down. True GFS can later propose an upward
     correction, so neither saturation nor instantaneous direction separates a
     finite optimum from infinity. The telemetry must not change the route.
+
+    Exercise the early nominations, not thousands of iterations toward the
+    optimum: this regression compares the entire real trajectory while the
+    two fits have the same finite iteration budget.
     """
     frame, response, predictors = _smooth_fixture()
     high_start = {"location:x#wiggle": 100.0, "scale:z#wiggle": 100.0}
@@ -4630,7 +4634,7 @@ def test_high_start_boundary_telemetry_never_changes_the_fit() -> None:
         predictors=predictors,
         lambdas=high_start,
         efs_config=DistributionalEFSConfig(
-            outer="efs", max_iterations=3000, boundary_saturation=0.95
+            outer="efs", max_iterations=20, boundary_saturation=0.95
         ),
     )
     reference = fit_dense_distributional(
@@ -4640,11 +4644,18 @@ def test_high_start_boundary_telemetry_never_changes_the_fit() -> None:
         weight_contract=WeightContract(semantics="prior"),
         predictors=predictors,
         lambdas=high_start,
-        efs_config=DistributionalEFSConfig(outer="efs", max_iterations=3000),
+        efs_config=DistributionalEFSConfig(outer="efs", max_iterations=20),
     )
 
     assert guarded.smoothing is not None and reference.smoothing is not None
     assert any(iteration.boundary_nominations for iteration in guarded.smoothing.history)
+    assert all(not iteration.boundary_nominations for iteration in reference.smoothing.history)
+    assert (
+        tuple(
+            replace(iteration, boundary_nominations=()) for iteration in guarded.smoothing.history
+        )
+        == reference.smoothing.history
+    )
     assert guarded.smoothing.iterations == reference.smoothing.iterations
     assert guarded.smoothing.objective == reference.smoothing.objective
     assert guarded.smoothing.converged == reference.smoothing.converged

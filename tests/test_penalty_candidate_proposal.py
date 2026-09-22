@@ -19,20 +19,20 @@ def _support(rank=128):
 
 @pytest.mark.parametrize("power", [-129, 129])
 def test_native_proposal_declines_outside_its_range(power):
-    left = np.eye(8, dtype=np.longdouble) * np.longdouble(2) ** power
+    left = np.eye(8, dtype=np.float64) * np.float64(2) ** power
     assert module._candidate_product(left, np.eye(8)) is None
 
 
-def test_native_proposal_uses_binary64_and_returns_finite_wide_storage(monkeypatch):
+def test_native_proposal_uses_binary64_and_returns_float64_storage(monkeypatch):
     def forbidden(*args, **kwargs):
-        raise AssertionError("a proposal does not require a certified wide product")
+        raise AssertionError("a proposal does not require a certified product")
 
-    monkeypatch.setattr(module, "_wide_product", forbidden)
-    left = np.array([[1, 2, -3], [-2, 1, 4]], dtype=np.longdouble)
-    right = np.array([[2, -1], [3, 2], [1, -4]], dtype=np.longdouble)
+    monkeypatch.setattr(module, "_native_product", forbidden)
+    left = np.array([[1, 2, -3], [-2, 1, 4]], dtype=np.float64)
+    right = np.array([[2, -1], [3, 2], [1, -4]], dtype=np.float64)
     product = module._candidate_product(left, right)
     np.testing.assert_array_equal(product, [[5, 15], [3, -12]])
-    assert product.dtype == np.dtype(np.longdouble)
+    assert product.dtype == np.dtype(np.float64)
 
 
 def test_summary_retries_whole_geometry_after_late_native_refusal(monkeypatch):
@@ -133,7 +133,7 @@ def test_original_reference_certifies_or_replaces_a_poor_proposal(monkeypatch, p
 
     def poor(left, right):
         calls.append(1)
-        result = np.zeros((left.shape[0], right.shape[1]), dtype=np.longdouble)
+        result = np.zeros((left.shape[0], right.shape[1]), dtype=np.float64)
         if proposal == "different":
             result[:rank] = np.eye(rank)
         return result

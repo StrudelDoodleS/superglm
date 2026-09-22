@@ -472,9 +472,11 @@ def test_channel_invariant_scans_run_once_per_assembly(monkeypatch, cached):
     assert "block_cross_tensor_main_s" in profile
     assert "block_cross_tensor_own_margin_s" in profile
     assert profile["block_cross_disc_disc_hist_calls"] == 1
+    # The seven cross calls each scan uncached weights once. The discrete
+    # pair shares one range decision between its two support projections.
     assert calls == {
         "legacy": 1 if cached else 4,
-        "bounds": 1 if cached else 8,
+        "bounds": 1 if cached else 7,
         "cells": 2 if cached else 4,
     }
 
@@ -500,6 +502,212 @@ def test_mixed_cross_values_after_channel_primes_assembly_cache(cross):
     bound = 32 * np.finfo(float).eps * max(*x.shape, *y.shape) * scale
     actual = algebra._cross_gram(left, right, weights, cache=cache)
     assert np.linalg.norm(actual - expected, ord=np.inf) <= bound
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_support_factor_scans_reuse_only_owned_factors_within_assembly(monkeypatch, cached):
+    group = DiscretizedSSPGroupMatrix(
+        np.array([[1.0, 0.25], [0.5, 1.0]]), np.eye(2), np.array([0, 1, 0])
+    )
+    partner = np.ones((2, 3))
+    original = algebra._operand_exponent_bounds
+    scans = {"basis": 0, "transform": 0, "partner": 0}
+
+    def recorded(values):
+        for name, operand in (
+            ("basis", group.B_unique),
+            ("transform", group.R_inv),
+            ("partner", partner),
+        ):
+            scans[name] += int(values is operand)
+        return original(values)
+
+    monkeypatch.setattr(algebra, "_operand_exponent_bounds", recorded)
+    for _ in range(2):
+        cache = algebra._BlockWeightCache() if cached else None
+        for value in (1.0, 2.0, 3.0):
+            partner.fill(value)
+            algebra._cross_support(group, cache, partner)
+    assert scans == {
+        "basis": 2 if cached else 6,
+        "transform": 2 if cached else 6,
+        "partner": 6,
+    }
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_support_factor_cache_observes_mutation_between_moment_assemblies(replace):
+    from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
+
+    groups = [
+        DiscretizedSSPGroupMatrix(
+            np.array([[1.0, 0.25], [0.5, 1.0]]) * (index + 1),
+            np.array([[1.0, 0.125], [-0.25, 1.0]]),
+            np.array([0, 1, index, 0]),
+        )
+        for index in range(2)
+    ]
+    weights = np.array([1.0, 0.5, 2.0, 0.75])
+    plan = MatrixExecutionPlan(groups, n=len(weights))
+    for iteration in range(2):
+        if iteration:
+            for group in groups:
+                for name in ("B_unique", "R_inv"):
+                    changed = getattr(group, name) * 0.5
+                    if replace:
+                        setattr(group, name, changed)
+                    else:
+                        getattr(group, name)[:] = changed
+            weights *= 2.0
+        design = np.hstack([group.toarray() for group in groups])
+        expected = design.T @ (weights[:, None] * design)
+        scale = np.linalg.norm(abs(design).T @ (weights[:, None] * abs(design)), np.inf)
+        bound = 16 * np.finfo(float).eps * max(design.shape) * scale
+        actual = plan.moments(weights).gram
+        assert np.linalg.norm(actual - expected, np.inf) <= bound
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_discrete_cross_scans_each_owned_factor_once_per_assembly(monkeypatch, cached):
+    groups = [
+        DiscretizedSSPGroupMatrix(
+            np.array([[1.0, 0.25], [0.5, 1.0]]) * (index + 1),
+            np.eye(2),
+            np.array([0, 1, index, 0]),
+        )
+        for index in range(2)
+    ]
+    factors = [factor for group in groups for factor in (group.B_unique, group.R_inv)]
+    scans = [0] * len(factors)
+    original = algebra._operand_exponent_bounds
+
+    def recorded(values):
+        for index, factor in enumerate(factors):
+            scans[index] += int(values is factor)
+        return original(values)
+
+    monkeypatch.setattr(algebra, "_operand_exponent_bounds", recorded)
+    weights = np.array([1.0, -0.5, 2.0, 0.75])
+    for _ in range(2):
+        cache = algebra._BlockWeightCache() if cached else None
+        algebra._cross_gram(*groups, weights, cache=cache)
+        algebra._cross_gram(*reversed(groups), weights, cache=cache)
+    # Two assemblies, each visiting both orientations. A factor is scanned
+    # once per call without a cache, or once per assembly with a cache.
+    assert scans == [2 if cached else 4] * len(factors)
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_discrete_cross_partner_range_cache_observes_next_assembly_mutation(replace):
+    left = DiscretizedSSPGroupMatrix(np.ones((2, 1)), np.ones((1, 1)), np.array([0, 1]))
+    right = DiscretizedSSPGroupMatrix(np.ones((2, 1)), np.ones((1, 1)), np.array([1, 0]))
+    weights = np.array([0.5, 1.0])
+    for exponent in (0, 1023):
+        for group, name, value in (
+            (left, "B_unique", np.ldexp(1.0, exponent)),
+            (right, "R_inv", np.ldexp(1.0, -exponent)),
+        ):
+            if replace:
+                setattr(group, name, np.full_like(getattr(group, name), value))
+            else:
+                getattr(group, name).fill(value)
+        cache = algebra._BlockWeightCache()
+        # Reciprocal factors keep the represented cross at exactly sum(weights),
+        # but the high exponent forces the unchanged raw-association guard.
+        with np.errstate(over="raise", invalid="raise", under="raise"):
+            actual = algebra._cross_gram(left, right, weights, cache=cache)
+        np.testing.assert_array_equal(actual, [[1.5]])
+        if exponent:
+            assert not cache._supports
+
+
+@pytest.mark.parametrize("operand", ["B_unique", "R_inv", "partner"])
+@pytest.mark.parametrize("exponent", [-1023, 1023])
+def test_support_factor_cache_keeps_extreme_range_refusal(operand, exponent):
+    group = DiscretizedSSPGroupMatrix(np.ones((2, 1)), np.ones((1, 1)), np.array([0, 1]))
+    partner = np.ones((2, 1))
+    cache = algebra._BlockWeightCache()
+    assert algebra._cross_support(group, cache, partner)[1] is None
+    if operand == "partner":
+        # A reused weighted scratch object can change inside one assembly.
+        partner[:] = np.ldexp(1.0, exponent)
+    else:
+        getattr(group, operand)[:] = np.ldexp(1.0, exponent)
+        cache = algebra._BlockWeightCache()
+    support, transform = algebra._cross_support(group, cache, partner)
+    assert support is group.B_unique and transform is group.R_inv
+
+
+@pytest.mark.parametrize("own_margin", [False, True])
+@pytest.mark.parametrize("cached", [False, True])
+def test_tensor_main_partner_scans_run_once_per_assembly(monkeypatch, own_margin, cached):
+    tensor, rng = _tensor(3, 4, 2, 2, 20, 3)
+    main = DiscretizedSSPGroupMatrix(
+        rng.normal(size=(3, 2)), np.eye(2), tensor.idx1 if own_margin else rng.integers(3, size=20)
+    )
+    cross = algebra._cross_gram_tensor_own_margin if own_margin else algebra._cross_gram_tensor_main
+    factors = (tensor.B1_unique_t, tensor.B2_unique_t, tensor.R_inv)
+    scans = [0, 0, 0]
+    original = algebra._operand_exponent_bounds
+
+    def recorded(values):
+        for index, factor in enumerate(factors):
+            scans[index] += int(values is factor)
+        return original(values)
+
+    monkeypatch.setattr(algebra, "_operand_exponent_bounds", recorded)
+    weights = rng.normal(size=20)
+    for _ in range(2):
+        cache = algebra._BlockWeightCache() if cached else None
+        for _ in range(3):
+            assert cross(tensor, main, weights, cache) is not None
+    assert scans == [2 if cached else 6] * 3
+
+
+@pytest.mark.parametrize("own_margin", [False, True])
+@pytest.mark.parametrize("replace", [False, True])
+def test_tensor_main_partner_cache_observes_live_margins_next_assembly(own_margin, replace):
+    tensor, rng = _tensor(3, 4, 2, 2, 20, 3)
+    main = DiscretizedSSPGroupMatrix(
+        rng.normal(size=(3, 2)), np.eye(2), tensor.idx1 if own_margin else rng.integers(3, size=20)
+    )
+    cross = algebra._cross_gram_tensor_own_margin if own_margin else algebra._cross_gram_tensor_main
+    weights = rng.normal(size=20)
+    for iteration in range(2):
+        if iteration:
+            for name in ("B1_unique_t", "B2_unique_t", "R_inv"):
+                changed = getattr(tensor, name) * 0.5
+                if replace:
+                    setattr(tensor, name, changed)
+                else:
+                    getattr(tensor, name)[:] = changed
+            weights *= 2.0
+        # Evaluate live margins literally; the stored joint table deliberately
+        # remains unchanged so it cannot hide stale marginal-factor reuse.
+        x = main.B_unique[main.bin_idx] @ main.R_inv
+        y = (
+            np.array(
+                [
+                    np.kron(tensor.B1_unique_t[i], tensor.B2_unique_t[j])
+                    for i, j in zip(tensor.idx1, tensor.idx2, strict=True)
+                ]
+            )
+            @ tensor.R_inv
+        )
+        expected = x.T @ (weights[:, None] * y)
+        scale = np.max(abs(x).T @ (abs(weights[:, None]) * abs(y)))
+        actual = cross(tensor, main, weights, algebra._BlockWeightCache())
+        _assert_product_close(actual, expected, scale, max(*x.shape, *y.shape))
+
+
+def test_support_factor_cache_does_not_retain_weighted_partner():
+    group = DiscretizedSSPGroupMatrix(np.ones((2, 1)), np.ones((1, 1)), np.array([0, 1]))
+    partner = np.ones((2, 3))
+    owner = weakref.ref(partner)
+    cache = algebra._BlockWeightCache()
+    algebra._cross_support(group, cache, partner)
+    del partner
+    assert owner() is None
 
 
 @pytest.mark.parametrize("cached", [False, True])

@@ -657,36 +657,13 @@ def test_structured_ladder_agrees_with_the_dense_ladder(moderate_pair):
 
 
 def test_issue_204_reachable_half_df_uses_the_profiled_trace():
-    """A reachable 0.5 rung must be classified from the PROFILED trace.
+    """The profiled trace brackets and resolves the reachable scalar 0.5 rung.
 
-    The raw trace is one while the stable profiled trace is 1e-12.  Scaling
-    from the raw trace puts the old low edge at 1e-10, where EDF is about
-    0.0099 and the reachable target is falsely classified as above the
-    bracket.  That classification is what this pins, and it still holds.
-
-    **THE 0.5 RUNG ITSELF IS NO LONGER PUBLISHED, AND THAT IS A REGRESSION
-    STATED RATHER THAN HIDDEN.**  This pair is one dimension wide, so ``edf``
-    at any lambda is exactly ``a / (a + lambda)`` for ``a = tr(V_eff)`` and the
-    exact value is available at every lambda.  Against it the factored form is
-    at round-off across the bracket -- 2.2e-16, 4.4e-16, 4.4e-16, 1.0e-14,
-    2.2e-16, 1.3e-15 relative at 1e-16, 1e-14, 5e-13, 1e-10, 1e-6 and 1e-2,
-    where the form it replaces reads 1.0e-04, 1.3e-05, 6.1e-05, 5.7e-06,
-    1.3e-04 and 1.8e-05, four to ten orders worse at every one of them.  But
-    at the two lambdas either side of the crossover where ``edf = 0.5`` it
-    reads 2.4e-04 relative against that form's 5.0e-13, because ``H``'s small
-    eigenvalue is 2e-12 there and ``1/h`` multiplies an ``eps``-sized residue.
-    2.4e-04 is 120x ``_EDF_TOL``, so the bisection cannot converge and the
-    ladder hands the pair back.
-
-    Two fixes were measured and neither is adopted: writing the level's
-    contribution in the shifted coordinates ``[K_q | K_q Y_q - Phi_q]``, and
-    equilibrating ``W_q`` before its PSD factorization.  Each makes this rung
-    exact and each moves three neighbouring lambdas the other way by the same
-    2e-04, and each reds more of this file than it greens.
-
-    The published row is a NaN either way -- ``screen_interactions`` gets no
-    rung -- so what changes is which pairs reach it, not what a caller sees
-    for this one.
+    The raw trace is one, but the stored cell weights give residual curvature
+    a=1e-12/(1+1e-12). Raw-trace scaling puts the low edge above the target.
+    The resolved rung also kills factoring the unscaled 1/h metric: that
+    contraction read 0.50012207031225 at the crossover on Linux and lost
+    different digits on macOS.
     """
     inputs = _near_absorbed_cells()
     p = spline_cat_moments(*inputs)
@@ -704,7 +681,13 @@ def test_issue_204_reachable_half_df_uses_the_profiled_trace():
 
     expected_trace = 1e-12 / (1.0 + 1e-12)
     assert p.profiled_trace == pytest.approx(expected_trace, rel=2e-13, abs=0.0)
-    assert structured_ladder(p, budgets=(0.5,)) is None
+    ladder = structured_ladder(p, budgets=(0.5,))
+    assert ladder is not None and len(ladder) == 1
+    rung = ladder[0]
+    expected_edf = expected_trace / (expected_trace + rung.lambda0)
+    assert rung.edf0 == pytest.approx(0.5, rel=2e-6, abs=0.0)
+    assert rung.edf0 == pytest.approx(expected_edf, rel=1e-13, abs=0.0)
+    assert rung.reference_variance == pytest.approx(2.0 * expected_edf**2, rel=1e-12, abs=0.0)
 
 
 def test_near_absorbed_edf_is_exact_where_the_dense_subtraction_is_not():
@@ -727,7 +710,7 @@ def test_near_absorbed_edf_is_exact_where_the_dense_subtraction_is_not():
     assert p.profiled_trace == pytest.approx(dense_trace, rel=2e-4, abs=0.0)
 
     a = p.profiled_trace
-    for lam in (1e-16, 1e-14, 5e-13, 1e-10, 1e-6, 1e-2):
+    for lam in (1e-16, 1e-14, 5e-13, 1e-12, 1e-10, 1e-6, 1e-2):
         _, edf = _evaluate(p, geometry, lam)
         assert edf == pytest.approx(a / (a + lam), rel=1e-13), lam
 
@@ -3950,118 +3933,49 @@ def _ladder_high_edge(p):
     return 1e10 * (max(p.profiled_trace, 1e-300) / max(tr_S, 1e-300))
 
 
-# ``edf`` at ``_ladder_high_edge`` for lifts of 0, 1, 3 and 10 eps*sigma_max,
-# in mpmath at 40 digits on each lifted pair's exact float64 design, with the
-# common null space of ``V_eff`` and ``S`` deflated once and every lambda read
-# off a Cholesky.  Stable to every digit shown between 40 and 30 digits.
-_RESIDUE_ORACLE = {
-    (2, 1e-4): (5.720073, 6.011589, 6.003720, 6.000985),
-    (13, 2e-3): (4.975844, 3.773915, 3.089880, 2.464699),
-}
-
-
 @pytest.mark.parametrize(
-    ("seed", "L", "reps", "width", "n_narrow", "bound"),
-    [(2, 10, 20, 1e-4, 3, 3.3), (13, 6, 12, 2e-3, 3, 0.03)],
+    ("L", "narrow_energy"),
+    [(9, 2.0**-18), (5, 2.0**-22)],
     ids=["wide-band-draw", "narrow-band-draw"],
 )
-def test_a_round_off_penalty_residue_moves_edf_the_way_the_pencil_says(
-    seed, L, reps, width, n_narrow, bound
-):
-    """A two-column spline margin's penalty is rank one, so its null residue
-    is round-off -- and lifting that residue by a few ``eps`` MOVES ``edf`` BY
-    WHOLE DEGREES OF FREEDOM.  That is not a defect; it is what the pencil
-    does, and this test used to assert the opposite.
+def test_a_round_off_penalty_residue_moves_edf_the_way_the_pencil_says(L, narrow_energy):
+    """Tiny positive penalties must act on the stored narrow-level geometry.
 
-    **THE PREMISE WAS WRONG AND AN ORACLE SETTLES IT.**  At the ladder's high
-    edge ``lambda`` is ``1e10 * scale``, which turns a penalty eigenvalue of a
-    few ``eps`` of ``sigma_max`` into a real penalty that reaches the free
-    directions of the narrow-band levels.  Evaluated in mpmath at 40 digits on
-    each lifted pair's exact design, ``edf`` at that edge is
-
-        wide-band draw   4.975844 -> 3.773915 -> 3.089880 -> 2.464699
-        narrow-band draw 3.973234 -> 2.808497 -> 2.393160 -> 2.135316
-
-    for lifts of 0, 1, 3 and 10 ``eps * sigma_max``: a swing of 2.51 and 1.84
-    df.  The form this replaces reports 2.957 / 2.670 / 3.098 / 2.463 and
-    2.976 / 2.355 / 2.385 / 2.132 -- flat to within 0.14 df on the first two
-    lifts and up to **2.02 df away from the truth**, because its own relative
-    cut drops the penalized direction from the inverse and it never sees the
-    penalty at all.  Its stability there was insensitivity, not accuracy, and
-    the assertion built on it was pinning that insensitivity.
-
-    What is asserted now is agreement with the oracle at each lift, which is
-    RED against that form by up to 2.02 df on the first draw and 1.00 on the
-    second.  The independent closed form in
-    :func:`_free_directions_left_free` says the same thing from the other
-    side on the vanishing-mass fixture, and this route agrees with it there.
+    A randomly reconstructed rank-one penalty has a platform-dependent null
+    residue. Freezing another platform's high-precision answer does not fix
+    its operands. Here both cell energies and diagonal penalties are dyadic.
+    Each margin has profiled eigenvalues d, repeated L-1 times, and d/(1+Ld),
+    giving an independent scalar filter-factor sum at every penalty lift.
     """
-    B_a, S_a, S_cell, W_cell, level_rows = _structured_inputs(
-        _rank_one_penalty_pair(seed, L, reps, width, n_narrow)
-    )
-    symmetric = 0.5 * (S_a + S_a.T)
-    sigma, directions = np.linalg.eigh(symmetric)
-    assert sigma.size == 2, sigma
-    lower, upper = _exact_residue_bounds(symmetric)
-    eps = np.finfo(np.float64).eps
-    # The fixture is what it says it is: the penalty is NOT singular, and its
-    # null residue is round-off on the largest eigenvalue, so a perturbation of
-    # a few eps is the same size as the residue.  Exact rationals, so this
-    # states it rather than measuring it to a tolerance.
-    assert 0.0 < lower <= upper <= 3.0 * eps * float(sigma[-1]), (lower, upper, sigma)
-
-    null_direction = np.outer(directions[:, 0], directions[:, 0])
-    moved = []
-    certified_refusals = []
-    for multiple, truth in zip((0.0, 1.0, 3.0, 10.0), _RESIDUE_ORACLE[(seed, width)], strict=True):
-        lifted = symmetric + multiple * eps * float(sigma[-1]) * null_direction
-        pair = spline_cat_moments(B_a, lifted, S_cell, W_cell, level_rows)
-        # A DROP HERE IS THE POLICY WORKING, NOT A FAILURE, AND THIS ARM MUST
-        # NOT ASSERT WHICH SIDE OF ROUND-OFF THE RESIDUE LANDED ON.
-        #
-        # An earlier form asserted ``dropped == 0.0`` unconditionally, to turn
-        # #323's new raise into a named failure rather than a bare ERROR out of
-        # the loop.  The diagnostic intent was right and the assertion was not:
-        # it pins a sign that is not determined.  ``S_a`` is 2x2, so the drop
-        # cut is ``2 eps ||S||_2`` -- the tightest in the suite -- and MEASURED
-        # over seven ``OPENBLAS_CORETYPE`` kernels at 1 and 8 threads the
-        # ``multiple = 0`` arm's smallest eigenvalue computes as **exactly
-        # 0.0**, one cut-width from the cut.  That distance IS the
-        # eigensolver's own absolute error bar on the same quantity, and
-        # :func:`_exact_residue_bounds` proves the true residue is positive but
-        # no larger than ``3 eps sigma_max``.  A kernel that reads it a couple
-        # of ulp negative is inside its error budget and ``_penalty_root``
-        # would then be right to drop -- see
-        # :mod:`superglm.screening._score_stat` on why a quantity at
-        # ``eps ||A||`` has no correct digits, its sign included.
-        #
-        # So a drop is recorded and its arm skipped.  ``certified_refusals``
-        # keeps it visible, and the emptiness assert below stops a kernel that
-        # refuses everything from passing this test vacuously.
-        _, dropped, cut = _penalty_root(lifted)
-        if dropped:
-            certified_refusals.append((multiple, dropped, cut))
-            continue
-        _, edf = _evaluate(pair, _profile(pair), _ladder_high_edge(pair))
-        moved.append((multiple, edf, truth))
-    assert moved, (
-        f"every arm was refused, so nothing was compared against the oracle: {certified_refusals}"
-    )
-    # ...and each rung matches the 40-digit value on that lifted design.  The
-    # bounds are the worst distance measured on each draw taken to two
-    # significant figures: 3.28 df on the wide-band one -- where the UNLIFTED
-    # residue is 5.6e-17 relative, below what ``max(w, 0)`` keeps, so this
-    # route reports the direction free at 9.000 against a certified 5.720 --
-    # and 0.024 df on the narrow-band one.  The unfixed form's worst distances
-    # on the same two draws are 0.315 and 2.019 df, so this is RED against it
-    # on the second and its own disclosure on the first.
-    for multiple, value, truth in moved:
-        assert value == pytest.approx(truth, abs=bound), (
-            multiple,
-            value,
-            truth,
-            certified_refusals,
+    B_a = np.array([[-1.0, 0.0], [1.0, 0.0], [0.0, -1.0], [0.0, 1.0]])
+    energies = np.array([narrow_energy, 1.0])
+    W_cell = np.empty((4, L + 1))
+    W_cell[:, 0] = 0.5
+    W_cell[:, 1:] = np.repeat(0.5 * energies, 2)[:, None]
+    S_cell = np.zeros_like(W_cell)
+    level_rows = np.arange(1, L + 1)
+    lam = 1.0e10
+    eps = np.finfo(float).eps
+    values = []
+    for multiple in (0.0, 1.0, 3.0, 10.0):
+        diagonal = np.array([multiple * eps, 1.0])
+        pair = spline_cat_moments(B_a, np.diag(diagonal), S_cell, W_cell, level_rows)
+        _, edf = _evaluate(pair, _profile(pair), lam)
+        expected = float(
+            np.sum(
+                (L - 1) * energies / (energies + lam * diagonal)
+                + energies / (energies + (1.0 + L * energies) * lam * diagonal)
+            )
         )
+        # Per-margin profiled conditioning is at most 1+L. Charge the small
+        # factor operations by their dimensions, not by a measured BLAS error.
+        operations = 32 * (2 * L + 3) ** 2
+        gamma = operations * eps / (1.0 - operations * eps)
+        bound = gamma * (L + 1) * max(expected, 1.0)
+        assert edf == pytest.approx(expected, rel=0.0, abs=bound)
+        values.append(edf)
+    assert np.all(np.diff(values) < 0.0)
+    assert values[0] - values[-1] > L / 2
 
 
 def _multi_null_pair(seed, width=1e-3, L=6, reps=12, n_narrow=2, m=3):

@@ -356,6 +356,74 @@ def test_log_mean_loading_limits_at_zero_skew(sigma):
     assert _rel(float(small), 2.0 * 1e-6 * math.sqrt(2.0 / math.pi)) <= 1e-11
 
 
+def test_log_mean_loading_reuses_each_real_log_cdf(monkeypatch):
+    calls = []
+    original = special.log_ndtr
+
+    def counted(arg):
+        calls.append(arg.copy())
+        return original(arg)
+
+    monkeypatch.setattr(special, "log_ndtr", counted)
+    sigma = np.array([0.8, 20.0, 20.0])[::-1]
+    skew = np.array([-0.5, -0.9, 0.9])[::-1]
+    sigma.flags.writeable = skew.flags.writeable = False
+    tp.log_mean_loading(sigma, skew)
+    assert len(calls) == 2
+    np.testing.assert_array_equal(calls[0], -sigma * (1 - skew))
+    np.testing.assert_array_equal(calls[1], sigma * (1 + skew))
+
+
+@pytest.mark.parametrize("skew", [0.9, 1 - 2**-20])
+def test_reused_loading_right_tail_has_gaussian_tilt_limits(skew):
+    # At a_right >= 38 the omitted left mass and right Gaussian tail are
+    # below 1e-300. Derivatives reduce to a shifted Gaussian half-line tilt.
+    sigma, width = 20.0, 1 + skew
+    expected = np.array(
+        [
+            math.log(width) + sigma**2 * width**2 / 2,
+            sigma * width**2,
+            1 / width + sigma**2 * width,
+            width**2,
+            2 * sigma * width,
+            sigma**2 - 1 / width**2,
+        ]
+    )
+    got = tp.log_mean_loading(np.array([sigma]), np.array([skew]))
+    # Hessian covariance subtraction squares the largest first derivative.
+    bound = 64 * np.finfo(float).eps * (1 + np.max(np.abs(expected[1:3])) ** 2)
+    np.testing.assert_allclose(np.array(got)[:, 0], expected, atol=bound, rtol=0)
+    assert all(value.dtype == np.float64 for value in got)
+
+
+@pytest.mark.parametrize("skew", [-0.9, -(1 - 2**-20)])
+def test_reused_loading_left_tail_matches_half_line_integral(skew):
+    sigma = 20.0
+    left, right = 1 - skew, 1 + skew
+    a, b = sigma * left, sigma * right
+    # Integrating the tilted negative half-line gives the Gaussian Mills
+    # expansion. Its alternating remainder is bounded by the next term.
+    terms, coefficient = [], 1
+    for k in range(8):
+        terms.append(coefficient / a ** (2 * k + 1))
+        coefficient *= -(2 * k + 1)
+    remainder = abs(coefficient / a**17)
+    mass = left * math.fsum(terms) / math.sqrt(2 * math.pi)
+    mass += right * math.exp(b * b / 2) * math.erfc(-b / math.sqrt(2)) / 2
+    expected = math.log(mass)
+    got = tp.log_mean_loading(np.array([sigma]), np.array([skew]))
+    bound = left * remainder / (math.sqrt(2 * math.pi) * mass)
+    bound += 64 * np.finfo(float).eps * (1 + a * a + abs(expected))
+    assert abs(got[0][0] - expected) <= bound
+    assert len(got) == 6 and np.isfinite(np.array(got)).all()
+
+
+def test_reused_loading_preserves_nonrepresentable_derivative_refusal():
+    with np.errstate(all="ignore"):
+        with pytest.raises(tp.TwoPieceDomainError, match="mean loading"):
+            tp.log_mean_loading(np.array([1e155]), np.array([0.0]))
+
+
 def test_mean_and_location_coordinates_invert_each_other():
     sigma, eps = np.array([0.8, 1.4]), np.array([0.3, -0.6])
     mean = np.array([2.5, 9.0])

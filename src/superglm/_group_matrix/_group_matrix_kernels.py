@@ -21,8 +21,36 @@ def _tensor_operand_in_reassociation_range(values):
 
 
 @njit(cache=True)
+def _float64_operand_exponent_bounds(values):
+    """Scan IEEE binary64 magnitudes with integer extrema and no array scratch."""
+    bits = values.view(np.uint64)
+    if values.flags.f_contiguous and not values.flags.c_contiguous:
+        bits = bits.T
+    smallest = np.uint64(0x7FF0000000000000)
+    largest = np.uint64(0)
+    for row in range(bits.shape[0]):
+        for col in range(bits.shape[1]):
+            # Positive binary64 encodings sort by magnitude, including
+            # subnormals. Exclude both signed zeros from the minimum.
+            magnitude = bits[row, col] & np.uint64(0x7FFFFFFFFFFFFFFF)
+            smallest = min(smallest, magnitude if magnitude else np.uint64(0x7FF0000000000000))
+            largest = max(largest, magnitude)
+    # Every infinity and NaN encoding sorts at or above positive infinity.
+    if largest >= np.uint64(0x7FF0000000000000):
+        return -1024, 1024
+    if largest == 0:
+        return 0, 0
+    return (
+        frexp(np.uint64(smallest).view(np.float64))[1] - 1,
+        frexp(np.uint64(largest).view(np.float64))[1],
+    )
+
+
+@njit(cache=True)
 def _operand_exponent_bounds(values):
     """Enclose nonzero magnitudes by powers of two, without array scratch."""
+    if values.dtype == np.dtype(np.float64):
+        return _float64_operand_exponent_bounds(values)
     smallest, largest = np.inf, 0.0
     for row in range(values.shape[0]):
         for col in range(values.shape[1]):

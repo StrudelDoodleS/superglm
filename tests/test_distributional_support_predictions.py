@@ -21,7 +21,7 @@ def _support_products(operation, problem, size):
 
     def trace(frame, event, arg):
         nonlocal count
-        if event == "line" and "/src/superglm/" in frame.f_code.co_filename:
+        if event == "line" and "/src/superglm/" in frame.f_code.co_filename.replace("\\", "/"):
             line = linecache.getline(frame.f_code.co_filename, frame.f_lineno)
             count += ("B_unique @" in line or "R_inv @" in line) and not line.lstrip().startswith(
                 "#"

@@ -20,10 +20,10 @@ Three measurement caveats the payload carries explicitly rather than leaving to
 a reader, because each was got wrong once:
 
 * wall clock is min-of-N, since a shared machine's median is not reproducible;
-* `ru_maxrss` is a high-water mark for the WHOLE process, so it compares across
+* peak RSS is a high-water mark for the WHOLE process, so it compares across
   runs only when both took the same number of fits -- `peak_rss_measures_fits`
-  records that, and its unit differs by platform, so `ru_maxrss_unit` records
-  that too;
+  records that. `peak_rss_source` identifies the platform counter, and
+  `ru_maxrss_unit` records its unit when that POSIX counter is used;
 * Native pools are observed synchronously at solver events in a separate
   untimed run. Timed runs have no observer and retain first-use work in the fit.
 
@@ -38,7 +38,6 @@ import hashlib
 import json
 import math
 import platform
-import resource
 import subprocess
 import sys
 import time
@@ -55,11 +54,10 @@ import superglm
 from superglm import SuperGLM
 from superglm.features import Categorical
 
-# `ru_maxrss` is bytes on macOS and kibibytes everywhere else.  Dividing by
-# 1024 unconditionally is right on Linux and 1024x wrong on macOS, while still
-# labelled MiB.
-_RSS_UNIT = "bytes" if sys.platform == "darwin" else "kib"
-_RSS_DIVISOR = 1024.0**2 if _RSS_UNIT == "bytes" else 1024.0
+if __package__:
+    from benchmarks import _platform
+else:  # Also support running this file directly.
+    import _platform
 
 
 def _design(levels: int, rows: int, seed: int):
@@ -276,6 +274,7 @@ def measure(
     beta = np.asarray(result.beta, dtype=float)
     zeros = np.flatnonzero(beta == 0.0)
     pool_receipt = _native_pool_receipt(sampler)
+    memory = _platform.peak_rss()
     return {
         "wall_time_status": "measured" if measure_time else "unmeasured",
         "configuration": {
@@ -303,10 +302,9 @@ def measure(
         },
         "memory": {
             "peak_rss_measures_fits": repeats,
-            "ru_maxrss_unit": _RSS_UNIT,
-            "peak_rss_mib": round(
-                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / _RSS_DIVISOR, 1
-            ),
+            "ru_maxrss_unit": memory.ru_maxrss_unit,
+            "peak_rss_source": memory.source,
+            "peak_rss_mib": round(memory.bytes / 1024.0**2, 1),
         },
         "numerical_outputs": {
             "effective_df": round(float(result.effective_df), 9),
@@ -372,6 +370,7 @@ def _provenance() -> dict[str, object]:
             json.dumps(source_hashes, sort_keys=True).encode()
         ).hexdigest(),
         "driver_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "platform_helper_sha256": hashlib.sha256(Path(_platform.__file__).read_bytes()).hexdigest(),
     }
 
 

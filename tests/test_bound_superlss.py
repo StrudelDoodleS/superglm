@@ -289,7 +289,12 @@ def test_independent_read_only_and_frozen_metadata_remains_supported(storage):
 @pytest.mark.parametrize("discrete", [False, True])
 @pytest.mark.parametrize("reml", [False, True])
 def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml, monkeypatch):
-    """Check bound inputs and publication of one real coefficient/REML fit."""
+    """Check bound inputs and publication of one real coefficient/REML fit.
+
+    Three outer steps exercise smoothing and result publication. Solver
+    convergence has separate coverage; this facade regression need not run
+    the full default outer budget for every backend.
+    """
     frame, response, weights, offsets = _fixture(n=160)
     family = GaussianLS(scale_floor=0.02)
     model = SuperLSS(
@@ -342,7 +347,7 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
         assert kwargs["config"] == DenseSolverConfig(max_iterations=100, tolerance=1.0e-7)
         assert kwargs["efs_config"] == (
             DistributionalEFSConfig(
-                max_iterations=100, initial_lambda=None, practical_convergence=True
+                max_iterations=3, initial_lambda=None, practical_convergence=True
             )
             if reml
             else None
@@ -373,7 +378,8 @@ def test_bound_smooth_interaction_compilation_and_fit_forwarding(discrete, reml,
 
     monkeypatch.setattr(distributional_api, "fit_dense_distributional", record_fit)
     fit = model.fit_reml if reml else model.fit
-    fit(frame, response, sample_weight=weights, offsets=offsets, lambdas=lambdas)
+    outer_options = {"max_reml_iter": 3} if reml else {}
+    fit(frame, response, sample_weight=weights, offsets=offsets, lambdas=lambdas, **outer_options)
     fitted = model._require_fitted()
     assert len(snapshots) == 1
     snapshot = snapshots[0]

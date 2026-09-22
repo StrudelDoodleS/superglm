@@ -494,6 +494,120 @@ def test_log_mean_loading_exact_lognormal_limit():
         assert _rel(float(value[0]), reference) <= 1.0e-15
 
 
+@pytest.mark.parametrize("order", [0, 1, 2])
+def test_mean_rows_reuses_one_raw_stirling_triplet(monkeypatch, order):
+    calls = []
+    original = gg._stirling_triplet
+
+    def counted(k):
+        calls.append(k.copy())
+        return original(k)
+
+    monkeypatch.setattr(gg, "_stirling_triplet", counted)
+    q = np.array([0.0, 0.5e-8, -0.5e-8, 1 / math.sqrt(8), -1.0])
+    result = gg.mean_rows(
+        np.ones(5), np.ones(5), np.full(5, 0.9), q, np.ones(5), derivative_order=order
+    )
+    assert result.valid.all()
+    assert len(calls) == 1
+
+
+def test_log_mean_loading_reuses_identical_series_l1(monkeypatch):
+    calls = []
+    original = gg.series_l1
+
+    def counted(v):
+        calls.append(v.copy())
+        return original(v)
+
+    monkeypatch.setattr(gg, "series_l1", counted)
+    gg.log_mean_loading(np.array([0.5, 0.9]), np.array([0.0, -0.5]))
+    assert len(calls) == 1
+
+
+def test_reused_mean_rows_still_checks_unused_loading_derivatives(monkeypatch):
+    monkeypatch.setattr(gg, "series_m3_d1", lambda v: np.full_like(v, np.nan))
+    with pytest.raises(gg.GeneralizedGammaDomainError, match="mean loading is not representable"):
+        gg.mean_rows(
+            *[np.array([value]) for value in (1.7, 1.2, 0.8, 0.0, 1.0)], derivative_order=0
+        )
+
+
+@pytest.mark.parametrize("q", [0.0, -1e-10, 1e-10])
+def test_reused_mean_rows_lognormal_derivatives(q):
+    # Analytic Q=0 Prentice derivatives, transformed with the analytic loading
+    # limits. No Stirling/series routine or optional high-precision oracle.
+    y, mean, sigma = 1.7, 1.2, 0.8
+    w = (math.log(y / mean) + sigma**2 / 2) / sigma
+    score_mu = w / sigma
+    c_q = -(sigma**3) / 6 - sigma / 2
+    location_score = np.array([score_mu, (w * w - 1) / sigma, -(w**3) / 6])
+    location_hessian = np.array(
+        [
+            [-1 / sigma**2, -2 * w / sigma**2, w**2 / (2 * sigma)],
+            [-2 * w / sigma**2, (1 - 3 * w**2) / sigma**2, w**3 / (2 * sigma)],
+            [w**2 / (2 * sigma), w**3 / (2 * sigma), -1 / 6 - w**4 / 12],
+        ]
+    )
+    jacobian = np.array([[1 / mean, -sigma, -c_q], [0, 1, 0], [0, 0, 1]])
+    mu_hessian = np.array(
+        [
+            [-1 / mean**2, 0, 0],
+            [0, -1, sigma**2 / 2 + 0.5],
+            [0, sigma**2 / 2 + 0.5, -(sigma**4) / 6 - sigma**2 / 2],
+        ]
+    )
+    expected_score = jacobian.T @ location_score
+    expected_hessian = jacobian.T @ location_hessian @ jacobian + score_mu * mu_hessian
+    result = gg.mean_rows(
+        *[np.array([value]) for value in (y, mean, sigma, q, 1.0)], derivative_order=2
+    )
+    # On this compact fixture the first Q corrections are bounded by 64;
+    # the Q=0 case uses only dimension-scaled float64 rounding allowance.
+    tolerance = 64 * (np.finfo(float).eps + abs(q))
+    np.testing.assert_allclose(
+        result.optimizing_log_likelihood, -math.log(sigma) - w**2 / 2, atol=tolerance, rtol=0
+    )
+    np.testing.assert_allclose(result.score[0], expected_score, atol=tolerance, rtol=0)
+    np.testing.assert_allclose(
+        result.hessian_packed[0], expected_hessian[np.triu_indices(3)], atol=tolerance, rtol=0
+    )
+
+
+@pytest.mark.parametrize("q", [1 / math.sqrt(8), -1 / math.sqrt(8), -1.0])
+def test_reused_mean_rows_density_at_switch_and_mean_boundary(q):
+    q_values = np.array([np.nextafter(q, -np.inf), q, np.nextafter(q, np.inf)])
+    sigma = 0.999 if q == -1.0 else 0.7
+    y, mean = 1.7, 1.2
+    result = gg.mean_rows(
+        np.full(3, y),
+        np.full(3, mean),
+        np.full(3, sigma),
+        q_values,
+        np.ones(3),
+        derivative_order=2,
+    )
+    for i, shape in enumerate(q_values):
+        k = 1 / shape**2
+        logc = (
+            (sigma / shape) * math.log(shape**2) + math.lgamma(k + sigma / shape) - math.lgamma(k)
+        )
+        u = shape * (math.log(y / mean) + logc) / sigma
+        terms = (
+            math.log(abs(shape)),
+            k * math.log(k),
+            -math.lgamma(k),
+            -math.log(sigma),
+            k * (u - math.exp(u)),
+            math.log(2 * math.pi) / 2,
+        )
+        tolerance = 128 * np.finfo(float).eps * sum(abs(value) for value in terms)
+        assert abs(result.optimizing_log_likelihood[i] - math.fsum(terms)) <= tolerance
+    assert result.valid.all()
+    assert np.isfinite(result.score).all()
+    assert np.isfinite(result.hessian_packed).all()
+
+
 def test_mean_exists_mask():
     sigma = np.array([0.9, 0.9, 2.5, 2.5, 0.5, 0.7])
     shape = np.array([0.7, -0.5, -0.5, 0.5, 0.0, -1.0])

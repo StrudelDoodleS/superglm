@@ -23,7 +23,7 @@ _CASE_NAMES = (
 
 @pytest.fixture(scope="module")
 def mgcv_fixture() -> dict:
-    return json.loads(_FIXTURE_PATH.read_text())
+    return json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
@@ -106,7 +106,7 @@ def test_superglm_source_does_not_name_private_mgcv_symbols() -> None:
     offenders = [
         str(path.relative_to(source_root))
         for path in source_root.rglob("*.py")
-        if private_namespace in path.read_text()
+        if private_namespace in path.read_text(encoding="utf-8")
     ]
 
     assert offenders == []

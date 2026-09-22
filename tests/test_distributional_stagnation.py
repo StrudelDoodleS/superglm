@@ -159,6 +159,73 @@ def test_objective_and_step_result_rejects_corrupted_retained_score(
         replace(result, terminal_score=corrupted_score)
 
 
+@pytest.mark.parametrize(
+    "case", ["certified", "material_score", "shifted", "score_only", "invalid_trials"]
+)
+def test_exhausted_distinct_trials_still_require_stationarity_certificate(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """One-ulp objective noise must not make certification depend on beta bits."""
+    family, _, layout, face, _, _, config, penalty = _no_op_problem()
+    response = np.array([-1.0, 0.0, 1.0])
+    plan = family.bind_likelihood(response, resolved_prior(np.ones(3)), COMPLETE_OBSERVATION)
+    initial = face.project(np.array([1.0 if case == "material_score" else 4e-9, 0, 0, 0]))
+    config = replace(config, tolerance=1e-12, max_backtracks=2)
+    original_evaluate = solver_module._evaluate_state
+    initial_objective = None
+    distinct_trials = 0
+
+    def one_ulp_worse_trial(context, coefficients, **kwargs):
+        nonlocal initial_objective, distinct_trials
+        state = original_evaluate(context, coefficients, **kwargs)
+        assert state is not None
+        if np.array_equal(coefficients, initial):
+            initial_objective = state.penalized_optimizing_log_likelihood
+            return state
+        distinct_trials += 1
+        if case == "invalid_trials":
+            return None
+        assert initial_objective is not None
+        # Controlled evaluation noise; the accepted state's exact Gaussian
+        # score/curvature and the production certificate remain untouched.
+        return replace(
+            state,
+            penalized_optimizing_log_likelihood=np.nextafter(initial_objective, -np.inf),
+        )
+
+    monkeypatch.setattr(solver_module, "_evaluate_state", one_ulp_worse_trial)
+    if case == "shifted":
+        original_direction = solver_module._solve_coefficient_direction
+
+        def shifted_direction(*args, **kwargs):
+            return replace(original_direction(*args, **kwargs), levenberg_shift=1.0)
+
+        monkeypatch.setattr(solver_module, "_solve_coefficient_direction", shifted_direction)
+    fit = (
+        solver_module._fit_dense_fixed_lambda_score_only
+        if case == "score_only"
+        else fit_dense_fixed_lambda
+    )
+    result = fit(
+        family,
+        layout,
+        response,
+        plan,
+        penalty,
+        initial=initial,
+        config=config,
+        coefficient_face=face,
+    )
+
+    assert distinct_trials == config.max_backtracks + 1
+    assert result.score_relative > config.tolerance
+    assert np.array_equal(result.coefficients, initial)
+    assert result.converged is (case == "certified")
+    assert result.convergence_reason == (
+        "objective_and_step" if case == "certified" else "line_search_failed"
+    )
+
+
 def test_ill_conditioned_analytic_decrement_uses_a_conservative_enclosure() -> None:
     """A cancellation-sensitive quadratic cannot certify below its exact gap."""
     off_diagonal = 1.0 - 1.0e-6

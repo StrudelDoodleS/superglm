@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -58,6 +58,83 @@ class TabmatCenteringState:
     eligible: bool | None = None
     raw_spline_eligible: bool | None = None
     raw_moment_eligible: bool | None = None
+    _raw_moment_owners: tuple = ()
+
+    def seed_raw_rejection(self, owners: tuple) -> bool | None:
+        """Carry only a refusal within one fixed-coordinate optimizer owner."""
+        if len(owners) != len(self._raw_moment_owners) or any(
+            current is not previous for current, previous in zip(owners, self._raw_moment_owners)
+        ):
+            self.raw_moment_eligible = None
+        self._raw_moment_owners = owners
+        return False if owners and self.raw_moment_eligible is False else None
+
+
+@dataclass
+class _InitialDataReuse:
+    """One initial data system, owned by a fixed-design synchronous line search.
+
+    The owner must discard this entry before changing source coordinates or
+    invoking user callbacks. No penalty, Hessian, or fitted state is retained.
+    """
+
+    key: tuple | None = None
+    weights: NDArray | None = None
+    response: NDArray | None = None
+    before: TabmatCenteringState | None = None
+    after: TabmatCenteringState | None = None
+    data: tuple | None = None
+
+    def take(self, key, W, z_off, state, penalty):
+        if self.key != key or self.before != state or self.data is None:
+            return None
+        for actual, saved in ((W, self.weights), (z_off, self.response)):
+            if (
+                actual.dtype != np.float64
+                or actual.shape != saved.shape
+                or not np.array_equal(actual.view(np.uint64), saved.view(np.uint64))
+            ):
+                return None
+        state.eligible = self.after.eligible
+        state.raw_spline_eligible = self.after.raw_spline_eligible
+        state.raw_moment_eligible = self.after.raw_moment_eligible
+        return _attach_centered_penalty(*self.data, penalty)
+
+    def remember(self, key, W, z_off, before, after, system):
+        self.key = key
+        self.weights, self.response = _freeze(W), _freeze(z_off)
+        self.before, self.after = replace(before), replace(after)
+        self.data = (system.sum_w, system.mean_x, system.mean_z, system.data_gram, system.rhs)
+
+
+@dataclass
+class _FisherDataReuse:
+    """Unpenalized data owned by one synchronous, fixed-coordinate optimizer."""
+
+    owners: tuple = ()
+    weights: NDArray | None = None
+    data: tuple | None = None
+
+    def clear(self):
+        self.owners = ()
+        self.weights = self.data = None
+
+    def take(self, owners, W):
+        if (
+            len(owners) != len(self.owners)
+            or any(current is not saved for current, saved in zip(owners, self.owners))
+            or self.weights is None
+            or W.dtype != np.float64
+            or W.shape != self.weights.shape
+            or not np.array_equal(W.view(np.uint64), self.weights.view(np.uint64))
+        ):
+            self.clear()
+        self.owners = owners
+        return self.data
+
+    def remember(self, W, system):
+        self.weights = _freeze(W)
+        self.data = (system.sum_w, system.mean_x, system.data_gram)
 
 
 def iter_grouped_design_chunks(dm: DesignMatrix) -> Iterator[tuple[int, int, NDArray]]:
@@ -154,33 +231,33 @@ def refresh_centered_rhs(
     z_off: NDArray,
 ) -> CenteredSystem:
     """Reuse an invariant centered Gram while refreshing its working RHS."""
-    mean_z = float(np.dot(W, z_off) / system.sum_w)
+    data = _refresh_centered_data_rhs(
+        dm=dm, W=W, z_off=z_off, data=(system.sum_w, system.mean_x, system.data_gram)
+    )
+    return CenteredSystem(*data, penalty=system.penalty, hessian=system.hessian)
+
+
+def _refresh_centered_data_rhs(*, dm, W, z_off, data):
+    sum_w, mean_x, data_gram = data
+    mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
-    centered_scale = np.sqrt(np.maximum(np.diag(system.data_gram), 0.0) / system.sum_w)
+    centered_scale = np.sqrt(np.maximum(np.diag(data_gram), 0.0) / sum_w)
     max_fast_ratio = np.finfo(float).eps ** -0.25
     well_scaled = np.all(
-        (np.abs(system.mean_x) <= max_fast_ratio * centered_scale)
-        | ((system.mean_x == 0.0) & (centered_scale == 0.0))
+        (np.abs(mean_x) <= max_fast_ratio * centered_scale)
+        | ((mean_x == 0.0) & (centered_scale == 0.0))
     )
     if well_scaled:
         weighted_z = W * z_centered
-        rhs = dm.rmatvec(weighted_z) - system.mean_x * float(np.sum(weighted_z))
+        rhs = dm.rmatvec(weighted_z) - mean_x * float(np.sum(weighted_z))
     else:
         rhs = centered_rhs(
             dm=dm,
             W=W,
-            mean_x=system.mean_x,
+            mean_x=mean_x,
             z_centered=z_centered,
         )
-    return CenteredSystem(
-        sum_w=system.sum_w,
-        mean_x=system.mean_x,
-        mean_z=mean_z,
-        data_gram=system.data_gram,
-        rhs=_freeze(rhs),
-        penalty=system.penalty,
-        hessian=system.hessian,
-    )
+    return sum_w, mean_x, mean_z, data_gram, _freeze(rhs)
 
 
 def build_centered_system(
@@ -193,6 +270,7 @@ def build_centered_system(
     tabmat_state: TabmatCenteringState | None = None,
     profile: dict | None = None,
     _force_chunked: bool = False,
+    _data: tuple | None = None,
 ) -> CenteredSystem:
     """Build a stably centered data Gram, RHS, and penalized Hessian."""
     n, p = dm.shape
@@ -209,6 +287,10 @@ def build_centered_system(
     sum_w = float(np.sum(W, dtype=np.float64))
     if not np.isfinite(sum_w) or sum_w <= 0.0:
         raise ValueError("working weights must have a positive finite sum")
+    if _data is not None:
+        return _attach_centered_penalty(
+            *_refresh_centered_data_rhs(dm=dm, W=W, z_off=z_off, data=_data), penalty
+        )
     mean_z = float(np.dot(W, z_off) / sum_w)
     z_centered = z_off - mean_z
     packed = packed_centered_gram_rhs(dm=dm, W=W, z_centered=z_centered)
@@ -308,6 +390,11 @@ def build_centered_system(
         )
     else:
         mean_x, data_gram, rhs = packed
+    return _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty)
+
+
+def _attach_centered_penalty(sum_w, mean_x, mean_z, data_gram, rhs, penalty):
+    """Attach a fresh trial penalty using the same numerical checks on every path."""
     penalty_symmetric = 0.5 * (penalty + penalty.T)
     hessian = data_gram + penalty_symmetric
     # Both terms are mathematically PSD. Degenerate spline

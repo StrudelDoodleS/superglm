@@ -195,7 +195,7 @@ def test_mutated_admitted_summary_cannot_be_seeded(field):
     assert _evaluate(target) == _evaluate(_build(raw, target_map))
 
 
-@pytest.mark.parametrize("helper", ["_reference_root_actions", "_dyadic_slices"])
+@pytest.mark.parametrize("helper", ["_reference_root_actions", "_native_product"])
 def test_changed_arithmetic_token_does_not_reuse_old_evidence(monkeypatch, helper):
     raw, target_map = _inputs()
     source = _build(raw, np.eye(3))

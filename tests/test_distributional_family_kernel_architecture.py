@@ -19,7 +19,7 @@ def _modules() -> dict[str, Path]:
 
 
 def _distributional_imports(path: Path) -> Iterator[str]:
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     current = ".".join(path.relative_to(ROOT).with_suffix("").parts)
     package = current.rsplit(".", 1)[0] if "." in current else ""
     for node in ast.walk(tree):
@@ -134,7 +134,7 @@ def test_kernels_share_their_primitive_helpers() -> None:
     for path in sorted(KERNELS.glob("*.py")):
         if path.name in {"__init__.py", "_common.py", "_tweedie_numba.py"}:
             continue
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)} | {
             target.id
             for node in tree.body
@@ -244,7 +244,7 @@ def test_adapters_share_their_plumbing() -> None:
     for path in sorted(ADAPTERS.glob("*.py")):
         if path.name in {"__init__.py", "_base.py"}:
             continue
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         names = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
         hits = sorted(names & set(duplicated))
         if hits:
@@ -260,7 +260,7 @@ def test_validators_are_public() -> None:
 
 def test_package_initializers_do_not_eagerly_import_implementations() -> None:
     for relative in ("__init__.py", "families/__init__.py", "kernels/__init__.py"):
-        tree = ast.parse((ROOT / relative).read_text(), filename=relative)
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"), filename=relative)
         assert not any(isinstance(node, ast.Import | ast.ImportFrom) for node in tree.body), (
             relative
         )

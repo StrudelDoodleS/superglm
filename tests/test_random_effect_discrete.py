@@ -11,6 +11,7 @@ from superglm._frame import as_eager_frame
 from superglm.dm_builder import build_design_matrix, should_discretize
 from superglm.group_matrix import (
     DenseGroupMatrix,
+    DiscretizedSSPGroupMatrix,
     RandomEffectGroupMatrix,
     SparseSSPGroupMatrix,
 )
@@ -261,12 +262,28 @@ def test_discrete_spline_is_exact_on_observed_support_with_random_effect():
         weight_semantics="frequency",
     )
 
-    np.testing.assert_allclose(
-        discrete.dm.toarray(),
-        exact.dm.toarray(),
-        rtol=0.0,
-        atol=4e-15,
-    )
+    for exact_group, discrete_group in zip(
+        exact.dm.group_matrices, discrete.dm.group_matrices, strict=True
+    ):
+        if isinstance(exact_group, SparseSSPGroupMatrix):
+            assert isinstance(discrete_group, DiscretizedSSPGroupMatrix)
+            raw = exact_group.B.toarray()
+            # Binning is lossless on this support. The two SSP transforms are
+            # rebuilt from differently grouped reductions and need not have
+            # identical rounding, even though the raw basis is identical.
+            np.testing.assert_array_equal(discrete_group.B_unique[discrete_group.bin_idx], raw)
+            left, right = exact_group.R_inv, discrete_group.R_inv
+            operations = 2 * raw.shape[1] + 3
+            epsilon = np.finfo(float).eps
+            gamma = operations * epsilon / (1.0 - operations * epsilon)
+            # |B(Rd-Re)| plus both matrix-product errors. Include rounding in
+            # the subtraction and bound reduction; no fitted error sets this.
+            bound = np.abs(raw) @ (np.abs(right - left) + gamma * (np.abs(left) + np.abs(right)))
+            bound = np.nextafter(bound / (1.0 - gamma), np.inf)
+            difference = np.abs(discrete_group.toarray() - exact_group.toarray())
+            assert np.all(difference <= bound), float(np.max(difference - bound))
+        else:
+            np.testing.assert_array_equal(discrete_group.toarray(), exact_group.toarray())
     np.testing.assert_allclose(discrete_result.beta, exact_result.beta, rtol=2e-10, atol=2e-11)
     assert discrete_result.intercept == pytest.approx(
         exact_result.intercept,

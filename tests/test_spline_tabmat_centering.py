@@ -36,12 +36,13 @@ def _spline_group(
     *,
     phase: int,
     transform: np.ndarray | None = None,
+    basis_values: tuple[float, float, float, float] = (0.1, 0.4, 0.4, 0.1),
 ) -> SparseSSPGroupMatrix:
     """Return a deterministic compact-support spline-like raw basis."""
     rows = np.repeat(np.arange(n, dtype=np.intp), 4)
     local = np.tile(np.arange(4, dtype=np.intp), n)
     columns = (np.repeat(np.arange(n, dtype=np.intp), 4) + local + phase) % width
-    values = np.tile(np.array([0.1, 0.4, 0.4, 0.1]), n)
+    values = np.tile(np.array(basis_values), n)
     basis = sp.csr_matrix((values, (rows, columns)), shape=(n, width))
     if transform is None:
         transform = np.eye(width)
@@ -254,16 +255,23 @@ def test_large_solver_translation_rejects_raw_moments_and_uses_stable_chunks() -
     transform[np.arange(width - 1), np.arange(1, width)] = 0.05
     shifted_transform = transform.copy()
     shifted_transform[:, 0] += 1.0e10
+    # A dyadic partition of unity makes the translated stored design exact.
+    # Decimal weights can introduce row-dependent rounding of order eps*1e10
+    # before centering starts; those are different inputs, not centering error.
+    basis_values = (0.125, 0.375, 0.375, 0.125)
     ordinary_groups = [
-        _spline_group(n, width, phase=0, transform=transform),
-        _spline_group(n, width, phase=2, transform=transform),
+        _spline_group(n, width, phase=0, transform=transform, basis_values=basis_values),
+        _spline_group(n, width, phase=2, transform=transform, basis_values=basis_values),
     ]
     shifted_groups = [
-        _spline_group(n, width, phase=0, transform=shifted_transform),
-        _spline_group(n, width, phase=2, transform=transform),
+        _spline_group(n, width, phase=0, transform=shifted_transform, basis_values=basis_values),
+        _spline_group(n, width, phase=2, transform=transform, basis_values=basis_values),
     ]
     ordinary = DesignMatrix(ordinary_groups, n=n, p=2 * width)
     shifted = DesignMatrix(shifted_groups, n=n, p=2 * width)
+    expected_design = ordinary.toarray()
+    expected_design[:, 0] += 1.0e10
+    np.testing.assert_array_equal(shifted.toarray(), expected_design)
     W = rng.uniform(0.25, 2.0, size=n)
     z = rng.normal(size=n)
     penalty = np.zeros((2 * width, 2 * width))

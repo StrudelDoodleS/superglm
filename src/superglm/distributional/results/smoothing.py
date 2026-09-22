@@ -32,6 +32,7 @@ from superglm.distributional.results.solver import (
     _assessment_penalty_direction_matches,
     _assessment_retained_kkt_ratio,
     _assessment_scalar_error_bound,
+    _assessment_unchanged_failed_cap,
     _assessment_unpenalized_logdet_term,
     _dense_penalty_fingerprint,
     _endpoint_revalidation_projection_bound,
@@ -625,7 +626,7 @@ class DistributionalEFSResult:
             cap_numerically_stationary: bool,
         ) -> None:
             """Authenticate shared stationarity and provenance for revalidation."""
-            if not cap_fit.converged:
+            if not cap_fit.converged and not _assessment_unchanged_failed_cap(cap_fit, source_fit):
                 raise ValueError("endpoint revalidation cap did not converge")
             if cap_numerically_stationary and not _assessment_is_numerically_stationary(
                 cap_fit,
@@ -827,6 +828,7 @@ class DistributionalEFSResult:
                             "endpoint state-change deactivation requires cap, endpoint, and rollback fits"
                         )
                     cap_fit, endpoint_fit, rollback_fit = (fits[index] for index in indices)
+                    source_fit = fits[item.source_fit_index]
                     tolerance = item.coefficient_tolerances[0]
                     if any(
                         fit.config.tolerance != tolerance
@@ -856,7 +858,10 @@ class DistributionalEFSResult:
                     ):
                         raise ValueError("endpoint state-change rollback used the wrong finite fit")
                     if (
-                        not cap_fit.converged
+                        not (
+                            cap_fit.converged
+                            or _assessment_unchanged_failed_cap(cap_fit, source_fit)
+                        )
                         or not endpoint_fit.converged
                         or not rollback_fit.converged
                         or cap_fit.config.coefficient_curvature != "observed"
@@ -873,13 +878,18 @@ class DistributionalEFSResult:
                         or item.accepted_curvature != rollback_fit.terminal_curvature
                     ):
                         raise ValueError("endpoint state-change deactivation used uncertified fits")
+                    if not cap_fit.converged:
+                        validate_sole_capped_component(
+                            item,
+                            finite_face=expected_finite_face,
+                            assessed_name=assessed_name,
+                        )
                     if not np.array_equal(cap_fit.penalty, rollback_fit.penalty):
                         raise ValueError(
                             "endpoint state-change rollback changed its finite penalty"
                         )
                     if cap_fit.config != rollback_fit.config:
                         raise ValueError("endpoint state-change rollback changed its fit policy")
-                    source_fit = fits[item.source_fit_index]
                     source_geometry = source_fit.coefficient_face
                     endpoint_face = endpoint_fit.coefficient_face
                     if (
@@ -889,9 +899,12 @@ class DistributionalEFSResult:
                         or not _assessment_face_geometry_matches(source_geometry, endpoint_face)
                     ):
                         raise ValueError("endpoint state-change revalidation changed face geometry")
-                    cap_numerically_stationary = _assessment_is_numerically_stationary(
-                        cap_fit,
-                        tolerance,
+                    cap_numerically_stationary = (
+                        cap_fit.converged
+                        and _assessment_is_numerically_stationary(
+                            cap_fit,
+                            tolerance,
+                        )
                     )
                     capped_outside = tuple(
                         name
@@ -970,9 +983,12 @@ class DistributionalEFSResult:
                 ):
                     raise ValueError("endpoint assessment used the wrong exact coefficient face")
                 tolerance = item.coefficient_tolerances[0]
-                cap_stationary = _assessment_is_numerically_stationary(
+                cap_stationary = cap_fit.converged and _assessment_is_numerically_stationary(
                     cap_fit,
                     tolerance,
+                )
+                cap_admissible = cap_fit.converged or _assessment_unchanged_failed_cap(
+                    cap_fit, fits[item.source_fit_index]
                 )
                 if not cap_stationary:
                     validate_sole_capped_component(
@@ -981,7 +997,7 @@ class DistributionalEFSResult:
                         assessed_name=item.refused_face_components[0],
                     )
                 if reason == "endpoint_not_converged":
-                    if not cap_fit.converged or endpoint_fit.converged:
+                    if not cap_admissible or endpoint_fit.converged:
                         raise ValueError("endpoint fit failure reason disagrees with its fits")
                     return
                 if reason == "endpoint_not_stationary":
@@ -1001,7 +1017,7 @@ class DistributionalEFSResult:
                     raise ValueError(
                         "endpoint state-change evidence is valid only for scalar retraction"
                     )
-                if not cap_fit.converged or not endpoint_fit.converged:
+                if not cap_admissible or not endpoint_fit.converged:
                     raise ValueError("endpoint analytic failure requires converged assessment fits")
                 provenance_changed = assessment_shared_signature(endpoint_fit) != (
                     assessment_shared_signature(cap_fit)
@@ -1022,7 +1038,10 @@ class DistributionalEFSResult:
             ):
                 raise ValueError("endpoint evidence must index its assessment coefficient fits")
             assessment_fits = tuple(fits[index] for index in indices)
-            if any(not fit.converged for fit in assessment_fits):
+            if not assessment_fits[-1].converged or not (
+                assessment_fits[0].converged
+                or _assessment_unchanged_failed_cap(assessment_fits[0], fits[item.source_fit_index])
+            ):
                 raise ValueError("endpoint assessment fits must converge")
             if any(
                 fit.config.tolerance != direction.coefficient_tolerance for fit in assessment_fits
@@ -1083,12 +1102,21 @@ class DistributionalEFSResult:
             assert tolerance is not None
             if not _assessment_is_numerically_stationary(endpoint_fit, tolerance):
                 raise ValueError("endpoint analytic evidence requires a stationary endpoint fit")
-            direct_nonstationary_cap = _assessment_retained_kkt_ratio(cap_fit) > tolerance
-            cap_numerically_stationary = _assessment_is_numerically_stationary(
-                cap_fit,
-                tolerance,
+            direct_nonstationary_cap = (
+                not cap_fit.converged or _assessment_retained_kkt_ratio(cap_fit) > tolerance
             )
-            if item.activated_face_components or item.revalidated_face_components:
+            cap_numerically_stationary = (
+                cap_fit.converged
+                and _assessment_is_numerically_stationary(
+                    cap_fit,
+                    tolerance,
+                )
+            )
+            if (
+                item.activated_face_components
+                or item.revalidated_face_components
+                or not cap_fit.converged
+            ):
                 validate_sole_capped_component(
                     item,
                     finite_face=expected_finite_face,

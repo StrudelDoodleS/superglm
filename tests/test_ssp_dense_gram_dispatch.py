@@ -165,8 +165,8 @@ def test_non_float64_weights_keep_the_existing_csr_route(monkeypatch):
     np.testing.assert_array_equal(group.gram(weights), expected)
 
 
-@pytest.mark.parametrize("dtype", [np.float32, np.longdouble, np.complex128])
-def test_non_float64_transforms_keep_the_existing_raw_operation_route(dtype, monkeypatch):
+@pytest.mark.parametrize("dtype", [np.float64, np.float32, np.longdouble, np.complex128])
+def test_transform_dtype_selects_the_existing_raw_operation_route(dtype, monkeypatch):
     transform = np.array([[1.0, 0.25], [-0.5, 1.0]], dtype=dtype)
     group = core.SparseSSPGroupMatrix(sp.csr_matrix([[1.0, 0.25], [0.5, 1.0]]), transform)
     weights = np.ones(2)
@@ -182,7 +182,8 @@ def test_non_float64_transforms_keep_the_existing_raw_operation_route(dtype, mon
     monkeypatch.setattr(core, "_csr_weighted_gram", record)
     monkeypatch.setattr(core, "_dense_if_saturated", _forbidden)
     np.testing.assert_array_equal(group.gram(weights), expected)
-    assert calls == [True]
+    # longdouble aliases float64 on Windows and macOS ARM64.
+    assert calls == ([] if transform.dtype == np.dtype(np.float64) else [True])
 
 
 @pytest.mark.parametrize("exponent", [600, -600])

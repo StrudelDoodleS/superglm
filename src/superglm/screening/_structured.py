@@ -2334,19 +2334,42 @@ def _filter_factor_sum(
     total = 0.0
     correction = 0.0
     uncertified = 0.0
+    small = keep & (singular < np.sqrt(0.5)) if r else np.empty(0, dtype=bool)
+    residual_coordinates = bool(np.any(small))
+    if residual_coordinates:
+        first = np.where(small, -1.0, np.where(keep, 1.0 / safe, 0.0))
+        crossed_scale = np.where(small, singular, -np.where(keep, 1.0 / safe, 1.0))
+        second = np.where(small, free, xi)
     block = np.empty((min(chunk, max(L, 1)), width, width), dtype=np.float64)
     for start, stop in blocks:
         carried = p.R[start:stop] @ coupling
         Y = cross[start:stop]
         contract = contracted[start:stop]
-        Yt = np.swapaxes(Y, -1, -2)
-        crossed = Y @ extended
         view = block[: stop - start]
-        view[:, :k_a, :k_a] = np.eye(k_a) + Y @ resolved @ Yt
-        view[:, :k_a, k_a:] = -crossed
-        view[:, k_a:, :k_a] = -np.swapaxes(crossed, -1, -2)
-        view[:, k_a:, k_a:] = coupled
         rows = np.concatenate((contract, carried), axis=2)
+        original_mass = np.sum(np.square(rows), axis=(1, 2))
+        if residual_coordinates:
+            # For h = sigma**2, the retained-direction contribution is
+            # ||K Y - Phi||**2 / h - ||Phi||**2. Use E=(K Y-Phi)/sigma
+            # before factoring: its congruent metric has top -Y Y', cross
+            # sigma Y, and bottom 1-h, all bounded when h < 1/2. Factoring
+            # the original 1/h entries loses the small contraction to eps/h.
+            rotated = Y @ right.T
+            overlap = carried @ right.T
+            residual = contract @ rotated - overlap
+            overlap[..., small] = residual[..., small] / singular[small]
+            rows = np.concatenate((contract, overlap), axis=2)
+            view[:, :k_a, :k_a] = np.eye(k_a) + (rotated * first) @ np.swapaxes(rotated, -1, -2)
+            crossed = rotated * crossed_scale
+            view[:, :k_a, k_a:] = crossed
+            view[:, k_a:, :k_a] = np.swapaxes(crossed, -1, -2)
+            view[:, k_a:, k_a:] = np.diag(second)
+        else:
+            crossed = Y @ extended
+            view[:, :k_a, :k_a] = np.eye(k_a) + Y @ resolved @ np.swapaxes(Y, -1, -2)
+            view[:, :k_a, k_a:] = -crossed
+            view[:, k_a:, :k_a] = -np.swapaxes(crossed, -1, -2)
+            view[:, k_a:, k_a:] = coupled
         factor, negative, top = _psd_factor(view)
         carried_factor = rows @ factor
         term = float(np.sum(np.square(carried_factor)))
@@ -2372,12 +2395,19 @@ def _filter_factor_sum(
         # this comment records that it was looked for rather than that it is
         # absent in general.
         allowance = _psd_clip_allowance(width, scale, geometry.orthonormality * deflation)
-        excess = np.maximum(negative - allowance, 0.0)
-        uncertified += float(np.sum(np.sum(np.square(rows), axis=(1, 2)) * excess))
+        # Keep the pre-congruence allowance in EDF units. The new metric's
+        # clip is charged against its own rows, not against the old metric's
+        # norm: changing coordinates must not enlarge the accepted error.
+        if residual_coordinates:
+            allowance_edf = original_mass * allowance
+            clipped_edf = np.sum(np.square(rows), axis=(1, 2)) * negative
+            uncertified += float(np.sum(np.maximum(clipped_edf - allowance_edf, 0.0)))
+            diagonal_error = allowance_edf + clipped_edf
+        else:
+            uncertified += float(np.sum(original_mass * np.maximum(negative - allowance, 0.0)))
+            diagonal_error = original_mass * (allowance + negative)
         if variance is not None:
-            variance.add_diagonal(
-                carried_factor, np.sum(np.square(rows), axis=(1, 2)) * (allowance + negative)
-            )
+            variance.add_diagonal(carried_factor, diagonal_error)
             variance.add_low_rank(
                 contract @ Y,
                 carried,

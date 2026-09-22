@@ -168,3 +168,20 @@ def test_wrong_full_rank_homogeneous_warm_face_releases_its_constraint():
 
     assert result.converged
     np.testing.assert_array_equal(result.beta, [1.0, 0.0])
+
+
+@pytest.mark.parametrize("row_scale", [1.0, 1e308])
+def test_complementarity_keeps_tiny_affine_solution_under_large_row_units(row_scale):
+    result = solve_constrained_qp(
+        np.eye(4),
+        np.zeros(4),
+        np.full((1, 4), row_scale),
+        np.array([row_scale * 4e-300]),
+        active_set_init=[0],
+        max_iter=5,
+    )
+    assert result.converged
+    # H=I and sum(beta)>=4e-300 have this unique, well-conditioned solution.
+    np.testing.assert_allclose(
+        result.beta / 1e-300, np.ones(4), rtol=64 * 4 * np.finfo(float).eps, atol=0
+    )

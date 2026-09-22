@@ -290,20 +290,20 @@ def test_auto_detection_cannot_bypass_group_geometry_validation(basis) -> None:
 
 def test_public_docs_use_explicit_spline_features_and_cover_factor_smooth_choices() -> None:
     module_path = Path("src/superglm/__init__.py")
-    module_doc = ast.get_docstring(ast.parse(module_path.read_text()))
+    module_doc = ast.get_docstring(ast.parse(module_path.read_text(encoding="utf-8")))
     python_fence = re.compile(r"```(?:python|py)\n(.*?)```", re.DOTALL)
     violations = [
         str(path)
         for path in Path("docs").rglob("*.md")
         if "superpowers" not in path.parts
-        for example in python_fence.findall(path.read_text())
+        for example in python_fence.findall(path.read_text(encoding="utf-8"))
         if re.search(r"\bsplines\s*=", example)
     ]
     if re.search(r"\bsplines\s*=", module_doc or ""):
         violations.append(str(module_path))
 
     assert violations == []
-    interactions = Path("docs/how-to/specify-interactions.md").read_text()
+    interactions = Path("docs/how-to/specify-interactions.md").read_text(encoding="utf-8")
     for required in (
         'basis="fs"',
         'basis="sz"',

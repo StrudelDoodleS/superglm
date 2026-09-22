@@ -637,6 +637,7 @@ def _fremtpl_frame(n_rows=80_000):
 
 
 @FREQ_SKIP
+@pytest.mark.slow
 def test_fremtpl_mixed_sweep_end_to_end():
     df, y, exposure = _fremtpl_frame()
     model = SuperGLM(family="poisson", features=_fremtpl_features())
@@ -661,6 +662,7 @@ def test_fremtpl_mixed_sweep_end_to_end():
 
 
 @FREQ_SKIP
+@pytest.mark.slow
 def test_fremtpl_example_specification_is_not_mis_specified():
     """The guide's worked example is an exemplar, so its spec must hold up.
 

@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 
 _EPS = np.finfo(np.float64).eps
-_LD = np.longdouble
+_LD = np.float64
 
 
 class PenaltyNumericalError(np.linalg.LinAlgError):
@@ -176,18 +176,27 @@ def _penalty_support_from_roots(
         for bound, root in zip(root_errors, roots, strict=True)
     ):
         raise ValueError("root error bounds must match roots and be finite and non-negative")
-    scales, balanced = [], []
+    log_scales, balanced = [], []
     for root in roots:
         maximum = np.max(np.abs(root), initial=0.0)
-        scale = (
-            _LD(maximum) * np.sqrt(np.sum((root.astype(_LD) / maximum) ** 2))
-            if maximum > 0
-            else _LD(1)
-        )
-        scales.append(scale)
-        balanced.append(root.astype(_LD) / scale)
+        if maximum > 0:
+            normalized_root = root / maximum
+            norm = np.sqrt(np.sum(normalized_root**2))
+            # The Frobenius scale may overflow although every root entry and
+            # the weighted geometry are finite. Only its logarithm is stored.
+            log_scales.append(np.log(maximum) + np.log(norm))
+            balanced.append(normalized_root / norm)
+        else:
+            log_scales.append(0.0)
+            balanced.append(root.copy())
     stacked = np.vstack(balanced)
     column_max = np.max(np.abs(stacked), axis=0, initial=_LD(0))
+    present = np.any(np.vstack(roots) != 0, axis=0)
+    if np.any(present & (column_max == 0)) or not np.all(np.isfinite(column_max)):
+        # The former wider arithmetic also refused a support coordinate map
+        # below binary64 range. Refuse here before its vanished columns can
+        # incorrectly become a smaller selected support.
+        raise PenaltyNumericalError("balanced support coordinates are not representable")
     normalized = np.zeros_like(stacked)
     np.divide(stacked, column_max, out=normalized, where=column_max > 0)
     column_scale = column_max * np.sqrt(np.sum(normalized * normalized, axis=0))
@@ -257,7 +266,7 @@ def _penalty_support_from_roots(
     return _PenaltySupport(
         tuple(selected),
         tuple(_readonly(value) for value in coordinates),
-        _readonly(np.log(np.asarray(scales, dtype=_LD))),
+        _readonly(np.asarray(log_scales, dtype=_LD)),
         _readonly(coordinate_map),
         _readonly(triangular),
         _readonly(plus),

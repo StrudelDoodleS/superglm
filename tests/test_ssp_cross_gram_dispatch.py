@@ -9,7 +9,12 @@ import scipy.sparse as sp
 
 from superglm._group_matrix import _group_matrix_algebra as algebra
 from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
-from superglm.group_matrix import DenseGroupMatrix, DiscretizedSSPGroupMatrix, SparseSSPGroupMatrix
+from superglm.group_matrix import (
+    CategoricalGroupMatrix,
+    DenseGroupMatrix,
+    DiscretizedSSPGroupMatrix,
+    SparseSSPGroupMatrix,
+)
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -215,7 +220,14 @@ def test_outside_range_preserves_the_finite_column_product(exponent, reverse, mo
     "decline",
     [
         "weights32",
-        "transform_wide",
+        "transform32",
+        pytest.param(
+            "transform_wide",
+            marks=pytest.mark.skipif(
+                np.dtype(np.longdouble) == np.dtype(np.float64),
+                reason="longdouble has the float64 dtype on this platform",
+            ),
+        ),
         "basis32",
         "weight_shape",
         "group_subclass",
@@ -229,6 +241,8 @@ def test_ineligible_pairs_decline_before_new_weighting(decline, monkeypatch):
     weights = np.ones(12)
     if decline == "weights32":
         weights = weights.astype(np.float32)
+    elif decline == "transform32":
+        right.R_inv = right.R_inv.astype(np.float32)
     elif decline == "transform_wide":
         right.R_inv = right.R_inv.astype(np.longdouble)
     elif decline == "basis32":
@@ -276,3 +290,137 @@ def test_pickle_and_row_subsets_preserve_live_raw_cross_dispatch(monkeypatch):
     weights = np.array([0.5, -0.25, 1.0, 0.0])
     monkeypatch.setattr(algebra, "_cross_gram_by_columns", _forbidden)
     _assert_target(algebra._cross_gram(left, right, weights), left, right, weights)
+
+
+def _categorical_pair():
+    left, _ = _pair()
+    left.R_inv = np.array([[1.0, 0.25], [0.5, 1.0], [0.25, 0.5]])
+    right = CategoricalGroupMatrix(np.array([0, 1, -1, 2] * 3), n_levels=3)
+    return left, right
+
+
+def _assert_categorical_target(actual, spline, category, weights):
+    # Exact source products, independent of both the grouped and column kernels.
+    fractions = np.vectorize(lambda value: Fraction(float(value)), otypes=[object])
+    basis, transform, weight = map(fractions, (spline.B.toarray(), spline.R_inv, weights))
+    design = basis @ transform
+    envelope = abs(basis) @ abs(transform)
+    target = np.zeros(actual.shape, dtype=object)
+    scale = np.zeros(actual.shape, dtype=object)
+    for row, code in enumerate(category.codes):
+        if code < category.n_levels:
+            target[:, code] += weight[row] * design[row]
+            scale[:, code] += abs(weight[row]) * envelope[row]
+    count = 2 * (len(weights) + basis.shape[1] + 2)
+    unit = Fraction(1, 2**53)
+    gamma = count * unit / (1 - count * unit)
+    for index in np.ndindex(actual.shape):
+        assert abs(Fraction(float(actual[index])) - target[index]) <= gamma * scale[index]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("signed", [False, True])
+def test_sparse_categorical_cross_uses_one_grouped_pass(monkeypatch, reverse, signed):
+    # Removing this route rebuilds and scans one observation vector per column.
+    left, right = _categorical_pair()
+    weights = np.linspace(0.0, 1.0, 12)
+    if signed:
+        weights[::2] *= -1
+    monkeypatch.setattr(algebra, "_cross_gram_by_columns", _forbidden)
+    monkeypatch.setattr(SparseSSPGroupMatrix, "toarray", _forbidden)
+    grouped_calls = []
+    grouped = algebra._csr_weighted_bincount
+
+    def recorded(*args):
+        grouped_calls.append(True)
+        return grouped(*args)
+
+    monkeypatch.setattr(algebra, "_csr_weighted_bincount", recorded)
+    profile = {}
+    actual = (
+        algebra._cross_gram(right, left, weights, profile=profile).T
+        if reverse
+        else algebra._cross_gram(left, right, weights, profile=profile)
+    )
+    _assert_categorical_target(actual, left, right, weights)
+    assert profile["block_cross_ssp_categorical_calls"] == 1
+    assert grouped_calls == [True]
+
+
+@pytest.mark.parametrize("change", ["values", "replace", "codes", "weights"])
+def test_sparse_categorical_cross_observes_live_changes(change):
+    left, right = _categorical_pair()
+    weights = np.linspace(-0.5, 1.0, 12)
+    for iteration in range(2):
+        if iteration:
+            if change == "values":
+                left.B.data *= 0.5
+                left.R_inv *= 2
+            elif change == "replace":
+                left.B = sp.csr_matrix(left.B.toarray()[:, ::-1])
+                left.R_inv = left.R_inv[::-1].copy()
+            elif change == "codes":
+                right.codes[:] = np.roll(right.codes, 1)
+            else:
+                weights *= -0.5
+        actual = algebra._cross_gram(left, right, weights)
+        _assert_categorical_target(actual, left, right, weights)
+
+
+@pytest.mark.parametrize(
+    "decline",
+    [
+        "weights32",
+        "transform32",
+        "custom",
+        "csr_subclass",
+        "noncanonical",
+        "budget",
+        "extreme",
+        "sensitive",
+    ],
+)
+def test_sparse_categorical_cross_retains_guarded_column_fallback(monkeypatch, decline):
+    left, right = _categorical_pair()
+    weights = np.ones(12)
+    if decline == "weights32":
+        weights = weights.astype(np.float32)
+    elif decline == "transform32":
+        left.R_inv = left.R_inv.astype(np.float32)
+    elif decline == "custom":
+
+        class CustomCategory(CategoricalGroupMatrix):
+            pass
+
+        right = CustomCategory(np.where(right.codes == 3, -1, right.codes), 3)
+    elif decline == "csr_subclass":
+
+        class CustomCSR(sp.csr_matrix):
+            pass
+
+        left.B = CustomCSR(left.B)
+    elif decline == "noncanonical":
+        # A cached scipy canonical flag must not hide a subsequent index edit.
+        assert left.B.has_canonical_format
+        left.B.indices[1] = left.B.indices[0]
+    elif decline == "budget":
+        monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", 1)
+    elif decline == "extreme":
+        left.B.data *= np.ldexp(1.0, 1020)
+        weights *= np.ldexp(1.0, -1020)
+    else:
+        raw = np.ones((12, 2))
+        raw[:, 1] += np.arange(12) * np.finfo(float).eps
+        left = SparseSSPGroupMatrix(sp.csr_matrix(raw), np.array([[1.0], [-1.0]]))
+        assert left._gram_with_projection(weights)[1]
+    calls = []
+    original = algebra._cross_gram_by_columns
+
+    def recorded(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(algebra, "_cross_gram_by_columns", recorded)
+    actual = algebra._cross_gram(left, right, weights)
+    _assert_categorical_target(actual, left, right, weights)
+    assert calls == [True]

@@ -1,6 +1,9 @@
 # tests/test_distributional_endpoint_direction.py
 from __future__ import annotations
 
+import hashlib
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -19,6 +22,7 @@ from superglm.distributional.result import (
     EndpointDirectionEvidence,
     JointEndpointDirectionEvidence,
 )
+from superglm.distributional.smoothing.authority import _endpoint_retained_kkt_relative
 from superglm.distributional.weights import WeightContract, resolve_likelihood_weights
 from superglm.features import Spline
 from superglm.links import LogLink
@@ -249,6 +253,7 @@ def test_gamma_decisions_agree_between_analytic_and_finite_difference() -> None:
     frame, mean = _linear_x_fixture()
     y = _gamma_response(mean)
     outcomes = {}
+    diagnostics = {}
     for label, family in (("analytic", GammaLS()), ("fd", _GammaWithoutDirection())):
         model = model_from_templates(
             family=family, predictors=(_mean_predictor(), Predictor("scale", {}))
@@ -260,6 +265,40 @@ def test_gamma_decisions_agree_between_analytic_and_finite_difference() -> None:
             model.exact_face_components_,
             round(smoothing.lambdas["mean:w#wiggle"], 3),
         )
+        diagnostics[label] = {
+            "converged": smoothing.converged,
+            "lambdas": dict(smoothing.lambdas),
+            "endpoint_checks": [
+                (
+                    item.iteration,
+                    item.endpoint_assessment_failure_reason,
+                    item.endpoint_direction_evidence,
+                )
+                for item in smoothing.history
+                if item.endpoint_assessment_failure_reason or item.endpoint_direction_evidence
+            ],
+            "coefficient_fits": [
+                (
+                    fit.convergence_reason,
+                    fit.iterations,
+                    _endpoint_retained_kkt_relative(fit),
+                    fit.config.tolerance,
+                )
+                for fit in smoothing.coefficient_fits
+            ],
+        }
+    inputs = np.column_stack((frame.to_numpy(), y))
+    diagnostic = {
+        "inputs_sha256": hashlib.sha256(inputs.astype("<f8").tobytes()).hexdigest(),
+        "rounded_inputs_sha256": hashlib.sha256(
+            np.round(inputs, 10).astype("<f8").tobytes()
+        ).hexdigest(),
+        "outcomes": outcomes,
+        "details": diagnostics,
+    }
+    if outcomes["analytic"] != outcomes["fd"] or outcomes["fd"][1] != ("mean:x#wiggle",):
+        # Captured stdout retains the full evidence; assertion reprs abbreviate it.
+        print(json.dumps(diagnostic, indent=2, default=str))
     assert outcomes["analytic"] == outcomes["fd"]
     assert outcomes["fd"][1] == ("mean:x#wiggle",)
 

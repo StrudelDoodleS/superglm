@@ -306,14 +306,16 @@ def log_mean_loading(scale: NDArray, skew: NDArray) -> tuple[NDArray[np.float64]
     _same_shape(sigma, eps)
     left_width, right_width = 1.0 - eps, 1.0 + eps
     a1, a2 = sigma * left_width, sigma * right_width
-    log_left = np.log1p(-eps) + 0.5 * a1 * a1 + special.log_ndtr(-a1)
-    log_right = np.log1p(eps) + 0.5 * a2 * a2 + special.log_ndtr(a2)
+    log_cdf_left = special.log_ndtr(-a1)
+    log_cdf_right = special.log_ndtr(a2)
+    log_left = np.log1p(-eps) + 0.5 * a1 * a1 + log_cdf_left
+    log_right = np.log1p(eps) + 0.5 * a2 * a2 + log_cdf_right
     logk = np.logaddexp(log_left, log_right)
     p_left = np.exp(log_left - logk)
     p_right = np.exp(log_right - logk)
     # inverse Mills ratios, formed in the log domain so the far tail survives
-    r1 = np.exp(-0.5 * a1 * a1 - _HALF_LOG_TWO_PI - special.log_ndtr(-a1))
-    r2 = np.exp(-0.5 * a2 * a2 - _HALF_LOG_TWO_PI - special.log_ndtr(a2))
+    r1 = np.exp(-0.5 * a1 * a1 - _HALF_LOG_TWO_PI - log_cdf_left)
+    r2 = np.exp(-0.5 * a2 * a2 - _HALF_LOG_TWO_PI - log_cdf_right)
     g1, g1d = a1 - r1, 1.0 + a1 * r1 - r1 * r1
     g2, g2d = a2 + r2, 1.0 - a2 * r2 - r2 * r2
     d1s, d1e = left_width * g1, -1.0 / left_width - sigma * g1

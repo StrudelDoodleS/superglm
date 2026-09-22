@@ -438,7 +438,7 @@ def _assessment_objective_error_bound(
     except ValueError as evidence:
         raise ValueError(f"{failure_context}: invalid original evidence") from evidence
     return float(
-        _enclosed_bound_sum(scalar, np.longdouble(0.5) * error, np.longdouble(0.5) * original_error)
+        _enclosed_bound_sum(scalar, np.float64(0.5) * error, np.float64(0.5) * original_error)
     )
 
 
@@ -495,6 +495,21 @@ def _assessment_retained_kkt_ratio(result: DenseSolverResult) -> float:
     if optimizing is None:
         raise ValueError("endpoint assessment fit has no optimizing likelihood")
     return score_norm / (1.0 + abs(float(optimizing)))
+
+
+def _assessment_unchanged_failed_cap(
+    cap: DenseSolverResult, source: DenseSolverResult | None
+) -> bool:
+    """An unchanged stalled refit can seed a face, not certify a finite cap."""
+    return bool(
+        source is not None
+        and source.converged
+        and not cap.converged
+        and cap.convergence_reason == "line_search_failed"
+        and cap.iterations == 0
+        and not cap.history
+        and np.array_equal(cap.coefficients, source.coefficients)
+    )
 
 
 def _assessment_is_numerically_stationary(

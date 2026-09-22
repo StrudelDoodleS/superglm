@@ -15,9 +15,7 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import platform
-import resource
 import sys
 import time
 import warnings
@@ -32,10 +30,12 @@ import pandas as pd
 import scipy
 from benchmarks import (
     _constrained_fit_profile,
+    _platform,
     profile_constrained_fit_paths,
     profile_structured_credibility,
     rank_deficient_complete_fit,
 )
+from benchmarks._platform import load_average, peak_rss
 from benchmarks.rank_deficient_complete_fit import (
     _DispatchSampler,
     _git_state,
@@ -85,6 +85,7 @@ def _source_identity():
     }
     helpers = (
         _constrained_fit_profile,
+        _platform,
         profile_constrained_fit_paths,
         profile_structured_credibility,
         rank_deficient_complete_fit,
@@ -383,7 +384,10 @@ def main():
         "--seed", type=int, help="Override seed: constrained defaults 42, SZ defaults 7401."
     )
     parser.add_argument("--measure-time", action="store_true")
+    parser.add_argument("--threads", type=int, default=1)
     args = parser.parse_args()
+    if args.threads < 1:
+        parser.error("--threads must be positive")
     model, frame, response, weights, offset, config = _fixture(args.case, args.seed)
     data_hash, input_hashes = _input_identity(frame, response, weights, offset)
     receipt = {
@@ -398,7 +402,8 @@ def main():
         "data_sha256": data_hash,
         "input_sha256": input_hashes,
         "provenance": _source_identity(),
-        "load_before": os.getloadavg(),
+        "load_before": load_average(),
+        "threads_requested": args.threads,
         "wall_time_status": "measured" if args.measure_time else "unmeasured",
         "peak_rss_measures_fits": 1,
         "solver_instrumented": not args.measure_time,
@@ -411,7 +416,7 @@ def main():
     )
     elapsed = None
     error = None
-    with warnings.catch_warnings(record=True) as recorded, threadpool_limits(limits=1):
+    with warnings.catch_warnings(record=True) as recorded, threadpool_limits(limits=args.threads):
         with sampler if sampler is not None else nullcontext(), context as dispatch:
             started = time.perf_counter() if args.measure_time else None
             try:
@@ -441,9 +446,10 @@ def main():
             }
     receipt["fit_seconds"] = elapsed
     receipt["fit_error"] = error
-    receipt["load_after"] = os.getloadavg()
-    rss_unit = 1024.0**2 if sys.platform == "darwin" else 1024.0
-    receipt["process_peak_rss_mib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_unit
+    receipt["load_after"] = load_average()
+    memory = peak_rss()
+    receipt["process_peak_rss_mib"] = memory.bytes / 1024.0**2
+    receipt["peak_rss_source"] = memory.source
     receipt["memory_scope"] = (
         "whole fresh process through one complete fit; before output prediction"
     )

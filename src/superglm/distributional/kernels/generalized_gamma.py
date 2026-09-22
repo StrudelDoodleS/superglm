@@ -386,6 +386,7 @@ class GeneralizedGammaKernelEvaluation:
 
 def _shape_terms(
     shape: NDArray[np.float64],
+    stirling: tuple[NDArray[np.float64], ...] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Return ``(S(k), k^2 S'(k), k^3 S''(k))``, including ``Q = 0``.
 
@@ -399,7 +400,7 @@ def _shape_terms(
     small = np.abs(shape) < _ZERO_SHAPE
     safe = np.where(small, 1.0, shape)
     k = 1.0 / (safe * safe)
-    s0_all, s1_all, s2_all = _stirling_triplet(k)
+    s0_all, s1_all, s2_all = _stirling_triplet(k) if stirling is None else stirling
     s0 = s0_all.copy()
     s0[small] = shape[small] * shape[small] / 12.0
     k2s1 = np.where(small, -1.0 / 12.0, k * k * s1_all)
@@ -427,6 +428,19 @@ def location_rows(
     under unit prior weights).  The carrier ``-log y - log(2 pi)/2`` is left to
     the caller.
     """
+    return _location_rows(response, mu, sigma, shape, multiplier, derivative_order=derivative_order)
+
+
+def _location_rows(
+    response: NDArray,
+    mu: NDArray,
+    sigma: NDArray,
+    shape: NDArray,
+    multiplier: NDArray,
+    *,
+    derivative_order: int,
+    stirling: tuple[NDArray[np.float64], ...] | None = None,
+) -> GeneralizedGammaKernelEvaluation:
     y = _positive_vector(response, name="response")
     mu_values = _vector(mu, name="mu")
     sigma_values = _positive_vector(sigma, name="sigma")
@@ -441,7 +455,7 @@ def location_rows(
     # keep Q*w appreciable. The existing series retain this product and
     # take their exact continuous limits only when the product is zero.
     u = q * w
-    s0, k2s1, k3s2 = _shape_terms(q)
+    s0, k2s1, k3s2 = _shape_terms(q, stirling)
     score = None
     hessian = None
     with np.errstate(over="ignore", invalid="ignore"):
@@ -571,6 +585,14 @@ def log_mean_loading(sigma: NDArray, shape: NDArray) -> tuple[NDArray[np.float64
     its exact ``Q = 0`` limit (``sigma^2/2``, ``sigma``, ``-sigma^3/6 - sigma/2``,
     ``1``, ``-sigma^2/2 - 1/2``, ``sigma^4/6 + sigma^2/2``).
     """
+    values, _ = _log_mean_loading_and_stirling(sigma, shape)
+    return values
+
+
+def _log_mean_loading_and_stirling(
+    sigma: NDArray,
+    shape: NDArray,
+) -> tuple[tuple[NDArray[np.float64], ...], tuple[NDArray[np.float64], ...]]:
     sigma_values = _positive_vector(sigma, name="sigma")
     q = _vector(shape, name="shape")
     if sigma_values.shape != q.shape:
@@ -597,8 +619,9 @@ def log_mean_loading(sigma: NDArray, shape: NDArray) -> tuple[NDArray[np.float64
     inv_q = np.where(zero, 0.0, 1.0 / safe)
     inv_q2 = inv_q * inv_q
     inv_q3 = inv_q2 * inv_q
-    logc = sig2 * (series_l2(v) + series_l1(v)) - 0.5 * np.log1p(v) + s0x - s0k
-    c_s = sigma_values * series_l1(v) - q / (2.0 * one_v) + s1x * inv_q
+    l1 = series_l1(v)
+    logc = sig2 * (series_l2(v) + l1) - 0.5 * np.log1p(v) + s0x - s0k
+    c_s = sigma_values * l1 - q / (2.0 * one_v) + s1x * inv_q
     c_q = (
         2.0 * sig2 * sigma_values * series_m3(v)
         - sigma_values * half_v / one_v
@@ -625,7 +648,9 @@ def log_mean_loading(sigma: NDArray, shape: NDArray) -> tuple[NDArray[np.float64
     values = (logc, c_s, c_q, c_ss, c_sq, c_qq)
     for value in values:
         _finite_or_raise("mean loading", value)
-    return tuple(readonly(value) for value in values)
+    # Keep the raw triplet: loading zeroes its small-Q terms, whereas location
+    # uses finite scaled limits. The receiving shape helper applies those limits.
+    return tuple(readonly(value) for value in values), (s0k_all, s1k_all, s2k_all)
 
 
 def _log_variance_loading(sigma: float, q: float) -> float:
@@ -820,15 +845,17 @@ def mean_rows(
     hessian = np.zeros((n, 6), dtype=_FLOAT) if order == 2 else None
     valid = np.array(exists, dtype=bool)
     if np.any(exists):
-        logc, c_s, c_q, c_ss, c_sq, c_qq = log_mean_loading(sigma_values[exists], q[exists])
+        loading, stirling = _log_mean_loading_and_stirling(sigma_values[exists], q[exists])
+        logc, c_s, c_q, c_ss, c_sq, c_qq = loading
         me = m[exists]
-        base = location_rows(
+        base = _location_rows(
             y[exists],
             np.log(me) - logc,
             sigma_values[exists],
             q[exists],
             weight[exists],
             derivative_order=order,
+            stirling=stirling,
         )
         optimizing[exists] = base.optimizing_log_likelihood
         valid[exists] = base.valid

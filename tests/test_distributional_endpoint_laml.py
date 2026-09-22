@@ -1886,6 +1886,75 @@ def test_endpoint_authority_polish_refuses_a_nonconverged_fresh_refit(
     assert fit_calls == 2
 
 
+@pytest.mark.parametrize(
+    "case", ["unchanged_cap", "moved_cap", "budget_failure", "failed_endpoint"]
+)
+def test_unchanged_failed_cap_is_not_endpoint_authority(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Only an unchanged stalled cap may seed an independently certified face."""
+    original = solver_module._run_iterations
+
+    def failed_strict_run(context, state, config, **kwargs):
+        if config.tolerance > 1e-12 or (
+            context.coefficient_face is not None and case != "failed_endpoint"
+        ):
+            return original(context, state, config, **kwargs)
+        if case == "moved_cap":
+            moved = state.coefficients.copy()
+            moved[0] += 1e-4
+            state = solver_module._evaluate_state(context, moved)
+            assert state is not None
+        geometry = solver_module._measured_geometry(context, state, "observed", None)
+        return solver_module._OptimizationRun(
+            state=state,
+            geometry=geometry,
+            history=(),
+            converged=False,
+            reason="max_iterations" if case == "budget_failure" else "line_search_failed",
+            score_relative=solver_module._optimization_score_relative(
+                context, geometry.score_penalized, state.penalized_optimizing_log_likelihood
+            ),
+            objective_relative_change=0.0,
+            step_relative=0.0,
+        )
+
+    monkeypatch.setattr(solver_module, "_run_iterations", failed_strict_run)
+    *_, capped_name, _finite_name, _config, smoothing = _gamma_isolated_cap_face_problem()
+    if case != "unchanged_cap":
+        assert not smoothing.converged
+        assert smoothing.terminal_fit.coefficient_face is None
+        assert not any(item.activated_face_components for item in smoothing.history)
+        if case == "failed_endpoint":
+            assert smoothing.history[-1].endpoint_assessment_failure_reason == (
+                "endpoint_not_converged"
+            )
+        return
+
+    assert smoothing.converged
+    assert smoothing.terminal_fit.coefficient_face.component_names == (capped_name,)
+    for item in smoothing.history:
+        if not (item.activated_face_components or item.revalidated_face_components):
+            continue
+        cap, endpoint = (smoothing.coefficient_fits[i] for i in item.coefficient_fit_indices)
+        source = smoothing.coefficient_fits[item.source_fit_index]
+        assert source.converged
+        assert not cap.converged
+        assert cap.convergence_reason == "line_search_failed"
+        assert cap.iterations == 0
+        np.testing.assert_array_equal(cap.coefficients, source.coefficients)
+        assert endpoint.converged
+        assert efs_module._assessment_is_numerically_stationary(
+            endpoint, item.coefficient_tolerances[-1]
+        )
+        assert item.endpoint_direction_evidence.lower_bound > 0.0
+        assert (
+            item.objective_after
+            <= item.objective_before
+            + smoothing.config.objective_tolerance * (1.0 + abs(item.objective_before))
+        )
+
+
 def test_nonstationary_sole_cap_can_continue_to_a_strict_exact_face() -> None:
     """Kills returning cap_not_stationary before assessing a sound exact face."""
     (
@@ -3781,14 +3850,34 @@ def test_terminal_face_recheck_preserves_the_canonical_endpoint_start(
         )
 
 
+@pytest.mark.parametrize("failed_cap", [False, True])
 def test_terminal_face_recheck_refuses_a_moving_endpoint_state(
     monkeypatch: pytest.MonkeyPatch,
+    failed_cap: bool,
 ) -> None:
     calls = 0
     inject_endpoint_result = False
     injected = False
     real_check = efs_module._check_face_direction
     real_fit = smoothing_faces._fit_endpoint_authority_stationary
+    real_run = solver_module._run_iterations
+
+    def stall_recheck_cap(context, state, config, **kwargs):
+        if not (failed_cap and inject_endpoint_result and context.coefficient_face is None):
+            return real_run(context, state, config, **kwargs)
+        geometry = solver_module._measured_geometry(context, state, "observed", None)
+        return solver_module._OptimizationRun(
+            state=state,
+            geometry=geometry,
+            history=(),
+            converged=False,
+            reason="line_search_failed",
+            score_relative=solver_module._optimization_score_relative(
+                context, geometry.score_penalized, state.penalized_optimizing_log_likelihood
+            ),
+            objective_relative_change=0.0,
+            step_relative=0.0,
+        )
 
     def inject_solver_result(*args: object, **kwargs: object):
         nonlocal injected
@@ -3813,6 +3902,7 @@ def test_terminal_face_recheck_refuses_a_moving_endpoint_state(
         finally:
             inject_endpoint_result = False
 
+    monkeypatch.setattr(solver_module, "_run_iterations", stall_recheck_cap)
     monkeypatch.setattr(smoothing_faces, "_fit_endpoint_authority_stationary", inject_solver_result)
     monkeypatch.setattr(smoothing_faces, "_check_face_direction", perturb_revalidation_start)
     monkeypatch.setattr(efs_module, "_check_face_direction", perturb_revalidation_start)
@@ -3823,6 +3913,39 @@ def test_terminal_face_recheck_refuses_a_moving_endpoint_state(
     assert smoothing.terminal_fit.coefficient_face is None
     assert smoothing.history[-1].deactivated_face_components == (component_name,)
     assert smoothing.history[-1].endpoint_direction_evidence is None
+
+    if failed_cap:
+        cap_index = smoothing.history[-1].coefficient_fit_indices[0]
+        assert not smoothing.coefficient_fits[cap_index].converged
+        # A legacy receipt has no grouped penalty context. Add a second cap
+        # only after activation, so its earlier sole-cap check still passes.
+        companion = "forged:companion"
+        maximum = smoothing.config.maximum_lambda
+        forged_history = tuple(
+            replace(
+                item,
+                lambdas_before={
+                    **item.lambdas_before,
+                    companion: maximum / 2 if index == 0 else maximum,
+                },
+                proposed_lambdas={**item.proposed_lambdas, companion: maximum},
+                lambdas_after={**item.lambdas_after, companion: maximum},
+                proposed_log_steps={**item.proposed_log_steps, companion: 0.0},
+                accepted_log_steps={**item.accepted_log_steps, companion: 0.0},
+                quadratic_forms={**item.quadratic_forms, companion: 0.0},
+                trace_terms={**item.trace_terms, companion: 0.0},
+            )
+            for index, item in enumerate(smoothing.history)
+        )
+        with pytest.raises(ValueError, match="sole capped component"):
+            replace(
+                smoothing,
+                initial_lambdas={**smoothing.initial_lambdas, companion: maximum / 2},
+                lambdas={**smoothing.lambdas, companion: maximum},
+                terminal_raw_log_steps={**smoothing.terminal_raw_log_steps, companion: 0.0},
+                history=forged_history,
+                _penalty_assessment_context=None,
+            )
 
 
 def test_stationary_cap_recheck_refuses_tiny_endpoint_state_movement(

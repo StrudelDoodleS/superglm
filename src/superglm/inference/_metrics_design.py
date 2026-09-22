@@ -299,16 +299,17 @@ MetricsDesign = DesignMatrix | EvaluationDesign | NDArray
 
 
 def centered_gram_from_moments(gram: NDArray, xtw1: NDArray, sum_w: float) -> NDArray:
-    """Profile the intercept from raw moments with extended-precision subtraction."""
+    """Profile the intercept with an exponent-scaled binary64 outer product."""
     if sum_w <= 0.0:
         raise ValueError("working weights must have positive total weight")
-    wide = np.longdouble
-    centered = np.asarray(gram, dtype=wide) - np.outer(
-        np.asarray(xtw1, dtype=wide),
-        np.asarray(xtw1, dtype=wide),
-    ) / wide(sum_w)
-    centered = np.asarray(centered, dtype=np.float64)
-    return 0.5 * (centered + centered.T)
+    mantissa, exponent = np.frexp(np.asarray(xtw1, dtype=np.float64))
+    weight, weight_exponent = np.frexp(sum_w)
+    correction = np.ldexp(
+        np.outer(mantissa / weight, mantissa),
+        exponent[:, None] + exponent[None, :] - weight_exponent,
+    )
+    centered = np.asarray(gram, dtype=np.float64) - correction
+    return 0.5 * centered + 0.5 * centered.T
 
 
 def iter_dense_chunks(design: MetricsDesign) -> Iterator[tuple[int, int, NDArray]]:

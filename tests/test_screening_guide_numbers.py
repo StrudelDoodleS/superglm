@@ -349,6 +349,7 @@ def _guide_frame(n_rows: int):
 
 
 @FREQ_SKIP
+@pytest.mark.slow
 def test_screening_guide_fixture_matches_the_real_book(measured) -> None:
     """Anchor the complete frequency-geometry measurement to one real book.
 
