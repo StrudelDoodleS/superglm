@@ -703,7 +703,8 @@ def _direct_candidate(
     )
     weighted = _candidate_product(stack, basis) if _native_candidate else None
     if weighted is None:
-        weighted = _native_product(stack, basis)
+        # Packed copy: Q_plus is a strided slice and matmul rounding depends on layout.
+        weighted = _native_product(stack, basis.copy(order="K"))
     maxima = np.max(np.abs(weighted), axis=0)
     if np.any(maxima == 0):
         return None
