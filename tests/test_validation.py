@@ -981,18 +981,18 @@ def test_weighted_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mi
     if mixed:
         values[1:] = 1.0
     visits = 0
-    original = validation._scaled_sum
+    original = validation._round_scaled
 
-    def counted(mantissa, exponent):
+    def counted(integer, base):
         nonlocal visits
-        visits += len(mantissa)
-        return original(mantissa, exponent)
+        visits += 1
+        return original(integer, base)
 
-    monkeypatch.setattr(validation, "_scaled_sum", counted)
+    monkeypatch.setattr(validation, "_round_scaled", counted)
     validation._scaled_product_sums(np.ones_like(values), values, np.arange(1, len(values) + 1))
-    # These fixtures need at most a few nonoverlapping scalar partials.
-    # Revisiting all 1+...+n source prefixes violates this linear-work bound.
-    assert visits <= 4 * len(values)
+    # A constant tiny unit stays on the fast path. The mixed column's exact
+    # path keeps one integer prefix state and rounds each reported prefix once.
+    assert visits == (len(values) if mixed else 0)
 
 
 def test_weighted_prefix_retains_small_terms_after_full_range_cancellation():
@@ -1137,25 +1137,18 @@ def test_gini_pair_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, m
     if mixed:
         weights[1:] = 1.0
     visits = 0
-    original_add = validation._add_scaled_partial
-    original_sum = validation._scaled_sum
+    original = validation._round_scaled
 
-    def counted_add(partials, value, exponent):
+    def counted(integer, base):
         nonlocal visits
-        visits += len(partials) + 1
-        return original_add(partials, value, exponent)
+        visits += 1
+        return original(integer, base)
 
-    def counted_sum(mantissa, exponent):
-        nonlocal visits
-        visits += len(mantissa)
-        return original_sum(mantissa, exponent)
-
-    monkeypatch.setattr(validation, "_add_scaled_partial", counted_add)
-    monkeypatch.setattr(validation, "_scaled_sum", counted_sum)
-    validation._weighted_pair_concordance(np.arange(size), weights, np.frexp(np.arange(size) % 2))
-    # The two weight scales need only a bounded number of scalar parts.
-    # This counts reduction work, independently of the exact-pair oracle.
-    assert visits <= 64 * size
+    monkeypatch.setattr(validation, "_round_scaled", counted)
+    validation._weighted_pair_concordance(np.arange(size), weights, np.arange(size) % 2.0)
+    # The exact contraction carries integer block and prefix state and
+    # rounds its one result once; a constant tiny unit stays on the fast path.
+    assert visits == int(mixed)
 
 
 @pytest.mark.parametrize("consumer", ["lift", "lorenz", "gini"])
@@ -1167,14 +1160,14 @@ def test_ordinary_validation_consumers_avoid_per_row_python_partials(monkeypatch
     predicted = observed[::-1].copy()
     weights = 0.5 + np.arange(size) / 128.0
     calls = 0
-    original = validation._add_scaled_partial
+    original = validation._exact_terms
 
     def counted(*args):
         nonlocal calls
         calls += 1
         return original(*args)
 
-    monkeypatch.setattr(validation, "_add_scaled_partial", counted)
+    monkeypatch.setattr(validation, "_exact_terms", counted)
     if consumer == "lift":
         validation.lift_chart(observed, predicted, sample_weight=weights)
     elif consumer == "lorenz":
@@ -1259,30 +1252,33 @@ def test_ordinary_prefix_enclosure_keeps_halfway_tail_and_cancellation(terms):
         assert abs(exact - approximation) <= Fraction.from_float(error)
 
 
-@pytest.mark.parametrize("power", [-34, -33, 31, 32])
-def test_validation_reduction_range_routes_extremes_to_existing_fallback(monkeypatch, power):
+@pytest.mark.parametrize("unit", [-900, 0, 900])
+@pytest.mark.parametrize("excess", [0, 1])
+def test_validation_reduction_range_routes_extremes_to_existing_fallback(monkeypatch, unit, excess):
     import math
 
     import superglm.validation as validation
 
     native, fallback = [], []
     original_native = validation._ordinary_product_terms
-    original_add = validation._add_scaled_partial
+    original_exact = validation._exact_terms
 
     def compiled(*args):
         native.append(1)
         return original_native(*args)
 
-    def scalar(*args):
+    def exact(*args):
         fallback.append(1)
-        return original_add(*args)
+        return original_exact(*args)
 
     monkeypatch.setattr(validation, "_ordinary_product_terms", compiled)
-    monkeypatch.setattr(validation, "_add_scaled_partial", scalar)
-    result = validation._scaled_product_total(np.full(2, 2.0**power), np.ones(2))
-    assert math.ldexp(*result) == 2.0 ** (power + 1)
-    assert len(native) == int(power in (-33, 31))
-    assert bool(fallback) == (power not in (-33, 31))
+    monkeypatch.setattr(validation, "_exact_terms", exact)
+    values = np.array([2.0**unit, 2.0 ** (unit - validation._ORDINARY_RANGE - excess)])
+    result = validation._scaled_product_total(np.ones(2), values)
+    assert math.ldexp(*result) == math.fsum(values)
+    # The spread within a column decides the route; its unit never does.
+    assert len(native) == int(excess == 0)
+    assert bool(fallback) == bool(excess)
 
 
 def test_ordinary_validation_gini_preserves_exact_weight_exposure_pairs_and_ties():
@@ -1329,7 +1325,7 @@ def test_pair_contractions_skip_zero_targets_after_full_weight_prefix(monkeypatc
 
     monkeypatch.setattr(validation, "_ordinary_prefix_parts", counted_prefix)
     monkeypatch.setattr(validation, "_two_product", counted_product)
-    validation._weighted_pair_concordance(np.arange(size), weights, np.frexp(target))
+    validation._weighted_pair_concordance(np.arange(size), weights, target)
     assert prefix_rows == [size]
     assert product_rows and set(product_rows) == {np.count_nonzero(target)}
 
@@ -1485,7 +1481,7 @@ def test_unit_weight_prefixes_do_not_carry_zero_product_channels(monkeypatch):
     monkeypatch.setattr(validation, "_ordinary_prefix_parts", counted)
     validation._scaled_product_sums(np.ones(16), values, np.arange(1, 17))
     validation._weighted_pair_concordance(
-        np.arange(16), np.ones(16), np.frexp(np.arange(16)), exposure=values
+        np.arange(16), np.ones(16), np.arange(16.0), exposure=values
     )
     assert channels == [1, 1]
 
@@ -1515,3 +1511,169 @@ def test_unit_factor_bypass_preserves_exact_products_and_readonly_strides(unit_f
         assert sum(Fraction.from_float(part[row]) for part in parts) == expected
     for factor, original in zip(factors, before, strict=True):
         np.testing.assert_array_equal(factor, original)
+
+
+@pytest.mark.parametrize(
+    "values", [[1.0, 2.0**-53, 2.0**-600], [1.0 + 2.0**-52, 2.0**-53, -(2.0**-600)]]
+)
+def test_totals_resolve_a_halfway_tie_from_a_distant_tail(values):
+    from fractions import Fraction
+
+    from superglm.validation import _weighted_total
+
+    values = np.array(values)
+    exact = float(sum(map(Fraction.from_float, values)))
+    assert _weighted_total(values, np.ones(3), "test") == exact
+    result = double_lift_chart(values, np.ones(3), np.ones(3), n_bins=1)
+    assert result.bins.loc[0, "target_sum"] == exact
+
+
+def test_subnormal_weighted_total_is_rounded_once(monkeypatch):
+    from fractions import Fraction
+
+    import superglm.validation as validation
+
+    values, weights = np.array([1.5 * 2.0**-600, -(2.0**-600)]), np.array([2.0**-474, 2.0**-534])
+    exact = sum(
+        Fraction.from_float(v) * Fraction.from_float(w)
+        for v, w in zip(values, weights, strict=True)
+    )
+    # Rounded to 53 bits first, the total is the subnormal midpoint 1.5 * 2**-1074.
+    assert float(exact) == np.nextafter(0.0, 1.0)
+    assert validation._weighted_total(values, weights, "test") == float(exact)
+    result = double_lift_chart(values, np.ones(2), np.ones(2), sample_weight=weights, n_bins=1)
+    assert result.bins.loc[0, "target_sum"] == float(exact)
+    monkeypatch.setattr(validation, "_ordinary_scaling", lambda factors: None)
+    assert validation._weighted_total(values, weights, "test") == float(exact)
+
+
+def test_weighted_mean_hull_ignores_zero_weight_rows():
+    from fractions import Fraction
+
+    from superglm.validation import _weighted_mean
+
+    values, weights = np.array([0.1, 0.1, 100.0]), np.array([0.1, 0.1, 0.0])
+    exact = sum(
+        Fraction.from_float(v) * Fraction.from_float(w)
+        for v, w in zip(values, weights, strict=True)
+    ) / sum(map(Fraction.from_float, weights))
+    assert _weighted_mean(values, weights, "test") == float(exact) == 0.1
+
+
+@pytest.mark.parametrize(
+    ("y", "scores", "weights"),
+    [
+        (
+            [-1.0, 1 + 2.0**-52, 1 + 5 * 2.0**-52, 1 + 11 * 2.0**-52, 1 + 15 * 2.0**-52],
+            [0.0, 1.0, 2.0, 4.0, 3.0],
+            [2.0**-33, 2.0**31, 2.0**31, 2.0**31, 2.0**31],
+        ),
+        (
+            [-np.finfo(float).max, 0.0, np.finfo(float).max / 2, np.finfo(float).max],
+            [1.0, 0.0, 3.0, 2.0],
+            [1.0, 0.5, 2.0, 0.25],
+        ),
+    ],
+)
+def test_gini_contracts_exact_target_differences(y, scores, weights):
+    from fractions import Fraction
+
+    from superglm.validation import _normalized_gini
+
+    y, scores, weights = np.array(y), np.array(scores), np.array(weights)
+    targets, mass = list(map(Fraction.from_float, y)), list(map(Fraction.from_float, weights))
+
+    def pair_sum(ordering):
+        return sum(
+            mass[i] * mass[j] * (targets[j] - targets[i])
+            for i in range(len(y))
+            for j in range(len(y))
+            if ordering[i] < ordering[j]
+        )
+
+    expected = float(pair_sum(scores) / pair_sum(y))
+    # Model and perfect sums are each rounded once to 53 bits, then divided once.
+    allowance = 2 * np.finfo(float).eps
+    assert _normalized_gini(y, scores, weights) == pytest.approx(expected, rel=allowance, abs=0)
+    result = lorenz_curve(y, scores, sample_weight=weights)
+    assert result.gini_ratio == pytest.approx(expected, rel=allowance, abs=0)
+
+
+def test_one_extreme_loss_or_exposure_keeps_the_fast_path(monkeypatch):
+    import superglm.validation as validation
+
+    def refuse(*factors):
+        raise AssertionError("the exact fallback must not run")
+
+    monkeypatch.setattr(validation, "_exact_terms", refuse)
+    rows = np.arange(64)
+    exposure = 0.25 + (rows % 7) / 8
+    exposure[1] = 1e-11
+    losses = np.where(rows % 3 == 0, 100.0 * (1 + rows % 5), 0.0)
+    losses[0] = 2.0**33
+    scores = (rows * 37 % 16).astype(float)
+    ginis = []
+    for unit in (1.0, 2.0**-20):
+        result = validation.lorenz_curve(losses * unit, scores, exposure=exposure)
+        standalone = validation._gini_coefficients(losses * unit, scores, exposure=exposure)
+        ginis.append((result.gini_model, result.gini_perfect, result.gini_ratio, *standalone))
+    assert ginis[0] == ginis[1]
+
+
+def test_fast_and_exact_paths_agree_bitwise(monkeypatch):
+    import superglm.validation as validation
+
+    rng = np.random.default_rng(20260922)
+    cases = []
+    for _ in range(16):
+        size = int(rng.integers(2, 40))
+        y = rng.gamma(2.0, 1.0, size) * 2.0 ** rng.integers(-40, 40, size)
+        y[rng.random(size) < 0.4] = 0.0
+        y[rng.random(size) < 0.1] *= -0.3
+        weights = rng.uniform(0.5, 2.0, size) * 2.0 ** rng.integers(-30, 30, size)
+        cases.append((y, rng.integers(0, 6, size) * 1.0, weights, rng.uniform(0.1, 1.0, size)))
+
+    _, ax = plt.subplots()
+
+    def results():
+        out = []
+        for y, scores, weights, exposure in cases:
+            lorenz = validation.lorenz_curve(
+                y, scores, sample_weight=weights, exposure=exposure, ax=ax
+            )
+            ends = np.arange(1, len(y) + 1)
+            sums, powers = validation._scaled_product_sums(weights, y, ends, exposure=exposure)
+            pair, power = validation._weighted_pair_concordance(
+                scores, weights, y, exposure=exposure
+            )
+            out.append(
+                (
+                    lorenz.curve.to_numpy().tobytes(),
+                    (lorenz.gini_model, lorenz.gini_perfect, lorenz.gini_ratio),
+                    # An exact zero carries no exponent on either path.
+                    (sums.tolist(), np.where(sums == 0, 0, powers).tolist()),
+                    (pair, power if pair else 0),
+                    validation._weighted_total(y, weights, "test"),
+                    validation._weighted_mean(y, weights, "test"),
+                )
+            )
+        return out
+
+    calls = []
+    original = validation._exact_terms
+
+    def counted(*factors):
+        calls.append(1)
+        return original(*factors)
+
+    monkeypatch.setattr(validation, "_exact_terms", counted)
+    fast = results()
+    assert not calls
+    # Refused certificates after scaling, then no scaling at all, must both
+    # reach the exact path with the caller's unscaled operands.
+    for certificate in ("_ordinary_product_sums", "_ordinary_pair_concordance"):
+        monkeypatch.setattr(validation, certificate, lambda *args: None)
+    assert results() == fast
+    monkeypatch.setattr(validation, "_ordinary_scaling", lambda factors: None)
+    assert results() == fast
+    assert calls
