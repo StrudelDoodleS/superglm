@@ -208,13 +208,7 @@ def _ordinary_scaling(columns):
     for column in columns:  # the two or three operands of one reduction
         mantissa, exponent = np.frexp(column)
         top = math.frexp(max(column.max(), -column.min()))[1]
-        # Zeros carry frexp exponent 0, which fails the bound only for
-        # columns reaching 2**_ORDINARY_RANGE; mask them just there.
-        lowest = (
-            exponent.min()
-            if top <= _ORDINARY_RANGE
-            else np.min(exponent, where=mantissa != 0, initial=top)
-        )
+        lowest = np.min(exponent, where=mantissa != 0, initial=top)
         if lowest < top - _ORDINARY_RANGE:
             return None
         scaled.append(column if top == 1 else np.ldexp(column, 1 - top))
