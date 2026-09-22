@@ -24,20 +24,42 @@ EXTENDED = frozenset(
 )
 
 
+# NumPy's character codes for the same types. One-letter strings are common
+# elsewhere (plot colours), so codes count only where a dtype is expected.
+CODES = frozenset({"g", "G", "f12", "f16", "c24", "c32"})
+
+
+def _dtype_codes(node: ast.Call) -> list[str]:
+    """String dtype codes passed to np.dtype(...), .astype(...) or dtype=."""
+    arguments = [keyword.value for keyword in node.keywords if keyword.arg == "dtype"]
+    if isinstance(node.func, ast.Attribute) and node.func.attr in {"dtype", "astype"}:
+        arguments.extend(node.args[:1])
+    strings = (arg.value for arg in arguments if isinstance(arg, ast.Constant))
+    return [
+        code.lstrip("<>=|")
+        for code in strings
+        if isinstance(code, str) and code.lstrip("<>=|") in CODES
+    ]
+
+
 def _names(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Call):
+        return _dtype_codes(node)
     if isinstance(node, ast.Attribute):
-        return [node.attr]
-    if isinstance(node, ast.ImportFrom):
-        return [alias.name for alias in node.names]
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return [node.value]
-    return []
+        names = [node.attr]
+    elif isinstance(node, ast.ImportFrom):
+        names = [alias.name for alias in node.names]
+    elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+        names = [node.value]
+    else:
+        return []
+    return [name for name in names if name in EXTENDED]
 
 
 def _extended_references(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     relative = path.relative_to(SOURCE)
-    hits = ((node, EXTENDED.intersection(_names(node))) for node in ast.walk(tree))
+    hits = ((node, _names(node)) for node in ast.walk(tree))
     return [f"{relative}:{node.lineno} {sorted(names)}" for node, names in hits if names]
 
 
