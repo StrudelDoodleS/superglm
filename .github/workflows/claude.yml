@@ -52,10 +52,21 @@ jobs:
           git config --local --add credential.helper ""
           git config --local --add credential.helper "${helper_path}"
 
+      # Review with the newest Claude Code rather than the version the action
+      # bundles, so newly released models work without waiting for a release.
+      - name: Install latest Claude Code
+        id: claude-code
+        shell: bash
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          "${HOME}/.local/bin/claude" --version
+          echo "path=${HOME}/.local/bin/claude" >> "${GITHUB_OUTPUT}"
+
       - name: Run Claude PR review
         id: claude
-        uses: anthropics/claude-code-action@9ca9355b36297178e28d37c799d1c9c8a28e6507 # v1 (main), Claude Code 2.1.280
+        uses: anthropics/claude-code-action@9ca9355b36297178e28d37c799d1c9c8a28e6507 # v1 (main)
         with:
+          path_to_claude_code_executable: ${{ steps.claude-code.outputs.path }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Avoid embedding the Claude App token in the Git remote. Commit tools stay denied.
           use_commit_signing: true
