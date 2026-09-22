@@ -516,17 +516,18 @@ def _gini_coefficients(
         total_weight, total_loss = totals
     if total_loss[0] <= 0:
         return 0.0, 0.0, 0.0
-    perfect_order, model_order = (None, None) if score_orders is None else score_orders
-    perfect = _weighted_pair_concordance(
-        y_obs, weights, y_obs, exposure=exposure, score_order=perfect_order
-    )
-    # Constant targets give an exact zero. Otherwise both contractions share
-    # the error bound W * sum|w*y| * 4 gamma**2, so a perfect ordering that
-    # clears it by the margin also fixes the model's ratio to about 1e-7.
+    # Constant targets give an exact zero without a contraction.
     live = weights != 0 if exposure is None else (weights != 0) & (exposure != 0)
     lowest = np.min(y_obs[live])
     if lowest == np.max(y_obs[live]):
         return 0.0, 0.0, 0.0
+    perfect_order, model_order = (None, None) if score_orders is None else score_orders
+    perfect = _weighted_pair_concordance(
+        y_obs, weights, y_obs, exposure=exposure, score_order=perfect_order
+    )
+    # Both contractions share the error bound W * sum|w*y| * 4 gamma**2, so a
+    # perfect ordering that clears it by the margin also fixes the model's
+    # ratio to about 1e-7.
     magnitude = (
         _scaled_product_total(weights, np.abs(y_obs), exposure=exposure)
         if lowest < 0
@@ -994,7 +995,7 @@ def lorenz_curve(
         y_obs,
         y_pred,
         w,
-        exposure=exp,
+        exposure=vectors.get("exposure"),
         totals=(total_exp, total_loss),
         score_orders=(perfect_order if np.all(positive_exposure) else None, model_order),
     )

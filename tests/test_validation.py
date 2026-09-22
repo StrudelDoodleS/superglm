@@ -1557,3 +1557,21 @@ def test_charts_accept_predictions_at_the_mu_clip_floor(chart):
     predictions = np.array([0.3, 0.1, 1e-50])
     exact = float(sum(map(Fraction.from_float, predictions)) / 3)
     assert chart(np.array([1.0, 0.0, 2.0]), predictions) == pytest.approx(exact, rel=4e-16)
+
+
+def test_lorenz_gini_without_exposure_uses_the_unweighted_limit():
+    from superglm.validation import _normalized_gini
+
+    # With no exposure the pair contraction multiplies three factors, not
+    # five, so a target spanning 200 binades is inside its 288-binade limit.
+    y, pred = np.array([1e-60, 1.0]), np.array([0.0, 1.0])
+    assert lorenz_curve(y, pred).gini_ratio == _normalized_gini(y, pred) == 1.0
+
+
+def test_constant_target_gini_is_zero_without_a_contraction():
+    from superglm.validation import _normalized_gini
+
+    # Weights 300 binades apart fit the totals' two-factor limit but not a
+    # pair contraction's, which a constant target never needs.
+    weights = np.array([1.0, 2.0**-300])
+    assert _normalized_gini(np.ones(2), np.array([0.0, 1.0]), weights) == 0.0
