@@ -749,14 +749,18 @@ def _warmup_group_matrix_kernels() -> None:
     frozen_codes = codes.copy()
     frozen_codes.setflags(write=False)
     # Maps and packed curvature columns also supply Fortran and strided
-    # operands. Cover both mutabilities so their first fit need not compile.
+    # operands. Cover both mutabilities so their first fit need not compile,
+    # and call the float64 scan directly: a caller loaded from numba's
+    # on-disk cache links it without compiling its dispatcher.
     for operand in (matrix, np.asfortranarray(matrix), np.ones((3, 4))[:, ::2]):
         _tensor_operand_in_reassociation_range(operand)
         _operand_exponent_bounds(operand)
+        _float64_operand_exponent_bounds(operand)
         frozen_operand = operand.view()
         frozen_operand.setflags(write=False)
         _tensor_operand_in_reassociation_range(frozen_operand)
         _operand_exponent_bounds(frozen_operand)
+        _float64_operand_exponent_bounds(frozen_operand)
     for support in (matrix, frozen_matrix):
         for indices in (codes, frozen_codes):
             _indexed_row_dot(matrix, support, indices, indices)
