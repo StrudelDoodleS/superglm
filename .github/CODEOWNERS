@@ -8,5 +8,6 @@ src/superglm/ @StrudelDoodleS
 .codex/agents/ @StrudelDoodleS
 .github/PULL_REQUEST_TEMPLATE.md @StrudelDoodleS
 AGENTS.md @StrudelDoodleS
+CLAUDE.md @StrudelDoodleS
 docs/development/releases.md @StrudelDoodleS
 scripts/bump_version.py @StrudelDoodleS
