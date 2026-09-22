@@ -1288,6 +1288,64 @@ def test_every_agg_by_bin_caller_is_guarded():
     )
 
 
+def test_sparse_categorical_aggregate_budget_includes_mapped_output(monkeypatch):
+    """The raw aggregate and its mapped result coexist, including the sink bin."""
+    from superglm._group_matrix import _group_matrix_algebra as algebra
+    from superglm._group_matrix._group_matrix_core import (
+        CategoricalGroupMatrix,
+        SparseSSPGroupMatrix,
+    )
+
+    n, p_b, p, bins = 12, 4, 2, 4
+    basis = np.eye(p_b)[np.arange(n) % p_b]
+    transform = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, 1.0]])
+    codes = np.arange(n, dtype=np.intp) % bins
+    spline = SparseSSPGroupMatrix(sp.csr_matrix(basis), transform)
+    category = CategoricalGroupMatrix(codes, bins - 1)
+    weights = 1.0 + np.arange(n) / 16.0
+    design = basis @ transform
+    indicators = np.eye(bins)[codes, :-1]
+    expected = design.T @ (weights[:, None] * indicators)
+    bound = (
+        (n + p_b + p)
+        * np.finfo(np.float64).eps
+        * np.linalg.norm(design, 1)
+        * np.max(weights)
+        * np.linalg.norm(indicators, np.inf)
+    )
+    aggregate_calls, fallback_calls = [], []
+    aggregate, fallback = algebra._agg_by_bin, algebra._cross_gram_by_columns
+
+    def record_aggregate(*args, **kwargs):
+        aggregate_calls.append(1)
+        return aggregate(*args, **kwargs)
+
+    def record_fallback(*args, **kwargs):
+        fallback_calls.append(1)
+        return fallback(*args, **kwargs)
+
+    monkeypatch.setattr(algebra, "_agg_by_bin", record_aggregate)
+    monkeypatch.setattr(algebra, "_cross_gram_by_columns", record_fallback)
+    required = bins * (p_b + p)
+    for budget in (required - 1, required):
+        monkeypatch.setattr(algebra, "_MAX_AGGREGATE_CELLS", budget)
+        for count in (1, bins, bins + 1):
+            assert algebra._agg_by_bin_fits(spline, count, extra_width=p) == (
+                count * (basis.shape[1] + p) <= budget
+            )
+            assert algebra._agg_by_bin_fits(spline, count) == (count * p_b <= budget)
+        for left, right, reference in (
+            (spline, category, expected),
+            (category, spline, expected.T),
+        ):
+            aggregate_calls.clear()
+            fallback_calls.clear()
+            actual = algebra._cross_gram(left, right, weights)
+            np.testing.assert_allclose(actual, reference, rtol=0.0, atol=bound)
+            assert len(aggregate_calls) == int(budget == required)
+            assert len(fallback_calls) == int(budget < required)
+
+
 def test_agg_by_bin_width_never_under_reports_the_allocated_width():
     """The load-bearing line of the guard, tested rather than left to review.
 

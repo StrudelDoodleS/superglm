@@ -361,7 +361,7 @@ def _runtime_group_matrix_types():
     )
 
 
-def _agg_by_bin_fits(gm: GroupMatrix, n_bins: int) -> bool:
+def _agg_by_bin_fits(gm: GroupMatrix, n_bins: int, *, extra_width: int = 0) -> bool:
     """Whether ``_agg_by_bin``'s output is small enough to materialise.
 
     Its result is ``(n_bins, gm.shape[1])`` -- the row count from the block
@@ -370,9 +370,10 @@ def _agg_by_bin_fits(gm: GroupMatrix, n_bins: int) -> bool:
     the subsystem bounds the product.  An earlier version of the invariant test
     exempted these calls on the stated ground that both dimensions came from the
     same block; that was simply wrong, and a narrow million-row support beside a
-    wide sparse term is the counterexample.
+    wide sparse term is the counterexample. ``extra_width`` also charges any
+    same-bin mapped output that must coexist with the raw aggregate.
     """
-    return int(n_bins) * _agg_by_bin_width(gm) <= _MAX_AGGREGATE_CELLS
+    return int(n_bins) * (_agg_by_bin_width(gm) + extra_width) <= _MAX_AGGREGATE_CELLS
 
 
 def _agg_by_bin_width(gm: GroupMatrix) -> int:
@@ -1641,7 +1642,7 @@ def _cross_gram_sparse_categorical(
         or R.shape != (B.shape[1], p)
         or category.shape != (n, bins - 1)
         or min(n, p, B.shape[1], bins - 1) <= 0
-        or bins * (B.shape[1] + p) > _MAX_AGGREGATE_CELLS
+        or not _agg_by_bin_fits(spline, bins, extra_width=p)
         or codes.min() < 0
         or codes.max() >= bins
     ):

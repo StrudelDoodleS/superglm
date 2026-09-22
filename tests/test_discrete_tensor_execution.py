@@ -472,9 +472,11 @@ def test_channel_invariant_scans_run_once_per_assembly(monkeypatch, cached):
     assert "block_cross_tensor_main_s" in profile
     assert "block_cross_tensor_own_margin_s" in profile
     assert profile["block_cross_disc_disc_hist_calls"] == 1
+    # The seven cross calls each scan uncached weights once. The discrete
+    # pair shares one range decision between its two support projections.
     assert calls == {
         "legacy": 1 if cached else 4,
-        "bounds": 1 if cached else 8,
+        "bounds": 1 if cached else 7,
         "cells": 2 if cached else 4,
     }
 
@@ -590,7 +592,9 @@ def test_discrete_cross_scans_each_owned_factor_once_per_assembly(monkeypatch, c
         cache = algebra._BlockWeightCache() if cached else None
         algebra._cross_gram(*groups, weights, cache=cache)
         algebra._cross_gram(*reversed(groups), weights, cache=cache)
-    assert scans == [2 if cached else 8] * len(factors)
+    # Two assemblies, each visiting both orientations. A factor is scanned
+    # once per call without a cache, or once per assembly with a cache.
+    assert scans == [2 if cached else 4] * len(factors)
 
 
 @pytest.mark.parametrize("replace", [False, True])
