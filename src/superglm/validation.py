@@ -393,29 +393,21 @@ def _validated_chart_inputs(
 
 
 def _weighted_mean(values: NDArray, weights: NDArray, name: str) -> float:
-    """Scale the product and division together, retaining subnormal answers."""
+    """Correctly rounded weighted mean: one division of the exact sums.
+
+    Rounding to nearest is monotone and the extreme weighted values are
+    floats, so the result cannot leave their hull and needs no clamp.
+    """
     total_weight = math.fsum(np.asarray(weights, dtype=float).tolist())
     if total_weight <= 0 or not np.isfinite(total_weight):
         raise ValueError(f"{name} weights must have a finite positive total")
-    numerator = _scaled_product_total(values, weights)
-    if numerator[0] == 0.0:
-        # Exact zero has no comparison exponent and is already in the hull.
-        return 0.0
-    denominator, power = math.frexp(total_weight)
-    mean, shift = math.frexp(numerator[0] / denominator)
-    exponent = numerator[1] - power + shift
-    # Only rows with weight enter the mean, so only they bound it.
-    weighted = values[weights != 0]
-    minimum, maximum = float(np.min(weighted)), float(np.max(weighted))
-    # Compare the hull in the mean's units before reconstructing it. Scaling
-    # all inputs to their largest exponent instead would erase tiny means.
-    with np.errstate(over="ignore", under="ignore"):
-        lower, upper = np.ldexp([minimum, maximum], -exponent)
-    if mean <= lower:
-        return minimum
-    if mean >= upper:
-        return maximum
-    return _scaled_ratio((mean, exponent), (1.0, 0), f"{name} weighted mean")
+    numerator, numerator_base = _exact_terms(values, weights)
+    denominator, denominator_base = _exact_terms(weights)
+    return _scaled_ratio(
+        (int(np.sum(numerator)), numerator_base),
+        (int(np.sum(denominator)), denominator_base),
+        f"{name} weighted mean",
+    )
 
 
 def _weighted_total(values: NDArray, weights: NDArray, name: str) -> float:

@@ -1152,7 +1152,7 @@ def test_gini_pair_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, m
 
 
 @pytest.mark.parametrize("consumer", ["lift", "lorenz", "gini"])
-def test_ordinary_validation_consumers_avoid_per_row_python_partials(monkeypatch, consumer):
+def test_ordinary_validation_consumers_stay_on_the_fast_path(monkeypatch, consumer):
     import superglm.validation as validation
 
     size = 128
@@ -1160,14 +1160,19 @@ def test_ordinary_validation_consumers_avoid_per_row_python_partials(monkeypatch
     predicted = observed[::-1].copy()
     weights = 0.5 + np.arange(size) / 128.0
     calls = 0
-    original = validation._exact_terms
 
-    def counted(*args):
-        nonlocal calls
-        calls += 1
-        return original(*args)
+    def counted(original):
+        def wrapper(*args):
+            nonlocal calls
+            calls += 1
+            return original(*args)
 
-    monkeypatch.setattr(validation, "_exact_terms", counted)
+        return wrapper
+
+    # Weighted means are exact by construction; the prefix and pair
+    # reductions must certify on the fast path for ordinary inputs.
+    for fallback in ("_exact_prefix_sums", "_exact_pair_concordance"):
+        monkeypatch.setattr(validation, fallback, counted(getattr(validation, fallback)))
     if consumer == "lift":
         validation.lift_chart(observed, predicted, sample_weight=weights)
     elif consumer == "lorenz":
@@ -1560,6 +1565,33 @@ def test_weighted_mean_hull_ignores_zero_weight_rows():
     assert _weighted_mean(values, weights, "test") == float(exact) == 0.1
 
 
+def test_weighted_mean_is_correctly_rounded():
+    from fractions import Fraction
+
+    from superglm.validation import _weighted_mean
+
+    def exact_mean(values, weights):
+        numerator = sum(
+            Fraction.from_float(v) * Fraction.from_float(w)
+            for v, w in zip(values, weights, strict=True)
+        )
+        return float(numerator / sum(map(Fraction.from_float, weights)))
+
+    # Dividing the separately rounded numerator and weight total lands one
+    # ulp above the correctly rounded mean of these four ordinary rows.
+    values, weights = np.array([8.63, 5.41, 3.0, 4.23]), np.array([0.13, 0.21, 0.7, 0.68])
+    assert _weighted_mean(values, weights, "test") == exact_mean(values, weights)
+    assert exact_mean(values, weights) == 4.206046511627907
+
+    rng = np.random.default_rng(20260922)
+    for _ in range(300):
+        size = int(rng.integers(2, 7))
+        scale = 2.0 ** int(rng.choice([-1074, -1060, -600, 0, 600, 960]))
+        values = rng.uniform(-1.0, 1.0, size) * scale
+        weights = rng.uniform(0.0, 1.0, size) * 2.0 ** rng.integers(-40, 40, size)
+        assert _weighted_mean(values, weights, "test") == exact_mean(values, weights)
+
+
 @pytest.mark.parametrize(
     ("y", "scores", "weights"),
     [
@@ -1660,13 +1692,17 @@ def test_fast_and_exact_paths_agree_bitwise(monkeypatch):
         return out
 
     calls = []
-    original = validation._exact_terms
 
-    def counted(*factors):
-        calls.append(1)
-        return original(*factors)
+    def counted(original):
+        def wrapper(*args):
+            calls.append(1)
+            return original(*args)
 
-    monkeypatch.setattr(validation, "_exact_terms", counted)
+        return wrapper
+
+    # Weighted means always take exact sums; only the reductions dispatch.
+    for fallback in ("_exact_prefix_sums", "_exact_pair_concordance"):
+        monkeypatch.setattr(validation, fallback, counted(getattr(validation, fallback)))
     fast = results()
     assert not calls
     # Refused certificates after scaling, then no scaling at all, must both
