@@ -2,6 +2,7 @@
 
 import linecache
 import sys
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -55,10 +56,10 @@ def test_single_column_products_satisfy_rounding_bounds(coefficient):
     group = DenseGroupMatrix(source[:, None])
     result = group_range_matvec(group, 0, len(source), np.array([coefficient]))
     # One scalar multiplication: relative epsilon plus one subnormal quantum.
-    exact = source.astype(np.longdouble) * np.longdouble(coefficient)
-    error = np.abs(result.astype(np.longdouble) - exact)
-    bound = np.abs(exact) * info.eps + np.longdouble(info.smallest_subnormal)
-    assert np.all(error <= bound)
+    for value, actual in zip(source, result, strict=True):
+        exact = Fraction(value) * Fraction(coefficient)
+        bound = abs(exact) * Fraction(info.eps) + Fraction(info.smallest_subnormal)
+        assert abs(Fraction(actual) - exact) <= bound
 
 
 @pytest.mark.parametrize("width", [0, 2])

@@ -20,6 +20,7 @@ from superglm.distributional.solver._global_moments import build_global_moment_p
 from superglm.group_matrix import CategoricalGroupMatrix
 
 from ._distributional_weights import resolved_prior
+from ._exact_reference import exact_sum
 from .test_distributional_automatic_panels import _predictor
 
 
@@ -150,8 +151,8 @@ def test_cancellation_uses_the_same_admitted_state_for_every_route(admitted_prob
                 *contributions,
                 layout.predictors[0].offset[:7],
             ]
-        ).astype(np.longdouble)
-        exact = operands.sum(axis=0, dtype=np.longdouble)
+        )
+        exact = exact_sum(operands)
         operations = len(operands) + 1
         epsilon = np.finfo(np.float64).eps
         bound = operations * epsilon / (1 - operations * epsilon) * np.abs(operands).sum(axis=0)

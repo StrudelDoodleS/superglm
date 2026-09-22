@@ -25,6 +25,7 @@ from superglm.group_matrix import (
     SupportCompressedSplineCategoricalGroupMatrix,
     SupportCompressedSSPGroupMatrix,
 )
+from tests._exact_reference import exact_matmul
 
 
 def _plan(groups, *, intercept=True):
@@ -932,7 +933,7 @@ def test_table_reassociation_has_a_raw_product_backward_error_bound():
             [DenseGroupMatrix(np.ones((103, 1))), DiscretizedSSPGroupMatrix(basis, transform, bins)]
         ),
     )
-    expected = basis[bins].astype(np.longdouble) @ transform.astype(np.longdouble)
+    expected = exact_matmul((basis[bins], transform))
     scale = np.abs(basis[bins]) @ np.abs(transform)
     bound = 16 * np.finfo(float).eps * basis.shape[1] * np.max(scale)
     result = _build(plans, slice(0, 103), byte_budget=2**20)

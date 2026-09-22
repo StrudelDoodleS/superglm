@@ -1,5 +1,6 @@
 """First-trial dispatch and numerical correctness are independent contracts."""
 
+import math
 import weakref
 from dataclasses import replace
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from superglm.distributional.solver._global_moments import GlobalMomentRefusalEr
 from superglm.distributional.weights import UnsupportedLikelihoodContractError
 from superglm.features import Numeric, Spline
 
+from ._exact_reference import exact_matmul, exact_weighted_gram
 from ._gaussian_lss_oracles import gamma, gaussian_row_oracle
 from .test_distributional_automatic_panels import _literal_design
 from .test_distributional_chunk_execution import _problem
@@ -414,13 +416,18 @@ def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypat
     if global_moments:
         monkeypatch.setattr(chunks, "automatic_global_moment_budget", lambda *args: 64 << 20)
     matrices = _literal_design(layout)
+    # Correctly rounded [X, offset] @ [beta; 1] for each predictor.
     eta = np.column_stack(
         [
-            np.asarray(matrix, dtype=np.longdouble) @ coefficients[state.coefficient_slice]
-            + np.asarray(state.offset, dtype=np.longdouble)
+            exact_matmul(
+                (
+                    np.column_stack([matrix, state.offset]),
+                    np.append(coefficients[state.coefficient_slice], 1.0),
+                )
+            )
             for matrix, state in zip(matrices, layout.predictors, strict=True)
         ]
-    ).astype(np.float64)
+    )
     sigma = context.family.scale_floor + np.exp(eta[:, 1])
     rows = gaussian_row_oracle(
         context.response,
@@ -435,7 +442,7 @@ def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypat
     # from absolute operands, then propagate it through the exact residual
     # polynomial; relative tolerance on the tiny residual would be inappropriate.
     n, q = len(context.response), len(coefficients)
-    x, z = (np.asarray(matrix, dtype=np.longdouble) for matrix in matrices)
+    x, z = matrices
     eta_error = gamma(64 * q) * (
         np.abs(x) @ np.abs(coefficients[location.coefficient_slice]) + np.abs(offset) + 1
     )
@@ -457,7 +464,9 @@ def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypat
             weight * (3 * d**2 / sigma**4 + d / sigma**3) * residual2_error,
         )
     )
-    score_expected = np.concatenate((x.T @ rows.link_score[:, 0], z.T @ rows.link_score[:, 1]))
+    score_expected = np.concatenate(
+        (exact_matmul((x.T, rows.link_score[:, 0])), exact_matmul((z.T, rows.link_score[:, 1])))
+    )
     score_bound = np.concatenate((np.abs(x).T @ score_error[:, 0], np.abs(z).T @ score_error[:, 1]))
     score_bound += gamma(64 * n + 64 * q) * np.maximum(
         1,
@@ -469,12 +478,14 @@ def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypat
         ),
     )
     assert np.all(np.abs(geometry.score_data - score_expected) <= score_bound)
-    expected = np.zeros((q, q), dtype=np.longdouble)
+    expected = np.zeros((q, q))
     bound = np.zeros_like(expected)
     for channel, (a, b) in enumerate(((0, 0), (0, 1), (1, 1))):
         left, right = (x, z)[a], (x, z)[b]
         index = (layout.predictors[a].coefficient_slice, layout.predictors[b].coefficient_slice)
-        expected[index] = left.T @ (rows.observed_link_curvature_packed[:, channel, None] * right)
+        expected[index] = exact_weighted_gram(
+            left, right, rows.observed_link_curvature_packed[:, channel]
+        )
         absolute = np.abs(left).T @ (
             np.abs(rows.observed_link_curvature_packed[:, channel, None]) * np.abs(right)
         )
@@ -489,18 +500,12 @@ def test_fused_gaussian_cancellation_obeys_independent_backward_bounds(monkeypat
         np.abs(rows.optimizing_log_likelihood)
     )
     assert (
-        abs(
-            sums.optimizing_log_likelihood
-            - np.sum(rows.optimizing_log_likelihood, dtype=np.longdouble)
-        )
+        abs(sums.optimizing_log_likelihood - math.fsum(rows.optimizing_log_likelihood))
         <= likelihood_bound
     )
     carrier_bound = gamma(64 * n) * max(1, np.sum(np.abs(rows.parameter_independent_carrier)))
     assert (
-        abs(
-            sums.parameter_independent_carrier
-            - np.sum(rows.parameter_independent_carrier, dtype=np.longdouble)
-        )
+        abs(sums.parameter_independent_carrier - math.fsum(rows.parameter_independent_carrier))
         <= carrier_bound
     )
 

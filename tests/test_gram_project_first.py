@@ -1,5 +1,8 @@
 """Cancellation regressions for projected spline moments."""
 
+import itertools
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,6 +15,7 @@ from superglm._group_matrix._group_matrix_execution import MatrixExecutionPlan
 from superglm.group_matrix import DenseGroupMatrix, DiscretizedSSPGroupMatrix
 from superglm.solvers import rank
 from superglm.solvers.centered_system import build_centered_system
+from tests._exact_reference import exact_matmul, two_product, two_sum
 
 
 @pytest.mark.parametrize("dtype", [np.int64, np.float32])
@@ -103,11 +107,19 @@ def _year_design(*, discrete=False, width=4e-5, side=1.0, pairs=()):
 def _reference(dm, weights):
     # Certify assembly against the represented solver rows. Rounding B @ R
     # itself has a separate factor-product error bound below; it is not Gram
-    # assembly error. Center-first long-double products avoid raw cancellation.
-    design = np.hstack([group.toarray() for group in dm.group_matrices]).astype(np.longdouble)
-    w = weights.astype(np.longdouble)
-    centered = design - (w @ design) / w.sum()
-    return np.asarray(centered.T @ (w[:, None] * centered), dtype=float)
+    # assembly error. For any center c with r = D.T @ w, D = X - c, the exact
+    # centered Gram is D.T W D - r r.T / sum(w). D is carried exactly as a
+    # TwoSum pair, so D.T W D is correctly rounded; with c the rounded mean the
+    # rank-one term is O(sum(w) * (eps * mean)**2) and its rounding is negligible.
+    design = np.hstack([group.toarray() for group in dm.group_matrices])
+    total = math.fsum(weights)
+    deviation = high, low = two_sum(design, -exact_matmul((weights, design)) / total)
+    weighted = (*two_product(weights[:, None], high), *two_product(weights[:, None], low))
+    gram = exact_matmul(
+        *((piece.T, product) for piece, product in itertools.product(deviation, weighted))
+    )
+    residual = exact_matmul(*((piece.T, weights) for piece in deviation))
+    return gram - np.outer(residual, residual) / total
 
 
 @pytest.mark.parametrize("discrete,pairs", [(False, ()), (True, ()), (True, (("a", "b"),))])
@@ -155,11 +167,13 @@ def test_year_gram_keeps_rank_certification_at_narrow_support(width, side):
 def test_year_projection_matches_source_factors_with_product_error_bound():
     dm, _ = _year_design()
     group = dm.group_matrices[0]
-    basis, transform = group.B_unique.astype(np.longdouble), group.R_inv.astype(np.longdouble)
+    basis, transform = group.B_unique, group.R_inv
     unit = np.finfo(float).eps / 2
     gamma = basis.shape[1] * unit / (1 - basis.shape[1] * unit)
-    exact = basis @ transform
-    error = abs((group.B_unique @ group.R_inv).astype(np.longdouble) - exact)
+    # The correctly rounded exact residual of the float64 product.
+    computed = basis @ transform
+    augmented = np.vstack([transform, np.eye(transform.shape[1])])
+    error = abs(exact_matmul((np.hstack([basis, -computed]), augmented)))
     assert np.all(error <= gamma * (abs(basis) @ abs(transform)))
 
 

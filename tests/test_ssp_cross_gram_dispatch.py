@@ -15,6 +15,7 @@ from superglm.group_matrix import (
     DiscretizedSSPGroupMatrix,
     SparseSSPGroupMatrix,
 )
+from tests._exact_reference import exact_matmul, exact_weighted_gram
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -30,8 +31,8 @@ def test_sensitive_sparse_dense_cross_matches_the_projected_diagonal(reverse):
     ]
     if reverse:
         groups.reverse()
-    design = np.hstack([group.toarray() for group in groups]).astype(np.longdouble)
-    target = np.asarray(design.T @ design, dtype=float)
+    design = np.hstack([group.toarray() for group in groups])
+    target = exact_matmul((design.T, design))
     scale = np.sqrt(np.diag(target))
     reference = target / np.outer(scale, scale)
     actual = MatrixExecutionPlan(groups, n=3).moments(np.ones(3)).gram
@@ -62,11 +63,9 @@ def test_cancellation_sensitive_sparse_cross_uses_projected_rows(right_kind, rev
     weights = np.linspace(0.5, 1.5, n)
     if signed:
         weights[::2] *= -1
-    design = np.hstack([left.toarray(), right.toarray()]).astype(np.longdouble)
-    target = np.asarray(design.T @ (weights.astype(np.longdouble)[:, None] * design), dtype=float)
-    energy = np.asarray(
-        design.T @ (abs(weights.astype(np.longdouble))[:, None] * design), dtype=float
-    )
+    design = np.hstack([left.toarray(), right.toarray()])
+    target = exact_weighted_gram(design, design, weights)
+    energy = exact_weighted_gram(design, design, abs(weights))
     scale = np.sqrt(np.diag(energy))
     plan = MatrixExecutionPlan((left, right), n=n)
     for _ in range(2):
