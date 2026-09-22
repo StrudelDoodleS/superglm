@@ -136,14 +136,17 @@ def _two_sum(left, right):
     return total, (left - (total - right_part)) + (right - right_part)
 
 
-# A column rescaled by a power of two so that its largest magnitude lies in
-# [1, 2) keeps every nonzero entry at or above 2**-_ORDINARY_RANGE, hence an
-# integer multiple of 2**-(_ORDINARY_RANGE + 52). The deepest exact product
-# multiplies five such factors: a Gini contraction takes weight, exposure and
-# one target part times a weight*exposure prefix. Dekker's product and TwoSum
-# stay error-free while every exact intermediate is normal, which holds when
-# 5 * (_ORDINARY_RANGE + 52) <= 1022. Magnitudes stay below 2**7 * n**2.
-_ORDINARY_RANGE = 1022 // 5 - 52
+def _span_limit(factors: int) -> int:
+    """Widest column span, in binades, for exact products of this many factors.
+
+    A column rescaled so that its largest magnitude lies in [1, 2) keeps every
+    nonzero entry above 2**-limit, hence a multiple of 2**-(limit + 52).
+    Dekker's product and TwoSum stay error-free while every exact intermediate
+    is normal, which holds when factors * (limit + 52) <= 1022: two factors for
+    weighted totals and means, three with exposure, and five for a Gini
+    contraction (weight, exposure and target times a weight*exposure prefix).
+    """
+    return 1022 // factors - 52
 
 
 def _live_rows(mass, columns):
@@ -153,7 +156,7 @@ def _live_rows(mass, columns):
     return tuple(np.where(live, column, 0.0) for column in columns)
 
 
-def _ordinary_scaling(columns):
+def _ordinary_scaling(columns, factors):
     """Exactly rescaled operand columns and their power-of-two shifts.
 
     Only the dynamic range within each column decides, never its units. A
@@ -165,13 +168,27 @@ def _ordinary_scaling(columns):
         mantissa, exponent = np.frexp(column)
         top = math.frexp(max(column.max(), -column.min()))[1]
         lowest = np.min(exponent, where=mantissa != 0, initial=top)
-        if lowest < top - _ORDINARY_RANGE:
+        if lowest < top - _span_limit(factors):
             raise ValueError(
-                f"validation inputs must span at most 2**{_ORDINARY_RANGE} within a column"
+                f"validation inputs must span at most 2**{_span_limit(factors)} within a column"
             )
         scaled.append(column if top == 1 else np.ldexp(column, 1 - top))
         shifts.append(top - 1)
     return scaled, shifts
+
+
+def _require_resolved(value, magnitude, count: int, name: str) -> None:
+    """Refuse a compensated result that its rounding error could swamp.
+
+    A double-length prefix is within gamma_(n+8)**2 times the sum of |terms|
+    (Ogita, Rump and Oishi 2005, Proposition 4.5, widened for the plain
+    correction sums), and the contraction's products are exact, so four such
+    errors bound the result. A 2**24 margin keeps ratios of it within 1e-7.
+    """
+    unit = (count + 8) * np.finfo(float).eps / 2
+    bound = 4 * 2.0**24 * (unit / (1 - unit)) ** 2 * magnitude[0], magnitude[1]
+    if value[0] <= 0 or _scaled_ratio(value, bound, name) <= 1:
+        raise ValueError(f"{name} cancel below binary64 resolution")
 
 
 def _ordinary_product_terms(left, right, exposure=None):
@@ -235,7 +252,7 @@ def _scaled_product_sums(
     compensated error of about one ulp. Snapshots do not alter state.
     """
     factors = (left, right) if exposure is None else (left, right, exposure)
-    scaled, shifts = _ordinary_scaling(_live_rows(factors, factors))
+    scaled, shifts = _ordinary_scaling(_live_rows(factors, factors), len(factors))
     mantissa, exponent = np.frexp(_ordinary_product_sums(scaled, ends))
     return mantissa, exponent + sum(shifts)
 
@@ -332,7 +349,7 @@ def _validated_chart_inputs(
 def _weighted_mean(values: NDArray, weights: NDArray, name: str) -> float:
     """Scaled numerator over fsum(weights), within the weighted values' hull.
 
-    Both sums are correctly rounded, so the quotient is within 2 ulps.
+    Both sums are correctly rounded, so the quotient is within 3u relative.
     """
     total_weight = math.fsum(np.asarray(weights, dtype=float).tolist())
     if total_weight <= 0 or not np.isfinite(total_weight):
@@ -472,15 +489,11 @@ def _weighted_pair_concordance(
         order, starts = score_order
     factors = (weights, target) if exposure is None else (weights, target, exposure)
     mass = factors[:1] + factors[2:]
-    scaled, shifts = _ordinary_scaling(_live_rows(mass, factors))
-    scaled_target, minimum = scaled[1], np.min(scaled[1])
-    # Pair differences ignore a common shift. Centring an almost-constant
-    # target keeps its differences from cancelling, and there Sterbenz's
-    # lemma makes y - min(y) exact; any other target stays raw.
-    if 0 < minimum and np.max(scaled_target) <= 2 * minimum:
-        scaled_target = scaled_target - minimum
+    # Targets stay raw; the caller's resolution check bounds the error from
+    # their raw magnitudes.
+    scaled, shifts = _ordinary_scaling(_live_rows(mass, factors), 2 * len(mass) + 1)
     value, power = _ordinary_pair_concordance(
-        order, starts, scaled[0], scaled_target, None if exposure is None else scaled[2]
+        order, starts, scaled[0], scaled[1], None if exposure is None else scaled[2]
     )
     # Quadratic in the weight*exposure mass, linear in the target.
     return value, power + 2 * (shifts[0] + sum(shifts[2:])) + shifts[1]
@@ -507,25 +520,20 @@ def _gini_coefficients(
     perfect = _weighted_pair_concordance(
         y_obs, weights, y_obs, exposure=exposure, score_order=perfect_order
     )
-    # Each compensated prefix is within gamma_n**2 * W of its exact value
-    # (Ogita, Rump and Oishi 2005, Proposition 4.5); three enter every
-    # coefficient and the products are exact, so the contraction is within
-    # 3 * gamma_n**2 * W * sum|w*y|, rounded up to 4. Constant targets give an
-    # exact zero; any other perfect ordering below the bound is unresolvable.
+    # Constant targets give an exact zero. Otherwise both contractions share
+    # the error bound W * sum|w*y| * 4 gamma**2, so a perfect ordering that
+    # clears it by the margin also fixes the model's ratio to about 1e-7.
     live = weights != 0 if exposure is None else (weights != 0) & (exposure != 0)
-    if np.ptp(y_obs[live]) == 0:
+    lowest = np.min(y_obs[live])
+    if lowest == np.max(y_obs[live]):
         return 0.0, 0.0, 0.0
-    signed = np.min(y_obs[live]) < 0
     magnitude = (
-        _scaled_product_total(weights, np.abs(y_obs), exposure=exposure) if signed else total_loss
+        _scaled_product_total(weights, np.abs(y_obs), exposure=exposure)
+        if lowest < 0
+        else total_loss
     )
-    count = len(y_obs) * np.finfo(float).eps / 2
-    floor = 4 * (count / (1 - count)) ** 2 * total_weight[0] * magnitude[0]
-    if (
-        perfect[0] <= 0
-        or _scaled_ratio(perfect, (floor, total_weight[1] + magnitude[1]), "Gini ratio") <= 1
-    ):
-        raise ValueError("Gini weights span too widely for a resolvable float64 contraction")
+    pair_magnitude = total_weight[0] * magnitude[0], total_weight[1] + magnitude[1]
+    _require_resolved(perfect, pair_magnitude, len(y_obs), "Gini pair sums")
     model = _weighted_pair_concordance(
         y_pred, weights, y_obs, exposure=exposure, score_order=model_order
     )
@@ -899,6 +907,11 @@ def lorenz_curve(
     total_loss = _scaled_product_total(w, losses, exposure=exp)
     total_exp = _scaled_product_total(w, exp)
 
+    if total_loss[0] > 0 and np.min(losses[(w != 0) & (exp != 0)], initial=0.0) < 0:
+        # Signed losses can cancel: every prefix must stay resolved against
+        # the total that normalizes it. A degenerate total is handled below.
+        magnitude = _scaled_product_total(w, np.abs(losses), exposure=exp)
+        _require_resolved(total_loss, magnitude, n, "Lorenz loss prefixes")
     if total_loss[0] <= 0 or total_exp[0] <= 0:
         # Degenerate: all zeros or no exposure
         curve_df = pd.DataFrame(

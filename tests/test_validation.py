@@ -1098,14 +1098,14 @@ def test_compensated_prefix_keeps_halfway_tail_and_cancellation(terms):
         assert abs(exact - approximation) <= gamma**2 * absolute
 
 
-@pytest.mark.parametrize("unit", [-900, 0, 900])
+@pytest.mark.parametrize("unit", [-500, 0, 500])
 @pytest.mark.parametrize("excess", [0, 1])
 def test_validation_reduction_range_depends_on_spread_not_units(unit, excess):
     import math
 
     import superglm.validation as validation
 
-    values = np.array([2.0**unit, 2.0 ** (unit - validation._ORDINARY_RANGE - excess)])
+    values = np.array([2.0**unit, 2.0 ** (unit - validation._span_limit(2) - excess)])
     if excess:
         with pytest.raises(ValueError, match="validation inputs must span at most"):
             validation._scaled_product_total(np.ones(2), values)
@@ -1418,6 +1418,7 @@ def test_weighted_mean_is_within_two_ulps():
         ),
     ],
 )
+@pytest.mark.filterwarnings("error::RuntimeWarning")
 def test_gini_contracts_exact_target_differences(y, scores, weights):
     from fractions import Fraction
 
@@ -1517,5 +1518,42 @@ def test_unresolvable_gini_contraction_is_refused_not_zero():
     # contraction's error bound must not be reported as a Gini of zero.
     weights = np.array([2.0**-133, 2.0**-125, 2.0**-61, 2.0**-1])
     y = np.array([0.0, 0.0, 2.0, 2.0])
-    with pytest.raises(ValueError, match="resolvable float64 contraction"):
+    with pytest.raises(ValueError, match="Gini pair sums cancel below binary64 resolution"):
         _normalized_gini(y, np.array([0.0, 0.0, 1.0, 2.0]), weights)
+
+
+def test_model_gini_is_refused_when_its_pair_sum_is_unresolved():
+    from superglm.validation import _normalized_gini
+
+    # The exact ratio is 1 - 2**-22 / (1 + 2**-23); the 2**-125 weight falls
+    # below the model prefix's resolution, which reported a clipped 1.0.
+    weights = np.array([2.0**-102, 2.0**-125, 2.0**-61, 2.0**-1])
+    y = np.array([0.0, 0.0, 2.0, 2.0])
+    with pytest.raises(ValueError, match="Gini pair sums cancel below binary64 resolution"):
+        _normalized_gini(y, np.array([0.0, 3.0, 2.0, 1.0]), weights)
+
+
+def test_lorenz_refuses_signed_losses_whose_total_cancels_below_resolution():
+    # The exact total is 2**-96 against terms of 4.6e6; the last prefix
+    # computed zero, so the model curve ended at a share of 0 instead of 1.
+    y = np.array([4613734.4, -1e-13, np.nextafter(1e-13, np.inf), 7e-4, -7e-4, -4613734.4])
+    with pytest.raises(ValueError, match="Lorenz loss prefixes cancel below binary64 resolution"):
+        lorenz_curve(y, np.arange(6.0))
+
+
+@pytest.mark.parametrize(
+    "chart",
+    [
+        lambda y, pred: lift_chart(y, pred, n_bins=1).bins["predicted"].iloc[0],
+        lambda y, pred: loss_ratio_chart(y, pred, n_bins=1).bins["predicted"].iloc[0],
+        lambda y, pred: double_lift_chart(y, pred, pred, n_bins=1).bins["model_avg"].iloc[0],
+    ],
+)
+def test_charts_accept_predictions_at_the_mu_clip_floor(chart):
+    from fractions import Fraction
+
+    # 1e-50 is the positive-mean floor fitted models clip to; a two-factor
+    # weighted mean may span 459 binades, well past its 166.
+    predictions = np.array([0.3, 0.1, 1e-50])
+    exact = float(sum(map(Fraction.from_float, predictions)) / 3)
+    assert chart(np.array([1.0, 0.0, 2.0]), predictions) == pytest.approx(exact, rel=4e-16)
