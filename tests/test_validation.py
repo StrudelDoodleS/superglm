@@ -770,29 +770,16 @@ def test_zero_exposure_rows_are_removed_by_combined_effective_weight(chart):
     ],
 )
 def test_weighted_means_avoid_intermediate_overflow(chart):
+    # Weight * value overflows binary64 before the power-of-two column scaling.
     maximum = np.finfo(np.float64).max
     result = chart(
-        np.array([maximum, 1.0]),
-        np.array([maximum, 1.0]),
+        np.array([maximum, 2.0**900]),
+        np.array([maximum, 2.0**900]),
         sample_weight=np.array([2.0, 1.0]),
         n_bins=1,
     )
 
     assert np.all(np.isfinite(result[["observed", "predicted"]]))
-
-
-def test_weighted_mean_preserves_a_representable_subnormal_contribution():
-    maximum = np.finfo(np.float64).max
-    smallest = np.nextafter(0.0, 1.0)
-    result = lift_chart(
-        np.array([0.0, maximum]),
-        np.array([0.0, maximum]),
-        sample_weight=np.array([maximum, smallest]),
-        n_bins=1,
-    )
-
-    assert result.bins.loc[0, "observed"] == smallest
-    assert result.bins.loc[0, "predicted"] == smallest
 
 
 def test_weighted_mean_clamps_rounding_to_the_input_convex_hull():
@@ -814,18 +801,6 @@ def test_weighted_mean_clamps_rounding_to_the_input_convex_hull():
     assert result.bins.loc[0, "predicted"] == maximum
 
 
-def test_extreme_aggregation_retains_a_subnormal_weighted_mean():
-    smallest = np.nextafter(0.0, 1.0)
-    almost_two = np.nextafter(2.0, 0.0)
-    result = lift_chart(
-        np.array([almost_two, smallest]),
-        np.array([almost_two, smallest]),
-        sample_weight=np.array([smallest, 1.0]),
-        n_bins=1,
-    )
-    assert result.bins.loc[0, "observed"] == 3 * smallest
-
-
 def test_float64_aggregation_allows_safe_cross_unit_single_row():
     scale = np.ldexp(1.0, 500)
     smallest = np.nextafter(0.0, 1.0)
@@ -844,24 +819,6 @@ def test_float64_aggregation_allows_safe_cross_unit_single_row():
 
     assert lift.bins.loc[0, "observed"] == scale
     assert lift.bins.loc[0, "predicted"] == scale
-    assert np.all(np.isfinite(lorenz.curve))
-
-
-def test_float64_aggregation_preserves_cancellation_across_exponents():
-    smallest = np.nextafter(0.0, 1.0)
-    scale = np.ldexp(1.0, 600)
-    lift = lift_chart(
-        [scale, -scale, np.ldexp(1.0, 100), np.ldexp(1.0, 100)],
-        [scale, -scale, np.ldexp(1.0, 100), np.ldexp(1.0, 100)],
-        sample_weight=[smallest, smallest, np.ldexp(1.0, -600), np.ldexp(1.0, -600)],
-        n_bins=1,
-    )
-    assert lift.bins.loc[0, "observed"] == np.ldexp(1.0, 100)
-    lorenz = lorenz_curve(
-        [scale, -scale, 1.0, 0.0],
-        [scale, -scale, 1.0, 0.0],
-        sample_weight=[np.ldexp(1.0, -600), np.ldexp(1.0, -600), np.ldexp(1.0, -600), 1.0],
-    )
     assert np.all(np.isfinite(lorenz.curve))
 
 
@@ -899,8 +856,8 @@ def test_double_lift_rejects_nonfinite_derived_sort_score():
 def test_lorenz_scaling_avoids_weighted_loss_overflow():
     maximum = np.finfo(np.float64).max
     result = lorenz_curve(
-        np.array([maximum, 1.0]),
-        np.array([maximum, 1.0]),
+        np.array([maximum, 2.0**900]),
+        np.array([maximum, 2.0**900]),
         sample_weight=np.array([2.0, 1.0]),
     )
 
@@ -908,33 +865,6 @@ def test_lorenz_scaling_avoids_weighted_loss_overflow():
     assert np.isfinite(result.gini_model)
     assert np.isfinite(result.gini_perfect)
     assert np.isfinite(result.gini_ratio)
-
-
-def test_lorenz_gini_preserves_extreme_positive_weight_ratios():
-    maximum = np.finfo(np.float64).max
-    smallest = np.nextafter(0.0, 1.0)
-    result = lorenz_curve(
-        np.array([0.0, 1.0]),
-        np.array([0.0, 1.0]),
-        sample_weight=np.array([maximum, smallest]),
-    )
-
-    assert result.gini_model == pytest.approx(1.0)
-    assert result.gini_perfect == pytest.approx(1.0)
-    assert result.gini_ratio == pytest.approx(1.0)
-
-
-def test_lorenz_curve_preserves_balanced_extreme_weight_loss_products():
-    maximum = np.finfo(np.float64).max
-    smallest = np.nextafter(0.0, 1.0)
-    result = lorenz_curve(
-        np.array([smallest, maximum]),
-        np.array([0.0, 1.0]),
-        sample_weight=np.array([maximum, smallest]),
-    )
-
-    assert result.curve.loc[1, "cum_loss_share_model"] == pytest.approx(0.5)
-    assert result.curve.loc[1, "cum_exposure_share"] == pytest.approx(1.0)
 
 
 def test_two_row_reverse_ranking_gini_is_exact_and_scale_invariant():
@@ -968,49 +898,9 @@ def test_lorenz_rejects_shares_or_gini_outside_float64_output_range():
 
     with pytest.raises(
         ValueError,
-        match="Lorenz cumulative shares must be finite|Gini coefficients must be finite",
+        match="Lorenz cumulative shares must be finite|Gini coefficients must be finite|validation inputs must span at most",
     ):
         lorenz_curve(y, y, sample_weight=weights)
-
-
-@pytest.mark.parametrize("mixed", [False, True])
-def test_weighted_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mixed):
-    import superglm.validation as validation
-
-    values = np.full(256 if mixed else 32, 1e-310)
-    if mixed:
-        values[1:] = 1.0
-    visits = 0
-    original = validation._scaled_sum
-
-    def counted(mantissa, exponent):
-        nonlocal visits
-        visits += len(mantissa)
-        return original(mantissa, exponent)
-
-    monkeypatch.setattr(validation, "_scaled_sum", counted)
-    validation._scaled_product_sums(np.ones_like(values), values, np.arange(1, len(values) + 1))
-    # These fixtures need at most a few nonoverlapping scalar partials.
-    # Revisiting all 1+...+n source prefixes violates this linear-work bound.
-    assert visits <= 4 * len(values)
-
-
-def test_weighted_prefix_retains_small_terms_after_full_range_cancellation():
-    import math
-    from fractions import Fraction
-
-    from superglm.validation import _scaled_product_sums
-
-    tiny = np.nextafter(0.0, 1.0)
-    values = np.array([tiny, 1e300, tiny, -1e300, tiny, 1.0, -1.0])
-    mantissas, exponents = _scaled_product_sums(
-        np.ones_like(values), values, np.arange(1, len(values) + 1)
-    )
-    exact = Fraction(0)
-    for value, mantissa, exponent in zip(values, mantissas, exponents, strict=True):
-        exact += Fraction.from_float(value)
-        actual = math.ldexp(float(mantissa), int(exponent))
-        assert abs(Fraction.from_float(actual) - exact) <= np.finfo(float).eps * abs(exact)
 
 
 @pytest.mark.parametrize("bits", [30, 40])
@@ -1128,62 +1018,6 @@ def test_lorenz_keeps_exposure_product_residuals_until_loss_reduction():
     np.testing.assert_array_equal(result.curve["cum_loss_share_perfect"], expected)
 
 
-@pytest.mark.parametrize("mixed", [False, True])
-def test_gini_pair_prefix_work_is_bounded_under_tiny_weight_units(monkeypatch, mixed):
-    import superglm.validation as validation
-
-    size = 256
-    weights = np.full(size, 1e-310)
-    if mixed:
-        weights[1:] = 1.0
-    visits = 0
-    original_add = validation._add_scaled_partial
-    original_sum = validation._scaled_sum
-
-    def counted_add(partials, value, exponent):
-        nonlocal visits
-        visits += len(partials) + 1
-        return original_add(partials, value, exponent)
-
-    def counted_sum(mantissa, exponent):
-        nonlocal visits
-        visits += len(mantissa)
-        return original_sum(mantissa, exponent)
-
-    monkeypatch.setattr(validation, "_add_scaled_partial", counted_add)
-    monkeypatch.setattr(validation, "_scaled_sum", counted_sum)
-    validation._weighted_pair_concordance(np.arange(size), weights, np.frexp(np.arange(size) % 2))
-    # The two weight scales need only a bounded number of scalar parts.
-    # This counts reduction work, independently of the exact-pair oracle.
-    assert visits <= 64 * size
-
-
-@pytest.mark.parametrize("consumer", ["lift", "lorenz", "gini"])
-def test_ordinary_validation_consumers_avoid_per_row_python_partials(monkeypatch, consumer):
-    import superglm.validation as validation
-
-    size = 128
-    observed = 1.0 + np.arange(size) / 16.0
-    predicted = observed[::-1].copy()
-    weights = 0.5 + np.arange(size) / 128.0
-    calls = 0
-    original = validation._add_scaled_partial
-
-    def counted(*args):
-        nonlocal calls
-        calls += 1
-        return original(*args)
-
-    monkeypatch.setattr(validation, "_add_scaled_partial", counted)
-    if consumer == "lift":
-        validation.lift_chart(observed, predicted, sample_weight=weights)
-    elif consumer == "lorenz":
-        validation.lorenz_curve(observed, predicted, sample_weight=weights)
-    else:
-        validation._normalized_gini(observed, predicted, weights)
-    assert calls == 0
-
-
 @pytest.mark.parametrize("consumer", ["lift", "lorenz", "gini"])
 def test_ordinary_validation_does_not_initialize_native_kernels(monkeypatch, consumer):
     from numba.core.registry import CPUDispatcher
@@ -1246,43 +1080,37 @@ def test_ordinary_validation_prefixes_match_exact_products(strided, with_exposur
         [1.0, -1.0, 2.0**-160],
     ],
 )
-def test_ordinary_prefix_enclosure_keeps_halfway_tail_and_cancellation(terms):
+def test_compensated_prefix_keeps_halfway_tail_and_cancellation(terms):
     from fractions import Fraction
 
     from superglm.validation import _ordinary_prefix_parts
 
-    high, low, bound = _ordinary_prefix_parts((np.array(terms),))
-    exact = Fraction(0)
-    for term, hi, lo, error in zip(terms, high, low, bound, strict=True):
+    # high + low is Sum2's double-length prefix: within gamma_(k-1)**2 of
+    # the exact sum of k terms (Ogita, Rump and Oishi 2005, Proposition 4.5).
+    unit = Fraction(1, 2**53)
+    high, low = _ordinary_prefix_parts((np.array(terms),))
+    exact = absolute = Fraction(0)
+    for count, (term, hi, lo) in enumerate(zip(terms, high, low, strict=True), start=1):
         exact += Fraction.from_float(term)
+        absolute += abs(Fraction.from_float(term))
+        gamma = (count - 1) * unit / (1 - (count - 1) * unit)
         approximation = Fraction.from_float(hi) + Fraction.from_float(lo)
-        assert abs(exact - approximation) <= Fraction.from_float(error)
+        assert abs(exact - approximation) <= gamma**2 * absolute
 
 
-@pytest.mark.parametrize("power", [-34, -33, 31, 32])
-def test_validation_reduction_range_routes_extremes_to_existing_fallback(monkeypatch, power):
+@pytest.mark.parametrize("unit", [-500, 0, 500])
+@pytest.mark.parametrize("excess", [0, 1])
+def test_validation_reduction_range_depends_on_spread_not_units(unit, excess):
     import math
 
     import superglm.validation as validation
 
-    native, fallback = [], []
-    original_native = validation._ordinary_product_terms
-    original_add = validation._add_scaled_partial
-
-    def compiled(*args):
-        native.append(1)
-        return original_native(*args)
-
-    def scalar(*args):
-        fallback.append(1)
-        return original_add(*args)
-
-    monkeypatch.setattr(validation, "_ordinary_product_terms", compiled)
-    monkeypatch.setattr(validation, "_add_scaled_partial", scalar)
-    result = validation._scaled_product_total(np.full(2, 2.0**power), np.ones(2))
-    assert math.ldexp(*result) == 2.0 ** (power + 1)
-    assert len(native) == int(power in (-33, 31))
-    assert bool(fallback) == (power not in (-33, 31))
+    values = np.array([2.0**unit, 2.0 ** (unit - validation._span_limit(2) - excess)])
+    if excess:
+        with pytest.raises(ValueError, match="validation inputs must span at most"):
+            validation._scaled_product_total(np.ones(2), values)
+        return
+    assert math.ldexp(*validation._scaled_product_total(np.ones(2), values)) == math.fsum(values)
 
 
 def test_ordinary_validation_gini_preserves_exact_weight_exposure_pairs_and_ties():
@@ -1329,7 +1157,7 @@ def test_pair_contractions_skip_zero_targets_after_full_weight_prefix(monkeypatc
 
     monkeypatch.setattr(validation, "_ordinary_prefix_parts", counted_prefix)
     monkeypatch.setattr(validation, "_two_product", counted_product)
-    validation._weighted_pair_concordance(np.arange(size), weights, np.frexp(target))
+    validation._weighted_pair_concordance(np.arange(size), weights, target)
     assert prefix_rows == [size]
     assert product_rows and set(product_rows) == {np.count_nonzero(target)}
 
@@ -1485,7 +1313,7 @@ def test_unit_weight_prefixes_do_not_carry_zero_product_channels(monkeypatch):
     monkeypatch.setattr(validation, "_ordinary_prefix_parts", counted)
     validation._scaled_product_sums(np.ones(16), values, np.arange(1, 17))
     validation._weighted_pair_concordance(
-        np.arange(16), np.ones(16), np.frexp(np.arange(16)), exposure=values
+        np.arange(16), np.ones(16), np.arange(16.0), exposure=values
     )
     assert channels == [1, 1]
 
@@ -1515,3 +1343,246 @@ def test_unit_factor_bypass_preserves_exact_products_and_readonly_strides(unit_f
         assert sum(Fraction.from_float(part[row]) for part in parts) == expected
     for factor, original in zip(factors, before, strict=True):
         np.testing.assert_array_equal(factor, original)
+
+
+@pytest.mark.parametrize(
+    "values", [[1.0, 2.0**-53, 2.0**-100], [1.0 + 2.0**-52, 2.0**-53, -(2.0**-100)]]
+)
+def test_totals_resolve_a_halfway_tie_from_a_distant_tail(values):
+    from fractions import Fraction
+
+    from superglm.validation import _weighted_total
+
+    # math.fsum rounds the exact sum once, so the tail breaks the tie.
+    values = np.array(values)
+    exact = float(sum(map(Fraction.from_float, values)))
+    assert _weighted_total(values, np.ones(3), "test") == exact
+    result = double_lift_chart(values, np.ones(3), np.ones(3), n_bins=1)
+    assert result.bins.loc[0, "target_sum"] == exact
+
+
+def test_weighted_mean_hull_ignores_zero_weight_rows():
+    from fractions import Fraction
+
+    from superglm.validation import _weighted_mean
+
+    values, weights = np.array([0.1, 0.1, 100.0]), np.array([0.1, 0.1, 0.0])
+    exact = sum(
+        Fraction.from_float(v) * Fraction.from_float(w)
+        for v, w in zip(values, weights, strict=True)
+    ) / sum(map(Fraction.from_float, weights))
+    assert _weighted_mean(values, weights, "test") == float(exact) == 0.1
+
+
+def test_weighted_mean_is_within_two_ulps():
+    from fractions import Fraction
+
+    from superglm.validation import _weighted_mean
+
+    def exact_mean(values, weights):
+        numerator = sum(
+            Fraction.from_float(v) * Fraction.from_float(w)
+            for v, w in zip(values, weights, strict=True)
+        )
+        return numerator / sum(map(Fraction.from_float, weights))
+
+    # Correctly rounded numerator and weight total, then one division: three
+    # roundings of at most u = eps/2 each, plus one subnormal quantum.
+    eps, quantum = Fraction(np.finfo(float).eps), Fraction(np.nextafter(0.0, 1.0))
+    rng = np.random.default_rng(20260922)
+    cases = [(np.array([8.63, 5.41, 3.0, 4.23]), np.array([0.13, 0.21, 0.7, 0.68]))]
+    for _ in range(300):
+        size = int(rng.integers(2, 7))
+        scale = 2.0 ** int(rng.choice([-1074, -1060, -600, 0, 600, 960]))
+        values = rng.uniform(-1.0, 1.0, size) * scale
+        weights = rng.uniform(0.0, 1.0, size) * 2.0 ** rng.integers(-40, 40, size)
+        cases.append((values, weights))
+    for values, weights in cases:
+        exact = exact_mean(values, weights)
+        error = abs(Fraction.from_float(_weighted_mean(values, weights, "test")) - exact)
+        assert error <= Fraction(3, 2) * eps * abs(exact) + quantum
+
+
+@pytest.mark.parametrize(
+    ("y", "scores", "weights"),
+    [
+        (
+            [-1.0, 1 + 2.0**-52, 1 + 5 * 2.0**-52, 1 + 11 * 2.0**-52, 1 + 15 * 2.0**-52],
+            [0.0, 1.0, 2.0, 4.0, 3.0],
+            [2.0**-33, 2.0**31, 2.0**31, 2.0**31, 2.0**31],
+        ),
+        (
+            [-np.finfo(float).max, 0.0, np.finfo(float).max / 2, np.finfo(float).max],
+            [1.0, 0.0, 3.0, 2.0],
+            [1.0, 0.5, 2.0, 0.25],
+        ),
+    ],
+)
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_gini_contracts_exact_target_differences(y, scores, weights):
+    from fractions import Fraction
+
+    from superglm.validation import _normalized_gini
+
+    y, scores, weights = np.array(y), np.array(scores), np.array(weights)
+    targets, mass = list(map(Fraction.from_float, y)), list(map(Fraction.from_float, weights))
+
+    def pair_sum(ordering):
+        return sum(
+            mass[i] * mass[j] * (targets[j] - targets[i])
+            for i in range(len(y))
+            for j in range(len(y))
+            if ordering[i] < ordering[j]
+        )
+
+    expected = float(pair_sum(scores) / pair_sum(y))
+    # Model and perfect sums are each rounded once to 53 bits, then divided once.
+    allowance = 2 * np.finfo(float).eps
+    assert _normalized_gini(y, scores, weights) == pytest.approx(expected, rel=allowance, abs=0)
+    result = lorenz_curve(y, scores, sample_weight=weights)
+    assert result.gini_ratio == pytest.approx(expected, rel=allowance, abs=0)
+
+
+def test_one_extreme_loss_or_exposure_is_unit_invariant():
+    import superglm.validation as validation
+
+    # One large loss or tiny exposure must not change the arithmetic, and a
+    # power-of-two change of units must give bitwise-identical Ginis.
+    rows = np.arange(64)
+    exposure = 0.25 + (rows % 7) / 8
+    exposure[1] = 1e-11
+    losses = np.where(rows % 3 == 0, 100.0 * (1 + rows % 5), 0.0)
+    losses[0] = 2.0**33
+    scores = (rows * 37 % 16).astype(float)
+    ginis = []
+    for unit in (1.0, 2.0**-20):
+        result = validation.lorenz_curve(losses * unit, scores, exposure=exposure)
+        standalone = validation._gini_coefficients(losses * unit, scores, exposure=exposure)
+        ginis.append((result.gini_model, result.gini_perfect, result.gini_ratio, *standalone))
+    assert ginis[0] == ginis[1]
+
+
+@pytest.mark.parametrize(
+    "reduce",
+    [
+        # Weights spanning the full binary64 range on rows that carry mass.
+        lambda: lift_chart(
+            [np.nextafter(2.0, 0.0), np.nextafter(0.0, 1.0)],
+            [np.nextafter(2.0, 0.0), np.nextafter(0.0, 1.0)],
+            sample_weight=[np.nextafter(0.0, 1.0), 1.0],
+            n_bins=1,
+        ),
+        lambda: lorenz_curve(
+            [0.0, 1.0], [0.0, 1.0], sample_weight=[np.finfo(float).max, np.nextafter(0.0, 1.0)]
+        ),
+        lambda: lorenz_curve(
+            [np.nextafter(0.0, 1.0), np.finfo(float).max],
+            [0.0, 1.0],
+            sample_weight=[np.finfo(float).max, np.nextafter(0.0, 1.0)],
+        ),
+        # Cancellation across 1200 binades within one column.
+        lambda: lift_chart(
+            [2.0**600, -(2.0**600), 2.0**100, 2.0**100],
+            [2.0**600, -(2.0**600), 2.0**100, 2.0**100],
+            sample_weight=[np.nextafter(0.0, 1.0)] * 2 + [2.0**-600] * 2,
+            n_bins=1,
+        ),
+        lambda: __import__("superglm.validation", fromlist=["_"])._weighted_total(
+            np.array([1.0, 2.0**-53, 2.0**-600]), np.ones(3), "test"
+        ),
+    ],
+)
+def test_validation_refuses_columns_beyond_the_reduction_range(reduce):
+    # Flushing a column's tiny entries could drop a term that another column's
+    # large factor makes significant, so such inputs are refused, not rounded.
+    with pytest.raises(ValueError, match="validation inputs must span at most"):
+        reduce()
+
+
+def test_rows_without_mass_do_not_widen_the_range_check():
+    from superglm.validation import _normalized_gini
+
+    # The 1e100 target has zero weight, so it contributes nothing and must not
+    # trigger the column-span refusal.
+    with_outlier = _normalized_gini(
+        np.array([1.0, 2.0, 1e100]), np.array([0.0, 1.0, 2.0]), np.array([1.0, 1.0, 0.0])
+    )
+    without = _normalized_gini(np.array([1.0, 2.0]), np.array([0.0, 1.0]), np.array([1.0, 1.0]))
+    assert with_outlier == without == 1.0
+
+
+def test_unresolvable_gini_contraction_is_refused_not_zero():
+    from superglm.validation import _normalized_gini
+
+    # A perfect ordering whose pair mass lies below the compensated
+    # contraction's error bound must not be reported as a Gini of zero.
+    weights = np.array([2.0**-133, 2.0**-125, 2.0**-61, 2.0**-1])
+    y = np.array([0.0, 0.0, 2.0, 2.0])
+    with pytest.raises(ValueError, match="Gini pair sums cancel below binary64 resolution"):
+        _normalized_gini(y, np.array([0.0, 0.0, 1.0, 2.0]), weights)
+
+
+def test_model_gini_is_refused_when_its_pair_sum_is_unresolved():
+    from superglm.validation import _normalized_gini
+
+    # The exact ratio is 1 - 2**-22 / (1 + 2**-23); the 2**-125 weight falls
+    # below the model prefix's resolution, which reported a clipped 1.0.
+    weights = np.array([2.0**-102, 2.0**-125, 2.0**-61, 2.0**-1])
+    y = np.array([0.0, 0.0, 2.0, 2.0])
+    with pytest.raises(ValueError, match="Gini pair sums cancel below binary64 resolution"):
+        _normalized_gini(y, np.array([0.0, 3.0, 2.0, 1.0]), weights)
+
+
+def test_lorenz_refuses_signed_losses_whose_total_cancels_below_resolution():
+    # The exact total is 2**-96 against terms of 4.6e6; the last prefix
+    # computed zero, so the model curve ended at a share of 0 instead of 1.
+    y = np.array([4613734.4, -1e-13, np.nextafter(1e-13, np.inf), 7e-4, -7e-4, -4613734.4])
+    with pytest.raises(ValueError, match="Lorenz loss prefixes cancel below binary64 resolution"):
+        lorenz_curve(y, np.arange(6.0))
+
+
+@pytest.mark.parametrize(
+    "chart",
+    [
+        lambda y, pred: lift_chart(y, pred, n_bins=1).bins["predicted"].iloc[0],
+        lambda y, pred: loss_ratio_chart(y, pred, n_bins=1).bins["predicted"].iloc[0],
+        lambda y, pred: double_lift_chart(y, pred, pred, n_bins=1).bins["model_avg"].iloc[0],
+    ],
+)
+def test_charts_accept_predictions_at_the_mu_clip_floor(chart):
+    from fractions import Fraction
+
+    # 1e-50 is the positive-mean floor fitted models clip to; a two-factor
+    # weighted mean may span 459 binades, well past its 166.
+    predictions = np.array([0.3, 0.1, 1e-50])
+    exact = float(sum(map(Fraction.from_float, predictions)) / 3)
+    assert chart(np.array([1.0, 0.0, 2.0]), predictions) == pytest.approx(exact, rel=4e-16)
+
+
+def test_lorenz_gini_without_exposure_uses_the_unweighted_limit():
+    from superglm.validation import _normalized_gini
+
+    # With no exposure the pair contraction multiplies three factors, not
+    # five, so a target spanning 200 binades is inside its 288-binade limit.
+    y, pred = np.array([1e-60, 1.0]), np.array([0.0, 1.0])
+    assert lorenz_curve(y, pred).gini_ratio == _normalized_gini(y, pred) == 1.0
+
+
+def test_constant_target_gini_is_zero_without_a_contraction():
+    from superglm.validation import _normalized_gini
+
+    # Weights 300 binades apart fit the totals' two-factor limit but not a
+    # pair contraction's, which a constant target never needs.
+    weights = np.array([1.0, 2.0**-300])
+    assert _normalized_gini(np.ones(2), np.array([0.0, 1.0]), weights) == 0.0
+
+
+@pytest.mark.parametrize("y", [np.ones(2), -np.ones(2)])
+def test_lorenz_accepts_what_normalized_gini_accepts_for_degenerate_targets(y):
+    from superglm.validation import _normalized_gini
+
+    # Without exposure every loss reduction multiplies two factors, so
+    # weights 300 binades apart stay inside the 459-binade limit.
+    pred, weights = np.array([0.0, 1.0]), np.array([1.0, 2.0**-300])
+    result = lorenz_curve(y, pred, sample_weight=weights)
+    assert result.gini_ratio == _normalized_gini(y, pred, weights) == 0.0

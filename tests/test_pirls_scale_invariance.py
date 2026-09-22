@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 import pytest
 import scipy.linalg
@@ -215,18 +217,16 @@ def test_cancellation_uses_absolute_score_error_not_relative_zero_accuracy(signa
     y = np.array([1.0, -1.0, -1.0, 1.0]) + signal * (X @ target)
     result = _fit(X, y, GroupLasso(lambda1=0.0), max_iter_outer=40)
 
-    # Independent extended-precision normal equations for the represented rows.
-    x_long = X.astype(np.longdouble)
-    y_long = y.astype(np.longdouble)
-    x_long -= x_long.mean(axis=0)
-    y_long -= y_long.mean()
-    gram = x_long.T @ x_long
-    rhs = x_long.T @ y_long
+    # Independent exact rational normal equations for the represented rows.
+    x_exact, y_exact = (np.vectorize(Fraction, otypes=[object])(array) for array in (X, y))
+    x_exact -= x_exact.mean(axis=0)
+    y_exact -= y_exact.mean()
+    gram = x_exact.T @ x_exact
+    rhs = x_exact.T @ y_exact
     determinant = gram[0, 0] * gram[1, 1] - gram[0, 1] ** 2
     expected = (
         np.array(
-            [gram[1, 1] * rhs[0] - gram[0, 1] * rhs[1], gram[0, 0] * rhs[1] - gram[0, 1] * rhs[0]],
-            dtype=np.longdouble,
+            [gram[1, 1] * rhs[0] - gram[0, 1] * rhs[1], gram[0, 0] * rhs[1] - gram[0, 1] * rhs[0]]
         )
         / determinant
     )
@@ -237,7 +237,8 @@ def test_cancellation_uses_absolute_score_error_not_relative_zero_accuracy(signa
     bound = 4 * score_error / np.linalg.eigvalsh(H)[0]
     assert result.converged
     assert result.n_iter < 40
-    assert np.linalg.norm(result.beta.astype(np.longdouble) - expected) <= bound
+    error = (np.vectorize(Fraction, otypes=[object])(result.beta) - expected).astype(float)
+    assert np.linalg.norm(error) <= bound
 
 
 @pytest.mark.parametrize("c", [1.0, 1e-8])

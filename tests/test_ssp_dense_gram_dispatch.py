@@ -11,6 +11,7 @@ import scipy.sparse as sp
 import superglm._group_matrix._group_matrix_core as core
 from superglm._group_matrix._group_matrix_algebra import _gram_any_sign
 from superglm.solvers.rank import decompose_symmetric
+from tests._exact_reference import exact_weighted_gram
 
 
 def _forbidden(*args, **kwargs):
@@ -34,20 +35,18 @@ def test_sparse_raw_gram_cancellation_recomputes_projected_rows(signed):
     weights = np.linspace(0.5, 1.5, n)
     if signed:
         weights[::2] *= -1
-    projected = group.toarray().astype(np.longdouble)
-    target = np.asarray(
-        projected.T @ (weights.astype(np.longdouble)[:, None] * projected), dtype=float
-    )
+    projected = group.toarray()
+    target = exact_weighted_gram(projected, projected, weights)
     # Signed moments have an absolute error scale from |W|, not a relative
     # accuracy target at a possibly zero signed diagonal.
-    energy = projected.T @ (abs(weights.astype(np.longdouble))[:, None] * projected)
-    scales = np.sqrt(np.asarray(np.diag(energy), dtype=float))
+    energy = exact_weighted_gram(projected, projected, abs(weights))
+    scales = np.sqrt(np.diag(energy))
     expected = target / np.outer(scales, scales)
     gram, projected_rows = group._gram_with_projection(weights)
     assert projected_rows
     actual = gram / np.outer(scales, scales)
     assert np.linalg.norm(actual - expected, 2) <= 100 * np.finfo(float).eps * np.linalg.norm(
-        np.asarray(energy, dtype=float) / np.outer(scales, scales), 2
+        energy / np.outer(scales, scales), 2
     )
 
 

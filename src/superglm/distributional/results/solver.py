@@ -437,9 +437,7 @@ def _assessment_objective_error_bound(
         )
     except ValueError as evidence:
         raise ValueError(f"{failure_context}: invalid original evidence") from evidence
-    return float(
-        _enclosed_bound_sum(scalar, np.float64(0.5) * error, np.float64(0.5) * original_error)
-    )
+    return float(_enclosed_bound_sum(scalar, 0.5 * error, 0.5 * original_error))
 
 
 def _assessment_face_geometry_matches(left: PenaltyFace, right: PenaltyFace) -> bool:

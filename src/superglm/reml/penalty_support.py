@@ -17,7 +17,6 @@ from numpy.typing import NDArray
 from superglm.solvers.rank import SHARED_RANK_POLICY, decompose_gram
 
 _EPS = np.finfo(np.float64).eps
-_LD = np.float64
 
 
 class PenaltyNumericalError(np.linalg.LinAlgError):
@@ -76,7 +75,7 @@ def _validated_matrix(matrix: NDArray) -> NDArray:
         raise ValueError("penalty matrices must be finite")
     scale = float(np.max(np.abs(values), initial=0.0))
     if scale:
-        normalized = values.astype(_LD) / _LD(scale)
+        normalized = values / scale
         allowance = 4 * max(len(values), 1) * _EPS
         if np.max(np.abs(normalized - normalized.T), initial=0) > allowance:
             raise ValueError("penalty matrices must be symmetric")
@@ -119,10 +118,9 @@ def _component_root(matrix: NDArray) -> tuple[NDArray, bool, NDArray]:
     else:
         raise PenaltyNumericalError("unsupported component root representation")
     root = _finite_double(root, "component root")
-    scale = d.column_scale.astype(_LD)
-    scale = np.where(scale > 0, scale, _LD(1))
-    equilibrated = values.astype(_LD) / scale[:, None] / scale[None, :]
-    scaled_root = root.astype(_LD) / scale
+    scale = np.where(d.column_scale > 0, d.column_scale, 1.0)
+    equilibrated = values / scale[:, None] / scale[None, :]
+    scaled_root = root / scale
     represented = scaled_root.T @ scaled_root
     bound = np.abs(equilibrated - represented)
     bound += 4 * max(d.width, 1) * _EPS * (np.abs(scaled_root).T @ np.abs(scaled_root))
@@ -190,7 +188,7 @@ def _penalty_support_from_roots(
             log_scales.append(0.0)
             balanced.append(root.copy())
     stacked = np.vstack(balanced)
-    column_max = np.max(np.abs(stacked), axis=0, initial=_LD(0))
+    column_max = np.max(np.abs(stacked), axis=0, initial=0.0)
     present = np.any(np.vstack(roots) != 0, axis=0)
     if np.any(present & (column_max == 0)) or not np.all(np.isfinite(column_max)):
         # The former wider arithmetic also refused a support coordinate map
@@ -220,7 +218,7 @@ def _penalty_support_from_roots(
     cutoff = SHARED_RANK_POLICY.factor_rcond * singular[0]
     rank = int(np.count_nonzero(singular > cutoff))
     vectors = vh[:rank].T
-    mapped = np.zeros((width, rank), dtype=_LD)
+    mapped = np.zeros((width, rank), dtype=np.float64)
     mapped[active] = column_scale[active, None] * vectors
     coordinate_map = _finite_double(mapped, "support coordinate map")
     full_q, full_t = scipy.linalg.qr(coordinate_map, mode="full", check_finite=False)
@@ -239,22 +237,25 @@ def _penalty_support_from_roots(
             projected = root.copy()
             selected_error = error
         else:
+            # Packed copies, not casts: ``plus`` is a strided column slice, and
+            # the matmul kernel, hence the rounded projection, depends on layout.
             projected = _finite_double(
-                (root.astype(_LD) @ plus.astype(_LD)) @ plus.T.astype(_LD), "support projection"
+                (root.copy(order="K") @ plus.copy(order="K")) @ plus.T.copy(order="K"),
+                "support projection",
             )
             # Both nonnegative products include their own rounding; a final
             # nextafter alone cannot enclose a rounded positive matrix dot.
-            unit = np.finfo(_LD).eps / 2
-            tiny = np.nextafter(_LD(0), _LD(1))
-            intermediate = error.astype(_LD) @ np.abs(plus.astype(_LD))
+            unit = np.finfo(np.float64).eps / 2
+            tiny = np.nextafter(0.0, 1.0)
+            intermediate = error.copy(order="K") @ np.abs(plus)
             allowance = (2 * width + 4) * unit
             intermediate = (intermediate + (2 * width + 1) * tiny) / (1 - allowance)
-            projected_error = intermediate @ np.abs(plus.T.astype(_LD))
+            projected_error = intermediate @ np.abs(plus.T)
             allowance = (2 * rank + 4) * unit
             selected_error = _finite_double(
                 (projected_error + (2 * rank + 1) * tiny) / (1 - allowance), "projected root error"
             )
-        projection_bounds.append(np.abs(projected.astype(_LD) - root.astype(_LD)))
+        projection_bounds.append(np.abs(projected - root))
         selected.append(_readonly(projected))
         selected_errors.append(_readonly(np.nextafter(selected_error, np.inf)))
     residual = factor - (factor @ vectors) @ vectors.T
@@ -266,7 +267,7 @@ def _penalty_support_from_roots(
     return _PenaltySupport(
         tuple(selected),
         tuple(_readonly(value) for value in coordinates),
-        _readonly(np.asarray(log_scales, dtype=_LD)),
+        _readonly(np.asarray(log_scales, dtype=np.float64)),
         _readonly(coordinate_map),
         _readonly(triangular),
         _readonly(plus),

@@ -527,8 +527,8 @@ class SumToZeroBlockFactor:
         indices = self.structured_indices
         diagonal = np.empty(p, dtype=np.float64)
         diagonal[self.small_indices] = np.diag(self.A)
-        diagonal[indices] = np.diagonal(self.D[:-1], axis1=1, axis2=2).astype(np.float64)
-        diagonal[indices] += np.diag(self.D[-1]).astype(np.float64)
+        diagonal[indices] = np.diagonal(self.D[:-1], axis1=1, axis2=2)
+        diagonal[indices] += np.diag(self.D[-1])
         if np.any(diagonal <= 0.0):
             return False
         scales = np.sqrt(diagonal)
@@ -536,27 +536,23 @@ class SumToZeroBlockFactor:
         # The shared Gram authority acts on the symmetric public matrix. Work
         # from these small symmetric moment blocks, retaining the original
         # absolute moments for the formation-error enclosure below.
-        symmetric_A = self.A.astype(np.float64) * 0.5 + self.A.T.astype(np.float64) * 0.5
-        symmetric_D = (
-            self.D.astype(np.float64) * 0.5 + self.D.swapaxes(1, 2).astype(np.float64) * 0.5
-        )
+        symmetric_A = self.A * 0.5 + self.A.T * 0.5
+        symmetric_D = self.D * 0.5 + self.D.swapaxes(1, 2) * 0.5
 
         # H = blockdiag(D_i) + V K V'. Normalize columns as well as public
         # coordinates so a uniform curvature unit does not create large thin
         # intermediates before they cancel.
         V = np.zeros((p, 2 * q + k), dtype=np.float64)
         V[self.small_indices, :q] = np.eye(q) / scales[self.small_indices, None]
-        V[indices, q : 2 * q] = (
-            self.C[:-1].astype(np.float64) - self.C[-1].astype(np.float64)
-        ) / local_scales[:, :, None]
+        V[indices, q : 2 * q] = (self.C[:-1] - self.C[-1]) / local_scales[:, :, None]
         V[indices, 2 * q :] = np.eye(k) / local_scales[:, :, None]
         K = np.zeros((2 * q + k, 2 * q + k), dtype=np.float64)
         K[:q, :q] = symmetric_A
         K[:q, q : 2 * q] = np.eye(q)
         K[q : 2 * q, :q] = np.eye(q)
         K[2 * q :, 2 * q :] = symmetric_D[-1]
-        U = self._public_border_basis.astype(np.float64) * scales[:, None]
-        J = self._border_inverse().astype(np.float64)
+        U = self._public_border_basis * scales[:, None]
+        J = self._border_inverse()
 
         def normalize(basis, core):
             units = np.max(np.abs(basis), axis=0, initial=0.0)
@@ -569,9 +565,7 @@ class SumToZeroBlockFactor:
             V, K, Be = (np.asarray(value, dtype=float) for value in (exact_V, exact_K, exact_Be))
             U, J = (np.asarray(value, dtype=float) for value in normalize(U, J))
             Bz = np.asarray(
-                self._pinv[:-1].astype(np.float64)
-                * local_scales[:, :, None]
-                * local_scales[:, None, :],
+                self._pinv[:-1] * local_scales[:, :, None] * local_scales[:, None, :],
                 dtype=float,
             )
         if not all(np.all(np.isfinite(value)) for value in (V, K, U, J, Be, Bz)):
@@ -587,11 +581,11 @@ class SumToZeroBlockFactor:
         # This dominates p + 3*r + 2*k + 32 for complete product/formation
         # paths and pk+2, pr+k+3, 2p+r^2+3 for the three scalar contractions.
         count = 4 * p * r + 8 * r * r + 4 * p * k + 32
-        product = np.float64(count) * (np.finfo(float).eps / 2)
+        product = count * (np.finfo(float).eps / 2)
         if product >= 0.5:
             return False
-        gamma = np.nextafter(product / (1.0 - product), np.float64(np.inf))
-        inflate = np.nextafter(1.0 / (1.0 - gamma), np.float64(np.inf))
+        gamma = np.nextafter(product / (1.0 - product), np.inf)
+        inflate = np.nextafter(1.0 / (1.0 - gamma), np.inf)
 
         def apply(blocks, basis):
             result = np.zeros_like(basis)
@@ -632,46 +626,36 @@ class SumToZeroBlockFactor:
         # Absolute actions use the supplied moments, not the possibly cancelled
         # public cross block or the private Schur complement.
         cross_action = (
-            (np.abs(self.C[:-1].astype(np.float64)) + np.abs(self.C[-1].astype(np.float64)))
+            (np.abs(self.C[:-1]) + np.abs(self.C[-1]))
             / local_scales[:, :, None]
             / scales[self.small_indices]
         )
         e_rows = np.zeros(p, dtype=np.float64)
         e_rows[self.small_indices] = np.sum(
-            np.abs(self.A.astype(np.float64))
-            / scales[self.small_indices, None]
-            / scales[None, self.small_indices],
+            np.abs(self.A) / scales[self.small_indices, None] / scales[None, self.small_indices],
             axis=1,
         ) + np.sum(cross_action, axis=(0, 1))
         e_rows[indices] = (
-            np.sum(np.abs(Be.astype(np.float64)), axis=2)
+            np.sum(np.abs(Be), axis=2)
             + np.sum(cross_action, axis=2)
-            + (np.abs(self.D[-1].astype(np.float64)) @ np.sum(1.0 / local_scales, axis=0))[None, :]
-            / local_scales
+            + (np.abs(self.D[-1]) @ np.sum(1.0 / local_scales, axis=0))[None, :] / local_scales
         )
         e_columns = np.zeros(p, dtype=np.float64)
         e_columns[self.small_indices] = np.sum(
-            np.abs(self.A.astype(np.float64))
-            / scales[self.small_indices, None]
-            / scales[None, self.small_indices],
+            np.abs(self.A) / scales[self.small_indices, None] / scales[None, self.small_indices],
             axis=0,
         ) + np.sum(cross_action, axis=(0, 1))
         e_columns[indices] = (
-            np.sum(np.abs(Be.astype(np.float64)), axis=1)
+            np.sum(np.abs(Be), axis=1)
             + np.sum(cross_action, axis=2)
-            + (np.abs(self.D[-1].astype(np.float64)).T @ np.sum(1.0 / local_scales, axis=0))[
-                None, :
-            ]
-            / local_scales
+            + (np.abs(self.D[-1]).T @ np.sum(1.0 / local_scales, axis=0))[None, :] / local_scales
         )
         e_norm = max(np.max(e_rows, initial=0.0), np.max(e_columns, initial=0.0)) * inflate
-        z_norm = (
-            np.float64(max(np.max(z_rows, initial=0.0), np.max(z_columns, initial=0.0))) * inflate
-        )
+        z_norm = max(np.max(z_rows, initial=0.0), np.max(z_columns, initial=0.0)) * inflate
         squared_upper = (max(0.0, squared) + gamma * squared_action) * inflate
-        formation = np.float64(gamma) * np.sqrt(np.float64(p)) * (1.0 + e_norm * z_norm)
-        rho = np.sqrt(np.float64(squared_upper)) + formation
-        rho = np.nextafter(rho * inflate, np.float64(np.inf))
+        formation = gamma * np.sqrt(p) * (1.0 + e_norm * z_norm)
+        rho = np.sqrt(squared_upper) + formation
+        rho = np.nextafter(rho * inflate, np.inf)
         spectral_error = np.float64(_eigensolver_relative_bar(p))
         relative_cutoff = max(SHARED_RANK_POLICY.gram_rcond, spectral_error)
         # Clear the shared cutoff even after its stated eigensolver error.

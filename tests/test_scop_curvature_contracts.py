@@ -18,6 +18,7 @@ from superglm.features._spline_constraints import (
     curvature_difference_operator,
 )
 from superglm.solvers.scop import build_scop_reparam, build_scop_solver_reparam
+from tests._exact_reference import exact_matmul
 
 DEGREE = 3
 # 12% of the rows sit exactly at the minimum.  With ``n_knots=10`` the
@@ -228,21 +229,21 @@ def test_fit_time_convex_cr_spline_fits_a_point_mass_at_the_predictor_minimum(pe
     # solution may fit the curve accurately while failing the original score;
     # only its actual certificate can authorize a convergence claim.
     assert terminal_qp["active"] == []
-    beta = np.asarray(model.result.beta, dtype=np.longdouble)
-    H = np.asarray(terminal_qp["H"], dtype=np.longdouble)
-    g = np.asarray(terminal_qp["g"], dtype=np.longdouble)
-    A = np.asarray(terminal_qp["A"], dtype=np.longdouble)
-    b = np.asarray(terminal_qp["b"], dtype=np.longdouble)
+    beta = np.asarray(model.result.beta, dtype=np.float64)
+    H, g, A, b = (np.asarray(terminal_qp[key], dtype=np.float64) for key in "HgAb")
     tol = terminal_qp["tol"]
     unit = np.finfo(float).eps / 2
     gamma = (len(beta) + 2) * unit / (1 - (len(beta) + 2) * unit)
     h_action = np.abs(H) @ np.abs(beta)
     g_action = np.abs(g)
     score_allowance = tol * np.maximum(h_action, g_action) + gamma * (h_action + g_action)
-    score_certified = bool(np.all(np.abs(H @ beta - g) <= score_allowance))
+    # Correctly rounded residuals [H, -g] @ [beta; 1] and [A, -b] @ [beta; 1].
+    augmented = np.append(beta, 1.0)
+    score_residual = exact_matmul((np.column_stack([H, -g]), augmented))
+    score_certified = bool(np.all(np.abs(score_residual) <= score_allowance))
     row_action = np.abs(A) @ np.abs(beta)
     primal_allowance = (tol + gamma) * np.maximum(row_action, np.abs(b))
-    assert np.all(A @ beta - b >= -primal_allowance)
+    assert np.all(exact_matmul((np.column_stack([A, -b]), augmented)) >= -primal_allowance)
     assert model.result.converged == score_certified
     assert model.result.termination_reason == (
         "converged" if score_certified else "constraint_kkt_incomplete"

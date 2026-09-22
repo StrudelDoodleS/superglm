@@ -11,13 +11,9 @@ import superglm.reml.penalty_support as support
 
 
 @pytest.mark.parametrize("n", [24, 64])
-def test_normal_diagonal_geometry_is_certified_in_float64(monkeypatch, n):
+def test_normal_diagonal_geometry_is_certified_in_float64(n):
     # This exposed the dimension-dependent extended-arithmetic enclosure:
     # normal diagonal geometry was refused when its working type was binary64.
-    monkeypatch.setattr(multi, "_LD", np.float64)
-    monkeypatch.setattr(support, "_LD", np.float64)
-    monkeypatch.setattr(multi, "_U_LD", np.finfo(float).eps / 2)
-    monkeypatch.setattr(multi, "_TINY_LD", np.nextafter(0.0, 1.0))
     components = [np.eye(n), 2 * np.eye(n)]
     weights = np.array([2.0, 3.0])
     result = multi.similarity_transform_logdet(components, weights)

@@ -26,6 +26,8 @@ def test_weighted_mean_retains_representable_extreme_contribution(monkeypatch):
 
     monkeypatch.setattr(np, "longdouble", np.float64)
     maximum, smallest = np.finfo(float).max, np.nextafter(0.0, 1.0)
+    # The maximum weight sits on a zero value, so only the smallest weight's
+    # product enters the numerator and the column ranges stay representable.
     assert (
         _weighted_mean(np.array([0.0, maximum]), np.array([maximum, smallest]), "test") == smallest
     )

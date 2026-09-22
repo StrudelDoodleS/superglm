@@ -25,6 +25,7 @@ from superglm.solvers.structured import (
     solve_cached_scalar_structured,
 )
 from superglm.types import GroupSlice, PenaltyComponent
+from tests._exact_reference import exact_weighted_gram
 
 
 @pytest.mark.parametrize("sensitive", [False, True])
@@ -52,10 +53,9 @@ def test_structured_sparse_diagonal_is_reused_by_level_crosses(monkeypatch, sens
             [spline, random], groups, weights, weights * x, dominant_group_index=1
         )
         assert len(calls) == iteration + 1
-        design = spline.toarray().astype(np.longdouble)
-        mass = weights.astype(np.longdouble)
-        expected_a = np.asarray(design.T @ (mass[:, None] * design), dtype=float)
-        expected_c = np.asarray(random.toarray().T @ (mass[:, None] * design), dtype=float)
+        design = spline.toarray()
+        expected_a = exact_weighted_gram(design, design, weights)
+        expected_c = exact_weighted_gram(random.toarray(), design, weights)
         scale = np.sqrt(np.diag(expected_a))
         bound = 100 * np.finfo(float).eps
         assert (

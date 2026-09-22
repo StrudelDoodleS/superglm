@@ -39,6 +39,7 @@ from superglm.solvers.rank import (
     streamed_weighted_factor,
 )
 from superglm.types import GroupSlice
+from tests._exact_reference import exact_matmul
 
 
 def _paired_boundary_design(
@@ -264,10 +265,8 @@ def _assert_log_pdet(actual: float, factor: np.ndarray) -> None:
     assert abs(actual - reference.log_pdet) <= reference.log_pdet_bound
 
 
-def _extended_precision_gram(factor: np.ndarray) -> np.ndarray:
-    extended = np.asarray(factor, dtype=np.longdouble)
-    products = extended[:, :, None] * extended[:, None, :]
-    return np.sum(products, axis=0, dtype=np.longdouble).astype(np.float64)
+def _correctly_rounded_gram(factor: np.ndarray) -> np.ndarray:
+    return exact_matmul((factor.T, factor))
 
 
 def test_factor_certificate_is_invariant_to_row_order_and_gram_accumulation() -> None:
@@ -277,7 +276,7 @@ def test_factor_certificate_is_invariant_to_row_order_and_gram_accumulation() ->
         (design, design.T @ design),
         (reversed_design, reversed_design.T @ reversed_design),
         (design, np.einsum("ni,nj->ij", design, design, optimize=False)),
-        (design, _extended_precision_gram(design)),
+        (design, _correctly_rounded_gram(design)),
     )
     reference_prediction = design @ right[:, 0]
 

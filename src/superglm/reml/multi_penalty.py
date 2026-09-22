@@ -28,9 +28,8 @@ from superglm.reml.penalty_support import (
 from superglm.solvers.rank import SHARED_RANK_POLICY
 
 _EPS = np.finfo(float).eps
-_LD = np.float64
-_U_LD = np.finfo(_LD).eps / 2
-_TINY_LD = np.nextafter(_LD(0), _LD(1))
+_UNIT_ROUNDOFF = _EPS / 2
+_SMALLEST_SUBNORMAL = np.nextafter(0.0, 1.0)
 # A work threshold, not an accuracy threshold: tiny reductions reuse the
 # scalar recurrence without loading Numba's native runtime on a small fit.
 _DOT2_NATIVE_MIN_WORK = 256
@@ -131,10 +130,10 @@ class SimilarityTransformResult:
 
 
 def _gamma(count: int, unit: float = _EPS / 2) -> float:
-    product = _LD(count) * _LD(unit)
+    product = np.float64(count) * np.float64(unit)
     if product >= 1:
         raise PenaltyNumericalError("arithmetic error bound is unresolved")
-    bound = product / (1 - product) / (1 - 3 * _U_LD)
+    bound = product / (1 - product) / (1 - 3 * _UNIT_ROUNDOFF)
     return float(np.nextafter(float(bound), np.inf))
 
 
@@ -146,12 +145,12 @@ def _upper(value: NDArray | float) -> NDArray:
 
 
 def _norm_upper(value: NDArray) -> float:
-    absolute = np.abs(np.asarray(value, dtype=_LD))
-    maximum = np.max(absolute, initial=_LD(0))
+    absolute = np.abs(np.asarray(value, dtype=np.float64))
+    maximum = np.max(absolute, initial=0.0)
     if maximum == 0:
         return 0.0
-    norm = maximum * np.sqrt(np.sum((absolute / maximum) ** 2, dtype=_LD))
-    return float(_upper(norm / (1 - _gamma(3 * absolute.size + 2, _U_LD))))
+    norm = maximum * np.sqrt(np.sum((absolute / maximum) ** 2, dtype=np.float64))
+    return float(_upper(norm / (1 - _gamma(3 * absolute.size + 2, _UNIT_ROUNDOFF))))
 
 
 def _positive_product(left: NDArray, right: NDArray) -> NDArray:
@@ -160,16 +159,16 @@ def _positive_product(left: NDArray, right: NDArray) -> NDArray:
     Native GEMM's componentwise gamma bound applies in the normal range.
     The remaining exponents use explicit gradual-underflow allowances.
     """
-    left, right = np.asarray(left, dtype=_LD), np.asarray(right, dtype=_LD)
+    left, right = np.asarray(left, dtype=np.float64), np.asarray(right, dtype=np.float64)
     count = left.shape[-1]
     if left.ndim == right.ndim == 2 and left.shape[1] == right.shape[0]:
-        maximum_left = np.max(left, initial=_LD(0))
-        maximum_right = np.max(right, initial=_LD(0))
+        maximum_left = np.max(left, initial=0.0)
+        maximum_right = np.max(right, initial=0.0)
         if (
             np.isfinite(maximum_left)
             and np.isfinite(maximum_right)
-            and np.min(left, initial=_LD(0)) >= 0
-            and np.min(right, initial=_LD(0)) >= 0
+            and np.min(left, initial=0.0) >= 0
+            and np.min(right, initial=0.0) >= 0
         ):
             shape = (left.shape[0], right.shape[1])
             if maximum_left == 0 or maximum_right == 0:
@@ -197,11 +196,13 @@ def _positive_product(left: NDArray, right: NDArray) -> NDArray:
                     return _positive_native_product(left, right)
     with np.errstate(over="ignore", invalid="ignore"):
         value = left @ right
-    value = (value + (2 * count + 1) * _TINY_LD) / (1 - _gamma(2 * count + 1, _U_LD))
+    value = (value + (2 * count + 1) * _SMALLEST_SUBNORMAL) / (
+        1 - _gamma(2 * count + 1, _UNIT_ROUNDOFF)
+    )
     return _upper(value)
 
 
-def _native_product(left: NDArray, right: NDArray, magnitude: NDArray | None = None) -> NDArray:
+def _native_product(left: NDArray, right: NDArray) -> NDArray:
     """Native binary64 product; the enclosing caller supplies the error bound."""
     return np.asarray(left, dtype=np.float64) @ np.asarray(right, dtype=np.float64)
 
@@ -209,16 +210,19 @@ def _native_product(left: NDArray, right: NDArray, magnitude: NDArray | None = N
 def _matmul_enclosed(
     left: NDArray, right: NDArray, *, _evidence: list[_ProductEvidence] | None = None
 ) -> tuple[NDArray, NDArray]:
-    left_value, right_value = np.asarray(left, dtype=_LD), np.asarray(right, dtype=_LD)
+    left_value, right_value = (
+        np.asarray(left, dtype=np.float64),
+        np.asarray(right, dtype=np.float64),
+    )
     magnitude = _positive_product(np.abs(left_value), np.abs(right_value))
-    product_value = _native_product(left_value, right_value, magnitude)
+    product_value = _native_product(left_value, right_value)
     result = _finite_double(product_value, "penalty factor product")
     # A length-k dot has at most k rounding factors per term, even though
     # it executes k products and k-1 additions. The positive magnitude bound
     # also proves that its partial sums cannot overflow. Gradual underflow
     # adds at most one minimum subnormal per executed operation.
     count = left.shape[-1]
-    error = _gamma(count) * magnitude + (2 * count + 1) * _TINY_LD
+    error = _gamma(count) * magnitude + (2 * count + 1) * _SMALLEST_SUBNORMAL
     error = _upper(error / (1 - _gamma(3)))
     if _evidence is not None:
         _evidence.append(
@@ -233,7 +237,7 @@ def _matmul_enclosed(
 
 def _root_error_product(left: NDArray, right: NDArray) -> NDArray:
     """Reuse identical tiny error rows within the enclosed positive product."""
-    left, right = np.asarray(left, dtype=_LD), np.asarray(right, dtype=_LD)
+    left, right = np.asarray(left, dtype=np.float64), np.asarray(right, dtype=np.float64)
     if (
         left.ndim == right.ndim == 2
         and left.shape[0] > 1
@@ -255,10 +259,9 @@ def _basis_gram(support: _PenaltySupport, basis: NDArray) -> tuple[NDArray, NDAr
     if basis is not support.Q_plus:
         return _matmul_enclosed(basis.T, basis)
     arithmetic = (
-        _LD,
         _EPS,
-        _U_LD,
-        _TINY_LD,
+        _UNIT_ROUNDOFF,
+        _SMALLEST_SUBNORMAL,
         _matmul_enclosed,
         _native_product,
         _positive_product,
@@ -295,52 +298,46 @@ def _inverse_gram_enclosed(inverse_root: NDArray, eta: float) -> tuple[NDArray, 
     The spectral metric uncertainty couples arbitrary rows of J, so its
     entrywise bound uses the outer product of upper bounds on their norms.
     """
-    J = np.asarray(inverse_root, dtype=_LD)
+    J = np.asarray(inverse_root, dtype=np.float64)
     rank = J.shape[1]
-    with np.errstate(over="ignore", under="ignore"):
-        native = np.asarray(J, dtype=np.float64)
-    nonzero = np.abs(native[native != 0])
-    normal = (
-        np.all(np.isfinite(native))
-        and not np.any((J != 0) & (native == 0))
-        and (
-            not nonzero.size
-            or (
-                np.min(nonzero) >= np.nextafter(np.sqrt(np.finfo(float).tiny), np.inf)
-                and np.max(nonzero) <= np.sqrt(np.finfo(float).max / (4 * max(rank, 1)))
-            )
+    nonzero = np.abs(J[J != 0])
+    normal = np.all(np.isfinite(J)) and (
+        not nonzero.size
+        or (
+            np.min(nonzero) >= np.nextafter(np.sqrt(np.finfo(float).tiny), np.inf)
+            and np.max(nonzero) <= np.sqrt(np.finfo(float).max / (4 * max(rank, 1)))
         )
     )
     if not normal:
         inverse, product_rounding = _matmul_enclosed(J, J.T)
-        rounding = product_rounding.astype(_LD)
-        row_squares = _upper(np.diag(inverse).astype(_LD) + np.diag(rounding))
+        rounding = product_rounding
+        row_squares = _upper(np.diag(inverse) + np.diag(rounding))
     else:
-        magnitude = _positive_native_product(np.abs(native), np.abs(native.T)).astype(_LD)
-        inverse = native @ native.T
+        magnitude = _positive_native_product(np.abs(J), np.abs(J.T))
+        inverse = J @ J.T
         gamma = _gamma(2 * rank + 1)
         rounding = gamma * magnitude
         # Signed partial sums may underflow despite the normal-product gate.
-        rounding += (2 * rank + 1) * _LD(np.nextafter(0.0, 1.0)) / (1 - gamma)
+        rounding += (2 * rank + 1) * _SMALLEST_SUBNORMAL / (1 - gamma)
         row_squares = _upper(np.diag(magnitude))
-    row_norms = _upper(np.sqrt(row_squares.astype(_LD)) / (1 - _gamma(4, _U_LD)))
-    row_products = _positive_product(row_norms[:, None], row_norms[None, :]).astype(_LD)
-    error = rounding + _LD(eta) / (1 - _LD(eta)) * row_products
-    return inverse, _upper((error + 32 * _TINY_LD) / (1 - _gamma(32, _U_LD)))
+    row_norms = _upper(np.sqrt(row_squares) / (1 - _gamma(4, _UNIT_ROUNDOFF)))
+    row_products = _positive_product(row_norms[:, None], row_norms[None, :])
+    error = rounding + np.float64(eta) / (1 - np.float64(eta)) * row_products
+    return inverse, _upper((error + 32 * _SMALLEST_SUBNORMAL) / (1 - _gamma(32, _UNIT_ROUNDOFF)))
 
 
 def _trace_bound(value: NDArray, error: NDArray) -> float:
-    diagonal = np.diag(value).astype(_LD)
-    trace = np.sum(diagonal, dtype=_LD)
-    bound = np.sum(np.diag(error).astype(_LD), dtype=_LD)
-    bound += _gamma(2 * len(diagonal) + 1, _U_LD) * np.sum(np.abs(diagonal))
-    return float(_upper((abs(trace) + bound) / (1 - _gamma(4 * len(diagonal) + 4, _U_LD))))
+    diagonal = np.diag(value)
+    trace = np.sum(diagonal, dtype=np.float64)
+    bound = np.sum(np.diag(error), dtype=np.float64)
+    bound += _gamma(2 * len(diagonal) + 1, _UNIT_ROUNDOFF) * np.sum(np.abs(diagonal))
+    return float(_upper((abs(trace) + bound) / (1 - _gamma(4 * len(diagonal) + 4, _UNIT_ROUNDOFF))))
 
 
 def _logdet_defect_bound(product: NDArray, error: NDArray) -> float:
     """Trace-series bound, retaining cancellation-free second-order terms."""
-    defect = product.astype(_LD) - np.eye(len(product), dtype=_LD)
-    error = _upper((error + _gamma(1) * np.abs(defect) + _TINY_LD) / (1 - _gamma(3)))
+    defect = product - np.eye(len(product))
+    error = _upper((error + _gamma(1) * np.abs(defect) + _SMALLEST_SUBNORMAL) / (1 - _gamma(3)))
     radius = float(_upper(_norm_upper(defect) + _norm_upper(error)))
     if radius >= 1:
         return np.inf
@@ -364,19 +361,19 @@ def _materialization_logdet_bound(
     """Enclose the determinant effect of an observed, signed product residual."""
     if _product_evidence is not None and _same_operands(_product_evidence.operands, left, right):
         product_value = _product_evidence.product
-        magnitude = _product_evidence.magnitude.astype(_LD)
+        magnitude = _product_evidence.magnitude
     else:
-        product_value = np.asarray(left, dtype=_LD) @ np.asarray(right, dtype=_LD)
-        magnitude = _positive_product(np.abs(left), np.abs(right)).astype(_LD)
-    residual = product_value - product.astype(_LD)
+        product_value = np.asarray(left, dtype=np.float64) @ np.asarray(right, dtype=np.float64)
+        magnitude = _positive_product(np.abs(left), np.abs(right))
+    residual = product_value - product
     uncertain = _gamma(left.shape[-1]) * magnitude
-    uncertain += (2 * left.shape[-1] + 1) * _TINY_LD
-    uncertain += _gamma(1) * np.abs(residual) + _TINY_LD
+    uncertain += (2 * left.shape[-1] + 1) * _SMALLEST_SUBNORMAL
+    uncertain += _gamma(1) * np.abs(residual) + _SMALLEST_SUBNORMAL
     if input_bound is not None:
         uncertain += input_bound
     uncertain = _upper(uncertain / (1 - _gamma(6)))
     action, error = _matmul_enclosed(residual, inverse)
-    error = _upper(error.astype(_LD) + _positive_product(_upper(uncertain), np.abs(inverse)))
+    error = _upper(error + _positive_product(_upper(uncertain), np.abs(inverse)))
     dual, dual_error = _matmul_enclosed(product, inverse)
     if _duality_evidence is not None:
         _duality_evidence.append(
@@ -386,8 +383,10 @@ def _materialization_logdet_bound(
                 _evidence_copy(dual_error),
             )
         )
-    defect = dual.astype(_LD) - np.eye(len(dual))
-    defect_error = _upper((dual_error + _gamma(1) * np.abs(defect) + _TINY_LD) / (1 - _gamma(3)))
+    defect = dual - np.eye(len(dual))
+    defect_error = _upper(
+        (dual_error + _gamma(1) * np.abs(defect) + _SMALLEST_SUBNORMAL) / (1 - _gamma(3))
+    )
     duality = float(_upper(_norm_upper(defect) + _norm_upper(defect_error)))
     norm = float(_upper(_norm_upper(action) + _norm_upper(error)))
     if duality >= 1 or norm >= 1 - duality:
@@ -401,7 +400,7 @@ def _materialization_logdet_bound(
                 _trace_bound(action, error)
                 + norm * duality / (1 - duality)
                 + relative**2 / (2 * (1 - relative))
-                + 8 * _TINY_LD
+                + 8 * _SMALLEST_SUBNORMAL
             )
             / (1 - _gamma(8))
         )
@@ -460,22 +459,22 @@ def _reference_root_actions(
     refinement when the native product cannot meet the admission budget.
     """
     values = _weights(lambdas, len(roots))
-    J = np.asarray(inverse_root, dtype=_LD)
+    J = np.asarray(inverse_root, dtype=np.float64)
     actions, bounds = [], []
     rows, rank = sum(len(root) for root in roots), J.shape[1]
     budget = _gamma(8 * (rows + J.shape[0] + rank + len(roots) + 1))
     dot_budget = budget / (8 * max(rank, 1) * math.sqrt(max(rows, 1)))
     for root, weight in zip(roots, values, strict=True):
-        H = np.sqrt(_LD(weight)) * np.asarray(root, dtype=_LD)
-        magnitude = _positive_product(np.abs(H), np.abs(J)).astype(_LD)
-        product_value = _native_product(H, J, magnitude)
+        H = np.sqrt(weight) * np.asarray(root, dtype=np.float64)
+        magnitude = _positive_product(np.abs(H), np.abs(J))
+        product_value = _native_product(H, J)
         action = _finite_double(product_value, "reference root action")
-        error = _gamma(2 * root.shape[1] + 4, _U_LD) * magnitude
+        error = _gamma(2 * root.shape[1] + 4, _UNIT_ROUNDOFF) * magnitude
         # Scaling a root entry can underflow before its multiplication by J.
         # That absolute error must follow the action through J.
-        scaling_underflow = np.where((root != 0) & (weight != 0), _TINY_LD, _LD(0))
+        scaling_underflow = np.where((root != 0) & (weight != 0), _SMALLEST_SUBNORMAL, 0.0)
         error += _positive_product(scaling_underflow, np.abs(J))
-        error += np.abs(product_value - action.astype(_LD)) + (2 * root.shape[1] + 4) * _TINY_LD
+        error += (2 * root.shape[1] + 4) * _SMALLEST_SUBNORMAL
         selected = np.argwhere(error > dot_budget) if _refine else np.empty((0, 2), dtype=int)
         if len(selected):
             try:
@@ -484,32 +483,31 @@ def _reference_root_actions(
                 # All reuse ends here: a changed root, weight or J recomputes.
                 dot_magnitude = _positive_product(np.abs(root), np.abs(J))
                 if len(selected) * root.shape[1] >= _DOT2_NATIVE_MIN_WORK:
-                    dots, success = _dot2_selected(np.asarray(root, dtype=_LD), J, selected)
+                    dots, success = _dot2_selected(np.asarray(root, dtype=np.float64), J, selected)
                 else:
                     # Keep shared enclosures for tiny batches without paying
                     # native-kernel startup or revalidating every scalar dot.
                     dots = np.array([_python_dot2_value(root[r], J[:, c]) for r, c in selected])
                     success = np.isfinite(dots)
                 row, column = selected.T
-                unit, inner = _LD(_EPS) / 2, root.shape[1]
+                unit, inner = _UNIT_ROUNDOFF, root.shape[1]
                 dot_error = (
                     unit * np.abs(dots)
-                    + _LD(_gamma(inner)) ** 2 * dot_magnitude[row, column]
-                    + 5 * inner * _TINY_LD
+                    + np.float64(_gamma(inner)) ** 2 * dot_magnitude[row, column]
+                    + 5 * inner * _SMALLEST_SUBNORMAL
                 ) / (1 - unit)
-                dot_error = _upper(dot_error / (1 - _gamma(12, _U_LD)))
-                scale = np.sqrt(_LD(weight))
-                scale_error = _gamma(1, _U_LD) * abs(scale) + _TINY_LD
+                dot_error = _upper(dot_error / (1 - _gamma(12, _UNIT_ROUNDOFF)))
+                scale = np.sqrt(weight)
+                scale_error = _gamma(1, _UNIT_ROUNDOFF) * abs(scale) + _SMALLEST_SUBNORMAL
                 scaled = scale * dots
                 refined = _finite_double(scaled, "compensated root action")
                 refined_error = (
                     abs(scale) * dot_error
                     + scale_error * (np.abs(dots) + dot_error)
-                    + _gamma(1, _U_LD) * np.abs(scaled)
-                    + np.abs(scaled - refined)
-                    + 2 * _TINY_LD
+                    + _gamma(1, _UNIT_ROUNDOFF) * np.abs(scaled)
+                    + 2 * _SMALLEST_SUBNORMAL
                 )
-                refined_error = _upper(refined_error / (1 - _gamma(12, _U_LD)))
+                refined_error = _upper(refined_error / (1 - _gamma(12, _UNIT_ROUNDOFF)))
                 use = success & (refined_error < error[row, column])
                 action[row[use], column[use]] = refined[use]
                 error[row[use], column[use]] = refined_error[use]
@@ -521,18 +519,17 @@ def _reference_root_actions(
         for row, column in selected:
             try:
                 dot, dot_error = _compensated_dot(root[row], J[:, column])
-                scale = np.sqrt(_LD(weight))
-                scale_error = _gamma(1, _U_LD) * abs(scale) + _TINY_LD
-                scaled = scale * _LD(dot)
+                scale = np.sqrt(weight)
+                scale_error = _gamma(1, _UNIT_ROUNDOFF) * abs(scale) + _SMALLEST_SUBNORMAL
+                scaled = scale * np.float64(dot)
                 refined = float(_finite_double(scaled, "compensated root action"))
                 refined_error = (
                     abs(scale) * dot_error
                     + scale_error * (abs(dot) + dot_error)
-                    + _gamma(1, _U_LD) * abs(scaled)
-                    + abs(scaled - _LD(refined))
-                    + 2 * _TINY_LD
+                    + _gamma(1, _UNIT_ROUNDOFF) * abs(scaled)
+                    + 2 * _SMALLEST_SUBNORMAL
                 )
-                refined_error = float(_upper(refined_error / (1 - _gamma(12, _U_LD))))
+                refined_error = float(_upper(refined_error / (1 - _gamma(12, _UNIT_ROUNDOFF))))
             except PenaltyNumericalError:
                 continue
             if refined_error < error[row, column]:
@@ -593,14 +590,14 @@ def _compensated_dot(left: NDArray, right: NDArray) -> tuple[float, float]:
         value = _python_dot2_value(x, y)
     if not math.isfinite(value):
         raise PenaltyNumericalError("compensated dot is not representable")
-    unit = _LD(_EPS) / 2
+    unit = _UNIT_ROUNDOFF
     count = len(x)
     error = (
         unit * abs(value)
-        + _LD(_gamma(count)) ** 2 * magnitude
-        + 5 * count * _LD(np.nextafter(0.0, 1.0))
+        + np.float64(_gamma(count)) ** 2 * magnitude
+        + 5 * count * _SMALLEST_SUBNORMAL
     ) / (1 - unit)
-    return value, float(_upper(error / (1 - _gamma(12, _U_LD))))
+    return value, float(_upper(error / (1 - _gamma(12, _UNIT_ROUNDOFF))))
 
 
 def _squared_norm_enclosed(value: NDArray, error: NDArray) -> tuple[float, float]:
@@ -667,8 +664,8 @@ def _reference_correct_once(
 
 def _triangular_solve(matrix: NDArray, rhs: NDArray) -> NDArray:
     """Substitution with a scaled RHS, without a reciprocal coordinate basis."""
-    A = np.asarray(matrix, dtype=_LD)
-    result = np.array(rhs, dtype=_LD, copy=True)
+    A = np.asarray(matrix, dtype=np.float64)
+    result = np.array(rhs, dtype=np.float64, copy=True)
     for i in range(len(A)):
         if A[i, i] == 0:
             raise PenaltyNumericalError("singular coordinate triangular factor")
@@ -688,7 +685,7 @@ def _candidate_product(left: NDArray, right: NDArray) -> NDArray | None:
             return None
     # Normal binary64 operands/products and any addressable inner dimension
     # fit safely in this envelope. Accuracy here only changes the proposed C.
-    return np.asarray(np.asarray(left, dtype=float) @ np.asarray(right, dtype=float), dtype=_LD)
+    return left @ right
 
 
 def _direct_candidate(
@@ -702,14 +699,12 @@ def _direct_candidate(
     rank, width = support.rank, support.Q_plus.shape[0]
     basis = np.eye(width) if rank == width else support.Q_plus
     stack = np.vstack(
-        [
-            np.sqrt(_LD(value)) * root.astype(_LD)
-            for root, value in zip(support.component_roots, values, strict=True)
-        ]
+        [np.sqrt(value) * root for root, value in zip(support.component_roots, values, strict=True)]
     )
     weighted = _candidate_product(stack, basis) if _native_candidate else None
     if weighted is None:
-        weighted = _native_product(stack, basis.astype(_LD))
+        # Packed copy: Q_plus is a strided slice and matmul rounding depends on layout.
+        weighted = _native_product(stack, basis.copy(order="K"))
     maxima = np.max(np.abs(weighted), axis=0)
     if np.any(maxima == 0):
         return None
@@ -722,13 +717,13 @@ def _direct_candidate(
     condition = np.linalg.norm(upper, ord=np.inf) * np.linalg.norm(inverse, ord=np.inf)
     if not np.isfinite(condition) or condition * min(separation, _EPS * rank) >= 1:
         return None
-    compact = upper.astype(_LD) * scales
+    compact = upper * scales
     product_evidence = []
     E, E_error = _matmul_enclosed(compact, basis.T, _evidence=product_evidence)
     magnitude = product_evidence[0].magnitude
-    E_error = _upper(E_error.astype(_LD) + _gamma(1, _U_LD) * magnitude)
+    E_error = _upper(E_error + _gamma(1, _UNIT_ROUNDOFF) * magnitude)
     inverse = _triangular_solve(upper[::-1, ::-1], np.eye(rank)[::-1])[::-1]
-    J = basis.astype(_LD) @ (inverse / scales[:, None])
+    J = basis @ (inverse / scales[:, None])
     _finite_double(J, "candidate inverse root")
     terms = [
         *(2 * float(np.log(v)) for v in scales),
@@ -743,7 +738,7 @@ def _direct_candidate(
         basis.T,
         E,
         J,
-        _gamma(1, _U_LD) * magnitude,
+        _gamma(1, _UNIT_ROUNDOFF) * magnitude,
         _product_evidence=product_evidence[0],
     )
     if not np.isfinite(basis_log_error) or not np.isfinite(materialization):
@@ -804,27 +799,23 @@ def _separated_candidate(
             break
     if len(chosen) != rank:
         raise PenaltyNumericalError("candidate cannot span the fixed penalty support")
-    coordinates = np.asarray(chosen, dtype=_LD) @ rotation.astype(_LD)
+    coordinates = np.asarray(chosen, dtype=np.float64) @ rotation
     # These are candidate zeros only. Omitted components and entries remain
     # present in every reference correction and fresh certificate.
     coordinates[np.triu_indices(rank, 1)] = 0
-    weighted = np.exp(np.asarray(logs, dtype=_LD))[:, None] * coordinates
+    weighted = np.exp(np.asarray(logs, dtype=np.float64))[:, None] * coordinates
     maxima = np.max(np.abs(weighted), axis=0)
     scales = maxima * np.sqrt(np.sum((weighted / maxima) ** 2, axis=0))
     normalized = _finite_double(weighted / scales, "scaled candidate roots")
     upper = scipy.linalg.qr(normalized, mode="r", check_finite=False)[0][:rank]
     if np.any(np.diag(upper) == 0):
         raise PenaltyNumericalError("zero candidate pivot on fixed penalty support")
-    compact = (
-        (upper.astype(_LD) * scales)
-        @ rotation.T.astype(_LD)
-        @ support.coordinate_triangular.T.astype(_LD)
-    )
+    compact = (upper * scales) @ rotation.T @ support.coordinate_triangular.T
     E, E_error = _matmul_enclosed(compact, support.Q_plus.T)
     rhs = _triangular_solve(upper[::-1, ::-1], np.eye(rank)[::-1])[::-1]
-    rhs = rotation.astype(_LD) @ (rhs / scales[:, None])
+    rhs = rotation @ (rhs / scales[:, None])
     solved = _triangular_solve(support.coordinate_triangular.T, rhs)
-    J = support.Q_plus.astype(_LD) @ solved
+    J = support.Q_plus @ solved
     _finite_double(J, "candidate inverse root")
     terms = [
         *(2 * math.log(abs(v)) for v in np.diag(support.coordinate_triangular)),
@@ -854,19 +845,21 @@ def _whitening_certificate(
 ) -> tuple[float, float]:
     Z, B = np.vstack(actions), np.vstack(action_bounds)
     gram, multiplication_bound = _matmul_enclosed(Z.T, Z)
-    error = multiplication_bound.astype(_LD)
+    error = multiplication_bound
     error += _positive_product(np.abs(Z.T), B)
     error += _positive_product(B.T, np.abs(Z))
     error += _positive_product(B.T, B)
     error = _upper(error / (1 - _gamma(4)))
     if _evidence is not None:
         _evidence.append((gram, error))
-    defect = gram.astype(_LD) - np.eye(J.shape[1], dtype=_LD)
-    defect_error = _upper((error + _gamma(1) * np.abs(defect) + _TINY_LD) / (1 - _gamma(3)))
+    defect = gram - np.eye(J.shape[1])
+    defect_error = _upper(
+        (error + _gamma(1) * np.abs(defect) + _SMALLEST_SUBNORMAL) / (1 - _gamma(3))
+    )
     eta = _norm_upper(defect) + _norm_upper(defect_error)
     if _duality is None:
         product, product_bound = _matmul_enclosed(E, J)
-        duality = _norm_upper(product.astype(_LD) - np.eye(J.shape[1], dtype=_LD))
+        duality = _norm_upper(product - np.eye(J.shape[1]))
         duality += _norm_upper(product_bound)
         _duality = float(np.nextafter(duality, np.inf))
     return float(np.nextafter(eta, np.inf)), _duality
@@ -883,7 +876,7 @@ def _positive_native_product(left: NDArray, right: NDArray) -> NDArray:
     value = left @ right
     allowance = _gamma(2 * count + 4)
     underflow = (2 * count + 1) * np.nextafter(0.0, 1.0)
-    return _upper((value.astype(_LD) + underflow) / (1 - allowance))
+    return _upper((value + underflow) / (1 - allowance))
 
 
 def _component_gram(factor: NDArray, bound: NDArray) -> tuple[NDArray, NDArray]:
@@ -892,7 +885,7 @@ def _component_gram(factor: NDArray, bound: NDArray) -> tuple[NDArray, NDArray]:
         np.abs(factor.T), np.abs(factor)
     )
     error = (
-        arithmetic.astype(_LD)
+        arithmetic
         + _positive_native_product(np.abs(factor.T), bound)
         + _positive_native_product(bound.T, np.abs(factor))
         + _positive_native_product(bound.T, bound)
@@ -904,12 +897,12 @@ def _gram_cross(
     left: tuple[NDArray, NDArray], right: tuple[NDArray, NDArray], dimension: int
 ) -> tuple[float, float] | None:
     """Use a cheap Gram contraction only when cancellation is resolved."""
-    A, A_error = (item.astype(_LD) for item in left)
-    B, B_error = (item.astype(_LD) for item in right)
+    A, A_error = left
+    B, B_error = right
     value, error = _compensated_dot(A.ravel(), B.ravel())
     error += np.sum(np.abs(A) * B_error + A_error * np.abs(B) + A_error * B_error)
-    error += 3 * A.size * _TINY_LD  # Three perturbation products per entry.
-    error = float(_upper(error / (1 - _gamma(6 * A.size + 4, _U_LD))))
+    error += 3 * A.size * _SMALLEST_SUBNORMAL  # Three perturbation products per entry.
+    error = float(_upper(error / (1 - _gamma(6 * A.size + 4, _UNIT_ROUNDOFF))))
     if value <= 0 or error > _gamma(8 * dimension) * value:
         return None
     return value, error
@@ -958,7 +951,7 @@ def _derivative_values(
                 product, product_bound = _matmul_enclosed(factors[i], factors[j].T)
                 product_bound = _upper(
                     (
-                        product_bound.astype(_LD)
+                        product_bound
                         + _positive_product(np.abs(factors[i]), bounds[j].T)
                         + _positive_product(bounds[i], np.abs(factors[j].T))
                         + _positive_product(bounds[i], bounds[j].T)
@@ -1039,9 +1032,7 @@ def _evaluate_penalty_geometry(
             active_support,
             component_reconstruction_bounds=support.component_reconstruction_bounds,
             support_projection_bounds=tuple(
-                _readonly(_upper(previous.astype(_LD) + current.astype(_LD)))
-                if value > 0
-                else current
+                _readonly(_upper(previous + current)) if value > 0 else current
                 for previous, current, value in zip(
                     support.support_projection_bounds,
                     active_support.support_projection_bounds,
@@ -1128,7 +1119,7 @@ def _evaluate_penalty_geometry(
             dual, dual_error = retained_dual.product, retained_dual.error
         else:
             dual, dual_error = _matmul_enclosed(E, J)
-        duality = _norm_upper(dual.astype(_LD) - np.eye(rank, dtype=_LD))
+        duality = _norm_upper(dual - np.eye(rank))
         duality = float(np.nextafter(duality + _norm_upper(dual_error), np.inf))
         if duality >= 1:
             continue
@@ -1147,9 +1138,9 @@ def _evaluate_penalty_geometry(
             )
             bounds = tuple(
                 _upper(
-                    bound.astype(_LD)
+                    bound
                     + _root_error_product(
-                        _upper((np.sqrt(_LD(value)) * error + _TINY_LD) / (1 - _gamma(3))),
+                        _upper((np.sqrt(value) * error + _SMALLEST_SUBNORMAL) / (1 - _gamma(3))),
                         np.abs(J),
                     )
                 )
@@ -1225,7 +1216,9 @@ def _evaluate_penalty_geometry(
     # distance from the returned E, including both measured defects.
     root_relative = (eta / (1 + math.sqrt(1 - eta)) + duality) / (1 - duality)
     column_norm = np.array([_norm_upper(column) for column in E.T])
-    root_error[:rank] = _upper(root_relative * column_norm / (1 - _gamma(4 * rank + 12, _U_LD)))
+    root_error[:rank] = _upper(
+        root_relative * column_norm / (1 - _gamma(4 * rank + 12, _UNIT_ROUNDOFF))
+    )
     certificate = _PenaltyCertificate(
         eta,
         duality,
@@ -1287,7 +1280,7 @@ def logdet_s_gradient(result, penalty_matrices: list[NDArray], lambdas: NDArray)
     if result._gradient is not None:
         return result._gradient.copy()
     return np.array(
-        [float(np.sum(factor.astype(_LD) ** 2, dtype=_LD)) for factor in result._component_factors]
+        [float(np.sum(factor**2, dtype=np.float64)) for factor in result._component_factors]
     )
 
 
