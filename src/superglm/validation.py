@@ -415,7 +415,7 @@ def _quantile_bins(sort_values: NDArray, weights: NDArray, n_bins: int) -> NDArr
 def _lorenz_cumulative_by_score(
     scores: NDArray,
     weights: NDArray,
-    exposure: NDArray,
+    exposure: NDArray | None,
     losses: NDArray,
     *,
     total_exp: tuple[float, int],
@@ -425,10 +425,9 @@ def _lorenz_cumulative_by_score(
     order = np.argsort(scores, kind="stable")
     _, starts = np.unique(scores[order], return_index=True)
     ends = np.append(starts[1:], len(order))
-    cumulative_exposure = _scaled_product_sums(weights[order], exposure[order], ends)
-    cumulative_loss = _scaled_product_sums(
-        weights[order], losses[order], ends, exposure=exposure[order]
-    )
+    w, e = weights[order], None if exposure is None else exposure[order]
+    cumulative_exposure = _scaled_product_sums(w, np.ones_like(w) if e is None else e, ends)
+    cumulative_loss = _scaled_product_sums(w, losses[order], ends, exposure=e)
     shares = []
     for (mantissa, exponent), total in (
         (cumulative_exposure, total_exp),
@@ -902,16 +901,18 @@ def lorenz_curve(
     )
     y_pred = vectors["y_pred"]
     n = len(y_obs)
-    exp = vectors.get("exposure", np.ones(n, dtype=float))
+    # Without exposure, the loss reductions multiply two factors, not three.
+    exposure = vectors.get("exposure")
+    exp = np.ones(n, dtype=float) if exposure is None else exposure
 
     losses = y_obs
-    total_loss = _scaled_product_total(w, losses, exposure=exp)
+    total_loss = _scaled_product_total(w, losses, exposure=exposure)
     total_exp = _scaled_product_total(w, exp)
 
     if total_loss[0] > 0 and np.min(losses[(w != 0) & (exp != 0)], initial=0.0) < 0:
         # Signed losses can cancel: every prefix must stay resolved against
         # the total that normalizes it. A degenerate total is handled below.
-        magnitude = _scaled_product_total(w, np.abs(losses), exposure=exp)
+        magnitude = _scaled_product_total(w, np.abs(losses), exposure=exposure)
         _require_resolved(total_loss, magnitude, n, "Lorenz loss prefixes")
     if total_loss[0] <= 0 or total_exp[0] <= 0:
         # Degenerate: all zeros or no exposure
@@ -964,7 +965,7 @@ def lorenz_curve(
     cum_exp_model, cum_loss_model, model_order = _lorenz_cumulative_by_score(
         y_pred,
         w,
-        exp,
+        exposure,
         losses,
         total_exp=total_exp,
         total_loss=total_loss,
@@ -977,7 +978,7 @@ def lorenz_curve(
     cum_exp_perfect, cum_loss_perfect, perfect_order = _lorenz_cumulative_by_score(
         loss_ratio,
         w,
-        exp,
+        exposure,
         losses,
         total_exp=total_exp,
         total_loss=total_loss,
@@ -995,7 +996,7 @@ def lorenz_curve(
         y_obs,
         y_pred,
         w,
-        exposure=vectors.get("exposure"),
+        exposure=exposure,
         totals=(total_exp, total_loss),
         score_orders=(perfect_order if np.all(positive_exposure) else None, model_order),
     )

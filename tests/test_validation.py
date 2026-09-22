@@ -1575,3 +1575,14 @@ def test_constant_target_gini_is_zero_without_a_contraction():
     # pair contraction's, which a constant target never needs.
     weights = np.array([1.0, 2.0**-300])
     assert _normalized_gini(np.ones(2), np.array([0.0, 1.0]), weights) == 0.0
+
+
+@pytest.mark.parametrize("y", [np.ones(2), -np.ones(2)])
+def test_lorenz_accepts_what_normalized_gini_accepts_for_degenerate_targets(y):
+    from superglm.validation import _normalized_gini
+
+    # Without exposure every loss reduction multiplies two factors, so
+    # weights 300 binades apart stay inside the 459-binade limit.
+    pred, weights = np.array([0.0, 1.0]), np.array([1.0, 2.0**-300])
+    result = lorenz_curve(y, pred, sample_weight=weights)
+    assert result.gini_ratio == _normalized_gini(y, pred, weights) == 0.0
