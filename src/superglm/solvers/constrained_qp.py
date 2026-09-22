@@ -695,7 +695,8 @@ def _solve_saddle_least_squares(KKT: NDArray, rhs: NDArray) -> NDArray:
 def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDArray:
     """Repair a half-space violation, for at most 100 sweeps.
 
-    Termination uses the same homogeneous primal predicate as the QP. Each
+    Termination uses the same homogeneous primal predicate as the QP, and
+    each sweep repairs the row with the most negative relative slack. Each
     repaired row is normalized before its squared norm is formed, preserving
     the projection under tiny or large constraint units. A violated zero row
     is impossible to repair and leaves an uncertified candidate. Exhaustion
@@ -713,7 +714,9 @@ def _project_feasible(beta: NDArray, A: NDArray, b: NDArray, tol: float) -> NDAr
         slack = np.divide(violations, scale, out=np.zeros_like(violations), where=scale > 0.0)
         if slack.min() >= -tol - _roundoff_tolerance(A.shape[1]):
             break
-        worst = int(np.argmin(violations))
+        # Rank by the unit-free slack: exceptional rows carry their own
+        # power-of-two units, so raw ``violations`` are not comparable.
+        worst = int(np.argmin(slack))
         # Project onto the violated constraint: a^T x >= b_i
         a = A[worst]
         row_scale = float(np.max(np.abs(a), initial=0.0))
