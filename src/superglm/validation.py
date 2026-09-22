@@ -641,6 +641,11 @@ def _gini_coefficients(
 
 def _normalized_gini(y_obs, y_pred, sample_weight=None) -> float:
     """Return a stable, tie-collapsed Gini ratio without creating a plot."""
+    # Unlike lorenz_curve, this scorer entry has no validated boundary, and a
+    # NaN target or weight would otherwise collapse to a plausible zero score.
+    operands = (y_obs,) if sample_weight is None else (y_obs, sample_weight)
+    if not all(np.all(np.isfinite(_ensure_array(value))) for value in operands):
+        raise ValueError("Gini coefficients must be finite")
     return _gini_coefficients(y_obs, y_pred, sample_weight)[2]
 
 

@@ -1766,6 +1766,38 @@ class TestGiniScorer:
         )
         assert all(np.isfinite(result.fold_scores["gini"]))
 
+    @pytest.mark.parametrize(
+        ("y", "sample_weight"),
+        [
+            ([0.0, np.nan, 3.0], None),
+            ([0.0, np.inf, 3.0], None),
+            ([0.0, 1.0, 3.0], [1.0, np.nan, 1.0]),
+            ([0.0, 1.0, 3.0], [1.0, np.inf, 1.0]),
+        ],
+    )
+    def test_gini_refuses_nonfinite_target_or_weight(self, y, sample_weight):
+        model = self._PredictionOnlyModel([0.1, 0.4, 0.9])
+
+        with pytest.raises(ValueError, match="Gini coefficients must be finite"):
+            _score_gini(model, None, np.array(y), sample_weight=sample_weight)
+
+    def test_nan_holdout_target_fails_the_gini_fold(self, poisson_data, base_model, caplog):
+        """A NaN target only in the holdout must not score as a plausible zero."""
+        df, y, _ = poisson_data
+        y = y.copy()
+        y[-1] = np.nan
+
+        class Holdout:
+            @staticmethod
+            def split(X, y=None, groups=None):
+                del y, groups
+                yield np.arange(len(X) - 50), np.arange(len(X) - 50, len(X))
+
+        result = cross_validate(base_model, df, y, cv=Holdout(), scoring="gini")
+
+        assert np.isnan(result.fold_scores["gini"]).all()
+        assert "Gini coefficients must be finite" in caplog.text
+
 
 class TestScorerEdgeCases:
     def test_dict_scorer_reserved_key_raises(self, poisson_data, base_model):
