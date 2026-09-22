@@ -146,6 +146,13 @@ def _two_sum(left, right):
 _ORDINARY_RANGE = 1022 // 5 - 52
 
 
+def _live_rows(mass, columns):
+    """Zero every column on rows without mass: they contribute nothing, so
+    they must not widen a column's range check."""
+    live = np.logical_and.reduce([column != 0 for column in mass])
+    return tuple(np.where(live, column, 0.0) for column in columns)
+
+
 def _ordinary_scaling(columns):
     """Exactly rescaled operand columns and their power-of-two shifts.
 
@@ -228,7 +235,7 @@ def _scaled_product_sums(
     compensated error of about one ulp. Snapshots do not alter state.
     """
     factors = (left, right) if exposure is None else (left, right, exposure)
-    scaled, shifts = _ordinary_scaling(factors)
+    scaled, shifts = _ordinary_scaling(_live_rows(factors, factors))
     mantissa, exponent = np.frexp(_ordinary_product_sums(scaled, ends))
     return mantissa, exponent + sum(shifts)
 
@@ -464,7 +471,8 @@ def _weighted_pair_concordance(
     else:
         order, starts = score_order
     factors = (weights, target) if exposure is None else (weights, target, exposure)
-    scaled, shifts = _ordinary_scaling(factors)
+    mass = factors[:1] + factors[2:]
+    scaled, shifts = _ordinary_scaling(_live_rows(mass, factors))
     scaled_target, minimum = scaled[1], np.min(scaled[1])
     # Pair differences ignore a common shift. Centring an almost-constant
     # target keeps its differences from cancelling, and there Sterbenz's
@@ -499,8 +507,25 @@ def _gini_coefficients(
     perfect = _weighted_pair_concordance(
         y_obs, weights, y_obs, exposure=exposure, score_order=perfect_order
     )
-    if perfect[0] <= 0:
+    # Each compensated prefix is within gamma_n**2 * W of its exact value
+    # (Ogita, Rump and Oishi 2005, Proposition 4.5); three enter every
+    # coefficient and the products are exact, so the contraction is within
+    # 3 * gamma_n**2 * W * sum|w*y|, rounded up to 4. Constant targets give an
+    # exact zero; any other perfect ordering below the bound is unresolvable.
+    live = weights != 0 if exposure is None else (weights != 0) & (exposure != 0)
+    if np.ptp(y_obs[live]) == 0:
         return 0.0, 0.0, 0.0
+    signed = np.min(y_obs[live]) < 0
+    magnitude = (
+        _scaled_product_total(weights, np.abs(y_obs), exposure=exposure) if signed else total_loss
+    )
+    count = len(y_obs) * np.finfo(float).eps / 2
+    floor = 4 * (count / (1 - count)) ** 2 * total_weight[0] * magnitude[0]
+    if (
+        perfect[0] <= 0
+        or _scaled_ratio(perfect, (floor, total_weight[1] + magnitude[1]), "Gini ratio") <= 1
+    ):
+        raise ValueError("Gini weights span too widely for a resolvable float64 contraction")
     model = _weighted_pair_concordance(
         y_pred, weights, y_obs, exposure=exposure, score_order=model_order
     )

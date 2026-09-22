@@ -21,14 +21,16 @@ def test_centered_moments_do_not_overflow_the_outer_product(monkeypatch):
     np.testing.assert_allclose(result, [[3e200]], rtol=4 * np.finfo(float).eps, atol=0)
 
 
-def test_weighted_mean_refuses_weights_spanning_the_binary64_range(monkeypatch):
+def test_weighted_mean_retains_representable_extreme_contribution(monkeypatch):
     from superglm.validation import _weighted_mean
 
     monkeypatch.setattr(np, "longdouble", np.float64)
     maximum, smallest = np.finfo(float).max, np.nextafter(0.0, 1.0)
-    # Weights spanning the whole binary64 range are refused, not rounded.
-    with pytest.raises(ValueError, match="validation inputs must span at most"):
-        _weighted_mean(np.array([0.0, maximum]), np.array([maximum, smallest]), "test")
+    # The maximum weight sits on a zero value, so only the smallest weight's
+    # product enters the numerator and the column ranges stay representable.
+    assert (
+        _weighted_mean(np.array([0.0, maximum]), np.array([maximum, smallest]), "test") == smallest
+    )
 
 
 def test_scop_roundoff_scales_before_squaring_large_actions(monkeypatch):

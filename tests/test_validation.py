@@ -1464,13 +1464,7 @@ def test_one_extreme_loss_or_exposure_is_unit_invariant():
 @pytest.mark.parametrize(
     "reduce",
     [
-        # Weights spanning the full binary64 range, with and without values.
-        lambda: lift_chart(
-            [0.0, np.finfo(float).max],
-            [0.0, np.finfo(float).max],
-            sample_weight=[np.finfo(float).max, np.nextafter(0.0, 1.0)],
-            n_bins=1,
-        ),
+        # Weights spanning the full binary64 range on rows that carry mass.
         lambda: lift_chart(
             [np.nextafter(2.0, 0.0), np.nextafter(0.0, 1.0)],
             [np.nextafter(2.0, 0.0), np.nextafter(0.0, 1.0)],
@@ -1502,3 +1496,26 @@ def test_validation_refuses_columns_beyond_the_reduction_range(reduce):
     # large factor makes significant, so such inputs are refused, not rounded.
     with pytest.raises(ValueError, match="validation inputs must span at most"):
         reduce()
+
+
+def test_rows_without_mass_do_not_widen_the_range_check():
+    from superglm.validation import _normalized_gini
+
+    # The 1e100 target has zero weight, so it contributes nothing and must not
+    # trigger the column-span refusal.
+    with_outlier = _normalized_gini(
+        np.array([1.0, 2.0, 1e100]), np.array([0.0, 1.0, 2.0]), np.array([1.0, 1.0, 0.0])
+    )
+    without = _normalized_gini(np.array([1.0, 2.0]), np.array([0.0, 1.0]), np.array([1.0, 1.0]))
+    assert with_outlier == without == 1.0
+
+
+def test_unresolvable_gini_contraction_is_refused_not_zero():
+    from superglm.validation import _normalized_gini
+
+    # A perfect ordering whose pair mass lies below the compensated
+    # contraction's error bound must not be reported as a Gini of zero.
+    weights = np.array([2.0**-133, 2.0**-125, 2.0**-61, 2.0**-1])
+    y = np.array([0.0, 0.0, 2.0, 2.0])
+    with pytest.raises(ValueError, match="resolvable float64 contraction"):
+        _normalized_gini(y, np.array([0.0, 0.0, 1.0, 2.0]), weights)
