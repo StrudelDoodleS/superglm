@@ -1,7 +1,7 @@
 """Compact all-level matrix tests for random effects."""
 
+import ast
 import inspect
-import re
 
 import numpy as np
 import pytest
@@ -34,13 +34,18 @@ def test_group_matrix_warmup_calls_every_module_owned_dispatcher_directly() -> N
     # A caller loaded from numba's on-disk cache links its jitted callees
     # without compiling their dispatchers, so the test above passes on a cold
     # cache even when the warmup reaches a kernel only through another one.
-    source = inspect.getsource(group_kernels._warmup_group_matrix_kernels)
+    tree = ast.parse(inspect.getsource(group_kernels._warmup_group_matrix_kernels))
+    called = {
+        getattr(node.func, "id", getattr(node.func, "attr", None))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    }
     indirect = [
         name
         for name, value in vars(group_kernels).items()
         if isinstance(value, CPUDispatcher)
         and value.py_func.__module__ == group_kernels.__name__
-        and not re.search(rf"\b{name}\(", source)
+        and name not in called
     ]
     assert not indirect
 

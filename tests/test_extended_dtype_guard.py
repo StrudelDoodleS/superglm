@@ -27,7 +27,9 @@ EXTENDED = frozenset(
 
 
 # NumPy's character codes for the same types. One-letter strings are common
-# elsewhere (plot colours), so codes count only where a dtype is expected.
+# elsewhere (plot colours), so codes count only in dtype= keywords and in the
+# positional arguments of NumPy calls and .astype(). A code-like argument
+# that is not a dtype, as in np.where(mask, "g", "r"), fails loudly.
 CODES = frozenset({"g", "G", "f12", "f16", "c24", "c32"})
 
 
