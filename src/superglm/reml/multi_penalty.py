@@ -685,7 +685,7 @@ def _candidate_product(left: NDArray, right: NDArray) -> NDArray | None:
             return None
     # Normal binary64 operands/products and any addressable inner dimension
     # fit safely in this envelope. Accuracy here only changes the proposed C.
-    return np.asarray(left, dtype=float) @ np.asarray(right, dtype=float)
+    return left @ right
 
 
 def _direct_candidate(
