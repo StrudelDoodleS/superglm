@@ -9,6 +9,8 @@ import ast
 from itertools import chain
 from pathlib import Path
 
+import pytest
+
 SOURCE = Path(__file__).parents[1] / "src" / "superglm"
 EXTENDED = frozenset(
     {
@@ -76,3 +78,20 @@ def test_source_references_no_extended_dtype() -> None:
     assert paths
     offenders = list(chain.from_iterable(map(_extended_references, paths)))
     assert not offenders, f"extended dtypes are platform-dependent: {offenders}"
+
+
+@pytest.mark.parametrize(
+    ("source", "codes"),
+    [
+        ('np.asarray(x, "g")', ["g"]),
+        ('np.zeros(n, "f16")', ["f16"]),
+        ('np.finfo("g")', ["g"]),
+        ('np.dtype("G")', ["G"]),
+        ('x.astype("<g")', ["g"]),
+        ('np.empty(3, dtype="c32")', ["c32"]),
+        ('ax.plot(x, "g")', []),
+        ('dict(color="g")', []),
+    ],
+)
+def test_dtype_codes_are_read_where_numpy_expects_a_dtype(source, codes) -> None:
+    assert _names(ast.parse(source, mode="eval").body) == codes
