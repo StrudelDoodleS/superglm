@@ -52,10 +52,21 @@ jobs:
           git config --local --add credential.helper ""
           git config --local --add credential.helper "${helper_path}"
 
+      # Review with the newest Claude Code rather than the version the action
+      # bundles, so newly released models work without waiting for a release.
+      - name: Install latest Claude Code
+        id: claude-code
+        shell: bash
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          "${HOME}/.local/bin/claude" --version
+          echo "path=${HOME}/.local/bin/claude" >> "${GITHUB_OUTPUT}"
+
       - name: Run Claude PR review
         id: claude
-        uses: anthropics/claude-code-action@56cf60fde42f7b19c3abfd5c9c48b69a1288461f # v1
+        uses: anthropics/claude-code-action@9ca9355b36297178e28d37c799d1c9c8a28e6507 # v1 (main)
         with:
+          path_to_claude_code_executable: ${{ steps.claude-code.outputs.path }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Avoid embedding the Claude App token in the Git remote. Commit tools stay denied.
           use_commit_signing: true
@@ -78,8 +89,8 @@ jobs:
             issues: write
             actions: read
           claude_args: |
-            --model "claude-opus-5"
-            --effort "max"
+            --model "claude-opus-5-5"
+            --effort "xhigh"
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Bash,Edit,Write,MultiEdit,NotebookEdit,Agent,Task,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
             --append-system-prompt "Act only as a code reviewer. Do not modify files, create commits, or push branches. Return review feedback through PR comments only."
