@@ -109,66 +109,15 @@ class LossRatioChartResult:
 # ── Private helpers ──────────────────────────────────────────────
 
 
-def _round_scaled(integer: int, base: int) -> tuple[float, int]:
-    """Round integer * 2**base once to 53 bits, keeping an unbounded exponent.
-
-    Dividing out a power of two leaves at most 64 significant bits in the
-    normal range, where integer true division rounds correctly to nearest
-    even (bpo-1811); the power of two is then restored exactly.
-    """
-    shift = max(abs(integer).bit_length() - 64, 0)
-    mantissa, exponent = math.frexp(integer / (1 << shift))
-    return mantissa, exponent + shift + base
-
-
 def _scaled_ratio(numerator, denominator, name: str) -> float:
-    """Round the quotient of two range-scaled values once, subnormals included.
-
-    Each significand, a float or an exact integer, is an integer ratio, so
-    one integer true division rounds the exact quotient. A float quotient
-    rescaled by ldexp would round a subnormal result a second time.
-    """
+    """Quotient of two (significand, exponent) pairs, refused if it overflows."""
     if denominator[0] == 0:
         return float("nan")
-    top, top_scale = numerator[0].as_integer_ratio()
-    bottom, bottom_scale = denominator[0].as_integer_ratio()
-    power = int(numerator[1]) - int(denominator[1])
-    try:
-        return (top * bottom_scale << max(power, 0)) / (bottom * top_scale << max(-power, 0))
-    except OverflowError:
-        raise ValueError(f"{name} must be finite") from None
-
-
-def _exact_terms(*factors: NDArray) -> tuple[NDArray, int]:
-    """Exact row products as Python integers over one shared power of two.
-
-    A finite binary64 value is an integer below 2**53 times a power of two,
-    so a row product is an integer at the summed power. Shifting every row
-    to the smallest power turns later sums into exact integer sums: the long
-    accumulator of Kulisch and Miranker (1984) and Neal (arXiv:1505.05571),
-    with a Python integer as the register. NumPy has no wider integer dtype,
-    so rows are object arrays, whose ufunc loops still run in C.
-    """
-    significand = np.ones(len(factors[0]), dtype=object)
-    power = np.zeros(len(factors[0]), dtype=np.int64)
-    for factor in factors:  # the two or three operands of one reduction
-        mantissa, exponent = np.frexp(factor)
-        significand = significand * np.ldexp(mantissa, 53).astype(np.int64).astype(object)
-        power += exponent - 53
-    nonzero = significand != 0
-    base = int(np.min(power, where=nonzero, initial=0))
-    return significand << np.where(nonzero, power - base, 0).astype(object), base
-
-
-def _exact_prefix_sums(factors, ends) -> tuple[NDArray, NDArray]:
-    """Exact prefix sums of row products at ends, each rounded once."""
-    terms, base = _exact_terms(*factors)
-    # One cumsum carries the exact state. Python integers expose no
-    # vectorised bit length, so each reported prefix rounds in its own call.
-    mantissa, exponent = zip(
-        *(_round_scaled(prefix, base) for prefix in np.cumsum(terms)[ends - 1]), strict=True
-    )
-    return np.array(mantissa), np.array(exponent, dtype=np.int64)
+    with np.errstate(over="ignore", under="ignore"):
+        result = float(np.ldexp(numerator[0] / denominator[0], numerator[1] - denominator[1]))
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
 
 
 def _two_product(left: float, right: float) -> tuple[float, float]:
@@ -198,19 +147,21 @@ _ORDINARY_RANGE = 1022 // 5 - 52
 
 
 def _ordinary_scaling(columns):
-    """Exactly rescaled operand columns and their power-of-two shifts, or None.
+    """Exactly rescaled operand columns and their power-of-two shifts.
 
-    Only the dynamic range within each column decides, never its units.
+    Only the dynamic range within each column decides, never its units. A
+    wider column is refused: flushing its small entries could drop a term
+    that another column's large factor makes significant.
     """
-    if (len(columns[0]) + 8) * np.finfo(float).eps > 0.5:
-        return None
     scaled, shifts = [], []
     for column in columns:  # the two or three operands of one reduction
         mantissa, exponent = np.frexp(column)
         top = math.frexp(max(column.max(), -column.min()))[1]
         lowest = np.min(exponent, where=mantissa != 0, initial=top)
         if lowest < top - _ORDINARY_RANGE:
-            return None
+            raise ValueError(
+                f"validation inputs must span at most 2**{_ORDINARY_RANGE} within a column"
+            )
         scaled.append(column if top == 1 else np.ldexp(column, 1 - top))
         shifts.append(top - 1)
     return scaled, shifts
@@ -237,29 +188,22 @@ def _ordinary_product_terms(left, right, exposure=None):
 
 
 def _ordinary_prefix_parts(terms):
-    """Keep unrounded prefix corrections, with an enclosure of the remainder.
+    """Compensated prefix sums: the running sum and its accumulated errors.
 
     Each add.accumulate prefix plus the exact prefix of its TwoSum errors
-    equals the exact input prefix. Recover the correction pass's errors too:
-    only their absolute sum is bounded, never a guessed rounding residual.
+    equals the exact prefix of the first term. The remaining terms join the
+    correction, so high + correction is a double-length prefix (Ogita, Rump
+    and Oishi, SIAM J. Sci. Comput. 26(6), 2005, Algorithm 4.4).
     """
     high = np.add.accumulate(terms[0])
     _, low = _two_sum(np.r_[0.0, high[:-1]], terms[0])
-    remainder = np.zeros_like(high)
-    for term in terms[1:]:
-        low, error = _two_sum(low, term)
-        remainder += np.abs(error)
-    correction = np.add.accumulate(low)
-    _, error = _two_sum(np.r_[0.0, correction[:-1]], low)
-    remainder = np.add.accumulate(remainder + np.abs(error))
-    # Positive-sum enclosure: at most n+8 rounded additions per entry.
-    # For (n+8)*eps <= 1/2, 1/(1-gamma_(n+8)) <= 1+(n+8)*eps.
-    error_bound = (1 + 2 * (len(high) + 8) * np.finfo(float).eps) * remainder
-    return high, correction, error_bound
+    for term in terms[1:]:  # the product residuals, at most three
+        low = low + term
+    return high, np.add.accumulate(low)
 
 
 def _ordinary_product_sums(factors, ends):
-    """Certified 53-bit prefix sums of rescaled row products at ends, or None.
+    """Compensated prefix sums of rescaled row products at ends.
 
     Dekker's TwoProduct is exact on the rescaled columns: their products,
     splitter products and nonzero residuals are all normal binary64 values.
@@ -271,36 +215,22 @@ def _ordinary_product_sums(factors, ends):
         nonzero = np.logical_and.reduce([factor != 0 for factor in factors])
         terms = _ordinary_product_terms(*(factor[nonzero] for factor in factors))
         return np.array([math.fsum(chain.from_iterable(term.tolist() for term in terms))])
-    terms = _ordinary_product_terms(*factors)
-    high, low, error = _ordinary_prefix_parts(terms)
-    rounded, residual = _two_sum(high[ends - 1], low[ends - 1])
-    error = error[ends - 1]
-    upper = (np.nextafter(rounded, np.inf) - rounded) / 2
-    lower = (rounded - np.nextafter(rounded, -np.inf)) / 2
-    certified = (error == 0) | (
-        (np.nextafter(residual + error, np.inf) < upper)
-        & (np.nextafter(residual - error, -np.inf) > -lower)
-    )
-    return rounded if np.all(certified) else None
+    high, low = _ordinary_prefix_parts(_ordinary_product_terms(*factors))
+    return high[ends - 1] + low[ends - 1]
 
 
 def _scaled_product_sums(
     left: NDArray, right: NDArray, ends: NDArray, *, exposure: NDArray | None = None
 ):
-    """Rounded output snapshots of weighted sums, not reusable prefix operands.
+    """Weighted prefix sums at ends as (significand, exponent) snapshots.
 
-    Each snapshot is its exact prefix rounded once to 53 bits, with an
-    unbounded exponent, on the fast path and the exact path alike.
-    Snapshots do not alter state.
+    Totals are correctly rounded by math.fsum; interior prefixes carry a
+    compensated error of about one ulp. Snapshots do not alter state.
     """
     factors = (left, right) if exposure is None else (left, right, exposure)
-    scaling = _ordinary_scaling(factors)
-    if scaling is not None:
-        rounded = _ordinary_product_sums(scaling[0], ends)
-        if rounded is not None:
-            mantissa, exponent = np.frexp(rounded)
-            return mantissa, exponent + sum(scaling[1])
-    return _exact_prefix_sums(factors, ends)
+    scaled, shifts = _ordinary_scaling(factors)
+    mantissa, exponent = np.frexp(_ordinary_product_sums(scaled, ends))
+    return mantissa, exponent + sum(shifts)
 
 
 def _scaled_product_total(
@@ -393,32 +323,37 @@ def _validated_chart_inputs(
 
 
 def _weighted_mean(values: NDArray, weights: NDArray, name: str) -> float:
-    """Correctly rounded weighted mean: one division of the exact sums.
+    """Scaled numerator over fsum(weights), within the weighted values' hull.
 
-    Rounding to nearest is monotone and the extreme weighted values are
-    floats, so the result cannot leave their hull and needs no clamp.
+    Both sums are correctly rounded, so the quotient is within 2 ulps.
     """
     total_weight = math.fsum(np.asarray(weights, dtype=float).tolist())
     if total_weight <= 0 or not np.isfinite(total_weight):
         raise ValueError(f"{name} weights must have a finite positive total")
-    numerator, numerator_base = _exact_terms(values, weights)
-    denominator, denominator_base = _exact_terms(weights)
-    return _scaled_ratio(
-        (int(np.sum(numerator)), numerator_base),
-        (int(np.sum(denominator)), denominator_base),
-        f"{name} weighted mean",
-    )
+    numerator = _scaled_product_total(values, weights)
+    if numerator[0] == 0.0:
+        # Exact zero has no comparison exponent and is already in the hull.
+        return 0.0
+    denominator, power = math.frexp(total_weight)
+    mean, shift = math.frexp(numerator[0] / denominator)
+    exponent = numerator[1] - power + shift
+    # Only rows with weight enter the mean, so only they bound it.
+    weighted = values[weights != 0]
+    minimum, maximum = float(np.min(weighted)), float(np.max(weighted))
+    # Compare the hull in the mean's units before reconstructing it, so a
+    # mean near the float64 limits neither overflows nor underflows here.
+    with np.errstate(over="ignore", under="ignore"):
+        lower, upper = np.ldexp([minimum, maximum], -exponent)
+    if mean <= lower:
+        return minimum
+    if mean >= upper:
+        return maximum
+    return _scaled_ratio((mean, exponent), (1.0, 0), f"{name} weighted mean")
 
 
 def _weighted_total(values: NDArray, weights: NDArray, name: str) -> float:
     """Refuse an overflowing result after range-safe products and cancellation."""
-    total = _scaled_product_total(values, weights)
-    if total[1] <= -1022:
-        # Below 2**-1022 binary64 keeps fewer than 53 bits, and a 53-bit total
-        # can sit on one of their midpoints: round the exact sum instead.
-        terms, base = _exact_terms(values, weights)
-        total = int(np.sum(terms)), base
-    return _scaled_ratio(total, (1.0, 0), f"{name} weighted total")
+    return _scaled_ratio(_scaled_product_total(values, weights), (1.0, 0), f"{name} weighted total")
 
 
 def _finite_ratio(numerator: float, denominator: float, name: str) -> float:
@@ -485,37 +420,24 @@ def _lorenz_cumulative_by_score(
 
 
 def _ordinary_pair_concordance(order, starts, weights, target, exposure):
-    """Certify the tie-block contraction without rounding its prefix operands."""
+    """Tie-block contraction on compensated prefixes, summed by math.fsum."""
     w, t = weights[order], target[order]
     weight_terms = (w,) if exposure is None else _ordinary_product_terms(w, exposure[order])
-    high, low, bound = _ordinary_prefix_parts(weight_terms)
-    high, low, bound = (np.r_[0.0, part] for part in (high, low, bound))
+    high, low = (np.r_[0.0, part] for part in _ordinary_prefix_parts(weight_terms))
     ends = np.append(starts[1:], len(order))
     # For every row in a score block, W_before - W_after equals
     # W_before + W_through - W_total. Excluding the whole block removes ties.
     coefficient, first = _two_sum(high[starts], high[ends])
     coefficient, second = _two_sum(coefficient, -high[-1])
-    correction, rounding = _two_sum(first, second)
-    radius = np.abs(rounding)
-    for term in (low[starts], low[ends], -low[-1]):
-        correction, rounding = _two_sum(correction, term)
-        radius += np.abs(rounding)
-    eps = np.finfo(float).eps
-    radius = (1 + 16 * eps) * (radius + bound[starts] + bound[ends] + bound[-1])
+    correction = first + second + low[starts] + low[ends] - low[-1]
     counts = ends - starts
-    coefficient, correction, radius = (
-        np.repeat(part, counts) for part in (coefficient, correction, radius)
-    )
+    coefficient, correction = (np.repeat(part, counts) for part in (coefficient, correction))
     # A zero target contributes no contraction, but its weight must remain
     # in the prefixes and tie blocks above.
     nonzero = t != 0
-    coefficient, correction, radius, t = (
-        part[nonzero] for part in (coefficient, correction, radius, t)
-    )
+    coefficient, correction, t = (part[nonzero] for part in (coefficient, correction, t))
     weight_terms = tuple(part[nonzero] for part in weight_terms)
     mass = tuple(value for part in weight_terms for value in _two_product(part, t) if np.any(value))
-    if not mass:
-        return 0.0, 0
     products = tuple(
         value
         for part in mass
@@ -523,46 +445,16 @@ def _ordinary_pair_concordance(order, starts, weights, target, exposure):
         for value in _two_product(part, factor)
         if np.any(value)
     )
-    # One fsum recovers a correction to a cheap initial sum, including every
-    # product residual. Its own rounding radius is only that of the correction.
-    initial = float(np.sum(products[0])) if products else 0.0
-    tail = math.fsum(chain((-initial,), chain.from_iterable(part.tolist() for part in products)))
-    value, residual = _two_sum(initial, tail)
-    magnitude = sum(np.abs(part) for part in mass)
-    error = (1 + 16 * eps) * math.fsum((radius * magnitude).tolist())
-    error = (1 + 4 * eps) * (error + (math.ulp(tail) / 2 if tail else 0.0))
-    upper = (math.nextafter(value, math.inf) - value) / 2
-    lower = (value - math.nextafter(value, -math.inf)) / 2
-    if error == 0 or (
-        math.nextafter(residual + error, math.inf) < upper
-        and math.nextafter(residual - error, -math.inf) > -lower
-    ):
-        return math.frexp(value)
-    return None
-
-
-def _exact_pair_concordance(order, starts, weights, target, exposure) -> tuple[float, int]:
-    """Exact tie-block contraction, rounded once.
-
-    A common shift of the target cancels from every pair difference, so the
-    exact integers need no centring and cannot overflow.
-    """
-    mass_factors = (weights[order],) if exposure is None else (weights[order], exposure[order])
-    mass, mass_base = _exact_terms(*mass_factors)
-    loss, loss_base = _exact_terms(*mass_factors, target[order])
-    block_mass, block_loss = (np.add.reduceat(part, starts) for part in (mass, loss))
-    before_mass, before_loss = (np.cumsum(part) - part for part in (block_mass, block_loss))
-    pairs = np.sum(before_mass * block_loss - before_loss * block_mass)
-    return _round_scaled(int(pairs), mass_base + loss_base)
+    return math.frexp(math.fsum(chain.from_iterable(part.tolist() for part in products)))
 
 
 def _weighted_pair_concordance(
     scores, weights, target, *, exposure=None, score_order=None
 ) -> tuple[float, int]:
-    """Contract retained prefix/block parts; rounded prefix snapshots are unsafe.
+    """Contract compensated prefix/block parts; rounded prefix snapshots are unsafe.
 
     For each strict-score block, add W_previous*T_block - T_previous*W_block.
-    Every block and prefix stays exact until after contraction, including
+    Prefixes keep their compensation until after contraction, including
     product residuals. Tied rows enter the prefix only after the block's
     contribution, so no within-tie pair is counted.
     """
@@ -572,24 +464,18 @@ def _weighted_pair_concordance(
     else:
         order, starts = score_order
     factors = (weights, target) if exposure is None else (weights, target, exposure)
-    scaling = _ordinary_scaling(factors)
-    if scaling is not None:
-        scaled, shifts = scaling
-        scaled_target, minimum = scaled[1], np.min(scaled[1])
-        # Pair differences ignore a common shift. Centring keeps an almost-
-        # constant target's differences within the certificate, and there
-        # Sterbenz's lemma makes y - min(y) exact; any other target stays raw,
-        # because a rounded y - min(y) would make the Gini exact only for the
-        # rounded targets.
-        if 0 < minimum and np.max(scaled_target) <= 2 * minimum:
-            scaled_target = scaled_target - minimum
-        candidate = _ordinary_pair_concordance(
-            order, starts, scaled[0], scaled_target, None if exposure is None else scaled[2]
-        )
-        if candidate is not None:
-            # Quadratic in the weight*exposure mass, linear in the target.
-            return candidate[0], candidate[1] + 2 * (shifts[0] + sum(shifts[2:])) + shifts[1]
-    return _exact_pair_concordance(order, starts, weights, target, exposure)
+    scaled, shifts = _ordinary_scaling(factors)
+    scaled_target, minimum = scaled[1], np.min(scaled[1])
+    # Pair differences ignore a common shift. Centring an almost-constant
+    # target keeps its differences from cancelling, and there Sterbenz's
+    # lemma makes y - min(y) exact; any other target stays raw.
+    if 0 < minimum and np.max(scaled_target) <= 2 * minimum:
+        scaled_target = scaled_target - minimum
+    value, power = _ordinary_pair_concordance(
+        order, starts, scaled[0], scaled_target, None if exposure is None else scaled[2]
+    )
+    # Quadratic in the weight*exposure mass, linear in the target.
+    return value, power + 2 * (shifts[0] + sum(shifts[2:])) + shifts[1]
 
 
 def _gini_coefficients(
