@@ -299,7 +299,8 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert "merge-multiple: true" in coverage_job
     assert "uv run coverage combine coverage-data" in coverage_job
     assert "uv run coverage xml -o coverage.xml" in coverage_job
-    assert "codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f" in coverage_job
+    # Pinned to a full commit; which commit is Dependabot's to move.
+    assert re.search(r"codecov/codecov-action@[0-9a-f]{40}\s", coverage_job)
 
     assert workflow.count("uv run ruff check src/ tests/") == 1
     assert workflow.count("uv run ruff format --check src/ tests/") == 1
