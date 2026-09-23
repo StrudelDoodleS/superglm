@@ -1867,30 +1867,15 @@ def _wide_frame(L, reps=6, seed=11):
     return df, slope * x + rng.normal(scale=0.5, size=n)
 
 
-def test_a_factor_above_the_dense_cap_is_scored_rather_than_refused():
+def test_a_factor_above_the_dense_cap_is_scored_rather_than_refused(monkeypatch):
     """The cap this whole module exists to remove.
 
     At the default max_cells the dense path takes a spline_cat block only to
     k = 1357, which for a width-11 spline is 124 levels.  A wider factor used
     to come back as a NaN row.
-    """
-    L = 400
-    df, y = _wide_frame(L)
-    model = SuperGLM(
-        family="gaussian", features={"g": Categorical(), "x": Spline(kind="ps", n_knots=8)}
-    )
-    model.fit_reml(df, y)
-    row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=BUDGETS).iloc[0]
-    assert row["kind"] == "spline_cat"
-    assert np.isfinite(row["z"])
-    assert np.isfinite(row["statistic"])
-    assert row["edf0"] > 16.0  # clamped: kron(S_a, I) outranks every budget
-    assert row["z"] > 0.0  # the data really does have a level-varying slope
 
-
-def test_the_wide_path_never_allocates_the_dense_blocks(monkeypatch):
-    """A pair routed structurally must not touch either thing the dense gates
-    refused it for: the ``(L, L-1)`` contrast menu, or the ``(k, k)``-wide
+    Scored structurally, the pair must also not touch either thing the dense
+    gates refused it for: the ``(L, L-1)`` contrast menu, or the ``(k, k)``-wide
     reduction the ladder would factorize.
 
     **RE-KEYED FOR ISSUE #257, AND THE RE-KEYING IS THE POINT.**  The spy used
@@ -1935,8 +1920,12 @@ def test_the_wide_path_never_allocates_the_dense_blocks(monkeypatch):
     )
     model.fit_reml(df, y)
     row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=BUDGETS).iloc[0]
-    assert np.isfinite(row["z"])
     assert calls == []
+    assert row["kind"] == "spline_cat"
+    assert np.isfinite(row["z"])
+    assert np.isfinite(row["statistic"])
+    assert row["edf0"] > 16.0  # clamped: kron(S_a, I) outranks every budget
+    assert row["z"] > 0.0  # the data really does have a level-varying slope
 
 
 def _thin_level_pair(low_weight):
