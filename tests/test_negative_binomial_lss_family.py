@@ -476,13 +476,15 @@ def test_all_zero_sample_has_a_typed_initializer_refusal() -> None:
 
 
 @pytest.mark.slow
-def test_book_shaped_nb2_fit_is_accepted_and_matches_the_aggregated_fit() -> None:
-    """2,000,000 synthetic rows with mean count 0.6 fit through the public API; the same data
-    aggregated to (cell, count) with frequency weights gives the same log-likelihood to 1e-9."""
+def test_million_cell_nb2_fit_is_accepted_and_matches_the_aggregated_fit() -> None:
+    """200,000 synthetic rows with mean count 6 carry 1.2e6 recurrence cells, above the old
+    1e6 ceiling, and fit through the public API; the same data aggregated to (cell, count)
+    with frequency weights gives the same log-likelihood to 1e-9. The book shape itself
+    (2,000,000 rows, mean 0.6) is pinned by the kernel's test_book_shaped_counts_are_accepted."""
     rng = np.random.default_rng(3)
-    n = 2_000_000
+    n = 200_000
     cell = rng.choice(np.array(["a", "b", "c"]), size=n)
-    mean = np.select([cell == "a", cell == "b"], [0.45, 0.6], 0.75)
+    mean = np.select([cell == "a", cell == "b"], [4.5, 6.0], 7.5)
     theta = np.select([cell == "a", cell == "b"], [0.7, 0.8], 1.0)
     counts = rng.negative_binomial(theta, theta / (mean + theta)).astype(np.float64)
     assert counts.sum() > 1_000_000
@@ -502,7 +504,7 @@ def test_book_shaped_nb2_fit_is_accepted_and_matches_the_aggregated_fit() -> Non
         .groupby(["cell", "count"], as_index=False)
         .size()
     )
-    assert len(aggregated) < 100
+    assert len(aggregated) < 1_000
     compact = model_from_templates(
         family=NegativeBinomialLS(),
         predictors=predictors(),
