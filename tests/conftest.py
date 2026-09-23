@@ -2,12 +2,6 @@
 
 import pytest
 
-# pytest-xdist rebuilds workers' warnings by importing their modules in one
-# receiver thread per worker. Threads that first import different
-# subpackages can deadlock on CPython's parent/child import locks and get a
-# half-initialised module, so the package is imported here, on the main thread.
-import superglm  # noqa: F401
-
 
 def pytest_addoption(parser):
     parser.addoption("--run-browser", action="store_true", help="run Playwright editor tests")
@@ -16,6 +10,16 @@ def pytest_addoption(parser):
         action="store_true",
         help="rewrite the distributional reorganisation golden record",
     )
+
+
+def pytest_configure(config):
+    # pytest-xdist rebuilds workers' warnings by importing their modules in one
+    # receiver thread per worker. Threads that first import different
+    # subpackages can deadlock on CPython's parent/child import locks and get a
+    # half-initialised module, so a parallel run imports the package here, on
+    # the main thread, before any worker starts. Serial runs skip the cost.
+    if getattr(config.option, "numprocesses", None):
+        import superglm  # noqa: F401
 
 
 def pytest_collection_modifyitems(config, items):

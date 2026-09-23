@@ -6,9 +6,11 @@ entry points and submodule import paths that the codebase still treats as
 supported.
 """
 
+import ast
 import inspect
 import subprocess
 import sys
+from pathlib import Path
 
 # ── Old paths (must keep working after moves) ──────────────────
 
@@ -238,6 +240,40 @@ def test_public_plotting_signatures_do_not_expose_private_frame_adapter():
 
     for name in plotting.__all__:
         assert "EagerFrame" not in str(inspect.signature(getattr(plotting, name))), name
+
+
+def test_import_superglm_loads_every_warning_class_module() -> None:
+    """A parallel run's conftest import must leave no warning module to import.
+
+    pytest-xdist rebuilds a worker's warning by importing the warning class's
+    module in a receiver thread. tests/conftest.py imports superglm on the
+    main thread first, which protects those threads only while ``import
+    superglm`` loads every module that defines a warning class.
+    """
+    root = Path(__file__).parents[1] / "src"
+    sources = {path: path.read_text(encoding="utf-8") for path in (root / "superglm").rglob("*.py")}
+    modules = sorted(
+        ".".join(path.relative_to(root).with_suffix("").parts).removesuffix(".__init__")
+        for path, text in sources.items()
+        # Parse only files that can define one: parsing all of them takes 1.5 s.
+        if "Warning" in text
+        and any(
+            isinstance(node, ast.ClassDef)
+            and any(
+                getattr(base, "id", getattr(base, "attr", "")).endswith("Warning")
+                for base in node.bases
+            )
+            for node in ast.walk(ast.parse(text))
+        )
+    )
+    assert modules
+    script = f"import sys, superglm; print([m for m in {modules!r} if m not in sys.modules])"
+    completed = subprocess.run(
+        [sys.executable, "-c", script], check=False, capture_output=True, text=True
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "[]"
 
 
 def test_pandas_fit_does_not_import_optional_polars_backend():
