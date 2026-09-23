@@ -490,6 +490,14 @@ def test_the_suite_runner_writes_stage_two_junit_beside_stage_one(junit: list[st
     ]
 
 
+def test_the_pytest_config_names_no_junit_report() -> None:
+    """The runner renames reports named on its command line or in PYTEST_ADDOPTS only;
+    one named in the config would reach both stages, and stage 2's would replace stage 1's."""
+    config = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    addopts = shlex.split(config["tool"]["pytest"]["ini_options"]["addopts"])
+    assert not any(arg.startswith(_suite_runner().JUNIT_OPTIONS) for arg in addopts)
+
+
 @pytest.mark.parametrize(
     ("codes", "expected"),
     [

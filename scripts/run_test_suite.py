@@ -15,12 +15,14 @@ Every other argument goes to both stages; no ``--`` separator is needed, so
 the same command line works under PowerShell. Select tests with ``-m`` or
 ``-k``: the runner always runs ``tests/``, so file paths are not supported.
 A junit report from stage 2 is written beside stage 1's (``-threads``
-suffix), whether named here or in ``PYTEST_ADDOPTS`` (one set in the pytest
-config file would be overwritten; this repository's sets none), and coverage from stage 2 is appended to stage 1's. Both stages
-need the ``dev`` extra's plugins loaded: both pass ``-n``, which
-pytest-xdist defines, and stage 2 also passes ``--cov-append``, which
-pytest-cov defines. Neither stage inherits ``SUPERGLM_BLAS_THREADS``, so
-the solver's BLAS cap follows its automatic policy throughout.
+suffix), whether it is named here or in ``PYTEST_ADDOPTS``. One named in
+the pytest config file is not renamed, so stage 2 would overwrite stage
+1's; this repository's config names none. Coverage from stage 2 is
+appended to stage 1's. Both stages need the ``dev`` extra's plugins
+loaded: both pass ``-n``, which pytest-xdist defines, and stage 2 also
+passes ``--cov-append``, which pytest-cov defines. Neither stage inherits
+``SUPERGLM_BLAS_THREADS``, so the solver's BLAS cap follows its automatic
+policy throughout.
 """
 
 from __future__ import annotations
