@@ -845,6 +845,19 @@ def test_series_prepares_log_gamma_coefficients_only_when_first_needed() -> None
                 np.testing.assert_equal(summary, baselines[case_id, derivative_order])
                 assert int(coefficients[10]) == expected_fills
 
+    # The restore must also put this process back on production code, which its disk-cache
+    # guard cannot see: the crossing case fills once, so a counting stand-in still live
+    # here would raise the spare slot to one.
+    crossing = next(case for case in cases if case[0] == "noninteger-crosses-threshold")
+    _, zeta, inverse_r, alpha, max_terms, _, fills = crossing
+    assert fills == 1
+    coefficients = np.empty(11, dtype=np.float64)
+    coefficients[10] = 0.0
+    compiled_module._series_summary(
+        zeta, 0.25, -0.125, inverse_r, alpha, 0, max_terms, 37.0, coefficients
+    )
+    assert coefficients[10] == 0.0
+
 
 def test_series_reuses_mode_boundary_ratios_for_first_window_steps() -> None:
     compiled_module = tweedie_kernel._compiled
