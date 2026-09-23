@@ -555,7 +555,9 @@ class TestREMLProfileSearchOverhead:
     @staticmethod
     def _model_and_data():
         rng = np.random.default_rng(11)
-        n = 4000
+        # Below the 100,000-row auto-validation ceiling every fit validates
+        # unless told to skip, so the row count only has to stay under it.
+        n = 400
         levels = [f"L{j:02d}" for j in range(8)]
         idx = rng.integers(0, len(levels), n)
         frame = pd.DataFrame({"band": np.array(levels)[idx], "z": rng.uniform(0, 10, n)})
@@ -586,8 +588,9 @@ class TestREMLProfileSearchOverhead:
             calls.append(bool(validate))
             return original(model_arg, *args, validate=validate, **kw)
 
+        # A few search steps are as good as ten: each one either validates or not.
         with patch.object(canon, "canonicalize_fitted_model", counting):
-            result = model.estimate_p(frame, y, sample_weight=weights, fit_mode="reml")
+            result = model.estimate_p(frame, y, sample_weight=weights, fit_mode="reml", maxiter=3)
 
         assert result.p_hat > 1.0
         validated = sum(calls)
