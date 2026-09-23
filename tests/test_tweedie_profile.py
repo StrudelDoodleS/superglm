@@ -3361,16 +3361,35 @@ class TestDecoupledSearchFitMode:
         assert decoupled.p_hat == pytest.approx(searched.p_hat)
         assert decoupled.phi_hat != pytest.approx(searched.phi_hat, rel=1e-12)
 
-    def test_default_leaves_the_coupled_reml_path_unchanged(self):
+    def test_a_coupled_run_defaults_reprofiles_and_still_inverts(self, subtests):
+        """Three properties of a coupled REML run, checked on one search.
+
+        The search is the expensive part, and each of these used to pay for
+        its own copy of the same one.
+        """
         X, y, sample_weight, offset = _offset_spline_tweedie_data()
-        kwargs = {"sample_weight": sample_weight, "offset": offset, "fit_mode": "reml"}
+        result = self._reml_model().estimate_p(
+            X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml"
+        )
 
-        coupled = self._reml_model().estimate_p(X, y, **kwargs)
-        defaulted = self._reml_model().estimate_p(X, y, search_fit_mode=None, **kwargs)
+        with subtests.test("the default leaves the coupled REML path unchanged"):
+            # An omitted search_fit_mode resolves to the publication mode.  A
+            # second call spelling search_fit_mode=None, as this used to make,
+            # takes the same code path and can only agree; the resolved mode is
+            # what a wrong default would change.
+            assert result.search_fit_mode == result.fit_mode == "fit_reml"
 
-        assert defaulted.p_hat == pytest.approx(coupled.p_hat, rel=1e-12)
-        assert defaulted.phi_hat == pytest.approx(coupled.phi_hat, rel=1e-12)
-        assert defaulted.search_fit_mode == "fit_reml"
+        with subtests.test("a coupled search also reprofiles against its publication"):
+            # The publication refit runs at the tight publication tolerance
+            # while candidates ran at the search bar, so the published
+            # dispersion is re-profiled in coupled mode too; the searched value
+            # stays behind as the reference the CI and plots measure against.
+            assert result.search_nll is not None
+            assert result._profile_reference_nll() == result.search_nll
+
+        with subtests.test("the lazy CI works when search and publication agree"):
+            lower, upper = result.ci(alpha=0.05)
+            assert lower < result.p_hat < upper
 
     def test_invalid_search_fit_mode_is_rejected(self):
         X, y, sample_weight, offset = _offset_spline_tweedie_data()
@@ -3409,15 +3428,6 @@ class TestDecoupledSearchFitMode:
         result._ci_cache.clear()
         with pytest.raises(RuntimeError, match="does not carry the searched objective"):
             result.ci(alpha=0.05)
-
-    def test_lazy_ci_still_works_when_search_and_publication_agree(self):
-        X, y, sample_weight, offset = _offset_spline_tweedie_data()
-        model = self._reml_model()
-
-        result = model.estimate_p(X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml")
-        lower, upper = result.ci(alpha=0.05)
-
-        assert lower < result.p_hat < upper
 
 
 class TestDecoupledSearchConfidenceInterval:
@@ -3484,19 +3494,6 @@ class TestDecoupledSearchConfidenceInterval:
         result = self._decoupled()
 
         assert result._profile_reference_nll() != result.nll
-
-    def test_a_coupled_search_also_reprofiles_against_its_publication(self):
-        X, y, sample_weight, offset = _offset_spline_tweedie_data()
-        model = self._reml_model()
-
-        result = model.estimate_p(X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml")
-
-        # The publication refit runs at the tight publication tolerance while
-        # candidates ran at the search bar, so the published dispersion is
-        # re-profiled in coupled mode too; the searched value stays behind as
-        # the reference the CI and plots measure against.
-        assert result.search_nll is not None
-        assert result._profile_reference_nll() == result.search_nll
 
     def test_a_pre_reference_pickle_falls_back_to_the_published_value(self):
         """A result pickled before this field existed must still invert."""
