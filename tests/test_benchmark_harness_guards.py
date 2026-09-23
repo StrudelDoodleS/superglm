@@ -244,20 +244,28 @@ def _run(*args: str) -> subprocess.CompletedProcess:
     ("flag", "value"),
     [("--seed", "-1"), ("--levels", "1"), ("--rows", "1"), ("--repeats", "0")],
 )
-def test_every_flag_is_validated_at_the_flag(flag: str, value: str) -> None:
+def test_every_flag_is_validated_at_the_flag(monkeypatch, flag: str, value: str) -> None:
     """A rejected input must name the flag, not die inside a library.
 
     ``--seed -1`` used to raise eight NumPy frames deep inside ``default_rng``,
-    mentioning neither the flag nor the harness.
+    mentioning neither the flag nor the harness.  Run in process: every check
+    precedes the first fit, and a spawned script paid ~2.3 s of imports to
+    reach it.  The coupon-collector test below keeps the script-mode run.
+
+    The rejection is matched as ``<flag> must be >= <floor>``, not by the flag
+    alone: the coupon-collector floor also refuses ``--rows 1`` by name, so a
+    flag-only match still passed with the rows floor deleted.
     """
     # Do not append a second --repeats: argparse keeps the last occurrence, so
     # it would silently overwrite the value under test.
     extra = () if flag == "--repeats" else ("--repeats", "1")
-    result = _run(flag, value, *extra)
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), flag, value, *extra])
 
-    assert result.returncode != 0, f"{flag} {value} was accepted"
-    assert flag in result.stderr, (
-        f"rejection did not name {flag}; stderr was:\n{result.stderr[-500:]}"
+    with pytest.raises(SystemExit) as rejected:
+        bench.main()
+
+    assert str(rejected.value.code).startswith(f"{flag} must be >= "), (
+        f"{flag} {value} was not rejected at the flag: {rejected.value.code!r}"
     )
 
 
@@ -268,6 +276,9 @@ def test_row_floor_is_coupon_collector_not_pigeonhole() -> None:
     ``L * ln L`` draws, not ``L``.  At 41 levels the old bound accepted 82 rows,
     where 41 training draws realize roughly 26 distinct levels -- and the run
     then reported ``levels: 41``.
+
+    Run as a script on purpose: it is the one test here that reaches the file's
+    script-mode import branch (``import _platform``).
     """
     result = _run("--levels", "41", "--rows", "82", "--repeats", "1")
 
