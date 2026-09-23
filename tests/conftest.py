@@ -2,6 +2,12 @@
 
 import pytest
 
+# pytest-xdist rebuilds workers' warnings by importing their modules in one
+# receiver thread per worker. Threads that first import different
+# subpackages can deadlock on CPython's parent/child import locks and get a
+# half-initialised module, so the package is imported here, on the main thread.
+import superglm  # noqa: F401
+
 
 def pytest_addoption(parser):
     parser.addoption("--run-browser", action="store_true", help="run Playwright editor tests")
