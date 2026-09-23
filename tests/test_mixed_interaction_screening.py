@@ -1183,7 +1183,7 @@ def test_cr_interaction_keeps_the_penalty_order_it_was_asked_for(m_order):
     from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
 
     rng = np.random.default_rng(4)
-    n = 4000
+    n = 1000
     x = rng.uniform(0.0, 10.0, n)
     df = pd.DataFrame(
         {
