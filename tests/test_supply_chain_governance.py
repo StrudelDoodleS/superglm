@@ -261,8 +261,9 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     assert "ruff check" not in compatibility_job
 
     run_steps = re.findall(r"(?ms)^      - name: [^\n]+\n(.*?)(?=^      - |\Z)", compatibility_job)
-    pytest_steps = [step for step in run_steps if "pytest tests/" in step]
-    assert len(pytest_steps) == compatibility_job.count("pytest tests/") == 2
+    runner = "uv run --with mpmath python scripts/run_test_suite.py"
+    pytest_steps = [step for step in run_steps if runner in step]
+    assert len(pytest_steps) == compatibility_job.count("scripts/run_test_suite.py") == 2
     regression, coverage = pytest_steps
     # Complementary conditions make coverage replace the normal invocation.
     assert (
@@ -270,7 +271,6 @@ def test_master_ci_runs_complete_supported_python_matrix_efficiently():
     )
     assert "if: github.event_name == 'push' && matrix.runtime.python-version == '3.12'" in coverage
     for step in pytest_steps:
-        assert "uv run --with mpmath pytest tests/" in step
         assert '-m "not browser and not docs"' in step
         assert "--splits 4" in step
         assert "--group ${{ matrix.group }}" in step
@@ -320,7 +320,8 @@ def test_dev_ci_keeps_auxiliary_checks_without_duplicating_the_regression_suite(
         (path, name)
         for path in (".github/workflows/ci.yml", ".github/workflows/dev-ci.yml")
         for name, block in _jobs(_read(path)).items()
-        if re.search(r"pytest\s+tests/(?:\s|$)", block)
+        # The full suite runs as `pytest tests/` or through the shared suite runner.
+        if re.search(r"pytest\s+tests/(?:\s|$)|scripts/run_test_suite\.py", block)
     ]
     assert full_suite_jobs == [(".github/workflows/ci.yml", "test-compatibility")]
 
@@ -347,7 +348,7 @@ def test_pre_push_pytest_uses_uv_dev_environment():
     pytest_hook = config.split("- id: pytest", maxsplit=1)[1]
 
     assert (
-        'entry: uv run --extra dev python -m pytest tests/ -q -m "not slow and not docs"'
+        'entry: uv run --extra dev python scripts/run_test_suite.py -m "not slow and not docs"'
         in pytest_hook
     )
     assert "language: system" in pytest_hook

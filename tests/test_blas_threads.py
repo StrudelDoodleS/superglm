@@ -7,6 +7,10 @@ from threadpoolctl import ThreadpoolController
 
 from superglm._blas_threads import _resolve_limit, solver_blas_threads
 
+# Every test here compares BLAS pool sizes with the process's own, so each needs
+# the default multi-thread pools: scripts/run_test_suite.py runs them unpinned.
+pytestmark = pytest.mark.threads
+
 
 def _blas_thread_counts() -> list[int]:
     return [
@@ -14,6 +18,21 @@ def _blas_thread_counts() -> list[int]:
         for info in ThreadpoolController().info()
         if info.get("user_api") == "blas"
     ]
+
+
+def _visible_blas_counts() -> list[int]:
+    counts = _blas_thread_counts()
+    if not counts:
+        pytest.skip("threadpoolctl exposes no BLAS pools; thread counts cannot be verified")
+    return counts
+
+
+def _native_blas_counts() -> list[int]:
+    """The process's own BLAS pool sizes, or a skip when a cap would be invisible."""
+    counts = _visible_blas_counts()
+    if max(counts) < 2:
+        pytest.skip("BLAS pool has a single thread; a cap or its release is unobservable")
+    return counts
 
 
 def test_resolver_policy(monkeypatch):
@@ -34,9 +53,7 @@ def test_resolver_policy(monkeypatch):
 
 def test_context_caps_and_restores(monkeypatch):
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
-    before = _blas_thread_counts()
-    if not before:
-        pytest.skip("threadpoolctl exposes no BLAS pools; thread counts cannot be verified")
+    before = _native_blas_counts()
     with solver_blas_threads():
         inside = _blas_thread_counts()
         assert inside and all(count == 1 for count in inside)
@@ -45,7 +62,7 @@ def test_context_caps_and_restores(monkeypatch):
 
 def test_native_disables_capping(monkeypatch):
     monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "native")
-    before = _blas_thread_counts()
+    before = _native_blas_counts()
     with solver_blas_threads():
         assert _blas_thread_counts() == before
 
@@ -71,7 +88,7 @@ def test_wide_design_releases_auto_cap(monkeypatch):
     from superglm._blas_threads import allow_wide_design
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
-    before = _blas_thread_counts()
+    before = _native_blas_counts()
     with solver_blas_threads():
         allow_wide_design(500)
         assert all(count == 1 for count in _blas_thread_counts())
@@ -84,7 +101,7 @@ def test_wide_design_respects_explicit_cap(monkeypatch):
     from superglm._blas_threads import allow_wide_design
 
     monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "2")
-    before = _blas_thread_counts()
+    before = _visible_blas_counts()
     with solver_blas_threads():
         allow_wide_design(5_000)
         assert all(count == 2 for count in _blas_thread_counts())
@@ -108,7 +125,7 @@ def test_overlapping_scopes_restore_native_state(monkeypatch):
     import time
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
-    before = _blas_thread_counts()
+    before = _native_blas_counts()
     both_inside = threading.Barrier(2)
 
     def worker(hold_seconds):
@@ -134,7 +151,7 @@ def test_nested_wide_scope_rearms_cap_for_outer(monkeypatch):
     from superglm._blas_threads import allow_wide_design
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
-    before = _blas_thread_counts()
+    before = _native_blas_counts()
     with solver_blas_threads():
         assert all(count == 1 for count in _blas_thread_counts())
         with solver_blas_threads():
@@ -153,7 +170,7 @@ def test_entrant_during_wide_overlap_gets_capped_after_wide_exits(monkeypatch):
     from superglm._blas_threads import allow_wide_design
 
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
-    before = _blas_thread_counts()
+    before = _native_blas_counts()
     wide_entered = threading.Event()
     narrow_ready = threading.Event()
     release_wide = threading.Event()
@@ -210,7 +227,7 @@ def test_enter_failure_does_not_leak_scope_counter(monkeypatch):
     assert blas._registration is None
 
     monkeypatch.undo()
-    before = _blas_thread_counts()
+    before = _native_blas_counts()
     with solver_blas_threads():
         assert all(count == 1 for count in _blas_thread_counts())
     assert _blas_thread_counts() == before

@@ -404,6 +404,7 @@ def test_worker_failure_cancels_queued_leaves_and_joins_running_leaves(monkeypat
     assert all(not thread.is_alive() for pool in pools for thread in pool._threads)
 
 
+@pytest.mark.threads
 def test_certificate_array_reads_use_the_current_numba_worker_budget(monkeypatch):
     """The old single hash streams every payload on the caller thread."""
     problem = _problem(n=24_000)

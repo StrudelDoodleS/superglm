@@ -52,6 +52,7 @@ def _predictors(location_k: int = 12, scale_k: int = 8):
 
 
 @pytest.mark.parametrize("n", [2_000, 60_000])
+@pytest.mark.threads
 def test_narrow_fit_keeps_blas_capped_regardless_of_row_count(monkeypatch, n: int):
     monkeypatch.delenv("SUPERGLM_BLAS_THREADS", raising=False)
     native = _blas_threads()

@@ -483,7 +483,10 @@ def test_parser_accepts_worker_fixture(tmp_path: Path) -> None:
     assert args.output == output
 
 
-def test_worker_environment_forces_reproducible_single_thread_limits() -> None:
+def test_worker_environment_forces_reproducible_single_thread_limits(monkeypatch) -> None:
+    # A caller value unlike the pin, so an inherited "1" cannot pass for the override.
+    for name in benchmark_module.THREAD_ENVIRONMENT_NAMES:
+        monkeypatch.setenv(name, "8")
     environment = _worker_environment()
 
     assert environment["PYTHONHASHSEED"] == "0"
@@ -493,7 +496,9 @@ def test_worker_environment_forces_reproducible_single_thread_limits() -> None:
     assert environment["NUMBA_NUM_THREADS"] == "1"
 
 
-def test_version_metadata_identifies_machine_and_git_state() -> None:
+def test_version_metadata_identifies_machine_and_git_state(monkeypatch) -> None:
+    for name in benchmark_module.THREAD_ENVIRONMENT_NAMES:
+        monkeypatch.setenv(name, "8")
     metadata = _version_metadata(environment=_worker_environment())
 
     assert metadata["machine"]

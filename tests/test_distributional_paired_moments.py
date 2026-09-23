@@ -48,6 +48,7 @@ def _build(fixture):
 
 @pytest.mark.parametrize("threads", [1, 2, 16])
 @pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.threads
 def test_paired_targets_match_old_vectors_across_chunks_resets_and_threads(threads, mixed):
     if threads > int(getattr(config, "NUMBA_NUM_THREADS")):
         pytest.skip("requested workers exceed the configured Numba maximum")

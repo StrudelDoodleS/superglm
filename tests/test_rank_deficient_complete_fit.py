@@ -301,6 +301,7 @@ def test_timed_rank_fit_has_no_observer_and_keeps_first_use_inside_clock(monkeyp
         ("solver_repair_complete_fit", "qp", "reml"),
     ],
 )
+@pytest.mark.threads
 def test_timed_complete_fit_drivers_have_no_observer(
     monkeypatch, tmp_path, driver_name, case, mode, threads
 ):
