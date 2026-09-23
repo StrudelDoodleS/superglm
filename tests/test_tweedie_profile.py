@@ -1230,6 +1230,7 @@ class TestDetailedPhiProfile:
 
         assert not result.converged
         assert result.used_fallback
+        assert result.n_fallback_evaluations > 0
         assert result.branch_switch_detected
         assert result.optimizer == "bounded"
         assert result.objective_finite

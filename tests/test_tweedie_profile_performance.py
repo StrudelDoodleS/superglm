@@ -86,26 +86,6 @@ def _large_routine_exact_fixture() -> _PhiFixture:
     )
 
 
-def _difficult_branch_fixture() -> _PhiFixture:
-    """A deterministic branch-jump case that exercises fallback provenance."""
-    return _PhiFixture(
-        name="difficult-branch-fallback",
-        p=1.0181533410437358,
-        y=np.array([1.81787899, 11275.9262, 0.0, 0.00306563885, 0.0000232882792, 1.18207511]),
-        mu=np.array(
-            [
-                0.0000253947806,
-                44091.7359,
-                198.869667,
-                0.000051937831,
-                331.859132,
-                0.0054422757,
-            ]
-        ),
-        weights=np.array([83.2444169, 0.17590785, 2.31976211, 463.433307, 2.50852264, 0.416322332]),
-    )
-
-
 def _counted_production_profile(fixture: _PhiFixture) -> _CountedProfile:
     """Run production while counting only real vector-density cache misses."""
     real_evaluate = tweedie_module._evaluate_tweedie_density
@@ -384,14 +364,6 @@ def _benchmark_fixture(fixture: _PhiFixture, *, repeats: int) -> dict[str, objec
     }
 
 
-def run_tweedie_phi_profile_benchmark(*, repeats: int = 5) -> list[dict[str, object]]:
-    """Return repeat-median diagnostic rows for routine and difficult fixtures."""
-    return [
-        _benchmark_fixture(_routine_exact_fixture(), repeats=repeats),
-        _benchmark_fixture(_difficult_branch_fixture(), repeats=repeats),
-    ]
-
-
 def run_large_routine_phi_profile_benchmark(*, repeats: int = 3) -> dict[str, object]:
     """Characterize exact-branch density cost at a size-scaled n=3000."""
     return _benchmark_fixture(_large_routine_exact_fixture(), repeats=repeats)
@@ -436,43 +408,6 @@ def test_end_to_end_timed_mode_order_is_counterbalanced():
     )
     with pytest.raises(ValueError, match="even number.*at least four"):
         _counterbalanced_mode_orders(3)
-
-
-@pytest.mark.slow
-def test_tweedie_phi_profile_benchmark_report():
-    """Print repeat medians under ``pytest -s`` without enforcing wall time."""
-    rows = run_tweedie_phi_profile_benchmark(repeats=5)
-
-    for row in rows:
-        print(
-            "Tweedie phi benchmark "
-            f"fixture={row['fixture']} n={row['n_observations']} p={row['p']:.8g} "
-            f"phi={row['phi']:.8g} log_phi={row['log_phi']:.8g} "
-            f"NLL={row['nll']:.8g} density_passes={row['density_passes']} "
-            f"score_passes={row['score_passes']} "
-            f"value_only_passes={row['value_only_passes']} "
-            f"fallback_count={row['fallback_count']} "
-            f"saddle_fraction={row['saddle_fraction']:.6f} "
-            f"elapsed_median_s={row['elapsed_median_seconds']:.6f} "
-            f"reference_phi={row['reference_phi']:.8g} "
-            f"reference_log_phi={row['reference_log_phi']:.8g} "
-            f"reference_NLL={row['reference_nll']:.8g} "
-            f"reference_density_passes={row['reference_density_passes']} "
-            f"reference_elapsed_median_s={row['reference_elapsed_median_seconds']:.6f}"
-        )
-
-    routine, difficult = rows
-    assert routine["fixture"] == "routine-weighted-zero-exact"
-    assert routine["used_fallback"] is False
-    assert routine["converged"] is True
-    assert routine["saddle_fraction"] == 0.0
-    assert routine["density_passes"] < routine["reference_density_passes"]
-    assert routine["nll"] == pytest.approx(routine["reference_nll"], abs=1e-10)
-    assert difficult["fixture"] == "difficult-branch-fallback"
-    assert difficult["used_fallback"] is True
-    assert difficult["fallback_count"] > 0
-    assert difficult["saddle_fraction"] >= 0.0
-    assert difficult["converged"] is False
 
 
 @pytest.mark.slow
