@@ -4752,7 +4752,11 @@ class TestSearchMethods:
     @pytest.mark.slow
     def test_low_p_boundary_regression(self):
         """Low-p profiles should not spuriously prefer the lower bound."""
-        X, y, _ = _tweedie_data(n=2_200, p_true=1.25, seed=7)
+        # Exact low-p densities are what this costs.  With every row forced onto
+        # the saddlepoint -- the leak this pins -- grid and both optimisers land
+        # on the 1.10 bound at this size too; the 0.02-spaced grid leaves the
+        # 0.02 agreement bound a 0.01 margin.
+        X, y, _ = _tweedie_data(n=1_100, p_true=1.25, seed=7)
         kwargs = {"p_bounds": (1.1, 1.9), "phi_method": "mle"}
 
         grid_model = SuperGLM(
@@ -4760,7 +4764,7 @@ class TestSearchMethods:
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        grid = np.linspace(1.1, 1.9, 81)
+        grid = np.linspace(1.1, 1.9, 41)
         r_grid = estimate_tweedie_p(grid_model, X, y, method="grid", grid=grid, **kwargs)
 
         lbfgsb_model = SuperGLM(
