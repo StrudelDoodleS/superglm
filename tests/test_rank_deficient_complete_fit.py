@@ -528,16 +528,31 @@ def test_two_runs_of_the_same_configuration_are_comparable(payload: dict) -> Non
         ("--rows", "80"),
     ],
 )
-def test_a_dimension_that_cannot_run_is_refused_at_the_flag(flag: str, value: str) -> None:
-    """`--repeats 0` skipped the loop and died on `assert model is not None`."""
+def test_a_dimension_that_cannot_run_is_refused_at_the_flag(
+    flag: str, value: str, monkeypatch
+) -> None:
+    """Checked in-process: the parser is the subject, and an interpreter per
+    case paid ~2 s of imports for a check that takes a millisecond."""
+    monkeypatch.setattr(sys, "argv", [bench.__file__, flag, value])
+    with pytest.raises(SystemExit) as excinfo:
+        bench.main()
+    assert flag in str(excinfo.value.code)
+
+
+def test_the_script_refuses_a_dimension_at_its_flag() -> None:
+    """`--repeats 0` skipped the loop and died on `assert model is not None`.
+
+    Run as a script once: a reproduction command runs ``__main__`` and its
+    script-mode ``import _platform``, which no in-process call reaches.
+    """
     completed = subprocess.run(
-        [sys.executable, bench.__file__, flag, value],
+        [sys.executable, bench.__file__, "--repeats", "0"],
         capture_output=True,
         text=True,
         timeout=300,
     )
     assert completed.returncode != 0
-    assert flag in completed.stderr or flag in completed.stdout
+    assert "--repeats" in completed.stderr or "--repeats" in completed.stdout
 
 
 def test_the_artifact_on_disk_still_satisfies_its_own_invariants() -> None:
