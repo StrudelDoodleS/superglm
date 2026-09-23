@@ -101,15 +101,28 @@ def test_candidates_rejects_deferred_and_ineligible_kinds():
 
 
 def test_fitted_pairs_of_every_class_are_excluded():
-    df, rng = _mixed_frame()
+    """Exclusion keys on parent_names, so it covers every interaction class
+    rather than TensorInteraction alone: a fitted pair of any class drops out
+    of the default sweep and is refused as a candidate.  The class names are
+    pinned below: a rename or a re-dispatch that quietly stopped building one
+    of these four would otherwise leave the exclusion untested for it."""
+    # The fit is the whole cost here and nothing below reads the row count.
+    df, rng = _mixed_frame(n=2000)
     y = _null_y(df, rng)
-    model = _fit_mixed(df, y, interactions=[("region", "brand"), ("age", "region")])
+    fitted = [("age", "power"), ("age", "region"), ("region", "brand"), ("bm", "region")]
+    model = _fit_mixed(df, y, interactions=fitted)
+    assert {type(spec).__name__ for spec in model._interaction_specs.values()} == {
+        "TensorInteraction",
+        "SplineCategorical",
+        "CategoricalInteraction",
+        "NumericCategorical",
+    }
     table = model.screen_interactions(df, y)
     pairs = {frozenset((a, b)) for a, b in zip(table["feature_a"], table["feature_b"])}
-    assert frozenset(("region", "brand")) not in pairs
-    assert frozenset(("age", "region")) not in pairs
-    with pytest.raises(ValueError, match="already fitted"):
-        model.screen_interactions(df, y, candidates=[("region", "brand")])
+    assert not pairs & {frozenset(pair) for pair in fitted}
+    for pair in fitted:
+        with pytest.raises(ValueError, match="already fitted"):
+            model.screen_interactions(df, y, candidates=[pair])
 
 
 def test_oc_margin_screens_beside_its_spline_siblings():
@@ -152,26 +165,6 @@ def test_oc_margin_screens_beside_its_spline_siblings():
     # them: the pure-spline pair scores exactly what it scores on its own.
     assert swept[frozenset(("age", "power"))].z == pytest.approx(alone["z"].iloc[0])
     assert swept[frozenset(("age", "band"))].z == pytest.approx(oc_pair["z"])
-
-
-def test_fitted_pairs_of_every_class_are_rejected_as_candidates():
-    """Exclusion now keys on parent_names, so it covers every interaction
-    class rather than TensorInteraction alone.  The class names are pinned
-    below: a rename or a re-dispatch that quietly stopped building one of
-    these four would otherwise leave the exclusion untested for it."""
-    df, rng = _mixed_frame()
-    y = _null_y(df, rng)
-    fitted = [("age", "power"), ("age", "region"), ("region", "brand"), ("bm", "region")]
-    model = _fit_mixed(df, y, interactions=fitted)
-    assert {type(spec).__name__ for spec in model._interaction_specs.values()} == {
-        "TensorInteraction",
-        "SplineCategorical",
-        "CategoricalInteraction",
-        "NumericCategorical",
-    }
-    for pair in fitted:
-        with pytest.raises(ValueError, match="already fitted"):
-            model.screen_interactions(df, y, candidates=[pair])
 
 
 def test_factor_smooth_pair_is_excluded():
