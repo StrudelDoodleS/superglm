@@ -879,7 +879,10 @@ def test_cat_cat_refuses_a_block_too_wide_to_solve():
     which grows as k^2, while the per-rung factorization grows as k^3 -- so
     they admitted cat_cat blocks up to k = 4472, measured at 24s and 1.3GB per
     pair.  The cubic gate refuses on the block dimension, with the same NaN-row
-    semantics as every other budget, and `max_cells` lifts it."""
+    semantics as every other budget, and `max_cells` lifts it.  The lift is
+    pinned at k = 361 by `test_cubic_gate_leaves_ordinary_pairs_alone`, the
+    same gate at the same call site: lifting this block would decompose it at
+    k = 1720 to prove the same threshold again."""
     la, lb = 44, 41
     k = (la - 1) * (lb - 1)  # 1720, one rung above the default ceiling of 1709
     df, y = _balanced_factorial(la, lb)
@@ -898,18 +901,11 @@ def test_cat_cat_refuses_a_block_too_wide_to_solve():
     # the other pairs in the same sweep are unaffected
     assert np.isfinite(table[table["kind"] != "cat_cat"]["z"]).all()
 
-    # One unit short of the cubic budget is still a refusal ...
+    # One unit short of the cubic budget is still a refusal.
     budget = -(-(k**3) // 1000)
     short = model.screen_interactions(df, y, candidates=[("a", "b")], max_cells=budget - 1).iloc[0]
     assert np.isnan(short["z"])
     assert short["n_cells"] == la * lb
-    # ... and at the budget the same pair computes, exactly and unpenalized.
-    lifted = model.screen_interactions(df, y, candidates=[("a", "b")], max_cells=budget).iloc[0]
-    assert np.isfinite(lifted["z"])
-    assert lifted["edf0"] == pytest.approx(k, abs=0.5)  # achieved rank
-    assert lifted["lambda0"] == 0.0
-    assert lifted["n_cells"] == la * lb
-    assert not lifted["approx"]
 
 
 def test_cubic_gate_leaves_ordinary_pairs_alone():
