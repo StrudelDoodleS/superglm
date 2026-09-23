@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from dataclasses import replace
 
 import numpy as np
 import pytest
 from numba import njit  # type: ignore[import-untyped]
+from numba.core.caching import NullCache  # type: ignore[import-untyped]
+from numba.core.dispatcher import Dispatcher  # type: ignore[import-untyped]
 
 from superglm import _tweedie_profile_kernel as profile_kernel
 from tests._distributional_family_kernels import tweedie as tweedie_kernel
@@ -668,22 +671,17 @@ def test_raw_core_leaves_unrequested_derivative_channels_uncomputed() -> None:
     _assert_raw_derivative_suppression(order_two, 2)
 
 
-def test_compiled_order_zero_series_skips_all_special_function_channels(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    compiled_module = tweedie_kernel._compiled
-    original = compiled_module._term_derivative_channels
-
+def test_compiled_order_zero_series_skips_all_special_function_channels() -> None:
     @njit
     def forbidden_channels(j, zeta_p, zeta_pp, inverse_r, derivative_order):
         if j > 0:
             raise RuntimeError("order-zero special-function poison")
         return zeta_p, zeta_pp, inverse_r, float(derivative_order)
 
-    monkeypatch.setattr(compiled_module, "_term_derivative_channels", forbidden_channels)
-    compiled_module._series_summary.recompile()
     coefficients = np.empty(10, dtype=np.float64)
-    try:
+    with _compiled_with(
+        ("_series_summary",), _term_derivative_channels=forbidden_channels
+    ) as compiled_module:
         summary = compiled_module._series_summary(
             math.log(2.0),
             math.nan,
@@ -708,29 +706,73 @@ def test_compiled_order_zero_series_skips_all_special_function_channels(
                 37.0,
                 coefficients,
             )
+
+
+_POSITIVE_PATH = (
+    "_term_derivative_channels",
+    "_series_summary",
+    "_positive_row",
+    "_evaluate_tweedie_batch_row",
+    "_evaluate_tweedie_batch_core",
+)
+_SERIES_PATH = (
+    "_log_gamma_increment",
+    "_log_adjacent_ratio",
+    "_locate_series_mode",
+    "_series_summary",
+)
+
+
+@contextmanager
+def _compiled_with(recompiled: tuple[str, ...], **stand_ins):
+    """Recompile ``recompiled`` against njit stand-ins for compiled-module globals.
+
+    ``Dispatcher.recompile()`` saves to Numba's disk cache under a key hashed from
+    the caller's own bytecode only, so a stand-in compiled into a caller would be
+    loaded by every later or concurrent process, and a counting stand-in would then
+    write past production's ten-element ``coefficients``. While patched, every
+    dispatcher that can reach a stand-in, and every recompiled one, compiles without
+    its disk cache; on exit their production overloads are reloaded from the
+    untouched cache instead of recompiled. Other callees keep loading from disk.
+    """
+    compiled_module = tweedie_kernel._compiled
+    dispatchers = {
+        name: value
+        for name, value in vars(compiled_module).items()
+        if isinstance(value, Dispatcher)
+    }
+    calls = {
+        name: set(dispatcher.py_func.__code__.co_names) for name, dispatcher in dispatchers.items()
+    }
+    tainted = set(stand_ins)
+    while grown := {name for name, called in calls.items() if called & tainted} - tainted:
+        tainted |= grown
+    saved = [
+        (name, dispatchers[name], dispatchers[name]._cache, tuple(dispatchers[name].overloads))
+        for name in sorted(tainted | set(recompiled))
+    ]
+    originals = {name: getattr(compiled_module, name) for name in stand_ins}
+    for _, dispatcher, _, _ in saved:
+        dispatcher._cache = NullCache()
+    try:
+        for name, stand_in in stand_ins.items():
+            setattr(compiled_module, name, stand_in)
+        for name in recompiled:
+            getattr(compiled_module, name).recompile()
+        yield compiled_module
     finally:
-        compiled_module._term_derivative_channels = original
-        compiled_module._series_summary.recompile()
+        for name, original in originals.items():
+            setattr(compiled_module, name, original)
+        for name, dispatcher, cache, signatures in saved:
+            dispatcher._cache = cache
+            if name in recompiled or tuple(dispatcher.overloads) != signatures:
+                dispatcher._make_finalizer()()
+                dispatcher._reset_overloads()
+                for signature in signatures:
+                    dispatcher.compile(signature)
 
 
-def _recompile_compiled_positive_path(compiled_module) -> None:
-    compiled_module._term_derivative_channels.recompile()
-    compiled_module._series_summary.recompile()
-    compiled_module._positive_row.recompile()
-    compiled_module._evaluate_tweedie_batch_row.recompile()
-    compiled_module._evaluate_tweedie_batch_core.recompile()
-
-
-def _recompile_compiled_series_path(compiled_module) -> None:
-    compiled_module._log_gamma_increment.recompile()
-    compiled_module._log_adjacent_ratio.recompile()
-    compiled_module._locate_series_mode.recompile()
-    compiled_module._series_summary.recompile()
-
-
-def test_series_prepares_log_gamma_coefficients_only_when_first_needed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_series_prepares_log_gamma_coefficients_only_when_first_needed() -> None:
     compiled_module = tweedie_kernel._compiled
     original_fill = compiled_module._fill_log_gamma_increment_coefficients
     cases = (
@@ -767,13 +809,7 @@ def test_series_prepares_log_gamma_coefficients_only_when_first_needed(
         original_fill(alpha, coefficients)
         coefficients[10] += 1.0
 
-    monkeypatch.setattr(
-        compiled_module,
-        "_fill_log_gamma_increment_coefficients",
-        counted_fill,
-    )
-    _recompile_compiled_series_path(compiled_module)
-    try:
+    with _compiled_with(_SERIES_PATH, _fill_log_gamma_increment_coefficients=counted_fill):
         for (
             case_id,
             zeta,
@@ -801,14 +837,9 @@ def test_series_prepares_log_gamma_coefficients_only_when_first_needed(
                 assert summary[0] == expected_status
                 np.testing.assert_equal(summary, baselines[case_id, derivative_order])
                 assert int(coefficients[10]) == expected_fills
-    finally:
-        compiled_module._fill_log_gamma_increment_coefficients = original_fill
-        _recompile_compiled_series_path(compiled_module)
 
 
-def test_series_reuses_mode_boundary_ratios_for_first_window_steps(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_series_reuses_mode_boundary_ratios_for_first_window_steps() -> None:
     compiled_module = tweedie_kernel._compiled
     original_ratio = compiled_module._log_adjacent_ratio
     large_mode = 10_007
@@ -842,10 +873,9 @@ def test_series_reuses_mode_boundary_ratios_for_first_window_steps(
             coefficients[12] += 1.0
         return original_ratio(j, zeta, alpha, coefficients)
 
-    monkeypatch.setattr(compiled_module, "_log_adjacent_ratio", counted_ratio)
-    compiled_module._locate_series_mode.recompile()
-    compiled_module._series_summary.recompile()
-    try:
+    with _compiled_with(
+        ("_locate_series_mode", "_series_summary"), _log_adjacent_ratio=counted_ratio
+    ):
         for case_id, zeta, expected_mode in cases:
             coefficients = np.empty(13, dtype=np.float64)
             coefficients[10:] = 0.0
@@ -872,36 +902,22 @@ def test_series_reuses_mode_boundary_ratios_for_first_window_steps(
                 assert summary[0] == compiled_module.KERNEL_OK
                 np.testing.assert_equal(summary, baselines[case_id, derivative_order])
                 np.testing.assert_array_equal(coefficients[10:], locate_counts)
-    finally:
-        compiled_module._log_adjacent_ratio = original_ratio
-        compiled_module._locate_series_mode.recompile()
-        compiled_module._series_summary.recompile()
 
 
-def test_production_order_one_batch_skips_poisoned_trigamma(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    compiled_module = tweedie_kernel._compiled
-    original = compiled_module._digamma_trigamma_positive
-
+def test_production_order_one_batch_skips_poisoned_trigamma() -> None:
     @njit
     def forbidden_trigamma(value):
         if value > 0.0:
             raise RuntimeError("order-one trigamma poison")
         return 0.0, 0.0
 
-    monkeypatch.setattr(compiled_module, "_digamma_trigamma_positive", forbidden_trigamma)
-    _recompile_compiled_positive_path(compiled_module)
-    try:
+    with _compiled_with(_POSITIVE_PATH, _digamma_trigamma_positive=forbidden_trigamma):
         arrays = _case_arrays(TWEEDIE_LSS_CASES[3])
         order_one = evaluate_tweedie_rows(*arrays, "prior", derivative_order=1)
         assert order_one.score is not None
         assert order_one.hessian_packed is None
         with pytest.raises(RuntimeError, match="order-one trigamma poison"):
             evaluate_tweedie_rows(*arrays, "prior", derivative_order=2)
-    finally:
-        compiled_module._digamma_trigamma_positive = original
-        _recompile_compiled_positive_path(compiled_module)
 
 
 def test_compiled_special_functions_are_local_cache_dependencies() -> None:
