@@ -614,8 +614,9 @@ def test_tests_that_read_or_set_thread_pools_run_unpinned() -> None:
     test must carry the ``threads`` marker (stage 2, default pools) unless it
     is listed above with the reason it does not need them. The scan follows
     helpers and fixtures defined in the test's own module and walks test
-    classes; it cannot see helpers imported from elsewhere, conftest fixtures,
-    import aliases, or tests that read the pinned environment variables.
+    classes; it cannot see helpers imported from elsewhere, helpers or fixtures
+    defined on a test class, conftest fixtures, import aliases, or tests that
+    read the pinned environment variables.
     """
     touched = {}
     for path in sorted((_ROOT / "tests").rglob("test_*.py")):

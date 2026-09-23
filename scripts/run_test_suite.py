@@ -15,7 +15,9 @@ Every other argument goes to both stages; no ``--`` separator is needed, so
 the same command line works under PowerShell. Select tests with ``-m`` or
 ``-k``: the runner always runs ``tests/``, so file paths are not supported.
 A junit report from stage 2 is written beside stage 1's (``-threads``
-suffix), and coverage from stage 2 is appended to stage 1's.
+suffix), and coverage from stage 2 is appended to stage 1's. Both stages
+need the ``dev`` extra's plugins loaded: stage 1 runs under pytest-xdist,
+and stage 2 always passes ``--cov-append``, which pytest-cov defines.
 """
 
 from __future__ import annotations
