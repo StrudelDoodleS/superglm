@@ -777,6 +777,9 @@ def _compiled_with(recompiled: tuple[str, ...], **stand_ins):
                 dispatcher.compile(signature)
     # Reached only when the body passed, so this never masks the body's own failure.
     assert all(isinstance(dispatcher._cache, FunctionCache) for _, dispatcher, _, _ in saved)
+    # A stand-in left as a module global survives a disk-cache reload (the key ignores
+    # globals), so every later recompile in this worker would link it back in.
+    assert all(getattr(compiled_module, name) is original for name, original in originals.items())
 
 
 def test_series_prepares_log_gamma_coefficients_only_when_first_needed() -> None:
