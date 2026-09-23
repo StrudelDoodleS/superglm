@@ -208,9 +208,14 @@ def _scipy_optimum(kind: str, start) -> dict[str, float]:
             out[i] = (4.0 * central[1] - central[0]) / 3.0
         return out
 
+    # The Richardson gradient bottoms out near 1e-6, so a gtol of 1e-10 was never met and
+    # L-BFGS-B stopped only when its line search failed, after up to nine times the probe
+    # fits. On every iterate the distance to the optimum stayed within 1.2 |g|_inf, so
+    # gtol 1e-5 leaves the reference a tenth of the 1e-4 bar it is judged against.
     res = minimize(
-        f, x0, jac=g, method="L-BFGS-B", options={"maxiter": 200, "ftol": 1e-16, "gtol": 1e-10}
+        f, x0, jac=g, method="L-BFGS-B", options={"maxiter": 200, "ftol": 1e-16, "gtol": 1e-5}
     )
+    assert res.success, res.message
     return unpack(res.x)
 
 
@@ -280,7 +285,8 @@ def _nb2_linear_effect_fit(*, seed: int, outer: str):
 @pytest.mark.parametrize("kind", ["gaussian", "gamma"])
 def test_endgame_reaches_the_optimum_scipy_reaches(kind) -> None:
     efs = _efs_stop(kind)
-    # matched precision: scipy runs to gtol 1e-10, so the engine runs at 1e-9 here
+    # the engine runs at 1e-9; scipy stops at gtol 1e-5, within about 1e-5 of the optimum
+    # (4.2e-6 gamma, 2.6e-6 gaussian), a tenth of the 1e-4 log-lambda bar below
     newton = _newton_stop(kind, tolerance=1.0e-9)
     assert newton.converged and newton.convergence_reason == "stationary"
     assert newton.objective < efs.objective

@@ -130,10 +130,7 @@ def _generate_weighted_tweedie(mu, phi, p, weights, rng):
     """Simulate Tweedie responses under the prior-weight convention phi / w."""
     mu = np.asarray(mu, dtype=np.float64)
     weights = np.asarray(weights, dtype=np.float64)
-    y = np.empty(len(mu), dtype=np.float64)
-    for i in range(len(mu)):
-        y[i] = generate_tweedie_cpg(1, mu=mu[i], phi=phi / weights[i], p=p, rng=rng)[0]
-    return y
+    return generate_tweedie_cpg(len(mu), mu=mu, phi=phi / weights, p=p, rng=rng)
 
 
 def _call_tweedie_low_level(function_name, y, mu, *, phi=2.0, p=1.5, weights=None):
@@ -1230,6 +1227,7 @@ class TestDetailedPhiProfile:
 
         assert not result.converged
         assert result.used_fallback
+        assert result.n_fallback_evaluations > 0
         assert result.branch_switch_detected
         assert result.optimizer == "bounded"
         assert result.objective_finite
@@ -3061,8 +3059,8 @@ class TestEstimatePFitMode:
 
     @pytest.mark.slow
     def test_fit_mode_reml_recovers_p(self):
-        """fit_mode='reml' should recover p using REML fits."""
-        X, y, p_true = _tweedie_data()
+        """fit_mode='reml' should recover p using REML fits, agreeing with fit."""
+        X, y, p_true = _tweedie_data(n=600)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
@@ -3075,6 +3073,19 @@ class TestEstimatePFitMode:
         assert model.family.p == result.p_hat
         assert model._last_fit_meta["method"] == "fit_reml"
         assert hasattr(model, "_reml_result")
+
+        # The truth is log-linear, inside the spline penalty's null space, so
+        # REML shrinks the spline to the Numeric fit and the two profiles are one
+        # curve: measured gap 3.9e-6.  Each Brent search resolves its optimum to
+        # xatol=1e-3, so 5e-3 bounds the pair.  A REML side that profiles phi by
+        # MLE instead of Pearson, or at a power 0.02 off, opens a ~0.02 gap while
+        # p still recovers within 0.2; the old 0.3 bound let both through.
+        result_fit = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        ).estimate_p(X, y, fit_mode="fit", phi_method="pearson")
+        np.testing.assert_allclose(result_fit.p_hat, result.p_hat, atol=5e-3)
 
     @pytest.mark.slow
     def test_flexible_spline_reml_mle_p_phi_recovery(self):
@@ -3224,7 +3235,7 @@ class TestEstimatePFitMode:
     @pytest.mark.slow
     def test_fit_mode_inherit_from_reml(self):
         """After fit_reml(), inherit should use the REML path."""
-        X, y, p_true = _tweedie_data()
+        X, y, p_true = _tweedie_data(n=600)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
@@ -3274,28 +3285,6 @@ class TestEstimatePFitMode:
         model = SuperGLM(family="poisson", selection_penalty=0, features={"x": Numeric()})
         with pytest.raises(ValueError, match="tweedie"):
             model.estimate_p(X, y, phi_method="pearson")
-
-    @pytest.mark.slow
-    def test_reml_and_fit_agree_on_p(self):
-        """REML and fit paths should agree on p estimate for the same data."""
-        X, y, p_true = _tweedie_data()
-        model_fit = SuperGLM(
-            family=TweedieDistribution(p=1.5),
-            selection_penalty=0,
-            features={"x1": Numeric()},
-        )
-        result_fit = model_fit.estimate_p(X, y, fit_mode="fit", phi_method="pearson")
-
-        model_reml = SuperGLM(
-            family=TweedieDistribution(p=1.5),
-            selection_penalty=0,
-            features={"x1": Spline(n_knots=6, penalty="ssp")},
-        )
-        result_reml = model_reml.estimate_p(X, y, fit_mode="reml", phi_method="pearson")
-
-        # Both should land near p_true; allow wider tolerance since
-        # different model flexibility may shift the estimate slightly
-        np.testing.assert_allclose(result_fit.p_hat, result_reml.p_hat, atol=0.3)
 
 
 class TestDecoupledSearchFitMode:
@@ -3369,16 +3358,35 @@ class TestDecoupledSearchFitMode:
         assert decoupled.p_hat == pytest.approx(searched.p_hat)
         assert decoupled.phi_hat != pytest.approx(searched.phi_hat, rel=1e-12)
 
-    def test_default_leaves_the_coupled_reml_path_unchanged(self):
+    def test_a_coupled_run_defaults_reprofiles_and_still_inverts(self, subtests):
+        """Three properties of a coupled REML run, checked on one search.
+
+        The search is the expensive part, and each of these used to pay for
+        its own copy of the same one.
+        """
         X, y, sample_weight, offset = _offset_spline_tweedie_data()
-        kwargs = {"sample_weight": sample_weight, "offset": offset, "fit_mode": "reml"}
+        result = self._reml_model().estimate_p(
+            X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml"
+        )
 
-        coupled = self._reml_model().estimate_p(X, y, **kwargs)
-        defaulted = self._reml_model().estimate_p(X, y, search_fit_mode=None, **kwargs)
+        with subtests.test("the default leaves the coupled REML path unchanged"):
+            # An omitted search_fit_mode resolves to the publication mode.  A
+            # second call spelling search_fit_mode=None, as this used to make,
+            # takes the same code path and can only agree; the resolved mode is
+            # what a wrong default would change.
+            assert result.search_fit_mode == result.fit_mode == "fit_reml"
 
-        assert defaulted.p_hat == pytest.approx(coupled.p_hat, rel=1e-12)
-        assert defaulted.phi_hat == pytest.approx(coupled.phi_hat, rel=1e-12)
-        assert defaulted.search_fit_mode == "fit_reml"
+        with subtests.test("a coupled search also reprofiles against its publication"):
+            # The publication refit runs at the tight publication tolerance
+            # while candidates ran at the search bar, so the published
+            # dispersion is re-profiled in coupled mode too; the searched value
+            # stays behind as the reference the CI and plots measure against.
+            assert result.search_nll is not None
+            assert result._profile_reference_nll() == result.search_nll
+
+        with subtests.test("the lazy CI works when search and publication agree"):
+            lower, upper = result.ci(alpha=0.05)
+            assert lower < result.p_hat < upper
 
     def test_invalid_search_fit_mode_is_rejected(self):
         X, y, sample_weight, offset = _offset_spline_tweedie_data()
@@ -3417,15 +3425,6 @@ class TestDecoupledSearchFitMode:
         result._ci_cache.clear()
         with pytest.raises(RuntimeError, match="does not carry the searched objective"):
             result.ci(alpha=0.05)
-
-    def test_lazy_ci_still_works_when_search_and_publication_agree(self):
-        X, y, sample_weight, offset = _offset_spline_tweedie_data()
-        model = self._reml_model()
-
-        result = model.estimate_p(X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml")
-        lower, upper = result.ci(alpha=0.05)
-
-        assert lower < result.p_hat < upper
 
 
 class TestDecoupledSearchConfidenceInterval:
@@ -3492,19 +3491,6 @@ class TestDecoupledSearchConfidenceInterval:
         result = self._decoupled()
 
         assert result._profile_reference_nll() != result.nll
-
-    def test_a_coupled_search_also_reprofiles_against_its_publication(self):
-        X, y, sample_weight, offset = _offset_spline_tweedie_data()
-        model = self._reml_model()
-
-        result = model.estimate_p(X, y, sample_weight=sample_weight, offset=offset, fit_mode="reml")
-
-        # The publication refit runs at the tight publication tolerance while
-        # candidates ran at the search bar, so the published dispersion is
-        # re-profiled in coupled mode too; the searched value stays behind as
-        # the reference the CI and plots measure against.
-        assert result.search_nll is not None
-        assert result._profile_reference_nll() == result.search_nll
 
     def test_a_pre_reference_pickle_falls_back_to_the_published_value(self):
         """A result pickled before this field existed must still invert."""
@@ -4763,7 +4749,11 @@ class TestSearchMethods:
     @pytest.mark.slow
     def test_low_p_boundary_regression(self):
         """Low-p profiles should not spuriously prefer the lower bound."""
-        X, y, _ = _tweedie_data(n=2_200, p_true=1.25, seed=7)
+        # Exact low-p densities are what this costs.  With every row forced onto
+        # the saddlepoint -- the leak this pins -- grid and both optimisers land
+        # on the 1.10 bound at this size too; the 0.02-spaced grid leaves the
+        # 0.02 agreement bound a 0.01 margin.
+        X, y, _ = _tweedie_data(n=1_100, p_true=1.25, seed=7)
         kwargs = {"p_bounds": (1.1, 1.9), "phi_method": "mle"}
 
         grid_model = SuperGLM(
@@ -4771,7 +4761,7 @@ class TestSearchMethods:
             selection_penalty=0,
             features={"x1": Numeric()},
         )
-        grid = np.linspace(1.1, 1.9, 81)
+        grid = np.linspace(1.1, 1.9, 41)
         r_grid = estimate_tweedie_p(grid_model, X, y, method="grid", grid=grid, **kwargs)
 
         lbfgsb_model = SuperGLM(
@@ -4882,7 +4872,7 @@ class TestSearchMethods:
     @pytest.mark.slow
     def test_grid_with_reml(self):
         """method='grid' should work with fit_mode='fit_reml'."""
-        X, y, p_true = _tweedie_data()
+        X, y, p_true = _tweedie_data(n=600)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
@@ -5634,6 +5624,9 @@ class TestOuterSearchHonesty:
             fit_mode="fit_reml",
             p_bounds=(1.1, 1.9),
             xatol=1.0e-3,
+            # Only the labels are read, and they are set whatever the search
+            # length: three Brent iterations run five REML fits, not eleven.
+            maxiter=3,
         )
 
         assert result.method == "brent"

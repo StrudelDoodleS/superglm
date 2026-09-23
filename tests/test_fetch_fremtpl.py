@@ -25,6 +25,7 @@ import hashlib
 import io
 import re
 import sys
+import unicodedata
 import urllib.error
 from pathlib import Path
 
@@ -67,7 +68,15 @@ def data_guarded_suites() -> dict[str, set[str]]:
     """
     found: dict[str, set[str]] = {}
     for path in sorted((_ROOT / "tests").glob("test_*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
+        # Parsing all 430 suites took ~1.8 s, and ``tests/test_dataset_guard.py``
+        # pays it again at import in every process that collects it.  A module
+        # can qualify only if it names ``skip_reason``, and Python folds
+        # identifiers to NFKC, so the text is folded the same way before the
+        # substring test: an exact filter at ~30 ms for the whole directory.
+        if "skip_reason" not in unicodedata.normalize("NFKC", source):
+            continue
+        tree = ast.parse(source)
         names: set[str] = set()
         for node in tree.body:
             if not isinstance(node, ast.Assign):

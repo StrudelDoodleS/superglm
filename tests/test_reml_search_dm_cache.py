@@ -15,23 +15,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, families
+from superglm import Spline, SuperGLM, families
 
-
-def _search_fixture(n: int = 1_200, seed: int = 7):
-    rng = np.random.default_rng(seed)
-    cat_levels = [f"c{j}" for j in range(4)]
-    cat = np.array(cat_levels)[rng.integers(0, 4, n)]
-    oc_levels = [f"o{j:02d}" for j in range(8)]
-    oc_idx = rng.integers(0, 8, n)
-    eta = 0.3 * (cat == "c1") + 0.05 * (oc_idx - 4) - 0.5
-    y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, np.exp(eta) * 2.0, n))
-    frame = pd.DataFrame({"c": cat, "o": np.array(oc_levels)[oc_idx]})
-    features = {
-        "c": Categorical(),
-        "o": OrderedCategorical(order=oc_levels, basis=Spline(kind="cr", k=8)),
-    }
-    return frame, y, features
+from ._tweedie_profile_fixtures import search_fixture as _search_fixture
 
 
 def _count_builds(monkeypatch) -> list[str]:
@@ -49,31 +35,29 @@ def _count_builds(monkeypatch) -> list[str]:
 
 
 class TestSearchBuildsOnce:
-    def test_coupled_search_builds_the_design_twice_in_total(self, monkeypatch):
-        """One build fills the candidate cache; the publication builds fresh."""
-        calls = _count_builds(monkeypatch)
-        frame, y, features = _search_fixture()
-
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.estimate_p(frame, y, fit_mode="reml")
-
-        assert len(calls) == 2
-
     def test_cached_search_matches_an_uncached_search_bitwise(self, monkeypatch):
-        """The cache is a pure cost optimization: every number is identical."""
-        frame, y, features = _search_fixture()
+        """The cache is a pure cost optimization: every number is identical.
+
+        And it is used: one build fills the candidate cache and the
+        publication builds fresh, so the cached search builds twice in total.
+        """
+        frame, y, features = _search_fixture(n=600)
 
         def run():
             model = SuperGLM(family=families.tweedie(p=1.5), features=features)
             result = model.estimate_p(frame, y, fit_mode="reml")
             return result, np.asarray(model.result.beta, dtype=float).copy()
 
+        calls = _count_builds(monkeypatch)
         cached_result, cached_beta = run()
+        assert len(calls) == 2
 
         import superglm.profiling.tweedie as tweedie_module
 
         monkeypatch.setattr(tweedie_module, "_SEARCH_DM_CACHE", False)
         uncached_result, uncached_beta = run()
+        # Otherwise the comparison below would pit the cached search against itself.
+        assert len(calls) > 4, "the uncached search still served from the cache"
 
         assert float(cached_result.p_hat) == float(uncached_result.p_hat)
         assert float(cached_result.phi_hat) == float(uncached_result.phi_hat)
@@ -102,7 +86,9 @@ class TestSearchBuildsOnce:
                 },
                 interactions=[("x1", "x2")],
             )
-            result = model.estimate_p(frame, y, fit_mode="reml", maxiter=6)
+            # One Brent step is enough: the two bracket endpoints are the
+            # first build and the first cache hit, where the defect fired.
+            result = model.estimate_p(frame, y, fit_mode="reml", maxiter=1)
             return result, np.asarray(model.result.beta, dtype=float).copy()
 
         cached_result, cached_beta = run()
@@ -218,12 +204,16 @@ class TestConstrainedGroupsDisableTheCache:
         the current group matrix), and the fixed-probe check certifies only
         the design's matvec -- it cannot see a mutated group. Until the
         bitwise-equivalence evidence covers constrained fixtures, the cache
-        stands down and every candidate builds fresh."""
+        stands down and every candidate builds fresh.
+
+        The stand-down keys on any constrained group. This fixture's monotone
+        ``ps`` term fits through the SCOP engine, not QP, so it pins that gate
+        for a SCOP model; the QP mutation named above is never reached here."""
         calls = _count_builds(monkeypatch)
-        rng = np.random.default_rng(5)
+        rng = np.random.default_rng(31)
         n = 900
         x = rng.uniform(0.0, 1.0, n)
-        eta = 0.8 * x - 0.6
+        eta = 0.9 * x - 0.6
         y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, np.exp(eta) * 2.0, n))
         frame = pd.DataFrame({"x": x})
         from superglm import Constraint
@@ -231,9 +221,9 @@ class TestConstrainedGroupsDisableTheCache:
         features = {"x": Spline(kind="ps", n_knots=8, constraint=Constraint.fit.increasing)}
 
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.estimate_p(frame, y, fit_mode="reml", maxiter=8)
+        model.estimate_p(frame, y, fit_mode="reml", maxiter=2)
 
         # One build per candidate fit plus the publication: strictly more
         # than the cached search's two, proving no candidate was served a
-        # possibly-mutated design.
+        # possibly-mutated design. Two Brent steps already make it five.
         assert len(calls) > 2

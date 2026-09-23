@@ -21,65 +21,17 @@ publication refit repays determination once.
 
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, families
+from superglm import Spline, SuperGLM, families
 from superglm.model import state_ops
 
-CAT_LEVELS = {"f0": 6, "f1": 9, "f2": 4, "f3": 11, "f4": 13, "f5": 11}
-OC_LEVELS = {"f6": 16, "f7": 24}
-
-
-def _flat_lambda_fixture(n: int = 12_000, seed: int = 4, *, informative_smooths: bool = False):
-    """Tweedie frame whose saturated cr terms leave log-lambda nearly flat.
-
-    On this realisation the exact-Newton optimizer at reml_tol=1e-6 stops five
-    iterations before the tight answer, moving a published SE by ~92%.
-
-    ``informative_smooths=True`` adds penalty-visible curvature to the two
-    ordinal smooths' level profiles (one sine cycle on f6, two on f7). The
-    default realisation's ordinal signal is purely linear in the level index,
-    which lies in the cr penalty's null space: nothing in the data then ties
-    those smoothing parameters down, so whether their log-lambda directions
-    read as "informative" was decided entirely by the criterion's error
-    terms. Under the pre-0.29.0 reduced Tweedie scale profile (which charged
-    this fixture's 83% zero rows a log-phi the exact saturated likelihood
-    does not contain) they measured informative; under the exact criterion
-    they are genuinely null — the 1-D exact-criterion profile decreases
-    monotonically toward the lambda cap and the optimizer's terminal beats
-    the reduced-criterion answer by 0.7 (12k) to 9.0 (400k). Tests about
-    *informative* directions must therefore opt into curvature the penalty
-    can see; tests about flat directions use the default.
-    """
-    rng = np.random.default_rng(seed)
-    cols: dict[str, np.ndarray] = {}
-    eta = np.full(n, -1.0)
-    for name, k in CAT_LEVELS.items():
-        levels = [f"{name}_{j:02d}" for j in range(k)]
-        idx = rng.integers(0, k, n)
-        cols[name] = np.array(levels)[idx]
-        eta += rng.normal(0, 0.2, k)[idx]
-    orders: dict[str, list[str]] = {}
-    for name, k in OC_LEVELS.items():
-        levels = [f"{name}_{j:02d}" for j in range(k)]
-        idx = rng.integers(0, k, n)
-        cols[name] = np.array(levels)[idx]
-        eta += 0.02 * (idx - k / 2)
-        if informative_smooths:
-            cycles = 1.0 if name == "f6" else 2.0
-            amplitude = 0.10 if name == "f6" else 0.25
-            eta += amplitude * np.sin(2.0 * np.pi * cycles * idx / (k - 1))
-        orders[name] = levels
-    frame = pd.DataFrame(cols)
-    weights = rng.uniform(1.19e-5, 1.0, n)
-    offset = np.where(rng.random(n) < 0.35, 0.0, 1.0986)
-    y = np.where(rng.random(n) < 0.83, 0.0, rng.gamma(1.5, np.exp(eta) * 900, n))
-    features: dict = {name: Categorical() for name in CAT_LEVELS}
-    for name, k in OC_LEVELS.items():
-        features[name] = OrderedCategorical(order=orders[name], basis=Spline(kind="cr", k=k))
-    return frame, y, weights, offset, features
+from ._tweedie_profile_fixtures import flat_lambda_fixture as _flat_lambda_fixture
+from ._tweedie_profile_fixtures import search_fixture as _small_search_fixture
 
 
 def _standard_errors(model: SuperGLM) -> np.ndarray:
@@ -101,22 +53,6 @@ def _spy_optimizer_tols(monkeypatch) -> list[float]:
 
     monkeypatch.setattr(reml_ops, "optimize_direct_reml", wrapper)
     return seen
-
-
-def _small_search_fixture(n: int = 1_200, seed: int = 7):
-    rng = np.random.default_rng(seed)
-    cat_levels = [f"c{j}" for j in range(4)]
-    cat = np.array(cat_levels)[rng.integers(0, 4, n)]
-    oc_levels = [f"o{j:02d}" for j in range(8)]
-    oc_idx = rng.integers(0, 8, n)
-    eta = 0.3 * (cat == "c1") + 0.05 * (oc_idx - 4) - 0.5
-    y = np.where(rng.random(n) < 0.4, 0.0, rng.gamma(1.2, np.exp(eta) * 2.0, n))
-    frame = pd.DataFrame({"c": cat, "o": np.array(oc_levels)[oc_idx]})
-    features = {
-        "c": Categorical(),
-        "o": OrderedCategorical(order=oc_levels, basis=Spline(kind="cr", k=8)),
-    }
-    return frame, y, features
 
 
 def _replace_dc(instance, **changes):
@@ -399,15 +335,22 @@ class TestEngineSeamSentinels:
 
 
 class TestPublicationDispersion:
-    def test_discrete_publication_profiles_phi_at_the_public_mean(self):
+    def test_discrete_publication_describes_the_public_mean(self, subtests):
         """On a binned model the internal design's mean is an approximation;
         the published dispersion must be profiled at the mean callers get
-        from predict(), not at the binned matvec."""
+        from predict(), not at the binned matvec. One published fit, one
+        mean: the summary statistics must be computed at that same public
+        mean, not left as a hybrid of public-mean phi inside binned-mean
+        likelihood/deviance. Both are claims about one search."""
         from superglm import Spline as _Spline
+        from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
         from superglm.profiling.tweedie import _profile_phi_detailed
 
         rng = np.random.default_rng(11)
-        n = 4_000
+        # 1500 rows keep the binned and public means ~1e-2 apart, and the
+        # dispersion profiled at each ~5e-5 apart: far above either claim's
+        # resolution (measured 2026-09-23).
+        n = 1_500
         frame = pd.DataFrame({"x1": rng.uniform(0.0, 1.0, n), "x2": rng.uniform(0.0, 1.0, n)})
         eta = 0.4 * np.sin(4.0 * frame["x1"].to_numpy()) + 0.3 * frame["x2"].to_numpy() - 0.6
         y = np.where(rng.random(n) < 0.5, 0.0, rng.gamma(1.4, np.exp(eta) * 3.0, n))
@@ -420,77 +363,97 @@ class TestPublicationDispersion:
             features={"x1": _Spline(kind="cr", n_knots=8), "x2": _Spline(kind="cr", n_knots=8)},
         )
         result = model.estimate_p(frame, y, fit_mode="reml")
-
         mu = np.asarray(model.predict(frame), dtype=float)
-        edf = float(model.result.effective_df)
-        # Warm-start from the SEARCH winner's phi, not from the published
-        # answer: starting at result.phi_hat only proves the answer is a
-        # stationary point; starting where the old code would have published
-        # from proves the re-profile moved to the published fit's optimum.
-        trace = result.search_trace
-        gap = (trace["p"] - float(result.p_hat)).abs()
-        search_phi = float(trace.loc[gap.idxmin(), "phi"])
-        oracle = _profile_phi_detailed(
-            np.asarray(y, dtype=float),
-            mu,
-            float(result.p_hat),
-            weights=np.ones(n),
-            df_resid=max(float(n) - edf, 1.0),
-            phi_method="mle",
-            phi_start=search_phi,
-        )
-
-        assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
-
-    def test_discrete_publication_stats_describe_the_public_mean(self):
-        """One published fit, one mean: the summary statistics must be
-        computed at the same public mean the published dispersion was
-        profiled at, not left as a hybrid of public-mean phi inside
-        binned-mean likelihood/deviance."""
-        from superglm import Spline as _Spline
-        from superglm.model.fit_ops import _compute_fit_stats, _compute_null_mu
-
-        rng = np.random.default_rng(11)
-        n = 4_000
-        frame = pd.DataFrame({"x1": rng.uniform(0.0, 1.0, n), "x2": rng.uniform(0.0, 1.0, n)})
-        eta = 0.4 * np.sin(4.0 * frame["x1"].to_numpy()) + 0.3 * frame["x2"].to_numpy() - 0.6
-        y = np.where(rng.random(n) < 0.5, 0.0, rng.gamma(1.4, np.exp(eta) * 3.0, n))
-
-        model = SuperGLM(
-            family=families.tweedie(p=1.5),
-            selection_penalty=0,
-            discrete=True,
-            n_bins=64,
-            features={"x1": _Spline(kind="cr", n_knots=8), "x2": _Spline(kind="cr", n_knots=8)},
-        )
-        result = model.estimate_p(frame, y, fit_mode="reml")
-
-        mu_pub = np.asarray(model.predict(frame), dtype=float)
         y_arr = np.asarray(y, dtype=float)
         ones = np.ones(n)
-        null_mu = _compute_null_mu(
-            y_arr, ones, None, model._distribution, model._link, weight_semantics="prior"
-        )
-        oracle = _compute_fit_stats(
-            y_arr,
-            mu_pub,
-            ones,
-            None,
-            model._distribution,
-            model._link,
-            float(result.phi_hat),
-            null_mu=null_mu,
-            weight_semantics="prior",
-        )
 
-        np.testing.assert_allclose(model._fit_mu, mu_pub, rtol=0, atol=0)
-        assert model._fit_stats.log_likelihood == pytest.approx(oracle.log_likelihood, rel=1e-12)
-        assert model._fit_stats.pearson_chi2 == pytest.approx(oracle.pearson_chi2, rel=1e-12)
-        assert model._fit_stats.explained_deviance == pytest.approx(
-            oracle.explained_deviance, rel=1e-12
-        )
+        with subtests.test("the published phi is profiled at the public mean"):
+            edf = float(model.result.effective_df)
+            # Warm-start from the SEARCH winner's phi, not from the published
+            # answer: starting at result.phi_hat only proves the answer is a
+            # stationary point; starting where the old code would have
+            # published from proves the re-profile moved to the published
+            # fit's optimum.
+            trace = result.search_trace
+            gap = (trace["p"] - float(result.p_hat)).abs()
+            search_phi = float(trace.loc[gap.idxmin(), "phi"])
+            oracle = _profile_phi_detailed(
+                y_arr,
+                mu,
+                float(result.p_hat),
+                weights=ones,
+                df_resid=max(float(n) - edf, 1.0),
+                phi_method="mle",
+                phi_start=search_phi,
+            )
 
-    def test_the_aggregate_judges_the_publication_refit_not_the_candidate(self, monkeypatch):
+            assert float(result.phi_hat) == pytest.approx(float(oracle.phi), rel=1e-8)
+
+        with subtests.test("the published statistics describe the public mean"):
+            null_mu = _compute_null_mu(
+                y_arr, ones, None, model._distribution, model._link, weight_semantics="prior"
+            )
+            oracle = _compute_fit_stats(
+                y_arr,
+                mu,
+                ones,
+                None,
+                model._distribution,
+                model._link,
+                float(result.phi_hat),
+                null_mu=null_mu,
+                weight_semantics="prior",
+            )
+
+            np.testing.assert_allclose(model._fit_mu, mu, rtol=0, atol=0)
+            assert model._fit_stats.log_likelihood == pytest.approx(
+                oracle.log_likelihood, rel=1e-12
+            )
+            assert model._fit_stats.pearson_chi2 == pytest.approx(oracle.pearson_chi2, rel=1e-12)
+            assert model._fit_stats.explained_deviance == pytest.approx(
+                oracle.explained_deviance, rel=1e-12
+            )
+
+    def test_the_coupled_publication_runs_tight_and_owns_its_dispersion_story(self, subtests):
+        """One coupled search, then every claim about what it published.
+
+        The search is the expensive part and is identical for every claim, so
+        it runs once. Each scenario below re-profiles a private deep copy of
+        the published (model, result) under its own monkeypatch, so no
+        scenario's mutations reach the next.
+        """
+        with pytest.MonkeyPatch.context() as mp:
+            seen = _spy_optimizer_tols(mp)
+            frame, y, features = _small_search_fixture()
+            model = SuperGLM(family=families.tweedie(p=1.5), features=features)
+            result = model.estimate_p(frame, y, fit_mode="reml")
+
+        with subtests.test("coupled candidates run loose and the publication runs tight"):
+            # Candidate fits rank powers; only the published refit pays for
+            # determination. Every optimizer call before the last must carry
+            # the loose search tolerance, and the last -- the publication fit
+            # at p_hat -- the tight default.
+            assert len(seen) >= 3
+            assert set(seen[:-1]) == {1e-6}
+            assert seen[-1] == 1e-9
+
+        for scenario in (
+            self._the_aggregate_judges_the_publication_refit_not_the_candidate,
+            self._a_troubled_reprofile_is_disclosed_on_the_result,
+            self._the_searched_density_provenance_survives_publication,
+            self._a_reprofile_rewrites_the_whole_dispersion_story,
+            self._a_published_boundary_dispersion_is_disclosed,
+        ):
+            with (
+                subtests.test(scenario.__name__.lstrip("_")),
+                pytest.MonkeyPatch.context() as monkeypatch,
+            ):
+                scenario(monkeypatch, frame, y, *copy.deepcopy((model, result)))
+
+    @staticmethod
+    def _the_aggregate_judges_the_publication_refit_not_the_candidate(
+        monkeypatch, frame, y, model, result
+    ):
         """fit/solver/reml convergence on the result must describe the
         publication refit. Candidates run at the loose search bar and the
         publication runs tight, so the two can disagree on exactly the
@@ -499,9 +462,6 @@ class TestPublicationDispersion:
 
         from superglm.model import profile_ops
 
-        frame, y, features = _small_search_fixture()
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml")
         assert result.converged and result.fit_converged
         assert result.search_fit_converged is True
 
@@ -531,7 +491,8 @@ class TestPublicationDispersion:
         assert result.search_fit_converged is True
         assert result.converged is True
 
-    def test_a_troubled_reprofile_is_disclosed_on_the_result(self, monkeypatch):
+    @staticmethod
+    def _a_troubled_reprofile_is_disclosed_on_the_result(monkeypatch, frame, y, model, result):
         """A boundary, fallback, or non-convergent published re-profile must
         not hide behind the search's clean record."""
         from dataclasses import replace as _replace
@@ -539,9 +500,6 @@ class TestPublicationDispersion:
         import superglm.profiling.tweedie as tweedie_module
         from superglm.model import profile_ops
 
-        frame, y, features = _small_search_fixture()
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml")
         baseline = len(result.warnings)
 
         real = tweedie_module._profile_phi_detailed
@@ -565,7 +523,8 @@ class TestPublicationDispersion:
         assert len(result.warnings) == baseline + 1
         assert "re-profile" in result.warnings[-1]
 
-    def test_the_searched_density_provenance_survives_publication(self):
+    @staticmethod
+    def _the_searched_density_provenance_survives_publication(monkeypatch, frame, y, model, result):
         """p_hat, search_nll, plots and the profile CI come from the
         SEARCHED curve. When the search scored its winner with saddlepoint
         density but the publication re-profile evaluates exactly, replacing
@@ -573,10 +532,6 @@ class TestPublicationDispersion:
         power estimate as exact -- the searched provenance survives beside
         the published one, disclosed in warnings."""
         from superglm.model import profile_ops
-
-        frame, y, features = _small_search_fixture()
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml")
 
         # Rewind to first-reprofile state with a saddlepoint-scored search.
         result.search_nll = None
@@ -603,7 +558,8 @@ class TestPublicationDispersion:
         assert "density approximation" in tweedie_profile_method_label(result)
         assert result._selection_density_exact() is False
 
-    def test_a_reprofile_rewrites_the_whole_dispersion_story(self, monkeypatch):
+    @staticmethod
+    def _a_reprofile_rewrites_the_whole_dispersion_story(monkeypatch, frame, y, model, result):
         """The re-profile IS the published dispersion, so the aggregate
         convergence flag, the density classification and the phi warnings
         must all describe it -- not the search winner it replaced."""
@@ -613,9 +569,6 @@ class TestPublicationDispersion:
         from superglm.model import profile_ops
         from superglm.profiling.tweedie import _TweedieLogpdfDiagnostics
 
-        frame, y, features = _small_search_fixture()
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml")
         assert result.converged and result.phi_converged
 
         # Stale entries from the search winner's phi: the rebuild must
@@ -662,7 +615,8 @@ class TestPublicationDispersion:
         assert any("Saddlepoint approximation used for 7/7" in w for w in result.warnings)
         assert any("re-profile did not converge" in w for w in result.warnings)
 
-    def test_a_published_boundary_dispersion_is_disclosed(self, monkeypatch):
+    @staticmethod
+    def _a_published_boundary_dispersion_is_disclosed(monkeypatch, frame, y, model, result):
         """The published dispersion landing on the hard phi bound must not
         be silent: label recomputed AND a warning entry on the result."""
         from dataclasses import replace as _replace
@@ -670,9 +624,6 @@ class TestPublicationDispersion:
         import superglm.profiling.tweedie as tweedie_module
         from superglm.model import profile_ops
 
-        frame, y, features = _small_search_fixture()
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        result = model.estimate_p(frame, y, fit_mode="reml")
         assert result.phi_boundary == ""
 
         real = tweedie_module._profile_phi_detailed
@@ -694,12 +645,17 @@ class TestPublicationDispersion:
 
         Candidates run at the search tolerance; the publication refit runs
         tight. Carrying the candidate's phi onto the tight refit scales every
-        published SE by sqrt(phi) of the wrong fit (4.7e-6 here, 2.3e-3 on the
-        12k stress realisation).
+        published SE by sqrt(phi) of the wrong fit: a relative phi gap of
+        2.1e-6 on this fixture, 200x what the assertion resolves (measured
+        2026-09-23). Weights and an offset keep the re-profile's weighted,
+        offset mean in play.
         """
         from superglm.profiling.tweedie import _profile_phi_detailed
 
-        frame, y, weights, offset, features = _flat_lambda_fixture(n=6_000)
+        frame, y, features = _small_search_fixture()
+        rng = np.random.default_rng(12)
+        weights = rng.uniform(0.2, 1.0, len(y))
+        offset = np.log(rng.choice([0.5, 1.0, 2.0], len(y)))
         model = SuperGLM(family=families.tweedie(p=1.5), features=features)
         result = model.estimate_p(frame, y, sample_weight=weights, offset=offset, fit_mode="reml")
 
@@ -728,21 +684,6 @@ class TestPublicationDispersion:
 
 
 class TestSearchPublishSplit:
-    def test_coupled_candidates_run_loose_and_the_publication_runs_tight(self, monkeypatch):
-        """Candidate fits rank powers; only the published refit pays for
-        determination. Every optimizer call before the last must carry the
-        loose search tolerance, and the last -- the publication fit at p_hat
-        -- the tight default."""
-        seen = _spy_optimizer_tols(monkeypatch)
-        frame, y, features = _small_search_fixture()
-
-        model = SuperGLM(family=families.tweedie(p=1.5), features=features)
-        model.estimate_p(frame, y, fit_mode="reml")
-
-        assert len(seen) >= 3
-        assert set(seen[:-1]) == {1e-6}
-        assert seen[-1] == 1e-9
-
     def test_decoupled_publication_is_the_only_reml_fit_and_is_tight(self, monkeypatch):
         seen = _spy_optimizer_tols(monkeypatch)
         frame, y, features = _small_search_fixture()
@@ -1176,6 +1117,7 @@ class TestFlatDirectionFloor:
         assert r.converged
         assert str(getattr(r, "termination_reason", "")) != "line_search_failed"
 
+    @pytest.mark.slow
     def test_large_n_keeps_the_informative_directions_active(self):
         """score_scale = 1+|objective| grows with the row count while
         log-lambda curvature saturates (measured f6: 0.25 at 12k, 0.62 at
@@ -1191,7 +1133,11 @@ class TestFlatDirectionFloor:
         reduced Tweedie criterion this release removes (see the fixture's
         docstring; per-dimension curvature measured here 1.3e-1 and 2.6e-1
         against the 1e-3 bar). The lambda pins are the exact-criterion
-        determined answer."""
+        determined answer.
+
+        Marked slow for its 400k rows: the n-free bar itself is pinned in
+        microseconds by test_reml_convergence.py's
+        test_freeze_judges_curvature_relative_to_the_strongest_direction."""
         frame, y, weights, offset, features = _flat_lambda_fixture(
             400_000, informative_smooths=True
         )

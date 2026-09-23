@@ -413,76 +413,74 @@ def _derivatives(model, *, chunk=53, want_hessian=True, reuse=None):
 @pytest.mark.parametrize("discrete", [False, True])
 def test_public_varying_scale_shared_penalty_profile(kind, discrete):
     """Every profile mode enters through SuperLSS.fit, including all stencil probes."""
-    for rho_left in (-0.4, 0.0, 0.4):
-        for rho_right in (-0.4, 0.0, 0.4):
-            rho = np.array([rho_left, rho_right])
-            model = _public_fit(kind, discrete, tuple(rho))
-            oracle = _independent_mode(model, kind)
-            state = model._require_fitted().fit_state
-            fit = state.solver_result
-            expected_backend = (
-                "distributional-chunked-v1" if discrete else "distributional-dense-v1"
+    # A dropped shared log-det cross term, a 1% error in its gradient and an FS-only
+    # gradient each failed at all nine centres of the former 3x3 grid, by 200x or more;
+    # these two centres keep both orders of the two shared weights.
+    for rho_left, rho_right in ((0.0, 0.0), (-0.4, 0.4)):
+        rho = np.array([rho_left, rho_right])
+        model = _public_fit(kind, discrete, tuple(rho))
+        oracle = _independent_mode(model, kind)
+        state = model._require_fitted().fit_state
+        fit = state.solver_result
+        expected_backend = "distributional-chunked-v1" if discrete else "distributional-dense-v1"
+        assert fit.execution_backend_identifier == expected_backend
+        assert (fit.resolved_chunk_size is not None) == discrete
+        production = joint_laplace_objective(fit, layout=state.layout, lambdas=state.lambdas)
+        assert abs(production - oracle.objective) <= oracle.error
+        derivatives = _derivatives(model)
+
+        def probe(delta):
+            result = _independent_mode(_public_fit(kind, discrete, tuple(rho + delta)), kind)
+            assert result.provenance == oracle.provenance
+            return result.objective, result.error + result.mode_error
+
+        def stencil(direction, h, order):
+            plus, e_plus = probe(h * direction)
+            minus, e_minus = probe(-h * direction)
+            if order == 1:
+                return (plus - minus) / (2 * h), (e_plus + e_minus) / (2 * h)
+            return (
+                (plus - 2 * oracle.objective + minus) / h**2,
+                (e_plus + e_minus + 2 * (oracle.error + oracle.mode_error)) / h**2,
             )
-            assert fit.execution_backend_identifier == expected_backend
-            assert (fit.resolved_chunk_size is not None) == discrete
-            production = joint_laplace_objective(fit, layout=state.layout, lambdas=state.lambdas)
-            assert abs(production - oracle.objective) <= oracle.error
-            derivatives = _derivatives(model)
 
-            def probe(delta):
-                result = _independent_mode(_public_fit(kind, discrete, tuple(rho + delta)), kind)
-                assert result.provenance == oracle.provenance
-                return result.objective, result.error + result.mode_error
-
-            def stencil(direction, h, order):
-                plus, e_plus = probe(h * direction)
-                minus, e_minus = probe(-h * direction)
-                if order == 1:
-                    return (plus - minus) / (2 * h), (e_plus + e_minus) / (2 * h)
-                return (
-                    (plus - 2 * oracle.objective + minus) / h**2,
-                    (e_plus + e_minus + 2 * (oracle.error + oracle.mode_error)) / h**2,
+        h = 2e-2
+        for index in range(2):
+            direction = np.eye(2)[index]
+            for order in (1, 2):
+                coarse, coarse_error = stencil(direction, h, order)
+                fine, fine_error = stencil(direction, h / 2, order)
+                richardson = (4 * fine - coarse) / 3
+                truncation = abs(fine - coarse) / 3
+                rounding = (4 * fine_error + coarse_error) / 3
+                value = (
+                    derivatives.gradient[index] if order == 1 else derivatives.hessian[index, index]
                 )
-
-            h = 2e-2
-            for index in range(2):
-                direction = np.eye(2)[index]
-                for order in (1, 2):
-                    coarse, coarse_error = stencil(direction, h, order)
-                    fine, fine_error = stencil(direction, h / 2, order)
-                    richardson = (4 * fine - coarse) / 3
-                    truncation = abs(fine - coarse) / 3
-                    rounding = (4 * fine_error + coarse_error) / 3
-                    value = (
-                        derivatives.gradient[index]
-                        if order == 1
-                        else derivatives.hessian[index, index]
-                    )
-                    certificate = (
-                        derivatives.gradient_certificate[index]
-                        if order == 1
-                        else derivatives.hessian_certificate[index, index]
-                    )
-                    assert abs(value - richardson) <= truncation + rounding + certificate
-
-            def mixed(step):
-                probes = [
-                    (left * right, probe(step * np.array([left, right])))
-                    for left in (-1, 1)
-                    for right in (-1, 1)
-                ]
-                return (
-                    sum(sign * value for sign, (value, _) in probes) / (4 * step**2),
-                    sum(error for _, (_, error) in probes) / (4 * step**2),
+                certificate = (
+                    derivatives.gradient_certificate[index]
+                    if order == 1
+                    else derivatives.hessian_certificate[index, index]
                 )
+                assert abs(value - richardson) <= truncation + rounding + certificate
 
-            coarse, coarse_error = mixed(h)
-            fine, fine_error = mixed(h / 2)
-            expected = (4 * fine - coarse) / 3
-            tolerance = (abs(fine - coarse) + 4 * fine_error + coarse_error) / 3
-            assert abs(derivatives.hessian[0, 1] - expected) <= (
-                tolerance + derivatives.hessian_certificate[0, 1]
+        def mixed(step):
+            probes = [
+                (left * right, probe(step * np.array([left, right])))
+                for left in (-1, 1)
+                for right in (-1, 1)
+            ]
+            return (
+                sum(sign * value for sign, (value, _) in probes) / (4 * step**2),
+                sum(error for _, (_, error) in probes) / (4 * step**2),
             )
+
+        coarse, coarse_error = mixed(h)
+        fine, fine_error = mixed(h / 2)
+        expected = (4 * fine - coarse) / 3
+        tolerance = (abs(fine - coarse) + 4 * fine_error + coarse_error) / 3
+        assert abs(derivatives.hessian[0, 1] - expected) <= (
+            tolerance + derivatives.hessian_certificate[0, 1]
+        )
 
 
 @pytest.mark.parametrize("kind", ["gaussian", "gamma"])

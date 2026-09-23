@@ -21,30 +21,45 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "benchmarks" / "rank_deficient_complete_fit.py"
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "rank_deficient_complete_fit",
-        "multi_penalty_support",
-        "solver_repair_complete_fit",
-        "c3_c1_complete_fit",
-    ],
+_DRIVERS = (
+    "rank_deficient_complete_fit",
+    "multi_penalty_support",
+    "solver_repair_complete_fit",
+    "c3_c1_complete_fit",
 )
-def test_imported_drivers_do_not_require_posix_modules(name):
+
+# Simulate a platform without resource, load average or CPU affinity, import
+# every driver named on the command line, and exit naming each one that failed.
+_IMPORT_WITHOUT_POSIX = """\
+import importlib, os, sys
+sys.modules['resource'] = None
+os.process_cpu_count = os.cpu_count
+for name in ('getloadavg', 'sched_getaffinity'):
+    if hasattr(os, name):
+        delattr(os, name)
+failed = []
+for module in sys.argv[1:]:
+    try:
+        importlib.import_module(module)
+    except BaseException as exc:
+        failed.append(f'{module}: {type(exc).__name__}: {exc}')
+sys.exit('\\n'.join(failed) or None)
+"""
+
+
+def test_imported_drivers_do_not_require_posix_modules():
+    """Every driver imports on a platform without POSIX process APIs.
+
+    One interpreter imports them all: the simulated platform is the same for
+    each, and a spawn per driver paid its ~2.3 s of imports four times over.
+    Each failing driver is named, not only the first.
+    """
     result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import importlib, os, sys; sys.modules['resource'] = None; "
-            "os.process_cpu_count = os.cpu_count; "
-            "[delattr(os, name) for name in ('getloadavg', 'sched_getaffinity') "
-            "if hasattr(os, name)]; importlib.import_module(sys.argv[1])",
-            f"benchmarks.{name}",
-        ],
+        [sys.executable, "-c", _IMPORT_WITHOUT_POSIX, *(f"benchmarks.{name}" for name in _DRIVERS)],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
     assert result.returncode == 0, result.stderr
 
@@ -229,20 +244,28 @@ def _run(*args: str) -> subprocess.CompletedProcess:
     ("flag", "value"),
     [("--seed", "-1"), ("--levels", "1"), ("--rows", "1"), ("--repeats", "0")],
 )
-def test_every_flag_is_validated_at_the_flag(flag: str, value: str) -> None:
+def test_every_flag_is_validated_at_the_flag(monkeypatch, flag: str, value: str) -> None:
     """A rejected input must name the flag, not die inside a library.
 
     ``--seed -1`` used to raise eight NumPy frames deep inside ``default_rng``,
-    mentioning neither the flag nor the harness.
+    mentioning neither the flag nor the harness.  Run in process: every check
+    precedes the first fit, and a spawned script paid ~2.3 s of imports to
+    reach it.  The coupon-collector test below keeps the script-mode run.
+
+    The rejection is matched as ``<flag> must be >= <floor>``, not by the flag
+    alone: the coupon-collector floor also refuses ``--rows 1`` by name, so a
+    flag-only match still passed with the rows floor deleted.
     """
     # Do not append a second --repeats: argparse keeps the last occurrence, so
     # it would silently overwrite the value under test.
     extra = () if flag == "--repeats" else ("--repeats", "1")
-    result = _run(flag, value, *extra)
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), flag, value, *extra])
 
-    assert result.returncode != 0, f"{flag} {value} was accepted"
-    assert flag in result.stderr, (
-        f"rejection did not name {flag}; stderr was:\n{result.stderr[-500:]}"
+    with pytest.raises(SystemExit) as rejected:
+        bench.main()
+
+    assert str(rejected.value.code).startswith(f"{flag} must be >= "), (
+        f"{flag} {value} was not rejected at the flag: {rejected.value.code!r}"
     )
 
 
@@ -253,6 +276,9 @@ def test_row_floor_is_coupon_collector_not_pigeonhole() -> None:
     ``L * ln L`` draws, not ``L``.  At 41 levels the old bound accepted 82 rows,
     where 41 training draws realize roughly 26 distinct levels -- and the run
     then reported ``levels: 41``.
+
+    Run as a script on purpose: it is the one test here that reaches the file's
+    script-mode import branch (``import _platform``).
     """
     result = _run("--levels", "41", "--rows", "82", "--repeats", "1")
 

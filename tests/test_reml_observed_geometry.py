@@ -3027,7 +3027,14 @@ class TestModeCertificationRecovery:
         assert tight.reml_diagnostics()["converged"] is True
 
     def test_uncertifiable_candidate_is_infeasible_not_fatal(self, monkeypatch):
-        """One bad candidate p must not abort the whole power search."""
+        """One bad candidate p must not abort the whole power search.
+
+        Nor may its score poison the search: an infeasible score must stay
+        finite, since inf-inf is NaN inside Brent. Both are claims about the
+        same search, so one search pins both.
+        """
+        import warnings as _warnings
+
         import superglm.reml.direct as direct_module
 
         X, y, weights = self._tweedie_fixture()
@@ -3042,39 +3049,15 @@ class TestModeCertificationRecovery:
 
         monkeypatch.setattr(direct_module, "observed_penalized_mode_score", flaky_score)
 
-        result = self._model().estimate_p(
-            X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
-        )
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            result = self._model().estimate_p(
+                X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
+            )
 
         assert any(seen), "the fixture never entered the uncertifiable region"
         assert 1.05 <= result.p_hat <= 1.6
         assert np.isfinite(result.nll)
-
-    def test_infeasible_powers_do_not_poison_the_optimizer_arithmetic(self, monkeypatch):
-        """An infeasible score must stay finite: inf-inf is NaN inside Brent."""
-        import warnings as _warnings
-
-        import superglm.reml.direct as direct_module
-
-        X, y, weights = self._tweedie_fixture()
-        monkeypatch.setattr(
-            direct_module,
-            "observed_penalized_mode_score",
-            lambda **kwargs: SimpleNamespace(
-                relative_max=(
-                    1.0e-3
-                    if any(getattr(g, "p", 0.0) > 1.6 for g in (kwargs.get("distribution"),))
-                    else 1.0e-12
-                )
-            ),
-        )
-
-        with _warnings.catch_warnings(record=True) as caught:
-            _warnings.simplefilter("always")
-            self._model().estimate_p(
-                X, y, sample_weight=weights, fit_mode="reml", p_bounds=(1.05, 1.95)
-            )
-
         numeric = [w for w in caught if "invalid value" in str(w.message)]
         assert not numeric, f"infeasible scores reached the optimizer as non-finite: {numeric}"
 
@@ -3744,12 +3727,16 @@ class TestModeCertifiesAtTheRoundOffFloor:
         )
         return pd.DataFrame(columns), y, weight, offset, n_cat
 
-    @pytest.mark.parametrize("basis", ["fs", "sz"])
-    def test_a_factor_smooth_certifies_on_either_basis(self, basis):
+    @pytest.mark.slow
+    def test_a_factor_smooth_certifies_at_its_round_off_stall(self):
         """``fs`` failed where ``sz`` fit, on identical data through one gate.
 
         Reported separately from the RandomEffect symptom; the same predicate
-        closes both, so both are pinned here.
+        closes both. Only ``fs`` is run: ``sz`` never stalls here (no
+        budget-exhausted PIRLS call at 60k or 6k rows, measured 2026-09-23),
+        so it never reaches the deferral and passed against the unfixed gate.
+        The size is load-bearing: the stall appeared at 60k and 30k rows and
+        not at 20k or 10k, so a smaller frame stops regressing anything.
         """
         from superglm import Categorical, FactorSmooth, Spline, SuperGLM
 
@@ -3762,7 +3749,7 @@ class TestModeCertifiesAtTheRoundOffFloor:
             link="log",
             selection_penalty=0.0,
             features=features,
-            interactions=[FactorSmooth("x", group="grp", basis=basis, kind="ps", k=6)],
+            interactions=[FactorSmooth("x", group="grp", basis="fs", kind="ps", k=6)],
             # The stall this test regresses arises on the structured backend's
             # trajectory, which this shape used to receive from `auto` before
             # the issue-343 crossover recalibration sent K=2 blocks beside a
@@ -3776,7 +3763,6 @@ class TestModeCertifiesAtTheRoundOffFloor:
             model.fit_reml(frame[columns], y, sample_weight=weight, offset=offset)
 
         assert model.reml_diagnostics()["converged"] is True
-        if basis == "fs":
-            assert any(reason == "max_iter" for _, reason in records), (
-                "the fs fixture no longer reaches the stall it exists to regress"
-            )
+        assert any(reason == "max_iter" for _, reason in records), (
+            "the fs fixture no longer reaches the stall it exists to regress"
+        )

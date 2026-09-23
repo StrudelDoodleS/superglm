@@ -101,15 +101,28 @@ def test_candidates_rejects_deferred_and_ineligible_kinds():
 
 
 def test_fitted_pairs_of_every_class_are_excluded():
-    df, rng = _mixed_frame()
+    """Exclusion keys on parent_names, so it covers every interaction class
+    rather than TensorInteraction alone: a fitted pair of any class drops out
+    of the default sweep and is refused as a candidate.  The class names are
+    pinned below: a rename or a re-dispatch that quietly stopped building one
+    of these four would otherwise leave the exclusion untested for it."""
+    # The fit is the whole cost here and nothing below reads the row count.
+    df, rng = _mixed_frame(n=2000)
     y = _null_y(df, rng)
-    model = _fit_mixed(df, y, interactions=[("region", "brand"), ("age", "region")])
+    fitted = [("age", "power"), ("age", "region"), ("region", "brand"), ("bm", "region")]
+    model = _fit_mixed(df, y, interactions=fitted)
+    assert {type(spec).__name__ for spec in model._interaction_specs.values()} == {
+        "TensorInteraction",
+        "SplineCategorical",
+        "CategoricalInteraction",
+        "NumericCategorical",
+    }
     table = model.screen_interactions(df, y)
     pairs = {frozenset((a, b)) for a, b in zip(table["feature_a"], table["feature_b"])}
-    assert frozenset(("region", "brand")) not in pairs
-    assert frozenset(("age", "region")) not in pairs
-    with pytest.raises(ValueError, match="already fitted"):
-        model.screen_interactions(df, y, candidates=[("region", "brand")])
+    assert not pairs & {frozenset(pair) for pair in fitted}
+    for pair in fitted:
+        with pytest.raises(ValueError, match="already fitted"):
+            model.screen_interactions(df, y, candidates=[pair])
 
 
 def test_oc_margin_screens_beside_its_spline_siblings():
@@ -152,26 +165,6 @@ def test_oc_margin_screens_beside_its_spline_siblings():
     # them: the pure-spline pair scores exactly what it scores on its own.
     assert swept[frozenset(("age", "power"))].z == pytest.approx(alone["z"].iloc[0])
     assert swept[frozenset(("age", "band"))].z == pytest.approx(oc_pair["z"])
-
-
-def test_fitted_pairs_of_every_class_are_rejected_as_candidates():
-    """Exclusion now keys on parent_names, so it covers every interaction
-    class rather than TensorInteraction alone.  The class names are pinned
-    below: a rename or a re-dispatch that quietly stopped building one of
-    these four would otherwise leave the exclusion untested for it."""
-    df, rng = _mixed_frame()
-    y = _null_y(df, rng)
-    fitted = [("age", "power"), ("age", "region"), ("region", "brand"), ("bm", "region")]
-    model = _fit_mixed(df, y, interactions=fitted)
-    assert {type(spec).__name__ for spec in model._interaction_specs.values()} == {
-        "TensorInteraction",
-        "SplineCategorical",
-        "CategoricalInteraction",
-        "NumericCategorical",
-    }
-    for pair in fitted:
-        with pytest.raises(ValueError, match="already fitted"):
-            model.screen_interactions(df, y, candidates=[pair])
 
 
 def test_factor_smooth_pair_is_excluded():
@@ -231,14 +224,43 @@ def _planted_bend(seed=4):
     return df, rng.poisson(np.exp(-1.3 + bend)).astype(np.float64)
 
 
-def test_spline_cat_planted_deviation_curve_ranks_first():
+def test_spline_cat_planted_deviation_curve_ranks_first(subtests):
+    """The planted bend screens first, confirms by refit, and screens the same
+    whichever order its pairs are named in.
+
+    All three read one mains fit of the same 20,000 rows, so they share it
+    rather than refit it three times; subtests keep a failure in one from
+    hiding the other two.
+    """
     df, y = _planted_bend()
     model = _fit_mixed(df, y)
-    table = model.screen_interactions(df, y)
-    top = table.iloc[0]
-    assert {top["feature_a"], top["feature_b"]} == {"age", "region"}
-    assert top["kind"] == "spline_cat"
-    assert top["z"] > 8.0
+
+    with subtests.test(msg="ranks first"):
+        top = model.screen_interactions(df, y).iloc[0]
+        assert {top["feature_a"], top["feature_b"]} == {"age", "region"}
+        assert top["kind"] == "spline_cat"
+        assert top["z"] > 8.0
+
+    with subtests.test(msg="pair order does not leak into the row"):
+        # A spline_cat pair is assembled with the categorical margin LAST, and
+        # a numeric_cat pair resolves which margin carries the slope by KIND
+        # rather than by argument position -- whichever order the caller names
+        # them in.  Either reordering is a column permutation the statistic is
+        # invariant to, and it must reach neither the reported columns nor any
+        # number in the row.
+        for a, b in (("age", "region"), ("bm", "region")):
+            fwd = model.screen_interactions(df, y, candidates=[(a, b)]).iloc[0]
+            rev = model.screen_interactions(df, y, candidates=[(b, a)]).iloc[0]
+            assert (fwd["feature_a"], fwd["feature_b"]) == (a, b)
+            assert (rev["feature_a"], rev["feature_b"]) == (b, a)
+            for column in ("kind", "statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
+                assert fwd[column] == rev[column], (a, b, column)
+
+    with subtests.test(msg="confirms by refit"):
+        # The pair the screen ranks first is real: the SplineCategorical refit
+        # the `spline_cat` kind names finds it in the likelihood too.
+        confirm = _fit_mixed(df, y, interactions=[("age", "region")])
+        assert model._result.deviance - confirm._result.deviance > 50.0
 
 
 def test_spline_cat_flags_approx_when_only_its_spline_margin_bins_lossily():
@@ -302,23 +324,6 @@ def test_spline_cat_flags_approx_when_only_its_spline_margin_bins_lossily():
     assert off[two_factors] == ("cat_cat", False)
 
 
-def test_mixed_pair_order_does_not_leak_into_the_row():
-    """A spline_cat pair is assembled with the categorical margin LAST, and a
-    numeric_cat pair resolves which margin carries the slope by KIND rather
-    than by argument position -- whichever order the caller names them in.
-    Either reordering is a column permutation the statistic is invariant to,
-    and it must reach neither the reported columns nor any number in the row."""
-    df, y = _planted_bend()
-    model = _fit_mixed(df, y)
-    for a, b in (("age", "region"), ("bm", "region")):
-        fwd = model.screen_interactions(df, y, candidates=[(a, b)]).iloc[0]
-        rev = model.screen_interactions(df, y, candidates=[(b, a)]).iloc[0]
-        assert (fwd["feature_a"], fwd["feature_b"]) == (a, b)
-        assert (rev["feature_a"], rev["feature_b"]) == (b, a)
-        for column in ("kind", "statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
-            assert fwd[column] == rev[column], (a, b, column)
-
-
 def test_two_level_factor_pairs_are_legal():
     df, rng = _mixed_frame(n=6000, seed=12)
     df = df.assign(fuel=rng.choice(["diesel", "petrol"], len(df)))
@@ -333,16 +338,6 @@ def test_two_level_factor_pairs_are_legal():
     assert row["kind"] == "cat_cat"
     assert row["edf0"] == pytest.approx(2.0, abs=0.26)  # (2-1)*(3-1)
     assert np.isfinite(row["z"])
-
-
-def test_spline_cat_confirms_by_refit():
-    """The pair the screen ranks first is real: the SplineCategorical refit
-    the `spline_cat` kind names finds it in the likelihood too."""
-    df, y = _planted_bend()
-    base = _fit_mixed(df, y)
-    dev0 = base._result.deviance
-    confirm = _fit_mixed(df, y, interactions=[("age", "region")])
-    assert dev0 - confirm._result.deviance > 50.0
 
 
 def test_numeric_cat_planted_slope_ranks_first_with_exact_df():
@@ -393,17 +388,8 @@ def test_numeric_numeric_planted_product_ranks_first():
     assert top["z"] > 5.0
 
 
-def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
-    """A z-moment pair has no grid to bin, so it cannot approximate: an
-    unaffordable numeric_cat pair is REFUSED, never degraded.  Every block it
-    builds scales with the factor's width and the largest is the (L+1)-wide
-    overlap curvature, so the gate is `(L+1)**2 <= max_cells` -- applied to
-    the level count alone, before the dense (L, L-1) menu is ever built.  The
-    cubic gate applies to the same width for the same reason (the blocks are
-    also FACTORIZED at that width), and at the default budget it is the
-    binding one: `(L-1)**3 <= 1000 * max_cells` admits 1710 levels where the
-    allocation gate admits 2235."""
-    L, reps = 2300, 2
+def _wide_numeric_cat(L, reps=2):
+    """A fitted numeric x factor model whose factor has ``L`` levels."""
     rng = np.random.default_rng(31)
     df = pd.DataFrame(
         {
@@ -416,7 +402,28 @@ def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
     y = rng.normal(size=len(df))
     model = SuperGLM(family="gaussian", features={"g": Categorical(), "bm": Numeric()})
     model.fit_reml(df, y)
+    return model, df, y
 
+
+def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
+    """A z-moment pair has no grid to bin, so it cannot approximate: an
+    unaffordable numeric_cat pair is REFUSED, never degraded.  Every block it
+    builds scales with the factor's width and the largest is the (L+1)-wide
+    overlap curvature, so the gate is `(L+1)**2 <= max_cells` -- applied to
+    the level count alone, before the dense (L, L-1) menu is ever built.  The
+    cubic gate applies to the same width for the same reason (the blocks are
+    also FACTORIZED at that width), and at the default budget it is the
+    binding one: `(L-1)**3 <= 1000 * max_cells` admits 1710 levels where the
+    allocation gate admits 2235.
+
+    Two factor widths, because a pair that computes costs `(L-1)**3` and the
+    two claims bind at different widths.  1711 levels is the narrowest factor
+    the cubic gate refuses at the default budget, which the allocation gate
+    alone would admit.  1005 is the narrowest whose cubic budget exceeds its
+    allocation budget, so the lift there is the cubic gate's own threshold, at
+    a fraction of the one-thread cost of lifting the refused width itself."""
+    L = 1711
+    model, df, y = _wide_numeric_cat(L)
     refused = model.screen_interactions(df, y).iloc[0]  # default max_cells
     assert refused["kind"] == "numeric_cat"
     assert np.isnan(refused["statistic"]) and np.isnan(refused["z"])
@@ -428,11 +435,16 @@ def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
     assert np.isnan(short["z"])
     assert short["n_cells"] == L
     # ... and so is the allocation budget on its own: the (L-1)^3 solve the
-    # blocks feed needs more than twice that, and BOTH gates must pass.
+    # blocks feed needs 1.7 times that, and BOTH gates must pass.
     allocation_only = model.screen_interactions(df, y, max_cells=(L + 1) ** 2).iloc[0]
     assert np.isnan(allocation_only["z"])
 
+    L = 1005
+    model, df, y = _wide_numeric_cat(L)
     budget = max((L + 1) ** 2, -(-((L - 1) ** 3) // 1000))
+    # One short of the cubic budget still clears the allocation budget, so
+    # the refusal below is the cubic gate's alone.
+    assert budget - 1 >= (L + 1) ** 2
     one_short = model.screen_interactions(df, y, max_cells=budget - 1).iloc[0]
     assert np.isnan(one_short["z"])
     # At the budget that clears both, the same pair computes, exactly and
@@ -598,13 +610,14 @@ FREQ_SKIP = pytest.mark.skipif(
 
 
 def _fremtpl_features():
-    # This mirrors the worked example in docs/how-to/screen-interactions.md, and the
-    # specification is deliberate.  BonusMalus is strongly curved on this book
-    # (splined it reports edf 7.5 of rank 11), so specifying it as a Numeric
-    # would both mis-fit the margin and demote every BonusMalus pair to the
-    # deferred spline x numeric kind -- the sweep would then screen fewer
-    # kinds than it can.  LogDensity is the honest linear margin: give it a
-    # spline and the smooth collapses to edf 1.4 of rank 11.
+    # This mirrors the worked example's specification in
+    # docs/how-to/screen-interactions.md, and the specification is deliberate.
+    # BonusMalus is strongly curved on this book (splined it reports edf 7.5
+    # of rank 11), so specifying it as a Numeric would both mis-fit the margin
+    # and demote every BonusMalus pair to the deferred spline x numeric kind --
+    # the sweep would then screen fewer kinds than it can.  LogDensity is the
+    # honest linear margin: give it a spline and the smooth collapses to edf
+    # 1.4 of rank 11.
     return {
         "DrivAge": Spline(kind="ps", n_knots=8),
         "VehAge": Spline(kind="ps", n_knots=12),
@@ -622,12 +635,15 @@ def _fremtpl_features():
 
 def _fremtpl_frame(n_rows=80_000):
     df = _datasets.load_freq().sample(n_rows, random_state=0).reset_index(drop=True)
-    # This fixture uses the documented Poisson case/frequency-weight encoding:
-    # the response is the claim rate and exposure controls its likelihood
-    # contribution. This is not Tweedie's Var(y) = phi * V(mu) / w prior-weight
-    # contract. Clip exposure first, exactly as
-    # tests/test_realdata_parity.py::_prep_freq does, so a near-zero denominator
-    # cannot manufacture a several-hundred-claim rate.
+    # The response is the claim rate and exposure is its weight.  The models
+    # fitted on this frame leave weight_semantics at its default, "prior",
+    # which reads exposure as an EDM prior weight, Var(y) = phi * V(mu) / w.
+    # The guide's worked example declares "frequency" instead, and its numbers
+    # are anchored in tests/test_screening_guide_numbers.py: the two contracts
+    # share a score equation but not phi, the REML criterion or the knot
+    # placement, so nothing here reproduces the guide's table.  Clip exposure
+    # first, exactly as tests/test_realdata_parity.py::_prep_freq does, so a
+    # near-zero denominator cannot manufacture a several-hundred-claim rate.
     df["Exposure"] = df["Exposure"].clip(lower=0.01)
     # log1p is the house transform for this column (see the credibility demo).
     df["LogDensity"] = np.log1p(df["Density"].to_numpy(dtype=np.float64))
@@ -638,54 +654,53 @@ def _fremtpl_frame(n_rows=80_000):
 
 @FREQ_SKIP
 @pytest.mark.slow
-def test_fremtpl_mixed_sweep_end_to_end():
+def test_fremtpl_mixed_sweep_end_to_end(subtests):
+    """The worked example's specification, fitted once on the real book.
+
+    That one mains fit is read twice.  The sweep runs end to end and its top
+    pair refits and improves.  And the specification holds up, because the
+    guide's worked example is an exemplar: two of its claims are load-bearing
+    and measurable -- BonusMalus is curved (so specifying it as a Numeric
+    would be wrong, and would demote its pairs to the deferred spline x
+    numeric kind), and LogDensity is not (so it is an honest Numeric rather
+    than one chosen to dodge a deferral).
+    """
     df, y, exposure = _fremtpl_frame()
     model = SuperGLM(family="poisson", features=_fremtpl_features())
     model.fit_reml(df, y, sample_weight=exposure)
-    table = model.screen_interactions(df, y, sample_weight=exposure)
-    # every v1 kind this feature set can produce shows up and computes
-    assert {"ti", "spline_cat", "numeric_cat", "cat_cat"} <= set(table["kind"])
-    assert np.isfinite(table["z"]).any()
-    # Six features make fifteen pairs; the three LogDensity x spline pairs are
-    # deferred, so the sweep reports twelve.  This pins the deferral as a
-    # silent drop from the default sweep rather than a NaN row.
-    assert len(table) == 12
-    # the queue is workable on a real book: the top pair refits and improves
-    top = table.iloc[0]
-    confirm = SuperGLM(
-        family="poisson",
-        features=_fremtpl_features(),
-        interactions=[(top["feature_a"], top["feature_b"])],
-    )
-    confirm.fit_reml(df, y, sample_weight=exposure)
-    assert confirm._result.deviance < model._result.deviance
 
+    with subtests.test(msg="sweep end to end"):
+        table = model.screen_interactions(df, y, sample_weight=exposure)
+        # every v1 kind this feature set can produce shows up and computes
+        assert {"ti", "spline_cat", "numeric_cat", "cat_cat"} <= set(table["kind"])
+        assert np.isfinite(table["z"]).any()
+        # Six features make fifteen pairs; the three LogDensity x spline pairs
+        # are deferred, so the sweep reports twelve.  This pins the deferral as
+        # a silent drop from the default sweep rather than a NaN row.
+        assert len(table) == 12
+        # the queue is workable on a real book: the top pair refits and improves
+        top = table.iloc[0]
+        confirm = SuperGLM(
+            family="poisson",
+            features=_fremtpl_features(),
+            interactions=[(top["feature_a"], top["feature_b"])],
+        )
+        confirm.fit_reml(df, y, sample_weight=exposure)
+        assert confirm._result.deviance < model._result.deviance
 
-@FREQ_SKIP
-@pytest.mark.slow
-def test_fremtpl_example_specification_is_not_mis_specified():
-    """The guide's worked example is an exemplar, so its spec must hold up.
+    with subtests.test(msg="specification is not mis-specified"):
 
-    Two claims in docs/how-to/screen-interactions.md are load-bearing and both are
-    measurable: BonusMalus is curved (so specifying it as a Numeric would be
-    wrong, and would demote its pairs to the deferred spline x numeric kind),
-    and LogDensity is not (so it is an honest Numeric rather than one chosen
-    to dodge a deferral).
-    """
-    df, y, exposure = _fremtpl_frame()
-    base = _fremtpl_features()
+        def deviance(overrides):
+            respecified = SuperGLM(family="poisson", features={**_fremtpl_features(), **overrides})
+            respecified.fit_reml(df, y, sample_weight=exposure)
+            return respecified._result.deviance
 
-    def deviance(overrides):
-        model = SuperGLM(family="poisson", features={**base, **overrides})
-        model.fit_reml(df, y, sample_weight=exposure)
-        return model._result.deviance
-
-    splined = deviance({})
-    # Linearising BonusMalus costs real deviance -- it is genuinely curved.
-    assert deviance({"BonusMalus": Numeric()}) - splined > 50.0
-    # Splining LogDensity buys almost nothing -- it is genuinely linear.
-    smoothed = deviance({"LogDensity": Spline(kind="ps", n_knots=8)})
-    assert splined - smoothed < 10.0
+        splined = model._result.deviance
+        # Linearising BonusMalus costs real deviance -- it is genuinely curved.
+        assert deviance({"BonusMalus": Numeric()}) - splined > 50.0
+        # Splining LogDensity buys almost nothing -- it is genuinely linear.
+        smoothed = deviance({"LogDensity": Spline(kind="ps", n_knots=8)})
+        assert splined - smoothed < 10.0
 
 
 def test_grouped_categorical_margins_screen_and_confirm_by_refit():
@@ -862,7 +877,10 @@ def test_cat_cat_refuses_a_block_too_wide_to_solve():
     which grows as k^2, while the per-rung factorization grows as k^3 -- so
     they admitted cat_cat blocks up to k = 4472, measured at 24s and 1.3GB per
     pair.  The cubic gate refuses on the block dimension, with the same NaN-row
-    semantics as every other budget, and `max_cells` lifts it."""
+    semantics as every other budget, and `max_cells` lifts it.  The lift is
+    pinned at k = 361 by `test_cubic_gate_leaves_ordinary_pairs_alone`, the
+    same gate at the same call site: lifting this block would decompose it at
+    k = 1720 to prove the same threshold again."""
     la, lb = 44, 41
     k = (la - 1) * (lb - 1)  # 1720, one rung above the default ceiling of 1709
     df, y = _balanced_factorial(la, lb)
@@ -881,18 +899,11 @@ def test_cat_cat_refuses_a_block_too_wide_to_solve():
     # the other pairs in the same sweep are unaffected
     assert np.isfinite(table[table["kind"] != "cat_cat"]["z"]).all()
 
-    # One unit short of the cubic budget is still a refusal ...
+    # One unit short of the cubic budget is still a refusal.
     budget = -(-(k**3) // 1000)
     short = model.screen_interactions(df, y, candidates=[("a", "b")], max_cells=budget - 1).iloc[0]
     assert np.isnan(short["z"])
     assert short["n_cells"] == la * lb
-    # ... and at the budget the same pair computes, exactly and unpenalized.
-    lifted = model.screen_interactions(df, y, candidates=[("a", "b")], max_cells=budget).iloc[0]
-    assert np.isfinite(lifted["z"])
-    assert lifted["edf0"] == pytest.approx(k, abs=0.5)  # achieved rank
-    assert lifted["lambda0"] == 0.0
-    assert lifted["n_cells"] == la * lb
-    assert not lifted["approx"]
 
 
 def test_cubic_gate_leaves_ordinary_pairs_alone():
@@ -1175,7 +1186,7 @@ def test_cr_interaction_keeps_the_penalty_order_it_was_asked_for(m_order):
     from superglm.features.spline import CardinalCRSpline, CubicRegressionSpline
 
     rng = np.random.default_rng(4)
-    n = 4000
+    n = 1000
     x = rng.uniform(0.0, 10.0, n)
     df = pd.DataFrame(
         {

@@ -1867,30 +1867,15 @@ def _wide_frame(L, reps=6, seed=11):
     return df, slope * x + rng.normal(scale=0.5, size=n)
 
 
-def test_a_factor_above_the_dense_cap_is_scored_rather_than_refused():
+def test_a_factor_above_the_dense_cap_is_scored_rather_than_refused(monkeypatch):
     """The cap this whole module exists to remove.
 
     At the default max_cells the dense path takes a spline_cat block only to
     k = 1357, which for a width-11 spline is 124 levels.  A wider factor used
     to come back as a NaN row.
-    """
-    L = 400
-    df, y = _wide_frame(L)
-    model = SuperGLM(
-        family="gaussian", features={"g": Categorical(), "x": Spline(kind="ps", n_knots=8)}
-    )
-    model.fit_reml(df, y)
-    row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=BUDGETS).iloc[0]
-    assert row["kind"] == "spline_cat"
-    assert np.isfinite(row["z"])
-    assert np.isfinite(row["statistic"])
-    assert row["edf0"] > 16.0  # clamped: kron(S_a, I) outranks every budget
-    assert row["z"] > 0.0  # the data really does have a level-varying slope
 
-
-def test_the_wide_path_never_allocates_the_dense_blocks(monkeypatch):
-    """A pair routed structurally must not touch either thing the dense gates
-    refused it for: the ``(L, L-1)`` contrast menu, or the ``(k, k)``-wide
+    Scored structurally, the pair must also not touch either thing the dense
+    gates refused it for: the ``(L, L-1)`` contrast menu, or the ``(k, k)``-wide
     reduction the ladder would factorize.
 
     **RE-KEYED FOR ISSUE #257, AND THE RE-KEYING IS THE POINT.**  The spy used
@@ -1935,8 +1920,12 @@ def test_the_wide_path_never_allocates_the_dense_blocks(monkeypatch):
     )
     model.fit_reml(df, y)
     row = model.screen_interactions(df, y, candidates=[("x", "g")], edf0=BUDGETS).iloc[0]
-    assert np.isfinite(row["z"])
     assert calls == []
+    assert row["kind"] == "spline_cat"
+    assert np.isfinite(row["z"])
+    assert np.isfinite(row["statistic"])
+    assert row["edf0"] > 16.0  # clamped: kron(S_a, I) outranks every budget
+    assert row["z"] > 0.0  # the data really does have a level-varying slope
 
 
 def _thin_level_pair(low_weight):
@@ -5141,17 +5130,22 @@ def test_the_structured_path_bins_rather_than_allocate_its_own_intermediate(monk
     """The kernel's ``(n_a, k_s, k_s)`` outer products need a gate of their own.
 
     It is the TRANSPOSE of the intermediate the dense path is gated on, and
-    no other structured gate bounds it: the block stacks are ``L * k_s^2``
-    and the cell table is ``n_a * L``, and neither is ``n_a * k_s^2``.  Left
-    ungated it grows with the spline's support, which the cell table alone
-    lets run to ``max_cells / L``.  Both terms scale with the support, so the
-    answer is to bin the spline margin, exactly as the dense path does.
+    no allocation gate bounds it: the block stacks are ``L * k_s^2`` and the
+    cell table is ``n_a * L``, and neither is ``n_a * k_s^2``.  Left ungated it
+    grows with the spline's support, which the cell table alone lets run to
+    ``max_cells / L``.  Both terms scale with the support, so the answer is to
+    bin the spline margin, exactly as the dense path does.  The work charge
+    #204 added for the profiled-trace setup bins the margin too, and first
+    whenever ``L > 6``, so it is lifted below to leave this term the only
+    thing that can bin it.
     """
     rng = np.random.default_rng(17)
-    L, n, support = 40, 5000, 4000
-    # The support is chosen so the CELL term passes on its own -- 4000 x 40
-    # is 160,000 against a 400,000 ceiling -- and only the intermediate is
-    # over, so nothing but the new term can be what bins the margin.
+    L, n, support = 40, 5000, 4001
+    # The support is chosen so the CELL term passes on its own -- 4001 x 40
+    # is 160,040 against a 400,000 ceiling -- and only the intermediate is
+    # over.  4001 and not a round 4000: a 4000-point grid puts ps(20)'s knots
+    # on data points, and the round-off residue there sends the MAINS fit
+    # down the exact-rational Gram path, which this test does not read.
     grid = np.linspace(0.0, 1.0, support)
     df = pd.DataFrame(
         {
@@ -5164,9 +5158,15 @@ def test_the_structured_path_bins_rather_than_allocate_its_own_intermediate(monk
         family="gaussian", features={"g": Categorical(), "x": Spline(kind="ps", n_knots=20)}
     )
     model.fit_reml(df, y)
+    # The setup charge is 2 * n_a * L * k_s^2 against 50 * max_cells, which
+    # reaches its ceiling before this term reaches 4 * max_cells whenever
+    # L > 6: here it alone would bin the margin, and deleting the term under
+    # test would change nothing.  An effectively unlimited pass allowance
+    # takes it out of the routing.
+    monkeypatch.setattr(ops, "_structured_evaluation_allowance", lambda *args: 10**6)
     row, seen = _routed_shapes(model, df, y, monkeypatch, max_cells=400_000)
     assert seen, "the pair must route through the arrow kernel"
-    # 4000 support points at width 23 is 2,116,000 doubles against a
+    # 4001 support points at width 23 is 2,116,529 doubles against a
     # 1,600,000 double intermediate budget; binned to 256 it is 135,424.
     assert seen["width"] > 20
     assert seen["support"] <= 256

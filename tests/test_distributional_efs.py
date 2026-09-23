@@ -4573,6 +4573,9 @@ def test_boundary_nomination_is_telemetry_only_and_preserves_the_numerical_route
 
 def test_an_interior_boundary_nomination_never_grants_convergence() -> None:
     frame, response, predictors = _smooth_fixture()
+    # The first nomination arrives at iteration 9 and recurs at every later one, so a
+    # 30-iteration budget leaves 21 nominated iterations in which one could stop the
+    # fit; its history is exactly the first 30 records of a 200-iteration run.
     model = fit_dense_distributional(
         frame,
         response,
@@ -4580,7 +4583,7 @@ def test_an_interior_boundary_nomination_never_grants_convergence() -> None:
         weight_contract=WeightContract(semantics="prior"),
         predictors=predictors,
         efs_config=DistributionalEFSConfig(
-            outer="efs", max_iterations=200, boundary_saturation=0.95
+            outer="efs", max_iterations=30, boundary_saturation=0.95
         ),
     )
 

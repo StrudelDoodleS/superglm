@@ -8,8 +8,10 @@ when PIRLS did not converge to a mode at all. The Tweedie power search catches
 only the first. The second escapes and kills the whole search -- from the
 bracket endpoint p=1.95, which the search probes second and never selects.
 
-Both fixtures below are sized so the failure lands on a power the search only
-probes, never returns.
+The natural-failure test below is sized so the failure lands on a power the
+search only probes, never returns. Tests that inject their failure run on a
+small frame instead: the data cannot matter to them, and a frame with walls of
+its own would let a natural failure stand in for the injected one.
 """
 
 from __future__ import annotations
@@ -18,80 +20,65 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, OrderedCategorical, Spline, SuperGLM, families
+from superglm import Spline, SuperGLM, families
 from superglm.reml.observed_geometry import ObservedModeNotCertifiedError
 
-CAT_LEVELS = {"f0": 6, "f1": 9, "f2": 4, "f3": 11, "f4": 13, "f5": 11}
-OC_LEVELS = {"f6": 16, "f7": 24}
+from ._tweedie_profile_fixtures import flat_lambda_fixture as _fixture
+from ._tweedie_profile_fixtures import search_fixture
 
 
-def _fixture(n: int, seed: int = 4):
-    """Small Tweedie/log frame with saturated cr bases on both ordered terms."""
-    rng = np.random.default_rng(seed)
-    columns: dict[str, np.ndarray] = {}
-    eta = np.full(n, -1.0)
-    for name, k in CAT_LEVELS.items():
-        levels = [f"{name}_{j:02d}" for j in range(k)]
-        idx = rng.integers(0, k, n)
-        columns[name] = np.array(levels)[idx]
-        eta += rng.normal(0, 0.2, k)[idx]
-    orders: dict[str, list[str]] = {}
-    for name, k in OC_LEVELS.items():
-        levels = [f"{name}_{j:02d}" for j in range(k)]
-        idx = rng.integers(0, k, n)
-        columns[name] = np.array(levels)[idx]
-        eta += 0.02 * (idx - k / 2)
-        orders[name] = levels
-    frame = pd.DataFrame(columns)
-    weights = rng.uniform(1.19e-5, 1.0, n)
-    offset = np.where(rng.random(n) < 0.35, 0.0, 1.0986)
-    y = np.where(rng.random(n) < 0.83, 0.0, rng.gamma(1.5, np.exp(eta) * 900, n))
-    features = {name: Categorical() for name in CAT_LEVELS}
-    for name, k in OC_LEVELS.items():
-        features[name] = OrderedCategorical(order=orders[name], basis=Spline(kind="cr", k=k))
-    return frame, y, weights, offset, features
+def _plumbing_fixture():
+    """A small frame for tests whose infeasible powers are injected.
+
+    Searches over [1.05, 1.95] on it meet no uncertifiable power (measured at
+    600 and 1,200 rows), so the only walls a test sees are the ones it made.
+    """
+    frame, y, features = search_fixture(n=600)
+    return frame, y, None, None, features
 
 
 def _model(features, p=1.5):
     return SuperGLM(family=families.tweedie(p=p), features=features)
 
 
-@pytest.mark.parametrize("n", [5_000, 4_000])
-def test_bracket_endpoint_without_a_converged_mode_is_routed_around(n):
-    """The search must survive a probe power whose penalized mode fails."""
-    frame, y, weights, offset, features = _fixture(n)
+def test_bracket_endpoint_without_a_converged_mode_is_routed_around(recwarn):
+    """The search must survive a probe power whose penalized mode fails.
+
+    One realisation carries three claims about the one coupled search: it
+    routes around the wall, it lands where the ML-mode search that never fits
+    REML at the wall lands, and it does not warn about censoring merely
+    because a wall exists far from p_hat.
+    """
+    frame, y, weights, offset, features = _fixture(5_000)
 
     # Precondition: p=1.95 -- the second point Brent probes -- has no usable
     # penalized mode under REML. Without this the test proves nothing, so the
-    # sizes are re-derived rather than kept: the mode is now REACHED and
-    # judged on its KKT residual instead of on PIRLS's step-length flag. The
-    # sizes retained here still miss the 1e-9 bar (scores 1.8e-4 at 5000 and
-    # 1.5e-7 at 4000); 6000 no longer fails at all, having failed only
-    # because the step test could not fire at its round-off floor. The 4000
-    # arm clears the bar by ~150x rather than the 5000 arm's ~1e5, so it is
-    # the one to re-derive first if a BLAS or numpy change moves it.
+    # size is re-derived rather than kept: the mode is now REACHED and judged
+    # on its KKT residual instead of on PIRLS's step-length flag. 5000 still
+    # misses the 1e-9 bar by ~7e4 (score 6.7e-5, measured 2026-09-23); 6000
+    # no longer fails at all, having failed only because the step test could
+    # not fire at its round-off floor. A 4000 arm re-ran this same search at
+    # 150x above the bar (score 1.5e-7) and was dropped as the fragile copy.
     with pytest.raises(ObservedModeNotCertifiedError) as excinfo:
         _model(features, p=1.95).fit_reml(frame, y, sample_weight=weights, offset=offset)
     assert "certify the penalized coefficient mode" in str(excinfo.value)
 
-    result = _model(features).estimate_p(
+    coupled = _model(features).estimate_p(
         frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
     )
-    assert 1.05 < float(result.p_hat) < 1.95
-    assert np.isfinite(float(result.phi_hat))
+    assert 1.05 < float(coupled.p_hat) < 1.95
+    assert np.isfinite(float(coupled.phi_hat))
 
+    # The fail-closed benchmark treats any warning as a failure, so censoring
+    # must not fire merely because an infeasible power exists. The wall has to
+    # be in the search's own record for that to be tested at all: the 6000-row
+    # version of this check met no wall and passed with the distance test gone.
+    assert 1.95 in coupled._infeasible_reason.__self__
+    assert not [w for w in recwarn.list if "censored" in str(w.message)]
 
-def test_decoupled_search_already_survives_what_the_coupled_search_does_not():
-    """The ML-mode search never fits REML at the failing power, so it completes.
-
-    Re-derived 6000 -> 5000 with the sibling test above and for the same
-    reason: at 6000 the p=1.95 probe now certifies, so the coupled search met
-    no infeasible power and this compared two unstressed searches. At 5000 the
-    probe still misses the bar, so the coupled arm must route around it to
-    reach the same answer as the arm that never fits REML there at all.
-    """
-    frame, y, weights, offset, features = _fixture(5_000)
-
+    # The ML-mode search never fits REML at the failing power, so it completes
+    # without routing; the coupled search must route around the wall to reach
+    # the same answer.
     decoupled = _model(features).estimate_p(
         frame,
         y,
@@ -101,10 +88,6 @@ def test_decoupled_search_already_survives_what_the_coupled_search_does_not():
         search_fit_mode="fit",
     )
     assert 1.05 < float(decoupled.p_hat) < 1.95
-
-    coupled = _model(features).estimate_p(
-        frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
-    )
     assert float(coupled.p_hat) == pytest.approx(float(decoupled.p_hat), rel=1e-2)
 
 
@@ -143,7 +126,7 @@ class TestTypedModeFailureContract:
         """
         from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 
-        frame, y, weights, offset, features = _fixture(3_000)
+        frame, y, weights, offset, features = _plumbing_fixture()
         real_fit_reml = SuperGLM.fit_reml
 
         def failing_above_19(self, X, yv, **kwargs):
@@ -169,23 +152,28 @@ class TestInitializationSearchesRouteAroundInfeasiblePoints:
     """
 
     @pytest.mark.parametrize(
-        ("method", "p_bounds"),
-        [("grid_refine", (1.05, 1.95)), ("profile_opt", (1.05, 1.95))],
+        ("method", "threshold"),
+        # Each threshold must fail at one of the method's own initialization
+        # powers: grid_refine's coarse grid ends at 1.95, and profile_opt
+        # starts from 1.14, 1.5 and 1.86. A failure above 1.9 never reaches
+        # profile_opt's, so that arm once exercised this only where 1.86
+        # happened to fail naturally.
+        [("grid_refine", 1.9), ("profile_opt", 1.8)],
     )
     def test_infeasible_initialization_points_are_routed_around(
-        self, monkeypatch, method, p_bounds
+        self, monkeypatch, method, threshold
     ):
         from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 
-        frame, y, weights, offset, features = _fixture(3_000)
+        frame, y, weights, offset, features = _plumbing_fixture()
         real_fit_reml = SuperGLM.fit_reml
 
-        def failing_above_19(self, X, yv, **kwargs):
-            if float(getattr(self.family, "p", 0.0)) > 1.9:
+        def failing_above_threshold(self, X, yv, **kwargs):
+            if float(getattr(self.family, "p", 0.0)) > threshold:
                 raise ObservedModeNotConvergedError()
             return real_fit_reml(self, X, yv, **kwargs)
 
-        monkeypatch.setattr(SuperGLM, "fit_reml", failing_above_19)
+        monkeypatch.setattr(SuperGLM, "fit_reml", failing_above_threshold)
 
         result = _model(features).estimate_p(
             frame,
@@ -194,10 +182,10 @@ class TestInitializationSearchesRouteAroundInfeasiblePoints:
             offset=offset,
             fit_mode="reml",
             method=method,
-            p_bounds=p_bounds,
+            p_bounds=(1.05, 1.95),
         )
 
-        assert p_bounds[0] < float(result.p_hat) < 1.9
+        assert 1.05 < float(result.p_hat) < threshold
 
 
 class TestPublicationModeFailure:
@@ -349,13 +337,20 @@ class TestBoundaryCensoringWarning:
             return real(p_hat, infeasible, xatol=xatol)
 
         monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", spy)
-        frame, y, weights, offset, features = _fixture(3_000)
+        frame, y, weights, offset, features = _plumbing_fixture()
 
+        # Four powers resolve this as well as twenty: any spacing but xatol.
         _model(features).estimate_p(
-            frame, y, sample_weight=weights, offset=offset, fit_mode="reml", method="grid"
+            frame,
+            y,
+            sample_weight=weights,
+            offset=offset,
+            fit_mode="reml",
+            method="grid",
+            n_grid=4,
         )
 
-        assert captured["resolution"] == pytest.approx((1.95 - 1.05) / 19.0)
+        assert captured["resolution"] == pytest.approx((1.95 - 1.05) / 3.0)
 
     def test_a_grid_step_gap_warns_at_grid_resolution(self):
         from superglm.profiling.tweedie import _boundary_censoring_message
@@ -384,7 +379,7 @@ class TestBoundaryCensoringWarning:
 
         forced = "FORCED: p_hat sits against the certifiable-region boundary (censored estimate)."
         monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", lambda *a, **k: forced)
-        frame, y, weights, offset, features = _fixture(3_000)
+        frame, y, weights, offset, features = _plumbing_fixture()
         result = _model(features).estimate_p(
             frame, y, sample_weight=weights, offset=offset, fit_mode="reml"
         )
@@ -413,18 +408,6 @@ class TestBoundaryCensoringWarning:
             "grid", None, bounds, 20, 10, 1e-3, "grid"
         ) == pytest.approx((1.95 - 1.05) / 19.0)
         assert _censoring_search_resolution("brent", None, bounds, 20, 10, 1e-3, "brent") == 1e-3
-
-    def test_routed_around_endpoints_do_not_warn_end_to_end(self, recwarn):
-        """The k-sweep fixture routes around p=1.95; its p_hat sits far away.
-
-        The fail-closed benchmark treats any warning as a failure, so the
-        warning must not fire merely because infeasible powers exist.
-        """
-        frame, y, weights, offset, features = _fixture(6_000)
-
-        _model(features).estimate_p(frame, y, sample_weight=weights, offset=offset, fit_mode="reml")
-
-        assert not [w for w in recwarn.list if "censored" in str(w.message)]
 
 
 class TestCIAtTheCertifiabilityWall:
@@ -560,15 +543,15 @@ class TestStaleInfeasibilityMarkers:
         against a now-valid point and the CI treats it as a wall."""
         from superglm.reml.observed_geometry import ObservedModeNotConvergedError
 
-        frame, y, weights, offset, features = _fixture(3_000)
+        frame, y, weights, offset, features = _plumbing_fixture()
         real_fit_reml = SuperGLM.fit_reml
         failures = {"n": 0}
 
         def failing_once_below_11(self, X, yv, **kwargs):
             # The 1.05 bracket endpoint is naturally FEASIBLE on this
-            # fixture (its real walls sit near the upper bound), so the
-            # injected one-shot failure is the only reason for its marker
-            # and the retry genuinely succeeds.
+            # fixture (it has no walls of its own), so the injected
+            # one-shot failure is the only reason for its marker and the
+            # retry genuinely succeeds.
             if float(getattr(self.family, "p", 0.0)) < 1.1 and failures["n"] == 0:
                 failures["n"] += 1
                 raise ObservedModeNotConvergedError()
@@ -771,8 +754,10 @@ class TestProfileOptCensoringResolution:
 
         monkeypatch.setattr(tweedie_module, "_censoring_search_resolution", resolution_spy)
         monkeypatch.setattr(tweedie_module, "_boundary_censoring_message", message_spy)
-        frame, y, weights, offset, features = _fixture(3_000)
+        frame, y, weights, offset, features = _plumbing_fixture()
 
+        # Two optimizer iterations already leave a trace around a winner; the
+        # claim is which spacing is handed over, not how precisely p is found.
         _model(features).estimate_p(
             frame,
             y,
@@ -781,6 +766,7 @@ class TestProfileOptCensoringResolution:
             fit_mode="reml",
             method="profile_opt",
             optimizer=optimizer,
+            maxiter=2,
         )
 
         trace = np.sort(np.unique(np.asarray(captured["evaluated_powers"], dtype=float)))
