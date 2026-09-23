@@ -59,7 +59,7 @@ dev = [
     # raise ImportError from inside the test body instead of skipping, so a
     # developer holding the gitignored parquet still gets no coverage.
     "pyarrow>=17",
-    "pytest>=7.0",
+    "pytest>=9.0",
     "pytest-cov",
     "pytest-split>=0.11.0",
     "pyyaml>=6.0",

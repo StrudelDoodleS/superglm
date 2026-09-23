@@ -2705,7 +2705,7 @@ requires-dist = [
     { name = "psutil", marker = "extra == 'dev'", specifier = ">=7.2" },
     { name = "pyarrow", marker = "extra == 'bench'", specifier = ">=17" },
     { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=17" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-split", marker = "extra == 'dev'", specifier = ">=0.11.0" },
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
