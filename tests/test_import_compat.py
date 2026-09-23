@@ -8,6 +8,7 @@ supported.
 
 import ast
 import inspect
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -274,16 +275,25 @@ def test_parallel_conftest_hook_loads_every_warning_class_module() -> None:
 import sys, types
 import tests.conftest as conftest
 
-def configure(workers):
-    conftest.pytest_configure(types.SimpleNamespace(option=types.SimpleNamespace(numprocesses=workers)))
+def configure(**option):
+    conftest.pytest_configure(types.SimpleNamespace(option=types.SimpleNamespace(**option)))
 
-configure(None)
+configure()  # CI: pytest-xdist is not installed, so there is no numprocesses option
+configure(numprocesses=None)  # xdist installed, no -n
 assert "superglm" not in sys.modules, "a serial run imported superglm"
-configure(2)
+configure(numprocesses=2)
 print([module for module in {modules!r} if module not in sys.modules])
 """
     completed = subprocess.run(
-        [sys.executable, "-c", script], cwd=root, check=False, capture_output=True, text=True
+        [sys.executable, "-c", script],
+        cwd=root,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")])),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
     )
 
     assert completed.returncode == 0, completed.stderr
