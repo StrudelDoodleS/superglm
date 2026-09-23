@@ -15,7 +15,8 @@ Every other argument goes to both stages; no ``--`` separator is needed, so
 the same command line works under PowerShell. Select tests with ``-m`` or
 ``-k``: the runner always runs ``tests/``, so file paths are not supported.
 A junit report from stage 2 is written beside stage 1's (``-threads``
-suffix), and coverage from stage 2 is appended to stage 1's. Both stages
+suffix), whether named here or in ``PYTEST_ADDOPTS`` (one set in the pytest
+config file would be overwritten; this repository's sets none), and coverage from stage 2 is appended to stage 1's. Both stages
 need the ``dev`` extra's plugins loaded: both pass ``-n``, which
 pytest-xdist defines, and stage 2 also passes ``--cov-append``, which
 pytest-cov defines. Neither stage inherits ``SUPERGLM_BLAS_THREADS``, so
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -54,10 +56,10 @@ def _beside(path: str) -> str:
     return f"{root}-threads{ext or '.xml'}"
 
 
-def _threads_arguments(passthrough: list[str]) -> list[str]:
-    """Stage 2's arguments: its junit report beside stage 1's, coverage appended."""
+def _junit_beside(args: list[str]) -> list[str]:
+    """``args`` with every junit report path moved beside the original."""
     arguments, rename_next = [], False
-    for arg in passthrough:
+    for arg in args:
         if rename_next:
             arg, rename_next = _beside(arg), False
         elif arg in JUNIT_OPTIONS:
@@ -66,9 +68,14 @@ def _threads_arguments(passthrough: list[str]) -> list[str]:
             option, _, path = arg.partition("=")
             arg = f"{option}={_beside(path)}"
         arguments.append(arg)
+    return arguments
+
+
+def _threads_arguments(passthrough: list[str]) -> list[str]:
+    """Stage 2's arguments: its junit report beside stage 1's, coverage appended."""
     # Coverage may be enabled here, in PYTEST_ADDOPTS or in the pytest config;
     # appending keeps stage 1's data in every case and does nothing without it.
-    return ["--cov-append", *arguments]
+    return ["--cov-append", *_junit_beside(passthrough)]
 
 
 def stage_commands(markers: str, passthrough: list[str]) -> list[tuple[list[str], bool]]:
@@ -86,12 +93,17 @@ def stage_commands(markers: str, passthrough: list[str]) -> list[tuple[list[str]
 def stage_environment(pinned: bool, base: Mapping[str, str]) -> dict[str, str]:
     """The caller's environment without its pool or solver-cap settings.
 
-    When ``pinned``, every pool is then set to one thread.
+    When ``pinned``, every pool is then set to one thread. Otherwise (stage 2)
+    a junit report named in ``PYTEST_ADDOPTS``, which pytest reads as
+    arguments, moves beside stage 1's as well.
     """
     inherited = (*PINNED_POOLS, SOLVER_BLAS_OVERRIDE)
     environment = {key: value for key, value in base.items() if key not in inherited}
     if pinned:
         environment.update(dict.fromkeys(PINNED_POOLS, "1"))
+    elif "PYTEST_ADDOPTS" in environment:
+        addopts = shlex.split(environment["PYTEST_ADDOPTS"])
+        environment["PYTEST_ADDOPTS"] = shlex.join(_junit_beside(addopts))
     return environment
 
 

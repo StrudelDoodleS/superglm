@@ -477,9 +477,17 @@ def test_the_suite_runner_pins_pools_in_parallel_and_frees_them_for_threads() ->
     ],
 )
 def test_the_suite_runner_writes_stage_two_junit_beside_stage_one(junit: list[str]) -> None:
-    (parallel, _), (threaded, _) = _suite_runner().stage_commands("not docs", junit)
+    runner = _suite_runner()
+    (parallel, _), (threaded, _) = runner.stage_commands("not docs", junit)
     assert "r.xml" in " ".join(parallel) and "r-threads.xml" not in " ".join(parallel)
     assert "r-threads.xml" in " ".join(threaded) and " r.xml" not in " " + " ".join(threaded)
+    # pytest reads PYTEST_ADDOPTS as arguments, so a report named there moves too.
+    caller = {"PYTEST_ADDOPTS": shlex.join([*junit, "-k", "not slow"])}
+    assert runner.stage_environment(True, caller)["PYTEST_ADDOPTS"] == caller["PYTEST_ADDOPTS"]
+    moved = shlex.split(runner.stage_environment(False, caller)["PYTEST_ADDOPTS"])
+    assert moved == [
+        arg.replace("r.xml", "r-threads.xml") for arg in shlex.split(caller["PYTEST_ADDOPTS"])
+    ]
 
 
 @pytest.mark.parametrize(
