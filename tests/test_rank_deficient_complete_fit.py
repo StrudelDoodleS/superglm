@@ -536,7 +536,10 @@ def test_a_dimension_that_cannot_run_is_refused_at_the_flag(
     monkeypatch.setattr(sys, "argv", [bench.__file__, flag, value])
     with pytest.raises(SystemExit) as excinfo:
         bench.main()
-    assert flag in str(excinfo.value.code)
+    # The coupon-collector refusal also names --rows, so each case must hit
+    # its own check: a floor, or the coupon bound for rows above the floor.
+    floor = flag != "--rows" or int(value) < 2
+    assert (f"{flag} must be >= " if floor else "coupon-collector") in str(excinfo.value.code)
 
 
 def test_the_script_refuses_a_dimension_at_its_flag() -> None:

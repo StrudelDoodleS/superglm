@@ -56,6 +56,8 @@ class TestSearchBuildsOnce:
 
         monkeypatch.setattr(tweedie_module, "_SEARCH_DM_CACHE", False)
         uncached_result, uncached_beta = run()
+        # Otherwise the comparison below would pit the cached search against itself.
+        assert len(calls) > 4, "the uncached search still served from the cache"
 
         assert float(cached_result.p_hat) == float(uncached_result.p_hat)
         assert float(cached_result.phi_hat) == float(uncached_result.phi_hat)
