@@ -86,16 +86,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     # Only -m: pytest's own --markers lists the registered markers.
     parser.add_argument("-m", dest="markers", default=DEFAULT_MARKERS, help="pytest -m expression")
+    # Drop "--" before parsing: a -m after it would reach pytest and override both stages.
+    argv = [arg for arg in (sys.argv[1:] if argv is None else argv) if arg != "--"]
     args, passthrough = parser.parse_known_args(argv)
-    passthrough = [arg for arg in passthrough if arg != "--"]
-    status = 0
-    for command, pinned in stage_commands(args.markers, passthrough):
-        code = subprocess.call(command, cwd=ROOT, env=stage_environment(pinned, os.environ))
-        if code == NO_TESTS_COLLECTED and not pinned:
-            code = 0  # a shard may hold no ``threads`` test; stage 1 must collect something
-        if code and not status:
-            status = code if code > 0 else 1  # a signal (negative code) is a failure too
-    return status
+    codes = [
+        subprocess.call(command, cwd=ROOT, env=stage_environment(pinned, os.environ))
+        for command, pinned in stage_commands(args.markers, passthrough)
+    ]
+    # Either stage may be empty (a shard without ``threads`` tests, a threads-only
+    # selection); both empty means the selection matched nothing.
+    if all(code == NO_TESTS_COLLECTED for code in codes):
+        return NO_TESTS_COLLECTED
+    failed = [code for code in codes if code not in (0, NO_TESTS_COLLECTED)]
+    if not failed:
+        return 0
+    return failed[0] if failed[0] > 0 else 1  # a signal (negative code) is a failure too
 
 
 if __name__ == "__main__":

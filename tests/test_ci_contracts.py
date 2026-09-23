@@ -132,6 +132,8 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert "pull_request:" in workflow
     pull_request = workflow.split("  pull_request:\n", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
     assert "paths:" not in pull_request and "paths-ignore:" not in pull_request
+    push = workflow.split("  push:\n", maxsplit=1)[1].split("  pull_request:\n", maxsplit=1)[0]
+    assert '"scripts/**"' in push, "a change to the suite runner must run master CI"
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow
     assert len(floor) == 1, f"exactly one job must publish {_PYTHON_FLOOR_CHECK!r}"
     assert "if: ${{ always() }}" in floor[0]
@@ -476,7 +478,8 @@ def test_the_suite_runner_writes_stage_two_junit_beside_stage_one(junit: list[st
     [
         ((0, 0), 0),
         ((0, 5), 0),  # a shard with no threads test
-        ((5, 0), 5),  # stage 1 collected nothing: a broken selection, not a pass
+        ((5, 0), 0),  # a selection of threads tests only
+        ((5, 5), 5),  # the selection matched nothing: a broken -m or -k, not a pass
         ((1, 0), 1),
         ((0, 1), 1),
         ((0, -11), 1),  # a segfault in the threads stage
@@ -502,18 +505,102 @@ def test_the_suite_runner_fails_on_any_failing_stage(monkeypatch, codes, expecte
     assert first[-2:] == second[-2:] == ["-k", "x"]
 
 
+@pytest.mark.parametrize("argv", [["--", "-m", "slow"], ["-k", "x", "--", "-mslow"]])
+def test_a_marker_after_the_separator_still_selects_per_stage(monkeypatch, argv) -> None:
+    # pytest keeps the last -m, so one reaching it would give both stages the same tests.
+    runner = _suite_runner()
+    commands = []
+
+    def fake_call(command, cwd, env):
+        commands.append(command[command.index("tests/") :])
+        return 0
+
+    monkeypatch.setattr(runner.subprocess, "call", fake_call)
+    assert runner.main(argv) == 0
+    stages = ["(slow) and not threads", "(slow) and threads"]
+    for pytest_args, expression in zip(commands, stages, strict=True):
+        assert [arg for arg in pytest_args if arg.startswith("-m")] == ["-m"]
+        assert pytest_args[pytest_args.index("-m") + 1] == expression
+
+
 # Tests that touch thread-pool APIs but do not need the default pools.
 _UNPINNED_THREAD_API_ALLOWLIST = {
-    "test_original_stress_fixture_has_fresh_strict_newton_authority": "caps its own pools",
-    "test_schema_refusal_before_arrays_does_not_resolve_or_start_workers": "patches get_num_threads",
-    "test_certificate_joins_workers_on_success_refusal_and_worker_failure": "patches get_num_threads",
-    "test_worker_failure_cancels_queued_leaves_and_joins_running_leaves": "patches get_num_threads",
-    "test_certificate_hashes_bounded_buffers_without_expansion_or_cache_creation": (
-        "patches get_num_threads"
+    "tests/test_c3_stress_stationarity.py::test_original_stress_fixture_has_fresh_strict_newton_authority": (
+        "caps its own pools"
     ),
-    "test_dispatch_comes_from_a_live_process_not_build_metadata": "checks a BLAS pool exists",
-    "test_tests_that_read_or_set_thread_pools_run_unpinned": "names the APIs it scans for",
+    "tests/test_rank_deficient_complete_fit.py::test_dispatch_comes_from_a_live_process_not_build_metadata": (
+        "checks a BLAS pool exists"
+    ),
 }
+_THREAD_POOL_API = {
+    "set_num_threads",
+    "get_num_threads",
+    "threadpool_limits",
+    "threadpool_info",
+    "ThreadpoolController",
+}
+
+
+def _names(node: ast.AST) -> set[str]:
+    """The identifiers a node uses; a name in a string, such as a patch target, is not one."""
+    return {
+        getattr(child, "id", None) or getattr(child, "attr", None) or child.arg
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name | ast.Attribute | ast.arg)
+    }
+
+
+def _marks_threads(text: str, nodes: list[ast.AST]) -> bool:
+    return any("mark.threads" in ast.get_source_segment(text, node) for node in nodes)
+
+
+def _pytestmark(body: list[ast.stmt]) -> list[ast.stmt]:
+    return [
+        node
+        for node in body
+        if isinstance(node, ast.Assign)
+        and any(getattr(target, "id", "") == "pytestmark" for target in node.targets)
+    ]
+
+
+def _thread_api_tests(path: Path) -> dict[str, bool]:
+    """The tests in ``path`` that touch a pool API, each mapped to whether it is marked.
+
+    A test touches the API when its source names it, or names a module-level
+    helper that does, directly or through other helpers.
+    """
+    text = path.read_text(encoding="utf-8")
+    if not _THREAD_POOL_API & set(re.findall(r"\w+", text)):
+        return {}
+    tree = ast.parse(text)
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.ClassDef)
+        and not node.name.startswith(("test_", "Test"))
+    ]
+    api = set(_THREAD_POOL_API)
+    while grown := {node.name for node in helpers if node.name not in api and api & _names(node)}:
+        api |= grown
+    module = path.relative_to(_ROOT).as_posix()
+    module_marked = _marks_threads(text, _pytestmark(tree.body))
+    scopes = [(module, tree.body, module_marked)] + [
+        (
+            f"{module}::{node.name}",
+            node.body,
+            module_marked or _marks_threads(text, node.decorator_list + _pytestmark(node.body)),
+        )
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test")
+    ]
+    return {
+        f"{scope}::{node.name}": marked or _marks_threads(text, node.decorator_list)
+        for scope, body, marked in scopes
+        for node in body
+        if isinstance(node, ast.FunctionDef)
+        and node.name.startswith("test_")
+        and api & _names(node)
+    }
 
 
 def test_tests_that_read_or_set_thread_pools_run_unpinned() -> None:
@@ -523,30 +610,11 @@ def test_tests_that_read_or_set_thread_pools_run_unpinned() -> None:
     test must carry the ``threads`` marker (stage 2, default pools) unless it
     is listed above with the reason it does not need them.
     """
-    api = re.compile(
-        r"\b(set_num_threads|get_num_threads|threadpool_limits|threadpool_info|ThreadpoolController)\b"
-    )
-    unmarked = []
+    touched = {}
     for path in sorted((_ROOT / "tests").rglob("test_*.py")):
-        text = path.read_text(encoding="utf-8")
-        if not api.search(text):
-            continue
-        tree = ast.parse(text)
-        module_marked = any(
-            isinstance(node, ast.Assign)
-            and any(getattr(target, "id", "") == "pytestmark" for target in node.targets)
-            and "threads" in ast.get_source_segment(text, node)
-            for node in tree.body
-        )
-        for node in tree.body:
-            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
-                continue
-            if not api.search(ast.get_source_segment(text, node)):
-                continue
-            marked = module_marked or any(
-                "mark.threads" in ast.get_source_segment(text, decorator)
-                for decorator in node.decorator_list
-            )
-            if not marked and node.name not in _UNPINNED_THREAD_API_ALLOWLIST:
-                unmarked.append(f"{path.relative_to(_ROOT)}::{node.name}")
+        touched |= _thread_api_tests(path)
+    allowed = _UNPINNED_THREAD_API_ALLOWLIST
+    unmarked = [test for test, marked in touched.items() if not marked and test not in allowed]
+    stale = sorted(set(allowed) - touched.keys())
     assert not unmarked, f"mark these @pytest.mark.threads or allowlist them: {unmarked}"
+    assert not stale, f"these allowlist entries match no test that touches a pool API: {stale}"

@@ -20,11 +20,16 @@ def _blas_thread_counts() -> list[int]:
     ]
 
 
-def _native_blas_counts() -> list[int]:
-    """The process's own BLAS pool sizes, or a skip when a cap would be invisible."""
+def _visible_blas_counts() -> list[int]:
     counts = _blas_thread_counts()
     if not counts:
         pytest.skip("threadpoolctl exposes no BLAS pools; thread counts cannot be verified")
+    return counts
+
+
+def _native_blas_counts() -> list[int]:
+    """The process's own BLAS pool sizes, or a skip when a cap would be invisible."""
+    counts = _visible_blas_counts()
     if max(counts) < 2:
         pytest.skip("BLAS pool has a single thread; a cap or its release is unobservable")
     return counts
@@ -96,7 +101,7 @@ def test_wide_design_respects_explicit_cap(monkeypatch):
     from superglm._blas_threads import allow_wide_design
 
     monkeypatch.setenv("SUPERGLM_BLAS_THREADS", "2")
-    before = _blas_thread_counts()
+    before = _visible_blas_counts()
     with solver_blas_threads():
         allow_wide_design(5_000)
         assert all(count == 2 for count in _blas_thread_counts())
