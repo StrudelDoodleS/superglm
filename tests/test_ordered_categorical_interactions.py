@@ -101,17 +101,6 @@ def test_oc_categorical_interaction_fits():
     assert np.isfinite(model._result.effective_df)
 
 
-def test_oc_spline_tensor_interaction_fits():
-    df, y = _frame()
-    model = SuperGLM(
-        family="poisson",
-        features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
-        interactions=[("age_band", "power")],
-    )
-    model.fit_reml(df, y)
-    assert np.isfinite(model._result.effective_df)
-
-
 def test_oc_categorical_interaction_fits_discrete():
     df, y = _frame()
     model = SuperGLM(
@@ -134,6 +123,9 @@ def test_oc_spline_tensor_interaction_fits_discrete():
     )
     model.fit_reml(df, y)
     assert np.isfinite(model._result.effective_df)
+    # ... and predicts: discretizing the OC parent would hand its label column
+    # to the fast-discrete predict path, which reads raw columns as float64.
+    assert np.all(np.isfinite(model.predict(df.iloc[:100])))
 
 
 def test_discretize_gates_refuse_oc_parents_under_discrete_mode():
@@ -204,8 +196,9 @@ def test_discretize_gates_refuse_oc_parents_that_pass_the_spline_duck_type():
     )
 
 
-def test_oc_tensor_fit_matches_manual_score_mapping():
-    # The OC×spline fit must equal the same model fitted on the scores directly.
+def test_oc_tensor_fit_matches_manual_score_mapping(subtests):
+    # The OC×spline fit must equal the same model fitted on the scores directly,
+    # and predict what that model predicts.  One pair of fits serves both.
     df, y = _frame()
     oc = _oc()
     model_oc = SuperGLM(
@@ -214,6 +207,7 @@ def test_oc_tensor_fit_matches_manual_score_mapping():
         interactions=[("age_band", "power")],
     )
     model_oc.fit_reml(df, y)
+    assert np.isfinite(model_oc._result.effective_df)
 
     df_num = df.copy()
     df_num["age_band"] = df_num["age_band"].map(oc._level_to_value)
@@ -223,19 +217,27 @@ def test_oc_tensor_fit_matches_manual_score_mapping():
         interactions=[("age_band", "power")],
     )
     model_num.fit_reml(df_num, y)
-    np.testing.assert_allclose(model_oc._result.deviance, model_num._result.deviance, rtol=1e-6)
 
-    # Deviance alone is invariant to how a term is recentered, and the two
-    # models take different canonicalization paths: OrderedCategorical has no
-    # ``_basis_matrix``, so neither the OC main effect nor the OC×power
-    # interaction is spline-backed, while every term of the numeric reference
-    # is. Assert on the fitted values too, which that asymmetry would move.
-    eta_oc = model_oc._dm.matvec(model_oc._result.beta) + model_oc._result.intercept
-    eta_num = model_num._dm.matvec(model_num._result.beta) + model_num._result.intercept
-    np.testing.assert_allclose(eta_oc, eta_num, rtol=1e-10, atol=1e-12)
-    np.testing.assert_allclose(
-        model_oc._link.inverse(eta_oc), model_num._link.inverse(eta_num), rtol=1e-10, atol=1e-12
-    )
+    with subtests.test(msg="fit"):
+        np.testing.assert_allclose(model_oc._result.deviance, model_num._result.deviance, rtol=1e-6)
+        # Deviance alone is invariant to how a term is recentered, and the two
+        # models take different canonicalization paths: OrderedCategorical has
+        # no ``_basis_matrix``, so neither the OC main effect nor the OC×power
+        # interaction is spline-backed, while every term of the numeric
+        # reference is. Assert on the fitted values too, which that asymmetry
+        # would move.
+        eta_oc = model_oc._dm.matvec(model_oc._result.beta) + model_oc._result.intercept
+        eta_num = model_num._dm.matvec(model_num._result.beta) + model_num._result.intercept
+        np.testing.assert_allclose(eta_oc, eta_num, rtol=1e-10, atol=1e-12)
+        np.testing.assert_allclose(
+            model_oc._link.inverse(eta_oc), model_num._link.inverse(eta_num), rtol=1e-10, atol=1e-12
+        )
+
+    with subtests.test(msg="predict"):
+        new = df.iloc[:200].copy()
+        new_num = new.copy()
+        new_num["age_band"] = new_num["age_band"].map(oc._level_to_value)
+        np.testing.assert_allclose(model_oc.predict(new), model_num.predict(new_num), rtol=1e-8)
 
 
 def test_oc_interaction_predict_round_trips_training_frame():
@@ -249,31 +251,6 @@ def test_oc_interaction_predict_round_trips_training_frame():
     mu_train = model.predict(df)
     assert mu_train.shape == (len(df),)
     assert np.all(np.isfinite(mu_train)) and np.all(mu_train > 0)
-
-
-def test_oc_tensor_predict_matches_manual_score_mapping():
-    df, y = _frame()
-    oc = _oc()
-    model_oc = SuperGLM(
-        family="poisson",
-        features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
-        interactions=[("age_band", "power")],
-    )
-    model_oc.fit_reml(df, y)
-    new = df.iloc[:200].copy()
-    pred_oc = model_oc.predict(new)
-
-    df_num = df.copy()
-    df_num["age_band"] = df_num["age_band"].map(oc._level_to_value)
-    model_num = SuperGLM(
-        family="poisson",
-        features={"age_band": Spline(kind="ps", n_knots=4), "power": Spline(kind="ps", n_knots=5)},
-        interactions=[("age_band", "power")],
-    )
-    model_num.fit_reml(df_num, y)
-    new_num = new.copy()
-    new_num["age_band"] = new_num["age_band"].map(oc._level_to_value)
-    np.testing.assert_allclose(pred_oc, model_num.predict(new_num), rtol=1e-8)
 
 
 def test_oc_interaction_predict_rejects_unseen_level():
@@ -382,19 +359,6 @@ def test_factor_smooth_keeps_label_levels_over_an_oc_group_main():
     eval_metrics = model.metrics(df.copy(), y)
     assert fit_metrics._uses_fit_design and not eval_metrics._uses_fit_design
     np.testing.assert_allclose(eval_metrics.leverage, fit_metrics.leverage, rtol=1e-8, atol=1e-10)
-
-
-def test_oc_interaction_survives_discrete_mode():
-    df, y = _frame()
-    model = SuperGLM(
-        family="poisson",
-        features={"age_band": _oc(), "power": Spline(kind="ps", n_knots=5)},
-        interactions=[("age_band", "power")],
-        discrete=True,
-    )
-    model.fit_reml(df, y)
-    mu = model.predict(df.iloc[:100])
-    assert np.all(np.isfinite(mu))
 
 
 def _poisson_deviance(y, mu):
