@@ -33,6 +33,7 @@ PINNED_POOLS = (
     "MKL_NUM_THREADS",
     "NUMBA_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS",
+    "BLIS_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
 DEFAULT_MARKERS = "not browser and not docs"
@@ -58,9 +59,9 @@ def _threads_arguments(passthrough: list[str]) -> list[str]:
             option, _, path = arg.partition("=")
             arg = f"{option}={_beside(path)}"
         arguments.append(arg)
-    if any(arg.startswith("--cov") for arg in passthrough):
-        arguments.append("--cov-append")
-    return arguments
+    # Coverage may be enabled here, in PYTEST_ADDOPTS or in the pytest config;
+    # appending keeps stage 1's data in every case and does nothing without it.
+    return ["--cov-append", *arguments]
 
 
 def stage_commands(markers: str, passthrough: list[str]) -> list[tuple[list[str], bool]]:

@@ -440,13 +440,17 @@ def test_the_suite_runner_pins_pools_in_parallel_and_frees_them_for_threads() ->
     assert "-n" not in threaded
     assert "--junitxml=pytest-results.xml" in parallel and "--cov-append" not in parallel
     assert "--junitxml=pytest-results-threads.xml" in threaded and "--cov-append" in threaded
-    # VECLIB is the only pin that reaches Accelerate BLAS on the macOS runners.
+    # Coverage enabled by PYTEST_ADDOPTS or the config must not erase stage 1's data.
+    assert "--cov-append" in runner.stage_commands("not docs", [])[1][0]
+    # VECLIB is the only pin that reaches Accelerate BLAS on the macOS runners;
+    # BLIS is the one a BLIS-backed NumPy reads.
     assert {
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
         "MKL_NUM_THREADS",
         "NUMBA_NUM_THREADS",
         "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
     } <= set(runner.PINNED_POOLS)
     caller = {"PATH": "/bin", "OMP_NUM_THREADS": "3", "NUMBA_NUM_THREADS": "2"}
     assert runner.stage_environment(True, caller) == {
