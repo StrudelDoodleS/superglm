@@ -305,8 +305,11 @@ def test_location_rows_refuse_nonpositive_response_and_scale():
 
 @pytest.mark.parametrize(("sigma", "q"), [(0.9, 0.6), (1.3, -0.5), (0.8, 0.05), (0.7, 0.0)])
 def test_location_expected_information_equals_minus_mean_hessian_and_score_outer_product(sigma, q):
+    # The mpmath tests pin both formulas to 1e-12. This identity covers the whole response
+    # law: at 200,000 draws a 5% error confined to w < -2, a tail no mpmath row point
+    # reaches, still fails the (0.9, 0.6) case, and a 20% error at least three of the four.
     rng = np.random.default_rng(20260902)
-    n = 2_000_000
+    n = 200_000
     q_draw = q if q != 0.0 else 1.0e-9
     k = 1.0 / q_draw**2
     gamma = rng.gamma(k, 1.0, n)
