@@ -38,6 +38,9 @@ PINNED_POOLS = (
     "BLIS_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
+# The solver's own BLAS cap: a caller's value would widen a pinned worker's
+# pool inside every fit, or change what the threads tests see.
+SOLVER_BLAS_OVERRIDE = "SUPERGLM_BLAS_THREADS"
 DEFAULT_MARKERS = "not browser and not docs"
 JUNIT_OPTIONS = ("--junitxml", "--junit-xml")
 NO_TESTS_COLLECTED = 5
@@ -73,13 +76,15 @@ def stage_commands(markers: str, passthrough: list[str]) -> list[tuple[list[str]
     threaded = [*base, "-m", f"({markers}) and threads"]
     return [
         ([*parallel, *passthrough], True),
-        ([*threaded, *_threads_arguments(passthrough)], False),
+        # Last, so a -n from the arguments or PYTEST_ADDOPTS cannot distribute it.
+        ([*threaded, *_threads_arguments(passthrough), "-n", "0"], False),
     ]
 
 
 def stage_environment(pinned: bool, base: Mapping[str, str]) -> dict[str, str]:
     """The caller's environment with every pool pinned to one thread, or none pinned."""
-    environment = {key: value for key, value in base.items() if key not in PINNED_POOLS}
+    inherited = (*PINNED_POOLS, SOLVER_BLAS_OVERRIDE)
+    environment = {key: value for key, value in base.items() if key not in inherited}
     if pinned:
         environment.update(dict.fromkeys(PINNED_POOLS, "1"))
     return environment

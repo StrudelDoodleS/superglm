@@ -437,7 +437,7 @@ def test_the_suite_runner_pins_pools_in_parallel_and_frees_them_for_threads() ->
     assert parallel[start : start + 4] == ["-n", "logical", "--dist", "worksteal"]
     marks = threaded.index("-m", threaded.index("tests/"))
     assert threaded[marks + 1] == "(not browser and not docs) and threads"
-    assert "-n" not in threaded
+    assert threaded[-2:] == ["-n", "0"], "stage 2 stays serial after any forwarded -n"
     assert "--junitxml=pytest-results.xml" in parallel and "--cov-append" not in parallel
     assert "--junitxml=pytest-results-threads.xml" in threaded and "--cov-append" in threaded
     # Coverage enabled by PYTEST_ADDOPTS or the config must not erase stage 1's data.
@@ -452,7 +452,12 @@ def test_the_suite_runner_pins_pools_in_parallel_and_frees_them_for_threads() ->
         "VECLIB_MAXIMUM_THREADS",
         "BLIS_NUM_THREADS",
     } <= set(runner.PINNED_POOLS)
-    caller = {"PATH": "/bin", "OMP_NUM_THREADS": "3", "NUMBA_NUM_THREADS": "2"}
+    caller = {
+        "PATH": "/bin",
+        "OMP_NUM_THREADS": "3",
+        "NUMBA_NUM_THREADS": "2",
+        "SUPERGLM_BLAS_THREADS": "8",
+    }
     assert runner.stage_environment(True, caller) == {
         "PATH": "/bin",
         **dict.fromkeys(runner.PINNED_POOLS, "1"),
@@ -506,7 +511,7 @@ def test_the_suite_runner_fails_on_any_failing_stage(monkeypatch, codes, expecte
     assert cwd == _ROOT
     assert all(first_env[pool] == "1" for pool in runner.PINNED_POOLS)
     assert not set(runner.PINNED_POOLS) & set(second_env)
-    assert first[-2:] == second[-2:] == ["-k", "x"]
+    assert first[-2:] == ["-k", "x"] and second[-4:] == ["-k", "x", "-n", "0"]
 
 
 @pytest.mark.parametrize("argv", [["--", "-m", "slow"], ["-k", "x", "--", "-mslow"]])
