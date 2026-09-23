@@ -610,13 +610,14 @@ FREQ_SKIP = pytest.mark.skipif(
 
 
 def _fremtpl_features():
-    # This mirrors the worked example in docs/how-to/screen-interactions.md, and the
-    # specification is deliberate.  BonusMalus is strongly curved on this book
-    # (splined it reports edf 7.5 of rank 11), so specifying it as a Numeric
-    # would both mis-fit the margin and demote every BonusMalus pair to the
-    # deferred spline x numeric kind -- the sweep would then screen fewer
-    # kinds than it can.  LogDensity is the honest linear margin: give it a
-    # spline and the smooth collapses to edf 1.4 of rank 11.
+    # This mirrors the worked example's specification in
+    # docs/how-to/screen-interactions.md, and the specification is deliberate.
+    # BonusMalus is strongly curved on this book (splined it reports edf 7.5
+    # of rank 11), so specifying it as a Numeric would both mis-fit the margin
+    # and demote every BonusMalus pair to the deferred spline x numeric kind --
+    # the sweep would then screen fewer kinds than it can.  LogDensity is the
+    # honest linear margin: give it a spline and the smooth collapses to edf
+    # 1.4 of rank 11.
     return {
         "DrivAge": Spline(kind="ps", n_knots=8),
         "VehAge": Spline(kind="ps", n_knots=12),
@@ -634,12 +635,15 @@ def _fremtpl_features():
 
 def _fremtpl_frame(n_rows=80_000):
     df = _datasets.load_freq().sample(n_rows, random_state=0).reset_index(drop=True)
-    # This fixture uses the documented Poisson case/frequency-weight encoding:
-    # the response is the claim rate and exposure controls its likelihood
-    # contribution. This is not Tweedie's Var(y) = phi * V(mu) / w prior-weight
-    # contract. Clip exposure first, exactly as
-    # tests/test_realdata_parity.py::_prep_freq does, so a near-zero denominator
-    # cannot manufacture a several-hundred-claim rate.
+    # The response is the claim rate and exposure is its weight.  The models
+    # fitted on this frame leave weight_semantics at its default, "prior",
+    # which reads exposure as an EDM prior weight, Var(y) = phi * V(mu) / w.
+    # The guide's worked example declares "frequency" instead, and its numbers
+    # are anchored in tests/test_screening_guide_numbers.py: the two contracts
+    # share a score equation but not phi, the REML criterion or the knot
+    # placement, so nothing here reproduces the guide's table.  Clip exposure
+    # first, exactly as tests/test_realdata_parity.py::_prep_freq does, so a
+    # near-zero denominator cannot manufacture a several-hundred-claim rate.
     df["Exposure"] = df["Exposure"].clip(lower=0.01)
     # log1p is the house transform for this column (see the credibility demo).
     df["LogDensity"] = np.log1p(df["Density"].to_numpy(dtype=np.float64))
@@ -650,54 +654,53 @@ def _fremtpl_frame(n_rows=80_000):
 
 @FREQ_SKIP
 @pytest.mark.slow
-def test_fremtpl_mixed_sweep_end_to_end():
+def test_fremtpl_mixed_sweep_end_to_end(subtests):
+    """The worked example's specification, fitted once on the real book.
+
+    That one mains fit is read twice.  The sweep runs end to end and its top
+    pair refits and improves.  And the specification holds up, because the
+    guide's worked example is an exemplar: two of its claims are load-bearing
+    and measurable -- BonusMalus is curved (so specifying it as a Numeric
+    would be wrong, and would demote its pairs to the deferred spline x
+    numeric kind), and LogDensity is not (so it is an honest Numeric rather
+    than one chosen to dodge a deferral).
+    """
     df, y, exposure = _fremtpl_frame()
     model = SuperGLM(family="poisson", features=_fremtpl_features())
     model.fit_reml(df, y, sample_weight=exposure)
-    table = model.screen_interactions(df, y, sample_weight=exposure)
-    # every v1 kind this feature set can produce shows up and computes
-    assert {"ti", "spline_cat", "numeric_cat", "cat_cat"} <= set(table["kind"])
-    assert np.isfinite(table["z"]).any()
-    # Six features make fifteen pairs; the three LogDensity x spline pairs are
-    # deferred, so the sweep reports twelve.  This pins the deferral as a
-    # silent drop from the default sweep rather than a NaN row.
-    assert len(table) == 12
-    # the queue is workable on a real book: the top pair refits and improves
-    top = table.iloc[0]
-    confirm = SuperGLM(
-        family="poisson",
-        features=_fremtpl_features(),
-        interactions=[(top["feature_a"], top["feature_b"])],
-    )
-    confirm.fit_reml(df, y, sample_weight=exposure)
-    assert confirm._result.deviance < model._result.deviance
 
+    with subtests.test(msg="sweep end to end"):
+        table = model.screen_interactions(df, y, sample_weight=exposure)
+        # every v1 kind this feature set can produce shows up and computes
+        assert {"ti", "spline_cat", "numeric_cat", "cat_cat"} <= set(table["kind"])
+        assert np.isfinite(table["z"]).any()
+        # Six features make fifteen pairs; the three LogDensity x spline pairs
+        # are deferred, so the sweep reports twelve.  This pins the deferral as
+        # a silent drop from the default sweep rather than a NaN row.
+        assert len(table) == 12
+        # the queue is workable on a real book: the top pair refits and improves
+        top = table.iloc[0]
+        confirm = SuperGLM(
+            family="poisson",
+            features=_fremtpl_features(),
+            interactions=[(top["feature_a"], top["feature_b"])],
+        )
+        confirm.fit_reml(df, y, sample_weight=exposure)
+        assert confirm._result.deviance < model._result.deviance
 
-@FREQ_SKIP
-@pytest.mark.slow
-def test_fremtpl_example_specification_is_not_mis_specified():
-    """The guide's worked example is an exemplar, so its spec must hold up.
+    with subtests.test(msg="specification is not mis-specified"):
 
-    Two claims in docs/how-to/screen-interactions.md are load-bearing and both are
-    measurable: BonusMalus is curved (so specifying it as a Numeric would be
-    wrong, and would demote its pairs to the deferred spline x numeric kind),
-    and LogDensity is not (so it is an honest Numeric rather than one chosen
-    to dodge a deferral).
-    """
-    df, y, exposure = _fremtpl_frame()
-    base = _fremtpl_features()
+        def deviance(overrides):
+            respecified = SuperGLM(family="poisson", features={**_fremtpl_features(), **overrides})
+            respecified.fit_reml(df, y, sample_weight=exposure)
+            return respecified._result.deviance
 
-    def deviance(overrides):
-        model = SuperGLM(family="poisson", features={**base, **overrides})
-        model.fit_reml(df, y, sample_weight=exposure)
-        return model._result.deviance
-
-    splined = deviance({})
-    # Linearising BonusMalus costs real deviance -- it is genuinely curved.
-    assert deviance({"BonusMalus": Numeric()}) - splined > 50.0
-    # Splining LogDensity buys almost nothing -- it is genuinely linear.
-    smoothed = deviance({"LogDensity": Spline(kind="ps", n_knots=8)})
-    assert splined - smoothed < 10.0
+        splined = model._result.deviance
+        # Linearising BonusMalus costs real deviance -- it is genuinely curved.
+        assert deviance({"BonusMalus": Numeric()}) - splined > 50.0
+        # Splining LogDensity buys almost nothing -- it is genuinely linear.
+        smoothed = deviance({"LogDensity": Spline(kind="ps", n_knots=8)})
+        assert splined - smoothed < 10.0
 
 
 def test_grouped_categorical_margins_screen_and_confirm_by_refit():
