@@ -11,7 +11,8 @@ Install the development environment with `uv sync --python 3.13 --extra dev`.
 The package supports Python 3.12 to 3.14 and CI runs all three; 3.13 is the
 development default. The ordinary checks are:
 
-- `uv run pytest tests/ -q` (add `-m "not slow"` for the quick pass)
+- `uv run python scripts/run_test_suite.py`, which runs the suite as CI does, in
+  parallel. Add `-m "not slow and not browser and not docs"` for the quick pass.
 - `uv run ruff check src/ tests/`
 - `uv run ruff format --check src/ tests/`
 - `uv lock --check`

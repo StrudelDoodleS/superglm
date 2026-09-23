@@ -80,10 +80,12 @@ jobs:
           print('float64', np.finfo(np.float64));
           print('longdouble', np.finfo(np.longdouble))"
 
+      # The runner mirrors local runs: a parallel pass with one BLAS/numba thread per
+      # worker, then the few `threads` tests serially with the default pools.
       - name: Run duration-balanced regression shard
         if: github.event_name != 'push' || matrix.runtime.python-version != '3.12'
         run: >-
-          uv run --with mpmath pytest tests/ -q --maxfail=0 -m "not browser and not docs"
+          uv run --with mpmath python scripts/run_test_suite.py -m "not browser and not docs"
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
           --junitxml=pytest-results.xml
@@ -93,7 +95,7 @@ jobs:
         env:
           COVERAGE_FILE: .coverage.${{ matrix.group }}
         run: >-
-          uv run --with mpmath pytest tests/ -q --maxfail=0 -m "not browser and not docs"
+          uv run --with mpmath python scripts/run_test_suite.py -m "not browser and not docs"
           --splits 4 --group ${{ matrix.group }}
           --splitting-algorithm least_duration
           --junitxml=pytest-results.xml
@@ -104,7 +106,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pytest-${{ runner.os }}-py${{ matrix.runtime.python-version }}-${{ matrix.group }}
-          path: pytest-results.xml
+          path: pytest-results*.xml
           if-no-files-found: warn
           retention-days: 7
 

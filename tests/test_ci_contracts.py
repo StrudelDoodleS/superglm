@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -138,7 +139,7 @@ def test_required_workflow_runs_for_pull_requests_and_python_floor() -> None:
     assert {case for case in _compatibility_cases(matrix) if case[0] == "3.12"} == {
         ("3.12", "ubuntu-latest", group, label, "") for group, label in enumerate("ABCD", start=1)
     }
-    assert "uv run --with mpmath pytest tests/" in matrix
+    assert "uv run --with mpmath python scripts/run_test_suite.py" in matrix
     assert "--extra dev --extra bench --extra plotting" in matrix, (
         "the compatibility test matrix must install the bench and plotting extras"
     )
@@ -158,31 +159,28 @@ def test_compatibility_shards_collect_all_failures_with_a_hang_limit() -> None:
     job = yaml.safe_load(workflow)["jobs"]["test-compatibility"]
     assert 0 < job.get("timeout-minutes", 0) <= 15
     assert job["strategy"].get("fail-fast", True) is False
-    pytest_commands = [
-        shlex.split(step["run"]) for step in job["steps"] if "pytest" in step.get("run", "")
+    suite_commands = [
+        shlex.split(step["run"])
+        for step in job["steps"]
+        if "run_test_suite.py" in step.get("run", "")
     ]
-    assert pytest_commands
-    assert all("-x" not in command and "--exitfirst" not in command for command in pytest_commands)
-    assert all("--maxfail=0" in command for command in pytest_commands)
-    assert all("--junitxml=pytest-results.xml" in command for command in pytest_commands)
+    assert suite_commands
+    assert all("--junitxml=pytest-results.xml" in command for command in suite_commands)
+    for command, _ in _suite_runner().stage_commands("not browser and not docs", []):
+        assert "-x" not in command and "--exitfirst" not in command
+        assert "--maxfail=0" in command
     report_step = next(step for step in job["steps"] if step.get("name") == "Upload shard results")
     assert report_step["if"] == "${{ always() }}"
-    assert report_step["with"]["path"] == "pytest-results.xml"
+    # The threads stage writes pytest-results-threads.xml beside the parallel report.
+    assert report_step["with"]["path"] == "pytest-results*.xml"
 
 
-@pytest.mark.parametrize("step_index", [0, 1], ids=["regression", "coverage"])
-def test_shard_failure_options_report_both_failures(tmp_path: Path, step_index: int) -> None:
-    """Changing either command back to exit-first loses the second failure."""
-    workflow = yaml.safe_load((_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
-    commands = [
-        shlex.split(step["run"])
-        for step in workflow["jobs"]["test-compatibility"]["steps"]
-        if "pytest" in step.get("run", "")
-    ]
+@pytest.mark.parametrize("stage", [0, 1], ids=["parallel", "threads"])
+def test_suite_runner_stages_report_both_failures(tmp_path: Path, stage: int) -> None:
+    """Changing either stage of the suite runner back to exit-first loses the second failure."""
+    command, _ = _suite_runner().stage_commands("not browser and not docs", [])[stage]
     stop_options = [
-        arg
-        for arg in commands[step_index]
-        if arg in ("-x", "--exitfirst") or arg.startswith("--maxfail=")
+        arg for arg in command if arg in ("-x", "--exitfirst") or arg.startswith("--maxfail=")
     ]
     fixture = tmp_path / "test_failures.py"
     fixture.write_text("def test_first(): assert False\ndef test_second(): assert False\n")
@@ -404,3 +402,45 @@ def test_coverage_omit_targets_the_plotting_package() -> None:
 
     assert omit == ["src/superglm/plotting/*"]
     assert sorted((_ROOT / "src/superglm/plotting").glob("*.py"))
+
+
+def _suite_runner():
+    """scripts/run_test_suite.py, the one runner CI and local runs share."""
+    path = _ROOT / "scripts" / "run_test_suite.py"
+    spec = importlib.util.spec_from_file_location("run_test_suite", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_suite_runner_pins_pools_in_parallel_and_frees_them_for_threads() -> None:
+    runner = _suite_runner()
+    passthrough = [
+        "--splits",
+        "4",
+        "--group",
+        "1",
+        "--junitxml=pytest-results.xml",
+        "--cov=superglm",
+    ]
+    (parallel, pinned), (threaded, free) = runner.stage_commands(
+        "not browser and not docs", passthrough
+    )
+    # Markers follow tests/; the first -m in each command is `python -m pytest`.
+    marks = parallel.index("-m", parallel.index("tests/"))
+    assert parallel[marks + 1] == "(not browser and not docs) and not threads"
+    start = parallel.index("-n")
+    assert parallel[start : start + 4] == ["-n", "auto", "--dist", "worksteal"]
+    assert pinned == dict.fromkeys(runner.PINNED_POOLS, "1")
+    assert {
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMBA_NUM_THREADS",
+    } <= set(runner.PINNED_POOLS)
+    marks = threaded.index("-m", threaded.index("tests/"))
+    assert threaded[marks + 1] == "(not browser and not docs) and threads"
+    assert "-n" not in threaded and free == {}
+    assert "--junitxml=pytest-results.xml" in parallel and "--cov-append" not in parallel
+    assert "--junitxml=pytest-results-threads.xml" in threaded and "--cov-append" in threaded
+    assert '"threads:' in (_ROOT / "pyproject.toml").read_text(encoding="utf-8")

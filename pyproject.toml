@@ -62,6 +62,7 @@ dev = [
     "pytest>=9.0",
     "pytest-cov",
     "pytest-split>=0.11.0",
+    "pytest-xdist>=3.8",
     "pyyaml>=6.0",
     "ruff==0.16.3",
     "ty==0.0.72",
@@ -137,6 +138,7 @@ markers = [
     "browser: runs real-browser editor integration tests",
     "slow: marks tests that fit real models (deselect with '-m \"not slow\"')",
     "docs: executes documentation notebooks (deselect with '-m \"not docs\"')",
+    "threads: needs the default thread pools; run serially and unpinned by scripts/run_test_suite.py",
 ]
 filterwarnings = [
     "ignore:Spline\\(kind='bs'\\):FutureWarning",

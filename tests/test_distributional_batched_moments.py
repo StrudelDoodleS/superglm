@@ -38,6 +38,7 @@ def _fixture(kind="both"):
 
 @pytest.mark.parametrize("threads", [1, 4])
 @pytest.mark.parametrize("kind", ["both", "histograms", "directions", "empty"])
+@pytest.mark.threads
 def test_batch_matches_serial_signed_masked_multichunk_reductions(threads, kind):
     if threads > config.NUMBA_NUM_THREADS:
         pytest.skip("the configured Numba maximum does not permit four workers")

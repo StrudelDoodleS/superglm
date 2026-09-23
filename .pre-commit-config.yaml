@@ -23,7 +23,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest-fast
-        entry: uv run --extra dev python -m pytest tests/ -q -m "not slow and not docs"
+        entry: uv run --extra dev python scripts/run_test_suite.py -m "not slow and not docs"
         language: system
         pass_filenames: false
         always_run: true
