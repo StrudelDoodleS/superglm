@@ -224,14 +224,43 @@ def _planted_bend(seed=4):
     return df, rng.poisson(np.exp(-1.3 + bend)).astype(np.float64)
 
 
-def test_spline_cat_planted_deviation_curve_ranks_first():
+def test_spline_cat_planted_deviation_curve_ranks_first(subtests):
+    """The planted bend screens first, confirms by refit, and screens the same
+    whichever order its pairs are named in.
+
+    All three read one mains fit of the same 20,000 rows, so they share it
+    rather than refit it three times; subtests keep a failure in one from
+    hiding the other two.
+    """
     df, y = _planted_bend()
     model = _fit_mixed(df, y)
-    table = model.screen_interactions(df, y)
-    top = table.iloc[0]
-    assert {top["feature_a"], top["feature_b"]} == {"age", "region"}
-    assert top["kind"] == "spline_cat"
-    assert top["z"] > 8.0
+
+    with subtests.test(msg="ranks first"):
+        top = model.screen_interactions(df, y).iloc[0]
+        assert {top["feature_a"], top["feature_b"]} == {"age", "region"}
+        assert top["kind"] == "spline_cat"
+        assert top["z"] > 8.0
+
+    with subtests.test(msg="pair order does not leak into the row"):
+        # A spline_cat pair is assembled with the categorical margin LAST, and
+        # a numeric_cat pair resolves which margin carries the slope by KIND
+        # rather than by argument position -- whichever order the caller names
+        # them in.  Either reordering is a column permutation the statistic is
+        # invariant to, and it must reach neither the reported columns nor any
+        # number in the row.
+        for a, b in (("age", "region"), ("bm", "region")):
+            fwd = model.screen_interactions(df, y, candidates=[(a, b)]).iloc[0]
+            rev = model.screen_interactions(df, y, candidates=[(b, a)]).iloc[0]
+            assert (fwd["feature_a"], fwd["feature_b"]) == (a, b)
+            assert (rev["feature_a"], rev["feature_b"]) == (b, a)
+            for column in ("kind", "statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
+                assert fwd[column] == rev[column], (a, b, column)
+
+    with subtests.test(msg="confirms by refit"):
+        # The pair the screen ranks first is real: the SplineCategorical refit
+        # the `spline_cat` kind names finds it in the likelihood too.
+        confirm = _fit_mixed(df, y, interactions=[("age", "region")])
+        assert model._result.deviance - confirm._result.deviance > 50.0
 
 
 def test_spline_cat_flags_approx_when_only_its_spline_margin_bins_lossily():
@@ -295,23 +324,6 @@ def test_spline_cat_flags_approx_when_only_its_spline_margin_bins_lossily():
     assert off[two_factors] == ("cat_cat", False)
 
 
-def test_mixed_pair_order_does_not_leak_into_the_row():
-    """A spline_cat pair is assembled with the categorical margin LAST, and a
-    numeric_cat pair resolves which margin carries the slope by KIND rather
-    than by argument position -- whichever order the caller names them in.
-    Either reordering is a column permutation the statistic is invariant to,
-    and it must reach neither the reported columns nor any number in the row."""
-    df, y = _planted_bend()
-    model = _fit_mixed(df, y)
-    for a, b in (("age", "region"), ("bm", "region")):
-        fwd = model.screen_interactions(df, y, candidates=[(a, b)]).iloc[0]
-        rev = model.screen_interactions(df, y, candidates=[(b, a)]).iloc[0]
-        assert (fwd["feature_a"], fwd["feature_b"]) == (a, b)
-        assert (rev["feature_a"], rev["feature_b"]) == (b, a)
-        for column in ("kind", "statistic", "z", "edf0", "lambda0", "n_cells", "approx"):
-            assert fwd[column] == rev[column], (a, b, column)
-
-
 def test_two_level_factor_pairs_are_legal():
     df, rng = _mixed_frame(n=6000, seed=12)
     df = df.assign(fuel=rng.choice(["diesel", "petrol"], len(df)))
@@ -326,16 +338,6 @@ def test_two_level_factor_pairs_are_legal():
     assert row["kind"] == "cat_cat"
     assert row["edf0"] == pytest.approx(2.0, abs=0.26)  # (2-1)*(3-1)
     assert np.isfinite(row["z"])
-
-
-def test_spline_cat_confirms_by_refit():
-    """The pair the screen ranks first is real: the SplineCategorical refit
-    the `spline_cat` kind names finds it in the likelihood too."""
-    df, y = _planted_bend()
-    base = _fit_mixed(df, y)
-    dev0 = base._result.deviance
-    confirm = _fit_mixed(df, y, interactions=[("age", "region")])
-    assert dev0 - confirm._result.deviance > 50.0
 
 
 def test_numeric_cat_planted_slope_ranks_first_with_exact_df():
