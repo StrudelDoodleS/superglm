@@ -3062,8 +3062,8 @@ class TestEstimatePFitMode:
 
     @pytest.mark.slow
     def test_fit_mode_reml_recovers_p(self):
-        """fit_mode='reml' should recover p using REML fits."""
-        X, y, p_true = _tweedie_data()
+        """fit_mode='reml' should recover p using REML fits, agreeing with fit."""
+        X, y, p_true = _tweedie_data(n=600)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
@@ -3076,6 +3076,19 @@ class TestEstimatePFitMode:
         assert model.family.p == result.p_hat
         assert model._last_fit_meta["method"] == "fit_reml"
         assert hasattr(model, "_reml_result")
+
+        # The truth is log-linear, inside the spline penalty's null space, so
+        # REML shrinks the spline to the Numeric fit and the two profiles are one
+        # curve: measured gap 3.9e-6.  Each Brent search resolves its optimum to
+        # xatol=1e-3, so 5e-3 bounds the pair.  A REML side that profiles phi by
+        # MLE instead of Pearson, or at a power 0.02 off, opens a ~0.02 gap while
+        # p still recovers within 0.2; the old 0.3 bound let both through.
+        result_fit = SuperGLM(
+            family=TweedieDistribution(p=1.5),
+            selection_penalty=0,
+            features={"x1": Numeric()},
+        ).estimate_p(X, y, fit_mode="fit", phi_method="pearson")
+        np.testing.assert_allclose(result_fit.p_hat, result.p_hat, atol=5e-3)
 
     @pytest.mark.slow
     def test_flexible_spline_reml_mle_p_phi_recovery(self):
@@ -3225,7 +3238,7 @@ class TestEstimatePFitMode:
     @pytest.mark.slow
     def test_fit_mode_inherit_from_reml(self):
         """After fit_reml(), inherit should use the REML path."""
-        X, y, p_true = _tweedie_data()
+        X, y, p_true = _tweedie_data(n=600)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
@@ -3275,28 +3288,6 @@ class TestEstimatePFitMode:
         model = SuperGLM(family="poisson", selection_penalty=0, features={"x": Numeric()})
         with pytest.raises(ValueError, match="tweedie"):
             model.estimate_p(X, y, phi_method="pearson")
-
-    @pytest.mark.slow
-    def test_reml_and_fit_agree_on_p(self):
-        """REML and fit paths should agree on p estimate for the same data."""
-        X, y, p_true = _tweedie_data()
-        model_fit = SuperGLM(
-            family=TweedieDistribution(p=1.5),
-            selection_penalty=0,
-            features={"x1": Numeric()},
-        )
-        result_fit = model_fit.estimate_p(X, y, fit_mode="fit", phi_method="pearson")
-
-        model_reml = SuperGLM(
-            family=TweedieDistribution(p=1.5),
-            selection_penalty=0,
-            features={"x1": Spline(n_knots=6, penalty="ssp")},
-        )
-        result_reml = model_reml.estimate_p(X, y, fit_mode="reml", phi_method="pearson")
-
-        # Both should land near p_true; allow wider tolerance since
-        # different model flexibility may shift the estimate slightly
-        np.testing.assert_allclose(result_fit.p_hat, result_reml.p_hat, atol=0.3)
 
 
 class TestDecoupledSearchFitMode:
@@ -4883,7 +4874,7 @@ class TestSearchMethods:
     @pytest.mark.slow
     def test_grid_with_reml(self):
         """method='grid' should work with fit_mode='fit_reml'."""
-        X, y, p_true = _tweedie_data()
+        X, y, p_true = _tweedie_data(n=600)
         model = SuperGLM(
             family=TweedieDistribution(p=1.5),
             selection_penalty=0,
