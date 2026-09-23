@@ -9,7 +9,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from numba import njit  # type: ignore[import-untyped]
-from numba.core.caching import NullCache  # type: ignore[import-untyped]
+from numba.core.caching import FunctionCache, NullCache  # type: ignore[import-untyped]
 from numba.core.dispatcher import Dispatcher  # type: ignore[import-untyped]
 
 from superglm import _tweedie_profile_kernel as profile_kernel
@@ -763,13 +763,20 @@ def _compiled_with(recompiled: tuple[str, ...], **stand_ins):
     finally:
         for name, original in originals.items():
             setattr(compiled_module, name, original)
+        stale = []
         for name, dispatcher, cache, signatures in saved:
             dispatcher._cache = cache
             if name in recompiled or tuple(dispatcher.overloads) != signatures:
                 dispatcher._make_finalizer()()
                 dispatcher._reset_overloads()
-                for signature in signatures:
-                    dispatcher.compile(signature)
+                stale.append((dispatcher, signatures))
+        # Reload only once no dispatcher holds a stand-in overload: a disk miss compiles
+        # from source, linking whatever each callee holds, and saves the production key.
+        for dispatcher, signatures in stale:
+            for signature in signatures:
+                dispatcher.compile(signature)
+    # Reached only when the body passed, so this never masks the body's own failure.
+    assert all(isinstance(dispatcher._cache, FunctionCache) for _, dispatcher, _, _ in saved)
 
 
 def test_series_prepares_log_gamma_coefficients_only_when_first_needed() -> None:
