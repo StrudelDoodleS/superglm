@@ -242,18 +242,21 @@ def test_public_plotting_signatures_do_not_expose_private_frame_adapter():
         assert "EagerFrame" not in str(inspect.signature(getattr(plotting, name))), name
 
 
-def test_import_superglm_loads_every_warning_class_module() -> None:
-    """A parallel run's conftest import must leave no warning module to import.
+def test_parallel_conftest_hook_loads_every_warning_class_module() -> None:
+    """Under ``-n``, the conftest leaves xdist no warning module to import.
 
     pytest-xdist rebuilds a worker's warning by importing the warning class's
-    module in a receiver thread. tests/conftest.py imports superglm on the
-    main thread first, which protects those threads only while ``import
-    superglm`` loads every module that defines a warning class.
+    module in a receiver thread. ``pytest_configure`` in tests/conftest.py
+    imports superglm on the main thread first when workers will run. That
+    protects the receiver threads only while the import loads every module
+    defining a warning class. Serial runs must not pay for the import.
     """
-    root = Path(__file__).parents[1] / "src"
-    sources = {path: path.read_text(encoding="utf-8") for path in (root / "superglm").rglob("*.py")}
+    root = Path(__file__).parents[1]
+    sources = {
+        path: path.read_text(encoding="utf-8") for path in (root / "src" / "superglm").rglob("*.py")
+    }
     modules = sorted(
-        ".".join(path.relative_to(root).with_suffix("").parts).removesuffix(".__init__")
+        ".".join(path.relative_to(root / "src").with_suffix("").parts).removesuffix(".__init__")
         for path, text in sources.items()
         # Parse only files that can define one: parsing all of them takes 1.5 s.
         if "Warning" in text
@@ -267,9 +270,20 @@ def test_import_superglm_loads_every_warning_class_module() -> None:
         )
     )
     assert modules
-    script = f"import sys, superglm; print([m for m in {modules!r} if m not in sys.modules])"
+    script = f"""
+import sys, types
+import tests.conftest as conftest
+
+def configure(workers):
+    conftest.pytest_configure(types.SimpleNamespace(option=types.SimpleNamespace(numprocesses=workers)))
+
+configure(None)
+assert "superglm" not in sys.modules, "a serial run imported superglm"
+configure(2)
+print([module for module in {modules!r} if module not in sys.modules])
+"""
     completed = subprocess.run(
-        [sys.executable, "-c", script], check=False, capture_output=True, text=True
+        [sys.executable, "-c", script], cwd=root, check=False, capture_output=True, text=True
     )
 
     assert completed.returncode == 0, completed.stderr
