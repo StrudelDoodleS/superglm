@@ -5623,6 +5623,9 @@ class TestOuterSearchHonesty:
             fit_mode="fit_reml",
             p_bounds=(1.1, 1.9),
             xatol=1.0e-3,
+            # Only the labels are read, and they are set whatever the search
+            # length: three Brent iterations run five REML fits, not eleven.
+            maxiter=3,
         )
 
         assert result.method == "brent"
