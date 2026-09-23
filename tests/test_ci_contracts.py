@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -423,24 +424,129 @@ def test_the_suite_runner_pins_pools_in_parallel_and_frees_them_for_threads() ->
         "--junitxml=pytest-results.xml",
         "--cov=superglm",
     ]
-    (parallel, pinned), (threaded, free) = runner.stage_commands(
+    (parallel, pinned), (threaded, unpinned) = runner.stage_commands(
         "not browser and not docs", passthrough
     )
+    assert (pinned, unpinned) == (True, False)
     # Markers follow tests/; the first -m in each command is `python -m pytest`.
     marks = parallel.index("-m", parallel.index("tests/"))
     assert parallel[marks + 1] == "(not browser and not docs) and not threads"
     start = parallel.index("-n")
-    assert parallel[start : start + 4] == ["-n", "auto", "--dist", "worksteal"]
-    assert pinned == dict.fromkeys(runner.PINNED_POOLS, "1")
+    assert parallel[start : start + 4] == ["-n", "logical", "--dist", "worksteal"]
+    marks = threaded.index("-m", threaded.index("tests/"))
+    assert threaded[marks + 1] == "(not browser and not docs) and threads"
+    assert "-n" not in threaded
+    assert "--junitxml=pytest-results.xml" in parallel and "--cov-append" not in parallel
+    assert "--junitxml=pytest-results-threads.xml" in threaded and "--cov-append" in threaded
+    # VECLIB is the only pin that reaches Accelerate BLAS on the macOS runners.
     assert {
         "OMP_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
         "MKL_NUM_THREADS",
         "NUMBA_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
     } <= set(runner.PINNED_POOLS)
-    marks = threaded.index("-m", threaded.index("tests/"))
-    assert threaded[marks + 1] == "(not browser and not docs) and threads"
-    assert "-n" not in threaded and free == {}
-    assert "--junitxml=pytest-results.xml" in parallel and "--cov-append" not in parallel
-    assert "--junitxml=pytest-results-threads.xml" in threaded and "--cov-append" in threaded
+    caller = {"PATH": "/bin", "OMP_NUM_THREADS": "3", "NUMBA_NUM_THREADS": "2"}
+    assert runner.stage_environment(True, caller) == {
+        "PATH": "/bin",
+        **dict.fromkeys(runner.PINNED_POOLS, "1"),
+    }
+    # Stage 2 drops pins the calling shell exported, or its threads tests run pinned.
+    assert runner.stage_environment(False, caller) == {"PATH": "/bin"}
     assert '"threads:' in (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "junit",
+    [
+        ["--junitxml=r.xml"],
+        ["--junit-xml=r.xml"],
+        ["--junitxml", "r.xml"],
+        ["--junit-xml", "r.xml"],
+    ],
+)
+def test_the_suite_runner_writes_stage_two_junit_beside_stage_one(junit: list[str]) -> None:
+    (parallel, _), (threaded, _) = _suite_runner().stage_commands("not docs", junit)
+    assert "r.xml" in " ".join(parallel) and "r-threads.xml" not in " ".join(parallel)
+    assert "r-threads.xml" in " ".join(threaded) and " r.xml" not in " " + " ".join(threaded)
+
+
+@pytest.mark.parametrize(
+    ("codes", "expected"),
+    [
+        ((0, 0), 0),
+        ((0, 5), 0),  # a shard with no threads test
+        ((5, 0), 5),  # stage 1 collected nothing: a broken selection, not a pass
+        ((1, 0), 1),
+        ((0, 1), 1),
+        ((0, -11), 1),  # a segfault in the threads stage
+        ((-9, 0), 1),  # an OOM kill in the parallel stage
+        ((2, 1), 2),  # the first failure's code is kept
+    ],
+)
+def test_the_suite_runner_fails_on_any_failing_stage(monkeypatch, codes, expected) -> None:
+    runner = _suite_runner()
+    calls = []
+
+    def fake_call(command, cwd, env):
+        calls.append((command, cwd, env))
+        return codes[len(calls) - 1]
+
+    monkeypatch.setattr(runner.subprocess, "call", fake_call)
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    assert runner.main(["-m", "not docs", "-k", "x"]) == expected
+    (first, cwd, first_env), (second, _, second_env) = calls
+    assert cwd == _ROOT
+    assert all(first_env[pool] == "1" for pool in runner.PINNED_POOLS)
+    assert not set(runner.PINNED_POOLS) & set(second_env)
+    assert first[-2:] == second[-2:] == ["-k", "x"]
+
+
+# Tests that touch thread-pool APIs but do not need the default pools.
+_UNPINNED_THREAD_API_ALLOWLIST = {
+    "test_original_stress_fixture_has_fresh_strict_newton_authority": "caps its own pools",
+    "test_schema_refusal_before_arrays_does_not_resolve_or_start_workers": "patches get_num_threads",
+    "test_certificate_joins_workers_on_success_refusal_and_worker_failure": "patches get_num_threads",
+    "test_worker_failure_cancels_queued_leaves_and_joins_running_leaves": "patches get_num_threads",
+    "test_certificate_hashes_bounded_buffers_without_expansion_or_cache_creation": (
+        "patches get_num_threads"
+    ),
+    "test_dispatch_comes_from_a_live_process_not_build_metadata": "checks a BLAS pool exists",
+    "test_tests_that_read_or_set_thread_pools_run_unpinned": "names the APIs it scans for",
+}
+
+
+def test_tests_that_read_or_set_thread_pools_run_unpinned() -> None:
+    """A test that reads or sets pool sizes silently loses its meaning when pinned.
+
+    scripts/run_test_suite.py pins every stage-1 worker to one thread, so such a
+    test must carry the ``threads`` marker (stage 2, default pools) unless it
+    is listed above with the reason it does not need them.
+    """
+    api = re.compile(
+        r"\b(set_num_threads|get_num_threads|threadpool_limits|threadpool_info|ThreadpoolController)\b"
+    )
+    unmarked = []
+    for path in sorted((_ROOT / "tests").rglob("test_*.py")):
+        text = path.read_text(encoding="utf-8")
+        if not api.search(text):
+            continue
+        tree = ast.parse(text)
+        module_marked = any(
+            isinstance(node, ast.Assign)
+            and any(getattr(target, "id", "") == "pytestmark" for target in node.targets)
+            and "threads" in ast.get_source_segment(text, node)
+            for node in tree.body
+        )
+        for node in tree.body:
+            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+                continue
+            if not api.search(ast.get_source_segment(text, node)):
+                continue
+            marked = module_marked or any(
+                "mark.threads" in ast.get_source_segment(text, decorator)
+                for decorator in node.decorator_list
+            )
+            if not marked and node.name not in _UNPINNED_THREAD_API_ALLOWLIST:
+                unmarked.append(f"{path.relative_to(_ROOT)}::{node.name}")
+    assert not unmarked, f"mark these @pytest.mark.threads or allowlist them: {unmarked}"

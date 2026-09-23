@@ -1837,6 +1837,7 @@ def test_parallel_core_preserves_frozen_complete_output_statuses(case) -> None:
     assert parallel[5:] == (case.status, case.failing_row)
 
 
+@pytest.mark.threads
 def test_parallel_core_reports_the_deterministic_earliest_of_multiple_bad_rows() -> None:
     arrays = (
         np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float64),

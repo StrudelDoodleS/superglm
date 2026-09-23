@@ -1,20 +1,21 @@
 """Run the test suite the way CI does, locally or on a CI shard.
 
 Stage 1 runs every selected test not marked ``threads`` under pytest-xdist,
-with each worker pinned to one BLAS, OpenMP and numba thread. Unpinned
-workers each start a full thread pool and oversubscribe the machine.
-Stage 2 runs the ``threads`` tests serially with the default thread pools,
-because they assert on thread counts or need a pool with more than one
-thread, which a pinned worker cannot provide.
+with one worker per logical CPU and each worker pinned to one BLAS, OpenMP
+and numba thread. Unpinned workers each start a full thread pool and
+oversubscribe the machine. Stage 2 runs the ``threads`` tests serially with
+the default thread pools, whatever the calling shell pinned, because they
+assert on thread counts or need a pool with more than one thread.
 
     uv run python scripts/run_test_suite.py                  # the full suite
     uv run python scripts/run_test_suite.py -m "not slow"    # the quick pass
     uv run python scripts/run_test_suite.py --splits 4 --group 1   # a CI shard
 
 Every other argument goes to both stages; no ``--`` separator is needed, so
-the same command line works under PowerShell. A ``--junitxml`` report from
-stage 2 is written beside stage 1's (``-threads`` suffix), and ``--cov``
-data from stage 2 is appended to stage 1's.
+the same command line works under PowerShell. Select tests with ``-m`` or
+``-k``: the runner always runs ``tests/``, so file paths are not supported.
+A junit report from stage 2 is written beside stage 1's (``-threads``
+suffix), and coverage from stage 2 is appended to stage 1's.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ import argparse
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
+from pathlib import Path
 
 PINNED_POOLS = (
     "OMP_NUM_THREADS",
@@ -33,38 +36,65 @@ PINNED_POOLS = (
     "NUMEXPR_NUM_THREADS",
 )
 DEFAULT_MARKERS = "not browser and not docs"
+JUNIT_OPTIONS = ("--junitxml", "--junit-xml")
 NO_TESTS_COLLECTED = 5
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def stage_commands(markers: str, passthrough: list[str]) -> list[tuple[list[str], dict[str, str]]]:
-    """The two pytest invocations and the environment each adds."""
-    base = [sys.executable, "-m", "pytest", "tests/", "-q", "--maxfail=0"]
-    parallel = [*base, "-m", f"({markers}) and not threads", "-n", "auto", "--dist", "worksteal"]
-    threaded = [*base, "-m", f"({markers}) and threads"]
-    stage_two = []
+def _beside(path: str) -> str:
+    root, ext = os.path.splitext(path)
+    return f"{root}-threads{ext or '.xml'}"
+
+
+def _threads_arguments(passthrough: list[str]) -> list[str]:
+    """Stage 2's arguments: its junit report beside stage 1's, coverage appended."""
+    arguments, rename_next = [], False
     for arg in passthrough:
-        if arg.startswith("--junitxml="):
-            root, ext = os.path.splitext(arg.removeprefix("--junitxml="))
-            arg = f"--junitxml={root}-threads{ext or '.xml'}"
-        stage_two.append(arg)
+        if rename_next:
+            arg, rename_next = _beside(arg), False
+        elif arg in JUNIT_OPTIONS:
+            rename_next = True
+        elif arg.startswith(tuple(f"{option}=" for option in JUNIT_OPTIONS)):
+            option, _, path = arg.partition("=")
+            arg = f"{option}={_beside(path)}"
+        arguments.append(arg)
     if any(arg.startswith("--cov") for arg in passthrough):
-        stage_two.append("--cov-append")
+        arguments.append("--cov-append")
+    return arguments
+
+
+def stage_commands(markers: str, passthrough: list[str]) -> list[tuple[list[str], bool]]:
+    """The two pytest invocations, each with whether its thread pools are pinned."""
+    base = [sys.executable, "-m", "pytest", "tests/", "-q", "--maxfail=0"]
+    parallel = [*base, "-m", f"({markers}) and not threads", "-n", "logical", "--dist", "worksteal"]
+    threaded = [*base, "-m", f"({markers}) and threads"]
     return [
-        ([*parallel, *passthrough], dict.fromkeys(PINNED_POOLS, "1")),
-        ([*threaded, *stage_two], {}),
+        ([*parallel, *passthrough], True),
+        ([*threaded, *_threads_arguments(passthrough)], False),
     ]
+
+
+def stage_environment(pinned: bool, base: Mapping[str, str]) -> dict[str, str]:
+    """The caller's environment with every pool pinned to one thread, or none pinned."""
+    environment = {key: value for key, value in base.items() if key not in PINNED_POOLS}
+    if pinned:
+        environment.update(dict.fromkeys(PINNED_POOLS, "1"))
+    return environment
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("-m", "--markers", default=DEFAULT_MARKERS, help="pytest -m expression")
+    # Only -m: pytest's own --markers lists the registered markers.
+    parser.add_argument("-m", dest="markers", default=DEFAULT_MARKERS, help="pytest -m expression")
     args, passthrough = parser.parse_known_args(argv)
     passthrough = [arg for arg in passthrough if arg != "--"]
     status = 0
     for command, pinned in stage_commands(args.markers, passthrough):
-        code = subprocess.call(command, env={**os.environ, **pinned})
-        # A shard may hold no ``threads`` test; an empty selection is not a failure.
-        status = max(status, 0 if code == NO_TESTS_COLLECTED else code)
+        code = subprocess.call(command, cwd=ROOT, env=stage_environment(pinned, os.environ))
+        if code == NO_TESTS_COLLECTED and not pinned:
+            code = 0  # a shard may hold no ``threads`` test; stage 1 must collect something
+        if code and not status:
+            status = code if code > 0 else 1  # a signal (negative code) is a failure too
     return status
 
 
