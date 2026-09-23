@@ -21,30 +21,45 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "benchmarks" / "rank_deficient_complete_fit.py"
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "rank_deficient_complete_fit",
-        "multi_penalty_support",
-        "solver_repair_complete_fit",
-        "c3_c1_complete_fit",
-    ],
+_DRIVERS = (
+    "rank_deficient_complete_fit",
+    "multi_penalty_support",
+    "solver_repair_complete_fit",
+    "c3_c1_complete_fit",
 )
-def test_imported_drivers_do_not_require_posix_modules(name):
+
+# Simulate a platform without resource, load average or CPU affinity, import
+# every driver named on the command line, and exit naming each one that failed.
+_IMPORT_WITHOUT_POSIX = """\
+import importlib, os, sys
+sys.modules['resource'] = None
+os.process_cpu_count = os.cpu_count
+for name in ('getloadavg', 'sched_getaffinity'):
+    if hasattr(os, name):
+        delattr(os, name)
+failed = []
+for module in sys.argv[1:]:
+    try:
+        importlib.import_module(module)
+    except BaseException as exc:
+        failed.append(f'{module}: {type(exc).__name__}: {exc}')
+sys.exit('\\n'.join(failed) or None)
+"""
+
+
+def test_imported_drivers_do_not_require_posix_modules():
+    """Every driver imports on a platform without POSIX process APIs.
+
+    One interpreter imports them all: the simulated platform is the same for
+    each, and a spawn per driver paid its ~2.3 s of imports four times over.
+    Each failing driver is named, not only the first.
+    """
     result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import importlib, os, sys; sys.modules['resource'] = None; "
-            "os.process_cpu_count = os.cpu_count; "
-            "[delattr(os, name) for name in ('getloadavg', 'sched_getaffinity') "
-            "if hasattr(os, name)]; importlib.import_module(sys.argv[1])",
-            f"benchmarks.{name}",
-        ],
+        [sys.executable, "-c", _IMPORT_WITHOUT_POSIX, *(f"benchmarks.{name}" for name in _DRIVERS)],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=120,
     )
     assert result.returncode == 0, result.stderr
 
