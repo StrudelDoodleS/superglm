@@ -130,10 +130,7 @@ def _generate_weighted_tweedie(mu, phi, p, weights, rng):
     """Simulate Tweedie responses under the prior-weight convention phi / w."""
     mu = np.asarray(mu, dtype=np.float64)
     weights = np.asarray(weights, dtype=np.float64)
-    y = np.empty(len(mu), dtype=np.float64)
-    for i in range(len(mu)):
-        y[i] = generate_tweedie_cpg(1, mu=mu[i], phi=phi / weights[i], p=p, rng=rng)[0]
-    return y
+    return generate_tweedie_cpg(len(mu), mu=mu, phi=phi / weights, p=p, rng=rng)
 
 
 def _call_tweedie_low_level(function_name, y, mu, *, phi=2.0, p=1.5, weights=None):
