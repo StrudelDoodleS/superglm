@@ -16,8 +16,10 @@ the same command line works under PowerShell. Select tests with ``-m`` or
 ``-k``: the runner always runs ``tests/``, so file paths are not supported.
 A junit report from stage 2 is written beside stage 1's (``-threads``
 suffix), and coverage from stage 2 is appended to stage 1's. Both stages
-need the ``dev`` extra's plugins loaded: stage 1 runs under pytest-xdist,
-and stage 2 always passes ``--cov-append``, which pytest-cov defines.
+need the ``dev`` extra's plugins loaded: both pass ``-n``, which
+pytest-xdist defines, and stage 2 also passes ``--cov-append``, which
+pytest-cov defines. Neither stage inherits ``SUPERGLM_BLAS_THREADS``, so
+the solver's BLAS cap follows its automatic policy throughout.
 """
 
 from __future__ import annotations
@@ -82,7 +84,10 @@ def stage_commands(markers: str, passthrough: list[str]) -> list[tuple[list[str]
 
 
 def stage_environment(pinned: bool, base: Mapping[str, str]) -> dict[str, str]:
-    """The caller's environment with every pool pinned to one thread, or none pinned."""
+    """The caller's environment without its pool or solver-cap settings.
+
+    When ``pinned``, every pool is then set to one thread.
+    """
     inherited = (*PINNED_POOLS, SOLVER_BLAS_OVERRIDE)
     environment = {key: value for key, value in base.items() if key not in inherited}
     if pinned:
