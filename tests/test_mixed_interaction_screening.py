@@ -393,17 +393,8 @@ def test_numeric_numeric_planted_product_ranks_first():
     assert top["z"] > 5.0
 
 
-def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
-    """A z-moment pair has no grid to bin, so it cannot approximate: an
-    unaffordable numeric_cat pair is REFUSED, never degraded.  Every block it
-    builds scales with the factor's width and the largest is the (L+1)-wide
-    overlap curvature, so the gate is `(L+1)**2 <= max_cells` -- applied to
-    the level count alone, before the dense (L, L-1) menu is ever built.  The
-    cubic gate applies to the same width for the same reason (the blocks are
-    also FACTORIZED at that width), and at the default budget it is the
-    binding one: `(L-1)**3 <= 1000 * max_cells` admits 1710 levels where the
-    allocation gate admits 2235."""
-    L, reps = 2300, 2
+def _wide_numeric_cat(L, reps=2):
+    """A fitted numeric x factor model whose factor has ``L`` levels."""
     rng = np.random.default_rng(31)
     df = pd.DataFrame(
         {
@@ -416,7 +407,28 @@ def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
     y = rng.normal(size=len(df))
     model = SuperGLM(family="gaussian", features={"g": Categorical(), "bm": Numeric()})
     model.fit_reml(df, y)
+    return model, df, y
 
+
+def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
+    """A z-moment pair has no grid to bin, so it cannot approximate: an
+    unaffordable numeric_cat pair is REFUSED, never degraded.  Every block it
+    builds scales with the factor's width and the largest is the (L+1)-wide
+    overlap curvature, so the gate is `(L+1)**2 <= max_cells` -- applied to
+    the level count alone, before the dense (L, L-1) menu is ever built.  The
+    cubic gate applies to the same width for the same reason (the blocks are
+    also FACTORIZED at that width), and at the default budget it is the
+    binding one: `(L-1)**3 <= 1000 * max_cells` admits 1710 levels where the
+    allocation gate admits 2235.
+
+    Two factor widths, because a pair that computes costs `(L-1)**3` and the
+    two claims bind at different widths.  1711 levels is the narrowest factor
+    the cubic gate refuses at the default budget, which the allocation gate
+    alone would admit.  1005 is the narrowest whose cubic budget exceeds its
+    allocation budget, so the lift there is the cubic gate's own threshold, at
+    a fraction of the one-thread cost of lifting the refused width itself."""
+    L = 1711
+    model, df, y = _wide_numeric_cat(L)
     refused = model.screen_interactions(df, y).iloc[0]  # default max_cells
     assert refused["kind"] == "numeric_cat"
     assert np.isnan(refused["statistic"]) and np.isnan(refused["z"])
@@ -428,11 +440,16 @@ def test_numeric_cat_refuses_a_factor_too_wide_for_its_blocks():
     assert np.isnan(short["z"])
     assert short["n_cells"] == L
     # ... and so is the allocation budget on its own: the (L-1)^3 solve the
-    # blocks feed needs more than twice that, and BOTH gates must pass.
+    # blocks feed needs 1.7 times that, and BOTH gates must pass.
     allocation_only = model.screen_interactions(df, y, max_cells=(L + 1) ** 2).iloc[0]
     assert np.isnan(allocation_only["z"])
 
+    L = 1005
+    model, df, y = _wide_numeric_cat(L)
     budget = max((L + 1) ** 2, -(-((L - 1) ** 3) // 1000))
+    # One short of the cubic budget still clears the allocation budget, so
+    # the refusal below is the cubic gate's alone.
+    assert budget - 1 >= (L + 1) ** 2
     one_short = model.screen_interactions(df, y, max_cells=budget - 1).iloc[0]
     assert np.isnan(one_short["z"])
     # At the budget that clears both, the same pair computes, exactly and
