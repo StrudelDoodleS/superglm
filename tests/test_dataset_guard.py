@@ -282,10 +282,12 @@ from tests import _datasets
 # No dataset, whatever this machine actually holds.
 _datasets.usable = lambda name: None
 REASON = _datasets.skip_reason("nothing.parquet")
+"""
 
+_HOOK_PROBE_ITEM = """
 
 @pytest.mark.{decorator}
-def test_guarded():
+def test_{mark}_guarded():
     raise AssertionError("the body must never run; this item can only skip or error")
 """
 
@@ -293,21 +295,24 @@ def test_guarded():
 #: was unescalated, and it needs the end-to-end form for the same reason the
 #: ``skipif`` case does: ``_pytest.skipping`` evaluates BOTH in its own
 #: ``tryfirst`` ``pytest_runtest_setup``, so the ordering that makes this hook
-#: win is a property of the registration and not of the function.
+#: win is a property of the registration and not of the function.  The probe
+#: carries one item per mark, so each child run answers for both.
 _HOOK_PROBE_MARKS = {
     "skipif": "skipif(True, reason=REASON)",
     "skip": "skip(reason=REASON)",
 }
 
 
-def _run_hook_probe(
-    tmp_path: Path, require_data: str, decorator: str
-) -> subprocess.CompletedProcess[str]:
-    """Run one sentinel-guarded item in a real pytest, with ``tests.conftest`` loaded."""
+def _run_hook_probe(tmp_path: Path, require_data: str) -> subprocess.CompletedProcess[str]:
+    """Run one sentinel-guarded item per mark in a real pytest, with ``tests.conftest`` loaded."""
     ini = tmp_path / "pytest.ini"
     ini.write_text("[pytest]\naddopts =\n", encoding="utf-8")
     probe = tmp_path / "test_hook_probe.py"
-    probe.write_text(_HOOK_PROBE.format(decorator=decorator), encoding="utf-8")
+    items = (
+        _HOOK_PROBE_ITEM.format(mark=mark, decorator=decorator)
+        for mark, decorator in _HOOK_PROBE_MARKS.items()
+    )
+    probe.write_text(_HOOK_PROBE + "".join(items), encoding="utf-8")
     return subprocess.run(
         [
             sys.executable,
@@ -330,8 +335,7 @@ def _run_hook_probe(
     )
 
 
-@pytest.mark.parametrize("mark", list(_HOOK_PROBE_MARKS), ids=list(_HOOK_PROBE_MARKS))
-def test_the_switch_works_through_a_real_pytest_run(tmp_path, mark):
+def test_the_switch_works_through_a_real_pytest_run(tmp_path):
     """Everything above calls the hook as a function; this runs it as a hook.
 
     That gap is not theoretical.  ``tryfirst`` is what puts this impl ahead of
@@ -339,20 +343,28 @@ def test_the_switch_works_through_a_real_pytest_run(tmp_path, mark):
     appends ``tryfirst`` impls and iterates the list reversed, so the later
     registration runs first, and the first impl to raise ends the call.  Drop
     the decorator and skipping wins: measured, the same probe goes from
-    ``1 error`` to ``1 skipped`` and every direct-call test above stays green.
+    ``2 errors`` to ``2 skipped`` and every direct-call test above stays green.
     Renaming the function, or unregistering it, is invisible to them too.
 
     A ``-p`` plugin is registered EARLIER than a conftest, so this is the
     pessimistic case for the ordering: if the hook wins here it wins as a
     conftest.
+
+    One child per switch setting carries both marks, and each mark is asserted
+    by name: a mark the hook stops reaching shows up as a skip beside the
+    other's error -- measured with the hook reading ``skipif`` alone, ``1
+    skipped, 1 error`` -- so two interpreters answer for what four used to.
     """
-    decorator = _HOOK_PROBE_MARKS[mark]
-    armed = _run_hook_probe(tmp_path, "1", decorator)
-    assert "1 error" in armed.stdout, armed.stdout + armed.stderr
+    armed = _run_hook_probe(tmp_path, "1")
+    for mark in _HOOK_PROBE_MARKS:
+        assert f"ERROR at setup of test_{mark}_guarded " in armed.stdout, (
+            armed.stdout + armed.stderr
+        )
+    assert f"{len(_HOOK_PROBE_MARKS)} errors" in armed.stdout, armed.stdout + armed.stderr
     assert "SUPERGLM_REQUIRE_DATA is set" in armed.stdout, armed.stdout
 
-    disarmed = _run_hook_probe(tmp_path, "0", decorator)
-    assert "1 skipped" in disarmed.stdout, disarmed.stdout + disarmed.stderr
+    disarmed = _run_hook_probe(tmp_path, "0")
+    assert f"{len(_HOOK_PROBE_MARKS)} skipped" in disarmed.stdout, disarmed.stdout + disarmed.stderr
 
 
 # ── every suite that guards on a dataset must route through skip_reason ─────
