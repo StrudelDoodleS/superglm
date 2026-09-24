@@ -291,6 +291,22 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
+    @app.post("/transform_term")
+    def transform_term(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._transform_term(
+                str(_required(payload, "term")),
+                form=str(_required(payload, "form")),
+                breaks=_break_list(payload.get("breaks", [])),
+                degrees=None
+                if payload.get("degrees") is None
+                else _number_list(payload, "degrees", _int),
+                degree=_optional_int(payload.get("degree"), "degree"),
+                method=str(payload.get("method", "auto")),
+                level_display=_level_display(payload),
+            )
+        )
+
     return app
 
 
@@ -495,6 +511,14 @@ def _float(value: Any, name: str) -> float:
 
 def _optional_int(value: Any, name: str) -> int | None:
     return None if value is None else _int(value, name)
+
+
+def _break_list(value: Any) -> list[str | float]:
+    if not isinstance(value, list) or any(
+        isinstance(item, bool) or not isinstance(item, str | int | float) for item in value
+    ):
+        raise EditorValueError("breaks must be a list of band names or numbers.")
+    return [item if isinstance(item, str) else float(item) for item in value]
 
 
 def _number_list[T](

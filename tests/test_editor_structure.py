@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import json
+import urllib.error
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from superglm import Categorical, Numeric, OrderedCategorical, Spline, SuperGLM
+from superglm import (
+    Categorical,
+    Constraint,
+    Numeric,
+    OrderedCategorical,
+    Piecewise,
+    Polynomial,
+    Spline,
+    SuperGLM,
+)
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
@@ -246,5 +258,222 @@ def test_widget_http_set_reference_returns_transition_envelope(region_model):
         assert payload["state"]["structure_history"]["last"]["label"] == (
             "set reference of region to C"
         )
+    finally:
+        widget.close()
+
+
+BANDS = [f"B{i}" for i in range(1, 9)]
+
+
+@pytest.fixture
+def banded():
+    rng = np.random.default_rng(20260928)
+    band = rng.choice(BANDS, 1200)
+    x = rng.uniform(0.0, 10.0, 1200)
+    kink = np.array([min(BANDS.index(b), 4) for b in band]) * 0.08
+    y = 0.3 + kink + 0.04 * x + rng.normal(0.0, 0.05, 1200)
+    X = pd.DataFrame({"band": band, "x": x})
+    features = {
+        "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", k=5), base="first"),
+        "x": Spline(n_knots=8),
+    }
+    model = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.1, features=features
+    )
+    model.fit(X, y)
+    return model, X, y
+
+
+TRANSFORM_CASES = [
+    (
+        "band",
+        dict(form="piecewise", breaks=["B3", "B6"], degrees=[1, 2, 0]),
+        lambda: OrderedCategorical(
+            order=BANDS, basis=Piecewise(breaks=["B3", "B6"], degrees=[1, 2, 0]), base="first"
+        ),
+    ),
+    (
+        "band",
+        dict(form="spline", breaks=["B3", "B6"]),
+        lambda: OrderedCategorical(
+            order=BANDS, basis=Spline(kind="ps", knots=["B3", "B6"]), base="first"
+        ),
+    ),
+    (
+        "band",
+        dict(form="polynomial", breaks=[], degree=2),
+        lambda: OrderedCategorical(order=BANDS, basis=Polynomial(degree=2), base="first"),
+    ),
+    ("x", dict(form="piecewise", breaks=[3.0, 6.5]), lambda: Piecewise(breaks=[3.0, 6.5])),
+    ("x", dict(form="spline", breaks=[3.0, 6.5]), lambda: Spline(kind="ps", knots=[3.0, 6.5])),
+    ("x", dict(form="polynomial", breaks=[], degree=3), lambda: Polynomial(degree=3)),
+]
+
+
+@pytest.mark.parametrize(("term", "request_", "expected_spec"), TRANSFORM_CASES)
+def test_transformed_model_predicts_like_a_direct_fit_of_the_same_spec(
+    banded, term, request_, expected_spec
+):
+    model, X, y = banded
+    session = EditorSession.from_model(model, terms=[term])
+    session.replace_with_transformed_term(term, method="fit", **request_)
+    features = {
+        "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", k=5), base="first"),
+        "x": Spline(n_knots=8),
+    }
+    features[term] = expected_spec()
+    direct = SuperGLM(
+        family="gaussian", selection_penalty=0.0, spline_penalty=0.1, features=features
+    )
+    direct.fit(X, y)
+    # Same spec, same data, same solver: agreement to the fit tolerance checks
+    # the whole replacement path against an independent construction.
+    np.testing.assert_allclose(session.model.predict(X), direct.predict(X), rtol=10 * model._tol)
+    assert session.structure_history[-1].operation == "transform_term"
+
+
+def test_transform_carries_a_monotone_constraint_to_a_spline_and_refuses_it_elsewhere(banded):
+    _, X, y = banded
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"x": Spline(n_knots=8, constraint=Constraint.fit.increasing)},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["x"])
+    for form in ("piecewise", "polynomial"):
+        with pytest.raises(EditorValueError, match="carries the increasing constraint"):
+            session.replace_with_transformed_term(
+                "x", form=form, breaks=[5.0] if form == "piecewise" else [], degree=2, method="fit"
+            )
+    assert session.structure_history == []
+    session.replace_with_transformed_term("x", form="spline", breaks=[5.0], method="fit")
+    assert session.model._specs["x"].constraint_kind == "increasing"
+
+
+def test_transform_keeps_the_base_specials_grouping_and_extrapolation(banded):
+    _, X, y = banded
+    X = X.assign(band=np.where(np.arange(len(X)) % 10 == 0, "MISSING", X["band"]))
+    band_spec = OrderedCategorical(
+        order=BANDS, basis=Spline(kind="ps", k=5), base="B4", specials=["MISSING"]
+    )
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={"band": band_spec, "x": Piecewise(breaks=[5.0], extrapolation="extend")},
+    )
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["band", "x"])
+    session.select_levels("band", ["B1", "B2"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    # A special is a free effect off the ordered axis: never a break position.
+    assert session_payload(session)["band"]["transform"]["axis"] == BANDS
+    session.replace_with_transformed_term(
+        "band", form="piecewise", breaks=["B4", "B6"], method="fit"
+    )
+    session.replace_with_transformed_term("x", form="spline", breaks=[3.0, 6.5], method="fit")
+    band, x = session.model._specs["band"], session.model._specs["x"]
+    assert band._base_level == "B4"
+    assert band._specials == ["MISSING"]
+    assert band._grouping.original_to_group["B1"] == "B1+B2"
+    assert x.extrapolation == "extend"
+
+
+INVALID_REQUESTS = [
+    ("x", dict(form="piecewise", breaks=[11.0]), "inside the fitted range"),
+    ("x", dict(form="piecewise", breaks=[5.0, 5.0]), "strictly increasing"),
+    ("x", dict(form="piecewise", breaks=[6.0, 3.0]), "strictly increasing"),
+    ("x", dict(form="piecewise", breaks=[]), "Add at least one break"),
+    ("x", dict(form="piecewise", breaks=[5.0], degrees=[2, 1]), "straight lines"),
+    ("x", dict(form="polynomial", breaks=[5.0], degree=2), "has no breaks"),
+    ("x", dict(form="polynomial", breaks=[], degree=6), "degree from 1 to 5"),
+    ("band", dict(form="piecewise", breaks=["B1"], degrees=[1, 1]), "interior band"),
+    ("band", dict(form="piecewise", breaks=["B8"], degrees=[1, 1]), "interior band"),
+    ("band", dict(form="piecewise", breaks=["B9"], degrees=[1, 1]), "interior band"),
+    (
+        "band",
+        dict(form="piecewise", breaks=["B6", "B3"], degrees=[1, 1, 1]),
+        "strictly increasing",
+    ),
+    ("band", dict(form="piecewise", breaks=["B3"], degrees=[1]), "one degree per segment"),
+    ("band", dict(form="bumps", breaks=["B3"]), "piecewise, spline or polynomial"),
+]
+
+
+@pytest.mark.parametrize(("term", "request_", "message"), INVALID_REQUESTS)
+def test_transform_refuses_invalid_requests_without_changing_anything(
+    banded, term, request_, message
+):
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=[term])
+    revision = session.model_revision
+    with pytest.raises(EditorValueError, match=message):
+        session.replace_with_transformed_term(term, method="fit", **request_)
+    assert session.model is model
+    assert session.model_revision == revision
+    assert session.structure_history == []
+
+
+def test_a_shape_the_library_refuses_reaches_the_analyst_as_a_fixed_message(banded):
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=["band"])
+    with pytest.raises(EditorValueError, match="could not fit this shape"):
+        session.replace_with_transformed_term(
+            "band", form="piecewise", breaks=["B3", "B6"], degrees=[0, 0, 0], method="fit"
+        )
+
+
+def test_payload_offers_the_current_breaks_for_editing(banded):
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=["band", "x"])
+    payload = session_payload(session)
+    assert payload["band"]["transform"] == {"axis": BANDS, "piecewise": None}
+    assert payload["x"]["transform"] == {"axis": None, "piecewise": None}
+    session.replace_with_transformed_term(
+        "band", form="piecewise", breaks=["B3", "B6"], degrees=[1, 2, 0], method="fit"
+    )
+    session.replace_with_transformed_term("x", form="piecewise", breaks=[3.0, 6.5], method="fit")
+    payload = session_payload(session)
+    assert payload["band"]["transform"]["piecewise"] == {
+        "breaks": ["B3", "B6"],
+        "degrees": [1, 2, 0],
+    }
+    assert payload["x"]["transform"]["piecewise"] == {"breaks": [3.0, 6.5], "degrees": [1, 1, 1]}
+
+
+def test_widget_http_transform_term_returns_transition_envelope(banded):
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=["x"])
+    widget = session.widget()
+    try:
+        payload = _post_json(
+            f"{widget.url}/transform_term", {"term": "x", "form": "piecewise", "breaks": [3.0, 6.5]}
+        )
+        assert set(payload) == {"state", "summary", "timing"}
+        assert payload["timing"]["operation"] == "transform_term"
+        assert payload["state"]["structure_history"]["last"]["label"] == (
+            "transform x to piecewise (2 breaks)"
+        )
+    finally:
+        widget.close()
+
+
+def test_widget_http_transform_term_refuses_breaks_that_are_not_names_or_numbers(banded):
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=["x"])
+    widget = session.widget()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _post_json(
+                f"{widget.url}/transform_term", {"term": "x", "form": "piecewise", "breaks": [True]}
+            )
+        assert error.value.code == 400
+        assert json.loads(error.value.read().decode("utf-8")) == {
+            "error": "breaks must be a list of band names or numbers."
+        }
+        assert session.model is model
+        assert session.structure_history == []
     finally:
         widget.close()

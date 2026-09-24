@@ -11,6 +11,7 @@ import numpy as np
 from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES
 from superglm.editor.group_display import build_group_display
 from superglm.editor.terms import term_from_inference
+from superglm.editor.transform import transform_payload
 
 _MAX_INTERACTIVE_HANDLES = 420
 
@@ -54,6 +55,7 @@ def session_payload(
             "level_groups": _level_groups(session, name, term),
             "level_order_changed": _level_order_changed(session, name),
             "reference": _reference_payload(session, name),
+            "transform": transform_payload(session.model._specs[name], term),
             "effective_df": _finite_float(term.metadata.get("edf")),
             "x_label": name,
             "y_label": "relativity",

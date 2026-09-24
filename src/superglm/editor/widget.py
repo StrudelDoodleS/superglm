@@ -1006,6 +1006,26 @@ class EditorWidget:
             level_display=level_display,
         )
 
+    def _transform_term(
+        self,
+        term: str,
+        *,
+        form: str,
+        breaks: list,
+        degrees: list[int] | None = None,
+        degree: int | None = None,
+        method: str = "auto",
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        return self._structural_step(
+            "transform_term",
+            lambda target: self.session.replace_with_transformed_term(
+                target, form=form, breaks=breaks, degrees=degrees, degree=degree, method=method
+            ),
+            term=term,
+            level_display=level_display,
+        )
+
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
         with self._lock:
             if term is not None:

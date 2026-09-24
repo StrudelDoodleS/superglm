@@ -22,6 +22,7 @@ from superglm.editor.collapse import (
 from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES, control_curve_after_move
 from superglm.editor.controls import control_points as _control_points
 from superglm.editor.errors import (
+    EditorClientError,
     EditorIndexError,
     EditorKeyError,
     EditorTypeError,
@@ -47,7 +48,14 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
+from superglm.editor.transform import transformed_feature_spec
 from superglm.solvers.dispersion import model_weight_semantics
+
+_TRANSFORM_REFUSED = (
+    "SuperGLM could not fit this shape. Check that no segment is flat next to another "
+    "flat one, that each segment has enough bands or data, and that no collapsed group "
+    "spans a break."
+)
 
 
 class EditorSession:
@@ -904,6 +912,45 @@ class EditorSession:
         return self._push_structure(
             refit_model,
             operation="set_reference",
+            term=term,
+            label=refit_model._editor_step["label"],
+        )
+
+    def replace_with_transformed_term(
+        self,
+        term: str,
+        *,
+        form: str,
+        breaks=(),
+        degrees=None,
+        degree=None,
+        **refit_kwargs: Any,
+    ):
+        """Give ``term`` a new shape, refit, and put the refit in force."""
+        editable = self._require_term(term)
+        try:
+            refit_model = self._refit_replacing(
+                term,
+                lambda X_ref: transformed_feature_spec(
+                    self.model,
+                    editable,
+                    form=form,
+                    breaks=list(breaks),
+                    degrees=degrees,
+                    degree=degree,
+                    X=X_ref,
+                ),
+                **refit_kwargs,
+            )
+        except EditorClientError:
+            raise
+        except ValueError as exc:
+            # The library's refusal text is backend text (editor/errors.py): the
+            # analyst gets one intentional sentence, Python callers keep the cause.
+            raise EditorValueError(_TRANSFORM_REFUSED) from exc
+        return self._push_structure(
+            refit_model,
+            operation="transform_term",
             term=term,
             label=refit_model._editor_step["label"],
         )
