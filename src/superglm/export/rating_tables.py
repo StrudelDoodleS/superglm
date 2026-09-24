@@ -1827,10 +1827,11 @@ def _impact_sweep(
                 "actual_bins": int(len(table)),
             }
             row.update(result.metrics)
-            diagnostics = result.band_diagnostics.get(feature, {})
-            row.update(
-                {f"band_{key}": value for key, value in diagnostics.items() if key != "bands"}
-            )
+            if bin_strategy == "exact":
+                diagnostics = result.band_diagnostics.get(feature, {})
+                row.update(
+                    {f"band_{key}": value for key, value in diagnostics.items() if key != "bands"}
+                )
             rows.append(row)
         # Beside the main-effect rows and in the same columns, because a
         # reader has to be able to see every block the workbook approximates
@@ -2440,7 +2441,7 @@ def build_rating_table_payload(
         if binned_continuous
         else None
     )
-    if selected is not None:
+    if selected is not None and bin_strategy == "exact":
         _warn_widened_bands(selected.band_diagnostics, n_bins)
 
     main_effects: list[RatingTableBlock] = []
