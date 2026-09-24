@@ -967,6 +967,13 @@ class EditorSession:
         self.replace_in_force_model(step.previous_model)
         return step.previous_model
 
+    def revert_to_reference_model(self):
+        """Put the opened model back in force and clear every history and display reorder."""
+        self._level_orders = {}
+        self.replace_in_force_model(self.reference_model)
+        self.structure_history.clear()
+        return self.reference_model
+
     def _refit_replacing(
         self,
         term: str,

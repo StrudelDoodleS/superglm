@@ -8,6 +8,7 @@ import numpy as np
 
 from superglm.editor.apply import materialize_edit_request
 from superglm.editor.terms import native_log_effect_values
+from superglm.inference.summary import editor_break_notes
 from superglm.inference.summary_levels import validate_level_display
 
 
@@ -81,7 +82,7 @@ def summary_payload(
         "compact": compact,
         "offset_terms": offset_terms,
         "offset_labels": offset_labels,
-        "note": _summary_note(source),
+        "note": " ".join([_summary_note(source), *editor_break_notes(summary._info)]),
     }
 
 

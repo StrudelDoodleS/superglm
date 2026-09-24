@@ -1041,6 +1041,13 @@ class EditorWidget:
             level_display=level_display,
         )
 
+    def _revert_to_original(self, *, level_display: str = "expanded") -> dict[str, Any]:
+        return self._structural_step(
+            "revert_to_original",
+            lambda _target: self.session.revert_to_reference_model(),
+            level_display=level_display,
+        )
+
     def _selected_level_labels(self, term: str) -> list[str]:
         editable = self.session.terms.get(term)
         if editable is None or editable.levels is None:

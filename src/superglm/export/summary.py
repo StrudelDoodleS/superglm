@@ -19,7 +19,7 @@ from superglm.inference._term_helpers import spline_groups
 # The legend's wording is imported rather than restated: it was a second string
 # literal here, and that is how it came to describe a rule neither module
 # implements (issue #239).
-from superglm.inference.summary import _LOW_CREDIBILITY_NOTE_BODY
+from superglm.inference.summary import _LOW_CREDIBILITY_NOTE_BODY, _editor_notes
 from superglm.model.fit_state import fitted_penalty
 from superglm.solvers.rank import selected_group_name_set
 
@@ -82,15 +82,6 @@ _PARAMETRIC_WALD_NOTE = (
 )
 _SMOOTH_WOOD_NOTE = "Smooth p-values use Wood (2013) Bayesian tests."
 _GROUP_WALD_NOTE = "Group chi-square p-values are Wald approximations."
-_EDITOR_STALE_NOTE = (
-    "Editor edits applied: coefficient standard errors, confidence intervals, "
-    "and p-values are suppressed because they belong to the original fitted "
-    "model, not the manually edited coefficients."
-)
-_EDITOR_OFFSET_NOTE = (
-    "Editor offset refit: listed editor terms are fixed offset factors. "
-    "Inference is conditional on those fixed offsets."
-)
 # The workbook's short cell values, one per trigger.  The two are deliberately
 # distinct because this cell travels WITHOUT the note: it lands in a
 # spreadsheet column that a downstream consumer reads on its own, so it has to
@@ -447,13 +438,7 @@ def _summary_notes(
     info = source.info
     notes: list[str] = []
     inference_stale = bool(info.get("editor_inference_stale", False))
-    if inference_stale:
-        edited_terms = ", ".join(info.get("editor_edited_terms") or [])
-        suffix = f" Edited terms: {edited_terms}." if edited_terms else ""
-        notes.append(_EDITOR_STALE_NOTE + suffix)
-    if info.get("editor_offset_terms"):
-        offset_terms = ", ".join(info.get("editor_offset_terms") or [])
-        notes.append(f"{_EDITOR_OFFSET_NOTE} Offset terms: {offset_terms}.")
+    notes.extend(_editor_notes(info))
     if not inference_stale:
         if any(row.kind.startswith("smooth") for row in terms):
             notes.append(_SMOOTH_WOOD_NOTE)

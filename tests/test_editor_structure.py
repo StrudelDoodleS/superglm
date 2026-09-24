@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import json
 import urllib.error
 
+import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -22,7 +24,9 @@ from superglm import (
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
+from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
+from superglm.export.summary import build_summary_export_payload
 from tests.test_editor import _post_json
 
 
@@ -477,3 +481,108 @@ def test_widget_http_transform_term_refuses_breaks_that_are_not_names_or_numbers
         assert session.structure_history == []
     finally:
         widget.close()
+
+
+def test_revert_returns_the_opened_model_and_clears_every_history(region_model):
+    model, X = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    session.select_indices("x", [3, 4])
+    session.shift("x", 0.1)
+    session.revert_to_reference_model()
+    assert session.model is model
+    assert session.structure_history == [] and session.history == [] and session.redo_stack == []
+    np.testing.assert_array_equal(session.to_model().predict(X), model.predict(X))
+
+
+def test_widget_http_revert_to_original_returns_transition_envelope(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region"])
+    widget = session.widget()
+    try:
+        session.select_levels("region", ["B", "C"])
+        widget._collapse_levels("region", "fit")
+        payload = _post_json(f"{widget.url}/revert_to_original", {})
+        assert set(payload) == {"state", "summary", "timing"}
+        assert payload["timing"]["operation"] == "revert_to_original"
+        assert payload["state"]["structure_history"] == {"depth": 0, "last": None}
+        assert session.model is model
+    finally:
+        widget.close()
+
+
+def test_restore_walks_a_mixed_two_term_sequence_back_exactly(banded):
+    model, X, _ = banded
+    territory = np.random.default_rng(20260929).choice(["T1", "T2", "T3", "T4"], len(X))
+    X = X.assign(territory=territory)
+    y = model._fit_y_ref + 0.05 * (territory == "T3")
+    two_term = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        spline_penalty=0.1,
+        features={
+            "band": OrderedCategorical(order=BANDS, basis=Spline(kind="ps", k=5), base="first"),
+            "territory": Categorical(base="first"),
+        },
+    )
+    two_term.fit(X, y)
+    session = EditorSession.from_model(two_term, terms=["band", "territory"])
+    before_each_step = [session.model.predict(X)]
+    session.select_levels("territory", ["T1", "T2"])
+    session.replace_with_collapsed_levels("territory", method="fit")
+    before_each_step.append(session.model.predict(X))
+    session.replace_with_transformed_term(
+        "band", form="piecewise", breaks=["B3", "B6"], degrees=[1, 1, 1], method="fit"
+    )
+    before_each_step.append(session.model.predict(X))
+    session.replace_with_reference_level("territory", "T3", method="fit")
+    before_each_step.append(session.model.predict(X))
+    session.select_levels("territory", ["T1", "T2"])
+    session.replace_with_ungrouped_levels("territory", method="fit")
+    for expected in reversed(before_each_step):
+        session.uncollapse_levels()
+        np.testing.assert_array_equal(session.model.predict(X), expected)
+    assert not session.can_uncollapse_levels()
+
+
+def test_breaks_note_reaches_every_renderer_and_survives_export(banded):
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=["band", "x"])
+    session.replace_with_transformed_term(
+        "band", form="piecewise", breaks=["B3", "B6"], degrees=[1, 2, 0], method="fit"
+    )
+    sentence = "Breaks for band were placed in the editor from this data."
+    assert sentence in str(session.model.summary())
+    assert sentence in session.model.summary()._repr_html_()
+    assert any(sentence in note for note in build_summary_export_payload(session.model).notes)
+    widget = EditorWidget(session)
+    try:
+        assert sentence in summary_payload(widget, "in_force")["note"]
+    finally:
+        widget.close()
+    # A later step on another term keeps the note: the mark lives on the basis.
+    session.replace_with_transformed_term("x", form="polynomial", breaks=[], degree=2, method="fit")
+    edited = session.to_model()
+    assert edited.summary()._info["editor_break_terms"] == ["band"]
+    buffer = io.BytesIO()
+    joblib.dump(edited, buffer)
+    buffer.seek(0)
+    assert joblib.load(buffer).summary()._info["editor_break_terms"] == ["band"]
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        lambda s: s.replace_with_transformed_term(
+            "band", form="polynomial", breaks=[], degree=2, method="fit"
+        ),
+        lambda s: s.replace_with_reference_level("band", "B3", method="fit"),
+    ],
+    ids=["polynomial", "set_reference"],
+)
+def test_no_breaks_note_without_editor_placed_breaks(banded, step):
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=["band"])
+    step(session)
+    assert "editor_break_terms" not in session.model.summary()._info
