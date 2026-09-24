@@ -110,6 +110,7 @@ def collapsed_feature_spec(
         "term": term.name,
         "group_label": label,
         "levels": selected_levels,
+        "label": f"collapse {' + '.join(selected_levels)} in {term.name}",
         "message": "Selected categorical levels were collapsed and the full model was refit.",
     }
     return replacement, metadata
@@ -169,9 +170,14 @@ def ungrouped_feature_spec(
         "format": "superglm.editor.level_ungroup.v1",
         "term": term.name,
         "levels": selected_levels,
+        "label": ungroup_label(term.name, selected_levels),
         "message": "Selected categorical levels were removed from collapsed groups and the full model was refit.",
     }
     return replacement, metadata
+
+
+def ungroup_label(term_name: str, levels: list[str]) -> str:
+    return f"ungroup {', '.join(levels)} in {term_name}"
 
 
 def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., lambda2=...):

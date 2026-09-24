@@ -61,3 +61,13 @@ class EditRecord:
     before: NDArray
     after: NDArray
     params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StructuralStep:
+    """One undoable structural change: the model that was in force before it."""
+
+    previous_model: Any
+    operation: str
+    term: str | None
+    label: str

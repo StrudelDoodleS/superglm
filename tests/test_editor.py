@@ -2328,11 +2328,12 @@ def test_collapse_selected_categorical_levels_refits_copied_model(editor_model, 
     assert grouping.original_to_group["A"] == "A"
     assert grouping.original_to_group["B"] == "B+C"
     assert grouping.original_to_group["C"] == "B+C"
-    assert refit._editor_level_collapse == {
+    assert refit._editor_step == {
         "format": "superglm.editor.level_collapse.v1",
         "term": "region",
         "group_label": "B+C",
         "levels": ["B", "C"],
+        "label": "collapse B + C in region",
         "method": "fit",
         "message": "Selected categorical levels were collapsed and the full model was refit.",
     }
@@ -2385,7 +2386,7 @@ def test_auto_level_refits_use_reml_when_source_model_was_reml_fit():
     collapsed = session.replace_with_collapsed_levels("territory", method="auto")
 
     assert collapsed._last_fit_meta["method"] == "fit_reml"
-    assert collapsed._editor_level_collapse["method"] == "fit_reml"
+    assert collapsed._editor_step["method"] == "fit_reml"
     assert collapsed._reml_lambdas
     assert "age" in collapsed._reml_lambdas
 
@@ -3018,6 +3019,8 @@ def test_ungroup_pre_collapsed_model_refits_without_history():
     assert refit is not collapsed
     assert getattr(refit.features["territory"], "_grouping", None) is None
     assert getattr(session.model.features["territory"], "_grouping", None) is None
+    assert [s.operation for s in session.structure_history] == ["ungroup_levels"]
+    assert session.structure_history[-1].previous_model is collapsed
 
 
 def test_ordered_integer_ungroup_pre_collapsed_model_refits_without_history():
@@ -3046,6 +3049,8 @@ def test_ordered_integer_ungroup_pre_collapsed_model_refits_without_history():
     refit = session.replace_with_ungrouped_levels("band", method="fit")
 
     assert refit is not collapsed
+    assert [s.operation for s in session.structure_history] == ["ungroup_levels"]
+    assert session.structure_history[-1].previous_model is collapsed
     assert getattr(refit.features["band"], "_grouping", None) is None
     assert getattr(session.model.features["band"], "_grouping", None) is None
     assert np.isfinite(refit.predict(X)).all()
@@ -3067,7 +3072,8 @@ def test_ungroup_last_collapsed_levels_restores_pre_collapse_in_force_model(edit
     assert restored is profiled_model
     assert session.model is profiled_model
     assert session.model._editor_profile_marker == "kept"
-    assert session.can_uncollapse_levels() is False
+    assert session.can_uncollapse_levels() is True
+    assert session.structure_history[-1].operation == "ungroup_levels"
 
 
 def test_final_ungroup_after_partial_ungroup_does_not_restore_stale_history():
@@ -3100,7 +3106,13 @@ def test_final_ungroup_after_partial_ungroup_does_not_restore_stale_history():
     assert final is not partial
     assert getattr(final.features["territory"], "_grouping", None) is None
     assert getattr(session.model.features["territory"], "_grouping", None) is None
-    assert session.can_uncollapse_levels() is False
+    assert [s.operation for s in session.structure_history] == [
+        "collapse_levels",
+        "collapse_levels",
+        "ungroup_levels",
+        "ungroup_levels",
+    ]
+    assert session.structure_history[-1].previous_model is partial
 
 
 def test_reorder_categorical_levels_is_display_only(editor_model):
@@ -4291,7 +4303,7 @@ def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, 
 
         before_model = session.model
         before_revision = session.model_revision
-        before_history = [id(model) for model in session.collapse_history]
+        before_history = [id(step.previous_model) for step in session.structure_history]
         before_chart_generation = widget._chart_generation
 
         with pytest.raises(ValueError, match="level_display"):
@@ -4304,7 +4316,7 @@ def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, 
 
         assert session.model is before_model
         assert session.model_revision == before_revision
-        assert [id(model) for model in session.collapse_history] == before_history
+        assert [id(step.previous_model) for step in session.structure_history] == before_history
         assert widget._chart_generation == before_chart_generation
     finally:
         widget.close()
@@ -4360,10 +4372,13 @@ def test_widget_final_ungroup_keeps_collapse_metadata_history_aligned(editor_mod
     finally:
         widget.close()
 
-    assert session.collapse_history == []
-    assert widget._collapse_info_history == []
+    assert [s.operation for s in session.structure_history] == [
+        "collapse_levels",
+        "ungroup_levels",
+    ]
+    assert len(widget._collapse_info_history) == len(session.structure_history)
     assert widget._in_force_info is None
-    assert state["can_uncollapse_levels"] is False
+    assert state["can_uncollapse_levels"] is True
     assert state["last_collapse"] is None
 
 

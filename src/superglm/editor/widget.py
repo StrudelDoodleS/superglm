@@ -958,7 +958,7 @@ class EditorWidget:
             fit_end = time.perf_counter()
             self._collapse_info_history.append(previous_info)
             self._collapsed_refit_model = refit_model
-            self._collapsed_refit_info = dict(getattr(refit_model, "_editor_level_collapse", {}))
+            self._collapsed_refit_info = dict(getattr(refit_model, "_editor_step", {}))
             self._in_force_info = dict(self._collapsed_refit_info)
             self._invalidate_refit()
             self._restore_selection(target, selected_levels, selected_indices)
@@ -987,17 +987,17 @@ class EditorWidget:
             selected_indices = self.session.selection(target).astype(int).tolist()
             selected_levels = self._selected_level_labels(target)
             previous_info = None if self._in_force_info is None else dict(self._in_force_info)
-            previous_history_depth = len(self.session.collapse_history)
+            previous_history_depth = len(self.session.structure_history)
             fit_start = time.perf_counter()
             refit_model = self.session.replace_with_ungrouped_levels(target, method=method)
             fit_end = time.perf_counter()
-            current_history_depth = len(self.session.collapse_history)
+            current_history_depth = len(self.session.structure_history)
             if current_history_depth > previous_history_depth:
                 self._collapse_info_history.append(previous_info)
             elif current_history_depth < previous_history_depth:
                 del self._collapse_info_history[current_history_depth:]
             self._collapsed_refit_model = refit_model
-            refit_info = getattr(refit_model, "_editor_level_collapse", None)
+            refit_info = getattr(refit_model, "_editor_step", None)
             self._collapsed_refit_info = None if not refit_info else dict(refit_info)
             self._in_force_info = (
                 None if self._collapsed_refit_info is None else dict(self._collapsed_refit_info)
@@ -1032,7 +1032,7 @@ class EditorWidget:
                 self._collapse_info_history.pop() if self._collapse_info_history else None
             )
             self._collapsed_refit_model = (
-                restored_model if getattr(restored_model, "_editor_level_collapse", None) else None
+                restored_model if getattr(restored_model, "_editor_step", None) else None
             )
             self._collapsed_refit_info = None if restored_info is None else dict(restored_info)
             self._in_force_info = None if restored_info is None else dict(restored_info)

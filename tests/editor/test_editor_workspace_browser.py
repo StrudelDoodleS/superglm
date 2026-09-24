@@ -1368,7 +1368,7 @@ def test_summary_level_display_toggle_is_view_only_and_synchronizes_full_summary
         initial_history = (
             len(session.history),
             len(session.redo_stack),
-            len(session.collapse_history),
+            len(session.structure_history),
         )
         initial_chart_group_mode = page.locator("#groupDisplayMode").input_value()
         initial_chart_is_collapsed = page.evaluate(
@@ -1454,7 +1454,7 @@ def test_summary_level_display_toggle_is_view_only_and_synchronizes_full_summary
         assert (
             len(session.history),
             len(session.redo_stack),
-            len(session.collapse_history),
+            len(session.structure_history),
         ) == initial_history
         assert page.locator("#groupDisplayMode").input_value() == initial_chart_group_mode
         assert (

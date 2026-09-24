@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -10,10 +11,11 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.editor import apply, persistence
-from superglm.editor._types import EditableTerm, EditRecord
+from superglm.editor._types import EditableTerm, EditRecord, StructuralStep
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
     collapsed_feature_spec,
+    ungroup_label,
     ungrouped_feature_spec,
 )
 from superglm.editor.controls import CONTROL_HANDLE_TERM_TYPES, control_curve_after_move
@@ -79,7 +81,7 @@ class EditorSession:
         self._level_orders: dict[str, list[str]] = {}
         self.history: list[EditRecord] = []
         self.redo_stack: list[EditRecord] = []
-        self.collapse_history: list[Any] = []
+        self.structure_history: list[StructuralStep] = []
         self._model_revision = 0
         self._edit_epoch = 0
         self._materialized_edit_model = None
@@ -808,163 +810,71 @@ class EditorSession:
             raise EditorValueError("parameter must be 'tweedie_p' or 'nb2_theta'.")
 
         self.replace_in_force_model(profile_model)
-        self.collapse_history.clear()
+        self.structure_history.clear()
         return result
 
     def refit_with_collapsed_levels(
-        self,
-        term: str,
-        *,
-        X=None,
-        y=None,
-        sample_weight=None,
-        offset=None,
-        method: str = "auto",
-        group_label: str | None = None,
-        lambda1=...,
-        lambda2=...,
-        **fit_kwargs: Any,
+        self, term: str, *, group_label: str | None = None, **refit_kwargs: Any
     ):
-        """Collapse selected categorical levels and refit a full model copy."""
-        if self.model is None:
-            raise RuntimeError("Cannot refit without a source model.")
+        """Collapse selected categorical levels and refit a full model copy.
+
+        ``refit_kwargs`` are ``X``, ``y``, ``sample_weight``, ``offset``,
+        ``method``, ``lambda1``, ``lambda2`` and fit keywords.
+        """
         editable = self._require_term(term)
         idx = self._require_selection(term)
-        X_ref, y_ref, sample_weight_ref, base_offset = self._resolve_refit_data(
-            X,
-            y,
-            sample_weight,
-            offset,
-        )
-        if y_ref is None:
-            raise RuntimeError("Fit response data was not retained on the source model.")
-
-        replacement, metadata = collapsed_feature_spec(
-            self.model,
-            editable,
-            idx,
-            X=X_ref,
-            group_label=group_label,
-        )
-        refit_model = clone_with_replaced_feature(
-            self.model,
+        return self._refit_replacing(
             term,
-            replacement,
-            lambda1=lambda1,
-            lambda2=lambda2,
+            lambda X_ref: collapsed_feature_spec(
+                self.model, editable, idx, X=X_ref, group_label=group_label
+            ),
+            **refit_kwargs,
         )
-        resolved_method = fit_refit_model(
-            self.model,
-            refit_model,
-            method=method,
-            X=X_ref,
-            y=y_ref,
-            sample_weight=sample_weight_ref,
-            offset=base_offset,
-            fit_kwargs=fit_kwargs,
-        )
-
-        metadata["method"] = resolved_method
-        refit_model._editor_level_collapse = metadata
-        return refit_model
 
     def replace_with_collapsed_levels(self, term: str, **kwargs: Any):
         """Collapse selected levels, refit, and make the refit the in-force edit model."""
-        previous_model = self.model
         refit_model = self.refit_with_collapsed_levels(term, **kwargs)
-        self.collapse_history.append(previous_model)
-        try:
-            self.replace_in_force_model(refit_model)
-        except Exception:
-            self.collapse_history.pop()
-            raise
-        return refit_model
+        return self._push_structure(
+            refit_model,
+            operation="collapse_levels",
+            term=term,
+            label=refit_model._editor_step["label"],
+        )
 
-    def refit_with_ungrouped_levels(
-        self,
-        term: str,
-        *,
-        X=None,
-        y=None,
-        sample_weight=None,
-        offset=None,
-        method: str = "auto",
-        lambda1=...,
-        lambda2=...,
-        **fit_kwargs: Any,
-    ):
+    def refit_with_ungrouped_levels(self, term: str, **refit_kwargs: Any):
         """Remove selected levels from collapsed groups and refit a model copy."""
-        if self.model is None:
-            raise RuntimeError("Cannot refit without a source model.")
         editable = self._require_term(term)
         idx = self._require_selection(term)
-        X_ref, y_ref, sample_weight_ref, base_offset = self._resolve_refit_data(
-            X,
-            y,
-            sample_weight,
-            offset,
-        )
-        if y_ref is None:
-            raise RuntimeError("Fit response data was not retained on the source model.")
-
-        replacement, metadata = ungrouped_feature_spec(
-            self.model,
-            editable,
-            idx,
-            X=X_ref,
-        )
-        refit_model = clone_with_replaced_feature(
-            self.model,
+        return self._refit_replacing(
             term,
-            replacement,
-            lambda1=lambda1,
-            lambda2=lambda2,
+            lambda X_ref: ungrouped_feature_spec(self.model, editable, idx, X=X_ref),
+            **refit_kwargs,
         )
-        resolved_method = fit_refit_model(
-            self.model,
-            refit_model,
-            method=method,
-            X=X_ref,
-            y=y_ref,
-            sample_weight=sample_weight_ref,
-            offset=base_offset,
-            fit_kwargs=fit_kwargs,
-        )
-
-        metadata["method"] = resolved_method
-        refit_model._editor_level_collapse = metadata
-        return refit_model
 
     def replace_with_ungrouped_levels(self, term: str, **kwargs: Any):
-        """Ungroup selected levels, refit, and make the refit the in-force model."""
-        previous_model = self.model
-        restore_previous = self._ungroup_restores_reference_model(term, **kwargs)
-        restored_history_model = None
-        clear_history_after_refit = False
-        if (
-            restore_previous
-            and self.collapse_history
-            and not self._model_has_collapsed_level_groups(self.collapse_history[-1])
-        ):
-            refit_model = self.collapse_history.pop()
-            restored_history_model = refit_model
-        else:
-            refit_model = self.refit_with_ungrouped_levels(term, **kwargs)
-            if restore_previous:
-                clear_history_after_refit = True
-            else:
-                self.collapse_history.append(previous_model)
-        try:
-            self.replace_in_force_model(refit_model)
-        except Exception:
-            if restored_history_model is not None:
-                self.collapse_history.append(restored_history_model)
-            elif not clear_history_after_refit:
-                self.collapse_history.pop()
-            raise
-        if clear_history_after_refit:
-            self.collapse_history.clear()
-        return refit_model
+        """Ungroup selected levels and put the result in force as one structural step.
+
+        When this ungroup removes the model's last collapsed group and the
+        model before the latest step had none, that earlier fit is exactly the
+        result, so it is reused instead of refitting.
+        """
+        model = self._pre_collapse_model(term, **kwargs)
+        if model is None:
+            model = self.refit_with_ungrouped_levels(term, **kwargs)
+        # Read after either path has validated the selection against a grouped
+        # term, in the sorted order the ungrouped spec's own metadata uses.
+        editable = self.terms[term]
+        levels = [str(editable.levels[i]) for i in np.unique(self._require_selection(term))]
+        return self._push_structure(
+            model, operation="ungroup_levels", term=term, label=ungroup_label(term, levels)
+        )
+
+    def _pre_collapse_model(self, term: str, **kwargs: Any):
+        """The model before the latest step, when this ungroup reproduces it exactly."""
+        if not self.structure_history or not self._ungroup_restores_reference_model(term, **kwargs):
+            return None
+        previous = self.structure_history[-1].previous_model
+        return None if self._model_has_collapsed_level_groups(previous) else previous
 
     def _ungroup_restores_reference_model(self, term: str, **kwargs: Any) -> bool:
         """Return whether ungrouping removes the last structural level collapse."""
@@ -983,16 +893,69 @@ class EditorSession:
         return not self._has_collapsed_level_groups_after_replacement(term, replacement)
 
     def can_uncollapse_levels(self) -> bool:
-        """Return whether a previous in-force model can be restored."""
-        return bool(self.collapse_history)
+        """Return whether a structural step can be restored."""
+        return bool(self.structure_history)
 
     def uncollapse_levels(self):
-        """Restore the previous in-force model from collapse history."""
-        if not self.collapse_history:
-            raise RuntimeError("No collapsed-level model is available to restore.")
-        previous_model = self.collapse_history.pop()
-        self.replace_in_force_model(previous_model)
-        return previous_model
+        """Restore the model that was in force before the latest structural step."""
+        if not self.structure_history:
+            raise RuntimeError("No structural step is available to restore.")
+        step = self.structure_history.pop()
+        self.replace_in_force_model(step.previous_model)
+        return step.previous_model
+
+    def _refit_replacing(
+        self,
+        term: str,
+        build: Callable[[Any], tuple[Any, dict[str, Any]]],
+        *,
+        X=None,
+        y=None,
+        sample_weight=None,
+        offset=None,
+        method: str = "auto",
+        lambda1=...,
+        lambda2=...,
+        **fit_kwargs: Any,
+    ):
+        """Refit a copy of the model with ``term``'s spec replaced by ``build(X_ref)``.
+
+        ``build`` returns the fresh replacement spec and the step's metadata;
+        the metadata, with the resolved fit method, is stamped on the refit.
+        """
+        if self.model is None:
+            raise RuntimeError("Cannot refit without a source model.")
+        X_ref, y_ref, sample_weight_ref, base_offset = self._resolve_refit_data(
+            X, y, sample_weight, offset
+        )
+        if y_ref is None:
+            raise RuntimeError("Fit response data was not retained on the source model.")
+        replacement, metadata = build(X_ref)
+        refit_model = clone_with_replaced_feature(
+            self.model, term, replacement, lambda1=lambda1, lambda2=lambda2
+        )
+        metadata["method"] = fit_refit_model(
+            self.model,
+            refit_model,
+            method=method,
+            X=X_ref,
+            y=y_ref,
+            sample_weight=sample_weight_ref,
+            offset=base_offset,
+            fit_kwargs=fit_kwargs,
+        )
+        refit_model._editor_step = metadata
+        return refit_model
+
+    def _push_structure(self, model, *, operation: str, term: str | None, label: str):
+        """Put ``model`` in force as one undoable structural step."""
+        self.structure_history.append(StructuralStep(self.model, operation, term, label))
+        try:
+            self.replace_in_force_model(model)
+        except Exception:
+            self.structure_history.pop()
+            raise
+        return model
 
     def replace_in_force_model(self, model, *, with_se: bool = True) -> EditorSession:
         """Replace the editable in-force model while retaining the original reference model."""
