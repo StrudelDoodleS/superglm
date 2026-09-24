@@ -991,6 +991,21 @@ class EditorWidget:
             level_display=level_display,
         )
 
+    def _set_reference(
+        self,
+        term: str,
+        level: str,
+        method: str = "auto",
+        *,
+        level_display: str = "expanded",
+    ) -> dict[str, Any]:
+        return self._structural_step(
+            "set_reference",
+            lambda target: self.session.replace_with_reference_level(target, level, method=method),
+            term=term,
+            level_display=level_display,
+        )
+
     def _reorder_levels(self, term: str | None = None, target_index: int = 0) -> dict[str, Any]:
         with self._lock:
             if term is not None:

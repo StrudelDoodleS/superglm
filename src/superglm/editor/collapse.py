@@ -92,13 +92,7 @@ def collapsed_feature_spec(
     base = _collapsed_base(spec.base, selected_levels, label, existing, grouping)
 
     if isinstance(spec, OrderedCategorical):
-        replacement = _ordered_spec_with_grouping(
-            spec,
-            grouping,
-            selected_levels,
-            base,
-            values,
-        )
+        replacement = rebuilt_ordered_spec(spec, grouping=grouping, base=base, data=values)
     else:
         replacement = Categorical(
             base=base,
@@ -156,12 +150,8 @@ def ungrouped_feature_spec(
 
     base = _valid_base_after_ungroup(spec.base, selected_levels, grouping)
     if isinstance(spec, OrderedCategorical):
-        replacement = _ordered_spec_with_grouping(
-            spec,
-            replacement_grouping,
-            selected_levels,
-            base,
-            values,
+        replacement = rebuilt_ordered_spec(
+            spec, grouping=replacement_grouping, base=base, data=values
         )
     else:
         replacement = Categorical(base=base, grouping=replacement_grouping)
@@ -178,6 +168,53 @@ def ungrouped_feature_spec(
 
 def ungroup_label(term_name: str, levels: list[str]) -> str:
     return f"ungroup {', '.join(levels)} in {term_name}"
+
+
+def reference_feature_spec(
+    model, term: EditableTerm, level: str, *, X
+) -> tuple[Any, dict[str, Any]]:
+    """Return a fresh replacement spec whose reference is the displayed ``level``."""
+    spec = model._specs[term.name]
+    if not isinstance(spec, Categorical | OrderedCategorical):
+        raise EditorTypeError(
+            f"Set reference is only available for categorical terms, got {term.name!r}."
+        )
+    _require_not_interaction_parent(model, term.name, operation="set the reference level")
+    grouping = getattr(spec, "_grouping", None)
+    fitted = _fitted_level_label(spec, grouping, term, level)
+    if isinstance(spec, OrderedCategorical):
+        frame = as_eager_frame(X)
+        frame.require_columns((term.name,))
+        replacement = rebuilt_ordered_spec(
+            spec, grouping=grouping, base=fitted, data=frame.column_array(term.name)
+        )
+    else:
+        # Fitted levels keep their native type (an integer level stays 3, not "3").
+        native = {str(value): value for value in spec._levels}[fitted]
+        replacement = Categorical(
+            base=native, grouping=grouping, levels=spec._declared_levels, unseen=spec.unseen
+        )
+    metadata = {
+        "format": "superglm.editor.reference_level.v1",
+        "term": term.name,
+        "level": fitted,
+        "label": f"set reference of {term.name} to {fitted}",
+        "message": (
+            f"The reference level of {term.name} was set to {fitted} and the full model was refit."
+        ),
+    }
+    return replacement, metadata
+
+
+def _fitted_level_label(spec, grouping, term: EditableTerm, level: str) -> str:
+    """The fitted level that carries the reference for a displayed ``level``."""
+    if level not in term.levels:
+        raise EditorValueError(f"{level!r} is not a level of term {term.name!r}.")
+    if isinstance(spec, OrderedCategorical) and level in special_labels(spec):
+        raise EditorValueError(
+            f"A special level can't be the reference of {term.name!r}; choose an ordered level."
+        )
+    return level if grouping is None else str(grouping.original_to_group.get(level, level))
 
 
 def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., lambda2=...):
@@ -355,13 +392,20 @@ def _original_level_order(spec, term: EditableTerm, grouping) -> list[str]:
     return [str(level) for level in term.levels or []]
 
 
-def _ordered_spec_with_grouping(
+def rebuilt_ordered_spec(
     spec: OrderedCategorical,
+    *,
     grouping: LevelGrouping | None,
-    selected_levels: list[str],
-    base: str,
+    base: Any,
     data,
+    basis=None,
 ) -> OrderedCategorical:
+    """A fresh, unfitted OrderedCategorical like ``spec`` with this grouping and base.
+
+    ``basis`` replaces the inner basis (a transform). By default the pristine
+    declared basis is cloned. A fitted spec is never mutated: its resolved base
+    is sticky and would silently survive a changed ``base``.
+    """
     values, native_base = _ordered_original_values(spec, grouping, data, base)
     # Clone the RAW declarations, not the string-coerced ``_specials``. A special
     # declared as ``9`` on a float column matches through its raw label -- the
@@ -369,6 +413,29 @@ def _ordered_spec_with_grouping(
     # from the coerced form silently drops that fallback and the special's
     # indicator comes back all-zero on a refit.
     specials = list(spec._special_raw) or list(spec._specials)
+    source = _pristine_basis(spec) if basis is None else basis
+    # Collapsing levels shrinks the level count, so the pristine spline's
+    # ``n_knots`` routinely exceeds the new ``n_levels - 1`` and construction
+    # clamps it. That clamp is the caller's own basis being re-fitted to the
+    # levels the caller just asked to merge, not a configuration mistake, and
+    # the user-facing construction already warned if the original declaration
+    # over-specified. Do not repeat it from an internal editor clone.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=re.escape(_CLAMP_WARNING_PREFIX),
+            category=UserWarning,
+        )
+        return OrderedCategorical(
+            values=values,
+            basis=source,
+            base=native_base,
+            grouping=grouping,
+            specials=specials or None,
+        )
+
+
+def _pristine_basis(spec: OrderedCategorical):
     # Clone from the pristine caller-supplied spline, not the clamped inner
     # copy: the new spec re-clamps against ITS OWN level count, which can
     # exceed the current one when a grouping is being undone. `_spline_obj` is
@@ -399,25 +466,7 @@ def _ordered_spec_with_grouping(
         requested = spec.__dict__.get("n_knots")
         if isinstance(requested, int | np.integer) and int(requested) > source.n_knots:
             source.n_knots = int(requested)
-    # Collapsing levels shrinks the level count, so the pristine spline's
-    # ``n_knots`` routinely exceeds the new ``n_levels - 1`` and construction
-    # clamps it. That clamp is the caller's own basis being re-fitted to the
-    # levels the caller just asked to merge, not a configuration mistake, and
-    # the user-facing construction already warned if the original declaration
-    # over-specified. Do not repeat it from an internal editor clone.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=re.escape(_CLAMP_WARNING_PREFIX),
-            category=UserWarning,
-        )
-        return OrderedCategorical(
-            values=values,
-            basis=source,
-            base=native_base,
-            grouping=grouping,
-            specials=specials or None,
-        )
+    return source
 
 
 def _ordered_original_values(
@@ -519,12 +568,7 @@ def _require_no_special_members(
     spec: OrderedCategorical, term_name: str, members: list[str]
 ) -> None:
     """Refuse a collapse selection that contains a free (special) level."""
-    # Both namespaces: `members` arrive in the DISPLAY spelling, so matching only
-    # the str-coerced `_specials` leaves this guard INERT on a float domain
-    # ("9" vs "9.0") -- and a guard that fails open here silently smooths a level
-    # that `specials=` still reports as free.
-    specials = {str(level) for level in spec._specials}
-    specials |= {str(level) for level in spec._special_display}
+    specials = special_labels(spec)
     if not specials:
         return
     selected = [member for member in members if member in specials]
@@ -535,6 +579,17 @@ def _require_no_special_members(
         f"Ordered categorical collapse for {term_name!r} cannot include free level(s) "
         f"{joined}: specials are fitted outside the smooth and cannot be grouped."
     )
+
+
+def special_labels(spec: OrderedCategorical) -> set[str]:
+    """The free (special) levels of ``spec``, in every spelling the editor displays."""
+    # Both namespaces: displayed levels arrive in the DISPLAY spelling, so
+    # matching only the str-coerced `_specials` leaves a guard INERT on a float
+    # domain ("9" vs "9.0") -- and a guard that fails open here silently smooths
+    # a level that `specials=` still reports as free.
+    return {str(level) for level in spec._specials} | {
+        str(level) for level in spec._special_display
+    }
 
 
 def _default_group_label(selected_levels: list[str]) -> str:

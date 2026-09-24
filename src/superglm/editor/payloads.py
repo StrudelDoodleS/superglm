@@ -53,6 +53,7 @@ def session_payload(
             "levels": term.levels,
             "level_groups": _level_groups(session, name, term),
             "level_order_changed": _level_order_changed(session, name),
+            "reference": _reference_payload(session, name),
             "effective_df": _finite_float(term.metadata.get("edf")),
             "x_label": name,
             "y_label": "relativity",
@@ -192,9 +193,13 @@ def _reference_log_effect(session, name: str, term) -> np.ndarray:
     values = np.asarray(reference.original_log_effect, dtype=np.float64)
     if term.levels is not None and reference.levels is not None:
         by_level = {level: float(values[i]) for i, level in enumerate(reference.levels)}
+        current = _reference_payload(session, name)
+        # Express the opened model's curve against the CURRENT reference; a
+        # reference that is a new group label has no value in the opened model.
+        anchor = by_level.get(current["level"], 0.0) if current else 0.0
         return np.array(
             [
-                by_level.get(level, term.original_log_effect[i])
+                by_level[level] - anchor if level in by_level else term.original_log_effect[i]
                 for i, level in enumerate(term.levels)
             ]
         )
@@ -207,6 +212,16 @@ def _reference_log_effect(session, name: str, term) -> np.ndarray:
     if values.size == term.size:
         return values
     return np.asarray(term.original_log_effect, dtype=np.float64)
+
+
+def _reference_payload(session, name: str) -> dict[str, str] | None:
+    """The term's reference level and how it was chosen; None without levels."""
+    spec = session.model._specs[name]
+    level = getattr(spec, "_base_level", "")
+    if level == "":
+        return None
+    policy = spec.base if spec.base in {"most_exposed", "first"} else "pinned"
+    return {"level": str(level), "policy": policy}
 
 
 def _term_weights(term) -> list[float]:

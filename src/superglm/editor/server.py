@@ -280,6 +280,17 @@ def create_editor_app(widget: Any) -> FastAPI:
             lambda: widget._restore_structure(level_display=_level_display(payload))
         )
 
+    @app.post("/set_reference")
+    def set_reference(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+        return _guarded_json(
+            lambda: widget._set_reference(
+                str(_required(payload, "term")),
+                str(_required(payload, "level")),
+                str(payload.get("method", "auto")),
+                level_display=_level_display(payload),
+            )
+        )
+
     return app
 
 

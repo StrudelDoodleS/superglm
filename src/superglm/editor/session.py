@@ -15,6 +15,7 @@ from superglm.editor._types import EditableTerm, EditRecord, StructuralStep
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
     collapsed_feature_spec,
+    reference_feature_spec,
     ungroup_label,
     ungrouped_feature_spec,
 )
@@ -891,6 +892,21 @@ class EditorSession:
             X=X_ref,
         )
         return not self._has_collapsed_level_groups_after_replacement(term, replacement)
+
+    def replace_with_reference_level(self, term: str, level: str, **refit_kwargs: Any):
+        """Pin ``level`` as ``term``'s reference, refit, and put the refit in force."""
+        editable = self._require_term(term)
+        refit_model = self._refit_replacing(
+            term,
+            lambda X_ref: reference_feature_spec(self.model, editable, level, X=X_ref),
+            **refit_kwargs,
+        )
+        return self._push_structure(
+            refit_model,
+            operation="set_reference",
+            term=term,
+            label=refit_model._editor_step["label"],
+        )
 
     def can_uncollapse_levels(self) -> bool:
         """Return whether a structural step can be restored."""
