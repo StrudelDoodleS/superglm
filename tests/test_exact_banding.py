@@ -3,13 +3,22 @@
 import itertools
 
 import numpy as np
+import pandas as pd
 import pytest
 
+from superglm import Polynomial, Spline, SuperGLM
+from superglm.diagnostics.discretize import (
+    _compute_edges,
+    _term_se_at,
+    _validated_discretization_weights,
+)
 from superglm.diagnostics.exact_banding import (
     MAX_EXACT_VALUES,
     _fewest_then_least,
     exact_bands,
 )
+from superglm.distributions import Poisson
+from superglm.export._ppform import extract_ppform
 
 _EPS = float(np.finfo(np.float64).eps)
 
@@ -131,3 +140,162 @@ def test_no_widening_when_the_cap_is_not_binding():
 def test_zero_tolerances_that_cannot_merge_are_refused():
     with pytest.raises(ValueError, match="cannot fit"):
         exact_bands(np.arange(6.0), np.ones(6), np.zeros(6), max_bands=3)
+
+
+@pytest.fixture(scope="module")
+def banded_model():
+    """Integer ages (63 values) with a steep young-driver effect, and a polynomial."""
+    rng = np.random.default_rng(7)
+    n = 4000
+    age = rng.integers(18, 81, n).astype(float)
+    density = rng.integers(0, 11, n).astype(float)
+    eta = (
+        -2.0 + 0.6 * np.exp(-(age - 18.0) / 6.0) + 0.02 * (age - 50.0) ** 2 / 50.0 + 0.05 * density
+    )
+    y = rng.poisson(np.exp(eta)).astype(float)
+    w = rng.uniform(0.5, 2.0, n)
+    df = pd.DataFrame({"age": age, "density": density})
+    model = SuperGLM(
+        family=Poisson(),
+        selection_penalty=0.0,
+        features={"age": Spline(n_knots=8), "density": Polynomial(degree=2)},
+    )
+    model.fit(df, y, sample_weight=w)
+    return model, df, y, w
+
+
+def _row_of(table, value):
+    last = len(table) - 1
+    for k, row in table.iterrows():
+        if row["bin_from"] <= value < row["bin_to"] or (k == last and value >= row["bin_from"]):
+            return row
+    raise AssertionError(f"no row holds {value}")
+
+
+def test_exact_tables_follow_the_limit(banded_model):
+    model, df, y, w = banded_model
+    result = model.discretization_impact(
+        df, y, sample_weight=w, n_bins=150, bin_strategy="exact", features=["age"]
+    )
+    table = result.tables["age"]
+    diag = result.band_diagnostics["age"]
+    assert len(table) == diag["bands"]
+    assert set(table["bin_from"]) <= set(np.unique(df["age"]))
+    assert diag["tolerance_factor"] == 1.0
+    values = np.unique(df["age"].to_numpy())
+    curve = extract_ppform(model, "age").evaluate(values)
+    se = _term_se_at(model, "age", values)
+    tol = np.minimum(se, np.log1p(0.10))
+    for value, s_v, tol_v in zip(values, curve, tol, strict=True):
+        row = _row_of(table, value)
+        # ppform reproduces the fitted curve to its certified 1e-11.
+        assert abs(s_v - row["log_relativity"]) <= tol_v + 1e-9
+
+
+def test_band_factor_is_the_weighted_mean_of_the_curve(banded_model):
+    model, df, y, w = banded_model
+    result = model.discretization_impact(
+        df, y, sample_weight=w, n_bins=150, bin_strategy="exact", features=["age"]
+    )
+    table = result.tables["age"]
+    age = df["age"].to_numpy()
+    curve = extract_ppform(model, "age").evaluate(age)
+    # Bands average with the geometry mass the other strategies use: replication
+    # mass under frequency weights, one unit per physical row under prior weights.
+    _, geometry = _validated_discretization_weights(model, w, len(df))
+    last = len(table) - 1
+    for k, row in table.iterrows():
+        inside = (age >= row["bin_from"]) & ((age < row["bin_to"]) | (k == last))
+        expected = np.average(curve[inside], weights=geometry[inside])
+        assert abs(row["log_relativity"] - expected) <= 1e-9
+
+
+def test_every_value_is_its_own_band_when_the_limit_is_tiny(banded_model):
+    model, df, y, w = banded_model
+    result = model.discretization_impact(
+        df,
+        y,
+        sample_weight=w,
+        n_bins=100,
+        bin_strategy="exact",
+        band_max_error=1e-12,
+        features=["age"],
+    )
+    table = result.tables["age"]
+    assert len(table) == df["age"].nunique()
+    last = table.iloc[-1]
+    assert last["bin_from"] == last["bin_to"] == df["age"].max()
+    assert last["n_obs"] == int((df["age"] == df["age"].max()).sum())
+
+
+def test_a_small_cap_reports_the_widened_limit(banded_model):
+    model, df, y, w = banded_model
+    result = model.discretization_impact(
+        df, y, sample_weight=w, n_bins=5, bin_strategy="exact", features=["age"]
+    )
+    assert len(result.tables["age"]) <= 5
+    assert result.band_diagnostics["age"]["tolerance_factor"] > 1.0
+
+
+def test_spline_and_polynomial_are_both_banded(banded_model):
+    model, df, y, w = banded_model
+    result = model.discretization_impact(df, y, sample_weight=w, n_bins=150, bin_strategy="exact")
+    assert set(result.band_diagnostics) == {"age", "density"}
+    assert set(result.tables) == {"age", "density"}
+
+
+def test_zero_weight_rows_do_not_move_edges(banded_model):
+    model, df, y, w = banded_model
+    w0 = w.copy()
+    w0[df["age"].to_numpy() == 18.0] = 0.0
+    result = model.discretization_impact(
+        df, y, sample_weight=w0, n_bins=150, bin_strategy="exact", features=["age"]
+    )
+    table = result.tables["age"]
+    assert table["bin_from"].iloc[0] == 19.0
+    assert table["n_obs"].sum() == len(df)
+
+
+def test_term_se_at_matches_the_library_grid(banded_model):
+    model, _, _, _ = banded_model
+    cov, active = model._coef_covariance
+    for name in ("age", "density"):
+        spec = model._specs[name]
+        grid = np.linspace(spec._lo, spec._hi, 50)
+        expected = model._feature_se_from_cov(name, cov, active, n_points=50)
+        np.testing.assert_allclose(_term_se_at(model, name, grid), expected, rtol=64 * _EPS, atol=0)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, np.nan, np.inf, True, "1"])
+def test_exact_rejects_bad_band_settings(banded_model, bad):
+    model, df, y, w = banded_model
+    with pytest.raises(ValueError, match="band_se"):
+        model.discretization_impact(df, y, sample_weight=w, bin_strategy="exact", band_se=bad)
+    with pytest.raises(ValueError, match="band_max_error"):
+        model.discretization_impact(
+            df, y, sample_weight=w, bin_strategy="exact", band_max_error=bad
+        )
+
+
+def test_other_strategies_ignore_band_settings(banded_model):
+    model, df, y, w = banded_model
+    result = model.discretization_impact(
+        df, y, sample_weight=w, n_bins=10, bin_strategy="exposure_quantile", band_se=-1.0
+    )
+    assert result.band_diagnostics == {}
+
+
+def test_exact_is_refused_where_there_is_no_curve():
+    with pytest.raises(ValueError, match="no fitted curve"):
+        _compute_edges(np.arange(5.0), np.ones(5), 3, "exact")
+
+
+def test_too_many_values_names_the_feature():
+    rng = np.random.default_rng(3)
+    n = MAX_EXACT_VALUES + 500
+    df = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
+    y = rng.poisson(1.0, n).astype(float)
+    model = SuperGLM(family=Poisson(), selection_penalty=0.0, features={"x": Spline(n_knots=5)})
+    model.fit(df, y)
+    with pytest.raises(ValueError, match="'x' has .* distinct values"):
+        model.discretization_impact(df, y, bin_strategy="exact")
