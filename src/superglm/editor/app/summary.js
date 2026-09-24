@@ -200,6 +200,14 @@ export function setReferenceTransition(term, level) {
   };
 }
 
+export function transformTransition(payload) {
+  return {
+    name: "transform and refit",
+    path: "/transform_term",
+    payload: { ...payload }
+  };
+}
+
 export function revertTransition() {
   return {
     name: "revert to original model",

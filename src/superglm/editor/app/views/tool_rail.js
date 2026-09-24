@@ -1,6 +1,6 @@
 // @ts-check
 
-/** @typedef {'select'|'move'|'zoom'|'handles'} ToolMode */
+/** @typedef {import('../api/contracts.js').EditorMode} ToolMode */
 
 /** @type {Readonly<Record<string, ToolMode>>} */
 const SHORTCUT_MODES = Object.freeze({
@@ -8,7 +8,9 @@ const SHORTCUT_MODES = Object.freeze({
   m: "move",
   z: "zoom",
   h: "handles",
+  b: "breaks",
 });
+const BREAKS_UNAVAILABLE = "Breaks need an ordered or numeric axis.";
 
 const ROVING_KEYS = new Set([
   "ArrowUp",
@@ -112,13 +114,17 @@ export function bindToolRail({ root, onMode, onHelp, shortcutRoot = document }) 
 
 /**
  * @param {HTMLElement} root
- * @param {{mode:ToolMode, handlesAvailable:boolean}} state
+ * @param {{mode:ToolMode, handlesAvailable:boolean, breaksAvailable:boolean}} state
  */
-export function renderToolRail(root, { mode, handlesAvailable }) {
-  const effectiveMode = mode === "handles" && !handlesAvailable ? "select" : mode;
+export function renderToolRail(root, { mode, handlesAvailable, breaksAvailable }) {
+  /** @type {Partial<Record<ToolMode, boolean>>} */
+  const available = { handles: handlesAvailable, breaks: breaksAvailable };
+  const effectiveMode = available[mode] === false ? "select" : mode;
   for (const element of root.querySelectorAll('[role="radio"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
-    if (element.dataset.tool === "handles") element.disabled = !handlesAvailable;
+    const tool = element.dataset.tool;
+    if (tool === "handles" || tool === "breaks") element.disabled = !available[tool];
+    if (tool === "breaks") renderBreaksReason(element, breaksAvailable);
     const active = element.dataset.tool === effectiveMode;
     element.setAttribute("aria-checked", String(active));
     element.tabIndex = active ? 0 : -1;
@@ -126,9 +132,22 @@ export function renderToolRail(root, { mode, handlesAvailable }) {
   }
 }
 
+// A disabled Breaks button says why; its own popover text outranks the tool help.
+/** @param {HTMLButtonElement} button @param {boolean} breaksAvailable */
+function renderBreaksReason(button, breaksAvailable) {
+  if (breaksAvailable) {
+    delete button.dataset.popoverTitle;
+    delete button.dataset.popoverBody;
+    return;
+  }
+  button.dataset.popoverTitle = "Breaks";
+  button.dataset.popoverBody = BREAKS_UNAVAILABLE;
+}
+
 /** @param {string|undefined} value @returns {value is ToolMode} */
 function isToolMode(value) {
-  return value === "select" || value === "move" || value === "zoom" || value === "handles";
+  return value === "select" || value === "move" || value === "zoom" || value === "handles" ||
+    value === "breaks";
 }
 
 /** @param {EventTarget|null} target */

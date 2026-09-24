@@ -1,3 +1,13 @@
+import {
+  addBreak,
+  breakX,
+  cycleDegree,
+  moveBreak,
+  removeBreak,
+  snapBreak,
+  stepBreak
+} from "./breaks.js";
+
 export function bindInteractions(context) {
   // One active interaction at a time. Drag previews are private payload clones;
   // only the action controller may replace the confirmed remote snapshot.
@@ -9,6 +19,8 @@ export function bindInteractions(context) {
     panDrag: null,
     zoomBox: null,
     orderDrag: null,
+    breakDrag: null,
+    breakGhost: null,
     pendingClickIndex: null
   };
   const { svg } = context;
@@ -52,6 +64,15 @@ export function bindInteractions(context) {
         basis: preview.controls.basis ? preview.controls.basis[i] : null
       };
       svg.setPointerCapture(event.pointerId);
+      return;
+    }
+    if (mode === "breaks") {
+      interaction.pendingClickIndex = null;
+      interaction.dragStart = null;
+      clearBoxZoom(interaction);
+      clearOrderDropPreview(interaction);
+      interaction.orderDrag = null;
+      if (beginBreakGesture(context, interaction, event)) svg.setPointerCapture(event.pointerId);
       return;
     }
     if (mode === "move" && index !== undefined) {
@@ -187,6 +208,10 @@ export function bindInteractions(context) {
       updateBoxZoom(interaction, svgPoint(context, event));
       return;
     }
+    if (context.mode() === "breaks") {
+      updateBreakHover(context, interaction, svgPoint(context, event));
+      return;
+    }
     if (!interaction.dragStart || !interaction.brush) return;
     const point = svgPoint(context, event);
     interaction.brush.setAttribute("x", Math.min(interaction.dragStart.x, point.x));
@@ -198,6 +223,10 @@ export function bindInteractions(context) {
   async function onPointerUp(event) {
     if (interaction.panDrag) {
       interaction.panDrag = null;
+      return;
+    }
+    if (interaction.breakDrag) {
+      interaction.breakDrag = null;
       return;
     }
     if (interaction.controlDrag) {
@@ -288,6 +317,19 @@ export function bindInteractions(context) {
     cancelActiveInteraction(context, interaction);
   }
 
+  function onPointerLeave() {
+    clearBreakGhost(interaction);
+  }
+
+  function onKeyDown(event) {
+    if (context.mode() !== "breaks") return;
+    const next = breakKeyResult(context, event);
+    if (next === null) return;
+    event.preventDefault();
+    context.setBreakDraft(next.draft);
+    focusBreakLabel(svg, Math.min(next.focusIndex, next.draft.breaks.length - 1));
+  }
+
   function onLostPointerCapture() {
     if (hasActiveInteraction(interaction)) {
       cancelActiveInteraction(context, interaction);
@@ -298,6 +340,8 @@ export function bindInteractions(context) {
   svg.addEventListener("pointermove", onPointerMove);
   svg.addEventListener("pointerup", onPointerUp);
   svg.addEventListener("pointercancel", onPointerCancel);
+  svg.addEventListener("pointerleave", onPointerLeave);
+  svg.addEventListener("keydown", onKeyDown);
   svg.addEventListener("lostpointercapture", onLostPointerCapture);
   svg.addEventListener("wheel", onWheel, wheelOptions);
 
@@ -308,6 +352,8 @@ export function bindInteractions(context) {
       svg.removeEventListener("pointermove", onPointerMove);
       svg.removeEventListener("pointerup", onPointerUp);
       svg.removeEventListener("pointercancel", onPointerCancel);
+      svg.removeEventListener("pointerleave", onPointerLeave);
+      svg.removeEventListener("keydown", onKeyDown);
       svg.removeEventListener("lostpointercapture", onLostPointerCapture);
       svg.removeEventListener("wheel", onWheel, wheelOptions);
       cancelActiveInteraction(context, interaction);
@@ -324,6 +370,7 @@ function hasActiveInteraction(interaction) {
     interaction.panDrag ||
     interaction.zoomBox ||
     interaction.orderDrag ||
+    interaction.breakDrag ||
     interaction.pendingClickIndex !== null
   );
 }
@@ -339,8 +386,113 @@ function cancelActiveInteraction(context, interaction) {
   interaction.controlDrag = null;
   interaction.panDrag = null;
   interaction.orderDrag = null;
+  interaction.breakDrag = null;
+  clearBreakGhost(interaction);
   interaction.pendingClickIndex = null;
   if (hadPreview) context.clearPreviewTerm();
+}
+
+// Breaks mode. A draft lives in the store; only the drag handle and the hover
+// ghost are gesture state here.
+function beginBreakGesture(context, interaction, event) {
+  const term = context.currentTerm();
+  const draft = context.breakDraft();
+  const target = event.target;
+  const remove = target.closest("[data-break-remove]");
+  if (remove) {
+    context.setBreakDraft(removeBreak(term, draft, Number(remove.dataset.breakRemove)));
+    return false;
+  }
+  const chip = target.closest("[data-segment]");
+  if (chip) {
+    context.setBreakDraft(cycleDegree(term, draft, Number(chip.dataset.segment)));
+    return false;
+  }
+  const handle = target.closest("[data-break-index]");
+  if (handle) {
+    const index = Number(handle.dataset.breakIndex);
+    interaction.breakDrag = { index, value: draft.breaks[index] };
+    return true;
+  }
+  const point = svgPoint(context, event);
+  if (!insidePlot(context, point)) return false;
+  context.setBreakDraft(addBreak(term, draft, snapBreak(term, dataFromPoint(context, point).x)));
+  return false;
+}
+
+function updateBreakHover(context, interaction, point) {
+  const term = context.currentTerm();
+  if (!term || !context.svg._scale) return;
+  const value = insidePlot(context, point)
+    ? snapBreak(term, dataFromPoint(context, point).x)
+    : null;
+  if (interaction.breakDrag) {
+    commitBreakDrag(context, interaction, term, value);
+    return;
+  }
+  drawBreakGhost(context, interaction, term, value);
+}
+
+function commitBreakDrag(context, interaction, term, value) {
+  const drag = interaction.breakDrag;
+  if (value === null || value === drag.value) return;
+  const draft = context.breakDraft();
+  const next = moveBreak(term, draft, drag.index, value);
+  // Snaps are discrete, so a drag commits (and the chart redraws) only when
+  // the snapped break changes: a handful of times per gesture, not per event.
+  if (next === draft) return;
+  drag.value = value;
+  context.setBreakDraft(next);
+}
+
+function drawBreakGhost(context, interaction, term, value) {
+  clearBreakGhost(interaction);
+  if (value === null) return;
+  const scale = context.svg._scale;
+  const x = scale.sx(breakX(term, value));
+  interaction.breakGhost = svgNode("line", {
+    class: "break-ghost",
+    x1: x,
+    y1: scale.margin.top,
+    x2: x,
+    y2: scale.margin.top + scale.innerH
+  });
+  context.svg.appendChild(interaction.breakGhost);
+}
+
+function clearBreakGhost(interaction) {
+  if (interaction.breakGhost) interaction.breakGhost.remove();
+  interaction.breakGhost = null;
+}
+
+function breakKeyResult(context, event) {
+  const term = context.currentTerm();
+  const draft = context.breakDraft();
+  const chip = event.target.closest("[data-segment]");
+  if (chip && (event.key === "Enter" || event.key === " ")) {
+    return { draft: cycleDegree(term, draft, Number(chip.dataset.segment)), focusIndex: -1 };
+  }
+  const label = event.target.closest("[data-break-index]");
+  if (!label) return null;
+  const index = Number(label.dataset.breakIndex);
+  const direction = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+  const next = direction
+    ? moveBreak(term, draft, index, stepBreak(term, draft.breaks[index], direction))
+    : event.key === "Delete" || event.key === "Backspace"
+      ? removeBreak(term, draft, index)
+      : draft;
+  return next === draft ? null : { draft: next, focusIndex: index };
+}
+
+function focusBreakLabel(svg, index) {
+  const label = svg.querySelector(`.break-label[data-break-index="${index}"]`);
+  if (label) label.focus();
+}
+
+function insidePlot(context, point) {
+  const { margin, innerW, innerH } = context.svg._scale;
+  return point.x >= margin.left && point.x <= margin.left + innerW &&
+    point.y >= margin.top && point.y <= margin.top + innerH;
 }
 
 function isModifierLevelSelection(event, term) {

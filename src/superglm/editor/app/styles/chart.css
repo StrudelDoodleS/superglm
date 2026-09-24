@@ -49,3 +49,106 @@
 .axis-measure-layer {
   pointer-events: none;
 }
+
+/* Breaks mode overlay: shaded segments, dashed break lines, labels, degree chips. */
+
+.break-segment {
+  fill: rgba(9, 105, 218, 0.05);
+  pointer-events: none;
+}
+
+.break-line {
+  stroke: var(--blue);
+  stroke-width: 1.4;
+  stroke-dasharray: 5 4;
+  pointer-events: none;
+}
+
+.break-ghost {
+  stroke: var(--blue);
+  stroke-opacity: 0.4;
+  stroke-width: 1.2;
+  stroke-dasharray: 3 3;
+  pointer-events: none;
+}
+
+.break-hit {
+  fill: transparent;
+  cursor: ew-resize;
+}
+
+.break-label {
+  cursor: ew-resize;
+  outline: none;
+}
+
+.break-label rect {
+  fill: var(--surface);
+  stroke: var(--blue);
+  stroke-width: 1.2;
+}
+
+.break-label:hover rect,
+.break-label:focus-visible rect {
+  fill: var(--blue-soft);
+}
+
+.break-label:focus-visible rect {
+  stroke-width: 2;
+}
+
+.break-label-text {
+  fill: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.break-remove {
+  cursor: pointer;
+}
+
+.break-remove circle {
+  fill: var(--surface-subtle);
+  stroke: none;
+}
+
+.break-remove path {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.break-remove:hover circle {
+  fill: var(--danger-surface);
+}
+
+.break-remove:hover path {
+  stroke: var(--danger);
+}
+
+.degree-chip {
+  cursor: pointer;
+  outline: none;
+}
+
+.degree-chip rect {
+  fill: var(--surface);
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.degree-chip:hover rect,
+.degree-chip:focus-visible rect {
+  fill: var(--blue-soft);
+  stroke: var(--blue);
+}
+
+.degree-chip-text {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+.degree-chip:hover .degree-chip-text {
+  fill: var(--blue);
+}

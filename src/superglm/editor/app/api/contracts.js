@@ -1,7 +1,7 @@
 // @ts-check
 
 /** @typedef {'editor'|'validation'|'final'} AppView */
-/** @typedef {'select'|'move'|'zoom'|'handles'} EditorMode */
+/** @typedef {'select'|'move'|'zoom'|'handles'|'breaks'} EditorMode */
 /** @typedef {'idle'|'running'|'error'} MutationStatus */
 /** @typedef {'idle'|'updating'|'current'|'stale'|'error'} EvidenceStatus */
 /** @typedef {'metrics'|'summary'|'report'} EvidencePanel */
@@ -38,6 +38,21 @@
  * @property {string} level
  * @property {'most_exposed'|'first'|'pinned'} policy
  */
+/** @typedef {'piecewise'|'spline'|'polynomial'} BreakForm */
+/**
+ * A per-term Breaks draft. Breaks are band labels on an ordered axis and x
+ * values on a numeric axis, exactly as /transform_term takes them.
+ * @typedef {Object} BreakDraft
+ * @property {BreakForm} form
+ * @property {Array<string|number>} breaks
+ * @property {number[]} degrees
+ * @property {number} degree
+ */
+/**
+ * @typedef {Object} TermTransform
+ * @property {string[]|null} axis
+ * @property {{breaks:Array<string|number>, degrees:number[]}|null} piecewise
+ */
 /**
  * @typedef {Object} TermPayload
  * @property {string} kind
@@ -53,6 +68,7 @@
  * @property {ImpactPayload} impact
  * @property {number|null} [effective_df]
  * @property {TermReference|null} [reference]
+ * @property {TermTransform|null} [transform]
  */
 /**
  * @typedef {Object} StructureHistory
@@ -116,6 +132,7 @@
  * @property {SummaryLevelDisplay} summaryLevelDisplay
  * @property {Record<string, unknown>} zoomByTerm
  * @property {Record<string, string>} groupModeByTerm
+ * @property {Record<string, BreakDraft>} breakDraftByTerm
  * @property {'summary'|'history'|'advanced'|'help'} inspectorPane
  * @property {boolean} inspectorOpen
  * @property {{term:string, payload:TermPayload, selection:number[]}|null} preview

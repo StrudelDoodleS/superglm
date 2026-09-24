@@ -29,6 +29,12 @@ export const TOOL_HELP = Object.freeze({
     body: "Edit spline control handles and inspect basis contributions.",
     shortcut: "H",
   }),
+  breaks: Object.freeze({
+    title: "Breaks",
+    body:
+      "Click the plot to add a break, drag a break to move it, and click × to remove it. Choose a form, then Transform and refit.",
+    shortcut: "B",
+  }),
   help: Object.freeze({
     title: "Help",
     body: "Open modes, gestures, shortcuts, curve operations, refits, and exporting.",
@@ -100,6 +106,11 @@ export const OPERATION_HELP = Object.freeze({
 
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
 export const STRUCTURE_HELP = Object.freeze({
+  transform_term: Object.freeze({
+    title: "Transform and refit",
+    body:
+      "Replace this term with the form and breaks shown, then refit the model. Restore undoes it.",
+  }),
   restore_structure: Object.freeze({
     title: "Restore previous structure",
     body: "Undo the latest collapse, ungroup, transform or reference change.",
@@ -137,7 +148,7 @@ export const CONTROL_HELP = Object.freeze({
 export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Modes",
-    keys: Object.freeze(["select", "move", "zoom", "handles"]),
+    keys: Object.freeze(["select", "move", "zoom", "handles", "breaks"]),
   }),
   Object.freeze({
     title: "Selection operations",
@@ -183,7 +194,7 @@ export function helpForElement(element) {
   if (!isHtml && !isSvg) return null;
 
   const tool = element.dataset.tool;
-  if (tool && TOOL_HELP[tool]) return TOOL_HELP[tool];
+  if (tool && TOOL_HELP[tool] && !element.dataset.popoverBody) return TOOL_HELP[tool];
 
   const operation = element.dataset.helpOperation || element.dataset.op;
   if (operation && OPERATION_HELP[operation]) return OPERATION_HELP[operation];

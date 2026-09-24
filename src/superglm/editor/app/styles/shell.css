@@ -235,3 +235,70 @@ body {
     overflow: hidden;
   }
 }
+
+.breaks-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.form-switch {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.form-switch button {
+  border: 0;
+  border-radius: 0;
+  background: var(--surface);
+}
+
+.form-switch button + button {
+  border-left: 1px solid var(--border);
+}
+
+.form-switch button[aria-checked="true"] {
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-weight: 600;
+}
+
+.degree-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.degree-stepper button {
+  width: 26px;
+  padding: 0;
+}
+
+.degree-stepper output {
+  min-width: 14px;
+  text-align: center;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.breaks-hint {
+  color: var(--muted);
+}
+
+.breaks-hint.warn {
+  color: var(--danger);
+}
+
+.icon-button.primary {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #fff;
+}
+
+.icon-button.primary:hover:not(:disabled) {
+  background: #0550ae;
+}

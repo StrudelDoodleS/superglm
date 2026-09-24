@@ -1,4 +1,11 @@
 import { editorClient } from "./api/client.js";
+import {
+  draftProblem,
+  initialDraft,
+  isTransformable,
+  setPolynomialDegree,
+  transformPayload
+} from "./breaks.js";
 import { drawChart, groupedTerms, updateChartSelection } from "./chart.js";
 import { renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
@@ -18,6 +25,7 @@ import {
   createEditorStore,
   createInitialEditorState,
   patchView as patchViewState,
+  setBreakDraft as setBreakDraftState,
   setPreviewTerm as setPreviewTermState
 } from "./state/store.js";
 import {
@@ -33,10 +41,12 @@ import {
   restoreTransition,
   revertTransition,
   setReferenceTransition,
+  transformTransition,
   ungroupTransition
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
 import { bindAppBar, renderAppBar } from "./views/app_bar.js";
+import { bindBreaksControls, renderBreaksControls } from "./views/breaks_controls.js";
 import { renderContextBar } from "./views/context_bar.js";
 import { bindExportDialog } from "./views/export_dialog.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
@@ -106,6 +116,7 @@ const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const setReference = document.getElementById("setReference");
 const restoreStructure = document.getElementById("restoreStructure");
+const breaksControls = document.getElementById("breaksControls");
 const structuralConfirmDialog = document.getElementById("structuralConfirmDialog");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
@@ -214,7 +225,8 @@ const chartContext = {
   showCi: () => store.getState().view.showCi,
   showContrib: () => store.getState().view.showContrib,
   buildProgress: () => buildProgress,
-  groupDisplayMode: () => activeGroupDisplayMode()
+  groupDisplayMode: () => activeGroupDisplayMode(),
+  breakDraft: activeBreakDraft
 };
 
 let openHelp = () => inspectorToggle.click();
@@ -357,6 +369,33 @@ function clearZoom(term) {
 
 function activeGroupDisplayMode() {
   return selectGroupDisplayMode(store.getState());
+}
+
+// The active term's Breaks draft: the stored one, else derived from the payload.
+function activeBreakDraft() {
+  const term = currentTerm();
+  if (!isTransformable(term)) return null;
+  return store.getState().view.breakDraftByTerm[selectedTerm()] ?? initialDraft(term);
+}
+
+function setBreakDraft(draft) {
+  store.update((state) => setBreakDraftState(state, selectedTerm(), draft));
+}
+
+function updateBreakDraft(change) {
+  setBreakDraft(change(activeBreakDraft()));
+}
+
+async function transformActiveTerm() {
+  const term = currentTerm();
+  const name = selectedTerm();
+  const draft = activeBreakDraft();
+  if (draftProblem(term, draft) !== null) return;
+  const envelope = await runStructuralRefit(
+    transformTransition(transformPayload(name, term, draft))
+  );
+  // The draft re-derives from the transformed term's own breaks.
+  if (envelope) store.update((state) => setBreakDraftState(state, name, null));
 }
 
 function visualMode() {
@@ -754,7 +793,8 @@ function renderChartWorkspace() {
   if (updateHandleCount(term)) return;
   renderToolRail(toolRail, {
     mode: view.mode,
-    handlesAvailable: Boolean(term.controls)
+    handlesAvailable: Boolean(term.controls),
+    breaksAvailable: isTransformable(term)
   });
   updateGroupDisplayControl(term);
   updateCollapseAction(term, selection);
@@ -831,7 +871,8 @@ function selectChartRenderState(state) {
     zoom: view.zoomByTerm[activeTerm] || null,
     groupMode: Object.prototype.hasOwnProperty.call(view.groupModeByTerm, activeTerm)
       ? view.groupModeByTerm[activeTerm]
-      : null
+      : null,
+    breakDraft: view.breakDraftByTerm[activeTerm] ?? null
   };
 }
 
@@ -843,7 +884,39 @@ function sameChartRenderState(next, previous) {
     next.showCi === previous.showCi &&
     next.showContrib === previous.showContrib &&
     next.zoom === previous.zoom &&
-    next.groupMode === previous.groupMode;
+    next.groupMode === previous.groupMode &&
+    next.breakDraft === previous.breakDraft;
+}
+
+function selectBreaksRenderState(state) {
+  const activeTerm = selectActiveTermName(state);
+  return {
+    visible: state.remote.snapshot !== null && state.view.mode === "breaks",
+    chartEpoch: state.remote.chartEpoch,
+    activeTerm,
+    draft: state.view.breakDraftByTerm[activeTerm] ?? null,
+    busy: state.request.mutation.status === "running"
+  };
+}
+
+function sameBreaksRenderState(next, previous) {
+  return next.visible === previous.visible &&
+    next.chartEpoch === previous.chartEpoch &&
+    next.activeTerm === previous.activeTerm &&
+    next.draft === previous.draft &&
+    next.busy === previous.busy;
+}
+
+function renderBreaksControlsState({ visible, busy }) {
+  const draft = visible ? activeBreakDraft() : null;
+  breaksControls.hidden = draft === null;
+  if (draft === null) return;
+  renderBreaksControls({
+    root: breaksControls,
+    draft,
+    problem: draftProblem(currentTerm(), draft),
+    busy
+  });
 }
 
 function selectHistoryRenderState(state) {
@@ -1257,6 +1330,7 @@ function applyTermDefaults(term) {
   } else if (!canShowContributions(term) && view.showContrib) {
     patch.showContrib = false;
   }
+  if (view.mode === "breaks" && !isTransformable(term)) patch.mode = "select";
   if (!Object.keys(patch).length) return false;
   actions.patchView(patch);
   return true;
@@ -1369,7 +1443,17 @@ const interactions = bindInteractions({
   clearPreviewTerm: clearInteractionPreview,
   setZoom,
   clearZoom,
+  breakDraft: activeBreakDraft,
+  setBreakDraft,
   actions,
+});
+
+bindBreaksControls({
+  root: breaksControls,
+  onForm: (form) => updateBreakDraft((draft) => ({ ...draft, form })),
+  onDegree: (step) => updateBreakDraft((draft) => setPolynomialDegree(draft, draft.degree + step)),
+  onClear: () => updateBreakDraft((draft) => ({ ...draft, breaks: [], degrees: [1] })),
+  onTransform: transformActiveTerm
 });
 
 termSelect.addEventListener("change", async () => {
@@ -1522,6 +1606,7 @@ restoreStructure.addEventListener("click", async () => {
 
 
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
+store.subscribe(selectBreaksRenderState, renderBreaksControlsState, sameBreaksRenderState);
 store.subscribe(
   selectTermPickerRenderState,
   renderTermPickerState,

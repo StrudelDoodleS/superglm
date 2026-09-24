@@ -20,6 +20,7 @@ const {
   normalizeSelectionIndices,
   patchView,
   selectionIndicesEqual,
+  setBreakDraft,
   setSelectionPreview,
   setPreviewTerm
 } = storeModule;
@@ -663,6 +664,20 @@ test("selectors expose confirmed state defaults and per-term display overrides",
   assert.equal(selectGroupDisplayMode(empty), "expanded");
 });
 
+test("a break draft is kept per term and deleted by a null draft", () => {
+  const initial = createInitialEditorState(snapshot(1));
+  assert.deepEqual(initial.view.breakDraftByTerm, {});
+  /** @type {import('../../src/superglm/editor/app/api/contracts.js').BreakDraft} */
+  const draft = { form: "piecewise", breaks: [2.5], degrees: [1, 1], degree: 3 };
+  const withDraft = setBreakDraft(initial, "age", draft);
+  assert.deepEqual(withDraft.view.breakDraftByTerm, { age: draft });
+  assert.deepEqual(initial.view.breakDraftByTerm, {});
+  const cleared = setBreakDraft(withDraft, "age", null);
+  assert.deepEqual(cleared.view.breakDraftByTerm, {});
+  assert.equal("age" in cleared.view.breakDraftByTerm, false);
+  assert.strictEqual(setBreakDraft(cleared, "age", null), cleared);
+});
+
 test("state modules expose only their requested public symbols", () => {
   assert.deepEqual(Object.keys(storeModule).sort(), [
     "beginEvidence",
@@ -677,6 +692,7 @@ test("state modules expose only their requested public symbols", () => {
     "normalizeSelectionIndices",
     "patchView",
     "selectionIndicesEqual",
+    "setBreakDraft",
     "setPreviewTerm",
     "setSelectionPreview"
   ]);

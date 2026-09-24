@@ -16,6 +16,7 @@ const {
   restoreTransition,
   revertTransition,
   setReferenceTransition,
+  transformTransition,
   runOffsetRefit,
   ungroupTransition
 } = await import(summaryModulePath);
@@ -199,6 +200,11 @@ test("structural transition descriptors are pure route descriptions", () => {
     name: "revert to original model",
     path: "/revert_to_original",
     payload: {}
+  });
+  assert.deepEqual(transformTransition({ term: "age", form: "spline", breaks: ["B3"] }), {
+    name: "transform and refit",
+    path: "/transform_term",
+    payload: { term: "age", form: "spline", breaks: ["B3"] }
   });
 });
 

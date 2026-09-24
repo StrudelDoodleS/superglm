@@ -107,7 +107,7 @@ globalThis.HTMLElement = FakeElement;
 globalThis.HTMLButtonElement = FakeButton;
 
 test("tool rail owns exclusive semantics, shortcuts, roving focus, and cleanup", () => {
-  const buttons = ["select", "move", "zoom", "handles", "help"].map(
+  const buttons = ["select", "move", "zoom", "handles", "breaks", "help"].map(
     (tool) => new FakeButton(tool),
   );
   const root = new FakeEventHub(buttons);
@@ -121,10 +121,11 @@ test("tool rail owns exclusive semantics, shortcuts, roving focus, and cleanup",
     onHelp: () => helpCount += 1,
   });
 
-  renderToolRail(root, { mode: "select", handlesAvailable: false });
+  renderToolRail(root, { mode: "select", handlesAvailable: false, breaksAvailable: true });
   assert.equal(buttons[0].getAttribute("aria-checked"), "true");
   assert.equal(buttons[0].tabIndex, 0);
   assert.equal(buttons[3].disabled, true);
+  assert.equal(buttons[4].disabled, false);
 
   root.emit("click", { target: buttons[1] });
   assert.deepEqual(modes, ["move"]);
@@ -133,15 +134,40 @@ test("tool rail owns exclusive semantics, shortcuts, roving focus, and cleanup",
   assert.deepEqual(modes, ["move", "zoom"]);
 
   shortcuts.emit("keydown", { target: root, key: "v" });
+  shortcuts.emit("keydown", { target: root, key: "b" });
   shortcuts.emit("keydown", { target: root, key: "?" });
-  assert.deepEqual(modes, ["move", "zoom", "select"]);
+  assert.deepEqual(modes, ["move", "zoom", "select", "breaks"]);
   assert.equal(helpCount, 1);
 
   binding.destroy();
   root.emit("click", { target: buttons[1] });
   shortcuts.emit("keydown", { target: root, key: "?" });
-  assert.deepEqual(modes, ["move", "zoom", "select"]);
+  assert.deepEqual(modes, ["move", "zoom", "select", "breaks"]);
   assert.equal(helpCount, 1);
+});
+
+test("Breaks is disabled, with its reason, on a term without an ordered or numeric axis", () => {
+  const buttons = ["select", "move", "zoom", "handles", "breaks", "help"].map(
+    (tool) => new FakeButton(tool),
+  );
+  const root = new FakeEventHub(buttons);
+  const shortcuts = new FakeEventHub();
+  const modes = [];
+  bindToolRail({ root, shortcutRoot: shortcuts, onMode: (mode) => modes.push(mode), onHelp() {} });
+
+  renderToolRail(root, { mode: "breaks", handlesAvailable: true, breaksAvailable: false });
+
+  assert.equal(buttons[4].disabled, true);
+  assert.equal(buttons[4].dataset.popoverBody, "Breaks need an ordered or numeric axis.");
+  assert.equal(buttons[4].getAttribute("aria-checked"), "false");
+  assert.equal(buttons[0].getAttribute("aria-checked"), "true");
+  shortcuts.emit("keydown", { target: root, key: "b" });
+  assert.deepEqual(modes, []);
+
+  renderToolRail(root, { mode: "breaks", handlesAvailable: true, breaksAvailable: true });
+  assert.equal(buttons[4].disabled, false);
+  assert.equal(buttons[4].dataset.popoverBody, undefined);
+  assert.equal(buttons[4].getAttribute("aria-checked"), "true");
 });
 
 test("unavailable Handles falls back to the sole enabled Select radio", () => {
@@ -150,7 +176,7 @@ test("unavailable Handles falls back to the sole enabled Select radio", () => {
   );
   const root = new FakeEventHub(buttons);
 
-  renderToolRail(root, { mode: "handles", handlesAvailable: false });
+  renderToolRail(root, { mode: "handles", handlesAvailable: false, breaksAvailable: false });
 
   assert.equal(buttons[0].disabled, false);
   assert.equal(buttons[0].getAttribute("aria-checked"), "true");

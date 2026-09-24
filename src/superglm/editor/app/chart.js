@@ -1,9 +1,11 @@
 import { fmt } from "./format.js";
+import { drawBreakOverlay } from "./chart/break_overlay.js";
 import {
   evenlySpacedIndices,
   planCategoricalAxis,
   splitLabelGraphemes
 } from "./chart/geometry.js";
+import { el, line, text } from "./chart/svg.js";
 
 const CATEGORICAL_MEASUREMENT_CACHE_LIMIT = 256;
 const CATEGORICAL_FONT_PROPERTIES = Object.freeze([
@@ -238,6 +240,8 @@ export function drawChart(term, selection, context) {
   } else {
     drawControlHandles(svg, term, sx, sy, margin, innerH);
   }
+  const breakDraft = visualMode === "breaks" ? context.breakDraft() : null;
+  if (breakDraft) drawBreakOverlay(svg, { term, draft: breakDraft, sx, margin, innerW, innerH });
   applyPlotClip(svg);
   const legendLayer = el("g", { class: "legend-layer" });
   svg.appendChild(legendLayer);
@@ -1104,17 +1108,6 @@ function errorBars(svg, x, lower, upper, sx, sy) {
   }
 }
 
-function line(svg, x1, y1, x2, y2, cls) {
-  svg.appendChild(el("line", { x1, y1, x2, y2, class: cls }));
-}
-
-function text(svg, x, y, value, cls, anchor) {
-  const node = el("text", { x, y, class: cls, "text-anchor": anchor });
-  node.textContent = value;
-  svg.appendChild(node);
-  return node;
-}
-
 function legend(svg, x, y, originalProjected = false, hasPrevious = false) {
   line(svg, x, y, x + 28, y, "original");
   text(svg, x + 36, y + 4, originalProjected ? "original projection" : "original", "legend", "start");
@@ -1128,10 +1121,4 @@ function legend(svg, x, y, originalProjected = false, hasPrevious = false) {
   text(svg, x + 36, y + 4 + 22 * row, "current edit", "legend", "start");
   svg.appendChild(el("circle", { cx: x + 14, cy: y + 22 * (row + 1), r: 4.6, class: "point selected" }));
   text(svg, x + 36, y + 4 + 22 * (row + 1), "selected", "legend", "start");
-}
-
-function el(tag, attrs) {
-  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
-  return node;
 }

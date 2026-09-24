@@ -1709,7 +1709,7 @@ def test_tool_rail_selects_one_mode_and_supports_roving_shortcuts(open_editor_pa
         select = rail.get_by_role("radio", name="Select", exact=True)
         move = rail.get_by_role("radio", name="Move", exact=True)
         zoom = rail.get_by_role("radio", name="Zoom", exact=True)
-        handles = rail.get_by_role("radio", name="Handles", exact=True)
+        breaks = rail.get_by_role("radio", name="Breaks", exact=True)
 
         assert select.get_attribute("aria-checked") == "true"
         assert select.get_attribute("tabindex") == "0"
@@ -1727,8 +1727,9 @@ def test_tool_rail_selects_one_mode_and_supports_roving_shortcuts(open_editor_pa
         assert zoom.evaluate("node => document.activeElement === node")
 
         page.keyboard.press("End")
-        assert handles.get_attribute("aria-checked") == "true"
-        assert handles.evaluate("node => document.activeElement === node")
+        assert breaks.get_attribute("aria-checked") == "true"
+        assert breaks.evaluate("node => document.activeElement === node")
+        assert page.locator("#breaksControls").is_visible()
 
         page.locator("#chart").focus()
         page.keyboard.press("v")
