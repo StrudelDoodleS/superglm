@@ -787,7 +787,7 @@ button:active { background: #e6edf3; }
 .axis, .tick { stroke: #8c959f; stroke-width: 1; }
 .grid { stroke: var(--grid); stroke-width: 1; }
 .zero { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 4; }
-.original { fill: none; stroke: #8c959f; stroke-width: 1.7; stroke-dasharray: 7 5; }
+.original { fill: none; stroke: #8c959f; stroke-opacity: 0.5; stroke-width: 3; }
 .previous-edit { fill: none; stroke: #f59e0b; stroke-width: 2; }
 .edited { fill: none; stroke: var(--blue); stroke-width: 2.3; }
 .ci { fill: rgba(9, 105, 218, 0.13); stroke: none; }

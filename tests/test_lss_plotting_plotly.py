@@ -48,7 +48,7 @@ BAND_FILL = "rgba(9, 105, 218, 0.13)"
 WHISKER = "rgba(9, 105, 218, 0.55)"
 SELECTED = "rgba(22, 163, 74, 0.62)"
 BLUE = "#0969da"
-GREY = "#8c959f"
+REFERENCE = "rgba(140, 149, 159, 0.5)"
 RED = "#d1242f"
 
 
@@ -290,8 +290,8 @@ def test_qq_draws_an_envelope_a_reference_and_the_order_statistics(qq) -> None:
     envelope, reference, observed = fig.data
     assert envelope.fillcolor == BAND_FILL
     assert envelope.line.width == 0
-    assert reference.line.color == GREY
-    assert reference.line.dash == "7px,5px"
+    assert reference.line.color == REFERENCE
+    assert reference.line.dash is None
     assert observed.mode == "markers"
     assert observed.selected.marker.color == SELECTED
     assert set(as_list(observed.marker.color)) <= {"#ffffff", RED}
@@ -313,7 +313,7 @@ def test_worm_draws_three_traces_per_interval(worm, worm_by_x) -> None:
     assert len(worm.panels) == 1
     assert len(single.data) == 3
     assert single.data[0].fillcolor == BAND_FILL
-    assert single.data[1].line.dash == "7px,5px"
+    assert single.data[1].line.color == REFERENCE
     assert single.data[2].line.color == BLUE
 
     grid = dp.plotly_worm(worm_by_x)
@@ -539,7 +539,7 @@ def test_comparison_draws_segments_the_murphy_curves_and_the_difference(comparis
     assert segments.error_y.color == WHISKER
     assert list(segments.x) == list(comparison.by_segment.index.astype(str))
     assert curve_a.line.color == BLUE
-    assert curve_b.line.dash == "7px,5px"
+    assert curve_b.line.color == REFERENCE
     assert band.fillcolor == BAND_FILL
     assert difference.line.color == BLUE
     assert murphy_zero.line.dash == "4px,4px"

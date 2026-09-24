@@ -70,7 +70,7 @@ TOKENS: dict[str, str] = {
 # the ``rgba(...)`` the CSS writes; hex strings are opaque.
 CHART: dict[str, dict[str, Any]] = {
     "edited": dict(color="#0969da", width=2.3),
-    "original": dict(color="#8c959f", width=1.7, dash=(7, 5)),
+    "original": dict(color="#8c959f", alpha=0.5, width=3.0),
     "previous_edit": dict(color="#f59e0b", width=2.0),
     "ci": dict(color=(9, 105, 218), alpha=0.13),
     "ci_whisker": dict(color=(9, 105, 218), alpha=0.55, width=1.4),

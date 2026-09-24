@@ -90,9 +90,8 @@ SELECTED_COLOR = "rgba(22, 163, 74, 0.62)"
 EXPOSURE_FILL = _rgba(CHART["exposure"]["fill"], CHART["exposure"]["alpha"])
 _FITTED = dict(color=CHART["edited"]["color"], width=CHART["edited"]["width"])
 _REFERENCE = dict(
-    color=CHART["original"]["color"],
+    color=_rgba(CHART["original"]["color"], CHART["original"]["alpha"]),
     width=CHART["original"]["width"],
-    dash=_dash(CHART["original"]["dash"]),
 )
 _ZERO = dict(
     color=CHART["zero"]["color"],
