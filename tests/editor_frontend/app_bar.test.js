@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bindAppBar } from "../../src/superglm/editor/app/views/app_bar.js";
+import { bindAppBar, renderAppBar } from "../../src/superglm/editor/app/views/app_bar.js";
 
 class FakeElement {
   constructor(tagName = "div") {
@@ -91,9 +91,13 @@ test("global undo and redo shortcuts pause while any native dialog is open", (t)
     root,
     undoButton,
     redoButton,
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
     onView: () => {},
     onUndo: () => { undoCalls += 1; },
     onRedo: () => { redoCalls += 1; },
+    onRevert: () => {},
+    onRefresh: () => {},
   });
 
   documentHub.openDialog = new FakeElement("dialog");
@@ -111,4 +115,37 @@ test("global undo and redo shortcuts pause while any native dialog is open", (t)
   assert.equal(redo.defaultPrevented, true);
 
   binding.destroy();
+});
+
+test("Refresh is disabled while busy and Revert only when something can be reverted", () => {
+  const root = new FakeElement("nav");
+  const buttons = {
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+  };
+  const render = (overrides) => renderAppBar({
+    root,
+    activeView: "editor",
+    ...buttons,
+    canUndo: false,
+    canRedo: false,
+    canRevert: false,
+    busy: false,
+    ...overrides,
+  });
+
+  render({});
+  assert.deepEqual(
+    [buttons.refreshButton.disabled, buttons.revertButton.disabled],
+    [false, true],
+  );
+  render({ busy: true });
+  assert.equal(buttons.refreshButton.disabled, true);
+  render({ canRevert: true });
+  assert.deepEqual(
+    [buttons.refreshButton.disabled, buttons.revertButton.disabled],
+    [false, false],
+  );
 });

@@ -34,6 +34,11 @@
  * @property {number} [selected_weight_share]
  */
 /**
+ * @typedef {Object} TermReference
+ * @property {string} level
+ * @property {'most_exposed'|'first'|'pinned'} policy
+ */
+/**
  * @typedef {Object} TermPayload
  * @property {string} kind
  * @property {string} term_type
@@ -47,6 +52,7 @@
  * @property {GroupDisplayPayload|null} group_display
  * @property {ImpactPayload} impact
  * @property {number|null} [effective_df]
+ * @property {TermReference|null} [reference]
  */
 /**
  * @typedef {Object} StructureHistory

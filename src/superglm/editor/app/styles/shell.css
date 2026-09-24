@@ -137,6 +137,10 @@ body {
   margin-bottom: 8px;
 }
 
+.chart-action-bar .action-bar-end {
+  margin-left: auto;
+}
+
 .context-term select {
   min-width: 180px;
 }

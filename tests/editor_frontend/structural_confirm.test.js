@@ -434,3 +434,55 @@ test("Continue alone resolves true and repeated calls do not duplicate listeners
   assert.deepEqual(firstLauncher.focusCalls, [{ preventScroll: true }]);
   assert.deepEqual(secondLauncher.focusCalls, [{ preventScroll: true }]);
 });
+
+const REVERT = deepFreeze({ name: "revert to original model", path: "/revert_to_original", payload: {} });
+
+test("revert confirms whenever manual edits or structural steps would be lost", () => {
+  const twoSteps = { depth: 2, last: COLLAPSE_STEP.last };
+  const both = structuralImpact(deepFreeze(snapshot(2, 1, twoSteps)), REVERT);
+  assert.equal(both.requiresConfirmation, true);
+  assert.equal(both.operationTitle, "Revert to original model");
+  assert.equal(
+    both.message,
+    "Revert to the original model? This clears 3 manual edits and 2 structural steps, "
+      + "and can't be undone.",
+  );
+
+  const stepsOnly = structuralImpact(deepFreeze(snapshot(0, 0, COLLAPSE_STEP)), REVERT);
+  assert.equal(stepsOnly.requiresConfirmation, true);
+  const editsOnly = structuralImpact(deepFreeze(snapshot(1)), REVERT);
+  assert.equal(editsOnly.requiresConfirmation, true);
+  assert.deepEqual(structuralImpact(deepFreeze(snapshot(0)), REVERT), {
+    requiresConfirmation: false,
+  });
+});
+
+test("revert copy uses singular forms for one edit and one step", () => {
+  const impact = structuralImpact(deepFreeze(snapshot(1, 0, COLLAPSE_STEP)), REVERT);
+  assert.equal(
+    impact.message,
+    "Revert to the original model? This clears 1 manual edit and 1 structural step, "
+      + "and can't be undone.",
+  );
+});
+
+test("set reference confirms like the other structural refits", () => {
+  const current = snapshot(2);
+  current.selection.region = [1];
+  deepFreeze(current);
+  const impact = structuralImpact(current, {
+    name: "set reference and refit",
+    path: "/set_reference",
+    payload: { term: "region", level: "B", method: "auto" },
+  });
+  assert.equal(impact.operationTitle, "Set reference");
+  assert.equal(
+    impact.message,
+    "Set reference B in region? This refit clears 2 manual edit history entries.",
+  );
+  assert.deepEqual(structuralImpact(deepFreeze(snapshot(0)), {
+    name: "set reference and refit",
+    path: "/set_reference",
+    payload: { term: "region", level: "B", method: "auto" },
+  }), { requiresConfirmation: false });
+});

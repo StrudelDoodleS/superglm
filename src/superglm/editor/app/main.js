@@ -31,6 +31,8 @@ import {
   showDistributionProfileDialog,
   runOffsetRefit,
   restoreTransition,
+  revertTransition,
+  setReferenceTransition,
   ungroupTransition
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
@@ -46,6 +48,8 @@ import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 const appBar = document.getElementById("appBar");
 const undoAction = document.getElementById("undoAction");
 const redoAction = document.getElementById("redoAction");
+const revertAction = document.getElementById("revertAction");
+const refreshAction = document.getElementById("refreshAction");
 const appShell = document.querySelector(".app-shell");
 const appBusyOverlay = document.getElementById("appBusyOverlay");
 const appBusyAnnouncement = document.getElementById("appBusyAnnouncement");
@@ -69,6 +73,7 @@ const selectionMenu = document.getElementById("selectionMenu");
 const termSelect = document.getElementById("term");
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
+const termReference = document.getElementById("termReference");
 const inspectorToggle = document.getElementById("inspectorToggle");
 const inspectorNode = document.getElementById("inspector");
 const inspectorClose = document.getElementById("inspectorClose");
@@ -99,7 +104,8 @@ const exportStatus = document.getElementById("exportStatus");
 const exportFormatInputs = [...document.querySelectorAll('input[name="exportFormat"]')];
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
-const uncollapseLevels = document.getElementById("uncollapseLevels");
+const setReference = document.getElementById("setReference");
+const restoreStructure = document.getElementById("restoreStructure");
 const structuralConfirmDialog = document.getElementById("structuralConfirmDialog");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
@@ -180,10 +186,24 @@ bindAppBar({
   root: appBar,
   undoButton: undoAction,
   redoButton: redoAction,
+  revertButton: revertAction,
+  refreshButton: refreshAction,
   onView: showView,
   onUndo: undo,
-  onRedo: redo
+  onRedo: redo,
+  onRevert: () => runStructuralRefit(revertTransition()),
+  onRefresh: refreshFromPython
 });
+
+async function refreshFromPython() {
+  const result = await actions.refreshFromPython();
+  if (result.ok) {
+    statusNode.textContent = `Synced with Python · revision ${result.snapshot.model_revision}`;
+  } else if (!result.skipped) {
+    statusNode.textContent = result.error.message;
+    statusNode.style.color = "#b42318";
+  }
+}
 
 const chartContext = {
   svg,
@@ -370,7 +390,6 @@ function summaryNodes() {
     profileTraceTable,
     collapseLevels,
     ungroupLevels,
-    uncollapseLevels,
     summaryStatus,
     summaryNote,
     summaryFrame
@@ -743,7 +762,7 @@ function renderChartWorkspace() {
   drawChart(term, selection, chartContext);
   const collapsedOriginalNote = selectionContextNote(term);
   renderContextBar(
-    { kindNode: termKind, edfNode: termEdf, statusNode },
+    { kindNode: termKind, edfNode: termEdf, referenceNode: termReference, statusNode },
     { name: selected, term, selectionSize: selection.size, note: collapsedOriginalNote }
   );
 }
@@ -851,15 +870,29 @@ function selectAppBarRenderState(state) {
     ),
     canRedo: Boolean(
       selectedTerm && snapshot?.history.redo.some((record) => record.term === selectedTerm)
-    )
+    ),
+    canRevert: Boolean(
+      snapshot &&
+      (snapshot.history.active.length + snapshot.history.redo.length > 0 ||
+        snapshot.structure_history.depth > 0)
+    ),
+    busy: state.request.mutation.status === "running"
   };
+}
+
+function renderRestoreAction(history) {
+  if (!history) return;
+  restoreStructure.hidden = history.depth === 0;
+  restoreStructure.dataset.popoverBody = history.last ? `Undo: ${history.last.label}` : "";
 }
 
 function sameAppBarRenderState(next, previous) {
   return next.ready === previous.ready &&
     next.activeView === previous.activeView &&
     next.canUndo === previous.canUndo &&
-    next.canRedo === previous.canRedo;
+    next.canRedo === previous.canRedo &&
+    next.canRevert === previous.canRevert &&
+    next.busy === previous.busy;
 }
 
 function renderAppBarState(state) {
@@ -869,8 +902,12 @@ function renderAppBarState(state) {
     activeView: state.activeView,
     undoButton: undoAction,
     redoButton: redoAction,
+    revertButton: revertAction,
+    refreshButton: refreshAction,
     canUndo: state.canUndo,
-    canRedo: state.canRedo
+    canRedo: state.canRedo,
+    canRevert: state.canRevert,
+    busy: state.busy
   });
 }
 
@@ -910,7 +947,7 @@ function renderSelectionState({ termName, indices }) {
   updateChartSelection(term, selection, chartContext);
   updateCollapseAction(term, selection);
   renderContextBar(
-    { kindNode: termKind, edfNode: termEdf, statusNode },
+    { kindNode: termKind, edfNode: termEdf, referenceNode: termReference, statusNode },
     {
       name: termName,
       term,
@@ -1128,7 +1165,6 @@ function updateGroupDisplayControl(term) {
 }
 
 function updateCollapseAction(term, selection) {
-  const snapshot = store.getState().remote.snapshot;
   const type = term.term_type || term.kind || "";
   const isLevelTerm = type === "categorical" || type === "ordered categorical";
   if (collapseLevels) {
@@ -1137,9 +1173,24 @@ function updateCollapseAction(term, selection) {
   if (ungroupLevels) {
     ungroupLevels.hidden = !(isLevelTerm && selectionTouchesCollapsedGroup(term, selection));
   }
-  if (uncollapseLevels) {
-    uncollapseLevels.hidden = snapshot.structure_history.depth === 0;
+  if (setReference) {
+    const label = isLevelTerm ? selectedLevelLabel(term, selection) : null;
+    setReference.hidden = label === null || label === term.reference?.level;
   }
+}
+
+// One displayed level: a single source level, or one whole collapsed group.
+function selectedLevelLabel(term, selection) {
+  if (selection.size === 1) {
+    const [index] = selection;
+    return term.levels?.[index] ?? null;
+  }
+  const groups = Array.isArray(term.level_groups) ? term.level_groups : [];
+  const group = groups.find((candidate) =>
+    candidate.indices.length === selection.size &&
+    candidate.indices.every((index) => selection.has(Number(index)))
+  );
+  return group ? group.label : null;
 }
 
 function selectionTouchesCollapsedGroup(term, selection) {
@@ -1457,11 +1508,18 @@ if (ungroupLevels) {
     await runStructuralRefit(ungroupTransition(selectedTerm()));
   });
 }
-if (uncollapseLevels) {
-  uncollapseLevels.addEventListener("click", async () => {
-    await runStructuralRefit(restoreTransition());
+if (setReference) {
+  setReference.addEventListener("click", async () => {
+    const term = currentTerm();
+    const label = term ? selectedLevelLabel(term, currentSelection()) : null;
+    if (label === null) return;
+    await runStructuralRefit(setReferenceTransition(selectedTerm(), label));
   });
 }
+restoreStructure.addEventListener("click", async () => {
+  await runStructuralRefit(restoreTransition());
+});
+
 
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
 store.subscribe(
@@ -1471,6 +1529,7 @@ store.subscribe(
 );
 store.subscribe(selectHistoryRenderState, renderHistoryState, sameHistoryRenderState);
 store.subscribe(selectAppBarRenderState, renderAppBarState, sameAppBarRenderState);
+store.subscribe((state) => state.remote.snapshot?.structure_history ?? null, renderRestoreAction);
 store.subscribe(
   selectActiveViewRenderState,
   renderActiveViewState,

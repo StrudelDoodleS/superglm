@@ -18,7 +18,15 @@ const OPERATION_TITLES = Object.freeze({
   "collapse levels": "Collapse levels",
   "ungroup levels": "Ungroup levels",
   "restore previous structure": "Restore previous structure",
+  "set reference and refit": "Set reference",
+  "transform and refit": "Transform",
+  "revert to original model": "Revert to original model",
 });
+
+/** @param {number} count @param {string} noun */
+function counted(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
 
 /**
  * Copy the user-visible impact of a structural refit from an authoritative snapshot.
@@ -29,7 +37,11 @@ const OPERATION_TITLES = Object.freeze({
  */
 export function structuralImpact(snapshot, operation) {
   const historyCount = snapshot.history.active.length + snapshot.history.redo.length;
-  if (historyCount === 0) return { requiresConfirmation: false };
+  const structureDepth = snapshot.structure_history.depth;
+  const isRevert = operation.name === "revert to original model";
+  if (historyCount + (isRevert ? structureDepth : 0) === 0) {
+    return { requiresConfirmation: false };
+  }
 
   const selectedTerm = snapshot.selected_term;
   const levels = snapshot.terms[selectedTerm]?.levels || [];
@@ -45,13 +57,18 @@ export function structuralImpact(snapshot, operation) {
     ? `Restore the model before "${snapshot.structure_history.last?.label}"?`
     : `${operationTitle}${labelCopy} in ${selectedTerm}?`;
 
+  const message = isRevert
+    ? `Revert to the original model? This clears ${counted(historyCount, "manual edit")} and `
+      + `${counted(structureDepth, "structural step")}, and can't be undone.`
+    : `${question} This refit clears ${historyCount} manual edit history ${historyNoun}.`;
+
   return {
     requiresConfirmation: true,
     historyCount,
     selectedTerm,
     selectedLabels,
     operationTitle,
-    message: `${question} This refit clears ${historyCount} manual edit history ${historyNoun}.`,
+    message,
   };
 }
 

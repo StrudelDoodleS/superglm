@@ -5,11 +5,18 @@
  * @param {HTMLElement} options.root
  * @param {HTMLButtonElement} options.undoButton
  * @param {HTMLButtonElement} options.redoButton
+ * @param {HTMLButtonElement} options.revertButton
+ * @param {HTMLButtonElement} options.refreshButton
  * @param {(view:string)=>unknown} options.onView
  * @param {()=>unknown} options.onUndo
  * @param {()=>unknown} options.onRedo
+ * @param {()=>unknown} options.onRevert
+ * @param {()=>unknown} options.onRefresh
  */
-export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRedo }) {
+export function bindAppBar({
+  root, undoButton, redoButton, revertButton, refreshButton,
+  onView, onUndo, onRedo, onRevert, onRefresh,
+}) {
   const tabs = Array.from(root.querySelectorAll('[role="tab"]')).filter(
     (tab) => tab instanceof HTMLButtonElement,
   );
@@ -60,6 +67,8 @@ export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRed
   root.addEventListener("keydown", onTabKeyDown);
   undoButton.addEventListener("click", onUndo);
   redoButton.addEventListener("click", onRedo);
+  revertButton.addEventListener("click", onRevert);
+  refreshButton.addEventListener("click", onRefresh);
   document.addEventListener("keydown", onDocumentKeyDown);
 
   return Object.freeze({
@@ -68,6 +77,8 @@ export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRed
       root.removeEventListener("keydown", onTabKeyDown);
       undoButton.removeEventListener("click", onUndo);
       redoButton.removeEventListener("click", onRedo);
+      revertButton.removeEventListener("click", onRevert);
+      refreshButton.removeEventListener("click", onRefresh);
       document.removeEventListener("keydown", onDocumentKeyDown);
     },
   });
@@ -79,10 +90,17 @@ export function bindAppBar({ root, undoButton, redoButton, onView, onUndo, onRed
  * @param {string} options.activeView
  * @param {HTMLButtonElement} options.undoButton
  * @param {HTMLButtonElement} options.redoButton
+ * @param {HTMLButtonElement} options.revertButton
+ * @param {HTMLButtonElement} options.refreshButton
  * @param {boolean} options.canUndo
  * @param {boolean} options.canRedo
+ * @param {boolean} options.canRevert
+ * @param {boolean} options.busy
  */
-export function renderAppBar({ root, activeView, undoButton, redoButton, canUndo, canRedo }) {
+export function renderAppBar({
+  root, activeView, undoButton, redoButton, revertButton, refreshButton,
+  canUndo, canRedo, canRevert, busy,
+}) {
   for (const element of root.querySelectorAll('[role="tab"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
     const active = element.dataset.view === activeView;
@@ -92,6 +110,8 @@ export function renderAppBar({ root, activeView, undoButton, redoButton, canUndo
   }
   undoButton.disabled = !canUndo;
   redoButton.disabled = !canRedo;
+  revertButton.disabled = !canRevert;
+  refreshButton.disabled = busy;
 }
 
 /** @param {EventTarget | null} target */

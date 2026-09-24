@@ -48,6 +48,27 @@
         aria-keyshortcuts="Control+Y Control+Shift+Z Meta+Shift+Z"
         data-popover-title="Redo"
         data-popover-body="Restore the most recently undone edit." disabled>Redo</button>
+      <button id="revertAction" class="icon-button" type="button"
+        aria-label="Revert to original model" data-popover-title="Revert to original model"
+        data-popover-body="Go back to the model the editor was opened with. Clears every edit and structural step."
+        disabled>
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M19 5h-7.5a5.5 5.5 0 0 0-5.5 5.5V16"></path>
+          <path d="m2.5 12.5 3.5 3.5 3.5-3.5"></path>
+          <path d="M3 20h18"></path>
+        </svg>
+      </button>
+      <button id="refreshAction" class="icon-button" type="button"
+        aria-label="Refresh from Python" data-popover-title="Refresh from Python"
+        data-popover-body="Re-read the Python session and redraw. Use it after changing the session in the notebook. Nothing refits."
+        disabled>
+        <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 12a8 8 0 0 1 8-8 8.6 8.6 0 0 1 6 2.5L20 8.5"></path>
+          <path d="M20 4v4.5h-4.5"></path>
+          <path d="M20 12a8 8 0 0 1-8 8 8.6 8.6 0 0 1-6-2.5L4 15.5"></path>
+          <path d="M8.5 15.5H4V20"></path>
+        </svg>
+      </button>
       <button id="exportAction" class="icon-button" type="button"
         aria-label="Export model or workbook" data-popover-title="Export"
         data-popover-body="Download a validated Python model or Excel rating workbook.">
@@ -64,6 +85,7 @@
     <label class="context-term">Term <select id="term"></select></label>
     <span id="termKind" class="context-chip"></span>
     <span id="termEdf" class="context-chip"></span>
+    <span id="termReference" class="context-chip" hidden></span>
     <label id="groupDisplayWrap" class="toolbar-field group-display-toggle">
       <span>Groups</span>
       <select id="groupDisplayMode">
@@ -88,6 +110,14 @@
     <button id="resetZoom" type="button">Home</button>
     <button id="resetOrder" type="button" data-op="reset_order" hidden>Reset order</button>
     <button type="button" data-op="reset">Reset</button>
+    <button id="restoreStructure" class="icon-button action-bar-end" type="button"
+      aria-label="Restore previous structure" data-popover-title="Restore previous structure"
+      data-popover-body="" hidden>
+      <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 12a8 8 0 1 0 8-8 8.6 8.6 0 0 0-6 2.5L4 8.5"></path>
+        <path d="M4 4v4.5h4.5"></path>
+      </svg>
+    </button>
   </div>
   <div class="main editor-workspace">
     <nav id="toolRail" class="tool-rail" aria-label="Chart tools">
@@ -246,13 +276,12 @@
             <path d="m9 13 3 3 3-3"></path>
           </svg>
         </button>
-        <button id="uncollapseLevels" class="selection-item"
-          data-help-operation="uncollapse_levels" type="button" aria-label="Restore collapse" hidden>
+        <button id="setReference" class="selection-item"
+          data-help-operation="set_reference" type="button" aria-label="Set reference and refit" hidden>
           <svg class="selection-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7 7h10"></path><path d="M7 17h10"></path>
-            <path d="M10 7v10"></path><path d="M14 7v10"></path>
-            <path d="M5 12h4"></path><path d="m7 10-2 2 2 2"></path>
-            <path d="M19 12h-4"></path><path d="m17 10 2 2-2 2"></path>
+            <path d="M12 18c-3-3.2-4.5-5.8-4.5-8a4.5 4.5 0 0 1 9 0c0 2.2-1.5 4.8-4.5 8z"></path>
+            <circle cx="12" cy="10" r="1.5"></circle>
+            <path d="M5 20h14"></path>
           </svg>
         </button>
         </div>

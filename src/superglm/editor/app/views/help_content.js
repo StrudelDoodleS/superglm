@@ -91,9 +91,26 @@ export const OPERATION_HELP = Object.freeze({
     title: "Ungroup and refit",
     body: "Separate the selected grouped levels and refit the model.",
   }),
-  uncollapse_levels: Object.freeze({
-    title: "Restore collapse",
-    body: "Restore the model state from before the last collapse.",
+  set_reference: Object.freeze({
+    title: "Set reference and refit",
+    body:
+      "Pin the selected level as the reference (relativity 1.00) and refit. Predictions stay the same unless a selection penalty is on.",
+  }),
+});
+
+/** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
+export const STRUCTURE_HELP = Object.freeze({
+  restore_structure: Object.freeze({
+    title: "Restore previous structure",
+    body: "Undo the latest collapse, ungroup, transform or reference change.",
+  }),
+  revert_to_original: Object.freeze({
+    title: "Revert to original model",
+    body: "Go back to the model the editor was opened with.",
+  }),
+  refresh_from_python: Object.freeze({
+    title: "Refresh from Python",
+    body: "Re-read the Python session after changing it in the notebook.",
   }),
 });
 
@@ -125,6 +142,10 @@ export const HELP_SECTIONS = Object.freeze([
   Object.freeze({
     title: "Selection operations",
     keys: Object.freeze(Object.keys(OPERATION_HELP)),
+  }),
+  Object.freeze({
+    title: "Model structure",
+    keys: Object.freeze(Object.keys(STRUCTURE_HELP)),
   }),
   Object.freeze({
     title: "Navigation",

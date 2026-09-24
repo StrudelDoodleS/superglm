@@ -192,6 +192,22 @@ export function restoreTransition() {
   };
 }
 
+export function setReferenceTransition(term, level) {
+  return {
+    name: "set reference and refit",
+    path: "/set_reference",
+    payload: { term, level, method: "auto" }
+  };
+}
+
+export function revertTransition() {
+  return {
+    name: "revert to original model",
+    path: "/revert_to_original",
+    payload: {}
+  };
+}
+
 export function renderSummary(payload, nodes) {
   const { summaryStatus, summaryNote, summaryFrame } = nodes;
   updateDistributionProfileActions(payload, nodes);

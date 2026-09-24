@@ -249,6 +249,33 @@ export function createEditorActions({
     return { ok: false, error: normalizedError };
   }
 
+  /**
+   * Re-read the Python session without refitting. A notebook-side change may leave the
+   * revision equal while the selection or structure moved, so the snapshot is accepted at an
+   * equal revision and the visible evidence is re-requested at once.
+   *
+   * @returns {Promise<ActionResult>}
+   */
+  async function refreshFromPython() {
+    if (store.getState().request.mutation.status === "running") {
+      return skippedMutation("An editor mutation is already running.");
+    }
+    let candidate;
+    try {
+      candidate = await client.getState();
+    } catch (value) {
+      return { ok: false, error: normalizeError(value) };
+    }
+    if (!isEditorSnapshot(candidate)) {
+      return { ok: false, error: new Error("Python returned an editor state this page cannot read.") };
+    }
+    const snapshot = /** @type {EditorSnapshot} */ (candidate);
+    store.update((state) => commitRemote(state, snapshot));
+    void Promise.resolve(scheduleVisibleEvidence(snapshot.model_revision, { immediate: true }))
+      .catch(() => {});
+    return { ok: true, snapshot };
+  }
+
   /** @returns {Promise<EditorSnapshot>} */
   async function initialize() {
     const snapshot = /** @type {EditorSnapshot} */ (await client.getState());
@@ -596,6 +623,7 @@ export function createEditorActions({
 
   return {
     initialize,
+    refreshFromPython,
     executeSelectionMutation,
     executeStateMutation,
     executeStructuralMutation,

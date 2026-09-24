@@ -14,6 +14,8 @@ const {
   renderSummary,
   runDistributionProfile,
   restoreTransition,
+  revertTransition,
+  setReferenceTransition,
   runOffsetRefit,
   ungroupTransition
 } = await import(summaryModulePath);
@@ -186,6 +188,16 @@ test("structural transition descriptors are pure route descriptions", () => {
   assert.deepEqual(restoreTransition(), {
     name: "restore previous structure",
     path: "/restore_structure",
+    payload: {}
+  });
+  assert.deepEqual(setReferenceTransition("region", "B"), {
+    name: "set reference and refit",
+    path: "/set_reference",
+    payload: { term: "region", level: "B", method: "auto" }
+  });
+  assert.deepEqual(revertTransition(), {
+    name: "revert to original model",
+    path: "/revert_to_original",
     payload: {}
   });
 });

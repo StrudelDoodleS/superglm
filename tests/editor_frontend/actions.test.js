@@ -1614,8 +1614,84 @@ test("action module exposes only the controller factory, paint helper, and exact
     "initialize",
     "patchView",
     "refreshEvidence",
+    "refreshFromPython",
     "retryEvidence",
     "retryMutation",
     "schedulePanelEvidence"
   ]);
+});
+
+test("refreshFromPython commits an equal-revision snapshot and re-requests visible evidence", async () => {
+  const opened = snapshot(3);
+  const store = createEditorStore(createInitialEditorState(opened));
+  const refreshed = snapshot(3);
+  refreshed.selection.age = [];
+  refreshed.structure_history = {
+    depth: 1,
+    last: { operation: "collapse_levels", term: "age", label: "collapse A + B in age" }
+  };
+  /** @type {unknown[]} */
+  const scheduled = [];
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => { throw new Error("refresh must not post"); },
+      getState: async () => refreshed
+    },
+    scheduleVisibleEvidence: (revision, options) => { scheduled.push([revision, options]); }
+  });
+
+  const result = await actions.refreshFromPython();
+
+  assert.equal(result.ok, true);
+  assert.strictEqual(store.getState().remote.snapshot, refreshed);
+  assert.deepEqual(selectCurrentSelection(store.getState()), []);
+  assert.deepEqual(scheduled, [[3, { immediate: true }]]);
+});
+
+test("refreshFromPython is skipped while a mutation is running", async () => {
+  const store = createEditorStore(createInitialEditorState(snapshot(3)));
+  store.update((state) => ({
+    ...state,
+    request: {
+      ...state.request,
+      mutation: { status: "running", operation: "shift", error: null, blocking: false }
+    }
+  }));
+  let stateCalls = 0;
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => ({}),
+      getState: async () => { stateCalls += 1; return snapshot(3); }
+    }
+  });
+
+  const result = await actions.refreshFromPython();
+
+  assert.equal(result.ok, false);
+  if (result.ok) assert.fail("refresh ran during a mutation");
+  assert.equal(result.skipped, true);
+  assert.equal(stateCalls, 0);
+});
+
+test("refreshFromPython leaves state unchanged on a malformed snapshot", async () => {
+  const opened = snapshot(3);
+  const store = createEditorStore(createInitialEditorState(opened));
+  const before = store.getState();
+  const actions = createEditorActions({
+    store,
+    client: {
+      postJSON: async () => ({}),
+      getState: async () => ({ model_revision: 3, terms: {} })
+    },
+    scheduleVisibleEvidence: () => { throw new Error("nothing to schedule"); }
+  });
+
+  const result = await actions.refreshFromPython();
+
+  assert.equal(result.ok, false);
+  if (result.ok) assert.fail("malformed snapshot unexpectedly refreshed");
+  assert.match(result.error.message, /cannot read/);
+  assert.strictEqual(store.getState(), before);
 });
