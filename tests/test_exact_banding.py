@@ -1,6 +1,7 @@
 """Tests for exact contiguous banding of a fitted curve."""
 
 import itertools
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -335,3 +336,32 @@ def test_payload_sweep_carries_the_settings(banded_model):
     )
     ages = payload.discretization_impact.query("feature == 'age'")
     assert ages["actual_bins"].tolist() == [df["age"].nunique()]
+
+
+def test_export_warns_when_the_cap_widens_the_limit(banded_model):
+    model, df, y, w = banded_model
+    with pytest.warns(UserWarning, match="widened"):
+        build_rating_table_payload(
+            model, df, y, sample_weight=w, n_bins=5, impact_bins=(), bin_strategy="exact"
+        )
+
+
+def test_export_is_quiet_when_the_limit_holds(banded_model):
+    model, df, y, w = banded_model
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        build_rating_table_payload(
+            model, df, y, sample_weight=w, n_bins=150, impact_bins=(), bin_strategy="exact"
+        )
+    assert not any("widened" in str(item.message) for item in caught)
+
+
+def test_impact_sheet_shows_the_band_limit(banded_model):
+    model, df, y, w = banded_model
+    with pytest.warns(UserWarning, match="widened"):
+        payload = build_rating_table_payload(
+            model, df, y, sample_weight=w, n_bins=5, impact_bins=(5,), bin_strategy="exact"
+        )
+    row = payload.discretization_impact.query("feature == 'age'").iloc[0]
+    assert row["band_tolerance_factor"] > 1.0
+    assert row["band_worst_error"] > 0.10

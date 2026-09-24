@@ -146,8 +146,9 @@ payload.discretization_impact[
 exposure is. It uses the fewest bands that keep every value's band average
 within one standard error of the fitted curve, and never more than 10% from it
 (`band_se=1.0`, `band_max_error=0.10`), with `n_bins` as the maximum. When the
-maximum is too small, the limit widens by the least factor that fits, and
-`discretization_impact(...).band_diagnostics` reports it.
+maximum is too small, the limit widens by the least factor that fits: the
+export warns, and the impact sheet's `band_*` columns and
+`discretization_impact(...).band_diagnostics` report it.
 
 `export_rating_tables` writes the same payload as an Excel workbook: one sheet
 of rating tables laid out side by side for a rater to key on, one for the

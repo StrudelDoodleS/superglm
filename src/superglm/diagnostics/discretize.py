@@ -788,6 +788,8 @@ def discretization_impact(
         the fewest bands that keep every value's band average within
         ``min(band_se * SE, log(1 + band_max_error))`` of the curve, then the
         least weighted squared error, with ``n_bins`` as the maximum band count.
+        When that is too few, every tolerance is widened by the least factor
+        that fits and ``band_diagnostics`` reports it.
         Geometry weight means replication mass under the frequency contract and
         unit physical-row mass for Tweedie.
     features : list[str], optional

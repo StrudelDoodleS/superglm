@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1754,6 +1755,20 @@ def _empty_impact_frame() -> pd.DataFrame:
     )
 
 
+def _warn_widened_bands(band_diagnostics: dict[str, dict[str, float]], n_bins: int) -> None:
+    """Say when ``bin_strategy="exact"`` could not hold its limit in ``n_bins`` bands."""
+    for name, diagnostics in band_diagnostics.items():
+        factor = diagnostics["tolerance_factor"]
+        if factor > 1.0:
+            warnings.warn(
+                f"bin_strategy='exact' could not keep {name!r} within its limit in "
+                f"{n_bins} bands, so the limit was widened {factor:.3g}x; the worst band "
+                f"error is {diagnostics['worst_error']:.1%}. Raise n_bins to keep the limit.",
+                UserWarning,
+                stacklevel=3,
+            )
+
+
 def _impact_sweep(
     model: SuperGLM,
     X: EagerFrame,
@@ -1812,6 +1827,10 @@ def _impact_sweep(
                 "actual_bins": int(len(table)),
             }
             row.update(result.metrics)
+            diagnostics = result.band_diagnostics.get(feature, {})
+            row.update(
+                {f"band_{key}": value for key, value in diagnostics.items() if key != "bands"}
+            )
             rows.append(row)
         # Beside the main-effect rows and in the same columns, because a
         # reader has to be able to see every block the workbook approximates
@@ -2150,7 +2169,9 @@ def build_rating_table_payload(
     ``bin_strategy="exact"`` bounds the banding error instead: ``n_bins`` caps
     the band count, and the fewest bands are placed that keep every band average
     within ``min(band_se * SE, log(1 + band_max_error))`` of the curve (defaults
-    1.0 and 0.10).  See ``discretization_impact``.
+    1.0 and 0.10).  When ``n_bins`` is too few, the limit is widened by the least
+    factor that fits, with a warning, and the impact sheet's ``band_*`` columns
+    record it.  See ``discretization_impact``.
 
     ``"ppform"`` emits the exact piecewise-polynomial form of the fitted curve
     instead: one row per knot interval carrying four coefficients.  A consumer
@@ -2419,6 +2440,8 @@ def build_rating_table_payload(
         if binned_continuous
         else None
     )
+    if selected is not None:
+        _warn_widened_bands(selected.band_diagnostics, n_bins)
 
     main_effects: list[RatingTableBlock] = []
     for name in model._feature_order:
@@ -2605,7 +2628,8 @@ def export_rating_tables(
     staying under it is not a route to an exact block -- see
     ``build_rating_table_payload``, where that is measured.
     ``bin_strategy="exact"`` bounds that error instead: every band average
-    stays within ``min(band_se * SE, log(1 + band_max_error))`` of the curve.
+    stays within ``min(band_se * SE, log(1 + band_max_error))`` of the curve,
+    unless ``n_bins`` is too few, in which case the limit widens with a warning.
 
     ``"ppform"`` writes the exact piecewise-polynomial form of the fitted
     curve: one row per knot interval carrying four coefficients.  A consumer
