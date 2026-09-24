@@ -1765,6 +1765,8 @@ def _impact_sweep(
     bin_strategy: str,
     features: list[str],
     exported_n_bins: int,
+    band_se: float,
+    band_max_error: float,
 ) -> pd.DataFrame:
     """One row per approximated block per swept resolution.
 
@@ -1799,6 +1801,8 @@ def _impact_sweep(
             n_bins=int(n_bins),
             bin_strategy=bin_strategy,
             features=features,
+            band_se=band_se,
+            band_max_error=band_max_error,
         )
         for feature, table in result.tables.items():
             row: dict[str, float | int | str] = {
@@ -1843,6 +1847,8 @@ def build_rating_table_payload(
     n_bins: int = 150,
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
+    band_se: float = 1.0,
+    band_max_error: float = 0.10,
     centering: str = "native",
     continuous_kind: str = "binned",
     allow_unbounded_extrapolation: bool = False,
@@ -2141,6 +2147,11 @@ def build_rating_table_payload(
     150 export as 29 interval rows.  So staying under the budget is not a route
     to an exact block; ``"ppform"`` is.
 
+    ``bin_strategy="exact"`` bounds the banding error instead: ``n_bins`` caps
+    the band count, and the fewest bands are placed that keep every band average
+    within ``min(band_se * SE, log(1 + band_max_error))`` of the curve (defaults
+    1.0 and 0.10).  See ``discretization_impact``.
+
     ``"ppform"`` emits the exact piecewise-polynomial form of the fitted curve
     instead: one row per knot interval carrying four coefficients.  A consumer
     reads both bounds back out of the interval key -- ``"[18.0,
@@ -2402,6 +2413,8 @@ def build_rating_table_payload(
             n_bins=n_bins,
             bin_strategy=bin_strategy,
             features=binned_continuous,
+            band_se=band_se,
+            band_max_error=band_max_error,
         )
         if binned_continuous
         else None
@@ -2503,6 +2516,8 @@ def build_rating_table_payload(
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
         exported_n_bins=int(n_bins),
+        band_se=band_se,
+        band_max_error=band_max_error,
         # Both lists, because both are approximated, and BOTH read off the
         # blocks that were built rather than re-derived from the specs -- so a
         # term the workbook carries exactly cannot be reported as approximated.
@@ -2548,6 +2563,8 @@ def export_rating_tables(
     n_bins: int = 150,
     impact_bins: tuple[int, ...] = (20, 50, 100, 200, 250),
     bin_strategy: str = "exposure_quantile",
+    band_se: float = 1.0,
+    band_max_error: float = 0.10,
     format: str | None = None,
     sheet_name: str = "Rating Tables",
     summary_sheet_name: str = "Model Summary",
@@ -2587,6 +2604,8 @@ def export_rating_tables(
     opens in the sparse tails.  ``n_bins`` is a budget rather than a target, and
     staying under it is not a route to an exact block -- see
     ``build_rating_table_payload``, where that is measured.
+    ``bin_strategy="exact"`` bounds that error instead: every band average
+    stays within ``min(band_se * SE, log(1 + band_max_error))`` of the curve.
 
     ``"ppform"`` writes the exact piecewise-polynomial form of the fitted
     curve: one row per knot interval carrying four coefficients.  A consumer
@@ -2659,6 +2678,8 @@ def export_rating_tables(
         n_bins=n_bins,
         impact_bins=impact_bins,
         bin_strategy=bin_strategy,
+        band_se=band_se,
+        band_max_error=band_max_error,
         centering=centering,
         continuous_kind=continuous_kind,
         allow_unbounded_extrapolation=allow_unbounded_extrapolation,

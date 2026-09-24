@@ -19,6 +19,7 @@ from superglm.diagnostics.exact_banding import (
 )
 from superglm.distributions import Poisson
 from superglm.export._ppform import extract_ppform
+from superglm.export.rating_tables import build_rating_table_payload
 
 _EPS = float(np.finfo(np.float64).eps)
 
@@ -299,3 +300,38 @@ def test_too_many_values_names_the_feature():
     model.fit(df, y)
     with pytest.raises(ValueError, match="'x' has .* distinct values"):
         model.discretization_impact(df, y, bin_strategy="exact")
+
+
+def test_payload_uses_the_exact_bands(banded_model):
+    model, df, y, w = banded_model
+    impact = model.discretization_impact(
+        df, y, sample_weight=w, n_bins=150, bin_strategy="exact", band_max_error=0.05
+    )
+    payload = build_rating_table_payload(
+        model,
+        df,
+        y,
+        sample_weight=w,
+        n_bins=150,
+        impact_bins=(),
+        bin_strategy="exact",
+        band_max_error=0.05,
+    )
+    block = next(b for b in payload.main_effects if b.name == "age")
+    assert len(block.table) == impact.band_diagnostics["age"]["bands"]
+
+
+def test_payload_sweep_carries_the_settings(banded_model):
+    model, df, y, w = banded_model
+    payload = build_rating_table_payload(
+        model,
+        df,
+        y,
+        sample_weight=w,
+        n_bins=150,
+        impact_bins=(150,),
+        bin_strategy="exact",
+        band_max_error=1e-12,
+    )
+    ages = payload.discretization_impact.query("feature == 'age'")
+    assert ages["actual_bins"].tolist() == [df["age"].nunique()]
