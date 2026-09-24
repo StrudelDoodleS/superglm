@@ -253,7 +253,9 @@ degree?: int, level_display}` and returns the existing structural envelope with
   structure"; its popover names the step it undoes, e.g. "Undo: transform MileageBand to
   piecewise". The palette's contextual Restore is removed.
 - **State.** The snapshot gains `structure_history: {depth, last: {operation, term, label} |
-  null}`, which drives the icon. `last_collapse` stays for existing consumers.
+  null}`, which drives the icon. It replaces `last_collapse` and `can_uncollapse_levels`, whose
+  only consumer was the old palette Restore. The widget's parallel info stack goes with them:
+  each step's information lives on its `StructuralStep` and on the refit model's stamp.
 - **Names.** The public session methods keep their names (`uncollapse_levels`,
   `can_uncollapse_levels`) with docstrings widened to "the previous structural step". The route
   becomes `POST /restore_structure`; the editor ships its own frontend, so no route alias is kept.
@@ -309,10 +311,12 @@ degree?: int, level_display}` and returns the existing structural envelope with
 
 ## 6. Errors and refusals
 
-- Browser-side checks are advisory; Python validation is authoritative. `ValueError`s raised by
-  spec construction or `build()` are re-raised as `EditorValueError` carrying the library's
-  message, so the analyst sees why (for example, a collapse group spanning a break). Internal
-  errors stay out of browser responses, per the existing policy.
+- Browser-side checks are advisory; Python validation is authoritative. The editor checks the
+  rules it can state itself (break positions, order and range; segment-degree counts and ranges;
+  polynomial degree; constraints) with its own intentional messages. `editor/errors.py` forbids
+  passing backend exception text to the browser, so any other `ValueError` from building or
+  fitting a transformed spec becomes one fixed message ("SuperGLM could not fit this shape…"),
+  chained to the original for Python callers.
 - A failed structural refit leaves the stack and the in-force model unchanged (the existing
   `try/except` pattern in the `replace_with_*` methods). The browser uses its existing recovery:
   reconcile from `/state`, then show an alert with Retry and Dismiss.
