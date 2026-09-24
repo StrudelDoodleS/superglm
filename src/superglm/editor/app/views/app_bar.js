@@ -1,5 +1,7 @@
 // @ts-check
 
+/** @typedef {import('../api/contracts.js').EditorSnapshot} EditorSnapshot */
+
 /**
  * @param {object} options
  * @param {HTMLElement} options.root
@@ -112,6 +114,17 @@ export function renderAppBar({
   redoButton.disabled = !canRedo;
   revertButton.disabled = !canRevert;
   refreshButton.disabled = busy;
+}
+
+/**
+ * Whether anything differs from the opened model: a manual edit, a structural
+ * step, or an in-force model replaced without either (a distribution re-profile).
+ * @param {EditorSnapshot} snapshot
+ */
+export function revertAvailable(snapshot) {
+  return snapshot.history.active.length + snapshot.history.redo.length > 0 ||
+    snapshot.structure_history.depth > 0 ||
+    !snapshot.in_force_is_original;
 }
 
 /** @param {EventTarget | null} target */

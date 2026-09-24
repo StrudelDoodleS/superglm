@@ -1,6 +1,10 @@
 import { requestJSON } from "./api.js";
 import { escapeHTML, fmt } from "./format.js";
 
+/** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
+/** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
+/** @typedef {import('./api/contracts.js').TransformTermRequest} TransformTermRequest */
+
 const PROFILE_ESTIMATE_LABELS = { p: "p_hat", theta: "theta_hat" };
 const summaryMarkupByFrame = new WeakMap();
 
@@ -184,6 +188,7 @@ export function ungroupTransition(term) {
   };
 }
 
+/** @returns {{name:string, path:string, payload:EmptyStructuralRequest}} */
 export function restoreTransition() {
   return {
     name: "restore previous structure",
@@ -192,6 +197,10 @@ export function restoreTransition() {
   };
 }
 
+/**
+ * @param {string} term @param {string} level
+ * @returns {{name:string, path:string, payload:SetReferenceRequest}}
+ */
 export function setReferenceTransition(term, level) {
   return {
     name: "set reference and refit",
@@ -200,6 +209,10 @@ export function setReferenceTransition(term, level) {
   };
 }
 
+/**
+ * @param {TransformTermRequest} payload
+ * @returns {{name:string, path:string, payload:TransformTermRequest}}
+ */
 export function transformTransition(payload) {
   return {
     name: "transform and refit",
@@ -208,6 +221,7 @@ export function transformTransition(payload) {
   };
 }
 
+/** @returns {{name:string, path:string, payload:EmptyStructuralRequest}} */
 export function revertTransition() {
   return {
     name: "revert to original model",

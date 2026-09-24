@@ -83,13 +83,17 @@ the selection palette. SuperGLM refits the model with that level as the referenc
 ## Give a Term a Shape with Breaks
 
 Breaks mode (shortcut `B`) replaces a term's curve with a simpler shape that you place by hand. It
-works on ordered categorical terms and numeric terms.
+works on ordered categorical terms and on numeric terms drawn as a curve.
 
 - Click inside the plot to add a break. Drag a break to move it; click the × on its label to
   remove it.
 - With a break focused, the arrow keys move it one step and Delete removes it.
 - On an ordered term, breaks sit on bands, never on the first or last band.
+- On an ordered term with collapsed groups, Breaks mode shows every band, because a break sits on
+  one band.
+- A band with a break on it cannot be collapsed into a group. Remove or move the break first.
 - On a numeric term, breaks sit strictly inside the fitted range.
+- A linear term is drawn as a single point, so it has no axis to place breaks on.
 
 Choose the form in the action bar:
 
@@ -112,8 +116,9 @@ Collapse, ungroup, set reference and transform each add one step to a single his
 step. It shows whenever there is a step to undo, and its popover names that step.
 
 **Revert to original model**, in the application bar next to Undo and Redo, goes back to the model
-the editor was opened with. It clears every manual edit and every structural step, so it always
-asks first and cannot be undone.
+the editor was opened with, which also undoes a distribution re-profile. It clears every manual
+edit and every structural step and cannot be undone, so it asks first whenever there is an edit or
+a step to lose.
 
 ## Refresh from Python
 

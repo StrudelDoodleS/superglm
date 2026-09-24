@@ -38,6 +38,11 @@ function numericTerm() {
   return { term_type: "spline", levels: null, x, transform: { axis: null, piecewise: null } };
 }
 
+function yearsTerm() {
+  const x = Array.from({ length: 201 }, (_, i) => 1990 + i * 0.15);
+  return { term_type: "spline", levels: null, x, transform: { axis: null, piecewise: null } };
+}
+
 function draft(breaks, degrees, form = "piecewise") {
   return { form, breaks, degrees, degree: 3 };
 }
@@ -50,9 +55,9 @@ test("snapBreak on an ordered term picks the nearest interior band", () => {
   assert.equal(snapBreak(term, -3), "B2");
 });
 
-test("snapBreak on a numeric term rounds to three significant figures strictly inside the range", () => {
+test("snapBreak on a numeric term rounds to three significant figures of the span, inside it", () => {
   const term = numericTerm();
-  assert.equal(snapBreak(term, 3.14159), 3.14);
+  assert.equal(snapBreak(term, 3.14159), 3.1);
   assert.equal(snapBreak(term, -1), null);
   assert.equal(snapBreak(term, 0), null);
   assert.equal(snapBreak(term, 10), null);
@@ -64,7 +69,7 @@ test("breakX maps a band to its axis position and a value to itself", () => {
   assert.equal(breakX(numericTerm(), 2.5), 2.5);
 });
 
-test("addBreak keeps breaks sorted, splits the segment and copies its degree", () => {
+test("addBreak keeps breaks sorted, splits the segment and copies its degree within the cap", () => {
   const term = orderedTerm();
   let current = initialDraft(term);
   assert.deepEqual(current, { form: "piecewise", breaks: [], degrees: [1], degree: 3 });
@@ -77,7 +82,8 @@ test("addBreak keeps breaks sorted, splits the segment and copies its degree", (
   const quadraticLast = { ...current, degrees: [1, 1, 2] };
   const split = addBreak(term, quadraticLast, "B7");
   assert.deepEqual(split.breaks, ["B3", "B5", "B7"]);
-  assert.deepEqual(split.degrees, [1, 1, 2, 2]);
+  // B7 to B8 spans one band, so that half can only be linear.
+  assert.deepEqual(split.degrees, [1, 1, 2, 1]);
   const flatFirst = { ...current, degrees: [0, 1, 1] };
   const splitFlat = addBreak(term, flatFirst, "B2");
   assert.deepEqual(splitFlat.breaks, ["B2", "B3", "B5"]);
@@ -111,15 +117,30 @@ test("moveBreak never crosses or lands on a neighbour", () => {
   assert.deepEqual(moveBreak(numeric, values, 0, 3).breaks, [3, 5]);
 });
 
-test("stepBreak moves one band or one display-grid step", () => {
+test("stepBreak moves one band or one grid step", () => {
   const term = orderedTerm();
   assert.equal(stepBreak(term, "B3", 1), "B4");
   assert.equal(stepBreak(term, "B3", -1), "B2");
   assert.equal(stepBreak(term, "B2", -1), null);
   assert.equal(stepBreak(term, "B7", 1), null);
   const numeric = numericTerm();
-  assert.equal(stepBreak(numeric, 3, 1), 3.05);
+  assert.equal(stepBreak(numeric, 3, 1), 3.1);
   assert.equal(stepBreak(numeric, 0.05, -1), null);
+});
+
+test("an offset numeric axis keeps a grid step between breaks, not only round values", () => {
+  const years = yearsTerm();
+  assert.equal(snapBreak(years, 2003.14159), 2003.1);
+  assert.equal(snapBreak(years, 2003), 2003);
+  assert.equal(stepBreak(years, 2003, 1), 2003.1);
+  assert.equal(stepBreak(years, 2003.1, -1), 2003);
+  assert.equal(snapBreak({ ...years, x: [10000, 40000] }, 12345), 12300);
+});
+
+test("moving a break lowers a segment degree its new span can't hold", () => {
+  const moved = moveBreak(orderedTerm(), draft(["B4"], [3, 3]), 0, "B2");
+  assert.deepEqual(moved.breaks, ["B2"]);
+  assert.deepEqual(moved.degrees, [1, 3]);
 });
 
 test("removeBreak merges the two segments at the higher degree", () => {

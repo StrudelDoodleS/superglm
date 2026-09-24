@@ -14,6 +14,7 @@ import pytest
 from superglm import (
     Categorical,
     Constraint,
+    LambdaPolicy,
     Numeric,
     OrderedCategorical,
     Piecewise,
@@ -22,7 +23,7 @@ from superglm import (
     SuperGLM,
 )
 from superglm.editor import EditorSession
-from superglm.editor.errors import EditorValueError
+from superglm.editor.errors import EditorTypeError, EditorValueError
 from superglm.editor.payloads import session_payload
 from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
@@ -94,6 +95,28 @@ def test_state_publishes_the_structure_history(region_model):
         restored = widget._restore_structure()
         assert restored["timing"]["operation"] == "restore_structure"
         assert restored["state"]["structure_history"]["depth"] == 0
+    finally:
+        widget.close()
+
+
+def test_state_says_when_the_in_force_model_is_not_the_opened_one(region_model, monkeypatch):
+    model, _ = region_model
+
+    def fit_instead_of_profiling(self, X, y, sample_weight=None, offset=None, **kwargs):
+        self.fit(X, y, sample_weight=sample_weight, offset=offset)
+
+    monkeypatch.setattr(type(model), "estimate_p", fit_instead_of_profiling)
+    session = EditorSession.from_model(model, terms=["region"])
+    widget = EditorWidget(session)
+    try:
+        assert widget._state()["in_force_is_original"] is True
+        session.reprofile_distribution("tweedie_p")
+        state = widget._state()
+        # A re-profile replaces the in-force model and clears both histories:
+        # only this fact leaves Revert something to do.
+        assert state["structure_history"]["depth"] == 0 and state["history"]["active"] == []
+        assert state["in_force_is_original"] is False
+        assert widget._revert_to_original()["state"]["in_force_is_original"] is True
     finally:
         widget.close()
 
@@ -190,6 +213,23 @@ def test_set_reference_on_a_grouped_member_pins_its_group(region_model):
     assert session.model._specs["region"]._base_level == "B+C"
 
 
+@pytest.mark.parametrize(
+    ("fixture", "term", "members"),
+    [("region_model", "region", ["B", "C"]), ("banded", "band", ["B4", "B5"])],
+    ids=["categorical", "ordered"],
+)
+def test_set_reference_on_a_group_label_pins_the_group(request, fixture, term, members):
+    model = request.getfixturevalue(fixture)[0]
+    session = EditorSession.from_model(model, terms=[term])
+    session.select_levels(term, members)
+    session.replace_with_collapsed_levels(term, method="fit")
+    # A click on a group in the Collapsed display, or a selection of all its
+    # members, sends the group's own label.
+    label = "+".join(members)
+    session.replace_with_reference_level(term, label, method="fit")
+    assert session.model._specs[term]._base_level == label
+
+
 def test_a_pinned_reference_survives_a_later_collapse(region_model):
     model, _ = region_model
     session = EditorSession.from_model(model, terms=["region"])
@@ -233,9 +273,10 @@ def test_set_reference_refuses_a_term_used_by_an_interaction(region_model):
     assert session.structure_history == []
 
 
-def test_payload_reports_the_reference_and_reanchors_the_original_line(region_model):
+@pytest.mark.parametrize("centering", ["native", "mean"])
+def test_payload_reports_the_reference_and_reanchors_the_original_line(region_model, centering):
     model, _ = region_model
-    session = EditorSession.from_model(model, terms=["region", "x"])
+    session = EditorSession.from_model(model, terms=["region", "x"], centering=centering)
     payload = session_payload(session)
     assert payload["region"]["reference"] == {"level": "A", "policy": "first"}
     assert payload["x"]["reference"] is None
@@ -245,6 +286,18 @@ def test_payload_reports_the_reference_and_reanchors_the_original_line(region_mo
     # A pure reparametrisation: the opened model's curve, re-expressed against
     # the new reference, is the current curve.
     np.testing.assert_allclose(region["original_y"], region["y"], rtol=10 * model._tol)
+
+
+def test_a_mean_centred_original_line_stays_put_for_an_untouched_term(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"], centering="mean")
+    opened = session_payload(session)["region"]["original_y"]
+    session.replace_with_transformed_term("x", form="polynomial", breaks=[], degree=2, method="fit")
+    # A mean-centred curve has no reference to anchor at: the untouched term's
+    # original line (and the impact read from it) is still the opened model's.
+    np.testing.assert_allclose(
+        session_payload(session)["region"]["original_y"], opened, rtol=10 * model._tol
+    )
 
 
 def test_widget_http_set_reference_returns_transition_envelope(region_model):
@@ -385,6 +438,32 @@ def test_transform_keeps_the_base_specials_grouping_and_extrapolation(banded):
     assert x.extrapolation == "extend"
 
 
+def test_transform_carries_a_numeric_sources_boundary_policy_and_pins(banded):
+    _, X, y = banded
+
+    def opened(x_spec):
+        model = SuperGLM(
+            family="gaussian", selection_penalty=0.0, spline_penalty=0.1, features={"x": x_spec}
+        )
+        # A lambda policy is a REML setting; each refit below inherits fit_reml.
+        model.fit_reml(X, y)
+        return EditorSession.from_model(model, terms=["x"])
+
+    policy = LambdaPolicy.fixed(2.0)
+    session = opened(Spline(n_knots=8, boundary=(-1.0, 11.0), lambda_policy=policy))
+    session.replace_with_transformed_term("x", form="spline", breaks=[3.0, 6.5])
+    knotted = session.model._specs["x"]
+    assert (knotted._explicit_boundary, knotted._lambda_policy) == ((-1.0, 11.0), policy)
+
+    session = opened(Piecewise(breaks=[5.0], lower=-1.0, upper=11.0, base=5.0))
+    session.replace_with_transformed_term("x", form="piecewise", breaks=[3.0, 5.0, 6.5])
+    moved = session.model._specs["x"]
+    assert (moved.lower, moved.upper, moved.base) == (-1.0, 11.0, 5.0)
+    # With no knot left at 5.0 the pinned base has nothing to name: the default applies.
+    session.replace_with_transformed_term("x", form="piecewise", breaks=[3.0, 6.5])
+    assert session.model._specs["x"].base == "most_exposed"
+
+
 INVALID_REQUESTS = [
     ("x", dict(form="piecewise", breaks=[11.0]), "inside the fitted range"),
     ("x", dict(form="piecewise", breaks=[5.0, 5.0]), "strictly increasing"),
@@ -418,6 +497,40 @@ def test_transform_refuses_invalid_requests_without_changing_anything(
     assert session.model is model
     assert session.model_revision == revision
     assert session.structure_history == []
+
+
+def test_a_linear_term_has_no_axis_to_place_breaks_on(region_model):
+    _, X = region_model
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first"), "x": Numeric()},
+    )
+    model.fit(X, region_model[0]._fit_y_ref)
+    session = EditorSession.from_model(model, terms=["x"])
+    # A linear term is drawn as one point, so the Breaks tool stays off for it.
+    assert session_payload(session)["x"]["transform"] is None
+    with pytest.raises(EditorTypeError, match="ordered or numeric axis"):
+        session.replace_with_transformed_term("x", form="piecewise", breaks=[5.0], method="fit")
+    assert session.model is model
+    assert session.structure_history == []
+
+
+@pytest.mark.parametrize("form", ["piecewise", "spline"])
+def test_a_group_that_takes_in_a_break_is_refused_in_words(banded, form):
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=["band"])
+    session.replace_with_transformed_term("band", form=form, breaks=["B3", "B6"], method="fit")
+    transformed = session.model
+    session.select_levels("band", ["B2", "B3", "B4"])
+    with pytest.raises(EditorValueError, match="break at 'B3'"):
+        session.replace_with_collapsed_levels("band", method="fit")
+    assert session.model is transformed
+    assert len(session.structure_history) == 1
+    # A group within one segment stays allowed.
+    session.select_levels("band", ["B4", "B5"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    assert len(session.structure_history) == 2
 
 
 def test_a_shape_the_library_refuses_reaches_the_analyst_as_a_fixed_message(banded):

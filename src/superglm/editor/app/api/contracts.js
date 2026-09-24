@@ -49,6 +49,27 @@
  * @property {number} degree
  */
 /**
+ * The /transform_term request: degrees only for a piecewise draft on bands, a
+ * degree only for a polynomial.
+ * @typedef {Object} TransformTermRequest
+ * @property {string} term
+ * @property {BreakForm} form
+ * @property {Array<string|number>} breaks
+ * @property {number[]} [degrees]
+ * @property {number} [degree]
+ */
+/**
+ * The /set_reference request: a displayed level, which may be a group label.
+ * @typedef {Object} SetReferenceRequest
+ * @property {string} term
+ * @property {string} level
+ * @property {string} method
+ */
+/**
+ * The /revert_to_original and /restore_structure requests carry no fields.
+ * @typedef {Record<string, never>} EmptyStructuralRequest
+ */
+/**
  * @typedef {Object} TermTransform
  * @property {string[]|null} axis
  * @property {{breaks:Array<string|number>, degrees:number[]}|null} piecewise
@@ -85,6 +106,7 @@
  * @property {Record<string, number[]>} selection
  * @property {StructureHistory} structure_history
  * @property {EditorHistory} history
+ * @property {boolean} in_force_is_original
  */
 /**
  * @typedef {Object} StructuralTransitionTiming

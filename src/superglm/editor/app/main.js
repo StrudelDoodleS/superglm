@@ -45,7 +45,7 @@ import {
   ungroupTransition
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
-import { bindAppBar, renderAppBar } from "./views/app_bar.js";
+import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { bindBreaksControls, renderBreaksControls } from "./views/breaks_controls.js";
 import { renderContextBar } from "./views/context_bar.js";
 import { bindExportDialog } from "./views/export_dialog.js";
@@ -944,11 +944,7 @@ function selectAppBarRenderState(state) {
     canRedo: Boolean(
       selectedTerm && snapshot?.history.redo.some((record) => record.term === selectedTerm)
     ),
-    canRevert: Boolean(
-      snapshot &&
-      (snapshot.history.active.length + snapshot.history.redo.length > 0 ||
-        snapshot.structure_history.depth > 0)
-    ),
+    canRevert: Boolean(snapshot && revertAvailable(snapshot)),
     busy: state.request.mutation.status === "running"
   };
 }
@@ -1229,7 +1225,8 @@ function renderEvidenceFreshness(evidence, options) {
 function updateGroupDisplayControl(term) {
   if (!groupDisplayWrap || !groupDisplayMode) return;
   const available = Boolean(term && term.group_display && term.group_display.available);
-  groupDisplayMode.disabled = !available;
+  // Breaks mode always draws every band (selectGroupDisplayMode).
+  groupDisplayMode.disabled = !available || visualMode() === "breaks";
   if (!available) {
     groupDisplayMode.value = "expanded";
     return;

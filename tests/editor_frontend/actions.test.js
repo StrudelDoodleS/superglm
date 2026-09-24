@@ -44,7 +44,8 @@ function snapshot(revision) {
     terms: { age: termPayload() },
     selection: { age: [0] },
     structure_history: { depth: 0, last: null },
-    history: { active: [], redo: [] }
+    history: { active: [], redo: [] },
+    in_force_is_original: true
   };
 }
 

@@ -5,6 +5,7 @@
 /** @typedef {import('./api/contracts.js').BreakDraft} BreakDraft */
 /** @typedef {import('./api/contracts.js').BreakForm} BreakForm */
 /** @typedef {import('./api/contracts.js').TermPayload} TermPayload */
+/** @typedef {import('./api/contracts.js').TransformTermRequest} TransformTermRequest */
 /** @typedef {string|number} BreakValue */
 
 export const MAX_SEGMENT_DEGREE = 3;
@@ -59,7 +60,7 @@ export function breakX(term, value) {
 
 /**
  * The break a pointer position stands for: the nearest interior band, or the
- * value rounded to three significant figures strictly inside the fitted range.
+ * value on the numeric grid, strictly inside the fitted range.
  * @param {TermPayload} term @param {number} dataX @returns {BreakValue|null}
  */
 export function snapBreak(term, dataX) {
@@ -71,22 +72,34 @@ export function snapBreak(term, dataX) {
   return axis[Math.min(Math.max(nearest, 1), axis.length - 2)];
 }
 
+/**
+ * The numeric grid's exponent: three significant figures of the fitted span,
+ * not of the value, so an offset axis such as years keeps every position.
+ * @param {TermPayload} term
+ */
+function gridExponent(term) {
+  return Math.floor(Math.log10(Math.max(...term.x) - Math.min(...term.x))) - 2;
+}
+
 /** @param {TermPayload} term @param {number} dataX @returns {number|null} */
 function snapValue(term, dataX) {
   const lo = Math.min(...term.x);
   const hi = Math.max(...term.x);
-  const value = Number(Number(dataX).toPrecision(3));
+  const exponent = gridExponent(term);
+  const step = 10 ** exponent;
+  // toFixed drops a step multiple's binary residue (31 * 0.1 is 3.1000000000000005).
+  const value = Number((Math.round(dataX / step) * step).toFixed(Math.max(0, -exponent)));
   return lo < value && value < hi ? value : null;
 }
 
 /**
- * One band or one display-grid step away, or null off the interior.
+ * One band or one grid step away, or null off the interior.
  * @param {TermPayload} term @param {BreakValue} value @param {-1|1} direction
  * @returns {BreakValue|null}
  */
 export function stepBreak(term, value, direction) {
   const axis = bandAxis(term);
-  if (!axis) return snapValue(term, Number(value) + direction * (term.x[1] - term.x[0]));
+  if (!axis) return snapValue(term, Number(value) + direction * 10 ** gridExponent(term));
   const index = axis.indexOf(String(value)) + direction;
   return 1 <= index && index <= axis.length - 2 ? axis[index] : null;
 }
@@ -105,11 +118,11 @@ export function addBreak(term, draft, value) {
   // A flat segment split in two would be two flats in a row: the right half
   // becomes linear.
   const right = degree === 0 ? 1 : degree;
-  return {
+  return withinDegreeCaps(term, {
     ...draft,
     breaks: [...draft.breaks.slice(0, index), value, ...draft.breaks.slice(index)],
     degrees: [...draft.degrees.slice(0, index), degree, right, ...draft.degrees.slice(index + 1)]
-  };
+  });
 }
 
 /**
@@ -127,7 +140,19 @@ export function moveBreak(term, draft, index, value) {
   if (!(left < at && at < right) || at === position(term, draft.breaks[index])) return draft;
   const breaks = draft.breaks.slice();
   breaks[index] = value;
-  return { ...draft, breaks };
+  return withinDegreeCaps(term, { ...draft, breaks });
+}
+
+/**
+ * A narrower segment keeps no more degree than its span holds: the library
+ * refuses the draft otherwise.
+ * @param {TermPayload} term @param {BreakDraft} draft @returns {BreakDraft}
+ */
+function withinDegreeCaps(term, draft) {
+  const degrees = draft.degrees.map(
+    (degree, segment) => Math.min(degree, maxSegmentDegree(term, draft, segment))
+  );
+  return { ...draft, degrees };
 }
 
 /** @param {TermPayload} term @param {BreakDraft} draft @param {number} index */
@@ -192,7 +217,7 @@ export function degreeName(degree) {
 /**
  * The /transform_term request: degrees only for a piecewise draft on bands.
  * @param {string} termName @param {TermPayload} term @param {BreakDraft} draft
- * @returns {Record<string, unknown>}
+ * @returns {TransformTermRequest}
  */
 export function transformPayload(termName, term, draft) {
   if (draft.form === "polynomial") {

@@ -176,8 +176,11 @@ between a notebook-side change and the next browser action or refresh.
 ### 4.3 Breaks tool, Transform and refit
 
 **Mode.** A new tool-rail mode, Breaks (shortcut `B`, after Handles). It is enabled for ordered
-categorical terms and numeric-axis terms (`Spline`, `Numeric`, `Polynomial`, `Piecewise`). On any
-other term it is disabled, and its popover says why: "Breaks need an ordered or numeric axis."
+categorical terms and numeric-axis terms (`Spline`, `Polynomial`, `Piecewise`). On any other term
+it is disabled, and its popover says why: "Breaks need an ordered or numeric axis." A linear
+`Numeric` term is drawn as a single point, so it has no axis to place a break on (§8). On an
+ordered term with collapsed groups, Breaks mode draws the expanded display, because a break names
+one band; the Groups control is disabled there.
 
 **Gestures.**
 
@@ -186,8 +189,9 @@ other term it is disabled, and its popover says why: "Breaks need an ordered or 
 - Keyboard: each break is focusable; arrow keys move it one band (ordered) or one grid step
   (numeric); Delete removes it.
 - **Snapping:** on an ordered term, to band positions strictly inside the axis (never the first or
-  last band). On a numeric term, to display-grid values rounded to three significant figures,
-  strictly inside the fitted range.
+  last band). On a numeric term, to a grid of three significant figures of the fitted span (of
+  the span, not the value, so an offset axis such as years keeps every position), strictly inside
+  the fitted range; the arrow keys move one grid step.
 - Entering the mode on a term that is already `Piecewise` (numeric or ordered-hosted) loads its
   current breaks and degrees.
 
@@ -208,15 +212,16 @@ segment flat, no two flat segments in a row — and disables the icon with the r
 Python remains authoritative.
 
 **What each form becomes.** Other parameters carry over from the source spec wherever the target
-has them (order, specials, grouping, base, extrapolation; spline kind, degree, penalty and
-`select`).
+has them (order, specials, grouping, base, extrapolation; spline kind, degree, penalty, `select`,
+boundary and lambda policy; a numeric `Piecewise`'s `lower` and `upper` pins, and its base knot
+while a knot is still there).
 
 | Source term | Form | Replacement spec |
 |---|---|---|
 | `OrderedCategorical` (any basis) | Piecewise | `OrderedCategorical(..., basis=Piecewise(breaks=[band names], degrees=[...]))` |
 | | Spline | `OrderedCategorical(..., basis=Spline(kind=<current kind, else "cr">, knots=[band names]))` |
 | | Polynomial | `OrderedCategorical(..., basis=Polynomial(degree=d))` |
-| Numeric axis (`Spline`, `Numeric`, `Polynomial`, `Piecewise`) | Piecewise | `Piecewise(breaks=[values], extrapolation=<source's, else "clip">)` — straight segments only |
+| Numeric axis (`Spline`, `Polynomial`, `Piecewise`) | Piecewise | `Piecewise(breaks=[values], extrapolation=<source's, else "clip">)` — straight segments only |
 | | Spline | `Spline(kind=<current kind, else "cr">, knots=[values], ...)` |
 | | Polynomial | `Polynomial(degree=d)` |
 
@@ -264,7 +269,8 @@ degree?: int, level_display}` and returns the existing structural envelope with
 
 - **Placement:** an icon in the app bar next to Undo and Redo. Accessible name "Revert to original
   model". It is enabled when anything differs from the opened model: a manual edit on any term,
-  or a non-empty structural stack.
+  a non-empty structural stack, or an in-force model replaced without either (a distribution
+  re-profile clears both histories).
 - **Action:** the in-force model becomes `session.reference_model` (already fitted, so there is no
   refit). This clears every term's manual history and redo stack, the structural stack, and any
   stored fixed-offset refit.
@@ -303,7 +309,7 @@ degree?: int, level_display}` and returns the existing structural envelope with
   JSON explicitly, put the mutation and locking in `EditorWidget`, and return the structural
   envelope from one post-refit lock scope.
 - **Snapshot:** `structure_history` (§4.4); the reference per level term (kind and level) for the
-  chip in §4.2.
+  chip in §4.2; `in_force_is_original` for Revert (§4.5).
 - **`api/contracts.js`:** `EditorMode` gains `'breaks'`; add the transform draft, the new request
   payloads and `structure_history`.
 - **Timing operation names:** `set_reference`, `transform_term`, `revert_to_original`,
@@ -363,6 +369,8 @@ derived from solver tolerance and conditioning, and a mutation check for every r
 - The same disclosure note for levels grouped by eye through collapse. The same caveat applies;
   this is a consistency follow-up.
 - Converting an unordered categorical into an ordered one.
+- Breaks on a linear `Numeric` term. It is drawn as a single point, so it first needs an axis over
+  its fitted range.
 
 ## 9. Decisions
 
@@ -383,7 +391,7 @@ derived from solver tolerance and conditioning, and a mutation check for every r
 - Restore moves to the action bar, with one shared stack; ungroup always pushes.
 - Revert is final, behind the existing confirmation.
 - Per-segment degree cap of 3; polynomial degree 1–5.
-- Numeric breaks round to three significant figures.
+- Numeric breaks round to three significant figures of the fitted span.
 - The reference chip goes in the context bar.
 - Style values: opacity 0.5, width 3.
 

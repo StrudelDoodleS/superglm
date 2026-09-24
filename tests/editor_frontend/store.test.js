@@ -53,7 +53,8 @@ function snapshot(revision = 0) {
     },
     selection: { age: [0] },
     structure_history: { depth: 0, last: null },
-    history: { active: [], redo: [] }
+    history: { active: [], redo: [] },
+    in_force_is_original: true
   };
 }
 
@@ -649,6 +650,8 @@ test("selectors expose confirmed state defaults and per-term display overrides",
   assert.strictEqual(selectCurrentTerm(state), confirmed.terms.age);
   assert.deepEqual(selectCurrentSelection(state), [0]);
   assert.equal(selectGroupDisplayMode(state), "collapsed");
+  // Breaks name original bands, so Breaks mode draws every band.
+  assert.equal(selectGroupDisplayMode(patchView(state, { mode: "breaks" })), "expanded");
   assert.strictEqual(selectMutation(state), state.request.mutation);
   assert.strictEqual(selectEvidence("metrics")(state), state.request.evidence.metrics);
 

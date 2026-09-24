@@ -18,6 +18,7 @@ from superglm.features.ordered_categorical import (
     _CLAMP_WARNING_PREFIX,
     OrderedCategorical,
 )
+from superglm.features.piecewise import Piecewise
 
 _SYMBOLIC_BASE_POLICIES = {"first", "most_exposed"}
 
@@ -59,6 +60,7 @@ def collapsed_feature_spec(
             _displayed_members(term, existing),
         )
         _require_no_special_members(spec, term.name, selected_originals)
+        _require_no_break_members(spec, term.name, selected_originals)
         if not _members_are_contiguous(
             selected_originals,
             _original_level_order(spec, term, existing),
@@ -208,12 +210,16 @@ def reference_feature_spec(
 
 def _fitted_level_label(spec, grouping, term: EditableTerm, level: str) -> str:
     """The fitted level that carries the reference for a displayed ``level``."""
-    if level not in term.levels:
-        raise EditorValueError(f"{level!r} is not a level of term {term.name!r}.")
     if isinstance(spec, OrderedCategorical) and level in special_labels(spec):
         raise EditorValueError(
             f"A special level can't be the reference of {term.name!r}; choose an ordered level."
         )
+    # A group in the Collapsed display, or a selection of all its members, is
+    # sent by its own label, which the fitted spec already carries as a level.
+    if grouping is not None and level in grouping.group_to_originals:
+        return level
+    if level not in term.levels:
+        raise EditorValueError(f"{level!r} is not a level of term {term.name!r}.")
     return level if grouping is None else str(grouping.original_to_group.get(level, level))
 
 
@@ -579,6 +585,34 @@ def _require_no_special_members(
         f"Ordered categorical collapse for {term_name!r} cannot include free level(s) "
         f"{joined}: specials are fitted outside the smooth and cannot be grouped."
     )
+
+
+def _require_no_break_members(spec: OrderedCategorical, term_name: str, members: list[str]) -> None:
+    """Refuse, in words, a group that takes in a stated break band.
+
+    The library refuses a grouping that absorbs or straddles a stated break,
+    and an ordered group is contiguous, so straddling one means taking it in.
+    """
+    absorbed = [band for band in _stated_break_bands(spec) if band in members]
+    if absorbed:
+        raise EditorValueError(
+            f"{term_name!r} has a break at {absorbed[0]!r}, so that band can't be collapsed; "
+            "remove or move the break first."
+        )
+
+
+def _stated_break_bands(spec: OrderedCategorical) -> list[str]:
+    """The bands where ``spec`` states a Piecewise break or a named Spline knot."""
+    basis = getattr(spec, "_spline_obj", None)
+    if isinstance(basis, Piecewise):
+        # Int-mode breaks are placed from the data: nothing is stated.
+        stated = basis.breaks if isinstance(basis.breaks, list) else []
+    else:
+        # A numeric knot states a coordinate, not a band; the library guards names only.
+        named = getattr(basis, "_named_knots", None) or []
+        stated = [knot for knot in named if isinstance(knot, str)]
+    declared = [str(level) for level in spec._declared_smooth_levels]
+    return [entry if isinstance(entry, str) else declared[int(entry)] for entry in stated]
 
 
 def special_labels(spec: OrderedCategorical) -> set[str]:

@@ -175,6 +175,9 @@ class EditorWidget:
                 },
                 "structure_history": structure_history_payload(self.session),
                 "history": history_payload(self.session),
+                # A distribution re-profile replaces the model and clears both
+                # histories, so neither says whether Revert has work to do.
+                "in_force_is_original": self.session.model is self.session.reference_model,
             }
             self._state_generation += 1
             state["state_generation"] = self._state_generation

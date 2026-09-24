@@ -16,7 +16,6 @@ from superglm.editor.collapse import (
 )
 from superglm.editor.errors import EditorTypeError, EditorValueError
 from superglm.features.constraint import ConstraintSpec
-from superglm.features.numeric import Numeric
 from superglm.features.ordered_categorical import OrderedCategorical, _spline_kind_name
 from superglm.features.piecewise import Piecewise
 from superglm.features.polynomial import Polynomial
@@ -29,7 +28,9 @@ MAX_POLYNOMIAL_DEGREE = 5
 # editor: a basis carrying it had its breaks placed in the editor from this
 # data, so its tests are conditional on them (spec §3.3).
 EDITOR_BREAKS_ATTRIBUTE = "_editor_chosen_breaks"
-_NUMERIC_KINDS = (_SplineBase, Numeric, Polynomial, Piecewise)
+# A linear Numeric term is drawn as a single point, so it has no axis to place
+# a break on: the Breaks tool stays off for it.
+_NUMERIC_KINDS = (_SplineBase, Polynomial, Piecewise)
 
 
 def transformed_feature_spec(
@@ -44,15 +45,16 @@ def transformed_feature_spec(
     if form not in FORMS:
         raise EditorValueError(f"Choose a piecewise, spline or polynomial form, got {form!r}.")
     source = _source_spline(spec)
-    # Numeric, Polynomial and ordered terms state no outside rule: the library default.
+    # Polynomial and ordered terms state no outside rule: the library default.
     extrapolation = getattr(spec, "extrapolation", "clip")
     if form == "polynomial":
         basis = _polynomial(term.name, source, breaks, degree)
     else:
         axis = _break_axis(spec, term) if ordered else None
         _validate_breaks(term, breaks, axis)
+        pins = _piecewise_pins(spec, breaks)
         basis = (
-            _piecewise(term.name, source, axis, breaks, degrees, extrapolation)
+            _piecewise(term.name, source, axis, breaks, degrees, extrapolation, pins)
             if form == "piecewise"
             else _knotted_spline(source, breaks, extrapolation)
         )
@@ -139,7 +141,9 @@ def _polynomial(name: str, source, breaks: list, degree) -> Polynomial:
     return Polynomial(degree=int(degree))
 
 
-def _piecewise(name: str, source, axis, breaks: list, degrees, extrapolation: str) -> Piecewise:
+def _piecewise(
+    name: str, source, axis, breaks: list, degrees, extrapolation: str, pins: dict[str, Any]
+) -> Piecewise:
     """Straight segments on a numeric axis; stated per-segment degrees on bands.
 
     All-flat and consecutive-flat segments stay the library's call.
@@ -151,7 +155,7 @@ def _piecewise(name: str, source, axis, breaks: list, degrees, extrapolation: st
                 "On a numeric feature, piecewise segments are straight lines; "
                 "per-segment degrees need an ordered term."
             )
-        return Piecewise(breaks=list(breaks), extrapolation=extrapolation)
+        return Piecewise(breaks=list(breaks), extrapolation=extrapolation, **pins)
     degrees = [1] * (len(breaks) + 1) if degrees is None else list(degrees)
     n = len(breaks)
     if len(degrees) != n + 1 or not all(_is_int(d) for d in degrees):
@@ -171,6 +175,18 @@ def _refuse_constraint(name: str, source, form: str) -> None:
         )
 
 
+def _piecewise_pins(spec, breaks: list) -> dict[str, Any]:
+    """A numeric Piecewise source's pinned outer knots, and its base while a knot keeps it."""
+    if not isinstance(spec, Piecewise):
+        return {}
+    pins = {"lower": spec.lower, "upper": spec.upper}
+    # The outer knots are refit from the same pins and data, so they stay put.
+    knots = {float(spec._knots[0]), *breaks, float(spec._knots[-1])}
+    if isinstance(spec.base, str) or float(spec.base) in knots:
+        pins["base"] = spec.base
+    return pins
+
+
 def _knotted_spline(source, knots: list, extrapolation: str) -> _SplineBase:
     """Knots at the breaks; a source spline's kind, settings and constraint carry over."""
     if source is None:
@@ -187,10 +203,12 @@ def _knotted_spline(source, knots: list, extrapolation: str) -> _SplineBase:
         penalty=source.penalty,
         select=source.select,
         extrapolation=source.extrapolation,
+        boundary=source._explicit_boundary,
         discrete=source.discrete,
         n_bins=source.n_bins,
         m=source._m_orders,
         constraint=constraint,
+        lambda_policy=source._lambda_policy,
     )
 
 

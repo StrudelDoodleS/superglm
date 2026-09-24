@@ -67,6 +67,35 @@ def test_breaks_mode_transforms_an_ordered_term(open_editor_page):
         assert isinstance(session.model._specs["age_band"]._spline_obj, Piecewise)
 
 
+def test_breaks_mode_draws_every_band_of_a_collapsed_ordered_term(open_editor_page):
+    with open_editor_page(
+        selected_term="age_band", collapsed_levels=("age_band", ("18-24", "25-34"))
+    ) as (page, _):
+        drawn = "document.querySelector('#chart')._selectionView.view"
+        # A grouped ordered term opens on its Collapsed display ...
+        assert page.evaluate(f"() => {drawn}.displayIsCollapsed") is True
+        page.locator("#chart").focus()
+        page.keyboard.press("b")
+        page.locator("#breaksControls").wait_for(state="visible")
+        # ... but a break names one original band, so Breaks mode draws them all.
+        assert page.evaluate(f"() => {drawn}.displayIsCollapsed") is False
+        assert page.locator("#groupDisplayMode").is_disabled()
+
+        index = page.evaluate(f"() => {drawn}.levels.indexOf('55-64')")
+        point = _plot_point(page, index)
+        page.mouse.click(point["x"], point["y"])
+        label = page.locator("#chart .break-label")
+        label.wait_for()
+        assert label.get_attribute("aria-valuetext") == "55-64"
+        line_x = float(page.locator("#chart .break-line").get_attribute("x1"))
+        point_x = page.evaluate(
+            "index => { const s = document.querySelector('#chart')._scale;"
+            " return s.sx(s.x[index]); }",
+            index,
+        )
+        assert line_x == point_x
+
+
 def test_set_reference_icon_needs_exactly_one_level(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, session):
         set_reference = page.locator("#setReference")
@@ -91,17 +120,21 @@ def test_refresh_pulls_a_notebook_side_structural_change(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, session):
         restore = page.locator("#restoreStructure")
         refresh = page.locator("#refreshAction")
+        reference = page.locator("#termReference")
         refresh.wait_for(state="visible")
         page.wait_for_function("() => !document.querySelector('#refreshAction').disabled")
         session.select_levels("territory", ["T01", "T02"])
         session.replace_with_collapsed_levels("territory", method="fit")
         assert restore.is_hidden()
         assert page.locator("#chart .level-group-marker").count() == 0
+        assert reference.text_content() == "reference T01 · first"
 
         refresh.click()
         restore.wait_for(state="visible")
         page.locator("#chart .level-group-marker").first.wait_for()
         assert page.locator("#chart .level-group-marker").count() == 2
+        # The first level now sits inside the new group, so the group is the reference.
+        assert reference.text_content() == "reference T01+T02 · first"
 
 
 def test_revert_confirms_and_returns_to_the_opened_model(open_editor_page):

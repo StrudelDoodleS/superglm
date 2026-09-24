@@ -3,7 +3,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bindAppBar, renderAppBar } from "../../src/superglm/editor/app/views/app_bar.js";
+import {
+  bindAppBar,
+  renderAppBar,
+  revertAvailable,
+} from "../../src/superglm/editor/app/views/app_bar.js";
 
 class FakeElement {
   constructor(tagName = "div") {
@@ -148,4 +152,19 @@ test("Refresh is disabled while busy and Revert only when something can be rever
     [buttons.refreshButton.disabled, buttons.revertButton.disabled],
     [false, false],
   );
+});
+
+test("Revert is available whenever anything differs from the opened model", () => {
+  const snapshot = (overrides) => ({
+    history: { active: [], redo: [] },
+    structure_history: { depth: 0, last: null },
+    in_force_is_original: true,
+    ...overrides,
+  });
+  assert.equal(revertAvailable(snapshot({})), false);
+  assert.equal(revertAvailable(snapshot({ history: { active: [{}], redo: [] } })), true);
+  assert.equal(revertAvailable(snapshot({ history: { active: [], redo: [{}] } })), true);
+  assert.equal(revertAvailable(snapshot({ structure_history: { depth: 1, last: null } })), true);
+  // A distribution re-profile replaces the model and clears both histories.
+  assert.equal(revertAvailable(snapshot({ in_force_is_original: false })), true);
 });

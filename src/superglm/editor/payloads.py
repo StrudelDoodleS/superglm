@@ -195,9 +195,11 @@ def _reference_log_effect(session, name: str, term) -> np.ndarray:
     values = np.asarray(reference.original_log_effect, dtype=np.float64)
     if term.levels is not None and reference.levels is not None:
         by_level = {level: float(values[i]) for i, level in enumerate(reference.levels)}
-        current = _reference_payload(session, name)
-        # Express the opened model's curve against the CURRENT reference; a
-        # reference that is a new group label has no value in the opened model.
+        current = _reference_payload(session, name) if session.centering == "native" else None
+        # A native curve is zero at its own reference, so express the opened
+        # model's curve against the CURRENT one; a mean-centred curve needs no
+        # anchor. A reference that is a new group label has no value in the
+        # opened model.
         anchor = by_level.get(current["level"], 0.0) if current else 0.0
         return np.array(
             [
