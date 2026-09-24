@@ -56,15 +56,70 @@ explanations describe the action before it is run.
 Expanded and Collapsed display modes change only how an existing fitted grouping is drawn. They do
 not rename levels or change the fitted model.
 
-Collapse selected levels, Ungroup selected levels, and Restore previous collapse are structural
-actions: SuperGLM refits the model and clears incompatible manual edit history. A confirmation is
+Collapse selected levels and Ungroup selected levels are structural actions: SuperGLM refits the
+model and clears incompatible manual edit history. A confirmation is
 shown only when history would actually be discarded; it names the term or levels and the number of
 history entries. The refit overlay reports elapsed time. When the fit returns, the plot and summary
-change together; metrics may remain marked Updating briefly.
+change together; metrics may remain marked Updating briefly. Restore is no longer in the selection
+palette: it now sits at the right end of the chart's action bar (see Restore and revert).
 
 Long category names may appear shortened with an end ellipsis on the x-axis. This is display-only.
 Hover or focus the tick (or inspect the point tooltip) for the complete value; selection, grouping,
 history, exports, and saved models retain the exact original string.
+
+## Set a Reference Level
+
+The reference level is the one whose relativity is 1.00. A chip beside the term's kind and EDF
+names it and says how it was chosen: most exposed, first, or pinned.
+
+To pin a different level, select exactly that one level and choose **Set reference and refit** in
+the selection palette. SuperGLM refits the model with that level as the reference.
+
+- Predictions stay the same unless the model has a selection penalty.
+- In the Collapsed display, selecting a whole group pins the group.
+- Special levels of an ordered term cannot be the reference.
+- A term used by an interaction cannot change its reference.
+
+## Give a Term a Shape with Breaks
+
+Breaks mode (shortcut `B`) replaces a term's curve with a simpler shape that you place by hand. It
+works on ordered categorical terms and numeric terms.
+
+- Click inside the plot to add a break. Drag a break to move it; click the × on its label to
+  remove it.
+- With a break focused, the arrow keys move it one step and Delete removes it.
+- On an ordered term, breaks sit on bands, never on the first or last band.
+- On a numeric term, breaks sit strictly inside the fitted range.
+
+Choose the form in the action bar:
+
+- **Piecewise** draws straight segments between the breaks. On an ordered term, click a segment's
+  chip to make it flat, linear, quadratic or cubic.
+- **Spline** draws a smooth curve with a knot at each break. It keeps the term's spline settings
+  and any shape constraint.
+- **Polynomial** draws one polynomial of degree 1 to 5 across the whole axis. It ignores the
+  breaks.
+
+Nothing changes until you choose **Transform and refit**. A term with a shape constraint can only
+become a Spline, so the constraint is never dropped. The summary, the Python `summary()` and the
+workbook note that the breaks were placed in the editor from this data: judge them on validation
+deviance.
+
+## Restore and Revert
+
+Collapse, ungroup, set reference and transform each add one step to a single history.
+**Restore previous structure**, at the right end of the chart's action bar, undoes the most recent
+step. It shows whenever there is a step to undo, and its popover names that step.
+
+**Revert to original model**, in the application bar next to Undo and Redo, goes back to the model
+the editor was opened with. It clears every manual edit and every structural step, so it always
+asks first and cannot be undone.
+
+## Refresh from Python
+
+If you change the session in the notebook, for example collapse levels from Python, the browser
+does not see it straight away. Choose **Refresh from Python** in the application bar to re-read the
+session and redraw. Nothing refits.
 
 ## Undo, Redo, and Recovery
 

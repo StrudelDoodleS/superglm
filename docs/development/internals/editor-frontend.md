@@ -74,8 +74,9 @@ in durable state; only the finished operation is sent to Python.
 `app/api/contracts.js` defines JSDoc types checked by TypeScript's `checkJs` mode. FastAPI routes live
 in `server.py` and call guarded methods on `EditorWidget`.
 
-Ordinary mutations return an authoritative state snapshot. Collapse, ungroup, and restore return one
-atomic envelope built from a single post-refit lock scope:
+Ordinary mutations return an authoritative state snapshot. Every structural operation (collapse,
+ungroup, set reference, transform, restore and revert) returns one atomic envelope built from a
+single post-refit lock scope:
 
 ```json
 {
@@ -206,6 +207,27 @@ Run the frontend check and the focused browser test before committing.
    stay centralized.
 5. Test the numerical result and revision in Python, then test the accessible name and posted
    operation in the browser.
+
+## Add a Structural Operation
+
+A structural operation replaces one term's spec, refits, and is undone by Restore. All of them share
+one path, so a new one only supplies its spec builder and its wiring:
+
+1. Write the spec builder next to `collapse.py` and `transform.py`. It builds a fresh replacement
+   spec (never a mutated fitted copy) and returns `(spec, metadata)`, where `metadata["label"]` is
+   the short text Restore's popover shows. Raise `EditorValueError` or `EditorTypeError` with fixed
+   text for every refusal.
+2. Add an `EditorSession.replace_with_...` method that passes the builder to `_refit_replacing` and
+   the refit to `_push_structure`, which records one `StructuralStep` and puts the refit in force.
+3. Add an `EditorWidget._...` method that calls `_structural_step` with the operation name and the
+   session call. It takes the lock and returns the envelope.
+4. Add a token-guarded route in `server.py` that parses the payload explicitly.
+5. Add a descriptor next to `setReferenceTransition` in `summary.js`, a title in
+   `views/structural_confirm.js`, and run it through `runStructuralRefit` from `main.js`.
+6. Test the refit, the one pushed step and the refusals in `tests/test_editor_structure.py`, and add
+   one browser case to `tests/editor/test_editor_structure_browser.py`.
+
+The stack is shared, so Restore, Revert and the `structure_history` snapshot field need no change.
 
 ## Add an Inspector Panel
 
