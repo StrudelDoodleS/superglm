@@ -18,6 +18,8 @@ from numpy.typing import NDArray
 
 MAX_EXACT_VALUES = 5000
 _EPS = float(np.finfo(np.float64).eps)
+_FACTOR_RTOL = 1e-6
+_FACTOR_LIMIT = 2.0**60
 
 
 @dataclass(frozen=True)
@@ -56,11 +58,16 @@ def exact_bands(s, w, tol, max_bands: int) -> ExactBanding:
         Nonnegative tolerance of each value: its band's weighted mean must lie
         within ``tol`` of it.  A single value is always its own mean.
     max_bands : int
-        Largest number of bands allowed.
+        Largest number of bands allowed.  When the tolerances need more, they
+        are all widened by the smallest factor that fits, reported as
+        ``tolerance_factor``.
     """
     s, w, tol = _validated(s, w, tol, max_bands)
     starts, sse = _fewest_then_least(s, w, tol)
     factor = 1.0
+    if len(starts) > max_bands:
+        factor = _smallest_fitting_factor(s, w, tol, max_bands)
+        starts, sse = _fewest_then_least(s, w, factor * tol)
     ends = np.append(starts[1:], len(s))
     factors = np.array(
         [np.average(s[a:b], weights=w[a:b]) for a, b in zip(starts, ends, strict=True)],
@@ -139,3 +146,30 @@ def _fewest_then_least(s, w, tol) -> tuple[NDArray[np.intp], float]:
         starts.append(int(start[j]))
         j = int(start[j]) - 1
     return np.array(starts[::-1], dtype=np.intp), float(sse[n])
+
+
+def _fits(s, w, tol, factor: float, max_bands: int) -> bool:
+    return len(_fewest_then_least(s, w, factor * tol)[0]) <= max_bands
+
+
+def _smallest_fitting_factor(s, w, tol, max_bands: int) -> float:
+    """Smallest multiplier of ``tol``, to relative 1e-6, whose banding fits ``max_bands``.
+
+    Widening every tolerance only enlarges each feasible set, so the fewest-band
+    count never rises with the factor and bisection applies.
+    """
+    lower, upper = 1.0, 2.0
+    while not _fits(s, w, tol, upper, max_bands):
+        lower, upper = upper, 2.0 * upper
+        if upper > _FACTOR_LIMIT:
+            raise ValueError(
+                f"cannot fit {len(s)} values into {max_bands} bands at any tolerance: "
+                "values with zero tolerance cannot share a band"
+            )
+    while upper / lower - 1.0 > _FACTOR_RTOL:
+        middle = 0.5 * (lower + upper)
+        if _fits(s, w, tol, middle, max_bands):
+            upper = middle
+        else:
+            lower = middle
+    return upper

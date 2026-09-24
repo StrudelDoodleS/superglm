@@ -7,6 +7,7 @@ import pytest
 
 from superglm.diagnostics.exact_banding import (
     MAX_EXACT_VALUES,
+    _fewest_then_least,
     exact_bands,
 )
 
@@ -104,3 +105,29 @@ def test_rejects_too_many_values():
     n = MAX_EXACT_VALUES + 1
     with pytest.raises(ValueError, match="at most 5000"):
         exact_bands(np.zeros(n), np.ones(n), np.zeros(n), max_bands=10)
+
+
+def test_a_small_cap_widens_the_tolerance_just_enough():
+    s = np.linspace(0.0, 1.0, 50) ** 2
+    w = np.ones(50)
+    tol = np.full(50, 0.01)
+    result = exact_bands(s, w, tol, max_bands=5)
+    assert len(result.starts) <= 5
+    assert result.tolerance_factor > 1.0
+    tighter = result.tolerance_factor / (1.0 + 2e-6)
+    assert len(_fewest_then_least(s, w, tighter * tol)[0]) > 5
+    ends = np.append(result.starts[1:], 50)
+    for a, b, factor in zip(result.starts, ends, result.factors, strict=True):
+        slack = 4 * _EPS * (b - a) * 2.0
+        assert np.all(np.abs(s[a:b] - factor) <= result.tolerance_factor * tol[a:b] + slack)
+
+
+def test_no_widening_when_the_cap_is_not_binding():
+    s = np.linspace(0.0, 1.0, 50) ** 2
+    result = exact_bands(s, np.ones(50), np.full(50, 0.01), max_bands=50)
+    assert result.tolerance_factor == 1.0
+
+
+def test_zero_tolerances_that_cannot_merge_are_refused():
+    with pytest.raises(ValueError, match="cannot fit"):
+        exact_bands(np.arange(6.0), np.ones(6), np.zeros(6), max_bands=3)
