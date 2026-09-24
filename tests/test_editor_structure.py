@@ -8,6 +8,7 @@ import pytest
 
 from superglm import Categorical, Spline, SuperGLM
 from superglm.editor import EditorSession
+from superglm.editor.widget import EditorWidget
 
 
 @pytest.fixture
@@ -52,3 +53,41 @@ def test_every_structural_step_pushes_one_restorable_entry(region_model):
     assert session.uncollapse_levels() is collapsed
     assert session.uncollapse_levels() is opened
     assert not session.can_uncollapse_levels()
+
+
+def test_state_publishes_the_structure_history(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region"])
+    widget = EditorWidget(session)
+    try:
+        assert widget._state()["structure_history"] == {"depth": 0, "last": None}
+        session.select_levels("region", ["B", "C"])
+        envelope = widget._collapse_levels("region", "fit")
+        assert envelope["state"]["structure_history"] == {
+            "depth": 1,
+            "last": {
+                "operation": "collapse_levels",
+                "term": "region",
+                "label": "collapse B + C in region",
+            },
+        }
+        assert "last_collapse" not in envelope["state"]
+        restored = widget._restore_structure()
+        assert restored["timing"]["operation"] == "restore_structure"
+        assert restored["state"]["structure_history"]["depth"] == 0
+    finally:
+        widget.close()
+
+
+def test_offset_refit_summary_goes_unavailable_after_a_notebook_side_edit(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    widget = EditorWidget(session)
+    try:
+        session.select_indices("x", [3, 4])
+        session.shift("x", 0.1)
+        assert widget._refit_offset("fit")["available"] is True
+        session.shift("x", 0.1)  # made in the notebook: never passes through the widget
+        assert widget._summary("refit")["available"] is False
+    finally:
+        widget.close()

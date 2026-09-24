@@ -30,7 +30,7 @@ import {
   runDistributionProfile,
   showDistributionProfileDialog,
   runOffsetRefit,
-  uncollapseTransition,
+  restoreTransition,
   ungroupTransition
 } from "./summary.js";
 import { bindInteractions } from "./interactions.js";
@@ -545,7 +545,7 @@ async function runStructuralRefit(descriptor) {
   }
 
   stopContributionBuild();
-  if (descriptor.name !== "restore collapsed levels") {
+  if (descriptor.name !== "restore previous structure") {
     summarySource.value = "selected";
   }
   const operationStart = performance.now();
@@ -1138,14 +1138,7 @@ function updateCollapseAction(term, selection) {
     ungroupLevels.hidden = !(isLevelTerm && selectionTouchesCollapsedGroup(term, selection));
   }
   if (uncollapseLevels) {
-    uncollapseLevels.hidden = !(
-      isLevelTerm &&
-      snapshot &&
-      snapshot.can_uncollapse_levels &&
-      snapshot.last_collapse &&
-      snapshot.last_collapse.term === selectedTerm() &&
-      selectionTouchesCollapsedGroup(term, selection)
-    );
+    uncollapseLevels.hidden = snapshot.structure_history.depth === 0;
   }
 }
 
@@ -1466,7 +1459,7 @@ if (ungroupLevels) {
 }
 if (uncollapseLevels) {
   uncollapseLevels.addEventListener("click", async () => {
-    await runStructuralRefit(uncollapseTransition());
+    await runStructuralRefit(restoreTransition());
   });
 }
 

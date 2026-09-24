@@ -17,7 +17,7 @@
 const OPERATION_TITLES = Object.freeze({
   "collapse levels": "Collapse levels",
   "ungroup levels": "Ungroup levels",
-  "restore collapsed levels": "Restore previous collapse",
+  "restore previous structure": "Restore previous structure",
 });
 
 /**
@@ -41,8 +41,8 @@ export function structuralImpact(snapshot, operation) {
     : sentenceCase(operation.name);
   const historyNoun = historyCount === 1 ? "entry" : "entries";
   const labelCopy = selectedLabels.length > 0 ? ` ${selectedLabels.join(", ")}` : "";
-  const question = operation.name === "restore collapsed levels"
-    ? `Restore the previous collapse in ${selectedTerm}?`
+  const question = operation.name === "restore previous structure"
+    ? `Restore the model before "${snapshot.structure_history.last?.label}"?`
     : `${operationTitle}${labelCopy} in ${selectedTerm}?`;
 
   return {

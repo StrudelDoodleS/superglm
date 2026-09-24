@@ -51,8 +51,7 @@ function snapshot(revision = 0) {
       }
     },
     selection: { age: [0] },
-    can_uncollapse_levels: false,
-    last_collapse: null,
+    structure_history: { depth: 0, last: null },
     history: { active: [], redo: [] }
   };
 }

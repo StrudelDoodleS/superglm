@@ -10,8 +10,6 @@ from superglm.editor.apply import materialize_edit_request
 from superglm.editor.terms import native_log_effect_values
 from superglm.inference.summary_levels import validate_level_display
 
-_UNSET = object()
-
 
 def summary_payload(
     widget,
@@ -20,7 +18,6 @@ def summary_payload(
     model_override=None,
     offset_terms_override: list[str] | None = None,
     offset_labels_override: list[dict[str, Any]] | None = None,
-    collapse_info_override: Any = _UNSET,
     level_display: str = "expanded",
 ) -> dict[str, Any]:
     level_display = validate_level_display(level_display)
@@ -37,18 +34,12 @@ def summary_payload(
         label = "Original"
         offset_terms: list[str] = []
         offset_labels: list[dict[str, Any]] = []
-        collapse_info = None
     elif source == "in_force":
         model = _in_force_summary_model(widget.session, model_override=model_override)
         label = "In-force edit model"
         offset_terms = []
         offset_labels = []
-        collapse_info = (
-            getattr(widget, "_in_force_info", None)
-            if collapse_info_override is _UNSET
-            else collapse_info_override
-        )
-    elif source == "refit":
+    else:
         model = widget._offset_refit_model if model_override is None else model_override
         label = "Fixed-offset refit"
         offset_terms = (
@@ -61,7 +52,6 @@ def summary_payload(
             if offset_labels_override is None
             else list(offset_labels_override)
         )
-        collapse_info = None
         if model is None:
             return {
                 "available": False,
@@ -69,19 +59,6 @@ def summary_payload(
                 "label": label,
                 "level_display": level_display,
                 "error": "No fixed-offset refit has been run for the current edits.",
-            }
-    else:
-        model = widget._collapsed_refit_model
-        label = "Collapsed-level refit"
-        offset_terms = []
-        offset_labels = []
-        collapse_info = widget._collapsed_refit_info
-        if model is None:
-            return {
-                "available": False,
-                "source": "collapse",
-                "label": label,
-                "error": "No collapsed-level refit has been run for the current selection.",
             }
 
     if model is None or getattr(model, "_result", None) is None:
@@ -104,7 +81,6 @@ def summary_payload(
         "compact": compact,
         "offset_terms": offset_terms,
         "offset_labels": offset_labels,
-        "collapse": collapse_info,
         "note": _summary_note(source),
     }
 

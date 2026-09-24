@@ -13,8 +13,8 @@ const {
   refreshSummary,
   renderSummary,
   runDistributionProfile,
+  restoreTransition,
   runOffsetRefit,
-  uncollapseTransition,
   ungroupTransition
 } = await import(summaryModulePath);
 
@@ -31,8 +31,7 @@ function snapshot(revision) {
       }
     },
     selection: { age: [0] },
-    can_uncollapse_levels: false,
-    last_collapse: null,
+    structure_history: { depth: 0, last: null },
     history: { active: [], redo: [] }
   };
 }
@@ -184,9 +183,9 @@ test("structural transition descriptors are pure route descriptions", () => {
     path: "/ungroup_levels",
     payload: { term: "region", method: "auto" }
   });
-  assert.deepEqual(uncollapseTransition(), {
-    name: "restore collapsed levels",
-    path: "/uncollapse_levels",
+  assert.deepEqual(restoreTransition(), {
+    name: "restore previous structure",
+    path: "/restore_structure",
     payload: {}
   });
 });

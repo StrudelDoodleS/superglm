@@ -14,7 +14,12 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-function snapshot(historyCount = 2, redoCount = 0) {
+const COLLAPSE_STEP = {
+  depth: 1,
+  last: { operation: "collapse_levels", term: "region", label: "collapse B + C in region" },
+};
+
+function snapshot(historyCount = 2, redoCount = 0, structureHistory = { depth: 0, last: null }) {
   return {
     model_revision: 7,
     selected_term: "region",
@@ -34,8 +39,7 @@ function snapshot(historyCount = 2, redoCount = 0) {
       },
     },
     selection: { region: [1, 2] },
-    can_uncollapse_levels: false,
-    last_collapse: null,
+    structure_history: structureHistory,
     history: {
       active: Array.from({ length: historyCount }, (_, index) => ({ index })),
       redo: Array.from({ length: redoCount }, (_, index) => ({ redo: index })),
@@ -78,10 +82,10 @@ test("redo-only history requires confirmation with singular copy", () => {
 });
 
 test("mixed active and redo history reports the full destructive count", () => {
-  const current = deepFreeze(snapshot(1, 2));
+  const current = deepFreeze(snapshot(1, 2, COLLAPSE_STEP));
   const operation = deepFreeze({
-    name: "restore collapsed levels",
-    path: "/uncollapse_levels",
+    name: "restore previous structure",
+    path: "/restore_structure",
     payload: {},
   });
 
@@ -90,7 +94,8 @@ test("mixed active and redo history reports the full destructive count", () => {
   assert.equal(impact.historyCount, 3);
   assert.equal(
     impact.message,
-    "Restore the previous collapse in region? This refit clears 3 manual edit history entries.",
+    'Restore the model before "collapse B + C in region"? '
+      + "This refit clears 3 manual edit history entries.",
   );
 });
 
@@ -116,7 +121,7 @@ test("collapse impact copies exact selected category labels and history count", 
 });
 
 test("structural impact uses exact operation copy for ungroup and restore", () => {
-  const current = deepFreeze(snapshot());
+  const current = deepFreeze(snapshot(2, 0, COLLAPSE_STEP));
   const cases = [
     {
       operation: {
@@ -129,13 +134,14 @@ test("structural impact uses exact operation copy for ungroup and restore", () =
     },
     {
       operation: {
-        name: "restore collapsed levels",
-        path: "/uncollapse_levels",
+        name: "restore previous structure",
+        path: "/restore_structure",
         payload: {},
       },
-      title: "Restore previous collapse",
+      title: "Restore previous structure",
       message:
-        "Restore the previous collapse in region? This refit clears 2 manual edit history entries.",
+        'Restore the model before "collapse B + C in region"? '
+        + "This refit clears 2 manual edit history entries.",
     },
   ];
 

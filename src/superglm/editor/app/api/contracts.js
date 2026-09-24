@@ -49,6 +49,11 @@
  * @property {number|null} [effective_df]
  */
 /**
+ * @typedef {Object} StructureHistory
+ * @property {number} depth
+ * @property {{operation:string, term:string|null, label:string}|null} last
+ */
+/**
  * @typedef {Object} EditorSnapshot
  * @property {number} model_revision
  * @property {number} [state_generation]
@@ -56,8 +61,7 @@
  * @property {string} selected_term
  * @property {Record<string, TermPayload>} terms
  * @property {Record<string, number[]>} selection
- * @property {boolean} can_uncollapse_levels
- * @property {Record<string, unknown>|null} last_collapse
+ * @property {StructureHistory} structure_history
  * @property {EditorHistory} history
  */
 /**

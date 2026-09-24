@@ -274,12 +274,10 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
-    @app.post("/uncollapse_levels")
-    def uncollapse_levels(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+    @app.post("/restore_structure")
+    def restore_structure(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
-            lambda: widget._uncollapse_levels(
-                level_display=_level_display(payload),
-            )
+            lambda: widget._restore_structure(level_display=_level_display(payload))
         )
 
     return app

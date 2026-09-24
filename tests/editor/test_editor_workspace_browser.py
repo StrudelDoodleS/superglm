@@ -1462,7 +1462,7 @@ def test_summary_level_display_toggle_is_view_only_and_synchronizes_full_summary
             is initial_chart_is_collapsed
         )
 
-        forbidden = {"collapse_levels", "ungroup_levels", "uncollapse_levels", "refit_offset"}
+        forbidden = {"collapse_levels", "ungroup_levels", "restore_structure", "refit_offset"}
         assert not any(path in forbidden for path, _payload in requests)
         summary_payloads = [payload for path, payload in requests if path == "summary"]
         assert [payload["level_display"] for payload in summary_payloads] == [

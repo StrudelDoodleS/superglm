@@ -72,6 +72,18 @@ def history_payload(session) -> dict[str, Any]:
     return {"active": active, "redo": redo}
 
 
+def structure_history_payload(session) -> dict[str, Any]:
+    """The Restore icon's state: how many steps there are and what the last one did."""
+    steps = session.structure_history
+    if not steps:
+        return {"depth": 0, "last": None}
+    last = steps[-1]
+    return {
+        "depth": len(steps),
+        "last": {"operation": last.operation, "term": last.term, "label": last.label},
+    }
+
+
 def _history_records_payload(records) -> list[dict[str, Any]]:
     parent_hash: str | None = None
     chronological = []

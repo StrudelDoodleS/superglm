@@ -184,10 +184,10 @@ export function ungroupTransition(term) {
   };
 }
 
-export function uncollapseTransition() {
+export function restoreTransition() {
   return {
-    name: "restore collapsed levels",
-    path: "/uncollapse_levels",
+    name: "restore previous structure",
+    path: "/restore_structure",
     payload: {}
   };
 }
