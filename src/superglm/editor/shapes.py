@@ -7,10 +7,14 @@ from collections.abc import Callable
 from numbers import Real
 from typing import Any
 
+import numpy as np
+
 from superglm._frame import as_eager_frame
+from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
 from superglm.editor.collapse import _pristine_basis, interaction_users, rebuilt_ordered_spec
 from superglm.editor.errors import EditorValueError
 from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange
+from superglm.features._spline_runtime import fit_support
 from superglm.features.ordered_categorical import OrderedCategorical, _spline_kind_name
 from superglm.features.spline import CardinalCRSpline, Spline, _SplineBase
 
@@ -27,14 +31,43 @@ def shape_availability(model, name: str) -> tuple[bool, str | None]:
     return reason is None, reason
 
 
-def shape_payload(model, name: str) -> dict[str, Any]:
-    """The palette's state for one term: availability and the ranges in force."""
+def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dict[str, Any]:
+    """The palette's state for one term: availability, the ranges in force, ``support``."""
     available, reason = shape_availability(model, name)
     ranges = [
         {"lo": r.lo, "hi": r.hi, "degree": r.degree, "label": r.label}
         for r in _current_ranges(model._specs[name])
     ]
-    return {"available": available, "reason": reason, "ranges": ranges}
+    return {"available": available, "reason": reason, "ranges": ranges, "support": support}
+
+
+def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[int]] | None:
+    """How many values a numeric term's refit sees below and up to each grid point's edges.
+
+    ``below[k]`` counts those under the lower edge a selection starting at
+    grid point k snaps to, and ``through[k]`` those up to the upper edge one
+    ending there snaps to, so a run i..j holds ``through[j] - below[i]``: the
+    count the library certifies a range with. The values are the refit's:
+    distinct positive-weight ones, or occupied bin centres when it bins. None
+    unless the term is a numeric spline that can take a shape and its data
+    was retained.
+    """
+    spec = model._specs[name]
+    if X is None or not isinstance(spec, _SplineBase) or _unavailable_reason(model, name):
+        return None
+    x = np.asarray(as_eager_frame(X).column_array(name), dtype=np.float64)
+    if sample_weight is not None:
+        x = x[np.asarray(sample_weight, dtype=np.float64) > 0.0]
+    binned = should_discretize(spec, model._discrete)
+    n_bins = resolve_discrete_n_bins(name, spec, model._n_bins) if binned else None
+    support = fit_support(x, n_bins)
+    boundary = spec.fitted_boundary
+    lows = [_snapped_edge(boundary, value, -1) for value in grid]
+    highs = [_snapped_edge(boundary, value, 1) for value in grid]
+    return {
+        "below": np.searchsorted(support, lows).tolist(),
+        "through": np.searchsorted(support, highs, side="right").tolist(),
+    }
 
 
 def shaped_feature_spec(model, name: str, *, lo, hi, degree: int, X) -> tuple[Any, dict[str, Any]]:
@@ -137,9 +170,15 @@ def _numeric_edges(spec, lo, hi) -> tuple[float, float]:
         raise EditorValueError("Range edges on a numeric term must be finite numbers.")
     if not lo < hi:
         raise EditorValueError(_TOO_FEW_POINTS)
-    b_lo, b_hi = spec.fitted_boundary
-    span = b_hi - b_lo
-    return max(b_lo, snap_edge(float(lo), span, -1)), min(b_hi, snap_edge(float(hi), span, 1))
+    boundary = spec.fitted_boundary
+    return _snapped_edge(boundary, float(lo), -1), _snapped_edge(boundary, float(hi), 1)
+
+
+def _snapped_edge(boundary: tuple[float, float], value: float, direction: int) -> float:
+    """``snap_edge`` on the fitted span, clipped to the boundary on the snapped side."""
+    b_lo, b_hi = boundary
+    snapped = snap_edge(value, b_hi - b_lo, direction)
+    return max(b_lo, snapped) if direction < 0 else min(b_hi, snapped)
 
 
 def _band_edges(spec: OrderedCategorical, name: str, lo, hi) -> tuple[str, str]:

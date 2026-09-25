@@ -49,12 +49,21 @@
  * @property {string} label
  */
 /**
- * The palette's shape state for a term: the ranges in force, and the hover
- * reason when the term cannot take one.
+ * How many values a numeric term's refit sees, per grid point: ``below[k]``
+ * under the lower edge a selection starting at k snaps to, ``through[k]`` up
+ * to the upper edge one ending at k snaps to.
+ * @typedef {Object} ShapeSupport
+ * @property {number[]} below
+ * @property {number[]} through
+ */
+/**
+ * The palette's shape state for a term: the ranges in force, the hover
+ * reason when the term cannot take one, and a numeric term's support counts.
  * @typedef {Object} TermShape
  * @property {boolean} available
  * @property {string|null} reason
  * @property {ShapedRange[]} ranges
+ * @property {ShapeSupport|null} support
  */
 /**
  * The /shape_range request: the selection's edges as shapeRangeForSelection

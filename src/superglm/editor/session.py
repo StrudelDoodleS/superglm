@@ -41,7 +41,7 @@ from superglm.editor.operations import (
     monotone_clamp_values,
 )
 from superglm.editor.refit import fit_refit_model
-from superglm.editor.shapes import shaped_feature_spec
+from superglm.editor.shapes import shape_support, shaped_feature_spec
 from superglm.editor.terms import (
     term_from_inference,
     term_offset_values,
@@ -149,6 +149,15 @@ class EditorSession:
         train_data=None,
     ) -> dict[str, EditableTerm]:
         editable: dict[str, EditableTerm] = {}
+        # The rows a shape refit reads (_resolve_refit_data).
+        refit_data = (
+            (train_data.X, train_data.sample_weight)
+            if train_data is not None
+            else (
+                getattr(model, "_fit_X_ref", None),
+                getattr(model, "_fit_sample_weight_ref", None),
+            )
+        )
         for name in names:
             if name in model._interaction_specs:
                 raise EditorValueError(f"Interactions are not editable in v1: {name!r}")
@@ -179,6 +188,8 @@ class EditorSession:
                 if train_data is not None
                 else term_weights_from_fit(model, name, term)
             )
+            # Owned by this term, so it lives exactly as long as the in-force model.
+            term.metadata["shape_support"] = shape_support(model, name, term.x, *refit_data)
             editable[name] = term
         return editable
 

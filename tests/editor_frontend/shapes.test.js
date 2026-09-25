@@ -90,7 +90,7 @@ test("a run ending inside a collapsed group is refused before it is sent; a grou
   assert.equal(shapeButtonState(term, new Set([0, 1, 2, 3])).enabled, true);
 });
 
-test("bands bound the degree an ordered range can carry; numeric grid points do not", () => {
+test("bands bound the degree an ordered range can carry", () => {
   const term = ordered();
   assert.equal(shapeButtonState(term, new Set([1, 2]), 1).enabled, true);
   assert.equal(
@@ -102,7 +102,24 @@ test("bands bound the degree an ordered range can carry; numeric grid points do 
     shapeButtonState(term, new Set([1, 2, 3]), 3).reason,
     "Select at least 4 bands for a Cubic."
   );
-  // The training values between two grid points are only known to Python.
+});
+
+test("a numeric run is gated on the values Python counts between its snapped edges", () => {
+  // Grid 18..50; the run 1..2 holds through[2] - below[1] = 5 - 3 = 2 values.
+  const support = { below: [0, 3, 4, 7, 10, 12], through: [1, 4, 5, 8, 12, 13] };
+  const term = { ...numeric, shape: { ...AVAILABLE, support } };
+  assert.equal(shapeButtonState(term, new Set([1, 2]), 1).enabled, true);
+  assert.deepEqual(shapeButtonState(term, new Set([1, 2]), 2), {
+    visible: true,
+    enabled: false,
+    reason: "Select at least 3 distinct values for a Quadratic."
+  });
+  assert.equal(shapeButtonState(term, new Set([1, 2, 3]), 3).enabled, true);
+  assert.equal(
+    shapeButtonState(term, new Set([4, 5]), 3).reason,
+    "Select at least 4 distinct values for a Cubic."
+  );
+  // Without counts (no retained data) Python decides when the range is sent.
   assert.equal(shapeButtonState(numeric, new Set([1, 2]), 3).enabled, true);
 });
 

@@ -55,7 +55,7 @@ def session_payload(
             "level_groups": _level_groups(session, name, term),
             "level_order_changed": _level_order_changed(session, name),
             "reference": _reference_payload(session, name),
-            "shape": shape_payload(session.model, name),
+            "shape": shape_payload(session.model, name, term.metadata.get("shape_support")),
             "effective_df": _finite_float(term.metadata.get("edf")),
             "x_label": name,
             "y_label": "relativity",

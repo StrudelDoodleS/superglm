@@ -4,6 +4,7 @@
 
 /** @typedef {import('./api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('./api/contracts.js').ShapedRange} ShapedRange */
+/** @typedef {import('./api/contracts.js').ShapeSupport} ShapeSupport */
 /** @typedef {{x:number[], displayToSourceIndices:number[][]}} DisplayAxis */
 
 export const SHAPE_NAMES = Object.freeze(["Flat", "Line", "Quadratic", "Cubic"]);
@@ -68,15 +69,25 @@ function disabledReason(term, selectedIndices, degree) {
   const run = selectedRun(selectedIndices);
   if (!run) return NOT_CONTIGUOUS;
   if (run[0] === run[1]) return TOO_FEW_POINTS;
-  if (!term.levels) return null;
+  if (!term.levels) return tooFewValues(term.shape.support, run, degree);
   if (groupedEdge(term, run)) return GROUPED_EDGE;
-  // A band is one distinct value, so the bands themselves bound the degree;
-  // a numeric range holds the training values between its grid points, which
-  // only Python can count.
+  // A band is one distinct value, so the bands themselves bound the degree.
   const needed = degree + 1;
   return run[1] - run[0] + 1 < needed
     ? `Select at least ${needed} bands for a ${SHAPE_NAMES[degree]}.`
     : null;
+}
+
+/**
+ * A numeric run holds the values the refit sees between its snapped edges,
+ * which Python counts per grid point: ``through[hi] - below[lo]``. Without
+ * counts (no retained data) Python still refuses a short range when sent.
+ * @param {ShapeSupport|null|undefined} support @param {[number, number]} run @param {number} degree
+ */
+function tooFewValues(support, [lo, hi], degree) {
+  const needed = degree + 1;
+  if (!support || support.through[hi] - support.below[lo] >= needed) return null;
+  return `Select at least ${needed} distinct values for a ${SHAPE_NAMES[degree]}.`;
 }
 
 /**

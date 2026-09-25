@@ -114,7 +114,10 @@ over it to see the shape and its edges.
 - A new range may not overlap one already shaped. Restore the old one, or choose a range outside
   it.
 - Choosing a new shape on exactly the same range replaces the old shape.
-- A Quadratic needs at least three distinct values in the range, and a Cubic needs four.
+- A Quadratic needs at least three distinct values in the range, and a Cubic needs four. When the
+  selection holds too few, the icon is disabled and says so on hover.
+- A binned fit (`discrete=True`) sees only the centres of its bins, so those are the values it
+  counts.
 - A range cannot start or end inside a collapsed group. Ungroup the bands at its ends first.
 - A band at the edge of a shaped range cannot be collapsed into a group.
 - A P-spline term is refitted as a B-spline with the same knots and a derivative penalty, so the

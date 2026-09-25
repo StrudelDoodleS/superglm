@@ -47,7 +47,7 @@ function snapshot(revision = 0) {
       age: {
         kind: "spline", term_type: "spline", x: [1], y: [1], original_y: [1],
         previous_y: null, levels: null, n_points: 1, controls: null,
-        group_display: null, impact: {}, shape: { available: true, reason: null, ranges: [] }
+        group_display: null, impact: {}, shape: { available: true, reason: null, ranges: [], support: null }
       }
     },
     selection: { age: [0] },

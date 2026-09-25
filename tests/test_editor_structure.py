@@ -27,7 +27,7 @@ from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
 from superglm.editor.session import _SHAPE_REFUSED
-from superglm.editor.shapes import EDITOR_CHOSEN_SHAPE_ATTRIBUTE, snap_edge
+from superglm.editor.shapes import EDITOR_CHOSEN_SHAPE_ATTRIBUTE, _numeric_edges, snap_edge
 from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
 from superglm.export.summary import build_summary_export_payload
@@ -520,14 +520,56 @@ def test_a_binned_term_refuses_a_shape_its_bin_centres_cannot_carry():
     )
     model.fit_reml(X, y, sample_weight=exposure)
     session = EditorSession.from_model(model, terms=["age"], n_points=260)
-    lo, hi = session.terms["age"].x[:2]
+    grid = session.terms["age"].x
+    # The palette's count for a run is the one the library certifies with, so
+    # its icons disable exactly the shapes the refit would refuse.
+    support = session_payload(session)["age"]["shape"]["support"]
+    assert support["through"][1] - support["below"][0] == 2
+    assert support["through"][2] - support["below"][0] == 4
     with pytest.raises(EditorValueError) as caught:
-        session.replace_with_shaped_range("age", lo=lo, hi=hi, degree=3, method="fit")
+        session.replace_with_shaped_range("age", lo=grid[0], hi=grid[1], degree=3, method="fit")
     assert str(caught.value) == _SHAPE_REFUSED
     assert "it has 2 once binned to 512" in str(caught.value.__cause__)
     assert session.model is model and session.structure_history == []
-    session.replace_with_shaped_range("age", lo=lo, hi=hi, degree=1, method="fit")
+    session.replace_with_shaped_range("age", lo=grid[0], hi=grid[1], degree=1, method="fit")
     assert _ranges(session.model._specs["age"]) == [(18.0, 18.3, 1)]
+    session.uncollapse_levels()
+    session.replace_with_shaped_range("age", lo=grid[0], hi=grid[2], degree=3, method="fit")
+    assert _ranges(session.model._specs["age"]) == [(18.0, 18.5, 3)]
+
+
+def test_the_palette_counts_the_values_in_the_range_a_refit_builds(aged):
+    # A run i..j holds through[j] - below[i] values: the distinct positive-
+    # weight ages inside the snapped range the refit is built on. Age 30
+    # carries no weight, so it counts for nothing.
+    model, X = aged
+    y = model._fit_y_ref
+    weight = np.where(X["age"] == 30, 0.0, 1.0)
+    weighted = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=1.0,
+        features={"age": Spline(kind="bs", k=12), "region": Categorical(base="first")},
+    )
+    weighted.fit(X, y, sample_weight=weight)
+    session = EditorSession.from_model(weighted, terms=["age"], train_data=(X, y, weight))
+    grid = session.terms["age"].x
+    support = session_payload(session)["age"]["shape"]["support"]
+    counted = np.unique(X["age"][weight > 0])
+    runs = [(i, i + 1) for i in range(grid.size - 1)] + [(0, grid.size - 1), (3, 40)]
+    edges = np.array([_numeric_edges(weighted._specs["age"], grid[i], grid[j]) for i, j in runs])
+    held = np.searchsorted(counted, edges[:, 1], side="right") - np.searchsorted(
+        counted, edges[:, 0]
+    )
+    i, j = np.array(runs).T
+    np.testing.assert_array_equal(
+        np.array(support["through"])[j] - np.array(support["below"])[i], held
+    )
+    # The fixture exercises both: snapping moves an edge across an age, and
+    # a run spans the weightless one.
+    raw = np.searchsorted(counted, grid[j], side="right") - np.searchsorted(counted, grid[i])
+    assert np.any(raw != held)
+    assert np.any((edges[:, 0] <= 30) & (edges[:, 1] >= 30))
 
 
 def test_revert_after_two_shapes_restores_the_opened_model(aged):
@@ -635,6 +677,7 @@ def test_an_unshapeable_term_says_why_and_is_refused_unchanged(region_model, fea
         "available": False,
         "reason": reason,
         "ranges": [],
+        "support": None,
     }
     with pytest.raises(EditorValueError, match=f"^{re.escape(reason)}$"):
         session.replace_with_shaped_range("x", lo=2.0, hi=4.0, degree=1, method="fit")
@@ -664,6 +707,7 @@ def test_categorical_and_ordered_step_terms_report_shapes_unavailable(region_mod
         "available": False,
         "reason": "Shapes need a spline term.",
         "ranges": [],
+        "support": None,
     }
     _, X, y = banded
     model = SuperGLM(
@@ -760,11 +804,15 @@ def test_widget_http_shape_range_returns_transition_envelope(aged):
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["timing"]["operation"] == "shape_range"
         assert payload["state"]["structure_history"]["last"]["label"] == "Line 30–45 in age"
-        assert payload["state"]["terms"]["age"]["shape"] == {
+        shape = payload["state"]["terms"]["age"]["shape"]
+        support = shape.pop("support")
+        assert shape == {
             "available": True,
             "reason": None,
             "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line"}],
         }
+        n_points = payload["state"]["terms"]["age"]["n_points"]
+        assert len(support["below"]) == len(support["through"]) == n_points
         assert "transform" not in payload["state"]["terms"]["age"]
     finally:
         widget.close()

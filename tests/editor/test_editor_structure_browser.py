@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from tests.test_editor_structure import EPS, _line_residual, _pinning_tolerance
 
+from superglm.editor.payloads import session_payload
+
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
 
@@ -127,6 +129,26 @@ def test_line_icon_pins_a_run_of_points_and_restore_removes_it(open_editor_page)
         page.wait_for_function("() => !document.querySelector('#chart .shape-range')")
         assert session.model is before
         assert session.model._specs["curve"].polynomial_ranges == ()
+
+
+def test_a_numeric_run_holding_too_few_values_disables_the_higher_shapes(open_editor_page):
+    with open_editor_page() as (page, session):
+        support = session_payload(session)["curve"]["shape"]["support"]
+        held = np.array(support["through"][1:]) - np.array(support["below"][:-1])
+        # Precondition: some two-point run holds two or three training values.
+        [candidates] = np.nonzero((held >= 2) & (held < 4))
+        assert candidates.size
+        k = int(candidates[0])
+        session.select_indices("curve", [k, k + 1])
+        _reload_editor(page, "curve")
+        page.locator("#selectionMenu").wait_for(state="visible")
+
+        cubic = page.locator("#shapeCubic")
+        assert cubic.get_attribute("aria-disabled") == "true"
+        assert cubic.get_attribute("data-popover-body") == (
+            "Select at least 4 distinct values for a Cubic."
+        )
+        assert page.locator("#shapeLine").get_attribute("aria-disabled") == "false"
 
 
 def test_quadratic_on_bands_spans_whole_bands_and_cubic_says_why_not(open_editor_page):
