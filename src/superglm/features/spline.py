@@ -253,7 +253,8 @@ class _SplineBase:
         reused on every subsequent ``transform()`` / ``predict()`` call.
         Pass them back via ``Spline(knots=..., boundary=...)`` to
         guarantee identical placement *and* boundary on a refit with
-        different data.
+        different data. With polynomial ranges they hold the repeated edge
+        knots, which ``knots=`` refuses; pass ``fitted_base_knots`` instead.
         """
         if self._n_basis == 0:
             return None

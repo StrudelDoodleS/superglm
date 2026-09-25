@@ -50,15 +50,24 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
-from superglm.features._spline_ranges import UndeterminedStretchError
+from superglm.features._spline_ranges import ConstantRangesError, UndeterminedStretchError
 from superglm.solvers.dispersion import model_weight_semantics
 
 _SHAPE_REFUSED = (
     "That range cannot be shaped. Choose a range with more distinct values, or a lower degree."
 )
+_CONSTANT_REFUSED = (
+    "A Flat range over the whole axis leaves the term one constant, which the intercept "
+    "already carries. Choose a Line, or leave part of the axis free."
+)
 _STRETCH_REFUSED = (
     "That range leaves too few values beside it to fit the rest of the curve. "
     "Widen it to the end of the axis or to the next shaped range."
+)
+
+_COLLAPSE_IN_RANGE_REFUSED = (
+    "Collapsing those bands leaves a shaped range too few bands for its shape. "
+    "Collapse bands outside it, or undo the range first."
 )
 
 
@@ -71,6 +80,8 @@ def _shape_refusal(exc: BaseException | None) -> str:
     while exc is not None:
         if isinstance(exc, UndeterminedStretchError):
             return _STRETCH_REFUSED
+        if isinstance(exc, ConstantRangesError):
+            return _CONSTANT_REFUSED
         exc = exc.__cause__
     return _SHAPE_REFUSED
 
@@ -107,6 +118,8 @@ class EditorSession:
         self._level_orders: dict[str, list[str]] = {}
         self.history: list[EditRecord] = []
         self.redo_stack: list[EditRecord] = []
+        # Each step keeps the fitted model in force before it, for the life of
+        # the session, so Undo never refits: memory grows by one fit per step.
         self.structure_history: list[StructuralStep] = []
         self.structure_redo: list[StructuralStep] = []
         self._model_revision = 0
@@ -320,6 +333,8 @@ class EditorSession:
         else:
             self._trim_term_history(term, idx)
         if not np.array_equal(before, restored):
+            # A change is a new action: the undone steps' future is gone.
+            self.structure_redo.clear()
             self._advance_model_revision()
         return self
 
@@ -874,13 +889,23 @@ class EditorSession:
         """
         editable = self._require_term(term)
         idx = self._require_selection(term)
-        return self._refit_replacing(
-            term,
-            lambda X_ref: collapsed_feature_spec(
-                self.model, editable, idx, X=X_ref, group_label=group_label
-            ),
-            **refit_kwargs,
-        )
+        try:
+            return self._refit_replacing(
+                term,
+                lambda X_ref: collapsed_feature_spec(
+                    self.model, editable, idx, X=X_ref, group_label=group_label
+                ),
+                **refit_kwargs,
+            )
+        except EditorClientError:
+            raise
+        except ValueError as exc:
+            # Collapsing bands inside a shaped range takes away positions its
+            # polynomial needs; the library refuses that at the refit.
+            basis = getattr(self.model._specs[term], "_spline_obj", None)
+            if not getattr(basis, "polynomial_ranges", ()):
+                raise
+            raise EditorValueError(_COLLAPSE_IN_RANGE_REFUSED) from exc
 
     def replace_with_collapsed_levels(self, term: str, **kwargs: Any):
         """Collapse selected levels, refit, and make the refit the in-force edit model."""

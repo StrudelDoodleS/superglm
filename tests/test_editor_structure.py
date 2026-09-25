@@ -82,6 +82,26 @@ def test_every_structural_step_pushes_one_restorable_entry(region_model):
     assert session.structure_history == []
 
 
+def test_a_reset_after_undoing_a_step_ends_the_steps_redo(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region"])
+    session.select_levels("region", ["B"])
+    session.shift("region", 0.1)
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    session.undo()
+    assert session.model is model and session.structure_redo
+
+    session.clear_selection("region")
+    session.reset("region")
+    session.redo()
+
+    assert session.model is model
+    np.testing.assert_array_equal(
+        session.terms["region"].edited_log_effect, session.terms["region"].original_log_effect
+    )
+
+
 def test_state_names_what_undo_and_redo_would_take(region_model):
     model, _ = region_model
     session = EditorSession.from_model(model, terms=["region"])
@@ -795,6 +815,32 @@ def test_a_join_outside_tangent_and_corner_is_refused(aged, join):
     assert session.model is model
 
 
+def test_select_all_then_flat_is_refused_in_words(aged):
+    model, _ = aged
+    session = EditorSession.from_model(model, terms=["age"])
+    with pytest.raises(EditorValueError, match="^A Flat range over the whole axis"):
+        session.replace_with_shaped_range("age", lo=18.0, hi=90.0, degree=0, method="fit")
+    assert session.model is model
+
+
+def test_a_degree_one_spline_refuses_a_tangent_join_and_takes_a_corner(aged):
+    _, X = aged
+    y = np.random.default_rng(3).poisson(np.exp(-2.0 + 0.3 * np.sin(X["age"] / 12.0)))
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=1.0,
+        features={"age": Spline(kind="bs", k=10, degree=1, m=1)},
+    ).fit(X[["age"]], y)
+    session = EditorSession.from_model(model, terms=["age"])
+    with pytest.raises(EditorValueError, match="^A degree-1 spline cannot join a range"):
+        session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=1, method="fit")
+    assert session.model is model
+
+    session.replace_with_shaped_range("age", lo=30.0, hi=45.0, degree=1, join="kink", method="fit")
+    assert [r.join for r in session.model._specs["age"].polynomial_ranges] == ["kink"]
+
+
 @pytest.mark.parametrize("edge", [float("nan"), float("inf"), "30"])
 def test_a_numeric_term_refuses_edges_that_are_not_finite_numbers(aged, edge):
     model, _ = aged
@@ -884,6 +930,18 @@ def test_ordered_ranges_overlap_by_band_and_collapse_respects_their_edges(banded
         ("B1", "B2", "Flat"),
         ("B3", "B6", "Line"),
     ]
+
+
+def test_collapsing_a_cubic_ranges_interior_below_its_degree_is_refused_in_words(banded):
+    # B3-B6 is four bands; a Cubic needs all four, so merging B4 and B5 leaves three.
+    model, _, _ = banded
+    session = EditorSession.from_model(model, terms=["band"])
+    session.replace_with_shaped_range("band", lo="B3", hi="B6", degree=3, method="fit")
+    shaped = session.model
+    session.select_levels("band", ["B4", "B5"])
+    with pytest.raises(EditorValueError, match="^Collapsing those bands leaves a shaped range"):
+        session.replace_with_collapsed_levels("band", method="fit")
+    assert session.model is shaped
 
 
 def test_widget_http_shape_range_returns_transition_envelope(aged):

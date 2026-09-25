@@ -17,6 +17,7 @@ from superglm import Constraint, LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.export._ppform import extract_ppform
 from superglm.features._spline_penalties import build_integrated_derivative_penalty
 from superglm.features._spline_ranges import (
+    ConstantRangesError,
     PolynomialRange,
     certify_determined,
     constraint_null_space,
@@ -165,12 +166,44 @@ def test_smooth_join_keeps_the_splines_own_continuity(nu):
         ([(8.0, 11.0, 1)], DEGREE, "inside the fitted range"),
         ([(2.0, 5.0, 1), (4.0, 7.0, 0)], DEGREE, "overlap"),
         ([(2.0, 5.0, 3)], 2, "exceeds the spline degree 2"),
+        ([(2.0, 5.0, 1)], 1, "cannot join it along its tangent"),
     ],
 )
 def test_invalid_ranges_are_refused_by_name(ranges, degree, message):
     ranges = [PolynomialRange(*fields) for fields in ranges]
     with pytest.raises(ValueError, match=message):
         validate_ranges(ranges, degree, LO, HI)
+
+
+def test_edges_within_a_hair_of_an_end_or_a_neighbour_are_moved_onto_it():
+    # A 1e-12-wide free piece between two tangent joins would put entries
+    # near its width to the minus third power into the penalty.
+    hair = 1e-12 * (HI - LO)
+    ranges = [PolynomialRange(LO + hair, 5.0, 1), PolynomialRange(5.0 + hair, HI - hair, 0)]
+    left, right = validate_ranges(ranges, DEGREE, LO, HI)
+    assert (left.lo, left.hi, right.lo, right.hi) == (LO, 5.0, 5.0, HI)
+
+
+@pytest.mark.parametrize(
+    "ranges",
+    [
+        [PolynomialRange(LO, HI, 0)],
+        [PolynomialRange(LO, 4.0, 0), PolynomialRange(4.0 + 1e-13, HI, 0)],
+    ],
+)
+def test_flat_ranges_tiling_the_axis_are_refused(ranges):
+    with pytest.raises(ConstantRangesError, match="one constant"):
+        validate_ranges(ranges, DEGREE, LO, HI)
+
+
+def test_a_line_among_ranges_tiling_the_axis_keeps_the_term():
+    ranges = [PolynomialRange(LO, 4.0, 0), PolynomialRange(4.0, HI, 1)]
+    assert len(validate_ranges(ranges, DEGREE, LO, HI)) == 2
+
+
+def test_a_degree_one_spline_takes_a_kink_join():
+    ranges = [PolynomialRange(2.0, 5.0, 1, "kink")]
+    assert validate_ranges(ranges, 1, LO, HI) == (PolynomialRange(2.0, 5.0, 1, "kink"),)
 
 
 @pytest.mark.parametrize(
@@ -425,6 +458,18 @@ def test_pinned_quadratic_is_not_shrunk_by_the_penalty(kind):
     tolerance = spec._n_basis**2 * EPS * scale
     assert abs(coefficients @ unrestricted @ coefficients - 60.0) <= tolerance
     assert abs(coefficients @ spec._build_penalty() @ coefficients) <= tolerance
+
+
+@pytest.mark.parametrize("discrete", [False, True])
+@pytest.mark.parametrize("kind", ["bs", "cr"])
+def test_a_whole_axis_flat_range_is_refused_at_the_fit(kind, discrete):
+    """Its one constant column would duplicate the intercept, which nothing then identifies."""
+    X, _, _ = _book()
+    lo, hi = float(X["age"].min()), float(X["age"].max())
+    with pytest.raises(ValueError, match="one constant") as refused:
+        _fit(kind, [PolynomialRange(lo, hi, 0)], discrete=discrete)
+    # The exact build names the feature around it; the binned build raises it as is.
+    assert ConstantRangesError in {type(refused.value), type(refused.value.__cause__)}
 
 
 @pytest.mark.parametrize("kind", ["bs", "cr"])

@@ -85,7 +85,8 @@ Spline(kind="bs", k=12, polynomial_ranges=[
   spline's own degree.
 - `join` sets how the curve meets the range at each edge:
   - `"tangent"` (the default): the curve leaves the range along its slope, so
-    there is no corner.
+    there is no corner. A degree-1 spline has no slope to carry, so it needs
+    `"kink"`.
   - `"kink"`: the curve stays continuous, but its slope may change at the
     edge, so there can be a corner.
   - `"smooth"`: the curve keeps the spline's own smoothness at the edge, which

@@ -113,7 +113,8 @@ over it to see the shape and its edges.
   starts or ends exactly on that range's edge, so the two meet.
 - On an ordered term the range covers whole bands and is drawn from the first band to the last.
   Two ranges can share an edge band.
-- The curve stays continuous at each edge of the range, but its slope may change there.
+- The curve stays continuous at each edge of the range. With Tangent it also keeps its slope
+  there; with Corner the slope may change.
 - Flat fits a level to the range. To hold the curve at its value at a range's edge instead of
   fitting a level, use **Level from left** or **Level from right**. That is an edit, not a refit.
 - To fit one polynomial over the whole axis, choose Select all and then a shape.

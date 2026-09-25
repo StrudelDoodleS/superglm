@@ -110,6 +110,10 @@ def shaped_feature_spec(
         raise EditorValueError("Choose a shape: Flat, Line, Quadratic or Cubic.")
     if join not in EDITOR_JOINS:
         raise EditorValueError("Choose a join: Tangent or Corner.")
+    if join == "tangent" and _source_spline(model._specs[name]).degree < 2:
+        raise EditorValueError(
+            "A degree-1 spline cannot join a range along its tangent; choose Corner."
+        )
     spec = model._specs[name]
     ordered = isinstance(spec, OrderedCategorical)
     position = spec._range_edge_value if ordered else float

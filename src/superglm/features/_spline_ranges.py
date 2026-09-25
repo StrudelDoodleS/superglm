@@ -31,6 +31,10 @@ class UndeterminedStretchError(ValueError):
     """A free stretch between ranges, or a range and an end, holds too few values."""
 
 
+class ConstantRangesError(ValueError):
+    """Flat ranges tile the whole axis, leaving the term a constant the intercept carries."""
+
+
 @dataclass(frozen=True)
 class PolynomialRange:
     """Pin a spline to a polynomial of ``degree`` (0-3) on ``[lo, hi]``.
@@ -62,9 +66,26 @@ class PolynomialRange:
 def validate_ranges(
     ranges: Sequence[PolynomialRange], degree: int, lo: float, hi: float
 ) -> tuple[PolynomialRange, ...]:
-    """Return the ranges with float edges, sorted by ``lo``, refusing anything ill-posed."""
-    numeric = (replace(r, lo=float(r.lo), hi=float(r.hi)) for r in ranges)
-    ordered = tuple(sorted(numeric, key=lambda r: r.lo))
+    """Return the ranges with float edges, sorted by ``lo``, refusing anything ill-posed.
+
+    An edge within ``1e-9 * (hi - lo)`` of an end, or of a neighbouring
+    range's edge, is moved onto it: a sliver interval there would carry a
+    penalty entry growing like its width to the minus third power.
+    """
+    tolerance = 1e-9 * (hi - lo)
+    numeric = (
+        replace(
+            r,
+            lo=_snapped(float(r.lo), lo, hi, tolerance),
+            hi=_snapped(float(r.hi), lo, hi, tolerance),
+        )
+        for r in ranges
+    )
+    ordered = sorted(numeric, key=lambda r: r.lo)
+    for index in range(1, len(ordered)):
+        if abs(ordered[index].lo - ordered[index - 1].hi) <= tolerance:
+            ordered[index] = replace(ordered[index], lo=ordered[index - 1].hi)
+    ordered = tuple(ordered)
     for r in ordered:
         if not float(r.lo) < float(r.hi):
             raise ValueError(f"PolynomialRange lo must be below hi, got [{r.lo}, {r.hi}]")
@@ -76,17 +97,41 @@ def validate_ranges(
             raise ValueError(
                 f"PolynomialRange degree {r.degree} exceeds the spline degree {degree}"
             )
+        if r.join == "tangent" and degree < 2:
+            raise ValueError(
+                "A degree-1 spline has no slope continuity to carry, so a range "
+                "cannot join it along its tangent; use join='kink'."
+            )
     for left, right in zip(ordered[:-1], ordered[1:]):
         if float(right.lo) < float(left.hi):
             raise ValueError(
                 f"PolynomialRanges [{left.lo}, {left.hi}] and [{right.lo}, {right.hi}] overlap"
             )
+    tiled = (
+        bool(ordered)
+        and ordered[0].lo == lo
+        and ordered[-1].hi == hi
+        and all(right.lo == left.hi for left, right in zip(ordered[:-1], ordered[1:]))
+    )
+    if tiled and all(r.degree == 0 for r in ordered):
+        # Shared edges are kinks, so tiled Flat pieces meet at one value.
+        raise ConstantRangesError(
+            "Flat ranges over the whole axis leave the term one constant, which the "
+            "intercept already carries; drop the term or leave part of the axis free."
+        )
     return ordered
+
+
+def _snapped(edge: float, lo: float, hi: float, tolerance: float) -> float:
+    """``edge``, moved onto ``lo`` or ``hi`` when it lies within ``tolerance`` of it."""
+    if abs(edge - lo) <= tolerance:
+        return lo
+    return hi if abs(edge - hi) <= tolerance else edge
 
 
 def edge_multiplicity(join: str, degree: int) -> int:
     """Knot copies at a range edge: C0 for a kink, C1 for a tangent, else the spline's own."""
-    return {"kink": degree, "tangent": max(degree - 1, 1), "smooth": 1}[join]
+    return {"kink": degree, "tangent": degree - 1, "smooth": 1}[join]
 
 
 def merged_interior_knots(
