@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import pickle
 import re
 import urllib.error
 
@@ -30,6 +31,7 @@ from superglm.editor.shapes import EDITOR_CHOSEN_SHAPE_ATTRIBUTE, snap_edge
 from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
 from superglm.export.summary import build_summary_export_payload
+from superglm.features.spline import _SplineBase
 from tests.test_editor import _post_json
 
 
@@ -865,6 +867,35 @@ def test_restore_walks_a_mixed_two_term_sequence_back_exactly(banded):
         session.uncollapse_levels()
         np.testing.assert_array_equal(session.model.predict(X), expected)
     assert not session.can_uncollapse_levels()
+
+
+def test_a_model_pickled_before_shaped_ranges_opens_refits_and_takes_a_shape(banded):
+    # Unpickling bypasses __init__, so every spline in a model pickled before
+    # shaped ranges lacks the two attributes they added. Deleting them from a
+    # live fitted model reproduces that object without a binary fixture; the
+    # class-level defaults must read as no ranges, with base knots the fitted.
+    model, X, y = banded
+    legacy = pickle.loads(pickle.dumps(model))
+    specs = legacy._specs.values()
+    splines = [
+        s for spec in specs for s in (spec, *vars(spec).values()) if isinstance(s, _SplineBase)
+    ]
+    assert len(splines) == 3  # x, and the ordered term's declared and working bases
+    for spline in splines:
+        spline.__dict__.pop("_polynomial_ranges")
+        spline.__dict__.pop("_base_interior_knots")
+    assert vars(_SplineBase)["_polynomial_ranges"] == ()  # immutable: shared by every legacy spec
+    x_spec = legacy._specs["x"]
+    np.testing.assert_array_equal(x_spec.fitted_base_knots, x_spec.fitted_knots)
+    session = EditorSession.from_model(legacy, terms=["band", "x"])
+    assert session_payload(session)["x"]["shape"]["ranges"] == []
+    session.select_levels("band", ["B2", "B3"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    session.replace_with_shaped_range("x", lo=2.0, hi=4.0, degree=1, method="fit")
+    assert _ranges(session.model._specs["x"]) == [(2.0, 4.0, 1)]
+    np.testing.assert_array_equal(session.model._specs["x"].fitted_base_knots, x_spec.fitted_knots)
+    legacy.fit(X, y)
+    np.testing.assert_array_equal(legacy._specs["x"].fitted_knots, model._specs["x"].fitted_knots)
 
 
 def test_shape_note_reaches_every_renderer_and_survives_export(banded):

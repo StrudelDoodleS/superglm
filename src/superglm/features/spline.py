@@ -115,6 +115,13 @@ class _SplineBase:
     _select_supported: bool = True
     _tensor_supported: bool = True
 
+    # Class-level defaults for the polynomial-range state. Unpickling bypasses
+    # `__init__`, so a spec pickled before this state existed reads these: no
+    # ranges, and base knots equal to the fitted ones. Immutable, because a
+    # class attribute is shared by every instance that never assigns its own.
+    _polynomial_ranges: tuple[PolynomialRange, ...] = ()
+    _base_interior_knots: NDArray | None = None
+
     def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
         """Whether select=True is supported with these m orders.
 
