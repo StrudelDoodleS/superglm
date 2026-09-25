@@ -39,7 +39,9 @@ function arrow(delta) {
 
 export function renderMetricGrid(payload, { metricGrid, metricSelect }) {
   if (payload === null) {
-    metricGrid.innerHTML = metricKeys.map((metric) => `
+    // The caption line is kept while pending, so the strip, and the chart
+    // drawn at its panel's size above it, keep their height when metrics land.
+    metricGrid.innerHTML = `<div class="metric-caption">Change against the original model</div>` + metricKeys.map((metric) => `
       <div class="metric-item" data-direction="neutral">
         <div class="metric-item-name">${metricLabel(metric, metricSelect)}</div>
         <div class="metric-pending">Pending recompute</div>

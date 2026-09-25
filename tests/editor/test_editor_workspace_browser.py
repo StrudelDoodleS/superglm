@@ -1583,8 +1583,11 @@ def test_failed_summary_level_display_refresh_remains_retryable(open_editor_page
             grouped.check()
 
         assert grouped_response.value.status == 503
-        page.wait_for_timeout(50)
-        assert page.locator("#summaryFrame").get_attribute("data-freshness") == "stale"
+        # The page handles the response on its own schedule; a fixed 50 ms was
+        # not always enough on a loaded runner.
+        page.wait_for_function(
+            "() => document.querySelector('#summaryFrame')?.dataset.freshness === 'stale'"
+        )
         assert page.locator("#summaryFrame").get_attribute("aria-busy") == "false"
         assert page.locator("#summaryRetry").is_visible()
         assert "Grouped summary unavailable." in page.locator("#summaryStatus").inner_text()
