@@ -498,6 +498,36 @@ def test_library_refusal_reaches_the_browser_as_the_fixed_sentence(aged):
     assert _ranges(session.model._specs["age"]) == [(lo, hi, 1)]
 
 
+def test_a_binned_term_refuses_a_shape_its_bin_centres_cannot_carry():
+    # The demo's settings: 512 bins, a 260-point grid and a pile of exposure
+    # at the youngest age. The first two grid points snap to [18, 18.3],
+    # which holds two bin centres: enough for a Line, not for a Cubic, whose
+    # third free direction nothing in the binned fit would set.
+    rng = np.random.default_rng(20261001)
+    n = 20_000
+    age = np.clip(rng.normal(48.0, 13.5, n), 18.0, 80.0)
+    exposure = rng.gamma(4.0, 0.25, n) + 0.05
+    y = rng.poisson(np.exp(-1.0 + 0.2 * np.sin((age - 18.0) / 6.0)) * exposure) / exposure
+    X = pd.DataFrame({"age": age})
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(kind="bs", k=14, knot_strategy="quantile_tempered")},
+        discrete=True,
+        n_bins=512,
+    )
+    model.fit_reml(X, y, sample_weight=exposure)
+    session = EditorSession.from_model(model, terms=["age"], n_points=260)
+    lo, hi = session.terms["age"].x[:2]
+    with pytest.raises(EditorValueError) as caught:
+        session.replace_with_shaped_range("age", lo=lo, hi=hi, degree=3, method="fit")
+    assert str(caught.value) == _SHAPE_REFUSED
+    assert "it has 2 once binned to 512" in str(caught.value.__cause__)
+    assert session.model is model and session.structure_history == []
+    session.replace_with_shaped_range("age", lo=lo, hi=hi, degree=1, method="fit")
+    assert _ranges(session.model._specs["age"]) == [(18.0, 18.3, 1)]
+
+
 def test_revert_after_two_shapes_restores_the_opened_model(aged):
     model, X = aged
     session = EditorSession.from_model(model, terms=["age"])

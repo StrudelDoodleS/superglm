@@ -18,9 +18,11 @@ from superglm.export._ppform import extract_ppform
 from superglm.features._spline_penalties import build_integrated_derivative_penalty
 from superglm.features._spline_ranges import (
     PolynomialRange,
+    certify_determined,
     constraint_null_space,
     derivative_design,
     merged_interior_knots,
+    pinned_intervals,
     pinning_rows,
     validate_ranges,
 )
@@ -180,6 +182,86 @@ def test_close_smooth_ranges_are_refused_as_dependent():
     knots = _clamped(merged_interior_knots(np.linspace(1, 9, 9), ranges, DEGREE, LO, HI))
     with pytest.raises(ValueError, match="meet at a kink"):
         constraint_null_space(pinning_rows(knots, DEGREE, ranges))
+
+
+# ── Certificate: the fit's support must determine every unpenalised curve ──
+
+BASE = np.linspace(1.0, 9.0, 9)
+DENSE = np.linspace(LO, HI, 201)
+BIN_CENTRES = 0.25 + 0.5 * np.arange(20)  # 20 equal-width bins on [0, 10]
+GAP = [PolynomialRange(2.0, 4.0, 1), PolynomialRange(4.1, 6.0, 1)]
+
+
+def _rank(M):
+    """Rank at NumPy's matrix_rank threshold; the spectrum must split cleanly there."""
+    s = np.linalg.svd(M, compute_uv=False)
+    tol = max(M.shape) * EPS * s[0]
+    assert np.all((s <= tol) | (s >= 1e-3 * s[0])), s / s[0]
+    return int(np.sum(s > tol))
+
+
+def _undetermined_directions(ranges, support, order):
+    """Unpenalised curves that vanish at every support point, by linear algebra alone.
+
+    A penalised least-squares fit is unique iff the design has full column
+    rank on the penalty's null space. That null space is read off the
+    order-``order`` derivative at interior points of every free knot
+    interval, which vanishes there iff the penalty does; the design is the
+    basis at ``support``. No counting rule enters, so this checks the one
+    ``certify_determined`` applies.
+    """
+    ranges = validate_ranges(ranges, DEGREE, LO, HI)
+    knots = _clamped(merged_interior_knots(BASE, ranges, DEGREE, LO, HI))
+    Z = constraint_null_space(pinning_rows(knots, DEGREE, ranges))
+    breaks = np.unique(knots)
+    a, b = breaks[:-1], breaks[1:]
+    bounds = np.array(pinned_intervals(ranges, LO, HI))
+    free = ~((a[:, None] >= bounds[:, 0]) & (b[:, None] <= bounds[:, 1])).any(axis=1)
+    points = (a[free, None] + (b - a)[free, None] * np.linspace(0.1, 0.9, 5)).ravel()
+    null = np.eye(Z.shape[1])
+    if points.size:
+        rows = derivative_design(knots, DEGREE, points, order)
+        rows = (rows / np.linalg.norm(rows, axis=1, keepdims=True)) @ Z
+        null = np.linalg.svd(rows)[2][_rank(rows) :].T
+    design = BSpline.design_matrix(support, knots, DEGREE).toarray() @ Z @ null
+    return null.shape[1] - _rank(design)
+
+
+@pytest.mark.parametrize(
+    ("ranges", "support", "order", "undetermined"),
+    [
+        pytest.param([PolynomialRange(4.0, 6.0, 2)], DENSE, 2, False, id="dense"),
+        pytest.param([PolynomialRange(4.0, 4.3, 3)], BIN_CENTRES, 2, True, id="cubic-in-one-bin"),
+        pytest.param([PolynomialRange(0.2, 5.0, 1)], BIN_CENTRES, 2, True, id="kink-by-empty-end"),
+        pytest.param(
+            [PolynomialRange(0.2, 5.0, 1, "smooth")],
+            BIN_CENTRES,
+            2,
+            False,
+            id="smooth-by-empty-end",
+        ),
+        pytest.param([PolynomialRange(0.2, 5.0, 1)], BIN_CENTRES, 1, False, id="order-1-empty-end"),
+        pytest.param(GAP, BIN_CENTRES, 2, False, id="empty-gap-order-2"),
+        pytest.param(GAP, BIN_CENTRES, 3, True, id="empty-gap-order-3"),
+        pytest.param(GAP, np.sort(np.append(BIN_CENTRES, 4.05)), 3, False, id="held-gap-order-3"),
+        pytest.param(
+            [PolynomialRange(LO, HI, 2)], np.array([1.0, 5.0, 9.0]), 2, False, id="whole-3"
+        ),
+        pytest.param([PolynomialRange(LO, HI, 2)], np.array([1.0, 5.0]), 2, True, id="whole-2"),
+    ],
+)
+def test_the_certificate_refuses_exactly_the_undetermined_fits(
+    ranges, support, order, undetermined
+):
+    # Each range here holds degree + 1 support points or none at all, where
+    # the per-range bound is exact; elsewhere it is the stated sufficient one.
+    assert (_undetermined_directions(ranges, support, order) > 0) == undetermined
+    resolved = validate_ranges(ranges, DEGREE, LO, HI)
+    if undetermined:
+        with pytest.raises(ValueError, match="distinct values of the feature"):
+            certify_determined(resolved, support, LO, HI, order)
+    else:
+        certify_determined(resolved, support, LO, HI, order)
 
 
 # ── Spline(polynomial_ranges=...) on fitted models ────────────────────────
@@ -436,6 +518,26 @@ def test_too_few_distinct_values_in_a_range_are_refused_by_name(discrete):
         _fit("bs", [PolynomialRange(50.5, 51.5, 1)], discrete=discrete, book=(X, y, w))
     # One value is enough for a Flat range: the bound is degree + 1, no more.
     _fit("bs", [PolynomialRange(50.5, 51.5, 0)], discrete=discrete, book=(X, y, w))
+
+
+def test_a_binned_fit_certifies_its_ranges_on_the_bin_centres():
+    # 512 bins of width ~0.121 on the 18-80 axis: [40, 40.2] holds a dozen
+    # distinct ages but at most two bin centres, which cannot fix a quadratic.
+    narrow = [PolynomialRange(40.0, 40.2, 2)]
+    _fit("bs", narrow)
+    with pytest.raises(ValueError, match=r"needs at least 3 distinct values .* once binned to 512"):
+        _fit("bs", narrow, discrete=True)
+
+
+def test_a_binned_fit_refuses_an_end_stretch_no_bin_centre_reaches():
+    # The first bin centre sits half a bin (~0.06) above the youngest age, so
+    # the stretch below a range starting 0.03 above it holds none: its slope
+    # would be set by nothing. The exact fit sees the youngest age itself.
+    book = _book()
+    sliver = [PolynomialRange(float(book[0]["age"].min()) + 0.03, 50.0, 1)]
+    _fit("bs", sliver, book=book)
+    with pytest.raises(ValueError, match=r"outside the polynomial ranges.*once binned to 512"):
+        _fit("bs", sliver, discrete=True, book=book)
 
 
 def test_ppform_export_reproduces_a_kinked_ranged_spline():

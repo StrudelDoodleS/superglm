@@ -186,12 +186,13 @@ def build_knots_and_penalty(
     spec: Any,
     x: NDArray,
     sample_weight: NDArray | None = None,
+    n_bins: int | None = None,
 ) -> tuple[NDArray | None, int, NDArray | None]:
     """Place knots and return projected penalty info without building the full basis."""
     _raise_if_unsupported_fit_shape_constraint(spec)
 
     x = np.asarray(x, dtype=np.float64).ravel()
-    spec._place_knots(x, sample_weight)
+    spec._place_knots(x, sample_weight, n_bins)
     spec._validate_m_orders_build()
     omega = spec._build_penalty()
     _, omega_constrained, n_cols, projection = spec._apply_constraints(None, omega)

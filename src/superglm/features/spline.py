@@ -211,9 +211,10 @@ class _SplineBase:
         self,
         x: NDArray,
         sample_weight: NDArray | None = None,
+        n_bins: int | None = None,
     ) -> None:
-        """Place interior knots and build the full knot vector."""
-        _spline_runtime.place_knots(self, x, sample_weight)
+        """Place interior knots and build the full knot vector (``n_bins``: a binned fit's)."""
+        _spline_runtime.place_knots(self, x, sample_weight, n_bins)
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
         """Build the full knot vector from interior knots.
@@ -375,11 +376,12 @@ class _SplineBase:
         return _spline_build.build_group_info(self, x, sample_weight)
 
     def build_knots_and_penalty(
-        self, x: NDArray, sample_weight: NDArray | None = None
+        self, x: NDArray, sample_weight: NDArray | None = None, n_bins: int | None = None
     ) -> tuple[NDArray | None, int, NDArray | None]:
         """Place knots and return penalty info, without building the full basis.
 
-        Used by the discretization path to avoid the O(n) basis construction.
+        Used by the discretization path, binning ``x`` to ``n_bins``, to avoid
+        the O(n) basis construction.
         Applies boundary constraints (NaturalSpline/CRS) and identifiability
         so the returned penalty and column count match the exact ``build()``
         path.
@@ -394,7 +396,7 @@ class _SplineBase:
         n_cols : effective number of basis columns.
         projection : (K, n_cols) constraint projection, or None.
         """
-        return _spline_build.build_knots_and_penalty(self, x, sample_weight)
+        return _spline_build.build_knots_and_penalty(self, x, sample_weight, n_bins)
 
     def transform(self, x: NDArray) -> NDArray:
         """Build design matrix using knots learned during build()."""
@@ -966,8 +968,12 @@ class CardinalCRSpline(_SplineBase):
         self,
         x: NDArray,
         sample_weight: NDArray | None = None,
+        n_bins: int | None = None,
     ) -> None:
-        """Place K = n_knots + 2 knots and build the cardinal CR matrices."""
+        """Place K = n_knots + 2 knots and build the cardinal CR matrices.
+
+        ``n_bins`` certifies polynomial ranges, which this kind refuses.
+        """
         _spline_cardinal_spec.place_knots(self, x, sample_weight)
 
     def _build_cr_matrices(self) -> None:

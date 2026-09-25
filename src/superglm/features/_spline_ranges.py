@@ -104,6 +104,57 @@ def merged_interior_knots(
     return np.sort(np.concatenate([kept, np.repeat(unique_edges, multiplicity)]))
 
 
+def certify_determined(
+    ranges: Sequence[PolynomialRange],
+    support: NDArray,
+    lo: float,
+    hi: float,
+    order: int,
+    note: str = "",
+) -> None:
+    """Refuse ranges that leave part of the curve undetermined by the data.
+
+    ``support`` is the sorted distinct values the fit evaluates the basis at.
+    A penalised fit is unique iff no nonzero curve is both unpenalised and zero
+    at every support point. The penalty skips the ranges, so such a curve is a
+    polynomial of the range's degree on each range and, since simple knots
+    carry the spline's own continuity, one polynomial of degree below the
+    penalty ``order`` on each free stretch between ranges or a range and an
+    end. A polynomial of degree d is fixed by d + 1 distinct values, so each
+    range needs ``degree + 1`` support points in it. A free stretch then needs
+    ``order`` conditions: its value at a kink edge (the range beside it fixes
+    that), everything at a smooth edge, and one per support point in it.
+    ``note`` qualifies the counts in the messages.
+    """
+    lows = np.array([float(r.lo) for r in ranges])
+    highs = np.array([float(r.hi) for r in ranges])
+    held = np.searchsorted(support, highs, side="right") - np.searchsorted(support, lows)
+    short = np.flatnonzero(held <= np.array([int(r.degree) for r in ranges]))
+    if short.size:
+        r, found = ranges[short[0]], held[short[0]]
+        raise ValueError(
+            f"PolynomialRange [{r.lo:g}, {r.hi:g}] needs at least {r.degree + 1} distinct "
+            f"values of the feature inside it; it has {found}{note}."
+        )
+    edge = np.array([1 if r.join == "kink" else order for r in ranges])
+    starts, ends = np.append(lo, highs), np.append(lows, hi)
+    # A stretch is closed at an end of the axis and open at a range edge,
+    # whose value the range already fixes.
+    first = np.searchsorted(support, starts, side="right")
+    first[0] = np.searchsorted(support, lo)
+    last = np.searchsorted(support, ends)
+    last[-1] = np.searchsorted(support, hi, side="right")
+    needed = order - np.append(0, edge) - np.append(edge, 0)
+    undetermined = np.flatnonzero((starts < ends) & (last - first < needed))
+    if undetermined.size:
+        i = undetermined[0]
+        raise ValueError(
+            f"The curve between {starts[i]:g} and {ends[i]:g}, outside the polynomial "
+            f"ranges, needs at least {needed[i]} distinct values of the feature there to "
+            f"be determined; it has {last[i] - first[i]}{note}."
+        )
+
+
 def pinned_intervals(
     ranges: Sequence[PolynomialRange], lo: float, hi: float
 ) -> list[tuple[float, float]]:
