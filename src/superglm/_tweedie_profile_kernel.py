@@ -422,8 +422,8 @@ def _series_moments_kernel(
     log_sum: NDArray[np.float64],
     mean_j: NDArray[np.float64],
     variance_j: NDArray[np.float64],
-) -> None:
-    """Fill each row's Dunn-Smyth log W, E[J] and Var[J], or mark it not exact.
+) -> int:
+    """Fill each row's Dunn-Smyth log W, E[J] and Var[J]; return how many rows were summed.
 
     Each row is summed on its own, so its result never depends on the other
     rows. ``lgamma(j + 1) + lgamma(a j)`` is shared by every row and tabulated
@@ -432,22 +432,28 @@ def _series_moments_kernel(
     a_plus_one = a + 1.0
     a_log_a = a * math.log(a)
     log_safe_mode = math.log(_MAX_SAFE_MODE)
+    # A row whose terms above the cutoff span more than ``max_terms`` is
+    # skipped before any summing: near a phi bound that is most rows, each
+    # needing millions of terms.
+    feasible = np.empty(log_t.size, dtype=np.bool_)
     table_size = 64
     for row in range(log_t.size):
-        mode = math.exp(min((log_t[row] - a_log_a) / a_plus_one, log_safe_mode))
+        log_mode = (log_t[row] - a_log_a) / a_plus_one
+        mode = math.exp(min(log_mode, log_safe_mode))
         radius = math.sqrt(2.0 * _LOG_CUTOFF * mode / a_plus_one)
-        if 2.0 * radius < max_terms:
+        feasible[row] = log_mode <= log_safe_mode and 2.0 * radius < max_terms
+        if feasible[row]:
             table_size = max(table_size, int(min(mode + 4.0 * radius + 64.0, _SERIES_TABLE_LIMIT)))
     log_base = np.empty(table_size, dtype=np.float64)
     for j in range(1, table_size):
         log_base[j] = math.lgamma(j + 1.0) + math.lgamma(a * j)
     for row in range(log_t.size):
-        log_mode = (log_t[row] - a_log_a) / a_plus_one
         moments = (False, math.nan, math.nan, math.nan)
-        if log_mode <= log_safe_mode:
-            mode = max(1, int(math.floor(math.exp(log_mode))))
+        if feasible[row]:
+            mode = max(1, int(math.floor(math.exp((log_t[row] - a_log_a) / a_plus_one))))
             moments = _row_series_moments(log_t[row], a, mode, max_terms, log_base)
         exact[row], log_sum[row], mean_j[row], variance_j[row] = moments
+    return int(np.count_nonzero(feasible))
 
 
 @njit(cache=True)
