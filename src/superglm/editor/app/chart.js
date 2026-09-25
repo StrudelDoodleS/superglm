@@ -1165,15 +1165,15 @@ function exposureLayer(svg, term, sx, margin, innerW, innerH, exposure) {
   if (!Number.isFinite(maxWeight) || maxWeight <= 0) return;
   const x = exposure.x || term.x;
   const yBase = margin.top + innerH;
-  // A low strip along the axis: context for the curve, never a block.
-  const maxH = innerH * 0.16;
+  // A strip along the axis, up to a third of the plot: context for the curve.
+  const maxH = innerH / 3;
   const exposureY = (v) => yBase - maxH * v / maxWeight;
   if (exposure.kind === "density") {
     exposureDensity(svg, x, exposure.y, sx, exposureY, yBase);
   } else {
     const nominalW = x.length > 1
-      ? Math.min(24, Math.abs(sx(x[1]) - sx(x[0])) * 0.6)
-      : Math.min(24, innerW * 0.4);
+      ? Math.abs(sx(x[1]) - sx(x[0])) * 0.7
+      : innerW * 0.4;
     for (let i = 0; i < exposure.y.length; i++) {
       const h = Math.max(1, maxH * exposure.y[i] / maxWeight);
       svg.appendChild(el("rect", {

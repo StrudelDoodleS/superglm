@@ -74,7 +74,7 @@ CHART: dict[str, dict[str, Any]] = {
     "previous_edit": dict(color="#f59e0b", width=1.6),
     "ci": dict(color=(36, 87, 197), alpha=0.13),
     "ci_whisker": dict(color=(36, 87, 197), alpha=0.5, width=1.2),
-    "exposure": dict(fill="#f4b942", alpha=0.32, edge="#d9a12c", width=0.0),
+    "exposure": dict(fill="#f4b942", alpha=0.6, edge="#d9a12c", width=0.0),
     "point": dict(face="#2457c5", edge="#ffffff", width=1.5),
     "point_selected": dict(face="#ea580c", edge="#ffffff"),
     "basis_contribution": dict(color=(92, 96, 104), alpha=0.3, width=1.2, dash=(4, 4)),
