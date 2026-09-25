@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from numbers import Real
+from numbers import Integral, Real
 from typing import Any
 
 import numpy as np
 
 from superglm._frame import as_eager_frame
 from superglm.dm_builder import resolve_discrete_n_bins, should_discretize
-from superglm.editor.collapse import _pristine_basis, interaction_users, rebuilt_ordered_spec
+from superglm.editor.collapse import (
+    _pristine_basis,
+    interaction_users,
+    rebuilt_ordered_spec,
+    special_labels,
+)
 from superglm.editor.errors import EditorValueError
 from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange
 from superglm.features._spline_runtime import fit_support
@@ -32,13 +37,24 @@ def shape_availability(model, name: str) -> tuple[bool, str | None]:
 
 
 def shape_payload(model, name: str, support: dict[str, list[int]] | None) -> dict[str, Any]:
-    """The palette's state for one term: availability, the ranges in force, ``support``."""
+    """The palette's state for one term: availability, the ranges in force, ``support``.
+
+    ``specials`` names an ordered term's special levels as the axis shows them.
+    """
+    spec = model._specs[name]
     available, reason = shape_availability(model, name)
     ranges = [
         {"lo": r.lo, "hi": r.hi, "degree": r.degree, "label": r.label}
-        for r in _current_ranges(model._specs[name])
+        for r in _current_ranges(spec)
     ]
-    return {"available": available, "reason": reason, "ranges": ranges, "support": support}
+    specials = spec._special_display if isinstance(spec, OrderedCategorical) else ()
+    return {
+        "available": available,
+        "reason": reason,
+        "ranges": ranges,
+        "support": support,
+        "specials": [str(level) for level in specials],
+    }
 
 
 def shape_support(model, name: str, grid, X, sample_weight) -> dict[str, list[int]] | None:
@@ -82,7 +98,7 @@ def shaped_feature_spec(model, name: str, *, lo, hi, degree: int, X) -> tuple[An
     reason = _unavailable_reason(model, name)
     if reason is not None:
         raise EditorValueError(reason)
-    if degree not in range(len(SHAPE_NAMES)):
+    if not _is_shape_degree(degree):
         raise EditorValueError("Choose a shape: Flat, Line, Quadratic or Cubic.")
     spec = model._specs[name]
     ordered = isinstance(spec, OrderedCategorical)
@@ -175,15 +191,23 @@ def _numeric_edges(spec, lo, hi) -> tuple[float, float]:
 
 
 def _snapped_edge(boundary: tuple[float, float], value: float, direction: int) -> float:
-    """``snap_edge`` on the fitted span, clipped to the boundary on the snapped side."""
+    """``snap_edge`` on the fitted span, clipped to the boundary before and after snapping.
+
+    Clipping first keeps an edge far past the boundary from overflowing the grid.
+    """
     b_lo, b_hi = boundary
-    snapped = snap_edge(value, b_hi - b_lo, direction)
+    snapped = snap_edge(min(max(value, b_lo), b_hi), b_hi - b_lo, direction)
     return max(b_lo, snapped) if direction < 0 else min(b_hi, snapped)
 
 
 def _band_edges(spec: OrderedCategorical, name: str, lo, hi) -> tuple[str, str]:
     """Two single bands in axis order; a group, a special or an unknown label refuses."""
     lo, hi = str(lo), str(hi)
+    if {lo, hi} & special_labels(spec):
+        raise EditorValueError(
+            f"A shaped range covers only the bands of {name}; "
+            "leave its special levels out of the selection."
+        )
     try:
         at = {lo: spec._range_edge_value(lo), hi: spec._range_edge_value(hi)}
     except ValueError as exc:
@@ -263,3 +287,9 @@ def _edge_text(edge) -> str:
 
 def _is_finite(value) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _is_shape_degree(value) -> bool:
+    """An integer naming a shape; a bool or a float such as 2.9 names none."""
+    integer = isinstance(value, Integral) and not isinstance(value, bool)
+    return integer and value in range(len(SHAPE_NAMES))

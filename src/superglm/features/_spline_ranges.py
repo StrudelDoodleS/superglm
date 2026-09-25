@@ -25,6 +25,10 @@ JOINS = ("kink", "smooth")
 SHAPE_NAMES = ("Flat", "Line", "Quadratic", "Cubic")
 
 
+class UndeterminedStretchError(ValueError):
+    """A free stretch between ranges, or a range and an end, holds too few values."""
+
+
 @dataclass(frozen=True)
 class PolynomialRange:
     """Pin a spline to a polynomial of ``degree`` (0-3) on ``[lo, hi]``.
@@ -148,7 +152,7 @@ def certify_determined(
     undetermined = np.flatnonzero((starts < ends) & (last - first < needed))
     if undetermined.size:
         i = undetermined[0]
-        raise ValueError(
+        raise UndeterminedStretchError(
             f"The curve between {starts[i]:g} and {ends[i]:g}, outside the polynomial "
             f"ranges, needs at least {needed[i]} distinct values of the feature there to "
             f"be determined; it has {last[i] - first[i]}{note}."

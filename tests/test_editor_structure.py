@@ -26,7 +26,7 @@ from superglm import (
 from superglm.editor import EditorSession
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
-from superglm.editor.session import _SHAPE_REFUSED
+from superglm.editor.session import _SHAPE_REFUSED, _STRETCH_REFUSED
 from superglm.editor.shapes import EDITOR_CHOSEN_SHAPE_ATTRIBUTE, _numeric_edges, snap_edge
 from superglm.editor.summaries import summary_payload
 from superglm.editor.widget import EditorWidget
@@ -500,6 +500,28 @@ def test_library_refusal_reaches_the_browser_as_the_fixed_sentence(aged):
     assert _ranges(session.model._specs["age"]) == [(lo, hi, 1)]
 
 
+@pytest.mark.parametrize("discrete", [False, True])
+def test_a_range_leaving_too_few_values_beside_it_says_to_widen_it(aged, discrete):
+    # A third-order penalty needs two values on the free stretch past a range.
+    # Stopping at 89 leaves one: even a Flat is refused, and reaching the end is not.
+    model, X = aged
+    third = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        spline_penalty=1.0,
+        discrete=discrete,
+        features={"age": Spline(kind="bs", k=12, m=3), "region": Categorical(base="first")},
+    )
+    third.fit(X, model._fit_y_ref)
+    session = EditorSession.from_model(third, terms=["age"])
+    with pytest.raises(EditorValueError) as caught:
+        session.replace_with_shaped_range("age", lo=30.0, hi=89.0, degree=0, method="fit")
+    assert str(caught.value) == _STRETCH_REFUSED
+    assert session.model is third and session.structure_history == []
+    session.replace_with_shaped_range("age", lo=30.0, hi=90.0, degree=0, method="fit")
+    assert _ranges(session.model._specs["age"]) == [(30.0, 90.0, 0)]
+
+
 def test_a_binned_term_refuses_a_shape_its_bin_centres_cannot_carry():
     # The demo's settings: 512 bins, a 260-point grid and a pile of exposure
     # at the youngest age. The first two grid points snap to [18, 18.3],
@@ -678,6 +700,7 @@ def test_an_unshapeable_term_says_why_and_is_refused_unchanged(region_model, fea
         "reason": reason,
         "ranges": [],
         "support": None,
+        "specials": [],
     }
     with pytest.raises(EditorValueError, match=f"^{re.escape(reason)}$"):
         session.replace_with_shaped_range("x", lo=2.0, hi=4.0, degree=1, method="fit")
@@ -708,6 +731,7 @@ def test_categorical_and_ordered_step_terms_report_shapes_unavailable(region_mod
         "reason": "Shapes need a spline term.",
         "ranges": [],
         "support": None,
+        "specials": [],
     }
     _, X, y = banded
     model = SuperGLM(
@@ -722,7 +746,7 @@ def test_categorical_and_ordered_step_terms_report_shapes_unavailable(region_mod
     assert ordered["shape"]["reason"] == "Shapes need a spline term."
 
 
-@pytest.mark.parametrize("degree", [-1, 4])
+@pytest.mark.parametrize("degree", [-1, 4, 2.9, True])
 def test_a_degree_outside_the_four_shapes_is_refused(aged, degree):
     model, _ = aged
     session = EditorSession.from_model(model, terms=["age"])
@@ -736,6 +760,34 @@ def test_a_numeric_term_refuses_edges_that_are_not_finite_numbers(aged, edge):
     session = EditorSession.from_model(model, terms=["age"])
     with pytest.raises(EditorValueError, match="must be finite numbers"):
         session.replace_with_shaped_range("age", lo=edge, hi=45.0, degree=1, method="fit")
+
+
+def test_an_edge_far_past_the_boundary_is_the_boundary(aged):
+    # Snapped on the span's grid, +-1e308 would overflow; clipped first, it is the end.
+    model, _ = aged
+    session = EditorSession.from_model(model, terms=["age"])
+    lo_b, hi_b = model._specs["age"].fitted_boundary
+    session.replace_with_shaped_range("age", lo=-1e308, hi=30.0, degree=1, method="fit")
+    session.replace_with_shaped_range("age", lo=60.0, hi=1e308, degree=0, method="fit")
+    assert _ranges(session.model._specs["age"]) == [(lo_b, 30.0, 1), (60.0, hi_b, 0)]
+
+
+def test_a_special_level_is_refused_as_outside_the_bands(banded):
+    _, X, y = banded
+    band = OrderedCategorical(
+        order=BANDS[:7], specials=["B8"], basis=Spline(kind="bs", k=5), base="first"
+    )
+    model = SuperGLM(family="gaussian", selection_penalty=0.0, features={"band": band})
+    model.fit(X, y)
+    session = EditorSession.from_model(model, terms=["band"])
+    assert session_payload(session)["band"]["shape"]["specials"] == ["B8"]
+    with pytest.raises(
+        EditorValueError,
+        match="^A shaped range covers only the bands of band; "
+        "leave its special levels out of the selection.$",
+    ):
+        session.replace_with_shaped_range("band", lo="B6", hi="B8", degree=1, method="fit")
+    assert session.model is model and session.structure_history == []
 
 
 def test_an_ordered_term_pins_whole_bands_and_becomes_a_b_spline(banded):
@@ -810,6 +862,7 @@ def test_widget_http_shape_range_returns_transition_envelope(aged):
             "available": True,
             "reason": None,
             "ranges": [{"lo": 30.0, "hi": 45.0, "degree": 1, "label": "Line"}],
+            "specials": [],
         }
         n_points = payload["state"]["terms"]["age"]["n_points"]
         assert len(support["below"]) == len(support["through"]) == n_points
@@ -833,6 +886,15 @@ def test_widget_http_shape_range_returns_transition_envelope(aged):
         (
             {"term": "age", "lo": 30.0, "hi": 30.0, "degree": 1},
             "Select at least two points to shape a range.",
+        ),
+        # The degree is never truncated: 2.9 is no shape, and neither is True.
+        (
+            {"term": "age", "lo": 30.0, "hi": 45.0, "degree": 2.9},
+            "Choose a shape: Flat, Line, Quadratic or Cubic.",
+        ),
+        (
+            {"term": "age", "lo": 30.0, "hi": 45.0, "degree": True},
+            "Choose a shape: Flat, Line, Quadratic or Cubic.",
         ),
         ({"term": "age", "lo": 30.0, "hi": 45.0, "degree": 2}, None),
     ],

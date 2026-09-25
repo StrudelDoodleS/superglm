@@ -49,11 +49,29 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
+from superglm.features._spline_ranges import UndeterminedStretchError
 from superglm.solvers.dispersion import model_weight_semantics
 
 _SHAPE_REFUSED = (
     "That range cannot be shaped. Choose a range with more distinct values, or a lower degree."
 )
+_STRETCH_REFUSED = (
+    "That range leaves too few values beside it to fit the rest of the curve. "
+    "Widen it to the end of the axis or to the next shaped range."
+)
+
+
+def _shape_refusal(exc: BaseException | None) -> str:
+    """The sentence for a library refusal, found on its cause chain.
+
+    The fit re-raises a term's build refusal to name the term, so the
+    library's own error can sit one or more causes down.
+    """
+    while exc is not None:
+        if isinstance(exc, UndeterminedStretchError):
+            return _STRETCH_REFUSED
+        exc = exc.__cause__
+    return _SHAPE_REFUSED
 
 
 class EditorSession:
@@ -945,8 +963,8 @@ class EditorSession:
             raise
         except ValueError as exc:
             # The library's refusal text is backend text (editor/errors.py): the
-            # analyst gets one intentional sentence, Python callers keep the cause.
-            raise EditorValueError(_SHAPE_REFUSED) from exc
+            # analyst gets an intentional sentence, Python callers keep the cause.
+            raise EditorValueError(_shape_refusal(exc)) from exc
         return self._push_structure(
             refit_model,
             operation="shape_range",
