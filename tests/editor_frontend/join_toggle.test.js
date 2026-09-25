@@ -151,7 +151,8 @@ test("a join the term cannot take is disabled, says why, and ignores clicks and 
     assert.equal(buttons[0].dataset.popoverBody, "A degree-1 spline cannot join a range along its tangent.");
     root.emit("click", { target: buttons[0] });
     root.emit("keydown", { target: buttons[1], key: "ArrowLeft", preventDefault: () => {} });
-    assert.deepEqual(chosen, ["kink"]);
+    // Neither the disabled Tangent nor the arrows onto Corner again change the remembered join.
+    assert.deepEqual(chosen, []);
 
     renderJoinToggle(root, "tangent", ["tangent", "kink"], null);
     assert.equal(buttons[0].getAttribute("aria-disabled"), "false");

@@ -91,6 +91,8 @@ export function bindJoinToggle(root, { onChange }) {
         ? options.length - 1
         : (index + (forward ? 1 : -1) + options.length) % options.length;
     options[next].focus();
+    // With one join usable the arrows stay on it: no change to remember.
+    if (options[next] === event.target) return;
     const join = options[next].dataset.join;
     if (isShapeJoin(join)) onChange(join);
   }
