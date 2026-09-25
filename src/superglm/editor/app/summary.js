@@ -1,5 +1,6 @@
 import { requestJSON } from "./api.js";
 import { escapeHTML, fmt } from "./format.js";
+import { SHAPE_NAMES } from "./shapes.js";
 
 /** @typedef {import('./api/contracts.js').EmptyStructuralRequest} EmptyStructuralRequest */
 /** @typedef {import('./api/contracts.js').SetReferenceRequest} SetReferenceRequest */
@@ -210,12 +211,13 @@ export function setReferenceTransition(term, level) {
 }
 
 /**
+ * Named for its shape, which the busy overlay and the confirmation show.
  * @param {string} term @param {number|string} lo @param {number|string} hi @param {number} degree
  * @returns {{name:string, path:string, payload:ShapeRangeRequest}}
  */
 export function shapeRangeTransition(term, lo, hi, degree) {
   return {
-    name: "shape and refit",
+    name: `make a ${SHAPE_NAMES[degree]} range`,
     path: "/shape_range",
     payload: { term, lo, hi, degree, method: "auto" }
   };

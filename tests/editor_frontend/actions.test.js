@@ -29,7 +29,7 @@ function termPayload() {
     original_y: [1],
     previous_y: null,
     levels: null,
-    shape: { available: true, reason: null, ranges: [], support: null },
+    shape: { available: true, reason: null, ranges: [], support: null, specials: [] },
     n_points: 1,
     controls: null,
     group_display: null,

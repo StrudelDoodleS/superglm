@@ -30,7 +30,7 @@ function snapshot(revision) {
       age: {
         kind: "spline", term_type: "spline", x: [1], y: [1], original_y: [1],
         previous_y: null, levels: null, n_points: 1, controls: null,
-        group_display: null, impact: {}, shape: { available: true, reason: null, ranges: [], support: null }
+        group_display: null, impact: {}, shape: { available: true, reason: null, ranges: [], support: null, specials: [] }
       }
     },
     selection: { age: [0] },
@@ -203,7 +203,7 @@ test("structural transition descriptors are pure route descriptions", () => {
     payload: {}
   });
   assert.deepEqual(shapeRangeTransition("age", 30, 45, 1), {
-    name: "shape and refit",
+    name: "make a Line range",
     path: "/shape_range",
     payload: { term: "age", lo: 30, hi: 45, degree: 1, method: "auto" }
   });

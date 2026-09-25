@@ -2,6 +2,8 @@
 // Pure shaped-range logic for the selection palette and the chart overlay:
 // no DOM, no store. Python validates every range again when it is sent.
 
+import { fmt } from "./format.js";
+
 /** @typedef {import('./api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('./api/contracts.js').ShapedRange} ShapedRange */
 /** @typedef {import('./api/contracts.js').ShapeSupport} ShapeSupport */
@@ -18,8 +20,8 @@ export const NOT_CONTIGUOUS = "Select a continuous run of points.";
 export const TOO_FEW_POINTS = "Select at least two points to shape a range.";
 export const GROUPED_EDGE =
   "A range must start and end on single bands. Ungroup the bands at its ends first.";
-// Bands sit one unit apart on the level axis, so a band owns half a unit each side.
-const HALF_BAND = 0.5;
+export const SPECIAL_LEVEL =
+  "A range covers bands only. Leave special levels out of the selection.";
 
 /**
  * The selection as a run of source indices: null unless it is non-empty and
@@ -44,8 +46,22 @@ function selectedRun(selectedIndices) {
 export function shapeRangeForSelection(term, selectedIndices) {
   const run = selectedRun(selectedIndices);
   if (!run) return null;
-  const axis = term.levels ?? term.x;
-  return { lo: axis[run[0]], hi: axis[run[1]] };
+  if (term.levels) return { lo: term.levels[run[0]], hi: term.levels[run[1]] };
+  return { lo: meetingEdge(term, run[0], -1), hi: meetingEdge(term, run[1], 1) };
+}
+
+/**
+ * A numeric run's edge: its end point, or a shaped range's facing edge when
+ * no drawn point lies between the two, so back-to-back selections meet
+ * instead of leaving the free sliver that snapping each outward would open.
+ * Past the first or last point ``next`` is undefined and matches nothing.
+ * @param {TermPayload} term @param {number} index @param {-1|1} direction
+ */
+function meetingEdge(term, index, direction) {
+  const x = term.x[index];
+  const next = term.x[index + direction];
+  const facing = term.shape.ranges.map((range) => Number(direction < 0 ? range.hi : range.lo));
+  return facing.find((edge) => (edge - x) * direction > 0 && (next - edge) * direction >= 0) ?? x;
 }
 
 /**
@@ -70,12 +86,24 @@ function disabledReason(term, selectedIndices, degree) {
   if (!run) return NOT_CONTIGUOUS;
   if (run[0] === run[1]) return TOO_FEW_POINTS;
   if (!term.levels) return tooFewValues(term.shape.support, run, degree);
+  const labels = term.levels.slice(run[0], run[1] + 1);
+  if (labels.some((label) => term.shape.specials.includes(label))) return SPECIAL_LEVEL;
   if (groupedEdge(term, run)) return GROUPED_EDGE;
-  // A band is one distinct value, so the bands themselves bound the degree.
   const needed = degree + 1;
-  return run[1] - run[0] + 1 < needed
+  return bandCount(term, run) < needed
     ? `Select at least ${needed} bands for a ${SHAPE_NAMES[degree]}.`
     : null;
+}
+
+/**
+ * The distinct values a run of bands holds: one per band, and one for a
+ * collapsed group inside it, whose bands share one place on the axis.
+ * @param {TermPayload} term @param {[number, number]} run
+ */
+function bandCount(term, [lo, hi]) {
+  const inside = (term.level_groups ?? [])
+    .filter(({ indices }) => lo < indices[0] && indices[0] < hi);
+  return inside.reduce((count, { indices }) => count - indices.length + 1, hi - lo + 1);
 }
 
 /**
@@ -100,15 +128,22 @@ function groupedEdge(term, [lo, hi]) {
   return groups.some((group) => group.indices.includes(lo) || group.indices.includes(hi));
 }
 
+/** @param {number|string} edge */
+function edgeText(edge) {
+  return typeof edge === "number" ? fmt(edge) : edge;
+}
+
 /** @param {ShapedRange} range */
 export function shapeRangeDescription(range) {
-  return `Pinned to ${SHAPE_DESCRIPTIONS[range.degree]} from ${range.lo} to ${range.hi}.`;
+  const { lo, hi } = range;
+  return `Pinned to ${SHAPE_DESCRIPTIONS[range.degree]} from ${edgeText(lo)} to ${edgeText(hi)}.`;
 }
 
 /**
- * The data-x extent a range covers on the displayed axis: the edge values on
- * a numeric term; on bands, from the first band's left gap to the last band's
- * right gap. Null when an edge band is not on the displayed axis.
+ * The data-x extent a range pins on the displayed axis: between its edge
+ * values on a numeric term, and between its edge bands' positions on an
+ * ordered one, so ranges sharing an edge band meet there. Null when an edge
+ * band is not on the displayed axis.
  * @param {TermPayload} term @param {DisplayAxis} view @param {ShapedRange} range
  * @returns {[number, number]|null}
  */
@@ -116,7 +151,7 @@ export function shapeRangeExtent(term, view, range) {
   if (!term.levels) return [Number(range.lo), Number(range.hi)];
   const lo = bandDisplayX(term.levels, view, range.lo);
   const hi = bandDisplayX(term.levels, view, range.hi);
-  return lo === null || hi === null ? null : [lo - HALF_BAND, hi + HALF_BAND];
+  return lo === null || hi === null ? null : [lo, hi];
 }
 
 /**

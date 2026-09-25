@@ -125,12 +125,12 @@ test("structural impact uses exact operation copy for ungroup, shape and restore
   const cases = [
     {
       operation: {
-        name: "shape and refit",
+        name: "make a Line range",
         path: "/shape_range",
         payload: { term: "region", lo: "B", hi: "C", degree: 1, method: "auto" },
       },
-      title: "Shape range",
-      message: "Shape range B, C in region? This refit clears 2 manual edit history entries.",
+      title: "Make a Line range",
+      message: "Make a Line range B, C in region? This refit clears 2 manual edit history entries.",
     },
     {
       operation: {

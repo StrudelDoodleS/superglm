@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   GROUPED_EDGE,
   NOT_CONTIGUOUS,
+  SPECIAL_LEVEL,
   TOO_FEW_POINTS,
   shapeButtonState,
   shapeRangeDescription,
@@ -16,7 +17,7 @@ import {
   helpForElement
 } from "../../src/superglm/editor/app/views/help_content.js";
 
-const AVAILABLE = Object.freeze({ available: true, reason: null, ranges: [] });
+const AVAILABLE = Object.freeze({ available: true, reason: null, ranges: [], specials: [] });
 const numeric = Object.freeze({
   term_type: "spline",
   x: [18, 20, 25, 30, 40, 50],
@@ -39,6 +40,20 @@ const expanded = { x: BANDS.map((_, i) => i), displayToSourceIndices: BANDS.map(
 
 test("contiguous numeric selection gives its x extent", () => {
   assert.deepEqual(shapeRangeForSelection(numeric, new Set([1, 2, 3])), { lo: 20, hi: 30 });
+});
+
+test("a run next to a shaped range meets it when no drawn point lies between them", () => {
+  // Snapped outward, 20 and 30 would leave free slivers beside the ranges ending
+  // at 19 and starting at 35; the neighbours 18 and 40 lie inside those ranges.
+  const shaped = (ranges) => ({ ...numeric, shape: { ...AVAILABLE, ranges } });
+  const left = { lo: 18, hi: 19, degree: 0, label: "Flat" };
+  const right = { lo: 35, hi: 50, degree: 1, label: "Line" };
+  assert.deepEqual(shapeRangeForSelection(shaped([left, right]), new Set([1, 2, 3])), {
+    lo: 19,
+    hi: 35
+  });
+  // A drawn point between them (20, left out of the run) keeps the gap chosen.
+  assert.deepEqual(shapeRangeForSelection(shaped([left]), new Set([2, 3])), { lo: 25, hi: 30 });
 });
 
 test("a gap in the selection gives no range, nor does an empty one", () => {
@@ -90,6 +105,23 @@ test("a run ending inside a collapsed group is refused before it is sent; a grou
   assert.equal(shapeButtonState(term, new Set([0, 1, 2, 3])).enabled, true);
 });
 
+test("a collapsed group inside the run counts as one band", () => {
+  const term = ordered([{ label: "B3+B4", indices: [2, 3] }]);
+  // B2, B3+B4, B5 are three values on the axis: enough for a Quadratic only.
+  assert.equal(shapeButtonState(term, new Set([1, 2, 3, 4]), 2).enabled, true);
+  assert.equal(
+    shapeButtonState(term, new Set([1, 2, 3, 4]), 3).reason,
+    "Select at least 4 bands for a Cubic."
+  );
+  assert.equal(shapeButtonState(term, new Set([0, 1, 2, 3, 4]), 3).enabled, true);
+});
+
+test("a run taking in a special level is refused before it is sent", () => {
+  const term = { ...ordered(), shape: { ...AVAILABLE, specials: ["B6"] } };
+  assert.equal(shapeButtonState(term, new Set([4, 5]), 1).reason, SPECIAL_LEVEL);
+  assert.equal(shapeButtonState(term, new Set([3, 4]), 1).enabled, true);
+});
+
 test("bands bound the degree an ordered range can carry", () => {
   const term = ordered();
   assert.equal(shapeButtonState(term, new Set([1, 2]), 1).enabled, true);
@@ -128,23 +160,34 @@ test("the overlay names the pinned shape and its edges", () => {
     shapeRangeDescription({ lo: 30, hi: 45, degree: 1, label: "Line" }),
     "Pinned to a straight line from 30 to 45."
   );
+  // An edge clipped to the fitted boundary is a raw data value; it prints as the axis does.
+  assert.equal(
+    shapeRangeDescription({ lo: 18.00177225602365, hi: 25.2, degree: 1, label: "Line" }),
+    "Pinned to a straight line from 18 to 25.2."
+  );
   assert.equal(
     shapeRangeDescription({ lo: "B2", hi: "B4", degree: 0, label: "Flat" }),
     "Pinned to a flat level from B2 to B4."
   );
 });
 
-test("a numeric range spans its edges; bands span from the first left gap to the last right gap", () => {
+test("a numeric range spans its edges; bands span their edge bands' positions", () => {
   const range = { lo: 30, hi: 45, degree: 1, label: "Line" };
   assert.deepEqual(shapeRangeExtent(numeric, expanded, range), [30, 45]);
   const bands = { lo: "B2", hi: "B4", degree: 1, label: "Line" };
-  assert.deepEqual(shapeRangeExtent(ordered(), expanded, bands), [0.5, 3.5]);
+  assert.deepEqual(shapeRangeExtent(ordered(), expanded, bands), [1, 3]);
+});
+
+test("ranges sharing an edge band meet at it without overlapping", () => {
+  const first = shapeRangeExtent(ordered(), expanded, { lo: "B1", hi: "B4", degree: 1 });
+  const second = shapeRangeExtent(ordered(), expanded, { lo: "B4", hi: "B6", degree: 2 });
+  assert.equal(first[1], second[0]);
 });
 
 test("a collapsed display places the edge bands through their source mapping", () => {
   const collapsed = { x: [0, 1, 2, 3, 4], displayToSourceIndices: [[0], [1, 2], [3], [4], [5]] };
   const range = { lo: "B1", hi: "B6", degree: 2, label: "Quadratic" };
-  assert.deepEqual(shapeRangeExtent(ordered(), collapsed, range), [-0.5, 4.5]);
+  assert.deepEqual(shapeRangeExtent(ordered(), collapsed, range), [0, 4]);
 });
 
 test("an edge that is not a band on the axis draws nothing", () => {

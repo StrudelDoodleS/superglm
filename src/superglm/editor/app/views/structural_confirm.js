@@ -19,7 +19,6 @@ const OPERATION_TITLES = Object.freeze({
   "ungroup levels": "Ungroup levels",
   "restore previous structure": "Restore previous structure",
   "set reference and refit": "Set reference",
-  "shape and refit": "Shape range",
   "revert to original model": "Revert to original model",
 });
 

@@ -58,12 +58,14 @@
  */
 /**
  * The palette's shape state for a term: the ranges in force, the hover
- * reason when the term cannot take one, and a numeric term's support counts.
+ * reason when the term cannot take one, a numeric term's support counts and
+ * an ordered term's special levels, which no range can cover.
  * @typedef {Object} TermShape
  * @property {boolean} available
  * @property {string|null} reason
  * @property {ShapedRange[]} ranges
  * @property {ShapeSupport|null} support
+ * @property {string[]} specials
  */
 /**
  * The /shape_range request: the selection's edges as shapeRangeForSelection

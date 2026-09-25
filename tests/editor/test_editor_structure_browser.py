@@ -7,6 +7,7 @@ import pytest
 from tests.test_editor_structure import EPS, _line_residual, _pinning_tolerance
 
 from superglm.editor.payloads import session_payload
+from superglm.editor.shapes import _numeric_edges
 
 pytest.importorskip("playwright.sync_api")
 pytestmark = pytest.mark.browser
@@ -167,8 +168,8 @@ def test_quadratic_on_bands_spans_whole_bands_and_cubic_says_why_not(open_editor
 
         declared = session.model._specs["age_band"]._spline_obj.polynomial_ranges
         assert [(r.lo, r.hi, r.degree) for r in declared] == [("25-34", "45-54", 2)]
-        # A band owns half a unit each side of its position, so the shaded
-        # range runs from the first band's left edge to the last band's right.
+        # The shaded range runs between the edge bands' positions, where the
+        # pinned piece ends, so ranges sharing an edge band meet there.
         extent = page.evaluate(
             """() => {
                 const svg = document.querySelector('#chart');
@@ -178,13 +179,34 @@ def test_quadratic_on_bands_spans_whole_bands_and_cubic_says_why_not(open_editor
                 return {
                     left,
                     right: left + Number(rect.getAttribute('width')),
-                    expected: [sx(x[1] - 0.5), sx(x[3] + 0.5)],
+                    expected: [sx(x[1]), sx(x[3])],
                 };
             }"""
         )
         assert [extent["left"], extent["right"]] == pytest.approx(extent["expected"], abs=1e-9)
         label = page.locator("#chart .shape-range-label")
         assert label.text_content() == "Quadratic"
+
+
+def test_back_to_back_runs_give_ranges_that_meet(open_editor_page):
+    with open_editor_page() as (page, session):
+        for run, icon in (((60, 100), "#shapeLine"), ((101, 140), "#shapeFlat")):
+            session.select_indices("curve", list(range(run[0], run[1] + 1)))
+            _reload_editor(page, "curve")
+            page.locator("#selectionMenu").wait_for(state="visible")
+            with page.expect_response(_posted("/shape_range")) as response_info:
+                page.locator(icon).click()
+            assert response_info.value.status == 200
+            _settled_after_refit(page)
+
+        spec = session.model._specs["curve"]
+        first, second = spec.polynomial_ranges
+        assert (first.degree, second.degree) == (1, 0)
+        assert first.hi == second.lo
+        # Snapped outward on its own, the second run would start past the first
+        # range and leave a free sliver, with a kink at each end, between them.
+        grid = session.terms["curve"].x
+        assert _numeric_edges(spec, grid[101], grid[140])[0] > first.hi
 
 
 def test_feature_search_filters_the_list_and_opens_the_first_match(open_editor_page):
