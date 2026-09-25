@@ -18,7 +18,6 @@ from superglm.diagnostics.exact_banding import (
     _fewest_then_least,
     exact_bands,
 )
-from superglm.distributions import Poisson
 from superglm.export._ppform import extract_ppform
 from superglm.export.rating_tables import build_rating_table_payload
 
@@ -157,11 +156,7 @@ def banded_model():
     y = rng.poisson(np.exp(eta)).astype(float)
     w = rng.uniform(0.5, 2.0, n)
     df = pd.DataFrame({"age": age, "density": density})
-    model = SuperGLM(
-        family=Poisson(),
-        selection_penalty=0.0,
-        features={"age": Spline(n_knots=8), "density": Polynomial(degree=2)},
-    )
+    model = SuperGLM(features={"age": Spline(n_knots=8), "density": Polynomial(degree=2)})
     model.fit(df, y, sample_weight=w)
     return model, df, y, w
 
@@ -297,7 +292,7 @@ def test_too_many_values_names_the_feature():
     n = MAX_EXACT_VALUES + 500
     df = pd.DataFrame({"x": rng.uniform(0.0, 1.0, n)})
     y = rng.poisson(1.0, n).astype(float)
-    model = SuperGLM(family=Poisson(), selection_penalty=0.0, features={"x": Spline(n_knots=5)})
+    model = SuperGLM(features={"x": Spline(n_knots=5)})
     model.fit(df, y)
     with pytest.raises(ValueError, match="'x' has .* distinct values"):
         model.discretization_impact(df, y, bin_strategy="exact")
