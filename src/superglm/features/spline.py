@@ -481,13 +481,21 @@ class _IntegratedPenaltySpline(_SplineBase):
     _penalty_semantics = "integrated_derivative"
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
-        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature."""
-        return _spline_penalties.build_integrated_derivative_penalty(
-            self._knots,
-            self.degree,
-            order,
-            excluded=_spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi),
+        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature.
+
+        With polynomial ranges, the penalty is certified to keep its rank
+        under REML's threshold (``certify_penalty_rank``).
+        """
+        excluded = _spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi)
+        omega = _spline_penalties.build_integrated_derivative_penalty(
+            self._knots, self.degree, order, excluded=excluded
         )
+        if self._polynomial_ranges:
+            structural = _spline_penalties.structural_derivative_penalty(
+                self._knots, self.degree, order, excluded=excluded
+            )
+            _spline_ranges.certify_penalty_rank(omega, structural, self._constraint_rows())
+        return omega
 
 
 class PSpline(_BSplineBase):

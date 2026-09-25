@@ -43,11 +43,18 @@ class ConstantRangesError(RangeError):
     """Flat ranges tile the whole axis, leaving the term a constant the intercept carries."""
 
 
+class NarrowGapError(RangeError):
+    """A range edge sits too close to an end, another edge or a knot for the penalty's rank."""
+
+
 # REML ranks a penalty at eps**(2/3) of its largest eigenvalue, and a free
 # piece of width h adds eigenvalues growing like h**-3, so a gap narrower than
-# eps**(2/9) of the span can cost the smooth part rank (measured: rank 7 at
-# gaps of 1e-2 and 1e-3 of the span, 6 at 1e-4, 2 at 1e-5, singular below).
-_NARROWEST_GAP = float(np.finfo(np.float64).eps) ** (2.0 / 9.0)
+# eps**(2/9) of the span costs the smooth part rank on any knot count
+# (measured on 12 knots: rank kept at 1e-3 of the span, lost at 1e-4). More
+# knots lower the smallest genuine eigenvalue, so wider gaps can cost rank
+# too: certify_penalty_rank checks the penalty itself.
+NARROWEST_GAP = float(np.finfo(np.float64).eps) ** (2.0 / 9.0)
+_REML_RANK_THRESHOLD = float(np.finfo(np.float64).eps) ** (2.0 / 3.0)
 
 
 @dataclass(frozen=True)
@@ -139,15 +146,15 @@ def validate_ranges(
 
 
 def _refuse_narrow_gaps(ranges: Sequence[PolynomialRange], lo: float, hi: float) -> None:
-    """Refuse a free gap, between two ranges or a range and an end, narrower than ``_NARROWEST_GAP``."""
+    """Refuse a free gap, between two ranges or a range and an end, narrower than ``NARROWEST_GAP``."""
     if not ranges:
         return
     starts = np.array([lo, *(r.hi for r in ranges)])
     ends = np.array([*(r.lo for r in ranges), hi])
-    narrow = np.flatnonzero((ends > starts) & (ends - starts < _NARROWEST_GAP * (hi - lo)))
+    narrow = np.flatnonzero((ends > starts) & (ends - starts < NARROWEST_GAP * (hi - lo)))
     if narrow.size:
         i = narrow[0]
-        raise RangeError(
+        raise NarrowGapError(
             f"The free gap between {starts[i]:g} and {ends[i]:g} is too narrow to penalise "
             "stably; make the ranges meet there or leave a wider gap."
         )
@@ -170,13 +177,14 @@ def merged_interior_knots(
 ) -> NDArray:
     """Base interior knots outside every range, plus each range's edge knots.
 
-    A base knot within ``1e-9 * (hi - lo)`` of a closed range is dropped: it
-    would otherwise leave a sliver interval beside the edge. An edge on ``lo``
+    A base knot within ``NARROWEST_GAP * (hi - lo)`` of a closed range is
+    dropped: the sliver interval it would leave beside the edge carries a
+    penalty entry growing like its width to the minus third power. An edge on ``lo``
     or ``hi`` is already a boundary knot and is not added; an edge two ranges
     share is a kink.
     """
     base = np.asarray(base, dtype=np.float64)
-    tolerance = 1e-9 * (hi - lo)
+    tolerance = NARROWEST_GAP * (hi - lo)
     lows = np.array([float(r.lo) for r in ranges], dtype=np.float64)
     highs = np.array([float(r.hi) for r in ranges], dtype=np.float64)
     near = (base[:, None] >= lows - tolerance) & (base[:, None] <= highs + tolerance)
@@ -280,6 +288,28 @@ def derivative_design(knots: NDArray, degree: int, points: NDArray, order: int) 
     """Order-``order`` derivative of every basis function at ``points``."""
     identity = np.eye(len(knots) - degree - 1)
     return BSpline(knots, identity, degree)(points, nu=order)
+
+
+def certify_penalty_rank(omega: NDArray, structural: NDArray, C: NDArray) -> None:
+    """Refuse ranges whose penalty REML would rank below its true rank.
+
+    REML ranks a penalty at eps**(2/3) of its largest eigenvalue.
+    ``structural`` (each knot interval's block at unit norm) has the same null
+    space, so its numerical rank is the true one; a narrow interval beside a
+    range edge inflates the largest eigenvalue until genuine directions fall
+    under REML's threshold, which would count them as unpenalised. Both are
+    compared in the coordinates the fit uses, ``beta = Z theta``.
+    """
+    Z = constraint_null_space(C) if C.shape[0] else np.eye(omega.shape[0])
+    eigenvalues = np.linalg.eigvalsh(Z.T @ omega @ Z)
+    ranked = np.count_nonzero(eigenvalues > _REML_RANK_THRESHOLD * max(eigenvalues.max(), 1e-12))
+    true_rank = np.linalg.matrix_rank(Z.T @ structural @ Z, hermitian=True)
+    if ranked < true_rank:
+        raise NarrowGapError(
+            "A polynomial range's edge sits so close to an end, another range or a knot "
+            f"that the penalty keeps rank {ranked} of {true_rank} in double precision; "
+            "move the edge or make the ranges meet."
+        )
 
 
 def constraint_null_space(C: NDArray) -> NDArray:

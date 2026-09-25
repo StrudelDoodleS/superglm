@@ -17,7 +17,9 @@ from superglm import Constraint, LambdaPolicy, Numeric, Spline, SuperGLM
 from superglm.export._ppform import extract_ppform
 from superglm.features._spline_penalties import build_integrated_derivative_penalty
 from superglm.features._spline_ranges import (
+    NARROWEST_GAP,
     ConstantRangesError,
+    NarrowGapError,
     PolynomialRange,
     certify_determined,
     constraint_null_space,
@@ -466,6 +468,45 @@ def test_pinned_quadratic_is_not_shrunk_by_the_penalty(kind):
     tolerance = spec._n_basis**2 * EPS * scale
     assert abs(coefficients @ unrestricted @ coefficients - 60.0) <= tolerance
     assert abs(coefficients @ spec._build_penalty() @ coefficients) <= tolerance
+
+
+def test_a_base_knot_a_hair_beside_a_corner_edge_is_dropped():
+    # Beside a kink edge (degree copies) a sliver of width d carries ((x - b)/d)**3,
+    # whose curvature integral is 12 / d**3: the knot adds nothing worth that.
+    edge = 3.0 + 1e-4 * (HI - LO)
+    knots = merged_interior_knots(
+        np.array([3.0, 8.0]), [PolynomialRange(edge, 6.0, 1, "kink")], DEGREE, LO, HI
+    )
+    assert 3.0 not in knots and 8.0 in knots
+    assert NARROWEST_GAP * (HI - LO) > edge - 3.0
+
+
+@pytest.mark.parametrize("n_knots", [12, 40])
+def test_the_penalty_rank_certificate_refuses_what_the_gap_rule_would_miss(n_knots, monkeypatch):
+    """With the fixed-width gap rule switched off, the rank certificate still refuses.
+
+    REML ranks at eps**(2/3) of the penalty's largest eigenvalue; a free gap of
+    1e-4 of the span between two tangent-joined ranges inflates it until
+    genuine directions fall under that, which the unit-norm block sum exposes.
+    """
+    from superglm.features import _spline_ranges
+
+    monkeypatch.setattr(_spline_ranges, "NARROWEST_GAP", 0.0)
+    X, y, w = _book()
+    lo, span = float(X["age"].min()), float(X["age"].max() - X["age"].min())
+    first, second = lo + 0.2 * span, lo + 0.2 * span + 1e-4 * span
+    ranges = [
+        PolynomialRange(lo + 0.1 * span, first, 1),
+        PolynomialRange(second, lo + 0.3 * span, 1),
+    ]
+    model = SuperGLM(
+        family="poisson",
+        selection_penalty=0.0,
+        features={"age": Spline(kind="bs", k=n_knots, polynomial_ranges=ranges)},
+    )
+    with pytest.raises(ValueError, match="keeps rank") as refused:
+        model.fit_reml(X, y, sample_weight=w)
+    assert NarrowGapError in {type(refused.value), type(refused.value.__cause__)}
 
 
 @pytest.mark.parametrize("discrete", [False, True])

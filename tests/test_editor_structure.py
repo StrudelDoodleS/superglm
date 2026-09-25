@@ -850,6 +850,35 @@ def test_a_refit_failure_that_is_not_a_range_refusal_keeps_its_own_error(aged, b
         assert not isinstance(raised.value, EditorValueError)
 
 
+@pytest.mark.parametrize(
+    ("boundary", "value", "direction", "expected"),
+    [
+        # 18.73, the second of 200 points, snaps to 18: 0.02 inside the end,
+        # under NARROWEST_GAP of the 150 span, so the end itself is the edge.
+        ((17.98, 167.98), 18.73, -1, 17.98),
+        ((18.02, 168.02), 167.5, 1, 168.02),
+        # Far enough inside, the grid value stands.
+        ((17.98, 167.98), 20.4, -1, 20.0),
+    ],
+)
+def test_an_edge_snapped_a_hair_inside_an_off_grid_end_goes_onto_it(
+    boundary, value, direction, expected
+):
+    from superglm.editor.shapes import _snapped_edge
+
+    assert _snapped_edge(boundary, value, direction) == expected
+
+
+def test_a_narrow_gap_refusal_has_its_own_sentence():
+    from superglm.editor import session as session_module
+    from superglm.features._spline_ranges import NarrowGapError
+
+    chained = ValueError("Feature 'x': ...")
+    chained.__cause__ = NarrowGapError("...")
+    sentence = session_module._range_refusal(chained, session_module._SHAPE_SENTENCES)
+    assert sentence == session_module._NARROW_REFUSED
+
+
 def test_select_all_then_flat_is_refused_in_words(aged):
     model, _ = aged
     session = EditorSession.from_model(model, terms=["age"])

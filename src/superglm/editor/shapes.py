@@ -18,7 +18,7 @@ from superglm.editor.collapse import (
     special_labels,
 )
 from superglm.editor.errors import EditorValueError
-from superglm.features._spline_ranges import SHAPE_NAMES, PolynomialRange
+from superglm.features._spline_ranges import NARROWEST_GAP, SHAPE_NAMES, PolynomialRange
 from superglm.features._spline_runtime import fit_support
 from superglm.features.ordered_categorical import OrderedCategorical, _spline_kind_name
 from superglm.features.spline import CardinalCRSpline, Spline, _SplineBase
@@ -215,10 +215,15 @@ def _snapped_edge(boundary: tuple[float, float], value: float, direction: int) -
     """``snap_edge`` on the fitted span, clipped to the boundary before and after snapping.
 
     Clipping first keeps an edge far past the boundary from overflowing the grid.
+    A boundary off the grid can leave a snapped edge a hair inside it, a free
+    end the library refuses as too narrow, so an edge that close goes onto the
+    boundary: still outward, so the range still holds every selected point.
     """
     b_lo, b_hi = boundary
     snapped = snap_edge(min(max(value, b_lo), b_hi), b_hi - b_lo, direction)
-    return max(b_lo, snapped) if direction < 0 else min(b_hi, snapped)
+    edge = max(b_lo, snapped) if direction < 0 else min(b_hi, snapped)
+    end = b_lo if direction < 0 else b_hi
+    return end if abs(edge - end) < NARROWEST_GAP * (b_hi - b_lo) else edge
 
 
 def _band_edges(spec: OrderedCategorical, name: str, lo, hi) -> tuple[str, str]:

@@ -52,6 +52,7 @@ from superglm.editor.terms import (
 )
 from superglm.features._spline_ranges import (
     ConstantRangesError,
+    NarrowGapError,
     RangeError,
     UndeterminedRangeError,
     UndeterminedStretchError,
@@ -70,6 +71,10 @@ _STRETCH_REFUSED = (
     "Widen it to the end of the axis or to the next shaped range."
 )
 
+_NARROW_REFUSED = (
+    "That range's edge falls too close to the end of the axis, another range or a knot "
+    "to fit stably. Move the edge, or let it meet the next range."
+)
 _COLLAPSE_IN_RANGE_REFUSED = (
     "Collapsing those bands leaves a shaped range too few bands for its shape. "
     "Collapse bands outside it, or undo the range first."
@@ -82,6 +87,7 @@ _COLLAPSE_STRETCH_REFUSED = (
 _SHAPE_SENTENCES = (
     (UndeterminedStretchError, _STRETCH_REFUSED),
     (ConstantRangesError, _CONSTANT_REFUSED),
+    (NarrowGapError, _NARROW_REFUSED),
     (RangeError, _SHAPE_REFUSED),
 )
 _COLLAPSE_SENTENCES = (
