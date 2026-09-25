@@ -450,7 +450,7 @@ class _BSplineBase(_SplineBase):
 
     Provides the open knot-vector assembly used by both PSpline and
     BSplineSmooth. CubicRegressionSpline has its own clamped knot assembly
-    and inherits from _SplineBase directly.
+    and does not inherit from it.
     """
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
@@ -468,6 +468,25 @@ class _BSplineBase(_SplineBase):
         to the data range.
         """
         _spline_subclass_ops.assemble_open_knot_vector(self, interior)
+
+
+class _IntegratedPenaltySpline(_SplineBase):
+    """Shared base for the derivative-penalty splines (BSplineSmooth, CubicRegressionSpline).
+
+    The penalty integrates the squared m-th derivative knot interval by knot
+    interval, so it skips the intervals the polynomial ranges pin.
+    """
+
+    _penalty_semantics = "integrated_derivative"
+
+    def _build_penalty_for_order(self, order: int) -> NDArray:
+        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature."""
+        return _spline_penalties.build_integrated_derivative_penalty(
+            self._knots,
+            self.degree,
+            order,
+            excluded=_spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi),
+        )
 
 
 class PSpline(_BSplineBase):
@@ -573,7 +592,7 @@ class PSpline(_BSplineBase):
         return self._build_penalty_for_order(self._m_orders[0])
 
 
-class BSplineSmooth(_BSplineBase):
+class BSplineSmooth(_IntegratedPenaltySpline, _BSplineBase):
     """B-spline smooth: B-spline basis with an integrated-derivative penalty.
 
     Same raw B-spline basis as ``PSpline``, but penalised via the
@@ -629,7 +648,6 @@ class BSplineSmooth(_BSplineBase):
         penalty skips the pinned intervals.
     """
 
-    _penalty_semantics = "integrated_derivative"
     _max_penalty_order: int | None = None  # validated dynamically in _build_penalty_for_order
 
     def __init__(
@@ -666,15 +684,6 @@ class BSplineSmooth(_BSplineBase):
             m=m,
             lambda_policy=lambda_policy,
             polynomial_ranges=polynomial_ranges,
-        )
-
-    def _build_penalty_for_order(self, order: int) -> NDArray:
-        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature."""
-        return _spline_penalties.build_integrated_derivative_penalty(
-            self._knots,
-            self.degree,
-            order,
-            excluded=_spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi),
         )
 
     def _build_monotone_constraints_raw(self) -> LinearConstraintSet:
@@ -739,7 +748,6 @@ class NaturalSpline(_SplineBase):
             m=m,
             lambda_policy=lambda_policy,
         )
-        self._Z: NDArray | None = None
 
     def _build_penalty_for_order(self, order: int) -> NDArray:
         return _spline_penalties.build_difference_penalty(self._n_basis, order)
@@ -758,7 +766,7 @@ class NaturalSpline(_SplineBase):
         return self._natural_constraint_rows()
 
 
-class CubicRegressionSpline(_SplineBase):
+class CubicRegressionSpline(_IntegratedPenaltySpline):
     """CR spline: integrated f'' squared penalty + natural boundary constraints.
 
     Compatible with the standard cubic regression spline construction
@@ -792,7 +800,6 @@ class CubicRegressionSpline(_SplineBase):
         A range reaching an end replaces that end's natural condition.
     """
 
-    _penalty_semantics = "integrated_derivative"
     _max_penalty_order = 3
 
     def _select_compatible(self, m_orders: tuple[int, ...]) -> bool:
@@ -833,7 +840,6 @@ class CubicRegressionSpline(_SplineBase):
             lambda_policy=lambda_policy,
             polynomial_ranges=polynomial_ranges,
         )
-        self._Z: NDArray | None = None
 
     def _assemble_knot_vector(self, interior: NDArray) -> None:
         """Clamped knot vector with exact boundary knots (no padding).
@@ -843,15 +849,6 @@ class CubicRegressionSpline(_SplineBase):
         epsilon like the base-class default.
         """
         _spline_subclass_ops.assemble_clamped_knot_vector(self, interior)
-
-    def _build_penalty_for_order(self, order: int) -> NDArray:
-        """Integrated f^(m) squared penalty via Gauss-Legendre quadrature."""
-        return _spline_penalties.build_integrated_derivative_penalty(
-            self._knots,
-            self.degree,
-            order,
-            excluded=_spline_ranges.pinned_intervals(self._polynomial_ranges, self._lo, self._hi),
-        )
 
     def _build_penalty(self) -> NDArray:
         return self._build_penalty_for_order(self._m_orders[0])
