@@ -106,26 +106,39 @@ SuperGLM refits straight away. The range is drawn as a light band labelled with 
 over it to see the shape and its edges.
 
 - On a numeric term the range runs from the first to the last selected point, widened to a round
-  value at three significant figures of the fitted range.
-- On an ordered term the range covers whole bands.
+  value at three significant figures of the fitted range, and never past its ends.
+- When no plotted point lies between the selection and a shaped range beside it, the new range
+  starts or ends exactly on that range's edge, so the two meet.
+- On an ordered term the range covers whole bands and is drawn from the first band to the last.
+  Two ranges can share an edge band.
 - The curve stays continuous at each edge of the range, but its slope may change there.
+- Flat fits a level to the range. To hold the curve at its value at a range's edge instead of
+  fitting a level, use **Level from left** or **Level from right**. That is an edit, not a refit.
 - To fit one polynomial over the whole axis, choose Select all and then a shape.
 - A term can hold several ranges, each added as its own step.
 - A new range may not overlap one already shaped. Restore the old one, or choose a range outside
   it.
 - Choosing a new shape on exactly the same range replaces the old shape.
-- A Quadratic needs at least three distinct values in the range, and a Cubic needs four. When the
+- A Line needs at least two distinct values in the range, a Quadratic three and a Cubic four. On
+  an ordered term each band is one value, and so is a collapsed group inside the range. When the
   selection holds too few, the icon is disabled and says so on hover.
-- A binned fit (`discrete=True`) sees only the centres of its bins, so those are the values it
-  counts.
+- A binned fit (`discrete=True`) sees only the centres of its occupied bins, so those are the
+  values it counts. Values that share a bin count once, so four distinct values may not be enough
+  for a Cubic.
+- The curve outside the ranges needs values too. If a range would leave too few between it and
+  the end of the axis, or the next shaped range, SuperGLM refuses it and says so. Widen the range
+  to reach the end or that range.
 - A range cannot start or end inside a collapsed group. Ungroup the bands at its ends first.
+- A range cannot take in a special level of an ordered term.
 - A band at the edge of a shaped range cannot be collapsed into a group.
-- A P-spline term is refitted as a B-spline with the same knots and a derivative penalty, so the
-  penalty can leave the shaped range alone.
+- A P-spline or natural spline term is refitted as a B-spline with the same knots and a derivative
+  penalty, so the penalty can leave the shaped range alone. A natural spline's curve is then no
+  longer held straight at the ends.
 
-The icons are disabled, with the reason on hover, when a term cannot take a shape:
+The icons are hidden on an unordered categorical term. On any other term that cannot take a shape
+they are disabled, with the reason on hover:
 
-- The term is not a spline.
+- The term is not a spline, such as a linear term or an ordered term without a spline basis.
 - The term is a cardinal cubic regression spline.
 - The term has a shape constraint, such as increasing or convex.
 - The term uses `select=True`.
