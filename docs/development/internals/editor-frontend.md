@@ -214,7 +214,7 @@ A structural operation replaces one term's spec, refits, and is one step on the 
 as the manual edits. All of them share one path, so a new one only supplies its spec builder and
 its wiring:
 
-1. Write the spec builder next to `collapse.py` and `transform.py`. It builds a fresh replacement
+1. Write the spec builder next to `collapse.py` and `shapes.py`. It builds a fresh replacement
    spec (never a mutated fitted copy) and returns `(spec, metadata)`, where `metadata["label"]` is
    the short text the Undo and Redo popovers show. Raise `EditorValueError` or `EditorTypeError`
    with fixed text for every refusal.
