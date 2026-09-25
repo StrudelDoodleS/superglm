@@ -76,6 +76,7 @@ To pin a different level, select exactly that one level and choose **Set referen
 the selection palette. SuperGLM refits the model with that level as the reference.
 
 - Predictions stay the same unless the model has a selection penalty.
+- If the term rates unseen levels at the reference, their rate moves with it.
 - In the Collapsed display, selecting a whole group pins the group.
 - Special levels of an ordered term cannot be the reference.
 - A term used by an interaction cannot change its reference.

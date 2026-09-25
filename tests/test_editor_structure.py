@@ -191,6 +191,30 @@ def test_set_reference_changes_the_fit_under_a_selection_penalty(region_model):
     assert np.max(np.abs(session.model.predict(X) - before)) > 1e3 * model._tol
 
 
+def test_unseen_levels_rated_at_the_reference_move_with_it():
+    rng = np.random.default_rng(20260930)
+    region = rng.choice(["A", "B", "C"], 600)
+    y = 0.4 + 0.2 * (region == "C") + rng.normal(0.0, 0.05, 600)
+    model = SuperGLM(
+        family="gaussian",
+        selection_penalty=0.0,
+        features={"region": Categorical(base="first", unseen="base")},
+    )
+    model.fit(pd.DataFrame({"region": region}), y)
+    session = EditorSession.from_model(model, terms=["region"])
+    unseen = pd.DataFrame({"region": ["Z"]})
+    with pytest.warns(UserWarning, match="unseen at fit"):
+        before = session.model.predict(unseen)
+    session.replace_with_reference_level("region", "C", method="fit")
+    with pytest.warns(UserWarning, match="unseen at fit"):
+        after = session.model.predict(unseen)
+    # Disclosed in the hover, Help and tutorial (Max, 2026-09-25): an unseen
+    # level is rated at the reference, so it moves from A's rate to C's.
+    reference_rate = session.model.predict(pd.DataFrame({"region": ["C"]}))
+    np.testing.assert_allclose(after, reference_rate, rtol=10 * model._tol)
+    assert abs(after[0] - before[0]) > 1e3 * model._tol
+
+
 def test_set_reference_maps_a_numeric_level_label_to_its_native_value():
     rng = np.random.default_rng(20260926)
     band = rng.choice([1, 2, 3], 400)

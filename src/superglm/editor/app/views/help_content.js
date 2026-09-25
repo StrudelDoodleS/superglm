@@ -100,7 +100,7 @@ export const OPERATION_HELP = Object.freeze({
   set_reference: Object.freeze({
     title: "Set reference and refit",
     body:
-      "Pin the selected level as the reference (relativity 1.00) and refit. Predictions stay the same unless a selection penalty is on.",
+      "Pin the selected level as the reference (relativity 1.00) and refit. Predictions stay the same unless a selection penalty is on. Unseen levels rated at the reference move with it.",
   }),
 });
 

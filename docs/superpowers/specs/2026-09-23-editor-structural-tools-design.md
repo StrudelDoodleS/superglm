@@ -149,9 +149,14 @@ between a notebook-side change and the next browser action or refresh.
 
 - **Placement:** an icon in the selection palette, after Collapse and Ungroup. Accessible name
   and popover title "Set reference and refit"; popover body: "Pin this level as the reference
-  (relativity 1.00) and refit. Predictions stay the same unless a selection penalty is on." It is
-  visible when the active term is categorical or ordered categorical, exactly one displayed level
-  is selected, and that level is not already the reference. Help carries the same text.
+  (relativity 1.00) and refit. Predictions stay the same unless a selection penalty is on. Unseen
+  levels rated at the reference move with it." It is visible when the active term is categorical
+  or ordered categorical, exactly one displayed level is selected, and that level is not already
+  the reference. Help carries the same text.
+- **Unseen levels (Max, 2026-09-25: disclose, don't refuse):** a `Categorical(unseen="base")`
+  term rates levels it never saw at the reference, so moving the reference moves their rate
+  (critic probe: 0.405 → 0.598). Every level seen in training predicts as before. The hover, Help
+  and tutorial say so, and a test pins it.
 - **Seeing the reference:** the context bar gains a chip, "reference ⟨level⟩ · most exposed",
   "· first" or "· pinned", beside the existing kind and edf chips.
 - **Python:** `EditorSession.replace_with_reference_level(term, level, *, method="auto", ...)`
