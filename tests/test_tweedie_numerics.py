@@ -5,9 +5,9 @@ import pandas as pd
 import pytest
 from scipy.special import digamma, gammaln, ive, polygamma
 
-import superglm._tweedie_series as series_module
 import superglm.profiling.tweedie as tweedie_module
 from superglm import SuperGLM
+from superglm._tweedie_profile_kernel import series_moments
 from superglm.distributions import Tweedie
 from superglm.features.numeric import Numeric
 from superglm.links import LogLink
@@ -85,7 +85,7 @@ def _exact_mean_nll(
         -prepared.zero_rate_numerator[prepared.zero_mask] * weights[prepared.zero_mask] / phi
     )
     log_t = prepared.positive_log_t_phi_independent - (prepared.a + 1.0) * log_phi
-    log_sum, _, exact = series_module.tweedie_log_series(log_t, prepared.a)
+    exact, log_sum, _, _ = series_moments(log_t, prepared.a)
     assert np.all(exact)
     logpdf[prepared.positive_mask] = (
         log_sum
@@ -178,19 +178,8 @@ def test_compiled_exact_profile_statistics_reject_impossible_work_without_raisin
     assert np.isinf(result.nll)
 
 
-def test_exact_series_starts_near_distant_mode(monkeypatch) -> None:
-    calls = 0
-    elements = 0
-    real_gammaln = series_module.gammaln
-
-    def counted(values):
-        nonlocal calls, elements
-        calls += 1
-        elements += int(np.size(values))
-        return real_gammaln(values)
-
-    monkeypatch.setattr(series_module, "gammaln", counted)
-    log_sum, expected_j, exact = series_module.tweedie_log_series(
+def test_exact_series_starts_near_distant_mode() -> None:
+    exact, log_sum, expected_j, variance_j = series_moments(
         np.array([_log_t_with_series_mode(1.5, 90_000)]),
         1.5,
     )
@@ -198,65 +187,33 @@ def test_exact_series_starts_near_distant_mode(monkeypatch) -> None:
     assert exact.tolist() == [True]
     assert np.isfinite(log_sum[0])
     assert expected_j[0] == pytest.approx(90_000.7, rel=2.0e-9)
-    assert calls < 100
-    assert elements < 20_000
+    assert variance_j[0] > 0.0
 
 
-def test_exact_series_reuses_gamma_base_for_shared_modes(monkeypatch) -> None:
-    elements = 0
-    real_gammaln = series_module.gammaln
-
-    def counted(values):
-        nonlocal elements
-        elements += int(np.size(values))
-        return real_gammaln(values)
-
-    monkeypatch.setattr(series_module, "gammaln", counted)
-    log_t = np.full(300, _log_t_with_series_mode(1.5, 10_000))
-
-    log_sum, expected_j, exact = series_module.tweedie_log_series(log_t, 1.5)
-
-    assert np.all(exact)
-    assert np.all(np.isfinite(log_sum))
-    np.testing.assert_array_equal(expected_j, np.full_like(expected_j, expected_j[0]))
-    assert elements < 50_000
-
-
-def test_series_budget_selection_does_not_reduce_each_row(monkeypatch) -> None:
-    calls = 0
-    real_sum = series_module.np.sum
-
-    def counted_sum(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return real_sum(*args, **kwargs)
-
-    monkeypatch.setattr(series_module.np, "sum", counted_sum)
-    counts = np.arange(1, 801, dtype=np.int64)
-    log_modes = np.linspace(0.0, 1.0, len(counts))
-    values = log_modes + 2.0
-
-    selected = series_module._select_budgeted_rows(
-        counts,
-        log_modes,
-        values,
-        max_total_terms=int(real_sum(counts)),
+def test_series_rows_do_not_depend_on_their_batch() -> None:
+    """A row's series is bitwise the same alone and beside rows that widen the table."""
+    row = _log_t_with_series_mode(1.5, 10_000)
+    alone = series_moments(np.array([row]), 1.5)
+    batched = series_moments(
+        np.array([-3.0, row, _log_t_with_series_mode(1.5, 90_000), 70.0]),
+        1.5,
+        max_terms=100_000,
     )
 
-    assert selected.size == counts.size
-    assert calls <= 1
+    for single, in_batch in zip(alone, batched, strict=True):
+        assert single[0] == in_batch[1]
 
 
 def test_exact_series_rejects_impossible_work_without_raising() -> None:
-    log_sum, expected_j, exact = series_module.tweedie_log_series(
-        np.array([70.0]),
+    exact, log_sum, expected_j, variance_j = series_moments(
+        np.array([70.0, 1.0]),
         1.5,
-        max_total_terms=1_000,
+        max_terms=1_000,
     )
 
-    assert exact.tolist() == [False]
-    assert np.isnan(log_sum[0])
-    assert np.isnan(expected_j[0])
+    assert exact.tolist() == [False, True]
+    assert np.isnan(log_sum[0]) and np.isnan(expected_j[0]) and np.isnan(variance_j[0])
+    assert np.isfinite(log_sum[1])
 
 
 @pytest.mark.parametrize("p", [1.2, 1.4, 1.5, 1.8])
@@ -499,7 +456,6 @@ def test_tweedie_fit_stats_reuses_one_density_normalizer(monkeypatch) -> None:
         phi,
         *,
         compute_score=False,
-        series_max_total_terms=tweedie_module._PROFILE_SERIES_MAX_TOTAL_TERMS,
     ):
         nonlocal calls
         calls += 1
@@ -507,7 +463,6 @@ def test_tweedie_fit_stats_reuses_one_density_normalizer(monkeypatch) -> None:
             prepared,
             phi,
             compute_score=compute_score,
-            series_max_total_terms=series_max_total_terms,
         )
 
     monkeypatch.setattr(tweedie_module, "_evaluate_tweedie_density", counted)
