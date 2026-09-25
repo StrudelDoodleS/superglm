@@ -69,11 +69,9 @@ Expanded and Collapsed display modes change only how an existing fitted grouping
 not rename levels or change the fitted model.
 
 Collapse selected levels and Ungroup selected levels are structural actions: SuperGLM refits the
-model and clears incompatible manual edit history. A confirmation is
-shown only when history would actually be discarded; it names the term or levels and the number of
-history entries. The refit overlay reports elapsed time. When the fit returns, the plot and summary
-change together; metrics may remain marked Updating briefly. Restore is no longer in the selection
-palette: it now sits at the right end of the chart's action bar (see Restore and revert).
+model straight away, and Undo brings back the model and the manual edits from before the refit
+(see Undo, Redo and Revert). The refit overlay reports elapsed time. When the fit returns, the plot
+and summary change together; metrics may remain marked Updating briefly.
 
 Long category names may appear shortened with an end ellipsis on the x-axis. This is display-only.
 Hover or focus the tick (or inspect the point tooltip) for the complete value; selection, grouping,
@@ -116,8 +114,7 @@ over it to see the shape and its edges.
   fitting a level, use **Level from left** or **Level from right**. That is an edit, not a refit.
 - To fit one polynomial over the whole axis, choose Select all and then a shape.
 - A term can hold several ranges, each added as its own step.
-- A new range may not overlap one already shaped. Restore the old one, or choose a range outside
-  it.
+- A new range may not overlap one already shaped. Undo the old one, or choose a range outside it.
 - Choosing a new shape on exactly the same range replaces the old shape.
 - A Line needs at least two distinct values in the range, a Quadratic three and a Cubic four. On
   an ordered term each band is one value, and so is a collapsed group inside the range. When the
@@ -147,16 +144,22 @@ they are disabled, with the reason on hover:
 The summary, the Python `summary()` and the workbook note that shaped ranges were chosen in the
 editor from this data. Tests are conditional on them, so judge them on validation deviance.
 
-## Restore and Revert
+## Undo, Redo and Revert
 
-Collapse, ungroup, set reference and shape each add one step to a single history.
-**Restore previous structure**, at the right end of the chart's action bar, undoes the most recent
-step. It shows whenever there is a step to undo, and its popover names that step.
+**Undo** and **Redo**, in the application bar, walk one history: every manual edit and every
+structural step (collapse, ungroup, set reference, shape and revert) in the order you made them,
+whichever term is on screen. Each popover names what it would undo or redo, for example
+*Undo: Line 30–45 in age* or *Undo: shift age*. They act on confirmed Python history, not on an
+uncommitted pointer preview.
 
-**Revert to original model**, in the application bar next to Undo and Redo, goes back to the model
-the editor was opened with, which also undoes a distribution re-profile. It clears every manual
-edit and every structural step and cannot be undone, so it asks first whenever there is an edit or
-a step to lose.
+- Undoing a step puts back the model, the curves, the manual edits, the level order and the
+  selection from before it. Redo puts the step back. Neither refits.
+- A new edit or step clears whatever was waiting to be redone.
+- A distribution re-profile starts the history afresh; Undo does not reach past it.
+
+**Revert to original model**, next to Undo and Redo, goes back to the model the editor was opened
+with, which also undoes a distribution re-profile. It is one more step, so Undo brings back
+everything it cleared.
 
 ## Refresh from Python
 
@@ -164,10 +167,7 @@ If you change the session in the notebook, for example collapse levels from Pyth
 does not see it straight away. Choose **Refresh from Python** in the application bar to re-read the
 session and redraw. Nothing refits.
 
-## Undo, Redo, and Recovery
-
-Undo and Redo are visible in the application bar and expose their keyboard shortcuts. They operate
-on confirmed Python history, not on an uncommitted pointer preview.
+## Recovery
 
 If an edit request fails, the browser restores the last confirmed Python state and shows a
 persistent message. Choose Retry to repeat that action after recovery or Dismiss to keep the
@@ -213,7 +213,7 @@ large formatted text block.
 - Use arrow keys inside tab lists and the mode rail; Home and End jump to the first and last item.
 - Use Enter or Space to activate a focused control.
 - Use Escape to close the current popover, Help drawer, inspector drawer, or dialog.
-- Use the displayed Undo/Redo shortcut for confirmed curve edits.
+- Use Ctrl/Cmd+Z to undo and Ctrl/Cmd+Shift+Z or Ctrl+Y to redo an edit or a structural step.
 
 Pointer editing remains the primary high-density curve workflow. Full per-point keyboard editing
 and an alternate editable data table are separate future accessibility enhancements.

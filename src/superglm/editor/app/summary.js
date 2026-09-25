@@ -189,15 +189,6 @@ export function ungroupTransition(term) {
   };
 }
 
-/** @returns {{name:string, path:string, payload:EmptyStructuralRequest}} */
-export function restoreTransition() {
-  return {
-    name: "restore previous structure",
-    path: "/restore_structure",
-    payload: {}
-  };
-}
-
 /**
  * @param {string} term @param {string} level
  * @returns {{name:string, path:string, payload:SetReferenceRequest}}
@@ -211,7 +202,7 @@ export function setReferenceTransition(term, level) {
 }
 
 /**
- * Named for its shape, which the busy overlay and the confirmation show.
+ * Named for its shape, which the busy overlay shows.
  * @param {string} term @param {number|string} lo @param {number|string} hi @param {number} degree
  * @returns {{name:string, path:string, payload:ShapeRangeRequest}}
  */

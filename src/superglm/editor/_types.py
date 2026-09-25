@@ -64,10 +64,26 @@ class EditRecord:
 
 
 @dataclass(frozen=True)
-class StructuralStep:
-    """One undoable structural change: the model that was in force before it."""
+class SessionState:
+    """The editor state on one side of a structural step."""
 
-    previous_model: Any
+    model: Any
+    terms: dict[str, EditableTerm]
+    selection: dict[str, NDArray[np.intp]]
+    level_orders: dict[str, list[str]]
+    history: list[EditRecord]
+    redo_stack: list[EditRecord]
+
+
+@dataclass(frozen=True)
+class StructuralStep:
+    """One structural change on the undo timeline and the state on its far side.
+
+    On the undo stack ``state`` is the state before the step; on the redo
+    stack it is the state the step left.
+    """
+
+    state: SessionState
     operation: str
     term: str | None
     label: str

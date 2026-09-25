@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ from numpy.typing import NDArray
 
 from superglm._frame import as_eager_frame
 from superglm.editor import apply, persistence
-from superglm.editor._types import EditableTerm, EditRecord, StructuralStep
+from superglm.editor._types import EditableTerm, EditRecord, SessionState, StructuralStep
 from superglm.editor.collapse import (
     clone_with_replaced_feature,
     collapsed_feature_spec,
@@ -107,6 +108,7 @@ class EditorSession:
         self.history: list[EditRecord] = []
         self.redo_stack: list[EditRecord] = []
         self.structure_history: list[StructuralStep] = []
+        self.structure_redo: list[StructuralStep] = []
         self._model_revision = 0
         self._edit_epoch = 0
         self._materialized_edit_model = None
@@ -563,7 +565,15 @@ class EditorSession:
         return self
 
     def undo(self, term: str | None = None) -> EditorSession:
-        """Undo the most recent edit."""
+        """Undo the latest edit or, with none since it, the latest structural step.
+
+        Undoing a step puts back the whole editor state from before it, edits
+        included, without refitting. ``term`` limits the undo to that term's
+        latest edit since the last structural step.
+        """
+        if term is None and not self.history and self.structure_history:
+            self._step_across(self.structure_history, self.structure_redo)
+            return self
         if not self.history:
             return self
         record = self._pop_record(self.history, term)
@@ -577,7 +587,10 @@ class EditorSession:
         return self
 
     def redo(self, term: str | None = None) -> EditorSession:
-        """Redo the most recently undone edit."""
+        """Redo the latest undone edit or, with none, the latest undone structural step."""
+        if term is None and not self.redo_stack and self.structure_redo:
+            self._step_across(self.structure_redo, self.structure_history)
+            return self
         if not self.redo_stack:
             return self
         record = self._pop_record(self.redo_stack, term)
@@ -847,6 +860,7 @@ class EditorSession:
 
         self.replace_in_force_model(profile_model)
         self.structure_history.clear()
+        self.structure_redo.clear()
         return result
 
     def refit_with_collapsed_levels(
@@ -909,7 +923,7 @@ class EditorSession:
         """The model before the latest step, when this ungroup reproduces it exactly."""
         if not self.structure_history or not self._ungroup_restores_reference_model(term, **kwargs):
             return None
-        previous = self.structure_history[-1].previous_model
+        previous = self.structure_history[-1].state.model
         return None if self._model_has_collapsed_level_groups(previous) else previous
 
     def _ungroup_restores_reference_model(self, term: str, **kwargs: Any) -> bool:
@@ -972,24 +986,15 @@ class EditorSession:
             label=refit_model._editor_step["label"],
         )
 
-    def can_uncollapse_levels(self) -> bool:
-        """Return whether a structural step can be restored."""
-        return bool(self.structure_history)
-
-    def uncollapse_levels(self):
-        """Restore the model that was in force before the latest structural step."""
-        if not self.structure_history:
-            raise RuntimeError("No structural step is available to restore.")
-        step = self.structure_history.pop()
-        self.replace_in_force_model(step.previous_model)
-        return step.previous_model
-
     def revert_to_reference_model(self):
-        """Put the opened model back in force and clear every history and display reorder."""
-        self._level_orders = {}
-        self.replace_in_force_model(self.reference_model)
-        self.structure_history.clear()
-        return self.reference_model
+        """Put the opened model back in force, in its own level order, as one structural step."""
+        return self._push_structure(
+            self.reference_model,
+            operation="revert_to_original",
+            term=None,
+            label="revert to original model",
+            level_orders={},
+        )
 
     def _refit_replacing(
         self,
@@ -1034,18 +1039,61 @@ class EditorSession:
         refit_model._editor_step = metadata
         return refit_model
 
-    def _push_structure(self, model, *, operation: str, term: str | None, label: str):
-        """Put ``model`` in force as one undoable structural step."""
-        self.structure_history.append(StructuralStep(self.model, operation, term, label))
-        try:
-            self.replace_in_force_model(model)
-        except Exception:
-            self.structure_history.pop()
-            raise
+    def _push_structure(
+        self,
+        model,
+        *,
+        operation: str,
+        term: str | None,
+        label: str,
+        level_orders: dict[str, list[str]] | None = None,
+    ):
+        """Put ``model`` in force as one structural step on the undo timeline.
+
+        The step keeps the state before it. Like any new action, it ends the
+        future of whatever was undone, so the kept state holds no redo.
+        """
+        step = StructuralStep(self._capture_state(), operation, term, label)
+        step.state.redo_stack.clear()
+        self.replace_in_force_model(model, level_orders=level_orders)
+        self.structure_history.append(step)
+        self.structure_redo.clear()
         return model
 
-    def replace_in_force_model(self, model, *, with_se: bool = True) -> EditorSession:
-        """Replace the editable in-force model while retaining the original reference model."""
+    def _capture_state(self) -> SessionState:
+        """The live state, its lists copied: a step clears the live ones in place."""
+        return SessionState(
+            model=self.model,
+            terms=self.terms,
+            selection=dict(self._selection),
+            level_orders={name: list(labels) for name, labels in self._level_orders.items()},
+            history=list(self.history),
+            redo_stack=list(self.redo_stack),
+        )
+
+    def _step_across(self, source: list[StructuralStep], target: list[StructuralStep]) -> None:
+        """Move the latest step from ``source`` to ``target``, swapping in the state it holds."""
+        step = source.pop()
+        target.append(replace(step, state=self._capture_state()))
+        self.model = step.state.model
+        self.terms = step.state.terms
+        self._selection = step.state.selection
+        self._level_orders = step.state.level_orders
+        self.history = step.state.history
+        self.redo_stack = step.state.redo_stack
+        self._advance_model_revision()
+
+    def replace_in_force_model(
+        self,
+        model,
+        *,
+        with_se: bool = True,
+        level_orders: dict[str, list[str]] | None = None,
+    ) -> EditorSession:
+        """Replace the editable in-force model while retaining the original reference model.
+
+        Display level reorders carry over unless ``level_orders`` replaces them.
+        """
         train_data = self._evaluation_data.get("train")
         new_terms = self._editable_terms_from_model(
             model,
@@ -1063,6 +1111,7 @@ class EditorSession:
         old_history = self.history
         old_redo_stack = self.redo_stack
         old_level_orders = self._level_orders
+        carried_orders = old_level_orders if level_orders is None else level_orders
 
         try:
             self.model = model
@@ -1070,7 +1119,7 @@ class EditorSession:
             self._selection = new_selection
             self.history = []
             self.redo_stack = []
-            self._level_orders = {name: list(labels) for name, labels in old_level_orders.items()}
+            self._level_orders = {name: list(labels) for name, labels in carried_orders.items()}
             self._reapply_level_orders()
         except Exception:
             self.model = old_model
@@ -1422,6 +1471,7 @@ class EditorSession:
             )
         )
         self.redo_stack.clear()
+        self.structure_redo.clear()
         if changed:
             self._advance_model_revision()
 

@@ -85,7 +85,7 @@
  * @property {string} method
  */
 /**
- * The /revert_to_original and /restore_structure requests carry no fields.
+ * The /revert_to_original request carries no fields.
  * @typedef {Record<string, never>} EmptyStructuralRequest
  */
 /**
@@ -107,9 +107,11 @@
  * @property {TermShape} shape
  */
 /**
- * @typedef {Object} StructureHistory
- * @property {number} depth
- * @property {{operation:string, term:string|null, label:string}|null} last
+ * What Undo and Redo would take next, edits and structural steps alike; null
+ * when there is nothing.
+ * @typedef {Object} UndoRedo
+ * @property {string|null} undo
+ * @property {string|null} redo
  */
 /**
  * @typedef {Object} EditorSnapshot
@@ -119,7 +121,7 @@
  * @property {string} selected_term
  * @property {Record<string, TermPayload>} terms
  * @property {Record<string, number[]>} selection
- * @property {StructureHistory} structure_history
+ * @property {UndoRedo} undo_redo
  * @property {EditorHistory} history
  * @property {boolean} in_force_is_original
  */

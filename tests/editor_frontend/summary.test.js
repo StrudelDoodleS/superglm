@@ -13,7 +13,6 @@ const {
   refreshSummary,
   renderSummary,
   runDistributionProfile,
-  restoreTransition,
   revertTransition,
   setReferenceTransition,
   shapeRangeTransition,
@@ -34,7 +33,7 @@ function snapshot(revision) {
       }
     },
     selection: { age: [0] },
-    structure_history: { depth: 0, last: null },
+    undo_redo: { undo: null, redo: null },
     history: { active: [], redo: [] },
     in_force_is_original: true
   };
@@ -186,11 +185,6 @@ test("structural transition descriptors are pure route descriptions", () => {
     name: "ungroup levels",
     path: "/ungroup_levels",
     payload: { term: "region", method: "auto" }
-  });
-  assert.deepEqual(restoreTransition(), {
-    name: "restore previous structure",
-    path: "/restore_structure",
-    payload: {}
   });
   assert.deepEqual(setReferenceTransition("region", "B"), {
     name: "set reference and refit",

@@ -274,12 +274,6 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
-    @app.post("/restore_structure")
-    def restore_structure(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
-        return _guarded_json(
-            lambda: widget._restore_structure(level_display=_level_display(payload))
-        )
-
     @app.post("/revert_to_original")
     def revert_to_original(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(

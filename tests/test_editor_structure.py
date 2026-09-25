@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 import io
 import json
 import pickle
 import re
 import urllib.error
+import weakref
 
 import joblib
 import numpy as np
@@ -24,6 +26,7 @@ from superglm import (
     SuperGLM,
 )
 from superglm.editor import EditorSession
+from superglm.editor import session as session_module
 from superglm.editor.errors import EditorValueError
 from superglm.editor.payloads import session_payload
 from superglm.editor.session import _SHAPE_REFUSED, _STRETCH_REFUSED
@@ -61,44 +64,45 @@ def test_every_structural_step_pushes_one_restorable_entry(region_model):
     session.select_levels("region", ["B", "C"])
     collapsed = session.replace_with_collapsed_levels("region", method="fit")
     assert [s.operation for s in session.structure_history] == ["collapse_levels"]
-    assert session.structure_history[-1].previous_model is opened
+    assert session.structure_history[-1].state.model is opened
     assert session.structure_history[-1].label == "collapse B + C in region"
 
     session.select_levels("region", ["B", "C"])
     session.replace_with_ungrouped_levels("region", method="fit")
     # The ungroup removes the last group, so the pre-collapse fit is reused ...
     assert session.model is opened
-    # ... but it is still a step of its own: Restore undoes it.
+    # ... but it is still a step of its own: Undo takes it back.
     assert [s.operation for s in session.structure_history] == [
         "collapse_levels",
         "ungroup_levels",
     ]
     assert session.structure_history[-1].label == "ungroup B, C in region"
-    assert session.uncollapse_levels() is collapsed
-    assert session.uncollapse_levels() is opened
-    assert not session.can_uncollapse_levels()
+    assert session.undo().model is collapsed
+    assert session.undo().model is opened
+    assert session.structure_history == []
 
 
-def test_state_publishes_the_structure_history(region_model):
+def test_state_names_what_undo_and_redo_would_take(region_model):
     model, _ = region_model
     session = EditorSession.from_model(model, terms=["region"])
     widget = EditorWidget(session)
     try:
-        assert widget._state()["structure_history"] == {"depth": 0, "last": None}
+        assert widget._state()["undo_redo"] == {"undo": None, "redo": None}
         session.select_levels("region", ["B", "C"])
         envelope = widget._collapse_levels("region", "fit")
-        assert envelope["state"]["structure_history"] == {
-            "depth": 1,
-            "last": {
-                "operation": "collapse_levels",
-                "term": "region",
-                "label": "collapse B + C in region",
-            },
+        assert envelope["state"]["undo_redo"] == {"undo": "collapse B + C in region", "redo": None}
+        # An edit after the step is what Undo takes first.
+        widget._select("region", [0])
+        widget._operate("shift_up")
+        assert widget._state()["undo_redo"]["undo"] == "shift region"
+        widget._operate("undo")
+        assert widget._state()["undo_redo"] == {
+            "undo": "collapse B + C in region",
+            "redo": "shift region",
         }
-        assert "last_collapse" not in envelope["state"]
-        restored = widget._restore_structure()
-        assert restored["timing"]["operation"] == "restore_structure"
-        assert restored["state"]["structure_history"]["depth"] == 0
+        undone = widget._operate("undo")
+        assert undone["undo_redo"] == {"undo": None, "redo": "collapse B + C in region"}
+        assert session.model is model
     finally:
         widget.close()
 
@@ -118,7 +122,7 @@ def test_state_says_when_the_in_force_model_is_not_the_opened_one(region_model, 
         state = widget._state()
         # A re-profile replaces the in-force model and clears both histories:
         # only this fact leaves Revert something to do.
-        assert state["structure_history"]["depth"] == 0 and state["history"]["active"] == []
+        assert state["undo_redo"] == {"undo": None, "redo": None}
         assert state["in_force_is_original"] is False
         assert widget._revert_to_original()["state"]["in_force_is_original"] is True
     finally:
@@ -340,9 +344,7 @@ def test_widget_http_set_reference_returns_transition_envelope(region_model):
             "level": "C",
             "policy": "pinned",
         }
-        assert payload["state"]["structure_history"]["last"]["label"] == (
-            "set reference of region to C"
-        )
+        assert payload["state"]["undo_redo"]["undo"] == "set reference of region to C"
     finally:
         widget.close()
 
@@ -426,7 +428,7 @@ def _pinning_tolerance(model, name, spec, effect):
     return members * np.linalg.norm(coefficients) + 4 * EPS * np.max(np.abs(effect))
 
 
-def test_line_range_pins_the_curve_and_restore_undoes_it(aged):
+def test_line_range_pins_the_curve_and_undo_takes_it_back(aged):
     model, X = aged
     session = EditorSession.from_model(model, terms=["age", "region"])
     before = session.model.predict(X)
@@ -442,7 +444,7 @@ def test_line_range_pins_the_curve_and_restore_undoes_it(aged):
     assert _line_residual(term.x[inside], effect) <= _pinning_tolerance(
         session.model, "age", spec, effect
     )
-    session.uncollapse_levels()
+    session.undo()
     np.testing.assert_array_equal(session.model.predict(X), before)
 
 
@@ -465,7 +467,7 @@ def test_overlapping_range_is_refused_by_name_and_same_range_replaces(aged):
     shaped = session.model
     with pytest.raises(
         EditorValueError,
-        match="^This range overlaps the Line range 30–45. Restore it or choose a range outside it.$",
+        match="^This range overlaps the Line range 30–45. Undo it or choose a range outside it.$",
     ):
         session.replace_with_shaped_range("age", lo=40.0, hi=50.0, degree=0, method="fit")
     assert session.model is shaped and len(session.structure_history) == 1
@@ -555,7 +557,7 @@ def test_a_binned_term_refuses_a_shape_its_bin_centres_cannot_carry():
     assert session.model is model and session.structure_history == []
     session.replace_with_shaped_range("age", lo=grid[0], hi=grid[1], degree=1, method="fit")
     assert _ranges(session.model._specs["age"]) == [(18.0, 18.3, 1)]
-    session.uncollapse_levels()
+    session.undo()
     session.replace_with_shaped_range("age", lo=grid[0], hi=grid[2], degree=3, method="fit")
     assert _ranges(session.model._specs["age"]) == [(18.0, 18.5, 3)]
 
@@ -602,7 +604,13 @@ def test_revert_after_two_shapes_restores_the_opened_model(aged):
     session.replace_with_shaped_range("age", lo=70.0, hi=80.0, degree=0, method="fit")
     session.revert_to_reference_model()
     np.testing.assert_array_equal(session.to_model().predict(X), opened)
-    assert session.structure_history == []
+    assert [s.operation for s in session.structure_history] == [
+        "shape_range",
+        "shape_range",
+        "revert_to_original",
+    ]
+    session.undo()
+    assert _ranges(session.model._specs["age"]) == [(30.0, 45.0, 1), (70.0, 80.0, 0)]
 
 
 def test_a_selection_through_the_last_point_ends_on_the_boundary(region_model):
@@ -855,7 +863,7 @@ def test_widget_http_shape_range_returns_transition_envelope(aged):
         )
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["timing"]["operation"] == "shape_range"
-        assert payload["state"]["structure_history"]["last"]["label"] == "Line 30–45 in age"
+        assert payload["state"]["undo_redo"]["undo"] == "Line 30–45 in age"
         shape = payload["state"]["terms"]["age"]["shape"]
         support = shape.pop("support")
         assert shape == {
@@ -918,17 +926,157 @@ def test_widget_http_shape_range_answers_refusals_with_intentional_messages(aged
         widget.close()
 
 
-def test_revert_returns_the_opened_model_and_clears_every_history(region_model):
+def _live_state(session) -> dict[str, object]:
+    """Everything a structural undo must put back, held by value or by identity."""
+    return {
+        "model": session.model,
+        "curves": {name: term.edited_log_effect.copy() for name, term in session.terms.items()},
+        "levels": {name: term.levels and list(term.levels) for name, term in session.terms.items()},
+        "selection": {name: session.selection(name) for name in session.terms},
+        "level_orders": {name: list(labels) for name, labels in session._level_orders.items()},
+        "history": [id(record) for record in session.history],
+        "redo": [id(record) for record in session.redo_stack],
+    }
+
+
+def _assert_state_is(session, expected: dict[str, object]) -> None:
+    assert session.model is expected["model"]
+    for name, curve in expected["curves"].items():
+        np.testing.assert_array_equal(session.terms[name].edited_log_effect, curve)
+        np.testing.assert_array_equal(session.selection(name), expected["selection"][name])
+    assert {name: term.levels for name, term in session.terms.items()} == expected["levels"]
+    assert session._level_orders == expected["level_orders"]
+    assert [id(record) for record in session.history] == expected["history"]
+    assert [id(record) for record in session.redo_stack] == expected["redo"]
+
+
+def test_undo_and_redo_walk_one_timeline_across_a_step_and_its_edits(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_levels("region", ["B", "C"])
+    before_step = _live_state(session)
+    session.replace_with_collapsed_levels("region", method="fit")
+    after_step = _live_state(session)["curves"]
+    session.select_indices("x", [2, 3])
+    session.shift("x", 0.1)
+    session.select_levels("region", ["D"])
+    session.shift("region", -0.05)
+    after_edits = _live_state(session)
+
+    session.undo().undo()
+    for name, curve in after_step.items():
+        np.testing.assert_array_equal(session.terms[name].edited_log_effect, curve)
+    session.undo()
+    _assert_state_is(session, before_step)
+    assert [step.label for step in session.structure_redo] == ["collapse B + C in region"]
+
+    session.redo().redo().redo()
+    _assert_state_is(session, after_edits)
+    assert session.structure_redo == [] and session.redo_stack == []
+
+
+def test_undoing_a_collapse_brings_back_the_edits_made_before_it(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_indices("x", list(range(10, 40)))
+    session.smooth("x", 0.5)
+    session.select_levels("region", ["D"])
+    session.shift("region", 0.1)
+    session.reorder_levels("region", target_index=0)
+    session.select_levels("region", ["B", "C"])
+    before = _live_state(session)
+    # Precondition: two live edits and a display order for the step to set aside.
+    assert len(before["history"]) == 2
+    assert before["level_orders"] == {"region": ["D", "A", "B", "C"]}
+
+    session.replace_with_collapsed_levels("region", method="fit")
+    assert session.history == [] and session.edited_terms() == []
+    session.undo()
+    _assert_state_is(session, before)
+
+
+def test_revert_is_one_step_that_undo_takes_back(region_model):
     model, X = region_model
     session = EditorSession.from_model(model, terms=["region", "x"])
     session.select_levels("region", ["B", "C"])
     session.replace_with_collapsed_levels("region", method="fit")
     session.select_indices("x", [3, 4])
     session.shift("x", 0.1)
+    session.select_levels("region", ["D"])
+    session.reorder_levels("region", target_index=0)
+    before = _live_state(session)
+
     session.revert_to_reference_model()
-    assert session.model is model
-    assert session.structure_history == [] and session.history == [] and session.redo_stack == []
+    assert session.model is model and session.history == [] and session._level_orders == {}
+    assert session.terms["region"].levels == ["A", "B", "C", "D"]
     np.testing.assert_array_equal(session.to_model().predict(X), model.predict(X))
+    assert session.structure_history[-1].label == "revert to original model"
+    session.undo()
+    _assert_state_is(session, before)
+
+
+def test_a_new_edit_or_step_ends_the_future_of_what_was_undone(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.select_levels("region", ["B", "C"])
+    session.replace_with_collapsed_levels("region", method="fit")
+    session.select_indices("x", [0, 1])
+    session.shift("x", 0.1)
+    session.undo().undo()
+    assert len(session.structure_redo) == 1
+    session.select_indices("x", [0, 1])
+    session.shift("x", -0.1)
+    assert session.structure_redo == [] and session.redo_stack == []
+    session.redo()
+    assert session.model is model and [r.operation for r in session.history] == ["shift"]
+
+    # An edit undone before a step is not what Redo brings back after it.
+    session.undo()
+    session.select_levels("region", ["A", "D"])
+    collapsed = session.replace_with_collapsed_levels("region", method="fit")
+    session.undo()
+    assert session.redo_stack == []
+    session.redo()
+    assert session.model is collapsed and session.redo_stack == []
+
+
+def test_undo_and_redo_of_a_step_swap_states_without_refitting(region_model, monkeypatch):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region"])
+    session.select_levels("region", ["B", "C"])
+    collapsed = session.replace_with_collapsed_levels("region", method="fit")
+    refits = []
+    fit = session_module.fit_refit_model
+    monkeypatch.setattr(
+        session_module, "fit_refit_model", lambda *a, **k: refits.append(a) or fit(*a, **k)
+    )
+    revision = session.model_revision
+
+    assert session.undo().model is model
+    assert session.redo().model is collapsed
+    assert refits == []
+    # Each swap is a new model revision, so every panel re-reads its evidence.
+    assert session.model_revision == revision + 2
+
+
+def test_the_timeline_holds_one_state_per_step(region_model):
+    model, _ = region_model
+    session = EditorSession.from_model(model, terms=["region", "x"])
+    session.replace_with_shaped_range("x", lo=2.0, hi=4.0, degree=1, method="fit")
+    session.replace_with_shaped_range("x", lo=6.0, hi=8.0, degree=0, method="fit")
+    for _ in range(3):
+        session.undo().undo()
+        assert (len(session.structure_history), len(session.structure_redo)) == (0, 2)
+        session.redo().redo()
+        assert (len(session.structure_history), len(session.structure_redo)) == (2, 0)
+
+    session.undo()
+    dropped = weakref.ref(session.structure_redo[-1].state.model)
+    session.select_indices("x", [0])
+    session.shift("x", 0.1)
+    gc.collect()
+    # The new edit ended the undone step's future, and its model with it.
+    assert dropped() is None
 
 
 def test_widget_http_revert_to_original_returns_transition_envelope(region_model):
@@ -941,13 +1089,13 @@ def test_widget_http_revert_to_original_returns_transition_envelope(region_model
         payload = _post_json(f"{widget.url}/revert_to_original", {})
         assert set(payload) == {"state", "summary", "timing"}
         assert payload["timing"]["operation"] == "revert_to_original"
-        assert payload["state"]["structure_history"] == {"depth": 0, "last": None}
+        assert payload["state"]["undo_redo"] == {"undo": "revert to original model", "redo": None}
         assert session.model is model
     finally:
         widget.close()
 
 
-def test_restore_walks_a_mixed_two_term_sequence_back_exactly(banded):
+def test_undo_walks_a_mixed_two_term_sequence_back_and_redo_forward_exactly(banded):
     model, X, _ = banded
     territory = np.random.default_rng(20260929).choice(["T1", "T2", "T3", "T4"], len(X))
     X = X.assign(territory=territory)
@@ -973,10 +1121,14 @@ def test_restore_walks_a_mixed_two_term_sequence_back_exactly(banded):
     before_each_step.append(session.model.predict(X))
     session.select_levels("territory", ["T1", "T2"])
     session.replace_with_ungrouped_levels("territory", method="fit")
+    after_every_step = session.model.predict(X)
     for expected in reversed(before_each_step):
-        session.uncollapse_levels()
+        session.undo()
         np.testing.assert_array_equal(session.model.predict(X), expected)
-    assert not session.can_uncollapse_levels()
+    assert session.structure_history == []
+    for _ in before_each_step:
+        session.redo()
+    np.testing.assert_array_equal(session.model.predict(X), after_every_step)
 
 
 def test_a_model_pickled_before_shaped_ranges_opens_refits_and_takes_a_shape(banded):

@@ -2472,7 +2472,7 @@ def test_to_model_applies_manual_edit_after_level_collapse(editor_model):
     assert np.isfinite(mu).all()
 
 
-def test_uncollapse_levels_restores_previous_in_force_model(editor_model):
+def test_undo_restores_the_model_before_a_collapse(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region", "band"])
     original_model = session.model
     session.select_levels("region", ["B", "C"])
@@ -2480,21 +2480,21 @@ def test_uncollapse_levels_restores_previous_in_force_model(editor_model):
     collapsed = session.replace_with_collapsed_levels("region", method="fit")
 
     assert session.model is collapsed
-    assert session.can_uncollapse_levels() is True
+    assert len(session.structure_history) == 1
     assert session.model.features["region"]._grouping.original_to_group["B"] == "B+C"
 
-    restored = session.uncollapse_levels()
+    session.undo()
 
-    assert restored is original_model
     assert session.model is original_model
-    assert session.can_uncollapse_levels() is False
+    assert session.structure_history == []
     assert getattr(session.model.features["region"], "_grouping", None) is None
     assert session.history == []
     assert session.redo_stack == []
-    assert session.selection("region").size == 0
+    # The selection the collapse was made from comes back with the model.
+    np.testing.assert_array_equal(session.selection("region"), [1, 2])
 
 
-def test_uncollapse_levels_rolls_back_one_collapse_at_a_time(editor_model):
+def test_undo_rolls_back_one_collapse_at_a_time(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region", "band"])
     original_model = session.model
 
@@ -2504,19 +2504,17 @@ def test_uncollapse_levels_rolls_back_one_collapse_at_a_time(editor_model):
     second_collapse = session.replace_with_collapsed_levels("band", method="fit")
     assert session.model is second_collapse
 
-    restored_once = session.uncollapse_levels()
+    session.undo()
 
-    assert restored_once is first_collapse
     assert session.model is first_collapse
-    assert session.can_uncollapse_levels() is True
+    assert len(session.structure_history) == 1
     assert session.model.features["region"]._grouping.original_to_group["B"] == "B+C"
     assert getattr(session.model.features["band"], "_grouping", None) is None
 
-    restored_twice = session.uncollapse_levels()
+    session.undo()
 
-    assert restored_twice is original_model
     assert session.model is original_model
-    assert session.can_uncollapse_levels() is False
+    assert session.structure_history == []
 
 
 def test_ordered_categorical_ungroup_rejects_non_contiguous_remainder():
@@ -3021,7 +3019,7 @@ def test_ungroup_pre_collapsed_model_refits_without_history():
     assert getattr(refit.features["territory"], "_grouping", None) is None
     assert getattr(session.model.features["territory"], "_grouping", None) is None
     assert [s.operation for s in session.structure_history] == ["ungroup_levels"]
-    assert session.structure_history[-1].previous_model is collapsed
+    assert session.structure_history[-1].state.model is collapsed
 
 
 def test_ordered_integer_ungroup_pre_collapsed_model_refits_without_history():
@@ -3051,7 +3049,7 @@ def test_ordered_integer_ungroup_pre_collapsed_model_refits_without_history():
 
     assert refit is not collapsed
     assert [s.operation for s in session.structure_history] == ["ungroup_levels"]
-    assert session.structure_history[-1].previous_model is collapsed
+    assert session.structure_history[-1].state.model is collapsed
     assert getattr(refit.features["band"], "_grouping", None) is None
     assert getattr(session.model.features["band"], "_grouping", None) is None
     assert np.isfinite(refit.predict(X)).all()
@@ -3073,7 +3071,7 @@ def test_ungroup_last_collapsed_levels_restores_pre_collapse_in_force_model(edit
     assert restored is profiled_model
     assert session.model is profiled_model
     assert session.model._editor_profile_marker == "kept"
-    assert session.can_uncollapse_levels() is True
+    assert len(session.structure_history) == 2
     assert session.structure_history[-1].operation == "ungroup_levels"
 
 
@@ -3113,7 +3111,7 @@ def test_final_ungroup_after_partial_ungroup_does_not_restore_stale_history():
         "ungroup_levels",
         "ungroup_levels",
     ]
-    assert session.structure_history[-1].previous_model is partial
+    assert session.structure_history[-1].state.model is partial
 
 
 def test_reorder_categorical_levels_is_display_only(editor_model):
@@ -3376,12 +3374,15 @@ def test_reprofile_distribution_clears_collapse_history(editor_model, editor_fra
     X, y = editor_frame
     session = EditorSession.from_model(
         editor_model,
-        terms=["region"],
+        terms=["region", "band"],
         train_data=(X, y, None),
     )
     session.select_levels("region", ["B", "C"])
     session.replace_with_collapsed_levels("region", method="fit")
-    assert session.can_uncollapse_levels()
+    session.select_levels("band", ["medium", "high"])
+    session.replace_with_collapsed_levels("band", method="fit")
+    session.undo()
+    assert (len(session.structure_history), len(session.structure_redo)) == (1, 1)
 
     def fake_estimate_p(self, X_arg, y_arg, sample_weight=None, offset=None, **kwargs):
         self.fit(X_arg, y_arg, sample_weight=sample_weight, offset=offset)
@@ -3399,7 +3400,7 @@ def test_reprofile_distribution_clears_collapse_history(editor_model, editor_fra
 
     assert result == "p-result"
     assert session.model._editor_profile_marker == "profiled"
-    assert session.can_uncollapse_levels() is False
+    assert session.structure_history == [] and session.structure_redo == []
 
 
 def test_reprofile_distribution_rejects_pending_manual_edits(editor_model, editor_frame):
@@ -4262,7 +4263,7 @@ def test_widget_structural_mutations_advance_chart_generation_once(editor_model)
     try:
         selected = widget._select("region", [1, 2])
         collapsed = widget._collapse_levels("region", method="fit")["state"]
-        uncollapsed = widget._restore_structure()["state"]
+        uncollapsed = widget._operate("undo")
         selected_again = widget._select("region", [1, 2])
         collapsed_again = widget._collapse_levels("region", method="fit")["state"]
         ungrouped = widget._ungroup_levels("region", method="fit")["state"]
@@ -4293,7 +4294,7 @@ def test_widget_structural_mutations_advance_chart_generation_once(editor_model)
     ] == [0, 1, 2, 2, 3, 4]
 
 
-@pytest.mark.parametrize("operation", ["collapse", "ungroup", "restore"])
+@pytest.mark.parametrize("operation", ["collapse", "ungroup", "revert"])
 def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, operation):
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()
@@ -4304,7 +4305,7 @@ def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, 
 
         before_model = session.model
         before_revision = session.model_revision
-        before_history = [id(step.previous_model) for step in session.structure_history]
+        before_history = [id(step.state.model) for step in session.structure_history]
         before_chart_generation = widget._chart_generation
 
         with pytest.raises(ValueError, match="level_display"):
@@ -4313,11 +4314,11 @@ def test_invalid_level_display_cannot_commit_structural_mutations(editor_model, 
             elif operation == "ungroup":
                 widget._ungroup_levels("region", method="fit", level_display="invalid")
             else:
-                widget._restore_structure(level_display="invalid")
+                widget._revert_to_original(level_display="invalid")
 
         assert session.model is before_model
         assert session.model_revision == before_revision
-        assert [id(step.previous_model) for step in session.structure_history] == before_history
+        assert [id(step.state.model) for step in session.structure_history] == before_history
         assert widget._chart_generation == before_chart_generation
     finally:
         widget.close()
@@ -4377,14 +4378,7 @@ def test_widget_final_ungroup_keeps_collapse_metadata_history_aligned(editor_mod
         "collapse_levels",
         "ungroup_levels",
     ]
-    assert state["structure_history"] == {
-        "depth": 2,
-        "last": {
-            "operation": "ungroup_levels",
-            "term": "region",
-            "label": "ungroup B, C in region",
-        },
-    }
+    assert state["undo_redo"] == {"undo": "ungroup B, C in region", "redo": None}
 
 
 def test_widget_composite_selection_serializes_state_once(editor_model, monkeypatch):
@@ -4848,13 +4842,13 @@ def _structural_alias_fixture(editor_model):
 def test_structural_transition_envelope_mutation_cannot_change_live_state(editor_model):
     session, widget, envelope = _structural_alias_fixture(editor_model)
     expected_levels = list(session.terms["region"].levels)
-    expected_history = json.loads(json.dumps(envelope["state"]["structure_history"]))
+    expected_history = json.loads(json.dumps(envelope["state"]["undo_redo"]))
     try:
         envelope["state"]["terms"]["region"]["levels"][0] = "envelope-level"
-        envelope["state"]["structure_history"]["last"]["label"] = "envelope-label"
+        envelope["state"]["undo_redo"]["undo"] = "envelope-label"
 
         assert session.terms["region"].levels == expected_levels
-        assert widget._state()["structure_history"] == expected_history
+        assert widget._state()["undo_redo"] == expected_history
     finally:
         widget.close()
 
@@ -4862,7 +4856,7 @@ def test_structural_transition_envelope_mutation_cannot_change_live_state(editor
 def test_live_state_mutation_cannot_change_structural_transition_envelope(editor_model):
     session, widget, envelope = _structural_alias_fixture(editor_model)
     expected_levels = list(envelope["state"]["terms"]["region"]["levels"])
-    expected_history = json.loads(json.dumps(envelope["state"]["structure_history"]))
+    expected_history = json.loads(json.dumps(envelope["state"]["undo_redo"]))
     try:
         session.terms["region"].levels[0] = "live-level"
         session.structure_history[-1] = dataclasses.replace(
@@ -4870,7 +4864,7 @@ def test_live_state_mutation_cannot_change_structural_transition_envelope(editor
         )
 
         assert envelope["state"]["terms"]["region"]["levels"] == expected_levels
-        assert envelope["state"]["structure_history"] == expected_history
+        assert envelope["state"]["undo_redo"] == expected_history
     finally:
         widget.close()
 
@@ -5036,7 +5030,7 @@ def test_widget_json_responses_report_serialization_timing(editor_model):
         widget.close()
 
 
-def test_widget_http_restore_structure_restores_previous_model(editor_model):
+def test_widget_http_undo_and_redo_step_across_a_collapse(editor_model):
     session = EditorSession.from_model(editor_model, terms=["region"])
     widget = session.widget()
     try:
@@ -5044,30 +5038,22 @@ def test_widget_http_restore_structure_restores_previous_model(editor_model):
         collapse_payload = _post_json(
             f"{widget.url}/collapse_levels", {"term": "region", "method": "fit"}
         )
-        collapsed_state = collapse_payload["state"]
-        assert collapsed_state["structure_history"]["depth"] == 1
-        assert widget.session.model is not editor_model
-        assert widget.session.model.features["region"]._grouping.original_to_group["B"] == "B+C"
+        collapsed = widget.session.model
+        assert collapse_payload["state"]["undo_redo"]["undo"] == "collapse B + C in region"
+        assert collapsed.features["region"]._grouping.original_to_group["B"] == "B+C"
 
-        payload = _post_json(
-            f"{widget.url}/restore_structure",
-            {"level_display": "grouped"},
-        )
+        state = _post_json(f"{widget.url}/op", {"operation": "undo"})
 
-        assert set(payload) == {"state", "summary", "timing"}
-        assert payload["summary"]["available"] is True
-        assert payload["summary"]["source"] == "in_force"
-        assert payload["summary"]["level_display"] == "grouped"
-        assert payload["state"]["model_revision"] == session.model_revision == 2
+        assert state["model_revision"] == session.model_revision == 2
         assert widget.session.model is editor_model
-        assert getattr(widget.session.model.features["region"], "_grouping", None) is None
-        state = payload["state"]
-        assert state["structure_history"] == {"depth": 0, "last": None}
+        assert state["undo_redo"] == {"undo": None, "redo": "collapse B + C in region"}
         assert state["terms"]["region"]["y"][1] != pytest.approx(state["terms"]["region"]["y"][2])
-        assert payload["timing"]["operation"] == "restore_structure"
-        assert payload["timing"]["fit_ms"] >= 0.0
-        assert payload["timing"]["summary_ms"] >= 0.0
-        assert payload["timing"]["state_ms"] >= 0.0
+
+        state = _post_json(f"{widget.url}/op", {"operation": "redo"})
+
+        assert widget.session.model is collapsed
+        assert state["undo_redo"] == {"undo": "collapse B + C in region", "redo": None}
+        assert state["terms"]["region"]["y"][1] == state["terms"]["region"]["y"][2]
     finally:
         widget.close()
 
@@ -6436,7 +6422,7 @@ def test_widget_save_directory_defaults_to_cwd(editor_model, tmp_path, monkeypat
     assert [entry["kind"] for entry in payload["entries"]] == ["directory", "file"]
 
 
-def test_widget_reset_and_undo_target_current_term_after_switching(editor_model):
+def test_widget_undo_takes_the_latest_edit_and_reset_the_shown_term(editor_model):
     session = EditorSession.from_model(editor_model, terms=["x_spline", "region"])
     widget = session.widget()
     try:
@@ -6451,9 +6437,10 @@ def test_widget_reset_and_undo_target_current_term_after_switching(editor_model)
         _post_json(f"{widget.url}/op", {"operation": "shift_down"})
         _post_json(f"{widget.url}/term", {"term": "x_spline"})
 
+        # One timeline: Undo takes the latest edit, on region, though x_spline is shown.
         _post_json(f"{widget.url}/op", {"operation": "undo"})
-        np.testing.assert_allclose(spline.edited_log_effect, spline_original)
-        assert region.edited_log_effect[1] == pytest.approx(region_original[1] + np.log(0.95))
+        np.testing.assert_array_equal(region.edited_log_effect, region_original)
+        assert spline.edited_log_effect[4] == pytest.approx(spline_original[4] + np.log(1.05))
 
         _post_json(f"{widget.url}/op", {"operation": "shift_up"})
         _post_json(f"{widget.url}/term", {"term": "region"})
@@ -6712,10 +6699,9 @@ def test_editor_structural_refits_show_busy_overlay_and_timing_debug():
     assert 'summaryNote.textContent = payload.note || ""' in main_js
     assert "collapseTransition" in main_js[:refit_start]
     assert "ungroupTransition" in main_js[:refit_start]
-    assert "restoreTransition" in main_js[:refit_start]
+    assert "restoreTransition" not in main_js
     assert "runStructuralRefit(collapseTransition(selectedTerm()))" in bindings_source
     assert "runStructuralRefit(ungroupTransition(selectedTerm()))" in bindings_source
-    assert "runStructuralRefit(restoreTransition())" in bindings_source
     assert "store.subscribe(selectChartRenderState" in bindings_source
     assert "sameChartRenderState" in bindings_source
     assert "(state) => state.remote.summary" in bindings_source
@@ -6740,11 +6726,10 @@ def test_editor_profile_ui_does_not_promise_an_implicit_ci_phase():
     assert '"profile_ci"' not in summary_js
 
 
-def test_editor_structural_confirmation_gate_precedes_every_refit_side_effect():
+def test_editor_structural_steps_run_their_side_effects_without_asking_first():
     root = Path(__file__).resolve().parents[1] / "src/superglm/editor/app"
     html = (root / "index.html").read_text()
     main_js = (root / "main.js").read_text()
-    confirm_js = (root / "views/structural_confirm.js").read_text()
     root_css = (root / "styles.css").read_text()
     dialog_css = (root / "styles/dialogs.css").read_text()
 
@@ -6754,43 +6739,24 @@ def test_editor_structural_confirmation_gate_precedes_every_refit_side_effect():
     bindings_start = main_js.index('collapseLevels.addEventListener("click"', refit_end)
     bindings_end = main_js.index("\nstore.subscribe", bindings_start)
     bindings_source = main_js[bindings_start:bindings_end]
-    impact_index = refit_source.index("structuralImpact(")
-    confirm_index = refit_source.index("structuralConfirm.confirm(impact)")
     contribution_index = refit_source.index("stopContributionBuild()")
     timing_index = refit_source.index("performance.now()")
     mutation_index = refit_source.index("actions.executeStructuralMutation")
 
-    assert main_js.count('from "./views/structural_confirm.js"') == 1
-    assert "selectSnapshot" in main_js[:refit_start]
-    assert "selectSnapshot(store.getState())" in refit_source
-    assert impact_index < confirm_index < contribution_index < timing_index < mutation_index
+    # Undo puts back everything a step sets aside, so no step asks first.
+    assert not (root / "views/structural_confirm.js").exists()
+    assert "structuralConfirm" not in main_js + html
+    assert ".structural-confirm" not in dialog_css
+    assert contribution_index < timing_index < mutation_index
     assert 'summarySource.value = "selected"' in refit_source
     assert "stopContributionBuild()" not in bindings_source
     assert "summarySource.value" not in bindings_source
-
-    assert html.count('id="structuralConfirmDialog"') == 1
-    assert (
-        '<dialog id="structuralConfirmDialog" class="structural-confirm" '
-        'aria-labelledby="structuralConfirmTitle" '
-        'aria-describedby="structuralConfirmMessage">'
-    ) in html.replace("\n", " ").replace("  ", " ")
-    assert '<form method="dialog">' in html
-    assert '<h2 id="structuralConfirmTitle">Confirm structural refit</h2>' in html
-    assert '<p id="structuralConfirmMessage"></p>' in html
-    assert '<button value="cancel" type="submit">Cancel</button>' in html
-    assert "Continue and refit</button>" in html
     assert html.index("/assets/styles/panels.css") < html.index("/assets/styles/dialogs.css")
 
     assert ".profile-dialog" not in root_css
     assert ".export-dialog" not in root_css
     assert ".profile-dialog" in dialog_css
     assert ".export-dialog" in dialog_css
-    assert ".structural-confirm" in dialog_css
-    assert ".dialog-actions" in dialog_css
-    assert "overflow-wrap" in dialog_css
-    assert "@media" in dialog_css
-    assert "textContent" in confirm_js
-    assert "innerHTML" not in confirm_js
 
 
 def test_editor_inspector_has_summary_history_advanced_and_help_tabs():
@@ -6875,7 +6841,6 @@ def test_widget_serves_editor_app_assets(editor_model):
             "interactions.js",
             "views/inspector.js",
             "views/help_drawer.js",
-            "views/structural_confirm.js",
         ]:
             request = urllib.request.Request(f"{widget.url}/assets/{asset}", method="GET")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -6991,7 +6956,7 @@ def test_editor_server_declares_fastapi_routes():
     assert ("/collapse_levels", frozenset({"POST"})) in routes
     assert ("/ungroup_levels", frozenset({"POST"})) in routes
     assert ("/reorder_levels", frozenset({"POST"})) in routes
-    assert ("/restore_structure", frozenset({"POST"})) in routes
+    assert ("/restore_structure", frozenset({"POST"})) not in routes
     assert ("/model_source", frozenset({"POST"})) not in routes
 
 

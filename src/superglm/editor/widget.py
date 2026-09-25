@@ -43,7 +43,7 @@ from superglm.editor.native_dialogs import open_directory_path
 from superglm.editor.payloads import (
     history_payload,
     session_payload,
-    structure_history_payload,
+    undo_redo_payload,
 )
 from superglm.editor.reports import report_payload, split_metrics_payload
 from superglm.editor.server import EditorAppServer
@@ -173,10 +173,10 @@ class EditorWidget:
                     name: self.session.selection(name).astype(int).tolist()
                     for name in self.session.terms
                 },
-                "structure_history": structure_history_payload(self.session),
+                "undo_redo": undo_redo_payload(self.session),
                 "history": history_payload(self.session),
-                # A distribution re-profile replaces the model and clears both
-                # histories, so neither says whether Revert has work to do.
+                # With the live edits, this says whether Revert has anything to
+                # change: a structural step or a re-profile each make it False.
                 "in_force_is_original": self.session.model is self.session.reference_model,
             }
             self._state_generation += 1
@@ -235,9 +235,9 @@ class EditorWidget:
                 editable = self.session.terms[target]
                 self.session.select_indices(target, np.arange(editable.size, dtype=np.intp))
             elif operation == "undo":
-                self.session.undo(target)
+                self.session.undo()
             elif operation == "redo":
-                self.session.redo(target)
+                self.session.redo()
             else:
                 raise EditorValueError(f"Unknown editor operation: {operation!r}")
             # A fixed-offset refit is conditional on the current edited factors,
@@ -1035,13 +1035,6 @@ class EditorWidget:
             self.session.reorder_levels(self.selected_term, target_index=int(target_index))
             self._chart_generation += 1
             return self._state()
-
-    def _restore_structure(self, *, level_display: str = "expanded") -> dict[str, Any]:
-        return self._structural_step(
-            "restore_structure",
-            lambda _target: self.session.uncollapse_levels(),
-            level_display=level_display,
-        )
 
     def _revert_to_original(self, *, level_display: str = "expanded") -> dict[str, Any]:
         return self._structural_step(

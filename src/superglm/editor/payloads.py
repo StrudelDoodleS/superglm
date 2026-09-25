@@ -75,16 +75,19 @@ def history_payload(session) -> dict[str, Any]:
     return {"active": active, "redo": redo}
 
 
-def structure_history_payload(session) -> dict[str, Any]:
-    """The Restore icon's state: how many steps there are and what the last one did."""
-    steps = session.structure_history
-    if not steps:
-        return {"depth": 0, "last": None}
-    last = steps[-1]
+def undo_redo_payload(session) -> dict[str, str | None]:
+    """What Undo and Redo would take next, for their popovers; None leaves one disabled."""
     return {
-        "depth": len(steps),
-        "last": {"operation": last.operation, "term": last.term, "label": last.label},
+        "undo": _next_label(session.history, session.structure_history),
+        "redo": _next_label(session.redo_stack, session.structure_redo),
     }
+
+
+def _next_label(records, steps) -> str | None:
+    """The live edits lie nearer than any structural step, either way, so they go first."""
+    if records:
+        return f"{records[-1].operation.replace('_', ' ')} {records[-1].term}"
+    return steps[-1].label if steps else None
 
 
 def _history_records_payload(records) -> list[dict[str, Any]]:

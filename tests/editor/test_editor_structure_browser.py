@@ -79,7 +79,11 @@ def _box_select_x(page, lo: float, hi: float) -> None:
         page.mouse.up()
 
 
-def test_line_icon_pins_a_run_of_points_and_restore_removes_it(open_editor_page):
+def _drawn_y(page) -> list[float]:
+    return page.evaluate("() => document.querySelector('#chart')._scale.y")
+
+
+def test_line_icon_pins_a_run_of_points_and_undo_and_redo_step_across_it(open_editor_page):
     with open_editor_page() as (page, session):
         before = session.model
         _box_select_x(page, 3.0, 5.0)
@@ -87,6 +91,7 @@ def test_line_icon_pins_a_run_of_points_and_restore_removes_it(open_editor_page)
         # Precondition: the box took one contiguous run of the drawn points.
         assert selected.size > 2
         np.testing.assert_array_equal(np.diff(selected), 1)
+        unshaped = _drawn_y(page)
 
         line = page.locator("#shapeLine")
         line.wait_for(state="visible")
@@ -125,11 +130,24 @@ def test_line_icon_pins_a_run_of_points_and_restore_removes_it(open_editor_page)
         )
         assert _line_residual(x[inside], effect) <= bound
 
-        page.locator("#restoreStructure").click()
-        _settled_after_refit(page)
+        shaped = session.model
+        undo = page.locator("#undoAction")
+        label = session.structure_history[-1].label
+        assert undo.get_attribute("data-popover-body") == f"Undo: {label}"
+        with page.expect_response(_posted("/op")):
+            undo.click()
         page.wait_for_function("() => !document.querySelector('#chart .shape-range')")
         assert session.model is before
-        assert session.model._specs["curve"].polynomial_ranges == ()
+        # A JSON float64 round-trips exactly, so the curve is the very one drawn before.
+        assert _drawn_y(page) == unshaped
+
+        redo = page.locator("#redoAction")
+        assert redo.get_attribute("data-popover-body") == f"Redo: {label}"
+        with page.expect_response(_posted("/op")):
+            redo.click()
+        page.locator("#chart .shape-range").wait_for()
+        assert session.model is shaped
+        assert _drawn_y(page) == drawn["y"]
 
 
 def test_a_numeric_run_holding_too_few_values_disables_the_higher_shapes(open_editor_page):
@@ -259,44 +277,48 @@ def test_set_reference_icon_needs_exactly_one_level(open_editor_page):
 
 def test_refresh_pulls_a_notebook_side_structural_change(open_editor_page):
     with open_editor_page(selected_term="territory") as (page, session):
-        restore = page.locator("#restoreStructure")
+        undo = page.locator("#undoAction")
         refresh = page.locator("#refreshAction")
         reference = page.locator("#termReference")
         refresh.wait_for(state="visible")
         page.wait_for_function("() => !document.querySelector('#refreshAction').disabled")
         session.select_levels("territory", ["T01", "T02"])
         session.replace_with_collapsed_levels("territory", method="fit")
-        assert restore.is_hidden()
+        assert undo.is_disabled()
         assert page.locator("#chart .level-group-marker").count() == 0
         assert reference.text_content() == "reference T01 · first"
 
         refresh.click()
-        restore.wait_for(state="visible")
+        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
+        assert undo.get_attribute("data-popover-body") == "Undo: collapse T01 + T02 in territory"
         page.locator("#chart .level-group-marker").first.wait_for()
         assert page.locator("#chart .level-group-marker").count() == 2
         # The first level now sits inside the new group, so the group is the reference.
         assert reference.text_content() == "reference T01+T02 · first"
 
 
-def test_revert_confirms_and_returns_to_the_opened_model(open_editor_page):
+def test_revert_is_one_step_that_undo_takes_back(open_editor_page):
     with open_editor_page(
         selected_term="territory", collapsed_levels=("territory", ("T01", "T02"))
     ) as (page, session):
+        collapsed = session.model
         revert = page.locator("#revertAction")
-        restore = page.locator("#restoreStructure")
-        dialog = page.locator("#structuralConfirmDialog")
+        undo = page.locator("#undoAction")
+        markers = page.locator("#chart .level-group-marker")
         page.wait_for_function("() => !document.querySelector('#revertAction').disabled")
-        assert restore.is_visible()
+        assert markers.count() == 2
 
-        revert.click()
-        dialog.wait_for(state="visible")
-        assert dialog.locator("#structuralConfirmMessage").text_content() == (
-            "Revert to the original model? This clears 0 manual edits and "
-            "1 structural step, and can't be undone."
-        )
         with page.expect_response(_posted("/revert_to_original")) as response_info:
-            dialog.get_by_role("button", name="Continue and refit", exact=True).click()
+            revert.click()
         assert response_info.value.status == 200
-        restore.wait_for(state="hidden")
         page.wait_for_function("() => document.querySelector('#revertAction').disabled")
-        assert session.structure_history == []
+        # Nothing is lost, so nothing asked first.
+        assert page.locator("dialog[open]").count() == 0
+        assert markers.count() == 0
+        assert undo.get_attribute("data-popover-body") == "Undo: revert to original model"
+
+        with page.expect_response(_posted("/op")):
+            undo.click()
+        page.wait_for_function("() => !document.querySelector('#revertAction').disabled")
+        assert markers.count() == 2
+        assert session.model is collapsed

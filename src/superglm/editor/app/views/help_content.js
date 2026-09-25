@@ -98,33 +98,29 @@ export const OPERATION_HELP = Object.freeze({
   }),
   shape_flat: Object.freeze({
     title: "Flat and refit",
-    body: "Make the selected range flat and refit. The rest of the curve stays smooth. Restore undoes it.",
+    body: "Make the selected range flat and refit. The rest of the curve stays smooth. Undo takes it back.",
   }),
   shape_line: Object.freeze({
     title: "Line and refit",
     body:
-      "Make the selected range a straight line and refit. The rest of the curve stays smooth. Restore undoes it.",
+      "Make the selected range a straight line and refit. The rest of the curve stays smooth. Undo takes it back.",
   }),
   shape_quadratic: Object.freeze({
     title: "Quadratic and refit",
     body:
-      "Make the selected range a quadratic and refit. The rest of the curve stays smooth. Restore undoes it.",
+      "Make the selected range a quadratic and refit. The rest of the curve stays smooth. Undo takes it back.",
   }),
   shape_cubic: Object.freeze({
     title: "Cubic and refit",
-    body: "Make the selected range a cubic and refit. The rest of the curve stays smooth. Restore undoes it.",
+    body: "Make the selected range a cubic and refit. The rest of the curve stays smooth. Undo takes it back.",
   }),
 });
 
 /** @type {Readonly<Record<string, Readonly<HelpEntry>>>} */
 export const STRUCTURE_HELP = Object.freeze({
-  restore_structure: Object.freeze({
-    title: "Restore previous structure",
-    body: "Undo the latest collapse, ungroup, shape or reference change.",
-  }),
   revert_to_original: Object.freeze({
     title: "Revert to original model",
-    body: "Go back to the model the editor was opened with.",
+    body: "Go back to the model the editor was opened with. Undo brings back everything it cleared.",
   }),
   refresh_from_python: Object.freeze({
     title: "Refresh from Python",
@@ -167,7 +163,7 @@ export const HELP_SECTIONS = Object.freeze([
       "Select a run of points or bands on a spline term, then choose Flat, Line, Quadratic or Cubic. That range is pinned to the shape; the rest of the term stays the fitted smooth.",
       "The curve stays continuous at the range's edges and its slope may change there. Select all, then a shape, for one polynomial over the whole axis.",
       "Flat fits a level. To hold the curve at its value at a range's edge instead of fitting a level, use Level from left or Level from right. That is an edit, not a refit.",
-      "A new range may not overlap one already shaped, and one selected right beside it meets it. The same range with a new shape replaces it. Restore undoes the latest shape.",
+      "A new range may not overlap one already shaped, and one selected right beside it meets it. The same range with a new shape replaces it. Undo takes back the latest shape.",
       "A P-spline or natural spline term becomes a B-spline with a derivative penalty so its penalty can skip the shaped range; a natural spline's ends are then no longer held straight.",
     ]),
   }),
@@ -191,10 +187,13 @@ export const HELP_SECTIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
-    title: "History",
+    title: "Undo, Redo and Revert",
     items: Object.freeze([
+      "Undo and Redo walk one history of edits and structural steps, in the order made, whichever term is shown. Their popovers name what they would undo or redo.",
+      "Undoing a step brings back the model, curves, edits and selection from before it, without refitting.",
       "Ctrl/Cmd+Z: undo",
       "Ctrl/Cmd+Shift+Z or Ctrl+Y: redo",
+      "Revert to original model is one more step: Undo brings back everything it cleared.",
     ]),
   }),
   Object.freeze({

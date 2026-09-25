@@ -44,7 +44,7 @@ function snapshot(revision) {
     selected_term: "age",
     terms: { age: termPayload() },
     selection: { age: [0] },
-    structure_history: { depth: 0, last: null },
+    undo_redo: { undo: null, redo: null },
     history: { active: [], redo: [] },
     in_force_is_original: true
   };
@@ -772,6 +772,10 @@ test("structural response rejects malformed snapshot and timing contracts", asyn
     {
       ...valid,
       timing: { ...valid.timing, state_ms: Number.POSITIVE_INFINITY }
+    },
+    {
+      ...valid,
+      state: { ...valid.state, undo_redo: { undo: 3, redo: null } }
     }
   ];
 
@@ -1628,10 +1632,7 @@ test("refreshFromPython commits an equal-revision snapshot and re-requests visib
   const store = createEditorStore(createInitialEditorState(opened));
   const refreshed = snapshot(3);
   refreshed.selection.age = [];
-  refreshed.structure_history = {
-    depth: 1,
-    last: { operation: "collapse_levels", term: "age", label: "collapse A + B in age" }
-  };
+  refreshed.undo_redo = { undo: "collapse A + B in age", redo: null };
   /** @type {unknown[]} */
   const scheduled = [];
   const actions = createEditorActions({

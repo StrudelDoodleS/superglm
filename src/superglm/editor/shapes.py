@@ -237,7 +237,7 @@ def _merged_ranges(
             raise EditorValueError(
                 f"This range overlaps the {current.label} range "
                 f"{_edge_text(current.lo)}–{_edge_text(current.hi)}. "
-                "Restore it or choose a range outside it."
+                "Undo it or choose a range outside it."
             )
         kept.append(current)
     return [*kept, new]

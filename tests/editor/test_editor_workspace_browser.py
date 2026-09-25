@@ -1204,8 +1204,10 @@ def test_application_bar_exposes_views_undo_redo_and_export(open_editor_page):
         page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
 
 
-def test_application_bar_history_actions_follow_the_selected_term(open_editor_page, choose_feature):
-    with open_editor_page(selected_term="curve") as (page, _session):
+def test_application_bar_undo_and_redo_follow_one_timeline_across_terms(
+    open_editor_page, choose_feature
+):
+    with open_editor_page(selected_term="curve") as (page, session):
         select_chart_tool(page, "Select")
         page.locator('button[data-op="select_all"]').click()
         page.locator("#selectionMenu").wait_for(state="visible")
@@ -1219,29 +1221,16 @@ def test_application_bar_history_actions_follow_the_selected_term(open_editor_pa
             )
         ):
             choose_feature(page, "territory")
-        page.wait_for_function("() => document.querySelector('#undoAction').disabled")
-        assert page.get_by_role("button", name="Undo edit").is_disabled()
+        # Another term is shown, and Undo still takes the curve's edit, by name.
+        undo = page.get_by_role("button", name="Undo edit")
+        assert undo.is_enabled()
+        assert undo.get_attribute("data-popover-body") == "Undo: shift curve"
 
-        with page.expect_response(
-            lambda response: (
-                response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/term")
-            )
-        ):
-            choose_feature(page, "curve")
-        page.wait_for_function("() => !document.querySelector('#undoAction').disabled")
-        page.get_by_role("button", name="Undo edit").click()
+        undo.click()
         page.wait_for_function("() => !document.querySelector('#redoAction').disabled")
-
-        with page.expect_response(
-            lambda response: (
-                response.request.method == "POST"
-                and response.url.split("?", maxsplit=1)[0].endswith("/term")
-            )
-        ):
-            choose_feature(page, "territory")
-        page.wait_for_function("() => document.querySelector('#redoAction').disabled")
-        assert page.get_by_role("button", name="Redo edit").is_disabled()
+        redo = page.get_by_role("button", name="Redo edit")
+        assert redo.get_attribute("data-popover-body") == "Redo: shift curve"
+        assert undo.is_disabled() and session.history == []
 
 
 def test_analyst_can_discover_edit_undo_redo_help_and_export(open_editor_page):
@@ -1483,7 +1472,7 @@ def test_summary_level_display_toggle_is_view_only_and_synchronizes_full_summary
             is initial_chart_is_collapsed
         )
 
-        forbidden = {"collapse_levels", "ungroup_levels", "restore_structure", "refit_offset"}
+        forbidden = {"collapse_levels", "ungroup_levels", "refit_offset"}
         assert not any(path in forbidden for path, _payload in requests)
         summary_payloads = [payload for path, payload in requests if path == "summary"]
         assert [payload["level_display"] for payload in summary_payloads] == [

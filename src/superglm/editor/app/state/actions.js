@@ -95,17 +95,17 @@ function isEditorSnapshot(value) {
   if (!isRecord(value) || !Number.isInteger(value.model_revision)) return false;
   if (typeof value.selected_term !== "string") return false;
   if (!isRecord(value.terms) || !isRecord(value.selection)) return false;
-  if (!isStructureHistory(value.structure_history)) return false;
+  if (!isUndoRedo(value.undo_redo)) return false;
   return isRecord(value.history) &&
     Array.isArray(value.history.active) &&
     Array.isArray(value.history.redo);
 }
 
 /** @param {unknown} value @returns {boolean} */
-function isStructureHistory(value) {
+function isUndoRedo(value) {
   return isRecord(value) &&
-    Number.isInteger(value.depth) && Number(value.depth) >= 0 &&
-    (value.last === null || (isRecord(value.last) && typeof value.last.label === "string"));
+    (value.undo === null || typeof value.undo === "string") &&
+    (value.redo === null || typeof value.redo === "string");
 }
 
 /** @param {unknown} value @returns {boolean} */

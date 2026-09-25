@@ -94,14 +94,14 @@ export function bindAppBar({
  * @param {HTMLButtonElement} options.redoButton
  * @param {HTMLButtonElement} options.revertButton
  * @param {HTMLButtonElement} options.refreshButton
- * @param {boolean} options.canUndo
- * @param {boolean} options.canRedo
+ * @param {string|null} options.undoLabel what Undo would take back; null disables it
+ * @param {string|null} options.redoLabel what Redo would put back; null disables it
  * @param {boolean} options.canRevert
  * @param {boolean} options.busy
  */
 export function renderAppBar({
   root, activeView, undoButton, redoButton, revertButton, refreshButton,
-  canUndo, canRedo, canRevert, busy,
+  undoLabel, redoLabel, canRevert, busy,
 }) {
   for (const element of root.querySelectorAll('[role="tab"]')) {
     if (!(element instanceof HTMLButtonElement)) continue;
@@ -110,21 +110,21 @@ export function renderAppBar({
     element.setAttribute("aria-selected", String(active));
     element.tabIndex = active ? 0 : -1;
   }
-  undoButton.disabled = !canUndo;
-  redoButton.disabled = !canRedo;
+  undoButton.disabled = undoLabel === null;
+  undoButton.dataset.popoverBody = undoLabel === null ? "Nothing to undo." : `Undo: ${undoLabel}`;
+  redoButton.disabled = redoLabel === null;
+  redoButton.dataset.popoverBody = redoLabel === null ? "Nothing to redo." : `Redo: ${redoLabel}`;
   revertButton.disabled = !canRevert;
   refreshButton.disabled = busy;
 }
 
 /**
- * Whether anything differs from the opened model: a manual edit, a structural
- * step, or an in-force model replaced without either (a distribution re-profile).
+ * Whether anything differs from the opened model: a live manual edit, or an
+ * in-force model a structural step or a distribution re-profile put there.
  * @param {EditorSnapshot} snapshot
  */
 export function revertAvailable(snapshot) {
-  return snapshot.history.active.length + snapshot.history.redo.length > 0 ||
-    snapshot.structure_history.depth > 0 ||
-    !snapshot.in_force_is_original;
+  return snapshot.history.active.length > 0 || !snapshot.in_force_is_original;
 }
 
 /** @param {EventTarget | null} target */

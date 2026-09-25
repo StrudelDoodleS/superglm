@@ -33,7 +33,6 @@ import {
   runDistributionProfile,
   showDistributionProfileDialog,
   runOffsetRefit,
-  restoreTransition,
   revertTransition,
   setReferenceTransition,
   shapeRangeTransition,
@@ -52,7 +51,6 @@ import {
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
 import { bindPopovers } from "./views/popover.js";
-import { bindStructuralConfirm, structuralImpact } from "./views/structural_confirm.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
 const appBar = document.getElementById("appBar");
@@ -125,9 +123,7 @@ const exportFormatInputs = [...document.querySelectorAll('input[name="exportForm
 const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const setReference = document.getElementById("setReference");
-const restoreStructure = document.getElementById("restoreStructure");
 const shapeButtons = [...document.querySelectorAll("button[data-shape-degree]")];
-const structuralConfirmDialog = document.getElementById("structuralConfirmDialog");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
 const metricFreshness = document.getElementById("metricFreshness");
@@ -165,10 +161,6 @@ const statusNode = document.getElementById("status");
 const uiPopover = document.getElementById("uiPopover");
 if (!uiPopover) throw new Error("Editor popover element is missing");
 bindPopovers({ root: document, popover: uiPopover });
-if (!(structuralConfirmDialog instanceof HTMLDialogElement)) {
-  throw new Error("Structural confirmation dialog is missing");
-}
-const structuralConfirm = bindStructuralConfirm(structuralConfirmDialog);
 
 let buildProgress = null;
 let buildFrame = null;
@@ -582,30 +574,14 @@ function scheduleVisibleEvidenceCatchUp() {
   scheduleVisibleEvidence(revision, { immediate: true, onlyStale: true });
 }
 
+// A structural step loses nothing: Undo puts back the state before it, edits
+// included, so it runs without asking.
 async function runStructuralRefit(descriptor) {
-  while (true) {
-    const state = store.getState();
-    if (appBusyActive || state.request.mutation.status !== "idle") {
-      return { ok: false, skipped: true };
-    }
-    const snapshot = selectSnapshot(store.getState());
-    if (!snapshot) return { ok: false, skipped: true };
-    const impact = structuralImpact(snapshot, descriptor);
-    if (impact.requiresConfirmation && !(await structuralConfirm.confirm(impact))) {
-      return { ok: false, skipped: true };
-    }
-
-    const confirmedState = store.getState();
-    if (appBusyActive || confirmedState.request.mutation.status !== "idle") {
-      return { ok: false, skipped: true };
-    }
-    if (selectSnapshot(confirmedState) === snapshot) break;
+  if (appBusyActive || store.getState().request.mutation.status !== "idle") {
+    return { ok: false, skipped: true };
   }
-
   stopContributionBuild();
-  if (descriptor.name !== "restore previous structure") {
-    summarySource.value = "selected";
-  }
+  summarySource.value = "selected";
   const operationStart = performance.now();
   const requestStart = performance.now();
   const milestones = {
@@ -893,32 +869,21 @@ function renderHistoryState({ history }) {
 
 function selectAppBarRenderState(state) {
   const snapshot = state.remote.snapshot;
-  const selectedTerm = snapshot?.selected_term;
   return {
     ready: snapshot !== null,
     activeView: state.view.activeView,
-    canUndo: Boolean(
-      selectedTerm && snapshot?.history.active.some((record) => record.term === selectedTerm)
-    ),
-    canRedo: Boolean(
-      selectedTerm && snapshot?.history.redo.some((record) => record.term === selectedTerm)
-    ),
+    undoLabel: snapshot?.undo_redo.undo ?? null,
+    redoLabel: snapshot?.undo_redo.redo ?? null,
     canRevert: Boolean(snapshot && revertAvailable(snapshot)),
     busy: state.request.mutation.status === "running"
   };
 }
 
-function renderRestoreAction(history) {
-  if (!history) return;
-  restoreStructure.hidden = history.depth === 0;
-  restoreStructure.dataset.popoverBody = history.last ? `Undo: ${history.last.label}` : "";
-}
-
 function sameAppBarRenderState(next, previous) {
   return next.ready === previous.ready &&
     next.activeView === previous.activeView &&
-    next.canUndo === previous.canUndo &&
-    next.canRedo === previous.canRedo &&
+    next.undoLabel === previous.undoLabel &&
+    next.redoLabel === previous.redoLabel &&
     next.canRevert === previous.canRevert &&
     next.busy === previous.busy;
 }
@@ -932,8 +897,8 @@ function renderAppBarState(state) {
     redoButton: redoAction,
     revertButton: revertAction,
     refreshButton: refreshAction,
-    canUndo: state.canUndo,
-    canRedo: state.canRedo,
+    undoLabel: state.undoLabel,
+    redoLabel: state.redoLabel,
     canRevert: state.canRevert,
     busy: state.busy
   });
@@ -1590,9 +1555,6 @@ for (const button of shapeButtons) {
     await runStructuralRefit(shapeRangeTransition(selectedTerm(), range.lo, range.hi, degree));
   });
 }
-restoreStructure.addEventListener("click", async () => {
-  await runStructuralRefit(restoreTransition());
-});
 
 
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
@@ -1603,7 +1565,6 @@ store.subscribe(
 );
 store.subscribe(selectHistoryRenderState, renderHistoryState, sameHistoryRenderState);
 store.subscribe(selectAppBarRenderState, renderAppBarState, sameAppBarRenderState);
-store.subscribe((state) => state.remote.snapshot?.structure_history ?? null, renderRestoreAction);
 store.subscribe(
   selectActiveViewRenderState,
   renderActiveViewState,

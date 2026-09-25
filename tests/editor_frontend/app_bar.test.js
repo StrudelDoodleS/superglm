@@ -133,8 +133,8 @@ test("Refresh is disabled while busy and Revert only when something can be rever
     root,
     activeView: "editor",
     ...buttons,
-    canUndo: false,
-    canRedo: false,
+    undoLabel: null,
+    redoLabel: null,
     canRevert: false,
     busy: false,
     ...overrides,
@@ -154,17 +154,45 @@ test("Refresh is disabled while busy and Revert only when something can be rever
   );
 });
 
+test("Undo and Redo follow the snapshot and name what they would take", () => {
+  const root = new FakeElement("nav");
+  const buttons = {
+    undoButton: new FakeButton(),
+    redoButton: new FakeButton(),
+    revertButton: new FakeButton(),
+    refreshButton: new FakeButton(),
+  };
+  const render = (undoLabel, redoLabel) => {
+    renderAppBar({
+      root, activeView: "editor", ...buttons, undoLabel, redoLabel, canRevert: false, busy: false,
+    });
+    const { undoButton, redoButton } = buttons;
+    return [undoButton.disabled, undoButton.dataset.popoverBody,
+      redoButton.disabled, redoButton.dataset.popoverBody];
+  };
+
+  assert.deepEqual(render("Line 30–45 in age", null),
+    [false, "Undo: Line 30–45 in age", true, "Nothing to redo."]);
+  assert.deepEqual(render(null, "shift age"),
+    [true, "Nothing to undo.", false, "Redo: shift age"]);
+});
+
 test("Revert is available whenever anything differs from the opened model", () => {
   const snapshot = (overrides) => ({
     history: { active: [], redo: [] },
-    structure_history: { depth: 0, last: null },
+    undo_redo: { undo: null, redo: null },
     in_force_is_original: true,
     ...overrides,
   });
   assert.equal(revertAvailable(snapshot({})), false);
   assert.equal(revertAvailable(snapshot({ history: { active: [{}], redo: [] } })), true);
-  assert.equal(revertAvailable(snapshot({ history: { active: [], redo: [{}] } })), true);
-  assert.equal(revertAvailable(snapshot({ structure_history: { depth: 1, last: null } })), true);
-  // A distribution re-profile replaces the model and clears both histories.
+  // An undone edit or step differs from nothing in force, and Revert would
+  // only push a step that changes nothing.
+  assert.equal(revertAvailable(snapshot({ history: { active: [], redo: [{}] } })), false);
+  assert.equal(
+    revertAvailable(snapshot({ undo_redo: { undo: "revert to original model", redo: "x" } })),
+    false,
+  );
+  // A structural step or a distribution re-profile puts another model in force.
   assert.equal(revertAvailable(snapshot({ in_force_is_original: false })), true);
 });

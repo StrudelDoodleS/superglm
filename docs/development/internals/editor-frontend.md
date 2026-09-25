@@ -75,7 +75,7 @@ in durable state; only the finished operation is sent to Python.
 in `server.py` and call guarded methods on `EditorWidget`.
 
 Ordinary mutations return an authoritative state snapshot. Every structural operation (collapse,
-ungroup, set reference, transform, restore and revert) returns one atomic envelope built from a
+ungroup, set reference, transform, shape and revert) returns one atomic envelope built from a
 single post-refit lock scope:
 
 ```json
@@ -210,24 +210,28 @@ Run the frontend check and the focused browser test before committing.
 
 ## Add a Structural Operation
 
-A structural operation replaces one term's spec, refits, and is undone by Restore. All of them share
-one path, so a new one only supplies its spec builder and its wiring:
+A structural operation replaces one term's spec, refits, and is one step on the same undo timeline
+as the manual edits. All of them share one path, so a new one only supplies its spec builder and
+its wiring:
 
 1. Write the spec builder next to `collapse.py` and `transform.py`. It builds a fresh replacement
    spec (never a mutated fitted copy) and returns `(spec, metadata)`, where `metadata["label"]` is
-   the short text Restore's popover shows. Raise `EditorValueError` or `EditorTypeError` with fixed
-   text for every refusal.
+   the short text the Undo and Redo popovers show. Raise `EditorValueError` or `EditorTypeError`
+   with fixed text for every refusal.
 2. Add an `EditorSession.replace_with_...` method that passes the builder to `_refit_replacing` and
-   the refit to `_push_structure`, which records one `StructuralStep` and puts the refit in force.
+   the refit to `_push_structure`. It records one `StructuralStep` holding the editor state before
+   the step (model, terms, edit history, level orders and selection) and puts the refit in force.
 3. Add an `EditorWidget._...` method that calls `_structural_step` with the operation name and the
    session call. It takes the lock and returns the envelope.
 4. Add a token-guarded route in `server.py` that parses the payload explicitly.
-5. Add a descriptor next to `setReferenceTransition` in `summary.js`, a title in
-   `views/structural_confirm.js`, and run it through `runStructuralRefit` from `main.js`.
+5. Add a descriptor next to `setReferenceTransition` in `summary.js` and run it through
+   `runStructuralRefit` from `main.js`.
 6. Test the refit, the one pushed step and the refusals in `tests/test_editor_structure.py`, and add
    one browser case to `tests/editor/test_editor_structure_browser.py`.
 
-The stack is shared, so Restore, Revert and the `structure_history` snapshot field need no change.
+The timeline is shared, so `EditorSession.undo` and `redo`, Revert and the `undo_redo` snapshot
+field need no change. Undo takes the latest edit while there is one since the last step, and
+otherwise swaps the step's stored state back in without refitting.
 
 ## Add an Inspector Panel
 
