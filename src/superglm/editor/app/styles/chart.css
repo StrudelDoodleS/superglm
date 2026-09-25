@@ -28,7 +28,7 @@
 
 .ui-popover span {
   margin-top: 2px;
-  color: #d9dbe1;
+  color: var(--popover-muted);
   font-size: 12px;
 }
 
@@ -52,18 +52,18 @@
 /* Shaped ranges: a light band per pinned range, named by a tag at its top. */
 
 .shape-range rect {
-  fill: rgba(36, 87, 197, 0.055);
-  stroke: rgba(36, 87, 197, 0.22);
+  fill: color-mix(in srgb, var(--blue) 5.5%, transparent);
+  stroke: color-mix(in srgb, var(--blue) 22%, transparent);
   stroke-width: 1;
 }
 
 .shape-range:hover rect {
-  fill: rgba(36, 87, 197, 0.1);
+  fill: color-mix(in srgb, var(--blue) 10%, transparent);
 }
 
 .shape-range rect.shape-range-tag {
   fill: var(--surface);
-  stroke: rgba(36, 87, 197, 0.3);
+  stroke: color-mix(in srgb, var(--blue) 30%, transparent);
   stroke-width: 1;
 }
 

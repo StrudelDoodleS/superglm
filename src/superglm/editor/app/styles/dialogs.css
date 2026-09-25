@@ -6,7 +6,7 @@
   padding: var(--space-4);
   color: var(--text);
   background: var(--surface);
-  box-shadow: 0 24px 60px rgba(21, 23, 28, 0.26), 0 0 0 1px var(--hairline);
+  box-shadow: 0 24px 60px color-mix(in srgb, var(--ink) 26%, transparent), 0 0 0 1px var(--hairline);
 }
 .export-dialog {
   width: min(620px, calc(100vw - 36px));
@@ -16,13 +16,13 @@
   padding: var(--space-4);
   color: var(--text);
   background: var(--surface);
-  box-shadow: 0 24px 60px rgba(21, 23, 28, 0.26), 0 0 0 1px var(--hairline);
+  box-shadow: 0 24px 60px color-mix(in srgb, var(--ink) 26%, transparent), 0 0 0 1px var(--hairline);
 }
 .export-dialog::backdrop {
-  background: rgba(21, 23, 28, 0.28);
+  background: color-mix(in srgb, var(--ink) 28%, transparent);
 }
 .profile-dialog::backdrop {
-  background: rgba(21, 23, 28, 0.28);
+  background: color-mix(in srgb, var(--ink) 28%, transparent);
 }
 .profile-dialog-head {
   display: flex;
@@ -178,7 +178,7 @@
   font-weight: 600;
 }
 .profile-run:hover {
-  background: #2a2d35;
+  background: var(--primary-hover);
 }
 .export-actions .profile-run {
   min-width: 0;
@@ -299,12 +299,15 @@
   background: var(--surface);
 }
 .profile-trace-grid {
-  stroke: rgba(140, 149, 159, 0.2);
+  stroke: color-mix(in srgb, var(--grey) 20%, transparent);
   stroke-width: 1;
 }
 .profile-trace-tick {
-  stroke: rgba(87, 96, 106, 0.55);
+  stroke: color-mix(in srgb, var(--trace-ink) 55%, transparent);
   stroke-width: 1;
+}
+.profile-trace-label {
+  fill: var(--trace-ink);
 }
 .profile-trace-line {
   fill: none;
@@ -312,17 +315,17 @@
   stroke-width: 2;
 }
 .profile-trace-dot {
-  fill: #fff;
+  fill: var(--surface);
   stroke: var(--blue);
   stroke-width: 1.5;
 }
 .profile-trace-best {
-  fill: #2da44e;
-  stroke: #fff;
+  fill: var(--trace-best);
+  stroke: var(--surface);
   stroke-width: 1;
 }
 .profile-trace-best-line {
-  stroke: rgba(45, 164, 78, 0.42);
+  stroke: color-mix(in srgb, var(--trace-best) 42%, transparent);
   stroke-width: 1.2;
   stroke-dasharray: 3 3;
 }
@@ -331,7 +334,7 @@
   font-size: 10px;
   font-weight: 600;
   paint-order: stroke;
-  stroke: #fff;
+  stroke: var(--surface);
   stroke-linejoin: round;
   stroke-width: 3px;
 }
@@ -342,11 +345,11 @@
   stroke-linejoin: round;
 }
 .profile-learning-point {
-  stroke: #fff;
+  stroke: var(--surface);
   stroke-width: 0.8;
 }
 .profile-learning-end {
-  stroke: #fff;
+  stroke: var(--surface);
   stroke-width: 1;
 }
 .profile-learning-best {

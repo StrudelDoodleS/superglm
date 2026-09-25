@@ -226,7 +226,7 @@ async function refreshFromPython() {
     statusNode.textContent = `Synced with Python · revision ${result.snapshot.model_revision}`;
   } else if (!result.skipped) {
     statusNode.textContent = result.error.message;
-    statusNode.style.color = "#b42318";
+    statusNode.classList.add("is-error");
   }
 }
 
@@ -789,7 +789,7 @@ function renderChartWorkspace() {
   const selection = view.preview && view.preview.term === selected
     ? new Set(view.preview.selection)
     : currentSelection();
-  statusNode.style.color = "";
+  statusNode.classList.remove("is-error");
   if (updateHandleCount(term)) return;
   renderToolRail(toolRail, { mode: view.mode, handlesAvailable: Boolean(term.controls) });
   updateGroupDisplayControl(term);
@@ -1676,5 +1676,5 @@ loadState().then(async () => {
   await refreshSummaryView();
 }).catch((error) => {
   statusNode.textContent = error.message;
-  statusNode.style.color = "#b42318";
+  statusNode.classList.add("is-error");
 });

@@ -353,9 +353,9 @@ function profileTraceSVG(trace, estimate) {
   const objective = profileObjectiveRows(trace, estimate);
   if (objective.length) return profileObjectiveSVG(objective, estimate);
   if (!trace.length) {
-    return '<text x="160" y="64" text-anchor="middle" fill="#57606a" font-size="12">waiting for first evaluation</text>';
+    return '<text x="160" y="64" text-anchor="middle" class="profile-trace-label" font-size="12">waiting for first evaluation</text>';
   }
-  return '<text x="160" y="64" text-anchor="middle" fill="#57606a" font-size="12">no profile loss values yet</text>';
+  return '<text x="160" y="64" text-anchor="middle" class="profile-trace-label" font-size="12">no profile loss values yet</text>';
 }
 
 function profileObjectiveRows(trace, estimate) {
@@ -405,14 +405,14 @@ function profileObjectiveSVG(values, estimate) {
   return `
     <line class="profile-trace-grid" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + height}"></line>
     <line class="profile-trace-grid" x1="${margin.left}" y1="${margin.top + height}" x2="${margin.left + width}" y2="${margin.top + height}"></line>
-    <text x="${margin.left}" y="10" fill="#57606a" font-size="10">profile NLL</text>
+    <text x="${margin.left}" y="10" class="profile-trace-label" font-size="10">profile NLL</text>
     <polyline class="profile-trace-line" points="${points.join(" ")}"></polyline>
     ${values.map((row) => `<circle class="profile-trace-dot" cx="${x(row.value).toFixed(2)}" cy="${y(row.nll).toFixed(2)}" r="3"></circle>`).join("")}
     <line class="profile-trace-best-line" x1="${bestX}" y1="${margin.top}" x2="${bestX}" y2="${axisY}"></line>
     <circle class="profile-trace-best" cx="${bestX}" cy="${bestY}" r="4"></circle>
     <text class="profile-trace-best-label" x="${bestLabelX.toFixed(2)}" y="${bestLabelY.toFixed(2)}">${escapeHTML(bestLabel)}</text>
-    <text x="${margin.left}" y="112" fill="#57606a" font-size="10">${escapeHTML(xLabel)}</text>
-    <text x="310" y="112" text-anchor="end" fill="#57606a" font-size="10">profile loss</text>
+    <text x="${margin.left}" y="112" class="profile-trace-label" font-size="10">${escapeHTML(xLabel)}</text>
+    <text x="310" y="112" text-anchor="end" class="profile-trace-label" font-size="10">profile loss</text>
   `;
 }
 
@@ -436,17 +436,17 @@ function profileLearningCurvesSVG(curves, estimate) {
   return `
     ${yTicks.map((tick) => `
       <line class="profile-trace-grid" x1="${margin.left}" y1="${y(tick).toFixed(2)}" x2="${margin.left + width}" y2="${y(tick).toFixed(2)}"></line>
-      <text x="${margin.left - 5}" y="${(y(tick) + 3).toFixed(2)}" text-anchor="end" fill="#57606a" font-size="9">${escapeHTML(formatProfileNumber(tick))}</text>
+      <text x="${margin.left - 5}" y="${(y(tick) + 3).toFixed(2)}" text-anchor="end" class="profile-trace-label" font-size="9">${escapeHTML(formatProfileNumber(tick))}</text>
     `).join("")}
     <line class="profile-trace-grid" x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${axisY}"></line>
     <line class="profile-trace-grid" x1="${margin.left}" y1="${axisY}" x2="${margin.left + width}" y2="${axisY}"></line>
     ${xTicks.map((tick) => `
       <line class="profile-trace-tick" x1="${x(tick).toFixed(2)}" y1="${axisY}" x2="${x(tick).toFixed(2)}" y2="${axisY + 4}"></line>
-      <text x="${x(tick).toFixed(2)}" y="${axisY + 14}" text-anchor="middle" fill="#57606a" font-size="9">${tick}</text>
+      <text x="${x(tick).toFixed(2)}" y="${axisY + 14}" text-anchor="middle" class="profile-trace-label" font-size="9">${tick}</text>
     `).join("")}
     ${visible.map((curve, i) => profileLearningCurvePath(curve, i, x, y, profileCurveIsBest(curve, visible, estimate))).join("")}
-    <text x="${margin.left}" y="114" fill="#57606a" font-size="10">fit iter</text>
-    <text x="310" y="114" text-anchor="end" fill="#57606a" font-size="10">loss</text>
+    <text x="${margin.left}" y="114" class="profile-trace-label" font-size="10">fit iter</text>
+    <text x="310" y="114" text-anchor="end" class="profile-trace-label" font-size="10">loss</text>
   `;
 }
 
@@ -474,10 +474,10 @@ function profileLearningCurvePath(curve, index, x, y, isBest) {
       ? `profile-learning-point profile-learning-end${isBest ? " profile-learning-best-point" : ""}`
       : "profile-learning-point";
     const radius = isLast && isBest ? 3.8 : (isLast ? 2.8 : 2.2);
-    return `<circle class="${classes}" cx="${x(point.iteration).toFixed(2)}" cy="${y(point.loss).toFixed(2)}" r="${radius}" fill="${color}"></circle>`;
+    return `<circle class="${classes}" cx="${x(point.iteration).toFixed(2)}" cy="${y(point.loss).toFixed(2)}" r="${radius}" style="fill:${color}"></circle>`;
   }).join("");
   return `
-    <polyline class="${curveClass}" points="${points}" stroke="${color}" opacity="${isBest ? "1" : opacity.toFixed(2)}"></polyline>
+    <polyline class="${curveClass}" points="${points}" style="stroke:${color}" opacity="${isBest ? "1" : opacity.toFixed(2)}"></polyline>
     ${markers}
   `;
 }
@@ -594,9 +594,10 @@ function outerProfileObjective(row) {
   return Number(row.nll);
 }
 
+// The trace palette lives in tokens.css as --trace-0 to --trace-9, one
+// value per theme; the SVG names its colour and the stylesheet supplies it.
 function profileCurveColor(index) {
-  const colors = ["#0969da", "#2da44e", "#bf3989", "#d97706", "#8250df", "#1f6feb", "#cf222e", "#0a7f8f", "#6f42c1", "#57606a"];
-  return colors[index % colors.length];
+  return `var(--trace-${index % 10})`;
 }
 
 function profileTraceRows(trace, label) {

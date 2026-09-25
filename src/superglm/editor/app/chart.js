@@ -457,6 +457,7 @@ function applyPlotClip(svg) {
     ".ci-whisker",
     ".exposure",
     ".exposure-density",
+    ".exposure-edge",
     ".basis-contribution",
     ".basis-active",
     ".basis-build-halo",
@@ -646,18 +647,16 @@ function drawLevelGroupMarker(svg, x, y, sx, sy, groupIndex) {
   }
 }
 
+// The categorical palettes live in tokens.css, one value per theme: the SVG
+// names a colour by index and the stylesheet supplies it, at the alpha asked.
 function levelGroupColor(index, alpha = 1) {
-  const colors = [
-    [196, 116, 0],
-    [126, 34, 206],
-    [5, 150, 105],
-    [220, 38, 38],
-    [8, 145, 178],
-    [37, 99, 235]
-  ];
-  const rgb = colors[Math.abs(Number(index) || 0) % colors.length];
-  const opacity = Math.max(0, Math.min(1, Number(alpha)));
-  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${opacity})`;
+  return paletteColor("group", 6, index, alpha);
+}
+
+function paletteColor(palette, count, index, alpha) {
+  const slot = Math.abs(Number(index) || 0) % count;
+  const percent = Math.max(0, Math.min(1, Number(alpha))) * 100;
+  return `color-mix(in srgb, var(--${palette}-${slot}) ${percent}%, transparent)`;
 }
 
 function drawControlHandles(svg, term, sx, sy, margin, innerH) {
@@ -756,32 +755,14 @@ function finalContributionEta(basis, logEffects, n) {
   return eta;
 }
 
+// The build curve runs from the basis green to the finished blue.
 function mixBuildColor(progress) {
-  const t = Math.max(0, Math.min(1, Number(progress) || 0));
-  const start = [22, 163, 74];
-  const end = [9, 105, 218];
-  const rgb = start.map((value, i) => Math.round(value + (end[i] - value) * t));
-  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+  const percent = Math.max(0, Math.min(1, Number(progress) || 0)) * 100;
+  return `color-mix(in srgb, var(--build-end) ${percent}%, var(--green))`;
 }
 
 function basisColor(index, alpha = 1) {
-  const colors = [
-    [22, 163, 74],
-    [217, 119, 6],
-    [124, 58, 237],
-    [8, 145, 178],
-    [220, 38, 38],
-    [37, 99, 235],
-    [194, 65, 12],
-    [101, 163, 13],
-    [190, 24, 93],
-    [15, 118, 110],
-    [147, 51, 234],
-    [202, 138, 4]
-  ];
-  const rgb = colors[Math.abs(Number(index) || 0) % colors.length];
-  const opacity = Math.max(0, Math.min(1, Number(alpha)));
-  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${opacity})`;
+  return paletteColor("basis", 12, index, alpha);
 }
 
 function contributionComponents(term) {
@@ -1195,6 +1176,8 @@ function exposureDensity(svg, x, y, sx, exposureY, yBase) {
   const right = `L ${sx(x[x.length - 1]).toFixed(2)} ${yBase.toFixed(2)}`;
   const left = `L ${sx(x[0]).toFixed(2)} ${yBase.toFixed(2)} Z`;
   svg.appendChild(el("path", { d: `${top} ${right} ${left}`, class: "exposure-density" }));
+  // The strip's top edge on its own, for a theme that outlines it.
+  svg.appendChild(el("path", { d: top, class: "exposure-edge" }));
 }
 
 // The strip's scale: its top and bottom, ticked on the right edge. The legend

@@ -9,7 +9,7 @@
   z-index: 40;
   display: grid;
   place-items: center;
-  background: rgba(255, 255, 255, 0.6);
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
   backdrop-filter: blur(1px);
 }
 .app-busy-overlay[hidden] {
@@ -82,7 +82,7 @@ button.primary {
   color: var(--surface);
   font-weight: 600;
 }
-button.primary:hover { background: #2a2d35; }
+button.primary:hover { background: var(--primary-hover); }
 input[type="text"],
 input[type="search"],
 input[type="number"] {
@@ -253,6 +253,9 @@ input[type="number"] {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+#status.is-error {
+  color: var(--danger);
+}
 
 /* The chart canvas. */
 .chart-shell {
@@ -280,7 +283,7 @@ input[type="number"] {
   padding: 4px 6px;
   border-radius: 8px;
   background: var(--surface);
-  box-shadow: 0 6px 22px rgba(21, 23, 28, 0.13), 0 0 0 1px var(--hairline);
+  box-shadow: 0 6px 22px color-mix(in srgb, var(--ink) 13%, transparent), 0 0 0 1px var(--hairline);
   overflow: visible;
   pointer-events: none;
 }
@@ -363,7 +366,7 @@ input[type="number"] {
   padding: 3px 4px;
   border-radius: var(--radius-md);
   background: var(--surface);
-  box-shadow: 0 6px 18px rgba(21, 23, 28, 0.16), 0 0 0 1px var(--hairline);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--ink) 16%, transparent), 0 0 0 1px var(--hairline);
   transform: translateX(-50%);
   white-space: nowrap;
 }
@@ -403,7 +406,7 @@ input[type="number"] {
 .join-option[aria-checked="true"] {
   background: var(--surface);
   color: var(--blue);
-  box-shadow: 0 1px 2px rgba(21, 23, 28, 0.14);
+  box-shadow: 0 1px 2px var(--shadow);
 }
 .join-option .selection-icon {
   width: 18px;
@@ -503,7 +506,7 @@ input[type="number"] {
   color: var(--text);
   font-weight: 600;
   background: var(--surface);
-  box-shadow: 0 1px 2px rgba(21, 23, 28, 0.14);
+  box-shadow: 0 1px 2px var(--shadow);
 }
 .summary-level-segments input:focus-visible + span {
   outline: 2px solid var(--focus);
@@ -786,11 +789,11 @@ input[type="number"] {
   white-space: nowrap;
 }
 /* Significance classes are data from Python; the tints stay, one step softer. */
-.se-cell.sig-strong { background: #d5f2e4; color: #0b5c3f; }
-.se-cell.sig-medium { background: #e1f5e6; color: #166534; }
-.se-cell.sig-standard { background: #eef7d4; color: #4d6a13; }
-.se-cell.sig-weak { background: #fbeed0; color: #8a4b0d; }
-.se-cell.sig-none { background: #fbe1e1; color: #8f1d1d; }
+.se-cell.sig-strong { background: var(--sig-strong-bg); color: var(--sig-strong-fg); }
+.se-cell.sig-medium { background: var(--sig-medium-bg); color: var(--sig-medium-fg); }
+.se-cell.sig-standard { background: var(--sig-standard-bg); color: var(--sig-standard-fg); }
+.se-cell.sig-weak { background: var(--sig-weak-bg); color: var(--sig-weak-fg); }
+.se-cell.sig-none { background: var(--sig-none-bg); color: var(--sig-none-fg); }
 .se-cell.sig-unknown { background: var(--surface-hover); color: var(--muted); }
 .se-cell.sig-reference { background: transparent; color: var(--muted); }
 .sig-code {
@@ -1047,26 +1050,28 @@ input[type="number"] {
 }
 
 /* The chart's SVG grammar. superglm/plotting/editor_style.py restates the
-   colours, widths and dashes of these classes; keep them parseable. */
-.axis, .tick { stroke: #8c959f; stroke-width: 1; }
+   colours, widths and dashes of these classes; keep them parseable. Amber
+   for the previous edit reads on both grounds and stays literal. */
+.axis, .tick { stroke: var(--grey); stroke-width: 1; }
 .grid { stroke: var(--grid); stroke-width: 1; }
-.zero { stroke: rgba(21, 23, 28, 0.28); stroke-width: 1.5; stroke-dasharray: 6 5; }
-.original { fill: none; stroke: #8c959f; stroke-opacity: 0.45; stroke-width: 4; stroke-linejoin: round; stroke-linecap: round; }
+.zero { stroke: var(--zero); stroke-width: 1.5; stroke-dasharray: 6 5; }
+.original { fill: none; stroke: var(--grey); stroke-opacity: 0.45; stroke-width: 4; stroke-linejoin: round; stroke-linecap: round; }
 .previous-edit { fill: none; stroke: #f59e0b; stroke-width: 1.6; stroke-linejoin: round; }
 .edited { fill: none; stroke: var(--blue); stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
-.ci { fill: rgba(36, 87, 197, 0.13); stroke: none; }
-.ci-whisker { stroke: rgba(36, 87, 197, 0.5); stroke-width: 1.2; }
+.ci { fill: var(--ci); stroke: none; }
+.ci-whisker { stroke: var(--ci-whisker); stroke-width: 1.2; }
 .exposure { fill: var(--yellow); fill-opacity: 0.6; stroke: var(--yellow-border); stroke-width: 0; }
 .exposure-density { fill: var(--yellow); fill-opacity: 0.6; stroke: none; }
+.exposure-edge { fill: none; stroke: var(--yellow); stroke-width: 0; stroke-linejoin: round; }
 .exposure-axis { stroke: var(--yellow-border); stroke-opacity: 0.7; stroke-width: 1; }
-.basis-contribution { fill: none; stroke: rgba(92, 96, 104, 0.3); stroke-width: 1.2; stroke-dasharray: 4 4; }
-.basis-contribution.build-active { stroke: rgba(22, 163, 74, 0.62); stroke-width: 1.45; stroke-dasharray: none; }
+.basis-contribution { fill: none; stroke: var(--basis-contribution); stroke-width: 1.2; stroke-dasharray: 4 4; }
+.basis-contribution.build-active { stroke: color-mix(in srgb, var(--green) 62%, transparent); stroke-width: 1.45; stroke-dasharray: none; }
 .basis-active { fill: none; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
-.basis-build-halo { fill: none; stroke: rgba(255, 255, 255, 0.92); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+.basis-build-halo { fill: none; stroke: color-mix(in srgb, var(--surface) 92%, transparent); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
 .basis-build { fill: none; stroke: var(--blue); stroke-width: 3.4; stroke-linecap: round; stroke-linejoin: round; }
-.basis-final-dot { fill: var(--blue); stroke: #fff; stroke-width: 1.3; }
-.point { fill: var(--blue); stroke: #ffffff; stroke-width: 1.5; pointer-events: all; }
-.point.selected { fill: var(--orange); stroke: #ffffff; }
+.basis-final-dot { fill: var(--blue); stroke: var(--surface); stroke-width: 1.3; }
+.point { fill: var(--blue); stroke: var(--surface); stroke-width: 1.5; pointer-events: all; }
+.point.selected { fill: var(--orange); stroke: var(--surface); }
 /* A dense curve hides its points until they are selected, hovered, or near
    the pointer; a term with few points (levels) shows them all. */
 .point-layer[data-dense="true"] .point:not(.selected):not(.near):not(:hover) {
@@ -1077,10 +1082,10 @@ input[type="number"] {
 }
 .point-tooltip { pointer-events: none; }
 .point-tooltip rect {
-  fill: rgba(255, 255, 255, 0.97);
+  fill: color-mix(in srgb, var(--surface) 97%, transparent);
   stroke: var(--border);
   stroke-width: 1;
-  filter: drop-shadow(0 3px 10px rgba(21, 23, 28, 0.16));
+  filter: drop-shadow(0 3px 10px color-mix(in srgb, var(--ink) 16%, transparent));
 }
 .point-tooltip-label,
 .point-tooltip-value {
@@ -1103,7 +1108,7 @@ input[type="number"] {
   font-size: 11px;
   font-weight: 600;
   paint-order: stroke;
-  stroke: #fff;
+  stroke: var(--surface);
   stroke-width: 3px;
   pointer-events: none;
 }
@@ -1111,8 +1116,8 @@ input[type="number"] {
   pointer-events: none;
 }
 .order-drop-ghost {
-  fill: rgba(36, 87, 197, 0.08);
-  stroke: rgba(36, 87, 197, 0.28);
+  fill: color-mix(in srgb, var(--blue) 8%, transparent);
+  stroke: color-mix(in srgb, var(--blue) 28%, transparent);
   stroke-width: 1;
 }
 .order-drop-rail {
@@ -1128,21 +1133,21 @@ input[type="number"] {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.control-stem { stroke: rgba(36, 87, 197, 0.2); stroke-width: 1; stroke-dasharray: 4 4; }
+.control-stem { stroke: color-mix(in srgb, var(--blue) 20%, transparent); stroke-width: 1; stroke-dasharray: 4 4; }
 .control-handle {
-  fill: #fff;
+  fill: var(--surface);
   stroke: var(--text);
   stroke-width: 1.5;
   cursor: ns-resize;
 }
 .control-handle:hover { stroke: var(--blue); fill: var(--blue-soft); }
-.brush { fill: rgba(36, 87, 197, 0.08); stroke: var(--blue); stroke-width: 1; stroke-dasharray: 3 3; }
+.brush { fill: color-mix(in srgb, var(--blue) 8%, transparent); stroke: var(--blue); stroke-width: 1; stroke-dasharray: 3 3; }
 /* Selection: a light band over the selected stretch, with a quiet frame the
    palette anchors to. */
 .selection-bounds-halo { fill: var(--blue-band); stroke: none; pointer-events: none; }
 .selection-bounds {
   fill: none;
-  stroke: rgba(36, 87, 197, 0.35);
+  stroke: color-mix(in srgb, var(--blue) 35%, transparent);
   stroke-width: 1;
   pointer-events: none;
 }
