@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 from scipy.interpolate import BSpline as BSpl
 
 from superglm.features import _spline_extrapolation, _spline_knots
+from superglm.features._spline_ranges import merged_interior_knots, validate_ranges
 
 _SPLINE_SCORE_CHUNK_SIZE = 8192
 _SPLINE_SCORE_SAMPLE_SIZE = 4096
@@ -138,7 +139,33 @@ def place_knots(
         explicit_boundary=spec._explicit_boundary,
         sample_weight=sample_weight,
     )
+    spec._base_interior_knots = np.array(interior, dtype=np.float64)
+    if spec._polynomial_ranges:
+        interior = _ranged_interior(spec, x, interior)
     spec._assemble_knot_vector(interior)
+
+
+def _ranged_interior(spec: Any, x: NDArray, interior: NDArray) -> NDArray:
+    """Validate the spec's ranges against the fitted data and insert their edge knots.
+
+    A range pinned to degree d needs d + 1 distinct observed values inside
+    it to determine its polynomial.
+    """
+    ranges = validate_ranges(spec._polynomial_ranges, spec.degree, spec._lo, spec._hi)
+    support = np.unique(x)
+    lows = np.array([r.lo for r in ranges])
+    highs = np.array([r.hi for r in ranges])
+    distinct = np.searchsorted(support, highs, side="right") - np.searchsorted(support, lows)
+    needed = np.array([r.degree + 1 for r in ranges])
+    short = np.flatnonzero(distinct < needed)
+    if short.size:
+        r, found = ranges[short[0]], distinct[short[0]]
+        raise ValueError(
+            f"PolynomialRange [{r.lo:g}, {r.hi:g}] needs at least {r.degree + 1} distinct "
+            f"values of the feature inside it; it has {found}."
+        )
+    spec._polynomial_ranges = ranges
+    return merged_interior_knots(interior, ranges, spec.degree, spec._lo, spec._hi)
 
 
 def assemble_clamped_knot_vector(spec: Any, interior: NDArray) -> None:

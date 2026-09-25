@@ -15,7 +15,7 @@ Z from the QR of C' (Wood 2017, *Generalized Additive Models*, section 1.8.1).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -55,8 +55,9 @@ class PolynomialRange:
 def validate_ranges(
     ranges: Sequence[PolynomialRange], degree: int, lo: float, hi: float
 ) -> tuple[PolynomialRange, ...]:
-    """Return numeric ranges sorted by ``lo``, refusing anything ill-posed."""
-    ordered = tuple(sorted(ranges, key=lambda r: float(r.lo)))
+    """Return the ranges with float edges, sorted by ``lo``, refusing anything ill-posed."""
+    numeric = (replace(r, lo=float(r.lo), hi=float(r.hi)) for r in ranges)
+    ordered = tuple(sorted(numeric, key=lambda r: r.lo))
     for r in ordered:
         if not float(r.lo) < float(r.hi):
             raise ValueError(f"PolynomialRange lo must be below hi, got [{r.lo}, {r.hi}]")
@@ -103,8 +104,15 @@ def merged_interior_knots(
     return np.sort(np.concatenate([kept, np.repeat(unique_edges, multiplicity)]))
 
 
-def pinned_intervals(ranges: Sequence[PolynomialRange]) -> list[tuple[float, float]]:
-    return [(float(r.lo), float(r.hi)) for r in ranges]
+def pinned_intervals(
+    ranges: Sequence[PolynomialRange], lo: float, hi: float
+) -> list[tuple[float, float]]:
+    """The intervals each range pins, open past the fitted boundary at an end.
+
+    A range touching ``lo`` or ``hi`` pins the end piece, whose extrapolation
+    is what the spline takes beyond the boundary, so it pins that too.
+    """
+    return [(-np.inf if r.lo <= lo else r.lo, np.inf if r.hi >= hi else r.hi) for r in ranges]
 
 
 def pinning_rows(knots: NDArray, degree: int, ranges: Sequence[PolynomialRange]) -> NDArray:
@@ -135,17 +143,18 @@ def derivative_design(knots: NDArray, degree: int, points: NDArray, order: int) 
 def constraint_null_space(C: NDArray) -> NDArray:
     """Orthonormal Z with ``C @ Z = 0`` for a certified full-row-rank C.
 
-    Rows are scaled to unit length first. That leaves the null space unchanged
-    and makes the rank decision independent of the feature's units: derivative
-    rows of different orders scale with different powers of the knot spacing.
-    The rank threshold is NumPy's ``matrix_rank`` default,
+    The rank is decided on rows scaled to unit length, which leaves the null
+    space unchanged and makes the decision independent of the feature's units:
+    derivative rows of different orders scale with different powers of the
+    knot spacing. The threshold is NumPy's ``matrix_rank`` default,
     ``max(C.shape) * eps * sigma_max``. Z is the trailing block of the complete
-    QR of C' (Wood 2017, section 1.8.1); positive row scaling leaves the
-    Householder reflectors unchanged in exact arithmetic.
+    QR of C' (Wood 2017, section 1.8.1), taken on the rows as given: Householder
+    QR is backward stable column by column (Higham, *Accuracy and Stability of
+    Numerical Algorithms*, 2nd ed., ch. 19), so column scaling cannot improve
+    it, and the natural-spline null space stays bit-identical to its old QR.
     """
     C = np.asarray(C, dtype=np.float64)
-    C = C / np.linalg.norm(C, axis=1, keepdims=True)
-    if np.linalg.matrix_rank(C) < C.shape[0]:
+    if np.linalg.matrix_rank(C / np.linalg.norm(C, axis=1, keepdims=True)) < C.shape[0]:
         raise ValueError(
             "polynomial range constraints are dependent; ranges this close need to meet at a kink"
         )

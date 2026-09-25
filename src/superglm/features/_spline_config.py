@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from superglm.features._spline_ranges import PolynomialRange
 from superglm.features.constraint import ConstraintSpec
 from superglm.types import LambdaPolicy
 
@@ -103,8 +105,17 @@ def initialize_spec(
     constraint: ConstraintSpec | None,
     m: int | tuple[int, ...],
     lambda_policy: LambdaPolicy | dict[str, LambdaPolicy] | None,
+    polynomial_ranges: Sequence[PolynomialRange] | None = None,
 ) -> None:
     """Initialize a spline spec's public config and mutable build-time state."""
+    spec._polynomial_ranges = tuple(polynomial_ranges or ())
+    if spec._polynomial_ranges and select:
+        raise ValueError("polynomial_ranges cannot be combined with select=True in this version.")
+    if spec._polynomial_ranges and constraint is not None:
+        raise ValueError(
+            "polynomial_ranges cannot be combined with a shape constraint in this version: "
+            "the constraint would move the pinned coefficients."
+        )
     constraint_kind, constraint_mode = _normalize_constraint(constraint)
     if degree == 0 and constraint_kind in {"convex", "concave"}:
         raise ValueError(
@@ -200,6 +211,7 @@ def _initialize_runtime_state(
 ) -> None:
     """Initialize mutable build-time state on a spline spec."""
     spec._knots = np.array([])
+    spec._base_interior_knots = None
     spec._n_basis = 0
     spec._lo = 0.0
     spec._hi = 1.0

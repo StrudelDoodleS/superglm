@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 from numpy.typing import NDArray
-from scipy.interpolate import BSpline as BSpl
+
+from superglm.features._spline_ranges import derivative_design
 
 
 def build_difference_penalty(n_basis: int, order: int) -> NDArray:
@@ -17,8 +20,18 @@ def build_difference_penalty(n_basis: int, order: int) -> NDArray:
     return Dm.T @ Dm
 
 
-def build_integrated_derivative_penalty(knots: NDArray, degree: int, order: int) -> NDArray:
-    """Integrated squared derivative penalty via Gauss-Legendre quadrature."""
+def build_integrated_derivative_penalty(
+    knots: NDArray,
+    degree: int,
+    order: int,
+    excluded: Sequence[tuple[float, float]] = (),
+) -> NDArray:
+    """Integrated squared derivative penalty via Gauss-Legendre quadrature.
+
+    The integral is an exact sum of per-knot-interval blocks (Wood 2016,
+    arXiv:1605.02446, section 1), so leaving out the intervals inside an
+    ``excluded`` ``(lo, hi)`` leaves the curve there unpenalised.
+    """
     if order > degree:
         raise ValueError(
             f"Derivative order {order} > spline degree {degree}. "
@@ -27,23 +40,17 @@ def build_integrated_derivative_penalty(knots: NDArray, degree: int, order: int)
 
     K = len(knots) - degree - 1
     unique_knots = np.unique(knots)
+    starts, ends = unique_knots[:-1], unique_knots[1:]
+    bounds = np.asarray(excluded, dtype=np.float64).reshape(-1, 2)
+    pinned = (starts[:, None] >= bounds[:, 0]) & (ends[:, None] <= bounds[:, 1])
+    kept = (ends - starts >= 1e-15) & ~pinned.any(axis=1)
     omega = np.zeros((K, K))
-    n_quad = max(order + 1, degree)
+    xi, wi = np.polynomial.legendre.leggauss(max(order + 1, degree))
 
-    for a, b in zip(unique_knots[:-1], unique_knots[1:]):
-        if b - a < 1e-15:
-            continue
-        xi, wi = np.polynomial.legendre.leggauss(n_quad)
+    for a, b in zip(starts[kept], ends[kept]):
         x_q = 0.5 * (b - a) * xi + 0.5 * (a + b)
         w_q = 0.5 * (b - a) * wi
-
-        Dm_q = np.zeros((len(x_q), K))
-        for j in range(K):
-            c = np.zeros(K)
-            c[j] = 1.0
-            spl = BSpl(knots, c, degree)
-            Dm_q[:, j] = spl(x_q, nu=order)
-
+        Dm_q = derivative_design(knots, degree, x_q, order)
         omega += Dm_q.T @ (Dm_q * w_q[:, None])
 
     return omega

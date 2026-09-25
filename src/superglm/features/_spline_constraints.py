@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import BSpline as BSpl
 
+from superglm.features._spline_ranges import derivative_design
 from superglm.types import LinearConstraintSet
 
 
@@ -174,29 +175,25 @@ def build_curvature_difference_constraints(
     return LinearConstraintSet(A=D2, b=np.zeros(D2.shape[0]))
 
 
-def build_natural_constraint_null_space(
+def build_natural_constraint_rows(
     knots: NDArray,
     degree: int,
     *,
     lo: float,
     hi: float,
 ) -> NDArray:
-    """Compute the null space of natural-boundary spline constraints."""
-    n_basis = len(knots) - degree - 1
-    C = np.zeros((2, n_basis))
-    for j in range(n_basis):
-        c = np.zeros(n_basis)
-        c[j] = 1.0
-        spl = BSpl(knots, c, degree)
-        C[0, j] = spl(lo, nu=2)
-        C[1, j] = spl(hi, nu=2)
-    Q, _ = np.linalg.qr(C.T, mode="complete")
-    return Q[:, 2:]
+    """The 2 x K rows f''(lo) and f''(hi) of the natural boundary conditions.
+
+    Evaluated with the de Boor derivative recursion (``BSpline(..., nu=2)``)
+    rather than ``BSpline.derivative(2)``, which divides by the zero spans of
+    the repeated clamped boundary knots.
+    """
+    return derivative_design(knots, degree, np.array([lo, hi]), 2)
 
 
 __all__ = [
     "build_curvature_difference_constraints",
     "build_monotone_difference_constraints",
-    "build_natural_constraint_null_space",
+    "build_natural_constraint_rows",
     "curvature_difference_operator",
 ]
