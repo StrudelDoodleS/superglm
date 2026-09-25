@@ -1,10 +1,153 @@
-/* panels.css: inspector, help, advanced controls, metrics, and reports. */
+/* panels.css: feature list, inspector, help, advanced controls, metrics, and reports. */
 
 /* Keep the plot stationary while notebook-width metric cards settle into two rows. */
 @media (max-width: 1250px) {
   .metric-grid {
     min-height: 152px;
   }
+}
+
+.feature-list {
+  width: 220px;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.feature-list-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.feature-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.feature-list-toggle {
+  flex: 0 0 auto;
+  display: grid;
+  width: 20px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+}
+
+.feature-list-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.feature-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.feature-group-title {
+  margin: 6px 6px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.feature-row {
+  display: grid;
+  width: 100%;
+  height: auto;
+  grid-template-columns: auto 1fr;
+  column-gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  text-align: left;
+  line-height: 1.3;
+}
+
+.feature-row:hover {
+  background: var(--surface-hover);
+}
+
+.feature-row[aria-current="true"] {
+  border-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.feature-row-name {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feature-row-kind,
+.feature-row-edf {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feature-empty {
+  margin: 8px 6px;
+  color: var(--muted);
+}
+
+/* Collapsed: a 28px strip that names the active feature and keeps the toggle. */
+.feature-list-strip {
+  display: none;
+  overflow: hidden;
+  align-self: center;
+  max-height: 100%;
+  padding: 8px 0;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+}
+
+.feature-list[data-open="false"] {
+  width: 28px;
+}
+
+.feature-list[data-open="false"] .feature-list-head {
+  justify-content: center;
+}
+
+.feature-list[data-open="false"] .feature-search,
+.feature-list[data-open="false"] .feature-rows {
+  display: none;
+}
+
+.feature-list[data-open="false"] .feature-list-strip {
+  display: block;
+}
+
+.feature-list[data-open="false"] .feature-list-toggle svg {
+  transform: rotate(180deg);
 }
 
 .inspector {
@@ -124,7 +267,7 @@
 
 @media (min-width: 1048px) {
   .editor-workspace:has(> .inspector[data-open="false"]) {
-    grid-template-columns: var(--tool-rail-width) minmax(0, 1fr);
+    grid-template-columns: auto var(--tool-rail-width) minmax(0, 1fr);
   }
 
   .inspector[data-open="false"] {

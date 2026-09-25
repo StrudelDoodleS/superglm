@@ -16,6 +16,7 @@ import {
   selectCurrentSelection,
   selectEvidenceNeedsRefresh,
   selectGroupDisplayMode,
+  selectModelRevision,
   selectRenderableTerm,
   selectSnapshot,
   selectSummaryLevelDisplay,
@@ -49,6 +50,12 @@ import { bindAppBar, renderAppBar, revertAvailable } from "./views/app_bar.js";
 import { bindBreaksControls, renderBreaksControls } from "./views/breaks_controls.js";
 import { renderContextBar } from "./views/context_bar.js";
 import { bindExportDialog } from "./views/export_dialog.js";
+import {
+  bindFeatureList,
+  readFeatureListOpen,
+  renderFeatureList,
+  storeFeatureListOpen
+} from "./views/feature_list.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
 import { bindPopovers } from "./views/popover.js";
@@ -80,7 +87,15 @@ const reportRetry = document.getElementById("reportRetry");
 const reportFrame = document.getElementById("reportFrame");
 const svg = document.getElementById("chart");
 const selectionMenu = document.getElementById("selectionMenu");
-const termSelect = document.getElementById("term");
+const featureListNodes = Object.freeze({
+  root: document.getElementById("featureList"),
+  search: document.getElementById("featureSearch"),
+  rows: document.getElementById("featureRows"),
+  toggle: document.getElementById("featureListToggle"),
+  strip: document.getElementById("featureListStrip")
+});
+let featureQuery = "";
+let featureListOpen = readFeatureListOpen();
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
 const termReference = document.getElementById("termReference");
@@ -685,7 +700,7 @@ function setAppBusy(active, title = "Working...", detail = "") {
 }
 
 function restoreFocusAfterBusy(opener) {
-  for (const candidate of [opener, termSelect, inspectorToggle]) {
+  for (const candidate of [opener, featureListNodes.search, inspectorToggle]) {
     if (!candidate || !candidate.isConnected || typeof candidate.focus !== "function") continue;
     candidate.focus({ preventScroll: true });
     if (document.activeElement === candidate) return;
@@ -823,39 +838,34 @@ function termCatalogueKey(terms) {
   ).join("\u0001");
 }
 
-function selectTermPickerRenderState(state) {
+// The revision stands in for every row's EDF, which only a refit changes.
+function selectFeatureListRenderState(state) {
   const snapshot = selectSnapshot(state);
   return {
     ready: snapshot !== null,
     catalogueKey: snapshot ? termCatalogueKey(snapshot.terms || {}) : "",
+    revision: selectModelRevision(state),
     activeTerm: selectActiveTermName(state)
   };
 }
 
-function sameTermPickerRenderState(next, previous) {
+function sameFeatureListRenderState(next, previous) {
   return next.ready === previous.ready &&
     next.catalogueKey === previous.catalogueKey &&
+    next.revision === previous.revision &&
     next.activeTerm === previous.activeTerm;
 }
 
-function renderTermPickerState(next, previous) {
-  const snapshot = selectSnapshot(store.getState());
-  if (!snapshot) return;
-  if (!previous.ready || next.catalogueKey !== previous.catalogueKey) {
-    termSelect.innerHTML = "";
-    for (const [group, names] of groupedTerms(snapshot.terms || {})) {
-      const optgroup = document.createElement("optgroup");
-      optgroup.label = group;
-      for (const name of names) {
-        const option = document.createElement("option");
-        option.value = name;
-        option.textContent = name;
-        optgroup.appendChild(option);
-      }
-      termSelect.appendChild(optgroup);
-    }
-  }
-  if (termSelect.value !== next.activeTerm) termSelect.value = next.activeTerm;
+function renderFeatureListState() {
+  const state = store.getState();
+  const terms = selectSnapshot(state)?.terms ?? {};
+  renderFeatureList(featureListNodes, {
+    groups: groupedTerms(terms),
+    terms,
+    activeTerm: selectActiveTermName(state),
+    query: featureQuery,
+    open: featureListOpen
+  });
 }
 
 function selectChartRenderState(state) {
@@ -1453,8 +1463,8 @@ bindBreaksControls({
   onTransform: transformActiveTerm
 });
 
-termSelect.addEventListener("change", async () => {
-  const term = termSelect.value;
+async function selectFeature(term) {
+  if (term === selectedTerm()) return;
   const result = await executeStateMutation("/term", { term });
   if (result.ok) {
     actions.patchView({ activeTerm: term });
@@ -1463,10 +1473,23 @@ termSelect.addEventListener("change", async () => {
   const snapshot = store.getState().remote.snapshot;
   const authoritativeTerm = snapshot?.selected_term;
   if (authoritativeTerm && snapshot.terms[authoritativeTerm]) {
-    termSelect.value = authoritativeTerm;
     actions.patchView({ activeTerm: authoritativeTerm });
   }
+}
+
+bindFeatureList(featureListNodes, {
+  onSelect: selectFeature,
+  onQuery: (query) => {
+    featureQuery = query;
+    renderFeatureListState();
+  },
+  onToggle: () => {
+    featureListOpen = !featureListOpen;
+    storeFeatureListOpen(featureListOpen);
+    renderFeatureListState();
+  }
 });
+renderFeatureListState();
 
 if (groupDisplayMode) {
   groupDisplayMode.addEventListener("change", () => {
@@ -1605,9 +1628,9 @@ restoreStructure.addEventListener("click", async () => {
 store.subscribe(selectChartRenderState, () => renderChartWorkspace(), sameChartRenderState);
 store.subscribe(selectBreaksRenderState, renderBreaksControlsState, sameBreaksRenderState);
 store.subscribe(
-  selectTermPickerRenderState,
-  renderTermPickerState,
-  sameTermPickerRenderState
+  selectFeatureListRenderState,
+  renderFeatureListState,
+  sameFeatureListRenderState
 );
 store.subscribe(selectHistoryRenderState, renderHistoryState, sameHistoryRenderState);
 store.subscribe(selectAppBarRenderState, renderAppBarState, sameAppBarRenderState);

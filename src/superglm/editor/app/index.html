@@ -82,7 +82,6 @@
   </header>
   <div id="editorView" class="app-view">
   <div class="context-bar" role="region" aria-label="Term context">
-    <label class="context-term">Term <select id="term"></select></label>
     <span id="termKind" class="context-chip"></span>
     <span id="termEdf" class="context-chip"></span>
     <span id="termReference" class="context-chip" hidden></span>
@@ -151,6 +150,22 @@
     </button>
   </div>
   <div class="main editor-workspace">
+    <nav id="featureList" class="feature-list" aria-label="Features" data-open="true">
+      <div class="feature-list-head">
+        <input id="featureSearch" class="feature-search" type="search" placeholder="Search features"
+          aria-label="Search features" autocomplete="off" spellcheck="false">
+        <button id="featureListToggle" class="feature-list-toggle" type="button"
+          aria-label="Feature list" aria-expanded="true" aria-controls="featureRows"
+          data-popover-title="Feature list"
+          data-popover-body="Collapse the list to a strip so the plot keeps its width, or expand it again.">
+          <svg class="toolbar-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m14.5 6-6 6 6 6"></path>
+          </svg>
+        </button>
+      </div>
+      <span id="featureListStrip" class="feature-list-strip" aria-hidden="true"></span>
+      <div id="featureRows" class="feature-rows"></div>
+    </nav>
     <nav id="toolRail" class="tool-rail" aria-label="Chart tools">
       <div class="tool-rail-modes" role="radiogroup" aria-label="Chart tools"
         aria-orientation="vertical">

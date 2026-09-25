@@ -69,6 +69,7 @@ body {
   min-height: 0;
   display: grid;
   grid-template-columns:
+    auto
     var(--tool-rail-width)
     minmax(0, 1fr)
     minmax(320px, var(--inspector-width));
@@ -141,10 +142,6 @@ body {
   margin-left: auto;
 }
 
-.context-term select {
-  min-width: 180px;
-}
-
 .context-chip {
   padding: 3px 7px;
   border: 1px solid var(--border);
@@ -204,7 +201,7 @@ body {
 
 @media (max-width: 1047px) {
   .editor-workspace {
-    grid-template-columns: var(--tool-rail-width) minmax(0, 1fr);
+    grid-template-columns: auto var(--tool-rail-width) minmax(0, 1fr);
   }
 }
 
@@ -227,7 +224,8 @@ body {
 }
 
 @media (min-width: 1048px) and (max-height: 620px) {
-  .inspector {
+  .inspector,
+  .feature-list {
     /* Match the 360px chart, 8px gap, and 170px reserved two-row metrics. */
     height: calc(360px + 8px + 170px);
     min-height: 0;
