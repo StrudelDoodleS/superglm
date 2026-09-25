@@ -45,8 +45,8 @@ from superglm._tweedie_profile_kernel import (
     PROFILE_KERNEL_WORK_LIMIT,
     ExactProfileStatistics,
     _exact_profile_statistics_prevalidated,
+    series_moments,
 )
-from superglm._tweedie_series import tweedie_log_series
 from superglm._utils import _validate_strict_prior_weights
 from superglm.distributions import clip_mu
 from superglm.links import stabilize_eta
@@ -434,7 +434,6 @@ def _validate_tweedie_phi(phi: float) -> float:
 _TWEEDIE_DEVIANCE_SERIES_THRESHOLD = 1e-3
 _TWEEDIE_DEVIANCE_SERIES_TERMS = 8
 _PROFILE_SERIES_MAX_TOTAL_TERMS = 1_000_000
-_FIT_STATS_SERIES_MAX_TOTAL_TERMS = 4_096
 _SERIES_FIRST_MIN_ROWS = 32
 _P15_BESSEL_ASYMPTOTIC_MIN_ARGUMENT = 1.0e6
 _JOINT_SAFE_POWER_BOUNDS = (1.05, 1.95)
@@ -654,7 +653,6 @@ def _evaluate_tweedie_density(
     phi: float,
     *,
     compute_score: bool = False,
-    series_max_total_terms: int = _PROFILE_SERIES_MAX_TOTAL_TERMS,
 ) -> _TweedieDensityEvaluation:
     """Evaluate a prepared density and its optional mean-NLL log-phi score."""
     phi = _validate_tweedie_phi(phi)
@@ -700,10 +698,9 @@ def _evaluate_tweedie_density(
             if not np.any(candidate_mask):
                 return
             series_attempted[candidate_mask] = True
-            series_log_sum, expected_j, series_exact = tweedie_log_series(
+            series_exact, series_log_sum, expected_j, _ = series_moments(
                 log_t[candidate_mask],
                 prepared.a,
-                max_total_terms=series_max_total_terms,
             )
             candidate_indices = np.flatnonzero(candidate_mask)
             successful_indices = candidate_indices[series_exact]
@@ -1004,7 +1001,6 @@ def _tweedie_logpdf_pair(
     evaluation = _evaluate_tweedie_density(
         prepared,
         validated_phi,
-        series_max_total_terms=_FIT_STATS_SERIES_MAX_TOTAL_TERMS,
     )
     with np.errstate(all="ignore"):
         fit_deviance = _tweedie_positive_unit_deviance(

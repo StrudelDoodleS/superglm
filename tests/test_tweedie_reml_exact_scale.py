@@ -299,6 +299,53 @@ class TestScaleProfileUnit:
             finite_difference, rel=1e-3
         )
 
+    @pytest.mark.parametrize("power", [1.2, 1.5, 1.8])
+    def test_newton_profile_matches_the_bounded_search(self, power, monkeypatch):
+        """Newton on the analytic score lands on the bounded search's optimum in a few passes.
+
+        The bounded value-only search needed ~19 density passes per profile
+        and made a 105k-row fit spend 98% of its time here; the analytic slope
+        (``-Var[J]/(p-1)^2 - c w/phi``) must equal a difference of the score.
+        """
+        from superglm.reml import scale as scale_module
+
+        rng = np.random.default_rng(11)
+        n = 2_000
+        mu = np.exp(0.1 + rng.normal(0.0, 0.5, n))
+        weights = rng.gamma(4.0, 0.25, n) + 0.05
+        y = generate_tweedie_cpg(n, mu, phi=0.6 / weights, p=power, rng=rng)
+        penalized_deviance = float(np.sum(weights * Tweedie(p=power).deviance_unit(y, mu)))
+        nullity = 3.0
+
+        def prepared():
+            return scale_module.prepare_tweedie_reml_scale_data(
+                y, weights, power, weight_semantics="prior"
+            )
+
+        bounded = scale_module._bounded_tweedie_log_phi(prepared(), penalized_deviance, nullity)
+        data = prepared()
+        passes = 0
+        real_derivatives = type(data).saturated_log_phi_derivatives
+
+        def counted(self, phi):
+            nonlocal passes
+            passes += 1
+            return real_derivatives(self, phi)
+
+        monkeypatch.setattr(type(data), "saturated_log_phi_derivatives", counted)
+        newton = scale_module._newton_tweedie_log_phi(data, penalized_deviance, nullity)
+
+        assert newton is not None
+        assert passes <= 8
+        assert newton[0] == pytest.approx(bounded[0], abs=1e-9)
+        assert newton[2] == pytest.approx(bounded[2], rel=1e-5)
+        step = 1e-4
+        phi = float(np.exp(newton[0]))
+        _, _, slope = real_derivatives(data, phi)
+        score_hi = real_derivatives(data, phi * np.exp(step))[1]
+        score_lo = real_derivatives(data, phi * np.exp(-step))[1]
+        assert slope == pytest.approx((score_hi - score_lo) / (2.0 * step), rel=1e-6)
+
     def test_sparse_positive_boundary_admits_power_dependent_profiles(self):
         """The finite-profile test must use the Tweedie tail, not a Gaussian one.
 
