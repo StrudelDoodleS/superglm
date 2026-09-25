@@ -218,7 +218,7 @@ def _term(model):
     return curve
 
 
-def _pinning_tolerance(model):
+def _pinning_tolerance(model, spec=None):
     """Round-off bound on a fitted term's distance from its pinned polynomial.
 
     The term is B(x) @ c with c = P w and P the orthonormal constraint and
@@ -227,7 +227,7 @@ def _pinning_tolerance(model):
     of total size ||w||_1 <= sqrt(n_cols) ||c||. Reading the term back off the
     predictor adds the round-off of adding and removing the intercept.
     """
-    spec = model._specs["age"]
+    spec = model._specs["age"] if spec is None else spec
     beta = model.result.beta
     coefficients = spec._R_inv @ beta
     members = np.sqrt(beta.size) * spec._n_basis * (DEGREE + 1) * EPS
@@ -446,3 +446,67 @@ def test_ppform_export_reproduces_a_kinked_ranged_spline():
     # Ten times the export's own exactness certificate (1e-11 on its read grid).
     np.testing.assert_allclose(block.evaluate(grid), _term(model)(grid), rtol=0.0, atol=1e-10)
     assert np.isin([30.0, 45.0], block.breaks).all()
+
+
+# ── OrderedCategorical(basis=Spline(polynomial_ranges=...)) ────────────────
+
+BANDS = ["A", "B", "C", "D", "E", "F", "G"]
+UNEVEN_VALUES = dict(zip(BANDS, [0.0, 1.0, 1.5, 3.0, 4.5, 5.0, 7.0]))
+
+
+def _band_book(n=8_000, seed=9):
+    """A Poisson book on seven bands whose true effect bends inside B..E."""
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame({"band": rng.choice(BANDS, n)})
+    effect = dict(zip(BANDS, [0.0, 0.1, 0.25, 0.3, 0.2, 0.35, 0.5]))
+    return X, rng.poisson(np.exp(X["band"].map(effect).to_numpy()))
+
+
+def _ordered(ranges, values=None, grouping=None):
+    from superglm import OrderedCategorical
+
+    axis = {"order": BANDS} if values is None else {"values": values}
+    basis = Spline(kind="cr", k=6, polynomial_ranges=ranges)
+    return OrderedCategorical(**axis, basis=basis, grouping=grouping)
+
+
+@pytest.mark.parametrize("values", [None, UNEVEN_VALUES], ids=["positions", "values"])
+def test_ordered_term_pins_whole_bands_named_by_label(values):
+    spec = _ordered([PolynomialRange("B", "E", 1)], values=values)
+    # The names resolve to the named bands' own coordinates on the smooth's
+    # axis: evenly spaced positions by default, the stated values= otherwise.
+    b, e = spec._level_to_value["B"], spec._level_to_value["E"]
+    assert spec._basis_spline.polynomial_ranges == (PolynomialRange(b, e, 1),)
+    # The declaration keeps its names, so an editor rebuild re-resolves them.
+    assert spec._spline_obj.polynomial_ranges == (PolynomialRange("B", "E", 1),)
+
+    X, y = _band_book()
+    model = SuperGLM(family="poisson", selection_penalty=0.0, features={"band": spec})
+    model.fit_reml(X, y)
+    fitted = model._specs["band"]
+    inner, beta = fitted._basis_spline, model.result.beta
+    # The whole stretch between the edge bands is one line, not only the
+    # four band points on it.
+    residual = _polynomial_residual(lambda grid: inner.score(grid, beta), b, e, 1)
+    assert residual <= _pinning_tolerance(model, inner)
+    # The bands the model predicts sit on that line too.
+    eta = np.asarray(model._predict_eta_exact(pd.DataFrame({"band": BANDS[1:5]})))
+    axis = np.array([fitted._level_to_value[band] for band in BANDS[1:5]])
+    line = np.polynomial.polynomial.polyfit(axis, eta, 1)
+    band_residual = np.max(np.abs(eta - np.polynomial.polynomial.polyval(axis, line)))
+    assert band_residual <= _pinning_tolerance(model, inner) + 4 * EPS * np.max(np.abs(eta))
+
+
+def test_a_grouping_that_absorbs_a_named_range_edge_is_refused_by_name():
+    from superglm.features.grouping import collapse_levels
+
+    data = np.array(BANDS * 4, dtype=object)
+    groups = {"D+E": ["D", "E"], **{band: [band] for band in "ABCFG"}}
+    grouping = collapse_levels(data, groups=groups, order=BANDS)
+    with pytest.raises(ValueError, match="absorbs the stated PolynomialRange edge at level 'E'"):
+        _ordered([PolynomialRange("B", "E", 1)], grouping=grouping)
+
+
+def test_an_unknown_band_in_a_range_is_refused_by_name():
+    with pytest.raises(ValueError, match="PolynomialRange edge entry 'Z' does not name"):
+        _ordered([PolynomialRange("B", "Z", 1)])
