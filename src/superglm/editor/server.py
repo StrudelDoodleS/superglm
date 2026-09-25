@@ -297,17 +297,14 @@ def create_editor_app(widget: Any) -> FastAPI:
             )
         )
 
-    @app.post("/transform_term")
-    def transform_term(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
+    @app.post("/shape_range")
+    def shape_range(payload: dict[str, Any] = Body(default_factory=dict)) -> Response:
         return _guarded_json(
-            lambda: widget._transform_term(
+            lambda: widget._shape_range(
                 str(_required(payload, "term")),
-                form=str(_required(payload, "form")),
-                breaks=_break_list(payload.get("breaks", [])),
-                degrees=None
-                if payload.get("degrees") is None
-                else _number_list(payload, "degrees", _int),
-                degree=_optional_int(payload.get("degree"), "degree"),
+                lo=_range_edge(_required(payload, "lo")),
+                hi=_range_edge(_required(payload, "hi")),
+                degree=_int(_required(payload, "degree"), "degree"),
                 method=str(payload.get("method", "auto")),
                 level_display=_level_display(payload),
             )
@@ -519,12 +516,10 @@ def _optional_int(value: Any, name: str) -> int | None:
     return None if value is None else _int(value, name)
 
 
-def _break_list(value: Any) -> list[str | float]:
-    if not isinstance(value, list) or any(
-        isinstance(item, bool) or not isinstance(item, str | int | float) for item in value
-    ):
-        raise EditorValueError("breaks must be a list of band names or numbers.")
-    return [item if isinstance(item, str) else float(item) for item in value]
+def _range_edge(value: Any) -> str | float:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        raise EditorValueError("lo and hi must be band names or numbers.")
+    return value if isinstance(value, str) else float(value)
 
 
 def _number_list[T](

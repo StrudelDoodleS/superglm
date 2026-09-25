@@ -41,6 +41,7 @@ from superglm.editor.operations import (
     monotone_clamp_values,
 )
 from superglm.editor.refit import fit_refit_model
+from superglm.editor.shapes import shaped_feature_spec
 from superglm.editor.terms import (
     term_from_inference,
     term_offset_values,
@@ -48,13 +49,10 @@ from superglm.editor.terms import (
     term_weights_from_data,
     term_weights_from_fit,
 )
-from superglm.editor.transform import transformed_feature_spec
 from superglm.solvers.dispersion import model_weight_semantics
 
-_TRANSFORM_REFUSED = (
-    "SuperGLM could not fit this shape. Check that no segment is flat next to another "
-    "flat one, that each segment has enough bands or data, and that no collapsed group "
-    "spans a break."
+_SHAPE_REFUSED = (
+    "That range cannot be shaped. Choose a range with more distinct values, or a lower degree."
 )
 
 
@@ -916,29 +914,19 @@ class EditorSession:
             label=refit_model._editor_step["label"],
         )
 
-    def replace_with_transformed_term(
-        self,
-        term: str,
-        *,
-        form: str,
-        breaks=(),
-        degrees=None,
-        degree=None,
-        **refit_kwargs: Any,
-    ):
-        """Give ``term`` a new shape, refit, and put the refit in force."""
-        editable = self._require_term(term)
+    def replace_with_shaped_range(self, term: str, *, lo, hi, degree: int, **refit_kwargs: Any):
+        """Pin ``term`` to a ``degree`` polynomial on ``[lo, hi]``, refit, put it in force.
+
+        ``lo`` and ``hi`` are values on a numeric term (snapped outward to
+        three significant figures of the fitted span) and band labels on an
+        ordered one.
+        """
+        self._require_term(term)
         try:
             refit_model = self._refit_replacing(
                 term,
-                lambda X_ref: transformed_feature_spec(
-                    self.model,
-                    editable,
-                    form=form,
-                    breaks=list(breaks),
-                    degrees=degrees,
-                    degree=degree,
-                    X=X_ref,
+                lambda X_ref: shaped_feature_spec(
+                    self.model, term, lo=lo, hi=hi, degree=degree, X=X_ref
                 ),
                 **refit_kwargs,
             )
@@ -947,10 +935,10 @@ class EditorSession:
         except ValueError as exc:
             # The library's refusal text is backend text (editor/errors.py): the
             # analyst gets one intentional sentence, Python callers keep the cause.
-            raise EditorValueError(_TRANSFORM_REFUSED) from exc
+            raise EditorValueError(_SHAPE_REFUSED) from exc
         return self._push_structure(
             refit_model,
-            operation="transform_term",
+            operation="shape_range",
             term=term,
             label=refit_model._editor_step["label"],
         )

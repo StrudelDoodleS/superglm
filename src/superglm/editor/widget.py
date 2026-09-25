@@ -1009,21 +1009,20 @@ class EditorWidget:
             level_display=level_display,
         )
 
-    def _transform_term(
+    def _shape_range(
         self,
         term: str,
         *,
-        form: str,
-        breaks: list,
-        degrees: list[int] | None = None,
-        degree: int | None = None,
+        lo: str | float,
+        hi: str | float,
+        degree: int,
         method: str = "auto",
         level_display: str = "expanded",
     ) -> dict[str, Any]:
         return self._structural_step(
-            "transform_term",
-            lambda target: self.session.replace_with_transformed_term(
-                target, form=form, breaks=breaks, degrees=degrees, degree=degree, method=method
+            "shape_range",
+            lambda target: self.session.replace_with_shaped_range(
+                target, lo=lo, hi=hi, degree=degree, method=method
             ),
             term=term,
             level_display=level_display,

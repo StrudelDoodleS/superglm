@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import re
 import warnings
+from itertools import chain
 from typing import Any
 
 import numpy as np
@@ -234,12 +235,17 @@ def clone_with_replaced_feature(model, term: str, replacement, *, lambda1=..., l
     return new_model
 
 
+def interaction_users(model, term: str) -> list[str]:
+    """The interactions that use ``term`` as a parent."""
+    return [
+        str(name)
+        for name, spec in getattr(model, "_interaction_specs", {}).items()
+        if term in getattr(spec, "parent_names", ())
+    ]
+
+
 def _require_not_interaction_parent(model, term: str, *, operation: str) -> None:
-    interactions: list[str] = []
-    for name, spec in getattr(model, "_interaction_specs", {}).items():
-        parent_names = getattr(spec, "parent_names", ())
-        if term in parent_names:
-            interactions.append(str(name))
+    interactions = interaction_users(model, term)
     if interactions:
         joined = ", ".join(interactions)
         raise EditorValueError(
@@ -408,7 +414,7 @@ def rebuilt_ordered_spec(
 ) -> OrderedCategorical:
     """A fresh, unfitted OrderedCategorical like ``spec`` with this grouping and base.
 
-    ``basis`` replaces the inner basis (a transform). By default the pristine
+    ``basis`` replaces the inner basis (a shaped range). By default the pristine
     declared basis is cloned. A fitted spec is never mutated: its resolved base
     is sticky and would silently survive a changed ``base``.
     """
@@ -596,13 +602,13 @@ def _require_no_break_members(spec: OrderedCategorical, term_name: str, members:
     absorbed = [band for band in _stated_break_bands(spec) if band in members]
     if absorbed:
         raise EditorValueError(
-            f"{term_name!r} has a break at {absorbed[0]!r}, so that band can't be collapsed; "
-            "remove or move the break first."
+            f"{term_name!r} has a break or a shaped-range edge at {absorbed[0]!r}, so that "
+            "band can't be collapsed; move or remove it first."
         )
 
 
 def _stated_break_bands(spec: OrderedCategorical) -> list[str]:
-    """The bands where ``spec`` states a Piecewise break or a named Spline knot."""
+    """The bands where ``spec`` states a Piecewise break, a named knot or a range edge."""
     basis = getattr(spec, "_spline_obj", None)
     if isinstance(basis, Piecewise):
         # Int-mode breaks are placed from the data: nothing is stated.
@@ -610,7 +616,9 @@ def _stated_break_bands(spec: OrderedCategorical) -> list[str]:
     else:
         # A numeric knot states a coordinate, not a band; the library guards names only.
         named = getattr(basis, "_named_knots", None) or []
-        stated = [knot for knot in named if isinstance(knot, str)]
+        ranges = getattr(basis, "polynomial_ranges", ())
+        edges = chain.from_iterable((r.lo, r.hi) for r in ranges)
+        stated = [entry for entry in chain(named, edges) if isinstance(entry, str)]
     declared = [str(level) for level in spec._declared_smooth_levels]
     return [entry if isinstance(entry, str) else declared[int(entry)] for entry in stated]
 
