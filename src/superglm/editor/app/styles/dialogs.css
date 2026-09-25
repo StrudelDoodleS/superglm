@@ -1,28 +1,28 @@
 .profile-dialog {
   width: min(680px, calc(100vw - 36px));
   max-height: calc(100dvh - 48px);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 12px;
-  color: #24292f;
-  background: #fff;
-  box-shadow: 0 24px 60px rgba(31, 35, 40, 0.26);
+  border: 0;
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 24px 60px rgba(21, 23, 28, 0.26), 0 0 0 1px var(--hairline);
 }
 .export-dialog {
   width: min(620px, calc(100vw - 36px));
   max-height: calc(100dvh - 48px);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 0;
+  border-radius: var(--radius-lg);
   padding: var(--space-4);
   color: var(--text);
   background: var(--surface);
-  box-shadow: 0 24px 60px rgba(31, 35, 40, 0.26);
+  box-shadow: 0 24px 60px rgba(21, 23, 28, 0.26), 0 0 0 1px var(--hairline);
 }
 .export-dialog::backdrop {
-  background: rgba(36, 41, 47, 0.24);
+  background: rgba(21, 23, 28, 0.28);
 }
 .profile-dialog::backdrop {
-  background: rgba(36, 41, 47, 0.24);
+  background: rgba(21, 23, 28, 0.28);
 }
 .profile-dialog-head {
   display: flex;
@@ -33,7 +33,8 @@
 }
 .profile-dialog-head h2 {
   margin: 0 0 2px;
-  font-size: 14px;
+  font-size: 15px;
+  font-weight: 600;
 }
 .profile-dialog-head p {
   margin: 0;
@@ -64,10 +65,10 @@
   min-width: 0;
   height: 28px;
   margin-top: 2px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: #fff;
-  color: #24292f;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
   padding: 0 7px;
   font: inherit;
 }
@@ -96,13 +97,13 @@
   gap: var(--space-2);
   align-items: start;
   padding: var(--space-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--surface);
   cursor: pointer;
 }
 .export-format-card:hover {
-  background: var(--surface-hover);
+  background: var(--surface-subtle);
 }
 .export-format-card:focus-within {
   outline: 2px solid var(--focus);
@@ -145,10 +146,10 @@
   width: 100%;
   height: 28px;
   margin-top: 2px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: #fff;
-  color: #24292f;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
   padding: 0 7px;
   font: inherit;
   user-select: text;
@@ -171,7 +172,13 @@
 .profile-run {
   width: 100%;
   margin: 0 0 8px;
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--surface);
   font-weight: 600;
+}
+.profile-run:hover {
+  background: #2a2d35;
 }
 .export-actions .profile-run {
   min-width: 0;
@@ -186,10 +193,9 @@
 }
 .profile-progress {
   margin: 0 0 8px;
-  padding: 7px;
-  border: 1px solid #d8dee4;
-  border-radius: 5px;
-  background: #f6f8fa;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
 }
 .profile-progress[hidden] {
   display: none;
@@ -213,7 +219,7 @@
   content: "";
   width: 9px;
   height: 9px;
-  border: 2px solid #d8dee4;
+  border: 2px solid var(--border);
   border-top-color: var(--blue);
   border-radius: 999px;
   animation: profile-spin 0.75s linear infinite;
@@ -230,10 +236,9 @@
 .profile-trace-legend {
   max-height: 150px;
   overflow: auto;
-  border: 1px solid #d8dee4;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 6px;
-  background: #fff;
+  background: var(--surface);
   font-size: 10px;
 }
 .profile-estimate {
@@ -241,10 +246,10 @@
   gap: 1px;
   margin-bottom: 6px;
   padding-bottom: 6px;
-  border-bottom: 1px solid #d8dee4;
+  border-bottom: 1px solid var(--border);
 }
 .profile-estimate strong {
-  color: #24292f;
+  color: var(--text);
   font-size: 11px;
 }
 .profile-estimate span,
@@ -267,7 +272,7 @@
 }
 .profile-legend-item strong {
   overflow: hidden;
-  color: #24292f;
+  color: var(--text);
   font-size: 10px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -281,7 +286,7 @@
   font-style: normal;
 }
 .profile-legend-best strong {
-  color: #0969da;
+  color: var(--blue);
 }
 .profile-legend-empty {
   color: var(--muted);
@@ -290,9 +295,8 @@
   display: block;
   width: 100%;
   height: 150px;
-  border: 1px solid #d8dee4;
-  border-radius: 4px;
-  background: #fff;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
 }
 .profile-trace-grid {
   stroke: rgba(140, 149, 159, 0.2);
@@ -323,7 +327,7 @@
   stroke-dasharray: 3 3;
 }
 .profile-trace-best-label {
-  fill: #0969da;
+  fill: var(--blue);
   font-size: 10px;
   font-weight: 600;
   paint-order: stroke;
@@ -349,7 +353,7 @@
   stroke-width: 2.8;
 }
 .profile-learning-best-point {
-  stroke: #24292f;
+  stroke: var(--text);
   stroke-width: 1.2;
 }
 .profile-learning-label text {
@@ -368,13 +372,13 @@
   display: grid;
   grid-template-columns: 24px 1fr 1fr 48px;
   gap: 5px;
-  color: #57606a;
+  color: var(--muted);
 }
 .profile-fit-trace-row {
   grid-template-columns: 24px 72px minmax(0, 1fr) 62px;
 }
 .profile-trace-row strong {
-  color: #24292f;
+  color: var(--text);
   font-weight: 600;
 }
 .profile-fit-loss {

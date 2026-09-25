@@ -45,8 +45,8 @@ with each term's kind and effective degrees of freedom. The current term is high
 - **Handles** edits a spline through fixed-x control handles. Basis contributions and the Build
   animation are available from Advanced when the fitted term exposes them.
 
-The active mode is always visible in the left tool rail. Hover briefly over an icon, or focus it with
-the keyboard, to see its name and shortcut.
+The active mode is always visible in the mode switch at the left of the chart's toolbar. Hover
+briefly over an icon, or focus it with the keyboard, to see its name and shortcut.
 
 ## Curve Selection Operations
 
@@ -98,7 +98,9 @@ fitted smooth. It works on numeric spline terms and on ordered terms with a spli
 
 1. In Select mode, select a continuous run of points, or of bands on an ordered term.
 2. Choose one of the four shape icons in the selection palette: **Flat**, **Line**, **Quadratic**
-   or **Cubic**.
+   or **Cubic**. The toggle beside them sets how the curve meets the range at each edge:
+   **Tangent** (the default) leaves the shape along its slope, **Corner** lets the slope change
+   there. The choice is remembered.
 
 SuperGLM refits straight away. The range is drawn as a light band labelled with its shape; hover
 over it to see the shape and its edges.
@@ -212,9 +214,10 @@ large formatted text block.
 
 ## Keyboard Shortcuts
 
-- Use Tab to reach application tabs, the feature list, the tool rail, context controls, the SVG
-  action palette, and the inspector.
-- Use arrow keys inside tab lists and the mode rail; Home and End jump to the first and last item.
+- Use Tab to reach application tabs, the feature list, the chart toolbar, the SVG action
+  palette, and the inspector.
+- Use arrow keys inside tab lists, the mode switch and the join toggle; Home and End jump to the
+  first and last item.
 - Use Enter or Space to activate a focused control.
 - Use Escape to close the current popover, Help drawer, inspector drawer, or dialog.
 - Use Ctrl/Cmd+Z to undo and Ctrl/Cmd+Shift+Z or Ctrl+Y to redo an edit or a structural step.

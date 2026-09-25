@@ -1,5 +1,5 @@
 import { editorClient } from "./api/client.js";
-import { drawChart, groupedTerms, updateChartSelection } from "./chart.js";
+import { bindPointLens, drawChart, groupedTerms, updateChartSelection } from "./chart.js";
 import { chartSize } from "./chart/geometry.js";
 import { renderHistory } from "./history.js";
 import { renderMetricGrid } from "./metrics.js";
@@ -50,6 +50,12 @@ import {
 } from "./views/feature_list.js";
 import { renderHelpDrawer } from "./views/help_drawer.js";
 import { bindInspector, renderInspector } from "./views/inspector.js";
+import {
+  bindJoinToggle,
+  readShapeJoin,
+  renderJoinToggle,
+  storeShapeJoin
+} from "./views/join_toggle.js";
 import { bindPopovers } from "./views/popover.js";
 import { bindToolRail, renderToolRail } from "./views/tool_rail.js";
 
@@ -89,9 +95,11 @@ let featureQuery = "";
 // Open by default only where the open list still leaves the chart 600px beside
 // the inspector: 1086px plus the 192px the open list takes over its strip.
 let featureListOpen = readFeatureListOpen(window.matchMedia("(min-width: 1278px)").matches);
+const termNameNode = document.getElementById("termName");
 const termKind = document.getElementById("termKind");
 const termEdf = document.getElementById("termEdf");
 const termReference = document.getElementById("termReference");
+const helpAction = document.getElementById("helpAction");
 const inspectorToggle = document.getElementById("inspectorToggle");
 const inspectorNode = document.getElementById("inspector");
 const inspectorClose = document.getElementById("inspectorClose");
@@ -124,6 +132,10 @@ const collapseLevels = document.getElementById("collapseLevels");
 const ungroupLevels = document.getElementById("ungroupLevels");
 const setReference = document.getElementById("setReference");
 const shapeButtons = [...document.querySelectorAll("button[data-shape-degree]")];
+const shapeJoin = document.getElementById("shapeJoin");
+const shapeJoinSeparator = document.getElementById("shapeJoinSeparator");
+const selectionRefitBreak = document.getElementById("selectionRefitBreak");
+const selectionRefitLabel = document.getElementById("selectionRefitLabel");
 const metricSelect = document.getElementById("metricSelect");
 const metricGrid = document.getElementById("metricGrid");
 const metricFreshness = document.getElementById("metricFreshness");
@@ -320,6 +332,19 @@ bindToolRail({
   },
   onHelp: () => openHelp()
 });
+// Help sits in the app bar, outside the tool rail's own click handling.
+helpAction.addEventListener("click", () => openHelp());
+
+// The join a shaped range gets at its edges, kept across pages when storage allows.
+let shapeJoinChoice = readShapeJoin();
+bindJoinToggle(shapeJoin, {
+  onChange: (join) => {
+    shapeJoinChoice = join;
+    storeShapeJoin(join);
+    renderJoinToggle(shapeJoin, join);
+  }
+});
+renderJoinToggle(shapeJoin, shapeJoinChoice);
 
 async function loadState() {
   await actions.initialize();
@@ -752,7 +777,6 @@ function renderChartWorkspace() {
   const snapshot = editorState.remote.snapshot;
   if (!snapshot) return;
   const view = editorState.view;
-  ciToggle.style.background = view.showCi ? "#dbeafe" : "#f6f8fa";
   ciToggle.setAttribute("aria-pressed", String(view.showCi));
   const selected = selectedTerm();
   const term = currentTerm();
@@ -775,7 +799,13 @@ function renderChartWorkspace() {
   drawChart(term, selection, chartContext);
   const collapsedOriginalNote = selectionContextNote(term);
   renderContextBar(
-    { kindNode: termKind, edfNode: termEdf, referenceNode: termReference, statusNode },
+    {
+      nameNode: termNameNode,
+      kindNode: termKind,
+      edfNode: termEdf,
+      referenceNode: termReference,
+      statusNode
+    },
     { name: selected, term, selectionSize: selection.size, note: collapsedOriginalNote }
   );
 }
@@ -941,7 +971,13 @@ function renderSelectionState({ termName, indices }) {
   updateCollapseAction(term, selection);
   updateShapeActions(term, selection);
   renderContextBar(
-    { kindNode: termKind, edfNode: termEdf, referenceNode: termReference, statusNode },
+    {
+      nameNode: termNameNode,
+      kindNode: termKind,
+      edfNode: termEdf,
+      referenceNode: termReference,
+      statusNode
+    },
     {
       name: termName,
       term,
@@ -1174,15 +1210,24 @@ function updateCollapseAction(term, selection) {
 }
 
 // The four shape icons share one state per selection, except that the bands
-// of an ordered term bound the degree they can carry.
+// of an ordered term bound the degree they can carry. The join toggle shows
+// with them, and the palette's refit row only when something is on it.
 function updateShapeActions(term, selection) {
+  let shapesVisible = false;
   for (const button of shapeButtons) {
     const degree = Number(button.dataset.shapeDegree);
     const { visible, enabled, reason } = shapeButtonState(term, selection, degree);
     button.hidden = !visible;
     button.setAttribute("aria-disabled", String(!enabled));
     renderShapeReason(button, reason);
+    shapesVisible = shapesVisible || visible;
   }
+  shapeJoin.hidden = !shapesVisible;
+  shapeJoinSeparator.hidden = !shapesVisible;
+  const refitVisible = shapesVisible ||
+    [collapseLevels, ungroupLevels, setReference].some((button) => button && !button.hidden);
+  selectionRefitBreak.hidden = !refitVisible;
+  selectionRefitLabel.hidden = !refitVisible;
 }
 
 // A disabled shape icon says why; its own popover text outranks the operation help.
@@ -1236,7 +1281,7 @@ function updateHandleCount(term) {
   contribPlay.hidden = !canShowContrib;
   contribPlay.disabled = buildFrame !== null;
   updateBuildDurationLabel();
-  basisToggle.style.background = view.showContrib && canShowContrib ? "#dbeafe" : "#f6f8fa";
+  basisToggle.setAttribute("aria-pressed", String(Boolean(view.showContrib && canShowContrib)));
   if (!canShowContrib) {
     stopContributionBuild();
     if (view.showContrib) {
@@ -1388,6 +1433,7 @@ const interactions = bindInteractions({
   clearZoom,
   actions,
 });
+bindPointLens(svg);
 
 async function selectFeature(term) {
   if (term === selectedTerm()) return;
@@ -1552,7 +1598,9 @@ for (const button of shapeButtons) {
     const range = term && shapeRangeForSelection(term, currentSelection());
     if (!range || button.getAttribute("aria-disabled") === "true") return;
     const degree = Number(button.dataset.shapeDegree);
-    await runStructuralRefit(shapeRangeTransition(selectedTerm(), range.lo, range.hi, degree));
+    await runStructuralRefit(
+      shapeRangeTransition(selectedTerm(), range.lo, range.hi, degree, shapeJoinChoice)
+    );
   });
 }
 

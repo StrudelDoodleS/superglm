@@ -184,7 +184,12 @@ def test_selection_noop_empty_box_preserves_chart_without_posting(open_editor_pa
         assert select_requests == []
         assert selection_dom_is_unchanged(page)
         assert {mutation["type"] for mutation in mutations} >= {"added", "removed"}
-        assert {mutation["className"] for mutation in mutations} == {"brush"}
+        # Only the brush comes and goes; the lens that shows the points near
+        # the pointer toggles a class on circles that are already drawn.
+        assert {mutation["className"] for mutation in mutations} <= {"brush", "point", "point near"}
+        assert {
+            mutation["className"] for mutation in mutations if mutation["type"] != "attribute"
+        } == {"brush"}
 
 
 def test_selection_incremental_feedback_precedes_delayed_backend_success(open_editor_page):
@@ -753,8 +758,8 @@ def test_selection_palette_wraps_inside_narrow_notebook_viewport(open_editor_pag
         assert layout["documentWidth"] <= baseline_document_width, layout
         assert layout["buttons"]
         for button in layout["buttons"]:
-            assert button["width"] == pytest.approx(40, abs=0.5)
-            assert button["height"] == pytest.approx(50, abs=0.5)
+            assert button["width"] == pytest.approx(34, abs=0.5)
+            assert button["height"] == pytest.approx(34, abs=0.5)
             assert button["insideMenu"] is True
             assert button["insideChart"] is True
             assert button["hit"] is True

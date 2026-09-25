@@ -13,14 +13,15 @@ const REFERENCE_POLICY = Object.freeze({
 });
 
 /**
- * @param {{kindNode:HTMLElement, edfNode:HTMLElement, referenceNode:HTMLElement, statusNode:HTMLElement}} nodes
+ * @param {{nameNode?:HTMLElement|null, kindNode:HTMLElement, edfNode:HTMLElement, referenceNode:HTMLElement, statusNode:HTMLElement}} nodes
  * @param {{name:string, term:TermPayload, selectionSize:number, note?:string}} context
  */
 export function renderContextBar(
-  { kindNode, edfNode, referenceNode, statusNode },
+  { nameNode = null, kindNode, edfNode, referenceNode, statusNode },
   { name, term, selectionSize, note = "" },
 ) {
   const kind = term.term_type || term.kind || "term";
+  if (nameNode) nameNode.textContent = name;
   kindNode.textContent = kind;
   edfNode.textContent = term.effective_df === null || term.effective_df === undefined
     ? "EDF unavailable"

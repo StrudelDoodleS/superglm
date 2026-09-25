@@ -8,8 +8,10 @@ import { el, text } from "./svg.js";
 /** @typedef {import('../api/contracts.js').TermPayload} TermPayload */
 /** @typedef {import('../shapes.js').DisplayAxis} DisplayAxis */
 
-const LABEL_INSET = 6;
-const LABEL_BASELINE = 14;
+const LABEL_INSET = 10;
+const LABEL_BASELINE = 18;
+const TAG_HEIGHT = 18;
+const TAG_PADDING = 6;
 
 /**
  * @param {SVGElement} svg
@@ -21,6 +23,8 @@ export function drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH }
   const left = margin.left;
   const right = margin.left + innerW;
   const layer = el("g", { class: "shape-layer" });
+  // In the document before the bands are made, so each label can be measured.
+  svg.appendChild(layer);
   for (const range of term.shape.ranges) {
     const extent = shapeRangeExtent(term, view, range);
     if (!extent) continue;
@@ -36,8 +40,27 @@ export function drawShapeOverlay(svg, { term, view, sx, margin, innerW, innerH }
       "data-popover-body": shapeRangeDescription(range)
     });
     band.appendChild(el("rect", { x: x0, y: margin.top, width: x1 - x0, height: innerH }));
-    text(band, x0 + LABEL_INSET, margin.top + LABEL_BASELINE, range.label, "shape-range-label", "start");
+    const label = text(
+      band, x0 + LABEL_INSET, margin.top + LABEL_BASELINE, range.label, "shape-range-label", "start"
+    );
     layer.appendChild(band);
+    // The label sits on a small tag at the band's top; the band's own rect
+    // stays first so the range's extent is the first rect the band holds.
+    band.insertBefore(el("rect", {
+      class: "shape-range-tag",
+      x: x0 + LABEL_INSET - TAG_PADDING,
+      y: margin.top + LABEL_BASELINE - TAG_HEIGHT + 4,
+      width: labelWidth(label) + TAG_PADDING * 2,
+      height: TAG_HEIGHT,
+      rx: 4,
+      ry: 4
+    }), label);
   }
-  svg.appendChild(layer);
+}
+
+/** @param {SVGElement} label */
+function labelWidth(label) {
+  const measure = /** @type {{getComputedTextLength?:()=>number}} */ (label).getComputedTextLength;
+  const measured = typeof measure === "function" ? measure.call(label) : 0;
+  return measured > 0 ? measured : (label.textContent || "").length * 6.5;
 }
